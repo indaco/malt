@@ -66,14 +66,14 @@ mt install <user>/<tap>/<formula>        # inline tap (no separate tap step)
 mt install <package> [<package> ...]     # multiple packages
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--cask` | Force cask installation |
-| `--formula` | Force formula installation |
-| `--dry-run` | Show what would be installed without installing |
-| `--force` | Overwrite existing installations |
-| `--quiet`, `-q` | Suppress all output except errors |
-| `--json` | Output result as JSON |
+| Flag            | Description                                     |
+| --------------- | ----------------------------------------------- |
+| `--cask`        | Force cask installation                         |
+| `--formula`     | Force formula installation                      |
+| `--dry-run`     | Show what would be installed without installing |
+| `--force`       | Overwrite existing installations                |
+| `--quiet`, `-q` | Suppress all output except errors               |
+| `--json`        | Output result as JSON                           |
 
 **Exit codes:** 0 success, 1 not found, 2 download failure, 3 link conflict, 4 disk full, 5 lock held, 6 post-install hook required.
 
@@ -87,11 +87,11 @@ mt uninstall --cask <app>
 mt uninstall <package> --force           # ignore dependents check
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--force` | Remove even if other packages depend on it |
-| `--zap` | Deep clean (cask only: remove preferences, caches) |
-| `--dry-run` | Show what would be removed |
+| Flag        | Description                                        |
+| ----------- | -------------------------------------------------- |
+| `--force`   | Remove even if other packages depend on it         |
+| `--zap`     | Deep clean (cask only: remove preferences, caches) |
+| `--dry-run` | Show what would be removed                         |
 
 Checks for dependent packages before removing. If dependents exist, refuses unless `--force` is passed. Store entries are preserved for `mt gc`.
 
@@ -107,12 +107,12 @@ mt upgrade <package>                     # upgrade specific package
 mt upgrade --cask                        # upgrade casks only
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--all` | Upgrade everything (formulas + casks) |
-| `--cask` | Upgrade casks only |
-| `--formula` | Upgrade formulas only |
-| `--dry-run` | Show what would be upgraded |
+| Flag        | Description                           |
+| ----------- | ------------------------------------- |
+| `--all`     | Upgrade everything (formulas + casks) |
+| `--cask`    | Upgrade casks only                    |
+| `--formula` | Upgrade formulas only                 |
+| `--dry-run` | Show what would be upgraded           |
 
 Installs the new version first, verifies it works, switches symlinks, then removes the old version. On failure, symlinks revert to the old version.
 
@@ -234,17 +234,17 @@ System health check.
 mt doctor
 ```
 
-| Check | Pass | Fail |
-|-------|------|------|
-| SQLite integrity | `PRAGMA integrity_check` returns `ok` | Suggest `mt doctor --repair` |
-| Orphaned store entries | All store entries referenced by a keg | Suggest `mt gc` |
-| Missing kegs | All DB entries have Cellar directories | Suggest reinstall |
-| Broken symlinks | All `bin/`, `lib/` links point to existing files | Suggest `mt cleanup` |
-| Disk space | >1 GB free on volume | Warn: low disk space |
-| macOS version | Supported version (12+) | Warn: untested version |
-| API reachable | HEAD to `formulae.brew.sh` returns 200 | Warn: offline |
-| Stale lock | No lock file, or lock PID is running | Suggest removal |
-| APFS volume | `/opt/malt` is on APFS | Warn: clonefile unavailable |
+| Check                  | Pass                                             | Fail                         |
+| ---------------------- | ------------------------------------------------ | ---------------------------- |
+| SQLite integrity       | `PRAGMA integrity_check` returns `ok`            | Suggest `mt doctor --repair` |
+| Orphaned store entries | All store entries referenced by a keg            | Suggest `mt gc`              |
+| Missing kegs           | All DB entries have Cellar directories           | Suggest reinstall            |
+| Broken symlinks        | All `bin/`, `lib/` links point to existing files | Suggest `mt cleanup`         |
+| Disk space             | >1 GB free on volume                             | Warn: low disk space         |
+| macOS version          | Supported version (12+)                          | Warn: untested version       |
+| API reachable          | HEAD to `formulae.brew.sh` returns 200           | Warn: offline                |
+| Stale lock             | No lock file, or lock PID is running             | Suggest removal              |
+| APFS volume            | `/opt/malt` is on APFS                           | Warn: clonefile unavailable  |
 
 **Exit codes:** 0 all OK, 1 warnings, 2 errors.
 
@@ -288,14 +288,14 @@ Scans the Homebrew Cellar, resolves each installed package via the API, and inst
 
 ### Global Flags
 
-| Flag | Description |
-|------|-------------|
-| `--verbose`, `-v` | Verbose output (all commands) |
-| `--quiet`, `-q` | Suppress non-error output (all commands) |
-| `--json` | JSON output (read commands) |
-| `--dry-run` | Preview without executing (mutating commands) |
-| `--help`, `-h` | Show help |
-| `--version` | Show version |
+| Flag              | Description                                   |
+| ----------------- | --------------------------------------------- |
+| `--verbose`, `-v` | Verbose output (all commands)                 |
+| `--quiet`, `-q`   | Suppress non-error output (all commands)      |
+| `--json`          | JSON output (read commands)                   |
+| `--dry-run`       | Preview without executing (mutating commands) |
+| `--help`, `-h`    | Show help                                     |
+| `--version`       | Show version                                  |
 
 ---
 
@@ -380,13 +380,13 @@ Every install follows a strict 9-step protocol. Failure at any step triggers cle
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `MALT_PREFIX` | Override install prefix | `/opt/malt` |
-| `MALT_CACHE` | Override cache directory | `{prefix}/cache` |
-| `NO_COLOR` | Disable colored output | unset |
-| `MALT_NO_EMOJI` | Disable emoji in output | unset |
-| `HOMEBREW_GITHUB_API_TOKEN` | GitHub token for higher API rate limits | unset |
+| Variable                    | Description                             | Default          |
+| --------------------------- | --------------------------------------- | ---------------- |
+| `MALT_PREFIX`               | Override install prefix                 | `/opt/malt`      |
+| `MALT_CACHE`                | Override cache directory                | `{prefix}/cache` |
+| `NO_COLOR`                  | Disable colored output                  | unset            |
+| `MALT_NO_EMOJI`             | Disable emoji in output                 | unset            |
+| `HOMEBREW_GITHUB_API_TOKEN` | GitHub token for higher API rate limits | unset            |
 
 ---
 
@@ -406,16 +406,39 @@ If `brew` is not installed, malt prints: `"'services' requires Homebrew. Install
 
 ## What's Not in v1
 
-| Feature | Reason | Workaround |
-|---------|--------|------------|
-| `post_install` hooks | Requires Ruby DSL interpreter | Detect and warn; suggest `brew install` |
-| Build from source | Requires compilers, `./configure`, `make` | Use bottles only; fall back to `brew` |
-| Mac App Store (mas) | Separate ecosystem, separate auth | Out of scope |
-| Linux support | ELF patching, different prefix, doubles scope | macOS only |
-| Services management | launchctl integration is complex and fragile | Delegate to `brew services` |
-| Brewfile/bundle | Nice-to-have, not critical for v1 | Delegate to `brew bundle` |
-| Formula creation | Authoring formulas requires Ruby | Use Homebrew for formula authoring |
-| Audit/linting | Formula validation tools | Out of scope |
+| Feature              | Reason                                        | Workaround                              |
+| -------------------- | --------------------------------------------- | --------------------------------------- |
+| `post_install` hooks | Requires Ruby DSL interpreter                 | Detect and warn; suggest `brew install` |
+| Build from source    | Requires compilers, `./configure`, `make`     | Use bottles only; fall back to `brew`   |
+| Mac App Store (mas)  | Separate ecosystem, separate auth             | Out of scope                            |
+| Linux support        | ELF patching, different prefix, doubles scope | macOS only                              |
+| Services management  | launchctl integration is complex and fragile  | Delegate to `brew services`             |
+| Brewfile/bundle      | Nice-to-have, not critical for v1             | Delegate to `brew bundle`               |
+| Formula creation     | Authoring formulas requires Ruby              | Use Homebrew for formula authoring      |
+| Audit/linting        | Formula validation tools                      | Out of scope                            |
+
+---
+
+## How malt Compares
+
+| | Homebrew | zerobrew | nanobrew | bru | **malt** |
+|---|---|---|---|---|---|
+| **Language** | Ruby | Zig + Rust | Zig | Zig | Zig |
+| **Binary size** | ~57 MB | 7.9 MB | 1.2 MB | ~2 MB | ~3 MB |
+| **Startup** | ~1.5s | Fast | Near-zero | Near-zero | Near-zero |
+| **Prefix** | `/opt/homebrew` | `/opt/zerobrew` | `/opt/nanobrew` | `/opt/homebrew` (shared) | `/opt/malt` (own) |
+| **Drop-in for brew** | N/A | No | No | Yes | No |
+| **Brew fallback** | N/A | No | No | Yes | Yes |
+| **Mach-O patching** | `install_name_tool` | Raw byte scan | Partial | Not needed | Struct-aware (`std.macho`) |
+| **Lib symlinks** | Full | Full | `bin`/`sbin` only | Full | Full |
+| **State backend** | Ruby/JSON | SQLite | JSON file | Binary index | SQLite (WAL) |
+| **Content store** | No | Yes | Yes | No | Yes |
+| **APFS clonefile** | No | Yes | Yes | No | Yes |
+| **Concurrent safety** | Lock file | Lock file | None | Unknown | flock + SQLite WAL |
+
+**bru** is a transparent accelerator — same prefix as Homebrew, zero migration, but no isolation. **malt** takes the opposite approach — full isolation with its own prefix, content-addressable store, and struct-aware Mach-O patching for correctness.
+
+For a detailed comparison with specific issue references and design tradeoffs, see [docs/COMPARISON.md](docs/COMPARISON.md).
 
 ---
 

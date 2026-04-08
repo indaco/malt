@@ -1,0 +1,58 @@
+version: 2
+
+project_name: malt
+
+before:
+  hooks:
+    - zig build test
+
+builds:
+  - builder: zig
+    binary: mt
+    targets:
+      - aarch64-macos
+      - x86_64-macos
+    flags:
+      - -Doptimize=ReleaseSafe
+
+universal_binaries:
+  - replace: true
+    name_template: mt
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+    wrap_in_directory: true
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+brews:
+  - name: malt
+    repository:
+      owner: indaco
+      name: homebrew-tap
+    homepage: https://github.com/indaco/malt
+    description: A fast, Homebrew-compatible package manager for macOS
+    license: MIT
+    install: |
+      bin.install "mt"
+    test: |
+      system "#{bin}/mt", "--version"
+
+release:
+  draft: true
+  prerelease: auto
+  name_template: "{{ .ProjectName }} v{{ .Version }}"
