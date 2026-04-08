@@ -10,17 +10,21 @@ const lock_mod = @import("../db/lock.zig");
 const linker = @import("../core/linker.zig");
 const cellar = @import("../core/cellar.zig");
 const store = @import("../core/store.zig");
+const cask_mod = @import("../core/cask.zig");
 const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "uninstall")) return;
 
     var force = false;
+    var force_cask = false;
     var pkg_name: ?[]const u8 = null;
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
             force = true;
+        } else if (std.mem.eql(u8, arg, "--cask")) {
+            force_cask = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             output.setQuiet(true);
         } else if (arg.len > 0 and arg[0] != '-') {
@@ -53,6 +57,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer db.close();
     schema.initSchema(&db) catch return;
+
+    // Check if it's a cask first (or if --cask was passed)
+    if (force_cask or cask_mod.isInstalled(&db, name)) {
+        uninstallCask(allocator, name, &db, prefix, force);
+        return;
+    }
 
     // Find the keg
     var find_stmt = db.prepare(
@@ -133,4 +143,32 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     output.success("{s} uninstalled", .{name});
+}
+
+/// Uninstall a cask by token.
+fn uninstallCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, force: bool) void {
+    const info = cask_mod.lookupInstalled(db, token) orelse {
+        output.err("{s} is not installed as a cask", .{token});
+        return;
+    };
+
+    // Check if running (unless --force)
+    if (!force) {
+        if (info.appPath()) |app_path| {
+            if (cask_mod.CaskInstaller.isAppRunningPub(app_path)) {
+                output.err("{s} appears to be running. Quit the app first, or use --force.", .{token});
+                return;
+            }
+        }
+    }
+
+    output.info("Uninstalling cask {s}...", .{token});
+
+    var installer = cask_mod.CaskInstaller.init(allocator, db, prefix);
+    installer.uninstall(token) catch {
+        output.err("Failed to uninstall cask {s}", .{token});
+        return;
+    };
+
+    output.success("{s} uninstalled", .{token});
 }
