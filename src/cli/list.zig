@@ -84,6 +84,13 @@ fn writeHumanOutput(
             const pinned = stmt.columnBool(2);
             const name_slice = std.mem.sliceTo(name, 0);
 
+            if (color.isColorEnabled()) {
+                stdout.writeAll(color.Style.cyan.code()) catch {};
+                stdout.writeAll("  ▸ ") catch {};
+                stdout.writeAll(color.Style.reset.code()) catch {};
+            } else {
+                stdout.writeAll("  ▸ ") catch {};
+            }
             stdout.writeAll(name_slice) catch {};
             if (show_versions) {
                 const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "?";
@@ -114,6 +121,13 @@ fn writeHumanOutput(
             const ver = stmt.columnText(1);
             const token_slice = std.mem.sliceTo(token, 0);
 
+            if (color.isColorEnabled()) {
+                stdout.writeAll(color.Style.cyan.code()) catch {};
+                stdout.writeAll("  ▸ ") catch {};
+                stdout.writeAll(color.Style.reset.code()) catch {};
+            } else {
+                stdout.writeAll("  ▸ ") catch {};
+            }
             stdout.writeAll(token_slice) catch {};
             if (show_versions) {
                 const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "?";
