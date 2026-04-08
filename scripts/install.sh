@@ -149,7 +149,7 @@ else
 fi
 
 echo ""
-printf "${BOLD}${GREEN}malt is ready!${RESET}\n"
+printf '%s%smalt is ready!%s\n' "${BOLD}" "${GREEN}" "${RESET}"
 echo ""
 echo "  Get started:"
 echo "    malt install jq           # install a formula"
