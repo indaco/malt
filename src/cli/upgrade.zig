@@ -3,8 +3,11 @@
 
 const std = @import("std");
 const output = @import("../ui/output.zig");
+const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(args, "upgrade")) return;
+
     _ = allocator;
 
     for (args) |arg| {

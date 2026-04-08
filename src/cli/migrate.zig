@@ -5,8 +5,11 @@ const std = @import("std");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const codesign = @import("../macho/codesign.zig");
+const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(args, "migrate")) return;
+
     _ = allocator;
     var dry_run = false;
     for (args) |arg| {

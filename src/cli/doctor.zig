@@ -10,9 +10,11 @@ const atomic = @import("../fs/atomic.zig");
 const clonefile = @import("../fs/clonefile.zig");
 const output = @import("../ui/output.zig");
 const color = @import("../ui/color.zig");
+const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    _ = args;
+    if (help.showIfRequested(args, "doctor")) return;
+
     const prefix = atomic.maltPrefix();
     var warnings: u32 = 0;
     var errors: u32 = 0;

@@ -8,8 +8,11 @@ const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
+const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(args, "outdated")) return;
+
     var json_mode = false;
 
     for (args) |arg| {

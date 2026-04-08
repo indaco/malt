@@ -4,8 +4,11 @@
 const std = @import("std");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(args, "update")) return;
+
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             output.setQuiet(true);

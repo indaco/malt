@@ -10,8 +10,11 @@ const lock_mod = @import("../db/lock.zig");
 const linker = @import("../core/linker.zig");
 const cellar = @import("../core/cellar.zig");
 const store = @import("../core/store.zig");
+const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(args, "uninstall")) return;
+
     var force = false;
     var pkg_name: ?[]const u8 = null;
 

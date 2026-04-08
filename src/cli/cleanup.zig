@@ -6,8 +6,11 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(args, "cleanup")) return;
+
     var dry_run = false;
     var prune_days: ?i64 = null;
     var scrub = false;

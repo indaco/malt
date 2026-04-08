@@ -18,6 +18,7 @@ const ghcr_mod = @import("../net/ghcr.zig");
 const api_mod = @import("../net/api.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const help = @import("help.zig");
 
 pub const InstallError = error{
     NoPackages,
@@ -101,6 +102,8 @@ fn downloadWorker(allocator: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, stor
 }
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(args, "install")) return;
+
     // Parse flags
     var packages: std.ArrayList([]const u8) = .empty;
     defer packages.deinit(allocator);

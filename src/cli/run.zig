@@ -12,8 +12,11 @@ const ghcr_mod = @import("../net/ghcr.zig");
 const api_mod = @import("../net/api.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(args, "run")) return;
+
     if (args.len == 0) {
         output.err("Usage: mt run <package> [-- <args...>]", .{});
         output.info("Example: mt run jq -- --version", .{});

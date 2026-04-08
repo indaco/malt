@@ -8,8 +8,11 @@ const store_mod = @import("../core/store.zig");
 const lock_mod = @import("../db/lock.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(args, "gc")) return;
+
     var dry_run = false;
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--dry-run")) dry_run = true;

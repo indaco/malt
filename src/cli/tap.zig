@@ -7,8 +7,11 @@ const schema = @import("../db/schema.zig");
 const tap_mod = @import("../core/tap.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(args, "tap")) return;
+
     const prefix = atomic.maltPrefix();
 
     var db_path_buf: [512]u8 = undefined;
