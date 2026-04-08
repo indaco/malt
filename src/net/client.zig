@@ -56,7 +56,7 @@ pub const HttpClient = struct {
         url: []const u8,
         extra_headers: []const std.http.Header,
     ) !Response {
-        return self.doGetLimited(url, extra_headers, MAX_BLOB_BYTES);
+        return self.doGetWithRetry(url, extra_headers, MAX_BLOB_BYTES);
     }
 
     /// Perform a HEAD request and return only the HTTP status code.
@@ -86,12 +86,47 @@ pub const HttpClient = struct {
 
     // ---- internal helper ----
 
+    const MAX_RETRIES = 3;
+    const RETRY_DELAYS_MS = [_]u64{ 1000, 2000, 4000 };
+
     fn doGet(
         self: *HttpClient,
         url: []const u8,
         extra_headers: []const std.http.Header,
     ) !Response {
-        return self.doGetLimited(url, extra_headers, MAX_METADATA_BYTES);
+        return self.doGetWithRetry(url, extra_headers, MAX_METADATA_BYTES);
+    }
+
+    fn doGetWithRetry(
+        self: *HttpClient,
+        url: []const u8,
+        extra_headers: []const std.http.Header,
+        max_bytes: usize,
+    ) !Response {
+        var attempt: usize = 0;
+        while (true) {
+            const result = self.doGetLimited(url, extra_headers, max_bytes);
+            if (result) |resp| {
+                // Retry on transient server errors
+                if (resp.status == 429 or resp.status == 503 or resp.status == 504) {
+                    resp.allocator.free(resp.body);
+                    if (attempt < MAX_RETRIES) {
+                        std.Thread.sleep(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms);
+                        attempt += 1;
+                        continue;
+                    }
+                }
+                return resp;
+            } else |err| {
+                // Retry on connection errors
+                if (attempt < MAX_RETRIES) {
+                    std.Thread.sleep(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms);
+                    attempt += 1;
+                    continue;
+                }
+                return err;
+            }
+        }
     }
 
     fn doGetLimited(

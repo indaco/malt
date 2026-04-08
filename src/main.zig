@@ -3,6 +3,17 @@
 
 const std = @import("std");
 
+/// Global interrupt flag — set by SIGINT handler, checked at install step boundaries.
+var g_interrupted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+pub fn isInterrupted() bool {
+    return g_interrupted.load(.acquire);
+}
+
+fn sigintHandler(_: c_int) callconv(.c) void {
+    g_interrupted.store(true, .release);
+}
+
 // CLI command modules
 const install = @import("cli/install.zig");
 const uninstall = @import("cli/uninstall.zig");
@@ -88,6 +99,16 @@ pub fn main() !void {
             std.log.err("memory leak detected", .{});
         }
     };
+
+    // Register SIGINT handler so Ctrl-C sets g_interrupted instead of
+    // immediately killing the process. Install commands check the flag at
+    // step boundaries and clean up before exiting.
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = &sigintHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
 
     var arena = std.heap.ArenaAllocator.init(backing);
     defer arena.deinit();
