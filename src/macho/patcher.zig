@@ -68,11 +68,18 @@ pub fn patchPaths(
             continue;
         }
 
-        // Copy new prefix
-        @memcpy(data[offset .. offset + new_prefix.len], new_prefix);
-        // Copy suffix
-        @memcpy(data[offset + new_prefix.len .. offset + new_path_len], suffix);
-        // Null-pad remaining bytes
+        // Build the new path in a temp buffer to avoid aliasing issues
+        // (suffix points into data which we're about to overwrite)
+        var new_path_buf: [1024]u8 = undefined;
+        if (new_path_len > new_path_buf.len) {
+            skipped += 1;
+            continue;
+        }
+        @memcpy(new_path_buf[0..new_prefix.len], new_prefix);
+        @memcpy(new_path_buf[new_prefix.len..new_path_len], suffix);
+
+        // Write replacement + null padding
+        @memcpy(data[offset .. offset + new_path_len], new_path_buf[0..new_path_len]);
         @memset(data[offset + new_path_len .. offset + lcp.max_path_len], 0);
 
         patched += 1;

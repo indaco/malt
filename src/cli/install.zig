@@ -200,8 +200,8 @@ fn installFormula(
     install_reason: []const u8,
 ) !void {
     // Step 3: Parse formula
-    var formula = formula_mod.parseFormula(allocator, formula_json) catch {
-        output.err("Failed to parse formula JSON for '{s}'", .{pkg_name});
+    var formula = formula_mod.parseFormula(allocator, formula_json) catch |e| {
+        output.err("Failed to parse formula JSON for '{s}': {s} (json len={d})", .{ pkg_name, @errorName(e), formula_json.len });
         return InstallError.FormulaNotFound;
     };
     defer formula.deinit();
@@ -286,7 +286,9 @@ fn installFormula(
         output.err("Failed to create temp directory", .{});
         return InstallError.DownloadFailed;
     };
-    defer atomic.cleanupTempDir(tmp_dir);
+    // Note: don't defer cleanupTempDir — commitFrom renames it to store.
+    // If download/commit fails, errdefer below cleans up.
+    errdefer atomic.cleanupTempDir(tmp_dir);
     defer allocator.free(tmp_dir);
 
     output.info("Downloading {s} bottle...", .{formula.name});
@@ -303,9 +305,9 @@ fn installFormula(
         return InstallError.DownloadFailed;
     };
 
-    // Step 7: Commit to store (atomic rename)
+    // Step 7: Commit to store (atomic rename from tmp dir)
     output.info("Committing {s} to store...", .{formula.name});
-    store.commit(result.sha256) catch {
+    store.commitFrom(result.sha256, tmp_dir) catch {
         output.err("Failed to commit {s} to store", .{formula.name});
         return InstallError.StoreFailed;
     };
@@ -471,6 +473,15 @@ fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
 
 /// Ensure all required directories under prefix exist.
 fn ensureDirs(prefix: []const u8) void {
+    // Create the prefix directory itself first (e.g. /opt/malt)
+    std.fs.makeDirAbsolute(prefix) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => {
+            output.err("Cannot create prefix directory {s} — you may need: sudo mkdir -p {s} && sudo chown $USER {s}", .{ prefix, prefix, prefix });
+            return;
+        },
+    };
+
     const subdirs = [_][]const u8{
         "store",
         "Cellar",
@@ -492,10 +503,7 @@ fn ensureDirs(prefix: []const u8) void {
         const dir_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
         std.fs.makeDirAbsolute(dir_path) catch |e| switch (e) {
             error.PathAlreadyExists => {},
-            else => {
-                // Try creating parent first
-                std.fs.cwd().makePath(dir_path) catch {};
-            },
+            else => continue,
         };
     }
 }

@@ -14,9 +14,18 @@ pub const Store = struct {
     }
 
     /// Atomic rename from tmp/{sha256} to store/{sha256}. Idempotent.
+    /// Atomic rename from a source path to store/{sha256}. Idempotent.
+    /// If src_path is null, defaults to {prefix}/tmp/{sha256}.
     pub fn commit(self: *Store, sha256: []const u8) StoreError!void {
-        var src_buf: [512]u8 = undefined;
-        const src = std.fmt.bufPrint(&src_buf, "{s}/tmp/{s}", .{ self.prefix, sha256 }) catch return StoreError.OutOfMemory;
+        return self.commitFrom(sha256, null);
+    }
+
+    /// Atomic rename from a specific source path to store/{sha256}. Idempotent.
+    pub fn commitFrom(self: *Store, sha256: []const u8, src_path: ?[]const u8) StoreError!void {
+        const src = src_path orelse blk: {
+            var src_buf: [512]u8 = undefined;
+            break :blk std.fmt.bufPrint(&src_buf, "{s}/tmp/{s}", .{ self.prefix, sha256 }) catch return StoreError.OutOfMemory;
+        };
         var dst_buf: [512]u8 = undefined;
         const dst = std.fmt.bufPrint(&dst_buf, "{s}/store/{s}", .{ self.prefix, sha256 }) catch return StoreError.OutOfMemory;
 

@@ -72,25 +72,65 @@ pub fn materialize(
 
     const new_prefix = atomic.maltPrefix();
 
-    // Patch Mach-O: /opt/homebrew -> /opt/malt (arm64 bottles)
-    _ = patcher.patchPaths(allocator, cellar_path, "/opt/homebrew", new_prefix) catch {};
+    // Build cellar replacement for @@HOMEBREW_CELLAR@@
+    var new_cellar_buf: [256]u8 = undefined;
+    const new_cellar = std.fmt.bufPrint(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;
 
-    // Patch Mach-O: /usr/local -> /opt/malt (x86_64 bottles)
-    _ = patcher.patchPaths(allocator, cellar_path, "/usr/local", new_prefix) catch {};
+    // Walk cellar directory and patch each Mach-O binary
+    patchAllMachO(allocator, cellar_path, new_prefix, new_cellar);
 
-    // Patch text files
+    // Patch text files (scripts, .pc files, configs)
     _ = patcher.patchTextFiles(allocator, cellar_path, "/opt/homebrew", new_prefix) catch {};
+    _ = patcher.patchTextFiles(allocator, cellar_path, "/usr/local", new_prefix) catch {};
 
     // Ad-hoc codesign on arm64
     if (codesign.isArm64()) {
         codesign.signAllMachOInDir(cellar_path, allocator) catch {};
     }
 
+    // Allocate the path so it survives beyond this function's stack
+    const owned_path = allocator.dupe(u8, cellar_path) catch return CellarError.OutOfMemory;
+
     return .{
         .name = name,
         .version = version,
-        .path = cellar_path,
+        .path = owned_path,
     };
+}
+
+/// Walk a directory and patch all Mach-O binaries with prefix replacements.
+fn patchAllMachO(allocator: std.mem.Allocator, dir_path: []const u8, new_prefix: []const u8, new_cellar: []const u8) void {
+    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var walker = dir.walk(allocator) catch return;
+    defer walker.deinit();
+
+    while (walker.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+
+        const full_path = std.fs.path.join(allocator, &.{ dir_path, entry.path }) catch continue;
+        defer allocator.free(full_path);
+
+        // Check if Mach-O by reading magic
+        const file = std.fs.openFileAbsolute(full_path, .{}) catch continue;
+        var magic_buf: [4]u8 = undefined;
+        const n = file.readAll(&magic_buf) catch {
+            file.close();
+            continue;
+        };
+        file.close();
+        if (n < 4) continue;
+
+        const parser_mod = @import("../macho/parser.zig");
+        if (!parser_mod.isMachO(&magic_buf)) continue;
+
+        // Patch all known prefix patterns in this Mach-O
+        _ = patcher.patchPaths(allocator, full_path, "/opt/homebrew", new_prefix) catch {};
+        _ = patcher.patchPaths(allocator, full_path, "/usr/local", new_prefix) catch {};
+        _ = patcher.patchPaths(allocator, full_path, "@@HOMEBREW_PREFIX@@", new_prefix) catch {};
+        _ = patcher.patchPaths(allocator, full_path, "@@HOMEBREW_CELLAR@@", new_cellar) catch {};
+    }
 }
 
 /// Remove a keg from the Cellar.

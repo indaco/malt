@@ -79,11 +79,22 @@ pub const HttpClient = struct {
 
         const status: u16 = @intFromEnum(response.head.status);
 
-        // Read response body into an allocating writer.
+        // Read response body with decompression (servers may send gzip).
         var body_writer: std.Io.Writer.Allocating = .init(self.allocator);
         errdefer body_writer.deinit();
 
-        const body_reader = response.reader(&.{});
+        // Allocate decompression buffers based on content encoding
+        const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+            .identity => &.{},
+            .zstd => try self.allocator.alloc(u8, std.compress.zstd.default_window_len),
+            .deflate, .gzip => try self.allocator.alloc(u8, std.compress.flate.max_window_len),
+            .compress => return error.ReadFailed,
+        };
+        defer if (decompress_buffer.len > 0) self.allocator.free(decompress_buffer);
+
+        var transfer_buffer: [64]u8 = undefined;
+        var decompress: std.http.Decompress = undefined;
+        const body_reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
         _ = body_reader.streamRemaining(&body_writer.writer) catch
             return error.ReadFailed;
 

@@ -103,12 +103,13 @@ pub const Database = struct {
     /// Open (or create) a database file at `path`.
     /// Configures pragmas: journal_mode=WAL, foreign_keys=ON, busy_timeout=5000.
     pub fn open(path: []const u8) SqliteError!Database {
-        // SQLite requires a null-terminated path.  Zig string literals are
-        // already sentinel-terminated, so we can try a direct cast when the
-        // slice happens to be backed by one.  For the general case we would
-        // need an allocator, but every call-site in this project passes a
-        // comptime-known literal, so the cast is safe.
-        const c_path: [*:0]const u8 = @ptrCast(path.ptr);
+        // SQLite requires a null-terminated path. Copy into a stack buffer
+        // and add the sentinel, since callers may pass bufPrint output.
+        var path_buf: [512]u8 = undefined;
+        if (path.len >= path_buf.len) return SqliteError.OpenFailed;
+        @memcpy(path_buf[0..path.len], path);
+        path_buf[path.len] = 0;
+        const c_path: [*:0]const u8 = path_buf[0..path.len :0];
 
         var db: ?*c.sqlite3 = null;
         const rc = c.sqlite3_open_v2(
