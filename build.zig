@@ -26,6 +26,7 @@ pub fn build(b: *std.Build) void {
         .flags = &.{
             "-DSQLITE_OMIT_LOAD_EXTENSION",
             "-DSQLITE_THREADSAFE=1",
+            "-DSQLITE_DQS=0",
         },
     });
     exe.root_module.addIncludePath(b.path("vendor/"));
