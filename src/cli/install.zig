@@ -150,6 +150,11 @@ fn installPackage(
     dry_run: bool,
     force: bool,
 ) !void {
+    // Check for tap formula format: user/repo/formula
+    if (isTapFormula(pkg_name)) {
+        return installTapFormula(allocator, pkg_name, db, linker, prefix, dry_run, force);
+    }
+
     // Step 2: Auto-detect formula vs cask
     if (!force_cask) {
         // Try formula first (unless --cask)
@@ -506,4 +511,323 @@ fn ensureDirs(prefix: []const u8) void {
             else => continue,
         };
     }
+}
+
+/// Check if a package name is a tap formula (user/repo/formula format).
+fn isTapFormula(name: []const u8) bool {
+    var slash_count: u32 = 0;
+    for (name) |ch| {
+        if (ch == '/') slash_count += 1;
+    }
+    return slash_count == 2;
+}
+
+/// Parse a tap formula name into user, repo, formula components.
+fn parseTapName(name: []const u8) ?struct { user: []const u8, repo: []const u8, formula: []const u8 } {
+    const first_slash = std.mem.indexOfScalar(u8, name, '/') orelse return null;
+    const rest = name[first_slash + 1 ..];
+    const second_slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+    return .{
+        .user = name[0..first_slash],
+        .repo = rest[0..second_slash],
+        .formula = rest[second_slash + 1 ..],
+    };
+}
+
+/// Install a tap formula by fetching the Ruby formula from GitHub and
+/// extracting URL + SHA256 for the current platform.
+fn installTapFormula(
+    allocator: std.mem.Allocator,
+    pkg_name: []const u8,
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    prefix: []const u8,
+    dry_run: bool,
+    force: bool,
+) !void {
+    const parts = parseTapName(pkg_name) orelse {
+        output.err("Invalid tap formula format: {s}", .{pkg_name});
+        return InstallError.FormulaNotFound;
+    };
+
+    output.info("Resolving tap formula {s}/{s}/{s}...", .{ parts.user, parts.repo, parts.formula });
+
+    // Fetch Ruby formula from GitHub
+    var url_buf: [512]u8 = undefined;
+    const rb_url = std.fmt.bufPrint(&url_buf, "https://raw.githubusercontent.com/{s}/homebrew-{s}/HEAD/Formula/{s}.rb", .{
+        parts.user,
+        parts.repo,
+        parts.formula,
+    }) catch return InstallError.FormulaNotFound;
+
+    var http = client_mod.HttpClient.init(allocator);
+    defer http.deinit();
+
+    var resp = http.get(rb_url) catch {
+        output.err("Cannot fetch tap formula from GitHub", .{});
+        return InstallError.FormulaNotFound;
+    };
+    defer resp.deinit();
+
+    if (resp.status != 200) {
+        output.err("Tap formula not found: {s}", .{pkg_name});
+        return InstallError.FormulaNotFound;
+    }
+
+    // Parse the Ruby formula to extract name, version, URL, SHA256 for current arch
+    const rb = parseRubyFormula(resp.body) orelse {
+        output.err("Cannot parse tap formula (Ruby format). Use: brew install {s}", .{pkg_name});
+        return InstallError.FormulaNotFound;
+    };
+
+    output.info("Found {s} {s}", .{ parts.formula, rb.version });
+
+    if (dry_run) {
+        output.info("Dry run: would install {s} {s} from {s}", .{ parts.formula, rb.version, rb.url });
+        return;
+    }
+
+    // Check if already installed
+    if (!force and isInstalled(db, parts.formula)) {
+        output.info("{s} is already installed", .{parts.formula});
+        return;
+    }
+
+    // Download the binary archive
+    output.info("Downloading {s}...", .{parts.formula});
+    var download_resp = http.get(rb.url) catch {
+        output.err("Failed to download {s}", .{parts.formula});
+        return InstallError.DownloadFailed;
+    };
+    defer download_resp.deinit();
+
+    if (download_resp.status != 200) {
+        output.err("Download failed with status {d}", .{download_resp.status});
+        return InstallError.DownloadFailed;
+    }
+
+    // Verify SHA256
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(download_resp.body, &hash, .{});
+    var hex_buf: [64]u8 = undefined;
+    const hex_chars = "0123456789abcdef";
+    for (hash, 0..) |b, i| {
+        hex_buf[i * 2] = hex_chars[b >> 4];
+        hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
+    }
+    const computed: []const u8 = &hex_buf;
+
+    if (!std.mem.eql(u8, computed, rb.sha256)) {
+        output.err("SHA256 mismatch for {s}", .{parts.formula});
+        return InstallError.DownloadFailed;
+    }
+
+    // Extract to Cellar directly (tap binaries are simple archives)
+    var cellar_buf: [512]u8 = undefined;
+    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, parts.formula, rb.version }) catch
+        return InstallError.CellarFailed;
+
+    // Create cellar directory
+    var parent_buf: [512]u8 = undefined;
+    const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, parts.formula }) catch
+        return InstallError.CellarFailed;
+    std.fs.makeDirAbsolute(parent) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => return InstallError.CellarFailed,
+    };
+    std.fs.makeDirAbsolute(cellar_path) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => return InstallError.CellarFailed,
+    };
+
+    // Create bin subdirectory and extract
+    var bin_buf: [512]u8 = undefined;
+    const bin_path = std.fmt.bufPrint(&bin_buf, "{s}/bin", .{cellar_path}) catch
+        return InstallError.CellarFailed;
+    std.fs.makeDirAbsolute(bin_path) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => return InstallError.CellarFailed,
+    };
+
+    // Write archive to temp file
+    var tmp_buf: [512]u8 = undefined;
+    const tmp_archive = std.fmt.bufPrint(&tmp_buf, "{s}/tmp/tap_download.tar.gz", .{prefix}) catch
+        return InstallError.DownloadFailed;
+
+    const tmp_file = std.fs.createFileAbsolute(tmp_archive, .{}) catch return InstallError.DownloadFailed;
+    tmp_file.writeAll(download_resp.body) catch {
+        tmp_file.close();
+        return InstallError.DownloadFailed;
+    };
+    tmp_file.close();
+    defer std.fs.cwd().deleteFile(tmp_archive) catch {};
+
+    // Extract tar.gz to cellar
+    var out_dir = std.fs.openDirAbsolute(cellar_path, .{}) catch return InstallError.CellarFailed;
+    defer out_dir.close();
+
+    const archive_file = std.fs.openFileAbsolute(tmp_archive, .{}) catch return InstallError.CellarFailed;
+    defer archive_file.close();
+
+    const archive_mod = @import("../fs/archive.zig");
+    var read_buf: [8192]u8 = undefined;
+    var file_reader = archive_file.reader(&read_buf);
+    archive_mod.extractTarGz(&file_reader.interface, out_dir) catch {
+        output.err("Failed to extract archive for {s}", .{parts.formula});
+        return InstallError.CellarFailed;
+    };
+
+    // If the binary ended up at the root, move it to bin/
+    // GoReleaser extracts the binary directly (no subdirectory)
+    {
+        var cellar_dir = std.fs.openDirAbsolute(cellar_path, .{ .iterate = true }) catch return InstallError.CellarFailed;
+        defer cellar_dir.close();
+        var iter = cellar_dir.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            if (std.mem.eql(u8, entry.name, parts.formula)) {
+                // Move binary to bin/
+                cellar_dir.rename(entry.name, std.fmt.bufPrint(&tmp_buf, "bin/{s}", .{entry.name}) catch continue) catch continue;
+                // Make executable
+                const bin_file = cellar_dir.openFile(std.fmt.bufPrint(&tmp_buf, "bin/{s}", .{entry.name}) catch continue, .{ .mode = .read_write }) catch continue;
+                defer bin_file.close();
+                bin_file.chmod(0o755) catch {};
+                break;
+            }
+        }
+    }
+
+    // Link
+    output.info("Linking {s}...", .{parts.formula});
+
+    // Record in DB first to get keg_id
+    db.beginTransaction() catch return InstallError.RecordFailed;
+    errdefer db.rollback();
+
+    var keg_id: i64 = 0;
+    {
+        var stmt = db.prepare(
+            "INSERT OR REPLACE INTO kegs (name, full_name, version, tap, store_sha256, cellar_path, install_reason)" ++
+                " VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'direct');",
+        ) catch return InstallError.RecordFailed;
+        defer stmt.finalize();
+        stmt.bindText(1, parts.formula) catch return InstallError.RecordFailed;
+        stmt.bindText(2, pkg_name) catch return InstallError.RecordFailed;
+        stmt.bindText(3, rb.version) catch return InstallError.RecordFailed;
+
+        var tap_buf: [128]u8 = undefined;
+        const tap_name = std.fmt.bufPrint(&tap_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch return InstallError.RecordFailed;
+        stmt.bindText(4, tap_name) catch return InstallError.RecordFailed;
+        stmt.bindText(5, rb.sha256) catch return InstallError.RecordFailed;
+        stmt.bindText(6, cellar_path) catch return InstallError.RecordFailed;
+        _ = stmt.step() catch return InstallError.RecordFailed;
+
+        keg_id = getLastInsertId(db) catch return InstallError.RecordFailed;
+    }
+
+    linker.link(cellar_path, parts.formula, keg_id) catch {};
+    linker.linkOpt(parts.formula, rb.version) catch {};
+
+    db.commit() catch return InstallError.RecordFailed;
+
+    output.info("{s} {s} installed successfully", .{ parts.formula, rb.version });
+}
+
+/// Minimal Ruby formula parser for GoReleaser-style formulas.
+/// Extracts version, URL, and SHA256 for the current platform.
+const RubyFormulaInfo = struct {
+    version: []const u8,
+    url: []const u8,
+    sha256: []const u8,
+};
+
+fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
+    const is_arm = @import("../macho/codesign.zig").isArm64();
+
+    var version: ?[]const u8 = null;
+    var url: ?[]const u8 = null;
+    var sha256: ?[]const u8 = null;
+
+    // State machine: look for the right CPU section
+    var in_correct_section = false;
+    var in_macos = false;
+
+    var line_start: usize = 0;
+    for (rb_content, 0..) |ch, idx| {
+        if (ch == '\n' or idx == rb_content.len - 1) {
+            const line_end = if (ch == '\n') idx else idx + 1;
+            const line = std.mem.trim(u8, rb_content[line_start..line_end], " \t\r");
+            line_start = idx + 1;
+
+            // Extract version (global)
+            if (version == null) {
+                if (extractQuoted(line, "version \"")) |v| {
+                    version = v;
+                }
+            }
+
+            // Track on_macos block
+            if (std.mem.indexOf(u8, line, "on_macos") != null) {
+                in_macos = true;
+            }
+
+            // Track CPU section
+            if (in_macos) {
+                if (is_arm and std.mem.indexOf(u8, line, "Hardware::CPU.arm?") != null) {
+                    in_correct_section = true;
+                } else if (!is_arm and std.mem.indexOf(u8, line, "Hardware::CPU.intel?") != null) {
+                    in_correct_section = true;
+                }
+            }
+
+            // Extract URL and SHA256 within the correct section
+            if (in_correct_section) {
+                if (url == null) {
+                    if (extractQuoted(line, "url \"")) |u| {
+                        url = u;
+                    }
+                }
+                if (sha256 == null) {
+                    if (extractQuoted(line, "sha256 \"")) |s| {
+                        sha256 = s;
+                    }
+                }
+            }
+
+            // If we have both, stop
+            if (url != null and sha256 != null) break;
+        }
+    }
+
+    // Fallback: if no CPU-specific section found, try global url/sha256
+    if (url == null or sha256 == null) {
+        var ls: usize = 0;
+        for (rb_content, 0..) |ch, idx| {
+            if (ch == '\n' or idx == rb_content.len - 1) {
+                const le = if (ch == '\n') idx else idx + 1;
+                const ln = std.mem.trim(u8, rb_content[ls..le], " \t\r");
+                ls = idx + 1;
+
+                if (url == null) {
+                    if (extractQuoted(ln, "url \"")) |u| url = u;
+                }
+                if (sha256 == null) {
+                    if (extractQuoted(ln, "sha256 \"")) |s| sha256 = s;
+                }
+            }
+        }
+    }
+
+    if (version != null and url != null and sha256 != null) {
+        return .{ .version = version.?, .url = url.?, .sha256 = sha256.? };
+    }
+    return null;
+}
+
+fn extractQuoted(line: []const u8, prefix: []const u8) ?[]const u8 {
+    const start = std.mem.indexOf(u8, line, prefix) orelse return null;
+    const value_start = start + prefix.len;
+    if (value_start >= line.len) return null;
+    const end = std.mem.indexOfScalar(u8, line[value_start..], '"') orelse return null;
+    return line[value_start .. value_start + end];
 }
