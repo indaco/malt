@@ -48,11 +48,13 @@ brew install malt
 git clone https://github.com/indaco/malt.git
 cd malt
 zig build -Doptimize=ReleaseSafe
-sudo install -m 755 zig-out/bin/malt /usr/local/bin/
+sudo install -m 755 zig-out/bin/malt zig-out/bin/mt /usr/local/bin/
 sudo mkdir -p /opt/malt && sudo chown $USER /opt/malt
 ```
 
 Requires [Zig 0.15.x](https://ziglang.org/download/). See [INSTALL.md](INSTALL.md) for build profiles, stripping, and universal binary instructions.
+
+> **Note:** `zig build` produces both `malt` and `mt` in `zig-out/bin/`. Both are identical — use whichever you prefer. All install methods (script, Homebrew, source) install both.
 
 ---
 

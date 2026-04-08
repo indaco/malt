@@ -33,6 +33,10 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // Install "mt" as a copy of "malt" so both names work out of the box
+    const mt_copy = b.addInstallBinFile(exe.getEmittedBin(), "mt");
+    b.getInstallStep().dependOn(&mt_copy.step);
+
     // --- Run step ---
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
