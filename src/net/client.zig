@@ -14,6 +14,16 @@ pub const HttpClient = struct {
     allocator: std.mem.Allocator,
     client: std.http.Client,
 
+    /// Per-request timeout in nanoseconds. Default: 30 seconds.
+    /// Zig 0.15's std.http.Client has no built-in timeout API, so we
+    /// implement this via a watchdog thread that aborts the request
+    /// if the body read hasn't completed within the deadline.
+    timeout_ns: u64 = DEFAULT_TIMEOUT_NS,
+
+    const DEFAULT_TIMEOUT_NS: u64 = 30 * std.time.ns_per_s;
+    /// Blob downloads (bottles, cask DMGs) get a much longer timeout.
+    const BLOB_TIMEOUT_NS: u64 = 600 * std.time.ns_per_s; // 10 minutes
+
     pub fn init(allocator: std.mem.Allocator) HttpClient {
         return .{
             .allocator = allocator,
@@ -167,15 +177,38 @@ pub const HttpClient = struct {
         var decompress: std.http.Decompress = undefined;
         var body_reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
 
-        // Wrap in a limited reader to enforce MAX_RESPONSE_BYTES.
-        // Limited.interface is a Reader that stops at the byte limit.
-        var limited_buf: [0]u8 = undefined;
-        var limited = body_reader.limited(std.Io.Limit.limited(max_bytes), &limited_buf);
-        const bytes_read = limited.interface.streamRemaining(&body_writer.writer) catch
-            return error.ReadFailed;
+        // --- Timeout-aware body read ---
+        // Zig 0.15's std.http.Client lacks per-request timeouts.
+        // We spawn a watchdog thread that sets a deadline flag. The chunked
+        // read loop checks the flag between reads, aborting if exceeded.
+        var timed_out = std.atomic.Value(bool).init(false);
+        var request_done = std.atomic.Value(bool).init(false);
+        const effective_timeout = if (max_bytes > MAX_METADATA_BYTES) BLOB_TIMEOUT_NS else self.timeout_ns;
+        const watchdog = std.Thread.spawn(.{}, watchdogFn, .{ &timed_out, &request_done, effective_timeout }) catch null;
+        defer {
+            request_done.store(true, .release);
+            if (watchdog) |w| w.join();
+        }
+
+        // Chunked stream with timeout + size limit checks.
+        // We stream in chunks (64 KB at a time) so we can check the
+        // timeout flag between chunks.
+        const chunk_size: usize = 65536;
+        var total_read: usize = 0;
+        while (total_read < max_bytes) {
+            // Check timeout between chunks
+            if (timed_out.load(.acquire)) return error.TimedOut;
+
+            const remaining = max_bytes - total_read;
+            const this_chunk = @min(chunk_size, remaining);
+            const n = body_reader.stream(&body_writer.writer, std.Io.Limit.limited(this_chunk)) catch
+                return error.ReadFailed;
+            total_read += n;
+            if (n < this_chunk) break; // EOF reached within this chunk
+        }
 
         // If we read exactly the limit, the response may be truncated — reject it.
-        if (bytes_read >= max_bytes) return error.ResponseTooLarge;
+        if (total_read >= max_bytes) return error.ResponseTooLarge;
 
         const body = try body_writer.toOwnedSlice();
 
@@ -184,5 +217,23 @@ pub const HttpClient = struct {
             .body = body,
             .allocator = self.allocator,
         };
+    }
+
+    /// Watchdog thread: sleeps for the timeout duration, then sets timed_out.
+    /// Exits early if request_done is set (request completed before timeout).
+    fn watchdogFn(
+        timed_out: *std.atomic.Value(bool),
+        request_done: *std.atomic.Value(bool),
+        timeout_ns: u64,
+    ) void {
+        var elapsed: u64 = 0;
+        const interval: u64 = 1 * std.time.ns_per_s;
+        while (elapsed < timeout_ns) {
+            if (request_done.load(.acquire)) return;
+            std.Thread.sleep(interval);
+            elapsed += interval;
+        }
+        // Timeout expired — signal the read loop to abort
+        timed_out.store(true, .release);
     }
 };
