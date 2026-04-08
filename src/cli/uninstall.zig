@@ -95,34 +95,42 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Unlink symlinks
     var lnk = linker.Linker.init(allocator, &db, prefix);
-    lnk.unlink(keg_id) catch {};
+    lnk.unlink(keg_id) catch {
+        output.warn("Could not remove all symlinks for {s}", .{name});
+    };
 
     // Remove Cellar directory
-    cellar.remove(prefix, name, version) catch {};
+    cellar.remove(prefix, name, version) catch {
+        output.warn("Could not remove cellar entry for {s} {s}", .{ name, version });
+    };
     // Also remove parent if empty (e.g. Cellar/jq/ after removing Cellar/jq/1.8.1/)
     {
         var parent_buf: [512]u8 = undefined;
         const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
-        if (parent_path.len > 0) std.fs.deleteDirAbsolute(parent_path) catch {};
+        if (parent_path.len > 0) std.fs.deleteDirAbsolute(parent_path) catch {}; // intentional: only succeeds if empty
     }
     // Remove opt/ symlink
     {
         var opt_buf: [512]u8 = undefined;
         const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch "";
-        if (opt_path.len > 0) std.fs.cwd().deleteFile(opt_path) catch {};
+        if (opt_path.len > 0) std.fs.cwd().deleteFile(opt_path) catch {}; // intentional: may not exist
     }
 
     // Decrement store ref
     if (sha256.len > 0) {
         var st = store.Store.init(allocator, &db, prefix);
-        st.decrementRef(sha256) catch {};
+        st.decrementRef(sha256) catch {
+            output.warn("Could not decrement store ref for {s}", .{name});
+        };
     }
 
     // Delete from DB (CASCADE handles deps/links)
     var del_stmt = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return;
     defer del_stmt.finalize();
     del_stmt.bindInt(1, keg_id) catch return;
-    _ = del_stmt.step() catch {};
+    _ = del_stmt.step() catch {
+        output.warn("Could not delete DB record for {s}", .{name});
+    };
 
     output.success("{s} uninstalled", .{name});
 }

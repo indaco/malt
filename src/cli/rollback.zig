@@ -121,10 +121,14 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Unlink current version
     var linker = linker_mod.Linker.init(allocator, &db, prefix);
-    linker.unlink(current_id) catch {};
+    linker.unlink(current_id) catch {
+        output.warn("Could not unlink current {s} — links may be stale", .{name});
+    };
 
     // Remove current cellar entry
-    cellar.remove(prefix, name, current_ver) catch {};
+    cellar.remove(prefix, name, current_ver) catch {
+        output.warn("Could not remove cellar entry for {s} {s}", .{ name, current_ver });
+    };
 
     // Materialize the old version from store
     const keg = cellar.materialize(allocator, prefix, target.sha256, name, target.version) catch {
@@ -162,8 +166,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const keg_id = if (id_stmt.step() catch false) id_stmt.columnInt(0) else return;
 
     // Link the old version
-    linker.link(keg.path, name, keg_id) catch {};
-    linker.linkOpt(name, target.version) catch {};
+    linker.link(keg.path, name, keg_id) catch {
+        output.warn("Could not link restored {s} — try: mt uninstall {s} && mt install {s}", .{ name, name, name });
+    };
+    linker.linkOpt(name, target.version) catch {
+        output.warn("Could not create opt link for {s}", .{name});
+    };
 
     db.commit() catch return;
 
