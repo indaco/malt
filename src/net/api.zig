@@ -128,4 +128,71 @@ pub const BrewApi = struct {
         defer file.close();
         file.writeAll(data) catch {};
     }
+
+    /// Maximum cache size (200 MB). Entries are evicted by age (oldest first).
+    const MAX_CACHE_BYTES: u64 = 200 * 1024 * 1024;
+
+    /// Evict oldest cache entries until total size is under MAX_CACHE_BYTES.
+    /// Called by `malt cleanup` and `malt doctor`.
+    pub fn evictCache(self: *BrewApi) u32 {
+        var dir_buf: [512]u8 = undefined;
+        const api_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return 0;
+
+        var dir = std.fs.openDirAbsolute(api_path, .{ .iterate = true }) catch return 0;
+        defer dir.close();
+
+        // Collect entries with size + mtime
+        const Entry = struct { name_buf: [256]u8, name_len: usize, size: u64, mtime: i128 };
+        var entries: std.ArrayList(Entry) = .empty;
+        defer entries.deinit(self.allocator);
+        var total_size: u64 = 0;
+
+        var iter = dir.iterate();
+        while (iter.next() catch null) |e| {
+            if (e.kind != .file) continue;
+            const stat = dir.statFile(e.name) catch continue;
+            var entry: Entry = .{ .name_buf = undefined, .name_len = e.name.len, .size = stat.size, .mtime = stat.mtime };
+            if (e.name.len > entry.name_buf.len) continue;
+            @memcpy(entry.name_buf[0..e.name.len], e.name);
+            entries.append(self.allocator, entry) catch continue;
+            total_size += stat.size;
+        }
+
+        if (total_size <= MAX_CACHE_BYTES) return 0;
+
+        // Sort by mtime ascending (oldest first)
+        std.mem.sort(Entry, entries.items, {}, struct {
+            fn cmp(_: void, a: Entry, b: Entry) bool {
+                return a.mtime < b.mtime;
+            }
+        }.cmp);
+
+        var evicted: u32 = 0;
+        for (entries.items) |entry| {
+            if (total_size <= MAX_CACHE_BYTES) break;
+            const name = entry.name_buf[0..entry.name_len];
+            dir.deleteFile(name) catch continue;
+            total_size -|= entry.size;
+            evicted += 1;
+        }
+        return evicted;
+    }
+
+    /// Return total cache size in bytes. Used by `malt doctor` for warnings.
+    pub fn cacheSize(self: *BrewApi) u64 {
+        var dir_buf: [512]u8 = undefined;
+        const api_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return 0;
+
+        var dir = std.fs.openDirAbsolute(api_path, .{ .iterate = true }) catch return 0;
+        defer dir.close();
+
+        var total: u64 = 0;
+        var iter = dir.iterate();
+        while (iter.next() catch null) |e| {
+            if (e.kind != .file) continue;
+            const stat = dir.statFile(e.name) catch continue;
+            total += stat.size;
+        }
+        return total;
+    }
 };

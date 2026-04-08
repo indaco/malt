@@ -283,8 +283,20 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         for (threads.items) |t| t.join();
     }
 
+    // Check for Ctrl-C between download and materialize phases
+    const main_mod = @import("../main.zig");
+    if (main_mod.isInterrupted()) {
+        output.warn("Interrupted. Cleaning up...", .{});
+        return;
+    }
+
     // ── Sequential materialize + link phase ──────────────────────────
     for (all_jobs.items) |*job| {
+        if (main_mod.isInterrupted()) {
+            output.warn("Interrupted. Stopping install.", .{});
+            return;
+        }
+
         if (!job.succeeded) {
             output.err("Download failed for {s}, skipping", .{job.name});
             continue;
