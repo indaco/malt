@@ -98,7 +98,9 @@ fn downloadWorker(_: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, store: *stor
     };
     allocator.free(tmp_dir);
 
-    store.incrementRef(job.sha256) catch {};
+    store.incrementRef(job.sha256) catch |e| {
+        std.log.warn("refcount increment failed for {s}: {s}", .{ job.sha256, @errorName(e) });
+    };
 
     output.info("  Downloaded {s} ✓", .{job.name});
     job.store_sha256 = job.sha256;
@@ -130,7 +132,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--json")) {
             output.setMode(.json);
         } else if (!std.mem.startsWith(u8, arg, "-")) {
-            packages.append(allocator, arg) catch {};
+            packages.append(allocator, arg) catch return error.OutOfMemory;
         }
     }
 
@@ -505,7 +507,9 @@ fn installCask(
     output.warn("Cask installation is not yet implemented. Found: {s} {s}", .{ cask.token, cask.version });
 
     // Record in DB for tracking
-    cask_mod.recordInstall(db, &cask, null) catch {};
+    cask_mod.recordInstall(db, &cask, null) catch {
+        output.warn("Failed to record cask {s} in database", .{cask.token});
+    };
 
     output.info("{s} {s} recorded (cask install pending implementation)", .{ cask.token, cask.version });
 }
@@ -896,8 +900,12 @@ fn installTapFormula(
         keg_id = getLastInsertId(db) catch return InstallError.RecordFailed;
     }
 
-    linker.link(cellar_path, parts.formula, keg_id) catch {};
-    linker.linkOpt(parts.formula, rb.version) catch {};
+    linker.link(cellar_path, parts.formula, keg_id) catch {
+        output.warn("Some links for {s} could not be created", .{parts.formula});
+    };
+    linker.linkOpt(parts.formula, rb.version) catch {
+        output.warn("Could not create opt link for {s}", .{parts.formula});
+    };
 
     db.commit() catch return InstallError.RecordFailed;
 

@@ -80,13 +80,21 @@ pub fn materialize(
     patchAllMachO(allocator, cellar_path, new_prefix, new_cellar) catch
         return CellarError.PatchFailed;
 
-    // Patch text files (scripts, .pc files, configs)
-    _ = patcher.patchTextFiles(allocator, cellar_path, "/opt/homebrew", new_prefix) catch {};
-    _ = patcher.patchTextFiles(allocator, cellar_path, "/usr/local", new_prefix) catch {};
+    // Patch text files (scripts, .pc files, configs).
+    // Failures here mean .pc files and scripts will have wrong prefixes,
+    // causing build/runtime errors for dependents. Warn but don't abort.
+    _ = patcher.patchTextFiles(allocator, cellar_path, "/opt/homebrew", new_prefix) catch |e| {
+        std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
+    };
+    _ = patcher.patchTextFiles(allocator, cellar_path, "/usr/local", new_prefix) catch |e| {
+        std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
+    };
 
-    // Ad-hoc codesign on arm64
+    // Ad-hoc codesign on arm64. Without this, binaries won't execute on Apple Silicon.
     if (codesign.isArm64()) {
-        codesign.signAllMachOInDir(cellar_path, allocator) catch {};
+        codesign.signAllMachOInDir(cellar_path, allocator) catch |e| {
+            std.log.warn("codesigning failed for {s}: {s}", .{ cellar_path, @errorName(e) });
+        };
     }
 
     // Write INSTALL_RECEIPT.json for brew compatibility
