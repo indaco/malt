@@ -76,10 +76,20 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
 });
 
 pub fn main() !void {
-    // Use an arena allocator backed by page_allocator. The arena frees
-    // everything in one shot when main() returns — no individual free()
-    // calls needed, no leak noise, and fast allocation.
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    // In debug builds, use GeneralPurposeAllocator as the backing
+    // allocator for leak detection and use-after-free checks.
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    const backing: std.mem.Allocator = if (@import("builtin").mode == .Debug)
+        gpa.allocator()
+    else
+        std.heap.page_allocator;
+    defer if (@import("builtin").mode == .Debug) {
+        if (gpa.deinit() == .leak) {
+            std.log.err("memory leak detected", .{});
+        }
+    };
+
+    var arena = std.heap.ArenaAllocator.init(backing);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -169,7 +179,7 @@ fn printUsage() void {
         \\  MALT_NO_EMOJI     Disable emoji in output
         \\
     ;
-    std.fs.File.stderr().writeAll(usage) catch {};
+    std.fs.File.stdout().writeAll(usage) catch {};
 }
 
 fn printVersion() void {
@@ -177,12 +187,42 @@ fn printVersion() void {
 }
 
 fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    _ = allocator;
+    // Try to find and exec the real brew binary
+    const brew_paths = [_][]const u8{
+        "/opt/homebrew/bin/brew",
+        "/usr/local/bin/brew",
+        "/home/linuxbrew/.linuxbrew/bin/brew",
+    };
+
+    for (brew_paths) |brew_path| {
+        std.fs.accessAbsolute(brew_path, .{}) catch continue;
+
+        // Build argv: [brew] ++ args
+        var argv_buf: [128][]const u8 = undefined;
+        argv_buf[0] = brew_path;
+        const argc = @min(args.len, argv_buf.len - 1);
+        for (args[0..argc], 1..) |arg, i| {
+            argv_buf[i] = arg;
+        }
+
+        var child = std.process.Child.init(argv_buf[0 .. argc + 1], allocator);
+        child.spawn() catch continue;
+        const term = child.wait() catch continue;
+        switch (term) {
+            .Exited => |code| {
+                if (code != 0) return error.BrewFailed;
+            },
+            else => return error.BrewFailed,
+        }
+        return;
+    }
+
+    // brew not found
     const stderr = std.fs.File.stderr();
     if (args.len > 0) {
         var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "==> malt: '{s}' not implemented. Delegating to brew...\n", .{args[0]}) catch return;
+        const msg = std.fmt.bufPrint(&buf, "malt: '{s}' is not a malt command and brew was not found.\n", .{args[0]}) catch return;
         stderr.writeAll(msg) catch {};
     }
-    stderr.writeAll("Use 'brew' for this command, or check 'mt --help'\n") catch {};
+    stderr.writeAll("Install Homebrew: https://brew.sh\n") catch {};
 }

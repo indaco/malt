@@ -77,7 +77,8 @@ pub fn materialize(
     const new_cellar = std.fmt.bufPrint(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;
 
     // Walk cellar directory and patch each Mach-O binary
-    patchAllMachO(allocator, cellar_path, new_prefix, new_cellar);
+    patchAllMachO(allocator, cellar_path, new_prefix, new_cellar) catch
+        return CellarError.PatchFailed;
 
     // Patch text files (scripts, .pc files, configs)
     _ = patcher.patchTextFiles(allocator, cellar_path, "/opt/homebrew", new_prefix) catch {};
@@ -102,7 +103,8 @@ pub fn materialize(
 }
 
 /// Walk a directory and patch all Mach-O binaries with prefix replacements.
-fn patchAllMachO(allocator: std.mem.Allocator, dir_path: []const u8, new_prefix: []const u8, new_cellar: []const u8) void {
+/// Returns PatchFailed if any binary has paths that are too long for in-place patching.
+fn patchAllMachO(allocator: std.mem.Allocator, dir_path: []const u8, new_prefix: []const u8, new_cellar: []const u8) CellarError!void {
     var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
 
@@ -128,11 +130,25 @@ fn patchAllMachO(allocator: std.mem.Allocator, dir_path: []const u8, new_prefix:
         const parser_mod = @import("../macho/parser.zig");
         if (!parser_mod.isMachO(&magic_buf)) continue;
 
-        // Patch all known prefix patterns in this Mach-O
-        _ = patcher.patchPaths(allocator, full_path, "/opt/homebrew", new_prefix) catch {};
-        _ = patcher.patchPaths(allocator, full_path, "/usr/local", new_prefix) catch {};
-        _ = patcher.patchPaths(allocator, full_path, "@@HOMEBREW_PREFIX@@", new_prefix) catch {};
-        _ = patcher.patchPaths(allocator, full_path, "@@HOMEBREW_CELLAR@@", new_cellar) catch {};
+        // Patch all known prefix patterns in this Mach-O.
+        // PathTooLong is a real error — surface it so the caller knows the
+        // binary cannot be relocated in-place.
+        _ = patcher.patchPaths(allocator, full_path, "/opt/homebrew", new_prefix) catch |e| switch (e) {
+            error.PathTooLong => return CellarError.PatchFailed,
+            else => continue,
+        };
+        _ = patcher.patchPaths(allocator, full_path, "/usr/local", new_prefix) catch |e| switch (e) {
+            error.PathTooLong => return CellarError.PatchFailed,
+            else => continue,
+        };
+        _ = patcher.patchPaths(allocator, full_path, "@@HOMEBREW_PREFIX@@", new_prefix) catch |e| switch (e) {
+            error.PathTooLong => return CellarError.PatchFailed,
+            else => continue,
+        };
+        _ = patcher.patchPaths(allocator, full_path, "@@HOMEBREW_CELLAR@@", new_cellar) catch |e| switch (e) {
+            error.PathTooLong => return CellarError.PatchFailed,
+            else => continue,
+        };
     }
 }
 

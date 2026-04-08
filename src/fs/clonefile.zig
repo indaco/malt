@@ -29,15 +29,17 @@ pub fn cloneTree(src_path: []const u8, dst_path: []const u8) CloneError!void {
     }
 }
 
-/// Heuristic check: attempt a probe clone in the same directory to see
-/// whether the volume supports APFS clonefile.  Returns true on macOS by
-/// default when the probe is inconclusive.
+/// Check whether the volume at `path` is APFS using statfs(2).
 pub fn isApfs(path: []const u8) bool {
-    _ = path;
-    // On macOS the vast majority of volumes are APFS.  A real probe would
-    // clone a temp file and inspect the result, but for now we simply
-    // return true so the caller always tries clonefile first.
-    return true;
+    const statfs_c = @cImport(@cInclude("sys/mount.h"));
+    const posix_path = std.posix.toPosixPath(path) catch return true;
+    var stat_buf: statfs_c.struct_statfs = undefined;
+    const rc = statfs_c.statfs(&posix_path, &stat_buf);
+    if (rc != 0) return true; // assume APFS if probe fails
+
+    // f_fstypename is a fixed-size array; compare the leading bytes
+    const fs_name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&stat_buf.f_fstypename)), 0);
+    return std.mem.eql(u8, fs_name, "apfs");
 }
 
 fn copyTreeFallback(src_path: []const u8, dst_path: []const u8) !void {
@@ -55,7 +57,7 @@ fn copyTreeFallback(src_path: []const u8, dst_path: []const u8) !void {
     defer dst_dir.close();
 
     // Walk the source tree.
-    var walker = src_dir.walk(std.heap.page_allocator) catch return error.OutOfMemory;
+    var walker = src_dir.walk(std.heap.c_allocator) catch return error.OutOfMemory;
     defer walker.deinit();
 
     while (walker.next() catch return error.AccessDenied) |entry| {

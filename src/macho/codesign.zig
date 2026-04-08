@@ -20,7 +20,9 @@ pub fn isArm64() bool {
 /// Suppresses codesign's own output (e.g., "replacing existing signature").
 pub fn adHocSign(path: []const u8) CodesignError!void {
     const argv = [_][]const u8{ "codesign", "--force", "--sign", "-", path };
-    var child = std.process.Child.init(&argv, std.heap.page_allocator);
+    // Use the C allocator for Child — lighter weight than bare page_allocator
+    // and avoids per-page granularity overhead.
+    var child = std.process.Child.init(&argv, std.heap.c_allocator);
     // Redirect stdout/stderr to /dev/null to suppress codesign messages
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
