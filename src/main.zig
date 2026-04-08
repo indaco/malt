@@ -18,6 +18,9 @@ const tap = @import("cli/tap.zig");
 const gc = @import("cli/gc.zig");
 const migrate = @import("cli/migrate.zig");
 const autoremove = @import("cli/autoremove.zig");
+const rollback = @import("cli/rollback.zig");
+const run_cmd = @import("cli/run.zig");
+const version_update = @import("cli/version_update.zig");
 
 const version = "0.1.0";
 
@@ -37,6 +40,9 @@ const Command = enum {
     gc,
     migrate,
     autoremove,
+    rollback,
+    run,
+    version_cmd,
     help,
     version,
 };
@@ -59,10 +65,12 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
     .{ "gc", .gc },
     .{ "migrate", .migrate },
     .{ "autoremove", .autoremove },
+    .{ "rollback", .rollback },
+    .{ "run", .run },
     .{ "help", .help },
     .{ "--help", .help },
     .{ "-h", .help },
-    .{ "version", .version },
+    .{ "version", .version_cmd },
     .{ "--version", .version },
 });
 
@@ -98,6 +106,16 @@ pub fn main() !void {
             .gc => try gc.execute(allocator, cmd_args),
             .migrate => try migrate.execute(allocator, cmd_args),
             .autoremove => try autoremove.execute(allocator, cmd_args),
+            .rollback => try rollback.execute(allocator, cmd_args),
+            .run => try run_cmd.execute(allocator, cmd_args),
+            .version_cmd => {
+                // "mt version" — check for "mt version update" subcommand
+                if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
+                    try version_update.execute(allocator, cmd_args[1..]);
+                } else {
+                    printVersion();
+                }
+            },
             .help => printUsage(),
             .version => printVersion(),
         }
@@ -128,6 +146,9 @@ fn printUsage() void {
         \\  gc            Garbage collect unreferenced store entries
         \\  migrate       Import existing Homebrew installation
         \\  autoremove    Remove orphaned dependencies
+        \\  rollback      Revert a package to its previous version
+        \\  run           Run a package binary without installing
+        \\  version       Show version (use 'version update' to self-update)
         \\
         \\Global flags:
         \\  --verbose, -v   Verbose output

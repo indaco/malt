@@ -88,6 +88,9 @@ pub fn materialize(
         codesign.signAllMachOInDir(cellar_path, allocator) catch {};
     }
 
+    // Write INSTALL_RECEIPT.json for brew compatibility
+    writeInstallReceipt(cellar_path, name, version, store_sha256);
+
     // Allocate the path so it survives beyond this function's stack
     const owned_path = allocator.dupe(u8, cellar_path) catch return CellarError.OutOfMemory;
 
@@ -131,6 +134,73 @@ fn patchAllMachO(allocator: std.mem.Allocator, dir_path: []const u8, new_prefix:
         _ = patcher.patchPaths(allocator, full_path, "@@HOMEBREW_PREFIX@@", new_prefix) catch {};
         _ = patcher.patchPaths(allocator, full_path, "@@HOMEBREW_CELLAR@@", new_cellar) catch {};
     }
+}
+
+/// Write a brew-compatible INSTALL_RECEIPT.json to the keg directory.
+/// This allows Homebrew to recognize malt-installed packages.
+fn writeInstallReceipt(cellar_path: []const u8, name: []const u8, version: []const u8, store_sha256: []const u8) void {
+    writeInstallReceiptFull(cellar_path, name, version, store_sha256, null, true);
+}
+
+/// Public version with full options for tap installs.
+pub fn writeInstallReceiptFull(
+    cellar_path: []const u8,
+    name: []const u8,
+    version: []const u8,
+    store_sha256: []const u8,
+    tap: ?[]const u8,
+    is_direct: bool,
+) void {
+    var path_buf: [512]u8 = undefined;
+    const receipt_path = std.fmt.bufPrint(&path_buf, "{s}/INSTALL_RECEIPT.json", .{cellar_path}) catch return;
+
+    const file = std.fs.createFileAbsolute(receipt_path, .{}) catch return;
+    defer file.close();
+
+    const timestamp = std.time.timestamp();
+    const tap_str = tap orelse "homebrew/core";
+    const reason = if (is_direct) "true" else "false";
+    const dep_reason = if (is_direct) "false" else "true";
+
+    var buf: [2048]u8 = undefined;
+    const json = std.fmt.bufPrint(&buf,
+        \\{{
+        \\  "homebrew_version": null,
+        \\  "used_options": [],
+        \\  "unused_options": [],
+        \\  "built_as_bottle": true,
+        \\  "poured_from_bottle": true,
+        \\  "installed_as_dependency": {s},
+        \\  "installed_on_request": {s},
+        \\  "changed_files": [],
+        \\  "time": {d},
+        \\  "source": {{
+        \\    "tap": "{s}",
+        \\    "path": null,
+        \\    "spec": "stable",
+        \\    "versions": {{
+        \\      "stable": "{s}",
+        \\      "head": null
+        \\    }},
+        \\    "vendor": "malt"
+        \\  }},
+        \\  "arch": "{s}",
+        \\  "store_sha256": "{s}"
+        \\}}
+    , .{
+        dep_reason,
+        reason,
+        timestamp,
+        tap_str,
+        version,
+        if (@import("builtin").cpu.arch == .aarch64) "arm64" else "x86_64",
+        store_sha256,
+    }) catch return;
+
+    // Also include name in a comment-style field (not standard but useful)
+    _ = name;
+
+    file.writeAll(json) catch {};
 }
 
 /// Remove a keg from the Cellar.

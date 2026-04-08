@@ -286,6 +286,45 @@ Scans the Homebrew Cellar, resolves each installed package via the API, and inst
 
 **Exit codes:** 0 success, 1 no Homebrew found, 2 some packages could not be migrated.
 
+### `mt rollback`
+
+Revert a formula to its previous version using the content-addressable store.
+
+```bash
+mt rollback <package>
+mt rollback <package> --dry-run
+```
+
+The store retains all previously installed bottle versions. Rollback unlinks the current version, materializes the previous one from the store, and updates the database. No re-download needed.
+
+**Exit codes:** 0 success, 1 not installed or no previous version.
+
+### `mt run`
+
+Run a package binary without installing it.
+
+```bash
+mt run <package> -- <args...>
+mt run jq -- --version
+mt run ripgrep -- --help
+```
+
+Downloads the bottle to a temp directory, extracts the binary, executes it with the provided arguments, and cleans up. If the package is already installed, runs the installed binary directly.
+
+**Exit codes:** 0 success, 1 formula not found.
+
+### `mt version update`
+
+Self-update the `mt` binary from GitHub releases.
+
+```bash
+mt version                    # show current version
+mt version update             # download and install latest
+mt version update --check     # check without installing
+```
+
+Queries the GitHub releases API, downloads the correct binary for the current platform, and replaces the running binary in-place.
+
 ### Global Flags
 
 | Flag              | Description                                   |
