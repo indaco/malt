@@ -2,37 +2,82 @@
 //! Human + JSON output formatting.
 
 const std = @import("std");
+const color = @import("color.zig");
 
 pub const OutputMode = enum {
     human,
     json,
 };
 
-/// Prints an info line to stderr.
+var quiet: bool = false;
+var mode: OutputMode = .human;
+
+pub fn setQuiet(q: bool) void {
+    quiet = q;
+}
+pub fn setMode(m: OutputMode) void {
+    mode = m;
+}
+pub fn isQuiet() bool {
+    return quiet;
+}
+
+/// Print info message: "==> {msg}" in cyan
 pub fn info(comptime fmt: []const u8, args: anytype) void {
+    if (quiet) return;
     var buf: [4096]u8 = undefined;
-    const w = std.fs.File.stderr().writer(&buf);
-    w.print("[INFO] " ++ fmt ++ "\n", args) catch {};
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    const f = std.fs.File.stderr();
+    if (color.isColorEnabled()) {
+        f.writeAll(color.Style.cyan.code()) catch {};
+        f.writeAll("==> ") catch {};
+        f.writeAll(color.Style.reset.code()) catch {};
+    } else {
+        f.writeAll("==> ") catch {};
+    }
+    f.writeAll(msg) catch {};
+    f.writeAll("\n") catch {};
 }
 
-/// Prints a warning line to stderr.
+/// Print warning: "Warning: {msg}" in yellow
 pub fn warn(comptime fmt: []const u8, args: anytype) void {
+    if (quiet) return;
     var buf: [4096]u8 = undefined;
-    const w = std.fs.File.stderr().writer(&buf);
-    w.print("[WARN] " ++ fmt ++ "\n", args) catch {};
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    const f = std.fs.File.stderr();
+    if (color.isColorEnabled()) {
+        f.writeAll(color.Style.yellow.code()) catch {};
+        f.writeAll("Warning: ") catch {};
+        f.writeAll(color.Style.reset.code()) catch {};
+    } else {
+        f.writeAll("Warning: ") catch {};
+    }
+    f.writeAll(msg) catch {};
+    f.writeAll("\n") catch {};
 }
 
-/// Prints an error line to stderr.
+/// Print error: "Error: {msg}" in red to stderr
 pub fn err(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
-    const w = std.fs.File.stderr().writer(&buf);
-    w.print("[ERROR] " ++ fmt ++ "\n", args) catch {};
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    const f = std.fs.File.stderr();
+    if (color.isColorEnabled()) {
+        f.writeAll(color.Style.red.code()) catch {};
+        f.writeAll("Error: ") catch {};
+        f.writeAll(color.Style.reset.code()) catch {};
+    } else {
+        f.writeAll("Error: ") catch {};
+    }
+    f.writeAll(msg) catch {};
+    f.writeAll("\n") catch {};
 }
 
-/// Serializes a value to JSON and writes it to stdout.
-pub fn jsonOutput(value: anytype) !void {
-    var buf: [4096]u8 = undefined;
-    const w = std.fs.File.stdout().writer(&buf);
-    try std.json.stringify(value, .{}, w);
-    try w.writeByte('\n');
+/// Write JSON to stdout
+pub fn jsonOutput(allocator: std.mem.Allocator, value: anytype) !void {
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(allocator);
+    std.json.stringify(value, .{}, list.writer(allocator)) catch |e| return e;
+    list.append(allocator, '\n') catch |e| return e;
+    const f = std.fs.File.stdout();
+    f.writeAll(list.items) catch {};
 }
