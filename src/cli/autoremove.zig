@@ -86,6 +86,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             if (version_ptr) |v| {
                 cellar_mod.remove(prefix, name, std.mem.sliceTo(v, 0)) catch {};
             }
+            // Remove empty parent dir
+            {
+                var parent_buf: [512]u8 = undefined;
+                const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
+                if (parent_path.len > 0) std.fs.deleteDirAbsolute(parent_path) catch {};
+            }
 
             // Decrement store ref
             if (sha_ptr) |s| {
