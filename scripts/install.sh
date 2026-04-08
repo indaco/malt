@@ -10,21 +10,21 @@ PREFIX="/opt/malt"
 
 # Colors (respect NO_COLOR)
 if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
-  BOLD="\033[1m"
-  CYAN="\033[36m"
-  GREEN="\033[32m"
-  YELLOW="\033[33m"
-  RED="\033[31m"
-  RESET="\033[0m"
+  BOLD=$'\033[1m'
+  CYAN=$'\033[36m'
+  GREEN=$'\033[32m'
+  YELLOW=$'\033[33m'
+  RED=$'\033[31m'
+  RESET=$'\033[0m'
 else
   BOLD="" CYAN="" GREEN="" YELLOW="" RED="" RESET=""
 fi
 
-info() { printf "${CYAN}==> ${RESET}%s\n" "$*"; }
-ok() { printf "${GREEN}==> ${RESET}%s\n" "$*"; }
-warn() { printf "${YELLOW}Warning: ${RESET}%s\n" "$*"; }
+info() { printf "${CYAN}  ▸ ${RESET}%s\n" "$*"; }
+ok() { printf "${GREEN}  ✓ ${RESET}%s\n" "$*"; }
+warn() { printf "${YELLOW}  ⚠ ${RESET}%s\n" "$*"; }
 error() {
-  printf "${RED}Error: ${RESET}%s\n" "$*" >&2
+  printf "${RED}  ✗ ${RESET}%s\n" "$*" >&2
   exit 1
 }
 
@@ -42,23 +42,29 @@ esac
 
 info "Detected macOS $ARCH_LABEL"
 
-# ── Find latest release ────────────────────────────────────────────
-info "Fetching latest release..."
+# ── Check for local repo first ────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd)"
+LATEST=""
 
-LATEST=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null |
-  grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
+if [ -f "${REPO_ROOT}/build.zig" ] && [ -f "${REPO_ROOT}/src/main.zig" ]; then
+  info "Local repository detected at ${REPO_ROOT}"
+else
+  # ── Find latest release ──────────────────────────────────────────
+  info "Fetching latest release..."
+  LATEST=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null |
+    grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
+fi
 
 if [ -z "$LATEST" ]; then
-  # No releases yet — try building from source
-  warn "No releases found on GitHub. Falling back to build from source."
+  # No releases — build from source (local or cloned)
+  if [ ! -f "${REPO_ROOT}/build.zig" ]; then
+    warn "No releases found on GitHub. Falling back to build from source."
+  fi
 
   if ! command -v zig >/dev/null 2>&1; then
     error "Zig is required to build from source. Install: https://ziglang.org/download/"
   fi
-
-  # Check if we're inside the repo already (local install)
-  SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
-  REPO_ROOT="$(cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd)"
 
   if [ -f "${REPO_ROOT}/build.zig" ] && [ -f "${REPO_ROOT}/src/main.zig" ]; then
     info "Building from local source (${REPO_ROOT})..."
