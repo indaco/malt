@@ -276,15 +276,35 @@ fn installFormula(
         return InstallError.NoBottle;
     };
 
-    // Build GHCR repo path: homebrew/core/{name}
+    // Extract GHCR repo path and digest from the bottle URL.
+    // URL format: https://ghcr.io/v2/{repo}/blobs/{digest}
+    // e.g. https://ghcr.io/v2/homebrew/core/openssl/3/blobs/sha256:abc...
     var repo_buf: [256]u8 = undefined;
-    const repo = std.fmt.bufPrint(&repo_buf, "homebrew/core/{s}", .{formula.name}) catch
-        return InstallError.DownloadFailed;
-
-    // Build digest from SHA256 for GHCR blob API
     var digest_buf: [128]u8 = undefined;
-    const digest = std.fmt.bufPrint(&digest_buf, "sha256:{s}", .{bottle.sha256}) catch
-        return InstallError.DownloadFailed;
+    var repo: []const u8 = undefined;
+    var digest: []const u8 = undefined;
+
+    const ghcr_prefix = "https://ghcr.io/v2/";
+    if (std.mem.startsWith(u8, bottle.url, ghcr_prefix)) {
+        const path = bottle.url[ghcr_prefix.len..];
+        if (std.mem.indexOf(u8, path, "/blobs/")) |blobs_pos| {
+            repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch
+                return InstallError.DownloadFailed;
+            digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch
+                return InstallError.DownloadFailed;
+        } else {
+            // Fallback: construct from name (replace @ with /)
+            repo = buildGhcrRepo(&repo_buf, formula.name) catch
+                return InstallError.DownloadFailed;
+            digest = std.fmt.bufPrint(&digest_buf, "sha256:{s}", .{bottle.sha256}) catch
+                return InstallError.DownloadFailed;
+        }
+    } else {
+        repo = buildGhcrRepo(&repo_buf, formula.name) catch
+            return InstallError.DownloadFailed;
+        digest = std.fmt.bufPrint(&digest_buf, "sha256:{s}", .{bottle.sha256}) catch
+            return InstallError.DownloadFailed;
+    }
 
     // Create temp dir for extraction
     const tmp_dir = atomic.createTempDir(allocator, formula.name) catch {
@@ -511,6 +531,23 @@ fn ensureDirs(prefix: []const u8) void {
             else => continue,
         };
     }
+}
+
+/// Build GHCR repo path from formula name, replacing @ with /
+fn buildGhcrRepo(buf: []u8, name: []const u8) ![]const u8 {
+    // Replace @ with / for versioned formulas (openssl@3 -> homebrew/core/openssl/3)
+    var pos: usize = 0;
+    const prefix_str = "homebrew/core/";
+    if (pos + prefix_str.len > buf.len) return error.OutOfMemory;
+    @memcpy(buf[pos .. pos + prefix_str.len], prefix_str);
+    pos += prefix_str.len;
+
+    for (name) |ch| {
+        if (pos >= buf.len) return error.OutOfMemory;
+        buf[pos] = if (ch == '@') '/' else ch;
+        pos += 1;
+    }
+    return buf[0..pos];
 }
 
 /// Check if a package name is a tap formula (user/repo/formula format).

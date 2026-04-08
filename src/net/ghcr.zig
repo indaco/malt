@@ -16,6 +16,7 @@ pub const GhcrClient = struct {
     allocator: std.mem.Allocator,
     http: *client_mod.HttpClient,
     cached_token: ?[]const u8,
+    cached_repo: ?[]const u8,
     token_expiry: i64,
     mutex: std.Thread.Mutex,
 
@@ -24,6 +25,7 @@ pub const GhcrClient = struct {
             .allocator = allocator,
             .http = http,
             .cached_token = null,
+            .cached_repo = null,
             .token_expiry = 0,
             .mutex = .{},
         };
@@ -31,6 +33,7 @@ pub const GhcrClient = struct {
 
     pub fn deinit(self: *GhcrClient) void {
         if (self.cached_token) |t| self.allocator.free(t);
+        if (self.cached_repo) |r| self.allocator.free(r);
     }
 
     /// Fetch an anonymous GHCR token for a repository.
@@ -39,12 +42,17 @@ pub const GhcrClient = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Double-checked: if token still valid, return cached
+        // Double-checked: if token still valid AND for the same repo, return cached
         const now = std.time.timestamp();
         if (self.cached_token) |t| {
-            if (now < self.token_expiry) return t;
+            const same_repo = if (self.cached_repo) |cr| std.mem.eql(u8, cr, repo) else false;
+            if (now < self.token_expiry and same_repo) return t;
             self.allocator.free(t);
             self.cached_token = null;
+            if (self.cached_repo) |cr| {
+                self.allocator.free(cr);
+                self.cached_repo = null;
+            }
         }
 
         // Build URL: https://ghcr.io/token?scope=repository:{repo}:pull
@@ -62,6 +70,7 @@ pub const GhcrClient = struct {
             return GhcrError.InvalidResponse;
 
         self.cached_token = token;
+        self.cached_repo = self.allocator.dupe(u8, repo) catch null;
         self.token_expiry = now + 270; // 4.5 min buffer before 5 min expiry
         return token;
     }
@@ -101,7 +110,14 @@ pub const GhcrClient = struct {
         }
         defer resp.deinit();
 
-        if (resp.status != 200) return GhcrError.DownloadFailed;
+        if (resp.status != 200) {
+            // Log the status for debugging
+            const stderr = std.fs.File.stderr();
+            var dbg_buf: [128]u8 = undefined;
+            const dbg_msg = std.fmt.bufPrint(&dbg_buf, "GHCR blob download returned status {d} for {s}\n", .{ resp.status, url }) catch "";
+            stderr.writeAll(dbg_msg) catch {};
+            return GhcrError.DownloadFailed;
+        }
 
         body_out.appendSlice(self.allocator, resp.body) catch return GhcrError.OutOfMemory;
     }
