@@ -444,7 +444,7 @@ Every install follows a strict 9-step protocol. Failure at any step triggers cle
 - **Atomic installs** — the 9-step protocol uses `errdefer` at every stage. Interrupted installs leave no partial state.
 - **Concurrent access** — advisory `flock()` with 30-second timeout prevents concurrent mutations. Read-only commands (`list`, `info`, `search`) do not acquire the lock.
 - **Upgrade rollback** — new version is fully installed and verified before the old version is touched. On failure, old symlinks are restored.
-- **Store immutability** — store entries are never modified after commit. Patching happens on the Cellar clone. Only `mt gc` deletes store entries.
+- **Store immutability** — store entries are never modified after commit. Patching happens on the Cellar clone. Only `malt gc` deletes store entries.
 
 ---
 
@@ -491,20 +491,22 @@ If `brew` is not installed, malt prints: `"'services' requires Homebrew. Install
 
 ## How malt Compares
 
-| | Homebrew | zerobrew | nanobrew | bru | **malt** |
-|---|---|---|---|---|---|
-| **Language** | Ruby | Zig + Rust | Zig | Zig | Zig |
-| **Binary size** | ~57 MB | 7.9 MB | 1.2 MB | ~2 MB | ~3 MB |
-| **Startup** | ~1.5s | Fast | Near-zero | Near-zero | Near-zero |
-| **Prefix** | `/opt/homebrew` | `/opt/zerobrew` | `/opt/nanobrew` | `/opt/homebrew` (shared) | `/opt/malt` (own) |
-| **Drop-in for brew** | N/A | No | No | Yes | No |
-| **Brew fallback** | N/A | No | No | Yes | Yes |
-| **Mach-O patching** | `install_name_tool` | Raw byte scan | Partial | Not needed | Struct-aware (`std.macho`) |
-| **Lib symlinks** | Full | Full | `bin`/`sbin` only | Full | Full |
-| **State backend** | Ruby/JSON | SQLite | JSON file | Binary index | SQLite (WAL) |
-| **Content store** | No | Yes | Yes | No | Yes |
-| **APFS clonefile** | No | Yes | Yes | No | Yes |
-| **Concurrent safety** | Lock file | Lock file | None | Unknown | flock + SQLite WAL |
+|                        | Homebrew            | zerobrew        | nanobrew          | bru                      | **malt**                   |
+| ---------------------- | ------------------- | --------------- | ----------------- | ------------------------ | -------------------------- |
+| **Language**           | Ruby                | Zig + Rust      | Zig               | Zig                      | Zig                        |
+| **Binary size**        | ~57 MB              | 7.9 MB          | 1.2 MB            | ~2 MB                    | ~2.8 MB                    |
+| **Prefix**             | `/opt/homebrew`     | `/opt/zerobrew` | `/opt/nanobrew`   | `/opt/homebrew` (shared) | `/opt/malt` (own)          |
+| **Drop-in**            | N/A                 | No              | No                | Yes                      | No                         |
+| **Brew fallback**      | N/A                 | No              | No                | Yes                      | Yes                        |
+| **Parallel downloads** | No                  | Yes             | Yes               | Yes                      | Yes                        |
+| **Mach-O patching**    | `install_name_tool` | Raw byte scan   | Partial           | Not needed               | Struct-aware (`std.macho`) |
+| **Lib symlinks**       | Full                | Full            | `bin`/`sbin` only | Full                     | Full                       |
+| **Content store**      | No                  | Yes             | Yes               | No                       | Yes                        |
+| **INSTALL_RECEIPT**    | Yes                 | No              | No                | Yes                      | Yes                        |
+| **Rollback**           | No                  | No              | Yes               | Yes                      | Yes                        |
+| **Ephemeral run**      | No                  | Yes (`zbx`)     | No                | No                       | Yes (`malt run`)           |
+| **Bundle/services**    | Yes                 | Partial         | Yes               | Yes                      | No (delegates to brew)     |
+| **Concurrent safety**  | Lock file           | Lock file       | None              | Unknown                  | flock + SQLite WAL         |
 
 **bru** is a transparent accelerator — same prefix as Homebrew, zero migration, but no isolation. **malt** takes the opposite approach — full isolation with its own prefix, content-addressable store, and struct-aware Mach-O patching for correctness.
 
