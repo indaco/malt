@@ -61,6 +61,26 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all unit tests");
 
+    // Shared library module — single root that re-exports all source modules.
+    // This avoids "file exists in multiple modules" errors from Zig's module system.
+    const malt_lib = b.createModule(.{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    malt_lib.addCSourceFile(.{
+        .file = b.path("vendor/sqlite3.c"),
+        .flags = &.{
+            "-DSQLITE_OMIT_LOAD_EXTENSION",
+            "-DSQLITE_THREADSAFE=1",
+            "-DSQLITE_DQS=0",
+        },
+    });
+    malt_lib.addIncludePath(b.path("vendor/"));
+    malt_lib.addIncludePath(b.path("c/"));
+    malt_lib.addOptions("version_string", version_options);
+
     inline for (test_modules) |test_file| {
         const t = b.addTest(.{
             .root_module = b.createModule(.{
@@ -70,15 +90,11 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
-        t.root_module.addCSourceFile(.{
-            .file = b.path("vendor/sqlite3.c"),
-            .flags = &.{
-                "-DSQLITE_OMIT_LOAD_EXTENSION",
-                "-DSQLITE_THREADSAFE=1",
-            },
-        });
+        // SQLite is already compiled in the malt_lib module — don't duplicate it here.
         t.root_module.addIncludePath(b.path("vendor/"));
         t.root_module.addIncludePath(b.path("c/"));
+        t.root_module.addOptions("version_string", version_options);
+        t.root_module.addImport("malt", malt_lib);
 
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);

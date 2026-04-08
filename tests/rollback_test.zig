@@ -1,25 +1,44 @@
 //! malt — rollback command tests
+//! Integration tests for rollback require a full install cycle.
+//! Unit tests here cover the DB query logic.
 
 const std = @import("std");
 const testing = std.testing;
+const sqlite = @import("malt").sqlite;
+const schema = @import("malt").schema;
 
-test "rollback requires package name" {
-    // mt rollback with no args should print usage error
+test "schema creates kegs table with expected columns" {
+    const prefix = "/tmp/malt_rb_test";
+    std.fs.makeDirAbsolute(prefix) catch {};
+    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+
+    var db = try sqlite.Database.open("/tmp/malt_rb_test/rb.db");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // Insert a keg and verify it can be queried
+    try db.exec("INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason) VALUES ('wget', 'wget', '1.24', 0, 'homebrew/core', 'abc', '/tmp/cellar', 'direct');");
+
+    var stmt = try db.prepare("SELECT name, version FROM kegs WHERE name = 'wget';");
+    defer stmt.finalize();
+    const has_row = try stmt.step();
+    try testing.expect(has_row);
+
+    const name = stmt.columnText(0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("wget", std.mem.sliceTo(name, 0));
 }
 
-test "rollback detects no previous version" {
-    // If store only has current version, rollback reports no previous version found
-}
+test "schema version table exists" {
+    const prefix = "/tmp/malt_sv_test";
+    std.fs.makeDirAbsolute(prefix) catch {};
+    defer std.fs.deleteTreeAbsolute(prefix) catch {};
 
-test "rollback restores previous version from store" {
-    // Install v1, upgrade to v2, rollback should restore v1 from store
-    // Verify: binary at bin/ points to v1, DB updated, cellar has v1
-}
+    var db = try sqlite.Database.open("/tmp/malt_sv_test/sv.db");
+    defer db.close();
+    try schema.initSchema(&db);
 
-test "rollback is atomic — failure leaves current version intact" {
-    // If materialization fails, current version should remain linked
-}
-
-test "rollback with --dry-run shows plan" {
-    // Dry run should report what would happen without changing state
+    var stmt = try db.prepare("SELECT version FROM schema_version LIMIT 1;");
+    defer stmt.finalize();
+    const has_row = try stmt.step();
+    try testing.expect(has_row);
 }
