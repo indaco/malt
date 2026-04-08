@@ -1,0 +1,24 @@
+# sley configuration file
+# Documentation: https://github.com/indaco/sley
+
+# Enabled plugins:
+#   - commit-parser
+#   - tag-manager
+#   - changelog-generator
+
+path: .version
+plugins:
+  # Analyzes conventional commits to suggest version bumps
+  commit-parser: true
+  # Automatically creates git tags after version changes
+  tag-manager:
+    enabled: true
+  # Generates changelogs from git commits
+  changelog-generator:
+    enabled: true
+    repository:
+      auto-detect: true
+    use-default-icons: true
+    contributors:
+      enabled: true
+      show-name: false

@@ -8,7 +8,7 @@ before:
 
 builds:
   - builder: zig
-    binary: mt
+    binary: malt
     targets:
       - aarch64-macos
       - x86_64-macos
@@ -17,7 +17,7 @@ builds:
 
 universal_binaries:
   - replace: true
-    name_template: mt
+    name_template: malt
 
 archives:
   - format: tar.gz
@@ -48,9 +48,10 @@ brews:
     description: A fast, Homebrew-compatible package manager for macOS
     license: MIT
     install: |
-      bin.install "mt"
+      bin.install "malt"
+      bin.install_symlink "malt", "mt"
     test: |
-      system "#{bin}/mt", "--version"
+      system "#{bin}/malt", "--version"
 
 release:
   draft: true

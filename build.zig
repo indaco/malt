@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
 
     // --- Main executable: mt ---
     const exe = b.addExecutable(.{
-        .name = "mt",
+        .name = "malt",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) void {
     const universal_step = b.step("universal", "Build universal binary (arm64 + x86_64) via lipo");
 
     const arm64_exe = b.addExecutable(.{
-        .name = "mt",
+        .name = "malt",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos }),
@@ -100,7 +100,7 @@ pub fn build(b: *std.Build) void {
     arm64_exe.root_module.addOptions("version_string", version_options);
 
     const x86_exe = b.addExecutable(.{
-        .name = "mt",
+        .name = "malt",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .macos }),
@@ -120,8 +120,8 @@ pub fn build(b: *std.Build) void {
     lipo.addArtifactArg(arm64_exe);
     lipo.addArtifactArg(x86_exe);
     lipo.addArgs(&.{ "-create", "-output" });
-    const universal_output = lipo.addOutputFileArg("mt");
+    const universal_output = lipo.addOutputFileArg("malt");
 
-    const install_universal = b.addInstallBinFile(universal_output, "mt");
+    const install_universal = b.addInstallBinFile(universal_output, "malt");
     universal_step.dependOn(&install_universal.step);
 }

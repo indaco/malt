@@ -130,7 +130,8 @@ fn printUsage() void {
     const usage =
         \\malt — a fast macOS package manager (Homebrew-compatible)
         \\
-        \\Usage: mt <command> [options] [arguments]
+        \\Usage: malt <command> [options] [arguments]
+        \\       mt <command> [options] [arguments]    (alias)
         \\
         \\Commands:
         \\  install       Install formulas, casks, or tap formulas
