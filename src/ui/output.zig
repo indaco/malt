@@ -10,16 +10,30 @@ pub const OutputMode = enum {
 };
 
 var quiet: bool = false;
+var verbose: bool = false;
+var dry_run: bool = false;
 var mode: OutputMode = .human;
 
 pub fn setQuiet(q: bool) void {
     quiet = q;
+}
+pub fn setVerbose(v: bool) void {
+    verbose = v;
+}
+pub fn setDryRun(d: bool) void {
+    dry_run = d;
 }
 pub fn setMode(m: OutputMode) void {
     mode = m;
 }
 pub fn isQuiet() bool {
     return quiet;
+}
+pub fn isVerbose() bool {
+    return verbose;
+}
+pub fn isDryRun() bool {
+    return dry_run;
 }
 
 /// Print info message: "==> {msg}" in cyan
