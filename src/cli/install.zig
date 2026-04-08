@@ -181,159 +181,160 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var store = store_mod.Store.init(allocator, &db, prefix);
     var linker = linker_mod.Linker.init(allocator, &db, prefix);
 
-    // Process each package
+    // ── Collect all download jobs across all packages ────────────────
+    var all_jobs: std.ArrayList(DownloadJob) = .empty;
+    defer all_jobs.deinit(allocator);
+
     for (packages.items) |pkg_name| {
-        installPackage(
-            allocator,
-            pkg_name,
-            &db,
-            &api,
-            &ghcr,
-            &store,
-            &linker,
-            prefix,
-            force_cask,
-            force_formula,
-            dry_run,
-            force,
-        ) catch |e| {
-            output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
-        };
-    }
-}
+        // Handle tap formulas separately (they don't use GHCR)
+        if (isTapFormula(pkg_name)) {
+            installTapFormula(allocator, pkg_name, &db, &linker, prefix, dry_run, force) catch |e| {
+                output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+            };
+            continue;
+        }
 
-/// Install a single package (formula or cask).
-fn installPackage(
-    allocator: std.mem.Allocator,
-    pkg_name: []const u8,
-    db: *sqlite.Database,
-    api: *api_mod.BrewApi,
-    ghcr: *ghcr_mod.GhcrClient,
-    store: *store_mod.Store,
-    linker: *linker_mod.Linker,
-    prefix: []const u8,
-    force_cask: bool,
-    force_formula: bool,
-    dry_run: bool,
-    force: bool,
-) !void {
-    // Check for tap formula format: user/repo/formula
-    if (isTapFormula(pkg_name)) {
-        return installTapFormula(allocator, pkg_name, db, linker, prefix, dry_run, force);
+        // Try formula
+        if (!force_cask) {
+            const formula_json = api.fetchFormula(pkg_name) catch {
+                if (force_formula) {
+                    output.err("Formula '{s}' not found", .{pkg_name});
+                    continue;
+                }
+                // Try cask
+                installCask(allocator, pkg_name, &db, &api, dry_run) catch |e| {
+                    output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+                };
+                continue;
+            };
+
+            // Collect jobs for this formula + its deps
+            collectFormulaJobs(allocator, pkg_name, formula_json, &api, &db, &store, force, &all_jobs) catch |e| {
+                output.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
+                continue;
+            };
+        } else {
+            installCask(allocator, pkg_name, &db, &api, dry_run) catch |e| {
+                output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+            };
+        }
     }
 
-    // Step 2: Auto-detect formula vs cask
-    if (!force_cask) {
-        // Try formula first (unless --cask)
-        const formula_json = api.fetchFormula(pkg_name) catch {
-            if (force_formula) {
-                output.err("Formula '{s}' not found", .{pkg_name});
-                return InstallError.FormulaNotFound;
-            }
-            // Fall through to cask
-            return installCask(allocator, pkg_name, db, api, dry_run);
-        };
-        defer allocator.free(formula_json);
-
-        return installFormula(
-            allocator,
-            pkg_name,
-            formula_json,
-            db,
-            api,
-            ghcr,
-            store,
-            linker,
-            prefix,
-            dry_run,
-            force,
-            "direct",
-        );
-    }
-
-    // --cask was specified
-    return installCask(allocator, pkg_name, db, api, dry_run);
-}
-
-/// Install a formula: resolve deps, download bottles, commit to store,
-/// materialize to cellar, link, and record in DB.
-fn installFormula(
-    allocator: std.mem.Allocator,
-    pkg_name: []const u8,
-    formula_json: []const u8,
-    db: *sqlite.Database,
-    api: *api_mod.BrewApi,
-    ghcr: *ghcr_mod.GhcrClient,
-    store: *store_mod.Store,
-    linker: *linker_mod.Linker,
-    prefix: []const u8,
-    dry_run: bool,
-    force: bool,
-    install_reason: []const u8,
-) !void {
-    // Step 3: Parse formula
-    var formula = formula_mod.parseFormula(allocator, formula_json) catch |e| {
-        output.err("Failed to parse formula JSON for '{s}': {s} (json len={d})", .{ pkg_name, @errorName(e), formula_json.len });
-        return InstallError.FormulaNotFound;
-    };
-    defer formula.deinit();
-
-    output.info("Installing {s} {s}", .{ formula.name, formula.version });
-
-    // Check if already installed (skip unless --force)
-    if (!force and isInstalled(db, formula.name)) {
-        output.info("{s} is already installed", .{formula.name});
-        return;
-    }
-
-    // Step 4: Resolve dependencies
-    const deps = deps_mod.resolve(allocator, formula.name, api, db) catch &.{};
-    defer {
-        if (deps.len > 0) allocator.free(deps);
-    }
+    if (all_jobs.items.len == 0) return;
 
     if (dry_run) {
-        // --dry-run: show plan and return
-        output.info("Dry run: would install {s} {s}", .{ formula.name, formula.version });
-        if (deps.len > 0) {
-            output.info("Dependencies to install:", .{});
-            for (deps) |dep| {
-                if (dep.already_installed) {
-                    output.info("  {s} (already installed)", .{dep.name});
-                } else {
-                    output.info("  {s}", .{dep.name});
-                }
-            }
+        output.info("Dry run: would install {d} package(s):", .{all_jobs.items.len});
+        for (all_jobs.items) |job| {
+            const tag: []const u8 = if (job.is_dep) " (dependency)" else "";
+            output.info("  {s} {s}{s}", .{ job.name, job.version_str, tag });
         }
         return;
     }
 
-    // ── Parallel download phase ──────────────────────────────────────────
-    // Collect all packages to download (deps + main formula) and download
-    // them concurrently. Materialization + linking stays sequential.
+    // ── Parallel download phase ──────────────────────────────────────
+    var to_download: u32 = 0;
+    for (all_jobs.items) |*job| {
+        if (store.exists(job.sha256)) {
+            job.store_sha256 = job.sha256;
+            job.succeeded = true;
+        } else {
+            to_download += 1;
+        }
+    }
 
-    var jobs: std.ArrayList(DownloadJob) = .empty;
-    defer jobs.deinit(allocator);
+    if (to_download > 0) {
+        output.info("Downloading {d} bottle(s)...", .{to_download});
 
-    // Resolve deps that need downloading
+        var threads: std.ArrayList(std.Thread) = .empty;
+        defer threads.deinit(allocator);
+
+        for (all_jobs.items) |*job| {
+            if (job.succeeded) {
+                output.info("  {s} (cached)", .{job.name});
+                continue;
+            }
+            const t = std.Thread.spawn(.{}, downloadWorker, .{
+                allocator, &ghcr, &store, job,
+            }) catch {
+                downloadWorker(allocator, &ghcr, &store, job);
+                continue;
+            };
+            threads.append(allocator, t) catch {
+                t.join();
+                continue;
+            };
+        }
+
+        for (threads.items) |t| t.join();
+    }
+
+    // ── Sequential materialize + link phase ──────────────────────────
+    for (all_jobs.items) |*job| {
+        if (!job.succeeded) {
+            output.err("Download failed for {s}, skipping", .{job.name});
+            continue;
+        }
+
+        materializeAndLink(allocator, job, &db, &linker, prefix);
+    }
+}
+
+/// Collect download jobs for a formula and all its dependencies.
+/// Appends to the shared jobs list for parallel download.
+fn collectFormulaJobs(
+    allocator: std.mem.Allocator,
+    pkg_name: []const u8,
+    formula_json: []const u8,
+    api: *api_mod.BrewApi,
+    db: *sqlite.Database,
+    store: *store_mod.Store,
+    force: bool,
+    jobs: *std.ArrayList(DownloadJob),
+) !void {
+    _ = store;
+    var formula = formula_mod.parseFormula(allocator, formula_json) catch |e| {
+        output.err("Failed to parse formula JSON for '{s}': {s}", .{ pkg_name, @errorName(e) });
+        return InstallError.FormulaNotFound;
+    };
+
+    // Check if already installed
+    if (!force and isInstalled(db, formula.name)) {
+        output.info("{s} is already installed", .{formula.name});
+        formula.deinit();
+        return;
+    }
+
+    // Resolve dependencies
+    const deps = deps_mod.resolve(allocator, formula.name, api, db) catch &.{};
+
+    // Add deps as jobs
     for (deps) |dep| {
         if (dep.already_installed) continue;
 
-        const dep_json = api.fetchFormula(dep.name) catch {
-            output.warn("Could not fetch dependency {s}, skipping", .{dep.name});
-            continue;
-        };
-
+        const dep_json = api.fetchFormula(dep.name) catch continue;
         var dep_formula = formula_mod.parseFormula(allocator, dep_json) catch {
             allocator.free(dep_json);
             continue;
         };
-
         const dep_bottle = formula_mod.resolveBottle(allocator, &dep_formula) catch {
             dep_formula.deinit();
             allocator.free(dep_json);
             continue;
         };
+
+        // Check for duplicate (another top-level pkg may share a dep)
+        var is_dup = false;
+        for (jobs.items) |existing| {
+            if (std.mem.eql(u8, existing.sha256, dep_bottle.sha256)) {
+                is_dup = true;
+                break;
+            }
+        }
+        if (is_dup) {
+            dep_formula.deinit();
+            allocator.free(dep_json);
+            continue;
+        }
 
         jobs.append(allocator, .{
             .name = dep_formula.name,
@@ -366,112 +367,58 @@ fn installFormula(
         .succeeded = false,
     }) catch return InstallError.DownloadFailed;
 
-    // Count how many need downloading (skip if already in store)
-    var to_download: u32 = 0;
-    for (jobs.items) |job| {
-        if (!store.exists(job.sha256)) to_download += 1;
-    }
+    output.info("Resolved {s} {s} ({d} packages)", .{ formula.name, formula.version, jobs.items.len });
+}
 
-    if (to_download > 0) {
-        output.info("Downloading {d} bottle(s)...", .{to_download});
-    }
+/// Materialize a downloaded bottle to the cellar, link, and record in DB.
+fn materializeAndLink(
+    allocator: std.mem.Allocator,
+    job: *DownloadJob,
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    prefix: []const u8,
+) void {
+    const reason: []const u8 = if (job.is_dep) "dependency" else "direct";
 
-    // Download all bottles concurrently using threads
-    var threads: std.ArrayList(std.Thread) = .empty;
-    defer threads.deinit(allocator);
+    output.info("Materializing {s} to cellar...", .{job.name});
+    const keg = cellar_mod.materialize(
+        allocator,
+        prefix,
+        job.store_sha256,
+        job.name,
+        job.version_str,
+    ) catch {
+        output.err("Failed to materialize {s}", .{job.name});
+        return;
+    };
 
-    for (jobs.items) |*job| {
-        if (store.exists(job.sha256)) {
-            job.store_sha256 = job.sha256;
-            job.succeeded = true;
-            output.info("  {s} (cached in store)", .{job.name});
-            continue;
-        }
+    // Parse formula for DB recording
+    var formula = formula_mod.parseFormula(allocator, job.formula_json) catch {
+        output.err("Failed to parse formula for {s}", .{job.name});
+        return;
+    };
+    defer formula.deinit();
 
-        // Spawn download thread
-        const t = std.Thread.spawn(.{}, downloadWorker, .{
-            allocator, ghcr, store, job,
-        }) catch {
-            output.warn("Failed to spawn download thread for {s}", .{job.name});
-            // Fall back to sequential download
-            downloadWorker(allocator, ghcr, store, job);
-            continue;
-        };
-        threads.append(allocator, t) catch {
-            t.join();
-            continue;
-        };
-    }
-
-    // Wait for all downloads to complete
-    for (threads.items) |t| t.join();
-
-    // Check results
-    var download_failures: u32 = 0;
-    for (jobs.items) |job| {
-        if (!job.succeeded) {
-            output.err("Failed to download {s}", .{job.name});
-            download_failures += 1;
-        }
-    }
-
-    if (download_failures > 0 and download_failures == jobs.items.len) {
-        return InstallError.DownloadFailed;
-    }
-
-    // ── Sequential materialize + link phase ────────────────────────────
-    // Process in order: dependencies first, then main formula.
-    for (jobs.items) |*job| {
-        if (!job.succeeded) continue;
-
-        const reason: []const u8 = if (job.is_dep) "dependency" else install_reason;
-
-        // Materialize
-        output.info("Materializing {s} to cellar...", .{job.name});
-        const keg = cellar_mod.materialize(
-            allocator,
-            prefix,
-            job.store_sha256,
-            job.name,
-            job.version_str,
-        ) catch {
-            output.err("Failed to materialize {s}", .{job.name});
-            continue;
+    // Link + record
+    if (!job.keg_only) {
+        const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch {
+            output.err("Failed to record {s} in database", .{job.name});
+            return;
         };
 
-        // Parse the dep formula for recording (main formula is already parsed)
-        var dep_formula_ptr: ?*formula_mod.Formula = null;
-        var dep_formula_storage: formula_mod.Formula = undefined;
-
-        if (job.is_dep) {
-            dep_formula_storage = formula_mod.parseFormula(allocator, job.formula_json) catch continue;
-            dep_formula_ptr = &dep_formula_storage;
-        }
-        defer if (dep_formula_ptr) |f| f.deinit();
-
-        const record_formula = if (dep_formula_ptr) |f| f else &formula;
-
-        // Link + record
-        if (!job.keg_only) {
-            const keg_id = recordKeg(db, record_formula, job.store_sha256, keg.path, reason) catch {
-                output.err("Failed to record {s} in database", .{job.name});
-                continue;
-            };
-
-            linker.link(keg.path, job.name, keg_id) catch {
-                output.warn("Some links for {s} could not be created", .{job.name});
-            };
-            linker.linkOpt(job.name, job.version_str) catch {};
-            recordDeps(db, keg_id, record_formula);
-        } else {
-            output.info("{s} is keg-only; not linking", .{job.name});
-            const keg_id = recordKeg(db, record_formula, job.store_sha256, keg.path, reason) catch continue;
-            linker.linkOpt(job.name, job.version_str) catch {};
-            recordDeps(db, keg_id, record_formula);
-        }
-
-        output.info("{s} {s} installed successfully", .{ job.name, job.version_str });
+        linker.link(keg.path, job.name, keg_id) catch {
+            output.warn("Some links for {s} could not be created", .{job.name});
+        };
+        linker.linkOpt(job.name, job.version_str) catch {};
+        recordDeps(db, keg_id, &formula);
+    } else {
+        output.info("{s} is keg-only; not linking", .{job.name});
+        const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch return;
+        linker.linkOpt(job.name, job.version_str) catch {};
+        recordDeps(db, keg_id, &formula);
     }
+
+    output.info("{s} {s} installed successfully", .{ job.name, job.version_str });
 }
 
 /// Install a cask (placeholder -- full implementation is a TODO).
