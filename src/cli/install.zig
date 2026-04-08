@@ -49,8 +49,11 @@ const DownloadJob = struct {
 };
 
 /// Download a bottle and commit to store. Runs in a worker thread.
-fn downloadWorker(allocator: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, store: *store_mod.Store, job: *DownloadJob) void {
-    const prefix = atomic.maltPrefix();
+fn downloadWorker(_: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, store: *store_mod.Store, job: *DownloadJob) void {
+    // Each thread gets its own arena — the parent arena is not thread-safe.
+    var thread_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer thread_arena.deinit();
+    const allocator = thread_arena.allocator();
 
     // Skip if already in store
     if (store.exists(job.sha256)) {
@@ -81,6 +84,7 @@ fn downloadWorker(allocator: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, stor
 
     // Download
     _ = bottle_mod.download(allocator, ghcr, repo, digest, job.sha256, tmp_dir) catch {
+        output.err("  Download failed: {s}", .{job.name});
         atomic.cleanupTempDir(tmp_dir);
         allocator.free(tmp_dir);
         return;
@@ -96,7 +100,7 @@ fn downloadWorker(allocator: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, stor
 
     store.incrementRef(job.sha256) catch {};
 
-    _ = prefix;
+    output.info("  Downloaded {s} ✓", .{job.name});
     job.store_sha256 = job.sha256;
     job.succeeded = true;
 }

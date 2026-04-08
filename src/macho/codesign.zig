@@ -17,9 +17,13 @@ pub fn isArm64() bool {
 }
 
 /// Ad-hoc codesign a single binary: `codesign --force --sign - <path>`
+/// Suppresses codesign's own output (e.g., "replacing existing signature").
 pub fn adHocSign(path: []const u8) CodesignError!void {
     const argv = [_][]const u8{ "codesign", "--force", "--sign", "-", path };
     var child = std.process.Child.init(&argv, std.heap.page_allocator);
+    // Redirect stdout/stderr to /dev/null to suppress codesign messages
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
     child.spawn() catch return CodesignError.SpawnFailed;
     const term = child.wait() catch return CodesignError.CodesignFailed;
     switch (term) {
