@@ -30,10 +30,10 @@ pub fn info(comptime fmt: []const u8, args: anytype) void {
     const f = std.fs.File.stderr();
     if (color.isColorEnabled()) {
         f.writeAll(color.Style.cyan.code()) catch {};
-        f.writeAll("==> ") catch {};
+        f.writeAll("  ▸ ") catch {};
         f.writeAll(color.Style.reset.code()) catch {};
     } else {
-        f.writeAll("==> ") catch {};
+        f.writeAll("  ▸ ") catch {};
     }
     f.writeAll(msg) catch {};
     f.writeAll("\n") catch {};
@@ -47,10 +47,10 @@ pub fn warn(comptime fmt: []const u8, args: anytype) void {
     const f = std.fs.File.stderr();
     if (color.isColorEnabled()) {
         f.writeAll(color.Style.yellow.code()) catch {};
-        f.writeAll("Warning: ") catch {};
+        f.writeAll("  ⚠ ") catch {};
         f.writeAll(color.Style.reset.code()) catch {};
     } else {
-        f.writeAll("Warning: ") catch {};
+        f.writeAll("  ⚠ ") catch {};
     }
     f.writeAll(msg) catch {};
     f.writeAll("\n") catch {};
@@ -63,10 +63,10 @@ pub fn err(comptime fmt: []const u8, args: anytype) void {
     const f = std.fs.File.stderr();
     if (color.isColorEnabled()) {
         f.writeAll(color.Style.red.code()) catch {};
-        f.writeAll("Error: ") catch {};
+        f.writeAll("  ✗ ") catch {};
         f.writeAll(color.Style.reset.code()) catch {};
     } else {
-        f.writeAll("Error: ") catch {};
+        f.writeAll("  ✗ ") catch {};
     }
     f.writeAll(msg) catch {};
     f.writeAll("\n") catch {};
