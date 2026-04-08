@@ -20,10 +20,13 @@ else
   BOLD="" CYAN="" GREEN="" YELLOW="" RED="" RESET=""
 fi
 
-info()  { printf "${CYAN}==> ${RESET}%s\n" "$*"; }
-ok()    { printf "${GREEN}==> ${RESET}%s\n" "$*"; }
-warn()  { printf "${YELLOW}Warning: ${RESET}%s\n" "$*"; }
-error() { printf "${RED}Error: ${RESET}%s\n" "$*" >&2; exit 1; }
+info() { printf "${CYAN}==> ${RESET}%s\n" "$*"; }
+ok() { printf "${GREEN}==> ${RESET}%s\n" "$*"; }
+warn() { printf "${YELLOW}Warning: ${RESET}%s\n" "$*"; }
+error() {
+  printf "${RED}Error: ${RESET}%s\n" "$*" >&2
+  exit 1
+}
 
 # ── Platform detection ──────────────────────────────────────────────
 OS="$(uname -s)"
@@ -32,8 +35,8 @@ ARCH="$(uname -m)"
 [ "$OS" = "Darwin" ] || error "malt is macOS only. Detected: $OS"
 
 case "$ARCH" in
-  arm64|aarch64) ARCH_LABEL="arm64" ;;
-  x86_64)        ARCH_LABEL="x86_64" ;;
+  arm64 | aarch64) ARCH_LABEL="arm64" ;;
+  x86_64) ARCH_LABEL="x86_64" ;;
   *) error "Unsupported architecture: $ARCH" ;;
 esac
 
@@ -42,8 +45,8 @@ info "Detected macOS $ARCH_LABEL"
 # ── Find latest release ────────────────────────────────────────────
 info "Fetching latest release..."
 
-LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
-  | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
+LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null |
+  grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
 
 if [ -z "$LATEST" ]; then
   # No releases yet — try building from source
@@ -87,8 +90,8 @@ else
   trap 'rm -rf "$TMPDIR"' EXIT
 
   info "Downloading ${ARCHIVE_NAME}..."
-  curl -fsSL "$DOWNLOAD_URL" -o "$TMPDIR/$ARCHIVE_NAME" \
-    || error "Download failed. Check https://github.com/${REPO}/releases"
+  curl -fsSL "$DOWNLOAD_URL" -o "$TMPDIR/$ARCHIVE_NAME" ||
+    error "Download failed. Check https://github.com/${REPO}/releases"
 
   # ── Verify checksum (if available) ──────────────────────────────
   CHECKSUM_URL="https://github.com/${REPO}/releases/download/${LATEST}/checksums.txt"
