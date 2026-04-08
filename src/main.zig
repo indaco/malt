@@ -30,6 +30,7 @@ const gc = @import("cli/gc.zig");
 const migrate = @import("cli/migrate.zig");
 const autoremove = @import("cli/autoremove.zig");
 const rollback = @import("cli/rollback.zig");
+const link_cmd = @import("cli/link.zig");
 const run_cmd = @import("cli/run.zig");
 const version_update = @import("cli/version_update.zig");
 
@@ -53,6 +54,8 @@ const Command = enum {
     migrate,
     autoremove,
     rollback,
+    link,
+    unlink,
     run,
     version_cmd,
     help,
@@ -78,6 +81,8 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
     .{ "migrate", .migrate },
     .{ "autoremove", .autoremove },
     .{ "rollback", .rollback },
+    .{ "link", .link },
+    .{ "unlink", .unlink },
     .{ "run", .run },
     .{ "help", .help },
     .{ "--help", .help },
@@ -170,6 +175,8 @@ pub fn main() !void {
             .migrate => try migrate.execute(allocator, cmd_args),
             .autoremove => try autoremove.execute(allocator, cmd_args),
             .rollback => try rollback.execute(allocator, cmd_args),
+            .link => try link_cmd.executeLink(allocator, cmd_args),
+            .unlink => try link_cmd.executeUnlink(allocator, cmd_args),
             .run => try run_cmd.execute(allocator, cmd_args),
             .version_cmd => {
                 // "mt version" — check for "mt version update" subcommand
@@ -211,6 +218,8 @@ fn printUsage() void {
         \\  migrate       Import existing Homebrew installation
         \\  autoremove    Remove orphaned dependencies
         \\  rollback      Revert a package to its previous version
+        \\  link          Create symlinks for an installed keg
+        \\  unlink        Remove symlinks (keg stays installed)
         \\  run           Run a package binary without installing
         \\  version       Show version (use 'version update' to self-update)
         \\
