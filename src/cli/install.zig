@@ -550,9 +550,12 @@ fn installTapFormula(
         return InstallError.FormulaNotFound;
     };
 
-    output.info("Resolving tap formula {s}/{s}/{s}...", .{ parts.user, parts.repo, parts.formula });
+    output.info("Resolving tap {s}/{s}/{s}...", .{ parts.user, parts.repo, parts.formula });
 
-    // Fetch Ruby formula from GitHub
+    var http = client_mod.HttpClient.init(allocator);
+    defer http.deinit();
+
+    // Try Formula/ first, then Casks/
     var url_buf: [512]u8 = undefined;
     const rb_url = std.fmt.bufPrint(&url_buf, "https://raw.githubusercontent.com/{s}/homebrew-{s}/HEAD/Formula/{s}.rb", .{
         parts.user,
@@ -560,17 +563,29 @@ fn installTapFormula(
         parts.formula,
     }) catch return InstallError.FormulaNotFound;
 
-    var http = client_mod.HttpClient.init(allocator);
-    defer http.deinit();
-
     var resp = http.get(rb_url) catch {
-        output.err("Cannot fetch tap formula from GitHub", .{});
+        output.err("Cannot fetch tap from GitHub", .{});
         return InstallError.FormulaNotFound;
     };
+
+    if (resp.status != 200) {
+        resp.deinit();
+        // Try Casks/ directory
+        const cask_url = std.fmt.bufPrint(&url_buf, "https://raw.githubusercontent.com/{s}/homebrew-{s}/HEAD/Casks/{s}.rb", .{
+            parts.user,
+            parts.repo,
+            parts.formula,
+        }) catch return InstallError.FormulaNotFound;
+
+        resp = http.get(cask_url) catch {
+            output.err("Cannot fetch tap from GitHub", .{});
+            return InstallError.FormulaNotFound;
+        };
+    }
     defer resp.deinit();
 
     if (resp.status != 200) {
-        output.err("Tap formula not found: {s}", .{pkg_name});
+        output.err("Tap formula/cask not found: {s}", .{pkg_name});
         return InstallError.FormulaNotFound;
     }
 
@@ -580,10 +595,22 @@ fn installTapFormula(
         return InstallError.FormulaNotFound;
     };
 
+    // Interpolate #{version} in URL if present
+    const version_needle = "#" ++ "{version}";
+    var final_url_buf: [512]u8 = undefined;
+    const final_url = blk: {
+        if (std.mem.indexOf(u8, rb.url, version_needle)) |pos| {
+            const before = rb.url[0..pos];
+            const after = rb.url[pos + version_needle.len ..];
+            break :blk std.fmt.bufPrint(&final_url_buf, "{s}{s}{s}", .{ before, rb.version, after }) catch rb.url;
+        }
+        break :blk rb.url;
+    };
+
     output.info("Found {s} {s}", .{ parts.formula, rb.version });
 
     if (dry_run) {
-        output.info("Dry run: would install {s} {s} from {s}", .{ parts.formula, rb.version, rb.url });
+        output.info("Dry run: would install {s} {s} from {s}", .{ parts.formula, rb.version, final_url });
         return;
     }
 
@@ -595,7 +622,7 @@ fn installTapFormula(
 
     // Download the binary archive
     output.info("Downloading {s}...", .{parts.formula});
-    var download_resp = http.get(rb.url) catch {
+    var download_resp = http.get(final_url) catch {
         output.err("Failed to download {s}", .{parts.formula});
         return InstallError.DownloadFailed;
     };
@@ -650,8 +677,10 @@ fn installTapFormula(
     };
 
     // Write archive to temp file
+    const is_xz = std.mem.endsWith(u8, final_url, ".tar.xz");
+    const ext = if (is_xz) ".tar.xz" else ".tar.gz";
     var tmp_buf: [512]u8 = undefined;
-    const tmp_archive = std.fmt.bufPrint(&tmp_buf, "{s}/tmp/tap_download.tar.gz", .{prefix}) catch
+    const tmp_archive = std.fmt.bufPrint(&tmp_buf, "{s}/tmp/tap_download{s}", .{ prefix, ext }) catch
         return InstallError.DownloadFailed;
 
     const tmp_file = std.fs.createFileAbsolute(tmp_archive, .{}) catch return InstallError.DownloadFailed;
@@ -662,34 +691,50 @@ fn installTapFormula(
     tmp_file.close();
     defer std.fs.cwd().deleteFile(tmp_archive) catch {};
 
-    // Extract tar.gz to cellar
-    var out_dir = std.fs.openDirAbsolute(cellar_path, .{}) catch return InstallError.CellarFailed;
-    defer out_dir.close();
-
-    const archive_file = std.fs.openFileAbsolute(tmp_archive, .{}) catch return InstallError.CellarFailed;
-    defer archive_file.close();
-
+    // Extract archive to cellar
     const archive_mod = @import("../fs/archive.zig");
-    var read_buf: [8192]u8 = undefined;
-    var file_reader = archive_file.reader(&read_buf);
-    archive_mod.extractTarGz(&file_reader.interface, out_dir) catch {
-        output.err("Failed to extract archive for {s}", .{parts.formula});
-        return InstallError.CellarFailed;
-    };
+    if (is_xz) {
+        // Use system tar for .tar.xz (Zig xz decompressor uses legacy I/O API)
+        archive_mod.extractTarXzFile(tmp_archive, cellar_path) catch {
+            output.err("Failed to extract .tar.xz archive for {s}", .{parts.formula});
+            return InstallError.CellarFailed;
+        };
+    } else {
+        var out_dir = std.fs.openDirAbsolute(cellar_path, .{}) catch return InstallError.CellarFailed;
+        defer out_dir.close();
 
-    // If the binary ended up at the root, move it to bin/
-    // GoReleaser extracts the binary directly (no subdirectory)
+        const archive_file = std.fs.openFileAbsolute(tmp_archive, .{}) catch return InstallError.CellarFailed;
+        defer archive_file.close();
+
+        var read_buf: [8192]u8 = undefined;
+        var file_reader = archive_file.reader(&read_buf);
+        archive_mod.extractTarGz(&file_reader.interface, out_dir) catch {
+            output.err("Failed to extract archive for {s}", .{parts.formula});
+            return InstallError.CellarFailed;
+        };
+    }
+
+    // Find and move the binary to bin/
+    // GoReleaser may extract directly or into a subdirectory
     {
         var cellar_dir = std.fs.openDirAbsolute(cellar_path, .{ .iterate = true }) catch return InstallError.CellarFailed;
         defer cellar_dir.close();
-        var iter = cellar_dir.iterate();
-        while (iter.next() catch null) |entry| {
+
+        // Walk all files (including subdirectories) looking for the formula binary
+        var walker = cellar_dir.walk(allocator) catch return InstallError.CellarFailed;
+        defer walker.deinit();
+
+        while (walker.next() catch null) |entry| {
             if (entry.kind != .file) continue;
-            if (std.mem.eql(u8, entry.name, parts.formula)) {
-                // Move binary to bin/
-                cellar_dir.rename(entry.name, std.fmt.bufPrint(&tmp_buf, "bin/{s}", .{entry.name}) catch continue) catch continue;
+
+            // Match binary by formula name (the basename, not the full path)
+            const basename = std.fs.path.basename(entry.path);
+            if (std.mem.eql(u8, basename, parts.formula)) {
+                // Copy to bin/
+                const dest_name = std.fmt.bufPrint(&tmp_buf, "bin/{s}", .{basename}) catch continue;
+                cellar_dir.copyFile(entry.path, cellar_dir, dest_name, .{}) catch continue;
                 // Make executable
-                const bin_file = cellar_dir.openFile(std.fmt.bufPrint(&tmp_buf, "bin/{s}", .{entry.name}) catch continue, .{ .mode = .read_write }) catch continue;
+                const bin_file = cellar_dir.openFile(dest_name, .{ .mode = .read_write }) catch continue;
                 defer bin_file.close();
                 bin_file.chmod(0o755) catch {};
                 break;
@@ -771,11 +816,15 @@ fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
                 in_macos = true;
             }
 
-            // Track CPU section
+            // Track CPU section (Formula style: Hardware::CPU, Cask style: on_arm/on_intel)
             if (in_macos) {
-                if (is_arm and std.mem.indexOf(u8, line, "Hardware::CPU.arm?") != null) {
+                if (is_arm and (std.mem.indexOf(u8, line, "Hardware::CPU.arm?") != null or
+                    std.mem.indexOf(u8, line, "on_arm") != null))
+                {
                     in_correct_section = true;
-                } else if (!is_arm and std.mem.indexOf(u8, line, "Hardware::CPU.intel?") != null) {
+                } else if (!is_arm and (std.mem.indexOf(u8, line, "Hardware::CPU.intel?") != null or
+                    std.mem.indexOf(u8, line, "on_intel") != null))
+                {
                     in_correct_section = true;
                 }
             }
