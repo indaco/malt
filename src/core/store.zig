@@ -8,9 +8,12 @@ pub const Store = struct {
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     prefix: []const u8,
+    /// Serializes write operations (commitFrom, incrementRef, decrementRef)
+    /// across parallel download workers. exists() is read-only and safe without lock.
+    mutex: std.Thread.Mutex,
 
     pub fn init(allocator: std.mem.Allocator, db: *sqlite.Database, prefix: []const u8) Store {
-        return .{ .allocator = allocator, .db = db, .prefix = prefix };
+        return .{ .allocator = allocator, .db = db, .prefix = prefix, .mutex = .{} };
     }
 
     /// Atomic rename from tmp/{sha256} to store/{sha256}. Idempotent.
@@ -21,7 +24,10 @@ pub const Store = struct {
     }
 
     /// Atomic rename from a specific source path to store/{sha256}. Idempotent.
+    /// Thread-safe: serialized by internal mutex.
     pub fn commitFrom(self: *Store, sha256: []const u8, src_path: ?[]const u8) StoreError!void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         const src = src_path orelse blk: {
             var src_buf: [512]u8 = undefined;
             break :blk std.fmt.bufPrint(&src_buf, "{s}/tmp/{s}", .{ self.prefix, sha256 }) catch return StoreError.OutOfMemory;
@@ -56,6 +62,8 @@ pub const Store = struct {
     }
 
     pub fn incrementRef(self: *Store, sha256: []const u8) StoreError!void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         var stmt = self.db.prepare(
             "INSERT INTO store_refs (store_sha256, refcount) VALUES (?1, 1)" ++
                 " ON CONFLICT(store_sha256) DO UPDATE SET refcount = refcount + 1;",
@@ -66,6 +74,8 @@ pub const Store = struct {
     }
 
     pub fn decrementRef(self: *Store, sha256: []const u8) StoreError!void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         var stmt = self.db.prepare(
             "UPDATE store_refs SET refcount = refcount - 1 WHERE store_sha256 = ?1 AND refcount > 0;",
         ) catch return StoreError.RefCountError;

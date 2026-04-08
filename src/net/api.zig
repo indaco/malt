@@ -11,9 +11,23 @@ pub const ApiError = error{
     NotFound,
     ApiUnreachable,
     InvalidResponse,
+    InvalidName,
     CacheError,
     OutOfMemory,
 };
+
+/// Validate a formula/cask name to prevent path traversal and URL injection.
+/// Allowed characters: [a-z0-9@._+-]
+pub fn validateName(name: []const u8) ApiError!void {
+    if (name.len == 0 or name.len > 128) return ApiError.InvalidName;
+    if (std.mem.indexOf(u8, name, "..") != null) return ApiError.InvalidName;
+    for (name) |ch| {
+        switch (ch) {
+            'a'...'z', '0'...'9', '@', '.', '_', '+', '-' => {},
+            else => return ApiError.InvalidName,
+        }
+    }
+}
 
 pub const BrewApi = struct {
     allocator: std.mem.Allocator,
@@ -30,6 +44,7 @@ pub const BrewApi = struct {
 
     /// Fetch formula JSON. Returns caller-owned bytes.
     pub fn fetchFormula(self: *BrewApi, name: []const u8) ApiError![]const u8 {
+        try validateName(name);
         var url_buf: [512]u8 = undefined;
         const url = std.fmt.bufPrint(&url_buf, BASE_URL ++ "/formula/{s}.json", .{name}) catch
             return ApiError.OutOfMemory;
@@ -38,6 +53,7 @@ pub const BrewApi = struct {
 
     /// Fetch cask JSON. Returns caller-owned bytes.
     pub fn fetchCask(self: *BrewApi, token: []const u8) ApiError![]const u8 {
+        try validateName(token);
         var url_buf: [512]u8 = undefined;
         const url = std.fmt.bufPrint(&url_buf, BASE_URL ++ "/cask/{s}.json", .{token}) catch
             return ApiError.OutOfMemory;

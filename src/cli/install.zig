@@ -215,6 +215,14 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 continue;
             };
 
+            // Check if name also exists as a cask — warn about ambiguity
+            if (!force_formula) {
+                if (api.fetchCask(pkg_name)) |cask_json| {
+                    allocator.free(cask_json);
+                    output.info("{s} exists as both a formula and a cask. Installing formula. Use --cask to install the cask instead.", .{pkg_name});
+                } else |_| {}
+            }
+
             // Collect jobs for this formula + its deps
             collectFormulaJobs(allocator, pkg_name, formula_json, &api, &db, &store, force, &all_jobs) catch |e| {
                 output.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
