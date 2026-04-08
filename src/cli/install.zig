@@ -374,6 +374,12 @@ fn collectFormulaJobs(
         .succeeded = false,
     }) catch return InstallError.DownloadFailed;
 
+    // Warn if formula defines post_install — malt cannot run Ruby post-install scripts
+    if (formula.post_install_defined) {
+        output.warn("{s} defines a post_install script that malt cannot execute.", .{formula.name});
+        output.warn("The package may not work correctly without it. Consider: brew install {s}", .{formula.name});
+    }
+
     output.info("Resolved {s} {s} ({d} packages)", .{ formula.name, formula.version, jobs.items.len });
 }
 
@@ -398,33 +404,55 @@ fn materializeAndLink(
         output.err("Failed to materialize {s}", .{job.name});
         return;
     };
-
     // Parse formula for DB recording
     var formula = formula_mod.parseFormula(allocator, job.formula_json) catch {
         output.err("Failed to parse formula for {s}", .{job.name});
+        cellar_mod.remove(prefix, job.name, job.version_str) catch {};
         return;
     };
     defer formula.deinit();
+
+    // Check for symlink conflicts before linking
+    if (!job.keg_only) {
+        const conflicts = linker.checkConflicts(keg.path) catch &.{};
+        if (conflicts.len > 0) {
+            output.err("{s}: {d} symlink conflict(s) detected:", .{ job.name, conflicts.len });
+            for (conflicts) |conflict| {
+                output.err("  {s} already linked by {s}", .{ conflict.link_path, conflict.existing_keg });
+            }
+            output.err("Use --force to overwrite, or uninstall the conflicting package first.", .{});
+            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
+            return;
+        }
+    }
 
     // Link + record
     if (!job.keg_only) {
         const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch {
             output.err("Failed to record {s} in database", .{job.name});
+            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return;
         };
 
         linker.link(keg.path, job.name, keg_id) catch {
             output.warn("Some links for {s} could not be created", .{job.name});
+            // Rollback: unlink what was partially created + remove DB record + cellar
+            linker.unlink(keg_id) catch {};
+            deleteKeg(db, keg_id);
+            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
+            return;
         };
         linker.linkOpt(job.name, job.version_str) catch {};
         recordDeps(db, keg_id, &formula);
     } else {
         output.info("{s} is keg-only; not linking", .{job.name});
-        const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch return;
+        const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch {
+            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
+            return;
+        };
         linker.linkOpt(job.name, job.version_str) catch {};
         recordDeps(db, keg_id, &formula);
     }
-
     output.success("{s} {s} installed", .{ job.name, job.version_str });
 }
 
@@ -496,6 +524,14 @@ fn recordKeg(
     db.commit() catch return InstallError.RecordFailed;
 
     return keg_id;
+}
+
+/// Delete a keg record from the database (rollback helper).
+fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
+    var stmt = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return;
+    defer stmt.finalize();
+    stmt.bindInt(1, keg_id) catch return;
+    _ = stmt.step() catch {};
 }
 
 /// Record dependencies for a keg.

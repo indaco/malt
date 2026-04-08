@@ -18,13 +18,63 @@ pub const Linker = struct {
     }
 
     /// Check for symlink conflicts before linking.
+    /// Returns a slice of conflicts (files already linked to a different keg).
     pub fn checkConflicts(self: *Linker, keg_path: []const u8) ![]Conflict {
-        // Walk keg_path/bin/, keg_path/lib/, etc.
-        // For each file, check if {prefix}/bin/{name} already exists
-        // If it does and points to a different keg, that's a conflict
-        _ = .{ self, keg_path };
-        // Return empty for now — will implement full walk later
-        return &.{};
+        const dirs_to_check = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc" };
+        var conflicts: std.ArrayList(Conflict) = .empty;
+
+        for (dirs_to_check) |subdir| {
+            var keg_dir_buf: [512]u8 = undefined;
+            const keg_subdir = std.fmt.bufPrint(&keg_dir_buf, "{s}/{s}", .{ keg_path, subdir }) catch continue;
+
+            var dir = std.fs.openDirAbsolute(keg_subdir, .{ .iterate = true }) catch continue;
+            defer dir.close();
+
+            var prefix_dir_buf: [512]u8 = undefined;
+            const prefix_subdir = std.fmt.bufPrint(&prefix_dir_buf, "{s}/{s}", .{ self.prefix, subdir }) catch continue;
+
+            var prefix_dir = std.fs.openDirAbsolute(prefix_subdir, .{}) catch continue;
+            defer prefix_dir.close();
+
+            var iter = dir.iterate();
+            while (iter.next() catch null) |entry| {
+                if (entry.kind == .directory) continue;
+
+                // Check if a symlink already exists at the target location
+                var link_target_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const link_target = prefix_dir.readLink(entry.name, &link_target_buf) catch continue;
+
+                // If the existing symlink points into a different keg, it's a conflict
+                if (!std.mem.startsWith(u8, link_target, keg_path)) {
+                    var link_path_buf: [512]u8 = undefined;
+                    const link_path = std.fmt.bufPrint(&link_path_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, entry.name }) catch continue;
+
+                    // Extract the existing keg path from the symlink target
+                    // Targets look like: /opt/malt/Cellar/<name>/<ver>/bin/<file>
+                    const existing_keg = extractKegFromPath(link_target) orelse link_target;
+
+                    conflicts.append(self.allocator, .{
+                        .link_path = self.allocator.dupe(u8, link_path) catch continue,
+                        .existing_keg = self.allocator.dupe(u8, existing_keg) catch continue,
+                    }) catch continue;
+                }
+            }
+        }
+
+        return conflicts.toOwnedSlice(self.allocator) catch return &.{};
+    }
+
+    /// Extract "Cellar/<name>/<ver>" from a full path like "/opt/malt/Cellar/foo/1.0/bin/foo"
+    fn extractKegFromPath(path: []const u8) ?[]const u8 {
+        const cellar_marker = "Cellar/";
+        const idx = std.mem.indexOf(u8, path, cellar_marker) orelse return null;
+        const after = path[idx + cellar_marker.len ..];
+        // Find second slash (end of name/version)
+        const first_slash = std.mem.indexOfScalar(u8, after, '/') orelse return after;
+        const rest = after[first_slash + 1 ..];
+        const second_slash = std.mem.indexOfScalar(u8, rest, '/') orelse return after;
+        _ = second_slash;
+        return path[idx .. idx + cellar_marker.len + first_slash + 1 + (std.mem.indexOfScalar(u8, rest, '/') orelse rest.len)];
     }
 
     /// Create symlinks for all files in a keg, recording in DB.
@@ -62,11 +112,18 @@ pub const Linker = struct {
             var target_buf: [512]u8 = undefined;
             const target = std.fmt.bufPrint(&target_buf, "{s}/{s}/{s}", .{ keg_path, subdir, entry.name }) catch continue;
 
-            // Remove existing symlink if present
-            parent_dir.deleteFile(entry.name) catch {};
-
-            // Create symlink
-            parent_dir.symLink(target, entry.name, .{}) catch continue;
+            // Atomic symlink: create at a temp name, then rename into place.
+            // This avoids a window where the link is absent after deleteFile.
+            var tmp_name_buf: [280]u8 = undefined;
+            const tmp_name = std.fmt.bufPrint(&tmp_name_buf, ".malt_tmp_{s}", .{entry.name}) catch continue;
+            parent_dir.deleteFile(tmp_name) catch {};
+            parent_dir.symLink(target, tmp_name, .{}) catch continue;
+            parent_dir.rename(tmp_name, entry.name) catch {
+                // Rename failed — fall back to direct replacement
+                parent_dir.deleteFile(tmp_name) catch {};
+                parent_dir.deleteFile(entry.name) catch {};
+                parent_dir.symLink(target, entry.name, .{}) catch continue;
+            };
 
             // Build the full link path for DB recording
             var link_buf: [512]u8 = undefined;

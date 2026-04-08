@@ -160,7 +160,7 @@ fn execBinary(path: []const u8, cmd_args: []const []const u8) void {
         argv_buf[i] = arg;
     }
 
-    var child = std.process.Child.init(argv_buf[0 .. argc + 1], std.heap.page_allocator);
+    var child = std.process.Child.init(argv_buf[0 .. argc + 1], std.heap.c_allocator);
     child.spawn() catch {
         output.err("Failed to execute binary", .{});
         return;

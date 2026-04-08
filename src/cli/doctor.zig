@@ -74,11 +74,22 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch break :blk2;
         const pid = lock_mod.LockFile.holderPid(lock_path);
         if (pid) |p| {
-            // Check if PID is running
-            var pid_buf: [64]u8 = undefined;
-            const pid_str = std.fmt.bufPrint(&pid_buf, "Lock held by PID {d}", .{p}) catch "Lock held";
-            printCheck("Stale lock", .warn_status, pid_str);
-            warnings += 1;
+            // Check if PID is still running via kill(pid, 0)
+            const is_alive = blk_alive: {
+                std.posix.kill(p, 0) catch break :blk_alive false;
+                break :blk_alive true;
+            };
+            if (is_alive) {
+                var pid_buf: [128]u8 = undefined;
+                const pid_str = std.fmt.bufPrint(&pid_buf, "Lock held by active PID {d}", .{p}) catch "Lock held";
+                printCheck("Stale lock", .warn_status, pid_str);
+                warnings += 1;
+            } else {
+                var pid_buf: [128]u8 = undefined;
+                const pid_str = std.fmt.bufPrint(&pid_buf, "Stale lock from dead PID {d}. Run: rm {s}", .{ p, lock_path }) catch "Stale lock detected";
+                printCheck("Stale lock", .warn_status, pid_str);
+                warnings += 1;
+            }
         } else {
             printCheck("Stale lock", .ok, null);
         }
