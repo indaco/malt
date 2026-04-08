@@ -478,7 +478,7 @@ fn materializeAndLink(
     output.success("{s} {s} installed", .{ job.name, job.version_str });
 }
 
-/// Install a cask (placeholder -- full implementation is a TODO).
+/// Install a cask (DMG, ZIP, or PKG).
 fn installCask(
     allocator: std.mem.Allocator,
     token: []const u8,
@@ -498,20 +498,51 @@ fn installCask(
     };
     defer cask.deinit();
 
-    if (dry_run) {
-        output.info("Dry run: would install cask {s} {s}", .{ cask.token, cask.version });
+    // Check if already installed
+    if (cask_mod.isInstalled(db, cask.token)) {
+        output.info("{s} is already installed", .{cask.token});
         return;
     }
 
-    // TODO: Full cask install (download DMG/PKG/ZIP, extract, move to /Applications)
-    output.warn("Cask installation is not yet implemented. Found: {s} {s}", .{ cask.token, cask.version });
+    const artifact_type = cask_mod.artifactTypeFromUrl(cask.url);
 
-    // Record in DB for tracking
-    cask_mod.recordInstall(db, &cask, null) catch {
-        output.warn("Failed to record cask {s} in database", .{cask.token});
+    if (dry_run) {
+        output.info("Dry run: would install cask {s} {s} ({s})", .{
+            cask.token,
+            cask.version,
+            @tagName(artifact_type),
+        });
+        return;
+    }
+
+    if (artifact_type == .unknown) {
+        output.err("Unsupported cask format for '{s}' — URL: {s}", .{ cask.token, cask.url });
+        output.err("malt supports .dmg, .zip, and .pkg casks. Use: brew install --cask {s}", .{cask.token});
+        return InstallError.CaskNotFound;
+    }
+
+    // Warn for PKG casks (require sudo)
+    if (artifact_type == .pkg) {
+        output.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
+    }
+
+    output.info("Installing cask {s} {s}...", .{ cask.token, cask.version });
+
+    const prefix = atomic.maltPrefix();
+    var installer = cask_mod.CaskInstaller.init(allocator, db, prefix);
+
+    const app_path = installer.install(&cask) catch {
+        output.err("Failed to install cask {s}", .{cask.token});
+        return InstallError.CaskNotFound;
     };
 
-    output.info("{s} {s} recorded (cask install pending implementation)", .{ cask.token, cask.version });
+    // Record in DB with install path
+    cask_mod.recordInstall(db, &cask, app_path) catch {
+        output.warn("Failed to record cask {s} in database", .{cask.token});
+    };
+    allocator.free(app_path);
+
+    output.success("{s} {s} installed", .{ cask.token, cask.version });
 }
 
 /// Record a keg in the database. Returns the keg_id.
