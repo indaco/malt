@@ -63,6 +63,8 @@ Requires [Zig 0.15.x](https://ziglang.org/download/). See [INSTALL.md](INSTALL.m
 ## Quick Start
 
 > **Tip:** `mt` is a built-in alias for `malt`. Every command works with either name — use `mt` if you prefer fewer keystrokes.
+>
+> Additional aliases: `remove` for `uninstall`, `ls` for `list`.
 
 ```bash
 # Install a formula (resolves dependencies automatically)
@@ -94,7 +96,7 @@ Install formulas, casks, or tap formulas.
 
 ```bash
 mt install <package>                     # auto-detect formula or cask
-mt install <package>@<version>           # specific version
+mt install <package>@<version>           # versioned formula (e.g. openssl@3)
 mt install --cask <app>                  # explicit cask
 mt install --formula <name>              # explicit formula
 mt install <user>/<tap>/<formula>        # inline tap (no separate tap step)
@@ -110,8 +112,6 @@ mt install <package> [<package> ...]     # multiple packages
 | `--quiet`, `-q` | Suppress all output except errors               |
 | `--json`        | Output result as JSON                           |
 
-**Exit codes:** 0 success, 1 not found, 2 download failure, 3 link conflict, 4 disk full, 5 lock held, 6 post-install hook required.
-
 ### `mt uninstall`
 
 Remove installed packages.
@@ -122,36 +122,27 @@ mt uninstall --cask <app>
 mt uninstall <package> --force           # ignore dependents check
 ```
 
-| Flag        | Description                                        |
-| ----------- | -------------------------------------------------- |
-| `--force`   | Remove even if other packages depend on it         |
-| `--zap`     | Deep clean (cask only: remove preferences, caches) |
-| `--dry-run` | Show what would be removed                         |
+| Flag            | Description                                |
+| --------------- | ------------------------------------------ |
+| `--force`, `-f` | Remove even if other packages depend on it |
+| `--cask`        | Force cask uninstall                       |
 
-Checks for dependent packages before removing. If dependents exist, refuses unless `--force` is passed. Store entries are preserved for `mt gc`.
-
-**Exit codes:** 0 success, 1 not installed, 3 has dependents.
+Checks for dependent packages before removing. If dependents exist, refuses unless `--force` is passed. For casks, checks if the application is running and refuses unless `--force` is passed. Store entries are preserved for `mt gc`.
 
 ### `mt upgrade`
 
 Upgrade installed packages to latest versions.
 
 ```bash
-mt upgrade                               # upgrade all outdated
-mt upgrade <package>                     # upgrade specific package
-mt upgrade --cask                        # upgrade casks only
+mt upgrade <package>                     # upgrade specific cask
+mt upgrade --cask                        # upgrade all outdated casks
 ```
 
-| Flag        | Description                           |
-| ----------- | ------------------------------------- |
-| `--all`     | Upgrade everything (formulas + casks) |
-| `--cask`    | Upgrade casks only                    |
-| `--formula` | Upgrade formulas only                 |
-| `--dry-run` | Show what would be upgraded           |
+| Flag     | Description        |
+| -------- | ------------------ |
+| `--cask` | Upgrade casks only |
 
-Installs the new version first, verifies it works, switches symlinks, then removes the old version. On failure, symlinks revert to the old version.
-
-**Exit codes:** 0 success, 1 not installed, 2 download failure.
+> **Note:** Formula upgrade is not yet implemented. Currently only cask upgrade is supported. For casks, the old version is uninstalled and the new version is installed fresh.
 
 ### `mt update`
 
@@ -163,8 +154,6 @@ mt update
 
 Invalidates all entries in the API cache. The next `install`, `search`, or `info` command fetches fresh data from the Homebrew API.
 
-**Exit codes:** 0 success, 1 API unreachable.
-
 ### `mt outdated`
 
 List packages with newer versions available.
@@ -172,18 +161,15 @@ List packages with newer versions available.
 ```bash
 mt outdated
 mt outdated --json
-mt outdated --formula
 mt outdated --cask
 ```
 
-Compares installed versions against the latest from the Homebrew API.
+Compares installed versions against the latest from the Homebrew API. Checks both formulas and casks.
 
 ```
 wget (1.24.5) < 1.25.0
 openssl@3 (3.3.2) < 3.4.1
 ```
-
-**Exit codes:** 0 success (even if nothing outdated).
 
 ### `mt list`
 
@@ -197,8 +183,6 @@ mt list --formula
 mt list --pinned
 mt list --json
 ```
-
-**Exit codes:** 0 success.
 
 ### `mt info`
 
@@ -220,8 +204,6 @@ Dependencies: libidn2, openssl@3
 Post-install hook: No
 ```
 
-**Exit codes:** 0 success, 1 not found.
-
 ### `mt search`
 
 Search formulas and casks by name.
@@ -232,8 +214,6 @@ mt search <query> --formula
 mt search <query> --cask
 mt search <query> --json
 ```
-
-**Exit codes:** 0 success (even if no results).
 
 ### `mt cleanup`
 
@@ -246,8 +226,6 @@ mt cleanup --prune=<days>               # cache age threshold (default: 30)
 mt cleanup -s                           # scrub entire download cache
 ```
 
-**Exit codes:** 0 success.
-
 ### `mt gc`
 
 Garbage collect unreferenced store entries.
@@ -259,8 +237,6 @@ mt gc --dry-run
 
 Scans `store/` for entries not referenced by any installed keg. Removes them to reclaim disk space.
 
-**Exit codes:** 0 success.
-
 ### `mt doctor`
 
 System health check.
@@ -269,19 +245,13 @@ System health check.
 mt doctor
 ```
 
-| Check                  | Pass                                             | Fail                         |
-| ---------------------- | ------------------------------------------------ | ---------------------------- |
-| SQLite integrity       | `PRAGMA integrity_check` returns `ok`            | Suggest `mt doctor --repair` |
-| Orphaned store entries | All store entries referenced by a keg            | Suggest `mt gc`              |
-| Missing kegs           | All DB entries have Cellar directories           | Suggest reinstall            |
-| Broken symlinks        | All `bin/`, `lib/` links point to existing files | Suggest `mt cleanup`         |
-| Disk space             | >1 GB free on volume                             | Warn: low disk space         |
-| macOS version          | Supported version (12+)                          | Warn: untested version       |
-| API reachable          | HEAD to `formulae.brew.sh` returns 200           | Warn: offline                |
-| Stale lock             | No lock file, or lock PID is running             | Suggest removal              |
-| APFS volume            | `/opt/malt` is on APFS                           | Warn: clonefile unavailable  |
-
-**Exit codes:** 0 all OK, 1 warnings, 2 errors.
+| Check               | Pass                                        | Fail                        |
+| ------------------- | ------------------------------------------- | --------------------------- |
+| SQLite integrity    | `PRAGMA integrity_check` returns `ok`       | Error: database corrupt     |
+| Directory structure | All required directories exist under prefix | Warn: missing directory     |
+| Stale lock          | No lock file, or lock PID is running        | Warn: suggest removal       |
+| APFS volume         | `/opt/malt` is on APFS                      | Warn: clonefile unavailable |
+| API reachable       | HEAD to `formulae.brew.sh` returns 2xx      | Warn: offline               |
 
 ### `mt tap` / `mt untap`
 
@@ -292,8 +262,6 @@ mt tap <user>/<repo>                    # register a tap
 mt tap                                  # list registered taps
 mt untap <user>/<repo>                  # remove a tap
 ```
-
-**Exit codes:** 0 success, 1 not found / already tapped.
 
 ### `mt autoremove`
 
@@ -306,8 +274,6 @@ mt autoremove --dry-run
 
 Finds kegs installed as dependencies that are no longer required by any directly-installed package, and removes them.
 
-**Exit codes:** 0 success (even if nothing to remove).
-
 ### `mt migrate`
 
 Import an existing Homebrew installation.
@@ -319,8 +285,6 @@ mt migrate --dry-run
 
 Scans the Homebrew Cellar, resolves each installed package via the API, and installs it through malt. Does **not** modify the Homebrew installation. Packages requiring `post_install` hooks are skipped with a report.
 
-**Exit codes:** 0 success, 1 no Homebrew found, 2 some packages could not be migrated.
-
 ### `mt rollback`
 
 Revert a formula to its previous version using the content-addressable store.
@@ -331,8 +295,6 @@ mt rollback <package> --dry-run
 ```
 
 The store retains all previously installed bottle versions. Rollback unlinks the current version, materializes the previous one from the store, and updates the database. No re-download needed.
-
-**Exit codes:** 0 success, 1 not installed or no previous version.
 
 ### `mt run`
 
@@ -346,7 +308,21 @@ mt run ripgrep -- --help
 
 Downloads the bottle to a temp directory, extracts the binary, executes it with the provided arguments, and cleans up. If the package is already installed, runs the installed binary directly.
 
-**Exit codes:** 0 success, 1 formula not found.
+### `mt link` / `mt unlink`
+
+Manage symlinks for installed kegs.
+
+```bash
+mt link <formula>                        # create prefix symlinks for a keg
+mt link <formula> --overwrite            # replace conflicting symlinks
+mt unlink <formula>                      # remove symlinks (keg stays installed)
+```
+
+| Flag                           | Description               |
+| ------------------------------ | ------------------------- |
+| `--overwrite`, `--force`, `-f` | Replace existing symlinks |
+
+`link` scans for symlink conflicts before creating links. If conflicts are found, it reports them and aborts unless `--overwrite` is passed. `unlink` removes symlinks from `bin/`, `lib/`, etc. and the `opt/` symlink, but leaves the keg installed in the Cellar.
 
 ### `mt version update`
 
@@ -466,15 +442,14 @@ Every install follows a strict 9-step protocol. Failure at any step triggers cle
 
 ## Transparent Fallback
 
-For commands not implemented by malt (e.g., `mt services`, `mt bundle`), malt checks if `brew` is installed and delegates the command with a visible message:
+For commands not implemented by malt (e.g., `mt services`, `mt bundle`), malt checks if `brew` is installed and silently delegates the command to it.
+
+If `brew` is not found, malt prints:
 
 ```
-$ mt services list
-==> malt: 'services' not implemented. Delegating to brew...
-[brew output follows]
+malt: 'services' is not a malt command and brew was not found.
+Install Homebrew: https://brew.sh
 ```
-
-If `brew` is not installed, malt prints: `"'services' requires Homebrew. Install: https://brew.sh"`.
 
 ---
 
