@@ -96,6 +96,18 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Remove Cellar directory
     cellar.remove(prefix, name, version) catch {};
+    // Also remove parent if empty (e.g. Cellar/jq/ after removing Cellar/jq/1.8.1/)
+    {
+        var parent_buf: [512]u8 = undefined;
+        const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
+        if (parent_path.len > 0) std.fs.deleteDirAbsolute(parent_path) catch {};
+    }
+    // Remove opt/ symlink
+    {
+        var opt_buf: [512]u8 = undefined;
+        const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch "";
+        if (opt_path.len > 0) std.fs.cwd().deleteFile(opt_path) catch {};
+    }
 
     // Decrement store ref
     if (sha256.len > 0) {
