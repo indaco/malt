@@ -23,7 +23,7 @@ pub fn adHocSign(path: []const u8) CodesignError!void {
     child.spawn() catch return CodesignError.SpawnFailed;
     const term = child.wait() catch return CodesignError.CodesignFailed;
     switch (term) {
-        .exited => |code| {
+        .Exited => |code| {
             if (code != 0) return CodesignError.CodesignFailed;
         },
         else => return CodesignError.CodesignFailed,

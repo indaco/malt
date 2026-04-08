@@ -115,8 +115,8 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
     //                 ncmds(4) + sizeofcmds(4) + flags(4) + reserved(4) = 32 bytes
     const ncmds = std.mem.readInt(u32, data[16..20], .little);
 
-    var paths = std.ArrayList(LoadCommandPath).init(allocator);
-    errdefer paths.deinit();
+    var paths: std.ArrayList(LoadCommandPath) = .empty;
+    errdefer paths.deinit(allocator);
 
     var cmd_offset: usize = 32; // past mach_header_64
     var cmd_idx: u32 = 0;
@@ -151,7 +151,7 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
                 const path_region = data[path_start..@min(path_end, data.len)];
                 const path = std.mem.sliceTo(path_region, 0);
 
-                paths.append(.{
+                paths.append(allocator, .{
                     .cmd = cmd,
                     .path_offset = base_offset + path_start,
                     .max_path_len = cmdsize - name_offset,
@@ -180,7 +180,7 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
                 const path_region = data[path_start..@min(path_end, data.len)];
                 const path = std.mem.sliceTo(path_region, 0);
 
-                paths.append(.{
+                paths.append(allocator, .{
                     .cmd = cmd,
                     .path_offset = base_offset + path_start,
                     .max_path_len = cmdsize - path_offset,
@@ -194,7 +194,7 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
     }
 
     return .{
-        .paths = paths.toOwnedSlice() catch return ParseError.OutOfMemory,
+        .paths = paths.toOwnedSlice(allocator) catch return ParseError.OutOfMemory,
         .allocator = allocator,
     };
 }

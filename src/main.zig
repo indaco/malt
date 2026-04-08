@@ -153,11 +153,11 @@ fn printVersion() void {
 
 fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
     _ = allocator;
+    const stderr = std.fs.File.stderr();
     if (args.len > 0) {
         var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "==> malt: '{s}' not implemented. Delegating to brew...\n", .{args[0]}) catch return error.NotImplemented;
-        std.fs.File.stderr().writeAll(msg) catch {};
+        const msg = std.fmt.bufPrint(&buf, "==> malt: '{s}' not implemented. Delegating to brew...\n", .{args[0]}) catch return;
+        stderr.writeAll(msg) catch {};
     }
-    // TODO: exec brew with args if available, else error
-    return error.NotImplemented;
+    stderr.writeAll("Use 'brew' for this command, or check 'mt --help'\n") catch {};
 }

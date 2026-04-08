@@ -89,7 +89,9 @@ pub fn findOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) ![]const 
     ) catch return orphans.toOwnedSlice(allocator) catch &.{};
     defer stmt.finalize();
 
-    while (stmt.step() catch break) {
+    while (true) {
+        const has_row = stmt.step() catch break;
+        if (!has_row) break;
         const name = stmt.columnText(0) orelse continue;
         const owned = allocator.dupe(u8, std.mem.sliceTo(name, 0)) catch continue;
         orphans.append(allocator, owned) catch continue;

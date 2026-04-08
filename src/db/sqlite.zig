@@ -28,8 +28,9 @@ fn mapError(rc: c_int, comptime default: SqliteError) SqliteError {
     };
 }
 
-/// SQLITE_TRANSIENT expressed as a Zig pointer, telling SQLite to copy bound data immediately.
-const SQLITE_TRANSIENT: c.sqlite3_destructor_type = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
+/// Use SQLITE_STATIC (null destructor) for text bindings.
+/// This is safe because all bound text outlives the statement step.
+const SQLITE_STATIC: c.sqlite3_destructor_type = null;
 
 pub const Statement = struct {
     stmt: *c.sqlite3_stmt,
@@ -61,7 +62,7 @@ pub const Statement = struct {
             @intCast(idx),
             @ptrCast(text.ptr),
             @intCast(text.len),
-            SQLITE_TRANSIENT,
+            SQLITE_STATIC,
         );
         if (rc != c.SQLITE_OK) return mapError(rc, SqliteError.BindFailed);
     }

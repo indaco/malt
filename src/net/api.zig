@@ -97,8 +97,7 @@ pub const BrewApi = struct {
         return content;
     }
 
-    fn writeCache(self: *BrewApi, key: []const u8, prefix: []const u8, data: []const u8) void {
-        _ = self;
+    fn writeCache(self: *const BrewApi, key: []const u8, prefix: []const u8, data: []const u8) void {
         var dir_buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.fs.makeDirAbsolute(dir_path) catch |e| switch (e) {

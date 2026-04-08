@@ -20,7 +20,7 @@ pub fn cloneTree(src_path: []const u8, dst_path: []const u8) CloneError!void {
 
     const e = std.posix.errno(rc);
     switch (e) {
-        .NOTSUP => {
+        .OPNOTSUPP => {
             copyTreeFallback(src_path, dst_path) catch return error.IoError;
         },
         .EXIST => return error.AlreadyExists,

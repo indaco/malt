@@ -39,8 +39,12 @@ pub fn download(
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(body.items, &hash, .{});
     var hex_buf: [64]u8 = undefined;
-    const computed_hex = std.fmt.bufPrint(&hex_buf, "{s}", .{std.fmt.fmtSliceHexLower(&hash)}) catch
-        return BottleError.OutOfMemory;
+    const hex_chars = "0123456789abcdef";
+    for (hash, 0..) |b, i| {
+        hex_buf[i * 2] = hex_chars[b >> 4];
+        hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
+    }
+    const computed_hex: []const u8 = &hex_buf;
 
     // Verify SHA256
     if (!std.mem.eql(u8, computed_hex, expected_sha256)) {

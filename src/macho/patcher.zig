@@ -130,11 +130,11 @@ pub fn patchTextFiles(
 
         // Perform replacements
         var modified = false;
-        var result = replaceAll(allocator, content, "@@HOMEBREW_PREFIX@@", new_prefix) catch continue;
+        const result = replaceAll(allocator, content, "@@HOMEBREW_PREFIX@@", new_prefix) catch continue;
 
         if (result.ptr != content.ptr) modified = true;
 
-        var result2 = replaceAll(allocator, result, "@@HOMEBREW_CELLAR@@", new_cellar) catch {
+        const result2 = replaceAll(allocator, result, "@@HOMEBREW_CELLAR@@", new_cellar) catch {
             if (modified) allocator.free(result);
             continue;
         };
@@ -143,7 +143,7 @@ pub fn patchTextFiles(
             modified = true;
         }
 
-        var result3 = replaceAll(allocator, result2, old_prefix, new_prefix) catch {
+        const result3 = replaceAll(allocator, result2, old_prefix, new_prefix) catch {
             if (result2.ptr != content.ptr) allocator.free(result2);
             continue;
         };

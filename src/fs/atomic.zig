@@ -28,7 +28,11 @@ pub fn createTempDir(allocator: std.mem.Allocator, label: []const u8) ![]const u
     std.crypto.random.bytes(&rand_bytes);
 
     var hex_buf: [16]u8 = undefined;
-    _ = std.fmt.bufPrint(&hex_buf, "{}", .{std.fmt.fmtSliceHexLower(&rand_bytes)}) catch unreachable;
+    const hex_chars = "0123456789abcdef";
+    for (rand_bytes, 0..) |b, i| {
+        hex_buf[i * 2] = hex_chars[b >> 4];
+        hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
+    }
 
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/tmp/{s}_{s}", .{ prefix, label, &hex_buf });
 

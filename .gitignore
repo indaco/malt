@@ -3,3 +3,7 @@ zig-out/
 
 # Override global gitignore — vendored SQLite is intentional
 !vendor/
+
+.claude-flow
+.swarm
+.mcp.json

@@ -32,7 +32,7 @@ pub const LockFile = struct {
                             std.posix.close(fd);
                             return error.Timeout;
                         }
-                        std.time.sleep(sleep_ns);
+                        std.Thread.sleep(sleep_ns);
                         elapsed_ns += sleep_ns;
                         continue;
                     },
