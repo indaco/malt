@@ -167,7 +167,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Link the old version
     linker.link(keg.path, name, keg_id) catch {
-        output.warn("Could not link restored {s} — try: mt uninstall {s} && mt install {s}", .{ name, name, name });
+        output.warn("Could not link restored {s} — try: mt link {s}", .{ name, name });
     };
     linker.linkOpt(name, target.version) catch {
         output.warn("Could not create opt link for {s}", .{name});
