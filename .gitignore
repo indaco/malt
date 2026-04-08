@@ -1,0 +1,5 @@
+.zig-cache/
+zig-out/
+
+# Override global gitignore — vendored SQLite is intentional
+!vendor/
