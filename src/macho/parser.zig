@@ -1,20 +1,9 @@
 //! malt — Mach-O parser
 //! Parse Mach-O 64-bit headers and extract load command paths for relocation.
+//! Uses std.macho struct types for type-safe field access.
 
 const std = @import("std");
-
-// Mach-O constants
-const MH_MAGIC_64: u32 = 0xFEEDFACF;
-const MH_CIGAM_64: u32 = 0xCFFAEDFE;
-const FAT_MAGIC: u32 = 0xCAFEBABE;
-const FAT_CIGAM: u32 = 0xBEBAFECA;
-
-// Load command types we care about
-pub const LC_ID_DYLIB: u32 = 0x0D;
-pub const LC_LOAD_DYLIB: u32 = 0x0C;
-pub const LC_LOAD_WEAK_DYLIB: u32 = 0x80000018;
-pub const LC_RPATH: u32 = 0x8000001C;
-pub const LC_REEXPORT_DYLIB: u32 = 0x8000001F;
+const macho = std.macho;
 
 pub const ParseError = error{
     InvalidMagic,
@@ -50,8 +39,8 @@ pub const MachO = struct {
 pub fn isMachO(data: []const u8) bool {
     if (data.len < 4) return false;
     const magic = std.mem.readInt(u32, data[0..4], .little);
-    return magic == MH_MAGIC_64 or magic == MH_CIGAM_64 or
-        magic == FAT_MAGIC or magic == FAT_CIGAM;
+    return magic == macho.MH_MAGIC_64 or magic == macho.MH_CIGAM_64 or
+        magic == macho.FAT_MAGIC or magic == macho.FAT_CIGAM;
 }
 
 /// Parse a Mach-O file from a memory-mapped buffer and extract all load command paths.
@@ -60,16 +49,11 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
 
     const magic = std.mem.readInt(u32, data[0..4], .little);
 
-    if (magic == FAT_MAGIC or magic == FAT_CIGAM) {
+    if (magic == macho.FAT_MAGIC or magic == macho.FAT_CIGAM) {
         return parseFat(allocator, data);
     }
 
-    if (magic == MH_MAGIC_64) {
-        return parseMachO64(allocator, data, 0);
-    }
-
-    // Try big-endian magic (MH_CIGAM_64)
-    if (magic == MH_CIGAM_64) {
+    if (magic == macho.MH_MAGIC_64 or magic == macho.MH_CIGAM_64) {
         return parseMachO64(allocator, data, 0);
     }
 
@@ -109,33 +93,40 @@ fn parseFat(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
 }
 
 fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usize) ParseError!MachO {
-    if (data.len < 32) return ParseError.TruncatedFile;
+    const header_size = @sizeOf(macho.mach_header_64);
+    if (data.len < header_size) return ParseError.TruncatedFile;
 
-    // mach_header_64: magic(4) + cputype(4) + cpusubtype(4) + filetype(4) +
-    //                 ncmds(4) + sizeofcmds(4) + flags(4) + reserved(4) = 32 bytes
-    const ncmds = std.mem.readInt(u32, data[16..20], .little);
+    // Read the header using the struct type for type-safe access
+    const header = std.mem.bytesAsValue(macho.mach_header_64, data[0..header_size]);
 
     var paths: std.ArrayList(LoadCommandPath) = .empty;
     errdefer paths.deinit(allocator);
 
-    var cmd_offset: usize = 32; // past mach_header_64
+    var cmd_offset: usize = header_size;
     var cmd_idx: u32 = 0;
-    while (cmd_idx < ncmds) : (cmd_idx += 1) {
-        if (cmd_offset + 8 > data.len) return ParseError.TruncatedFile;
+    while (cmd_idx < header.ncmds) : (cmd_idx += 1) {
+        if (cmd_offset + @sizeOf(macho.load_command) > data.len) return ParseError.TruncatedFile;
 
-        const cmd = std.mem.readInt(u32, data[cmd_offset..][0..4], .little);
-        const cmdsize = std.mem.readInt(u32, data[cmd_offset + 4 ..][0..4], .little);
+        // Read the generic load_command to get cmd + cmdsize
+        const lc = std.mem.bytesAsValue(macho.load_command, data[cmd_offset..][0..@sizeOf(macho.load_command)]);
+        const cmdsize = lc.cmdsize;
 
-        if (cmdsize < 8 or cmd_offset + cmdsize > data.len) return ParseError.InvalidLoadCommand;
+        if (cmdsize < @sizeOf(macho.load_command) or cmd_offset + cmdsize > data.len)
+            return ParseError.InvalidLoadCommand;
 
-        switch (cmd) {
-            LC_ID_DYLIB, LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB => {
-                // dylib_command: cmd(4) + cmdsize(4) + name.offset(4) + timestamp(4) + ...
-                if (cmdsize < 16) {
+        const cmd_int = @intFromEnum(lc.cmd);
+
+        switch (lc.cmd) {
+            .ID_DYLIB, .LOAD_DYLIB, .LOAD_WEAK_DYLIB, .REEXPORT_DYLIB => {
+                if (cmdsize < @sizeOf(macho.dylib_command)) {
                     cmd_offset += cmdsize;
                     continue;
                 }
-                const name_offset = std.mem.readInt(u32, data[cmd_offset + 8 ..][0..4], .little);
+                const dylib_cmd = std.mem.bytesAsValue(
+                    macho.dylib_command,
+                    data[cmd_offset..][0..@sizeOf(macho.dylib_command)],
+                );
+                const name_offset = dylib_cmd.dylib.name;
                 if (name_offset >= cmdsize) {
                     cmd_offset += cmdsize;
                     continue;
@@ -152,19 +143,22 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
                 const path = std.mem.sliceTo(path_region, 0);
 
                 paths.append(allocator, .{
-                    .cmd = cmd,
+                    .cmd = cmd_int,
                     .path_offset = base_offset + path_start,
                     .max_path_len = cmdsize - name_offset,
                     .path = path,
                 }) catch return ParseError.OutOfMemory;
             },
-            LC_RPATH => {
-                // rpath_command: cmd(4) + cmdsize(4) + path.offset(4)
-                if (cmdsize < 12) {
+            .RPATH => {
+                if (cmdsize < @sizeOf(macho.rpath_command)) {
                     cmd_offset += cmdsize;
                     continue;
                 }
-                const path_offset = std.mem.readInt(u32, data[cmd_offset + 8 ..][0..4], .little);
+                const rpath_cmd = std.mem.bytesAsValue(
+                    macho.rpath_command,
+                    data[cmd_offset..][0..@sizeOf(macho.rpath_command)],
+                );
+                const path_offset = rpath_cmd.path;
                 if (path_offset >= cmdsize) {
                     cmd_offset += cmdsize;
                     continue;
@@ -181,7 +175,7 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
                 const path = std.mem.sliceTo(path_region, 0);
 
                 paths.append(allocator, .{
-                    .cmd = cmd,
+                    .cmd = cmd_int,
                     .path_offset = base_offset + path_start,
                     .max_path_len = cmdsize - path_offset,
                     .path = path,
