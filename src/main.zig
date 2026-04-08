@@ -22,7 +22,8 @@ const rollback = @import("cli/rollback.zig");
 const run_cmd = @import("cli/run.zig");
 const version_update = @import("cli/version_update.zig");
 
-const version = "0.1.0";
+const version_mod = @import("version.zig");
+const version = version_mod.value;
 
 const Command = enum {
     install,

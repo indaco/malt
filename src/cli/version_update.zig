@@ -6,7 +6,7 @@ const builtin = @import("builtin");
 const client_mod = @import("../net/client.zig");
 const output = @import("../ui/output.zig");
 
-const CURRENT_VERSION = "0.1.0";
+const CURRENT_VERSION = @import("../version.zig").value;
 const RELEASES_API = "https://api.github.com/repos/indaco/malt/releases/latest";
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {

@@ -4,6 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // --- Version from .version file ---
+    const version_options = b.addOptions();
+    version_options.addOption([]const u8, "version", @embedFile(".version"));
+
     // --- Main executable: mt ---
     const exe = b.addExecutable(.{
         .name = "mt",
@@ -14,6 +18,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    exe.root_module.addOptions("version_string", version_options);
 
     // Compile vendored SQLite amalgamation
     exe.root_module.addCSourceFile(.{
@@ -92,6 +97,7 @@ pub fn build(b: *std.Build) void {
     });
     arm64_exe.root_module.addIncludePath(b.path("vendor/"));
     arm64_exe.root_module.addIncludePath(b.path("c/"));
+    arm64_exe.root_module.addOptions("version_string", version_options);
 
     const x86_exe = b.addExecutable(.{
         .name = "mt",
@@ -108,6 +114,7 @@ pub fn build(b: *std.Build) void {
     });
     x86_exe.root_module.addIncludePath(b.path("vendor/"));
     x86_exe.root_module.addIncludePath(b.path("c/"));
+    x86_exe.root_module.addOptions("version_string", version_options);
 
     const lipo = b.addSystemCommand(&.{"lipo"});
     lipo.addArtifactArg(arm64_exe);
