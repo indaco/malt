@@ -76,12 +76,14 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
 });
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // Use an arena allocator backed by page_allocator. The arena frees
+    // everything in one shot when main() returns — no individual free()
+    // calls needed, no leak noise, and fast allocation.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
 
     if (args.len < 2) {
         printUsage();
