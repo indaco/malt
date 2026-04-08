@@ -100,8 +100,37 @@ pub fn main() !void {
         return;
     }
 
-    const cmd_str = args[1];
-    const cmd_args = if (args.len > 2) args[2..] else &[_][]const u8{};
+    // Parse global flags before dispatch — strip them from the args
+    // passed to subcommands so they don't need to parse them individually.
+    const output = @import("ui/output.zig");
+    var filtered: std.ArrayList([]const u8) = .empty;
+    defer filtered.deinit(allocator);
+    var cmd_str: []const u8 = "";
+    var found_cmd = false;
+    for (args[1..]) |arg| {
+        if (!found_cmd and !std.mem.startsWith(u8, arg, "-")) {
+            cmd_str = arg;
+            found_cmd = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
+            output.setVerbose(true);
+        } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
+            output.setQuiet(true);
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            output.setMode(.json);
+        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+            output.setDryRun(true);
+        } else {
+            filtered.append(allocator, arg) catch {};
+        }
+    }
+
+    if (!found_cmd) {
+        printUsage();
+        return;
+    }
+    const cmd_args = filtered.items;
 
     if (command_map.get(cmd_str)) |cmd| {
         switch (cmd) {
