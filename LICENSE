@@ -1,0 +1,52 @@
+MIT License
+
+Copyright (c) 2026 indaco
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## Third-Party Acknowledgments
+
+malt uses or interacts with the following projects:
+
+### SQLite (vendored)
+- License: Public Domain
+- https://sqlite.org/copyright.html
+- The SQLite amalgamation (sqlite3.c, sqlite3.h) is compiled into the malt
+  binary. SQLite is in the public domain and has no license restrictions.
+
+### Zig Standard Library
+- License: MIT
+- https://github.com/ziglang/zig/blob/master/LICENSE
+- Portions of the Zig standard library are statically linked into the binary.
+
+### Homebrew
+- License: BSD-2-Clause
+- https://github.com/Homebrew/brew/blob/master/LICENSE.txt
+- malt is a client for Homebrew's package infrastructure. It queries the
+  public Homebrew Formulae API (formulae.brew.sh) and downloads pre-built
+  bottles from the GitHub Container Registry (ghcr.io). No Homebrew source
+  code is included in malt.
+
+### Homebrew-core
+- License: BSD-2-Clause
+- https://github.com/Homebrew/homebrew-core/blob/master/LICENSE.txt
+- Formula metadata is consumed via the public API. No formula definitions
+  are bundled.
