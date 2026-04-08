@@ -45,7 +45,7 @@ info "Detected macOS $ARCH_LABEL"
 # ── Find latest release ────────────────────────────────────────────
 info "Fetching latest release..."
 
-LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null |
+LATEST=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null |
   grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
 
 if [ -z "$LATEST" ]; then
