@@ -33,6 +33,73 @@ pub const InstallError = error{
     RecordFailed,
 };
 
+/// A bottle download job for parallel processing.
+const DownloadJob = struct {
+    name: []const u8,
+    version_str: []const u8,
+    sha256: []const u8,
+    bottle_url: []const u8,
+    is_dep: bool,
+    keg_only: bool,
+    formula_json: []const u8,
+    /// Set after download completes
+    store_sha256: []const u8,
+    succeeded: bool,
+};
+
+/// Download a bottle and commit to store. Runs in a worker thread.
+fn downloadWorker(allocator: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, store: *store_mod.Store, job: *DownloadJob) void {
+    const prefix = atomic.maltPrefix();
+
+    // Skip if already in store
+    if (store.exists(job.sha256)) {
+        job.store_sha256 = job.sha256;
+        job.succeeded = true;
+        return;
+    }
+
+    // Extract repo + digest from bottle URL
+    const ghcr_prefix_str = "https://ghcr.io/v2/";
+    var repo_buf: [256]u8 = undefined;
+    var digest_buf: [128]u8 = undefined;
+    var repo: []const u8 = undefined;
+    var digest: []const u8 = undefined;
+
+    if (std.mem.startsWith(u8, job.bottle_url, ghcr_prefix_str)) {
+        const path = job.bottle_url[ghcr_prefix_str.len..];
+        if (std.mem.indexOf(u8, path, "/blobs/")) |blobs_pos| {
+            repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return;
+            digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return;
+        } else return;
+    } else return;
+
+    // Create temp dir
+    const tmp_dir = atomic.createTempDir(allocator, job.name) catch return;
+
+    output.info("  Downloading {s}...", .{job.name});
+
+    // Download
+    _ = bottle_mod.download(allocator, ghcr, repo, digest, job.sha256, tmp_dir) catch {
+        atomic.cleanupTempDir(tmp_dir);
+        allocator.free(tmp_dir);
+        return;
+    };
+
+    // Commit to store
+    store.commitFrom(job.sha256, tmp_dir) catch {
+        atomic.cleanupTempDir(tmp_dir);
+        allocator.free(tmp_dir);
+        return;
+    };
+    allocator.free(tmp_dir);
+
+    store.incrementRef(job.sha256) catch {};
+
+    _ = prefix;
+    job.store_sha256 = job.sha256;
+    job.succeeded = true;
+}
+
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Parse flags
     var packages: std.ArrayList([]const u8) = .empty;
@@ -241,158 +308,170 @@ fn installFormula(
         return;
     }
 
-    // Step 5: Install dependencies first (topological order)
+    // ── Parallel download phase ──────────────────────────────────────────
+    // Collect all packages to download (deps + main formula) and download
+    // them concurrently. Materialization + linking stays sequential.
+
+    var jobs: std.ArrayList(DownloadJob) = .empty;
+    defer jobs.deinit(allocator);
+
+    // Resolve deps that need downloading
     for (deps) |dep| {
         if (dep.already_installed) continue;
 
-        output.info("Installing dependency: {s}", .{dep.name});
         const dep_json = api.fetchFormula(dep.name) catch {
             output.warn("Could not fetch dependency {s}, skipping", .{dep.name});
             continue;
         };
-        defer allocator.free(dep_json);
 
-        installFormula(
-            allocator,
-            dep.name,
-            dep_json,
-            db,
-            api,
-            ghcr,
-            store,
-            linker,
-            prefix,
-            false,
-            force,
-            "dependency",
-        ) catch |e| {
-            output.warn("Failed to install dependency {s}: {s}", .{ dep.name, @errorName(e) });
+        var dep_formula = formula_mod.parseFormula(allocator, dep_json) catch {
+            allocator.free(dep_json);
+            continue;
         };
+
+        const dep_bottle = formula_mod.resolveBottle(allocator, &dep_formula) catch {
+            dep_formula.deinit();
+            allocator.free(dep_json);
+            continue;
+        };
+
+        jobs.append(allocator, .{
+            .name = dep_formula.name,
+            .version_str = dep_formula.version,
+            .sha256 = dep_bottle.sha256,
+            .bottle_url = dep_bottle.url,
+            .is_dep = true,
+            .keg_only = dep_formula.keg_only,
+            .formula_json = dep_json,
+            .store_sha256 = "",
+            .succeeded = false,
+        }) catch continue;
     }
 
-    // Step 6: Select + download bottle
+    // Add main formula
     const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
         output.err("No bottle available for {s} on this platform", .{formula.name});
         return InstallError.NoBottle;
     };
 
-    // Extract GHCR repo path and digest from the bottle URL.
-    // URL format: https://ghcr.io/v2/{repo}/blobs/{digest}
-    // e.g. https://ghcr.io/v2/homebrew/core/openssl/3/blobs/sha256:abc...
-    var repo_buf: [256]u8 = undefined;
-    var digest_buf: [128]u8 = undefined;
-    var repo: []const u8 = undefined;
-    var digest: []const u8 = undefined;
+    jobs.append(allocator, .{
+        .name = formula.name,
+        .version_str = formula.version,
+        .sha256 = bottle.sha256,
+        .bottle_url = bottle.url,
+        .is_dep = false,
+        .keg_only = formula.keg_only,
+        .formula_json = formula_json,
+        .store_sha256 = "",
+        .succeeded = false,
+    }) catch return InstallError.DownloadFailed;
 
-    const ghcr_prefix = "https://ghcr.io/v2/";
-    if (std.mem.startsWith(u8, bottle.url, ghcr_prefix)) {
-        const path = bottle.url[ghcr_prefix.len..];
-        if (std.mem.indexOf(u8, path, "/blobs/")) |blobs_pos| {
-            repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch
-                return InstallError.DownloadFailed;
-            digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch
-                return InstallError.DownloadFailed;
-        } else {
-            // Fallback: construct from name (replace @ with /)
-            repo = buildGhcrRepo(&repo_buf, formula.name) catch
-                return InstallError.DownloadFailed;
-            digest = std.fmt.bufPrint(&digest_buf, "sha256:{s}", .{bottle.sha256}) catch
-                return InstallError.DownloadFailed;
+    // Count how many need downloading (skip if already in store)
+    var to_download: u32 = 0;
+    for (jobs.items) |job| {
+        if (!store.exists(job.sha256)) to_download += 1;
+    }
+
+    if (to_download > 0) {
+        output.info("Downloading {d} bottle(s)...", .{to_download});
+    }
+
+    // Download all bottles concurrently using threads
+    var threads: std.ArrayList(std.Thread) = .empty;
+    defer threads.deinit(allocator);
+
+    for (jobs.items) |*job| {
+        if (store.exists(job.sha256)) {
+            job.store_sha256 = job.sha256;
+            job.succeeded = true;
+            output.info("  {s} (cached in store)", .{job.name});
+            continue;
         }
-    } else {
-        repo = buildGhcrRepo(&repo_buf, formula.name) catch
-            return InstallError.DownloadFailed;
-        digest = std.fmt.bufPrint(&digest_buf, "sha256:{s}", .{bottle.sha256}) catch
-            return InstallError.DownloadFailed;
+
+        // Spawn download thread
+        const t = std.Thread.spawn(.{}, downloadWorker, .{
+            allocator, ghcr, store, job,
+        }) catch {
+            output.warn("Failed to spawn download thread for {s}", .{job.name});
+            // Fall back to sequential download
+            downloadWorker(allocator, ghcr, store, job);
+            continue;
+        };
+        threads.append(allocator, t) catch {
+            t.join();
+            continue;
+        };
     }
 
-    // Create temp dir for extraction
-    const tmp_dir = atomic.createTempDir(allocator, formula.name) catch {
-        output.err("Failed to create temp directory", .{});
-        return InstallError.DownloadFailed;
-    };
-    // Note: don't defer cleanupTempDir — commitFrom renames it to store.
-    // If download/commit fails, errdefer below cleans up.
-    errdefer atomic.cleanupTempDir(tmp_dir);
-    defer allocator.free(tmp_dir);
+    // Wait for all downloads to complete
+    for (threads.items) |t| t.join();
 
-    output.info("Downloading {s} bottle...", .{formula.name});
-
-    const result = bottle_mod.download(
-        allocator,
-        ghcr,
-        repo,
-        digest,
-        bottle.sha256,
-        tmp_dir,
-    ) catch {
-        output.err("Failed to download bottle for {s}", .{formula.name});
-        return InstallError.DownloadFailed;
-    };
-
-    // Step 7: Commit to store (atomic rename from tmp dir)
-    output.info("Committing {s} to store...", .{formula.name});
-    store.commitFrom(result.sha256, tmp_dir) catch {
-        output.err("Failed to commit {s} to store", .{formula.name});
-        return InstallError.StoreFailed;
-    };
-
-    // Increment ref count
-    store.incrementRef(result.sha256) catch {};
-
-    // Step 8: Materialize to cellar (clonefile + patch + codesign)
-    output.info("Materializing {s} to cellar...", .{formula.name});
-    const keg = cellar_mod.materialize(
-        allocator,
-        prefix,
-        result.sha256,
-        formula.name,
-        formula.version,
-    ) catch {
-        output.err("Failed to materialize {s}", .{formula.name});
-        return InstallError.CellarFailed;
-    };
-
-    // Step 9a: Link (create symlinks unless keg_only)
-    if (!formula.keg_only) {
-        output.info("Linking {s}...", .{formula.name});
-
-        // Record in DB first to get keg_id for linking
-        const keg_id = recordKeg(db, &formula, result.sha256, keg.path, install_reason) catch {
-            output.err("Failed to record {s} in database", .{formula.name});
-            return InstallError.RecordFailed;
-        };
-
-        // Check for conflicts
-        _ = linker.checkConflicts(keg.path) catch {};
-
-        // Link binaries, libs, etc.
-        linker.link(keg.path, formula.name, keg_id) catch {
-            output.warn("Some links for {s} could not be created", .{formula.name});
-        };
-
-        // Create opt link
-        linker.linkOpt(formula.name, formula.version) catch {};
-
-        // Record dependencies
-        recordDeps(db, keg_id, &formula);
-    } else {
-        // Keg-only: still record in DB but skip linking
-        output.info("{s} is keg-only; not linking", .{formula.name});
-
-        const keg_id = recordKeg(db, &formula, result.sha256, keg.path, install_reason) catch {
-            output.err("Failed to record {s} in database", .{formula.name});
-            return InstallError.RecordFailed;
-        };
-
-        // Create opt link even for keg-only
-        linker.linkOpt(formula.name, formula.version) catch {};
-
-        // Record dependencies
-        recordDeps(db, keg_id, &formula);
+    // Check results
+    var download_failures: u32 = 0;
+    for (jobs.items) |job| {
+        if (!job.succeeded) {
+            output.err("Failed to download {s}", .{job.name});
+            download_failures += 1;
+        }
     }
 
-    output.info("{s} {s} installed successfully", .{ formula.name, formula.version });
+    if (download_failures > 0 and download_failures == jobs.items.len) {
+        return InstallError.DownloadFailed;
+    }
+
+    // ── Sequential materialize + link phase ────────────────────────────
+    // Process in order: dependencies first, then main formula.
+    for (jobs.items) |*job| {
+        if (!job.succeeded) continue;
+
+        const reason: []const u8 = if (job.is_dep) "dependency" else install_reason;
+
+        // Materialize
+        output.info("Materializing {s} to cellar...", .{job.name});
+        const keg = cellar_mod.materialize(
+            allocator,
+            prefix,
+            job.store_sha256,
+            job.name,
+            job.version_str,
+        ) catch {
+            output.err("Failed to materialize {s}", .{job.name});
+            continue;
+        };
+
+        // Parse the dep formula for recording (main formula is already parsed)
+        var dep_formula_ptr: ?*formula_mod.Formula = null;
+        var dep_formula_storage: formula_mod.Formula = undefined;
+
+        if (job.is_dep) {
+            dep_formula_storage = formula_mod.parseFormula(allocator, job.formula_json) catch continue;
+            dep_formula_ptr = &dep_formula_storage;
+        }
+        defer if (dep_formula_ptr) |f| f.deinit();
+
+        const record_formula = if (dep_formula_ptr) |f| f else &formula;
+
+        // Link + record
+        if (!job.keg_only) {
+            const keg_id = recordKeg(db, record_formula, job.store_sha256, keg.path, reason) catch {
+                output.err("Failed to record {s} in database", .{job.name});
+                continue;
+            };
+
+            linker.link(keg.path, job.name, keg_id) catch {
+                output.warn("Some links for {s} could not be created", .{job.name});
+            };
+            linker.linkOpt(job.name, job.version_str) catch {};
+            recordDeps(db, keg_id, record_formula);
+        } else {
+            output.info("{s} is keg-only; not linking", .{job.name});
+            const keg_id = recordKeg(db, record_formula, job.store_sha256, keg.path, reason) catch continue;
+            linker.linkOpt(job.name, job.version_str) catch {};
+            recordDeps(db, keg_id, record_formula);
+        }
+
+        output.info("{s} {s} installed successfully", .{ job.name, job.version_str });
+    }
 }
 
 /// Install a cask (placeholder -- full implementation is a TODO).
