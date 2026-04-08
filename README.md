@@ -62,6 +62,8 @@ Requires [Zig 0.15.x](https://ziglang.org/download/). See [INSTALL.md](INSTALL.m
 
 ## Quick Start
 
+> **Tip:** `mt` is a built-in alias for `malt`. Every command works with either name — use `mt` if you prefer fewer keystrokes.
+
 ```bash
 # Install a formula (resolves dependencies automatically)
 malt install wget
