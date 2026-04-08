@@ -56,17 +56,27 @@ if [ -z "$LATEST" ]; then
     error "Zig is required to build from source. Install: https://ziglang.org/download/"
   fi
 
-  TMPDIR=$(mktemp -d)
-  trap 'rm -rf "$TMPDIR"' EXIT
+  # Check if we're inside the repo already (local install)
+  SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+  REPO_ROOT="$(cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd)"
 
-  info "Cloning repository..."
-  git clone --depth 1 "https://github.com/${REPO}.git" "$TMPDIR/malt"
+  if [ -f "${REPO_ROOT}/build.zig" ] && [ -f "${REPO_ROOT}/src/main.zig" ]; then
+    info "Building from local source (${REPO_ROOT})..."
+    cd "$REPO_ROOT"
+    zig build -Doptimize=ReleaseSafe
+    BINARY_PATH="${REPO_ROOT}/zig-out/bin/malt"
+  else
+    TMPDIR=$(mktemp -d)
+    trap 'rm -rf "$TMPDIR"' EXIT
 
-  info "Building (this may take a minute)..."
-  cd "$TMPDIR/malt"
-  zig build -Doptimize=ReleaseSafe
+    info "Cloning repository..."
+    git clone --depth 1 "https://github.com/${REPO}.git" "$TMPDIR/malt"
 
-  BINARY_PATH="$TMPDIR/malt/zig-out/bin/malt"
+    info "Building (this may take a minute)..."
+    cd "$TMPDIR/malt"
+    zig build -Doptimize=ReleaseSafe
+    BINARY_PATH="$TMPDIR/malt/zig-out/bin/malt"
+  fi
 
   if [ ! -f "$BINARY_PATH" ]; then
     error "Build failed — binary not found"
