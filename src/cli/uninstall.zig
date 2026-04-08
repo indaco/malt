@@ -124,5 +124,5 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     del_stmt.bindInt(1, keg_id) catch return;
     _ = del_stmt.step() catch {};
 
-    output.info("{s} has been uninstalled.", .{name});
+    output.success("{s} uninstalled", .{name});
 }

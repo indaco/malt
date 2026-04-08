@@ -56,6 +56,23 @@ pub fn warn(comptime fmt: []const u8, args: anytype) void {
     f.writeAll("\n") catch {};
 }
 
+/// Print success: "✓ {msg}" in green to stderr
+pub fn success(comptime fmt: []const u8, args: anytype) void {
+    if (quiet) return;
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    const f = std.fs.File.stderr();
+    if (color.isColorEnabled()) {
+        f.writeAll(color.Style.green.code()) catch {};
+        f.writeAll("  ✓ ") catch {};
+        f.writeAll(color.Style.reset.code()) catch {};
+    } else {
+        f.writeAll("  ✓ ") catch {};
+    }
+    f.writeAll(msg) catch {};
+    f.writeAll("\n") catch {};
+}
+
 /// Print error: "Error: {msg}" in red to stderr
 pub fn err(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;

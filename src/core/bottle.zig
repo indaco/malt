@@ -33,7 +33,7 @@ pub fn download(
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
 
-    ghcr.downloadBlob(repo, digest, &body) catch return BottleError.DownloadFailed;
+    ghcr.downloadBlob(allocator, repo, digest, &body) catch return BottleError.DownloadFailed;
 
     // Compute SHA256 of downloaded data
     var hash: [32]u8 = undefined;

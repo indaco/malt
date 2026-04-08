@@ -425,7 +425,7 @@ fn materializeAndLink(
         recordDeps(db, keg_id, &formula);
     }
 
-    output.info("{s} {s} installed successfully", .{ job.name, job.version_str });
+    output.success("{s} {s} installed", .{ job.name, job.version_str });
 }
 
 /// Install a cask (placeholder -- full implementation is a TODO).
@@ -845,7 +845,7 @@ fn installTapFormula(
 
     db.commit() catch return InstallError.RecordFailed;
 
-    output.info("{s} {s} installed successfully", .{ parts.formula, rb.version });
+    output.success("{s} {s} installed", .{ parts.formula, rb.version });
 }
 
 /// Minimal Ruby formula parser for GoReleaser-style formulas.

@@ -76,50 +76,55 @@ pub const GhcrClient = struct {
     }
 
     /// Download a blob from GHCR, handling 401 -> token -> retry.
-    /// digest format: "sha256:abcdef..."
-    /// Writes response body to body_out.
+    /// Thread-safe: creates its own HTTP client per call to avoid
+    /// sharing connections across threads.
     pub fn downloadBlob(
         self: *GhcrClient,
+        allocator: std.mem.Allocator,
         repo: []const u8,
         digest: []const u8,
         body_out: *std.ArrayList(u8),
     ) GhcrError!void {
+        _ = self;
+
+        // Each download gets its own HTTP client (thread-safe)
+        var http = client_mod.HttpClient.init(allocator);
+        defer http.deinit();
+
         // Build URL: https://ghcr.io/v2/{repo}/blobs/{digest}
         var url_buf: [512]u8 = undefined;
         const url = std.fmt.bufPrint(&url_buf, "https://ghcr.io/v2/{s}/blobs/{s}", .{ repo, digest }) catch
             return GhcrError.OutOfMemory;
 
-        // First attempt (may get 401)
-        var resp = self.http.get(url) catch return GhcrError.DownloadFailed;
+        // Fetch a fresh token for this specific repo
+        var token_url_buf: [512]u8 = undefined;
+        const token_url = std.fmt.bufPrint(&token_url_buf, "https://ghcr.io/token?scope=repository:{s}:pull", .{repo}) catch
+            return GhcrError.OutOfMemory;
 
-        if (resp.status == 401) {
-            resp.deinit();
-            // Fetch token and retry
-            const token = try self.fetchToken(repo);
+        var token_resp = http.get(token_url) catch return GhcrError.TokenFetchFailed;
+        defer token_resp.deinit();
 
-            var auth_buf: [2048]u8 = undefined;
-            const auth_value = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token}) catch
-                return GhcrError.OutOfMemory;
+        if (token_resp.status != 200) return GhcrError.TokenFetchFailed;
 
-            const headers = [_]std.http.Header{
-                .{ .name = "Authorization", .value = auth_value },
-            };
+        const token = extractTokenField(allocator, token_resp.body) catch
+            return GhcrError.InvalidResponse;
 
-            resp = self.http.getWithHeaders(url, &headers) catch
-                return GhcrError.DownloadFailed;
-        }
+        // Download with token
+        var auth_buf: [2048]u8 = undefined;
+        const auth_value = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token}) catch
+            return GhcrError.OutOfMemory;
+
+        const headers = [_]std.http.Header{
+            .{ .name = "Authorization", .value = auth_value },
+        };
+
+        var resp = http.getWithHeaders(url, &headers) catch
+            return GhcrError.DownloadFailed;
         defer resp.deinit();
 
-        if (resp.status != 200) {
-            // Log the status for debugging
-            const stderr = std.fs.File.stderr();
-            var dbg_buf: [128]u8 = undefined;
-            const dbg_msg = std.fmt.bufPrint(&dbg_buf, "GHCR blob download returned status {d} for {s}\n", .{ resp.status, url }) catch "";
-            stderr.writeAll(dbg_msg) catch {};
-            return GhcrError.DownloadFailed;
-        }
+        if (resp.status != 200) return GhcrError.DownloadFailed;
 
-        body_out.appendSlice(self.allocator, resp.body) catch return GhcrError.OutOfMemory;
+        body_out.appendSlice(allocator, resp.body) catch return GhcrError.OutOfMemory;
     }
 };
 

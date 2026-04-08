@@ -111,5 +111,5 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    output.info("Removed {d} orphaned dependencies", .{removed});
+    output.success("Removed {d} orphaned dependencies", .{removed});
 }
