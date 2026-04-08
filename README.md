@@ -6,7 +6,9 @@
 ![Zig 0.15.x](https://img.shields.io/badge/zig-0.15.x-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-malt is a macOS-only package manager written in Zig that consumes Homebrew's existing formula, bottle, cask, and tap ecosystem. It ships as a single binary (`mt`, ~3 MB) with sub-millisecond cold start. malt downloads pre-built bottles from the Homebrew infrastructure — it is a fast client for Homebrew's package registry, not a fork.
+malt is a macOS-only package manager written in Zig that consumes Homebrew's existing formula, bottle, cask, and tap ecosystem. It ships as a single binary (`malt`, ~2.8 MB) with sub-millisecond cold start. malt downloads pre-built bottles from the Homebrew infrastructure — it is a fast client for Homebrew's package registry, not a fork.
+
+> **Experimental project.** malt is a human-in-the-loop AI experiment. The design specification, architecture decisions, implementation strategy, and quality assurance were directed by a human. All implementation code was written by AI — [Claude Code](https://claude.ai/code) and [ruflo](https://github.com/ruvnet/ruflo). Every commit, bug fix, and feature was reviewed and validated by the human operator before merging. This is an exploration of what's possible when a human architect drives an AI coder on a non-trivial systems project.
 
 ---
 
@@ -531,7 +533,7 @@ For a detailed comparison with specific issue references and design tradeoffs, s
 ```bash
 # Requires Zig 0.15.x
 zig build                                # debug build
-zig build -Doptimize=ReleaseSafe         # release build (~3 MB)
+zig build -Doptimize=ReleaseSafe         # release build (~2.8 MB)
 zig build test                           # run tests
 zig build universal                      # universal binary (arm64 + x86_64 via lipo)
 ```
