@@ -25,28 +25,57 @@ malt is a macOS-only package manager written in Zig that consumes Homebrew's exi
 
 ---
 
+## Install
+
+### One-liner (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+```
+
+Downloads the latest release, verifies the SHA256 checksum, installs the binary to `/usr/local/bin/`, and creates `/opt/malt` with proper ownership. Falls back to building from source if no release is available.
+
+### Via Homebrew
+
+```bash
+brew tap indaco/tap
+brew install malt
+```
+
+### From source
+
+```bash
+git clone https://github.com/indaco/malt.git
+cd malt
+zig build -Doptimize=ReleaseSafe
+sudo install -m 755 zig-out/bin/malt /usr/local/bin/
+sudo mkdir -p /opt/malt && sudo chown $USER /opt/malt
+```
+
+Requires [Zig 0.15.x](https://ziglang.org/download/). See [INSTALL.md](INSTALL.md) for build profiles, stripping, and universal binary instructions.
+
+---
+
 ## Quick Start
 
 ```bash
-# Build from source (requires Zig 0.15.x)
-zig build -Doptimize=ReleaseSafe
-sudo mkdir -p /opt/malt && sudo chown $USER /opt/malt
-cp zig-out/bin/mt /usr/local/bin/
-
 # Install a formula (resolves dependencies automatically)
-mt install wget
+malt install wget
 
 # Install a cask (auto-detected)
-mt install --cask firefox
+malt install --cask firefox
 
 # Install from a tap (inline — no separate tap step)
-mt install user/tap/formula
+malt install user/tap/formula
+
+# Install multiple packages (downloads in parallel)
+malt install jq wget ripgrep
 
 # List installed packages
-mt list --versions
+malt list --versions
 
 # Uninstall
-mt uninstall wget
+malt uninstall wget
 ```
 
 ---
