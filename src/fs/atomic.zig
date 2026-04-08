@@ -62,7 +62,11 @@ pub fn maltDbDir(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/db", .{maltPrefix()});
 }
 
-/// Return "{prefix}/cache", allocated via `allocator`.
+/// Return the cache directory, honouring MALT_CACHE env var.
+/// Falls back to "{prefix}/cache".
 pub fn maltCacheDir(allocator: std.mem.Allocator) ![]const u8 {
+    if (std.posix.getenv("MALT_CACHE")) |cache| {
+        return allocator.dupe(u8, std.mem.sliceTo(cache, 0));
+    }
     return std.fmt.allocPrint(allocator, "{s}/cache", .{maltPrefix()});
 }

@@ -26,8 +26,25 @@ pub const HttpClient = struct {
     }
 
     /// Perform a GET request and return the response status and body.
+    /// Automatically injects HOMEBREW_GITHUB_API_TOKEN as Authorization
+    /// header for GitHub/Homebrew API requests when the env var is set.
     /// The caller owns the returned `Response` and must call `deinit` on it.
     pub fn get(self: *HttpClient, url: []const u8) !Response {
+        if (std.posix.getenv("HOMEBREW_GITHUB_API_TOKEN")) |token| {
+            // Apply token to GitHub and Homebrew API requests
+            if (std.mem.indexOf(u8, url, "github.com") != null or
+                std.mem.indexOf(u8, url, "formulae.brew.sh") != null or
+                std.mem.indexOf(u8, url, "ghcr.io") != null)
+            {
+                var auth_buf: [256]u8 = undefined;
+                const auth_value = std.fmt.bufPrint(&auth_buf, "token {s}", .{std.mem.sliceTo(token, 0)}) catch
+                    return self.doGet(url, &.{});
+                const headers = [_]std.http.Header{
+                    .{ .name = "Authorization", .value = auth_value },
+                };
+                return self.doGet(url, &headers);
+            }
+        }
         return self.doGet(url, &.{});
     }
 
