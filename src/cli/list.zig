@@ -6,6 +6,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const color = @import("../ui/color.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Parse flags
@@ -20,7 +21,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             show_formula = true;
         } else if (std.mem.eql(u8, arg, "--cask") or std.mem.eql(u8, arg, "--casks")) {
             show_cask = true;
-        } else if (std.mem.eql(u8, arg, "--versions")) {
+        } else if (std.mem.eql(u8, arg, "--versions") or std.mem.eql(u8, arg, "--version")) {
             show_versions = true;
         } else if (std.mem.eql(u8, arg, "--pinned")) {
             show_pinned = true;
@@ -80,19 +81,23 @@ fn writeHumanOutput(
             const pinned = stmt.columnBool(2);
             const name_slice = std.mem.sliceTo(name, 0);
 
+            stdout.writeAll(name_slice) catch {};
             if (show_versions) {
                 const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "?";
-                var line_buf: [512]u8 = undefined;
-                const line = if (pinned)
-                    std.fmt.bufPrint(&line_buf, "{s} {s} [pinned]\n", .{ name_slice, ver_slice }) catch continue
-                else
-                    std.fmt.bufPrint(&line_buf, "{s} {s}\n", .{ name_slice, ver_slice }) catch continue;
-                stdout.writeAll(line) catch {};
-            } else {
-                stdout.writeAll(name_slice) catch {};
-                if (pinned) stdout.writeAll(" [pinned]") catch {};
-                stdout.writeAll("\n") catch {};
+                const use_color = color.isColorEnabled();
+                if (use_color) stdout.writeAll(color.Style.dim.code()) catch {};
+                stdout.writeAll(" (") catch {};
+                stdout.writeAll(ver_slice) catch {};
+                stdout.writeAll(")") catch {};
+                if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
             }
+            if (pinned) {
+                const use_color = color.isColorEnabled();
+                if (use_color) stdout.writeAll(color.Style.yellow.code()) catch {};
+                stdout.writeAll(" [pinned]") catch {};
+                if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
+            }
+            stdout.writeAll("\n") catch {};
         }
     }
 
@@ -106,15 +111,17 @@ fn writeHumanOutput(
             const ver = stmt.columnText(1);
             const token_slice = std.mem.sliceTo(token, 0);
 
+            stdout.writeAll(token_slice) catch {};
             if (show_versions) {
                 const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "?";
-                var line_buf: [512]u8 = undefined;
-                const line = std.fmt.bufPrint(&line_buf, "{s} {s}\n", .{ token_slice, ver_slice }) catch continue;
-                stdout.writeAll(line) catch {};
-            } else {
-                stdout.writeAll(token_slice) catch {};
-                stdout.writeAll("\n") catch {};
+                const use_color = color.isColorEnabled();
+                if (use_color) stdout.writeAll(color.Style.dim.code()) catch {};
+                stdout.writeAll(" (") catch {};
+                stdout.writeAll(ver_slice) catch {};
+                stdout.writeAll(")") catch {};
+                if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
             }
+            stdout.writeAll("\n") catch {};
         }
     }
 }
