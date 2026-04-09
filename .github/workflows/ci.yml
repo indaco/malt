@@ -16,7 +16,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.1
+          version: 0.15.2
 
       - name: Build (Debug)
         run: zig build
@@ -52,7 +52,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.1
+          version: 0.15.2
 
       - name: Check formatting
         run: zig fmt --check src/ tests/
