@@ -57,6 +57,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Clean old Cellar versions (keep only latest per formula)
     total_freed += cleanOldVersions(allocator, prefix, dry_run);
 
+    // Clean stale cask cache entries (downloads for uninstalled casks)
+    total_freed += cleanCaskCache(allocator, prefix, dry_run);
+
     if (dry_run) {
         var buf: [128]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Would free approximately {d} bytes (dry run)", .{total_freed}) catch return;
@@ -157,6 +160,91 @@ fn cleanOldVersions(allocator: std.mem.Allocator, prefix: []const u8, dry_run: b
         }
         // Actual old version cleanup would require sorting by version
         // and removing older ones. For safety, we only report here.
+    }
+
+    return freed;
+}
+
+/// Clean stale cask cache entries — remove cached downloads for casks
+/// that are no longer installed.
+fn cleanCaskCache(allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) u64 {
+    var cask_cache_buf: [512]u8 = undefined;
+    const cask_cache_path = std.fmt.bufPrint(&cask_cache_buf, "{s}/cache/Cask", .{prefix}) catch return 0;
+
+    var dir = std.fs.openDirAbsolute(cask_cache_path, .{ .iterate = true }) catch return 0;
+    defer dir.close();
+
+    // Open DB to check which casks are still installed
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return 0;
+    var db = sqlite.Database.open(db_path) catch return 0;
+    defer db.close();
+
+    var freed: u64 = 0;
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind == .directory) continue;
+
+        // Extract token from filename: "token.dmg" / "token.zip" / "token.pkg"
+        const name = entry.name;
+        const token = blk: {
+            for ([_][]const u8{ ".dmg", ".zip", ".pkg" }) |ext| {
+                if (std.mem.endsWith(u8, name, ext)) {
+                    break :blk name[0 .. name.len - ext.len];
+                }
+            }
+            break :blk name;
+        };
+
+        // Check if this cask is still installed
+        const token_z = allocator.dupeZ(u8, token) catch continue;
+        defer allocator.free(token_z);
+
+        var stmt = db.prepare("SELECT token FROM casks WHERE token = ?1 LIMIT 1;") catch continue;
+        defer stmt.finalize();
+        stmt.bindText(1, token_z) catch continue;
+
+        const still_installed = stmt.step() catch false;
+        if (still_installed) continue;
+
+        // Not installed — remove the cache file
+        const stat = dir.statFile(entry.name) catch continue;
+        freed += stat.size;
+        if (dry_run) {
+            output.info("  Would remove stale cask cache: {s}", .{entry.name});
+        } else {
+            dir.deleteFile(entry.name) catch {};
+        }
+    }
+
+    // Also clean stale Caskroom entries
+    var caskroom_buf: [512]u8 = undefined;
+    const caskroom_path = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom", .{prefix}) catch return freed;
+
+    var caskroom = std.fs.openDirAbsolute(caskroom_path, .{ .iterate = true }) catch return freed;
+    defer caskroom.close();
+
+    var cr_iter = caskroom.iterate();
+    while (cr_iter.next() catch null) |entry| {
+        if (entry.kind != .directory) continue;
+
+        const token_z = allocator.dupeZ(u8, entry.name) catch continue;
+        defer allocator.free(token_z);
+
+        var stmt = db.prepare("SELECT token FROM casks WHERE token = ?1 LIMIT 1;") catch continue;
+        defer stmt.finalize();
+        stmt.bindText(1, token_z) catch continue;
+
+        const still_installed = stmt.step() catch false;
+        if (still_installed) continue;
+
+        if (dry_run) {
+            output.info("  Would remove stale Caskroom entry: {s}", .{entry.name});
+        } else {
+            std.fs.deleteTreeAbsolute(
+                std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}", .{ prefix, entry.name }) catch continue,
+            ) catch {};
+        }
     }
 
     return freed;
