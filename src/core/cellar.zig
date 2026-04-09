@@ -24,6 +24,7 @@ pub const Keg = struct {
 /// Materialize a keg from the store to the Cellar.
 /// 1. clonefile store/{sha256}/... → Cellar/{name}/{version}/
 /// 2. Patch Mach-O load commands (both /opt/homebrew and /usr/local prefixes)
+///    — skipped when cellar_type is ":any" or ":any_skip_relocation" (relocatable bottle)
 /// 3. Patch text files (@@HOMEBREW_PREFIX@@ etc.)
 /// 4. Ad-hoc codesign on arm64
 /// Uses errdefer to clean up Cellar entry on failure.
@@ -33,6 +34,21 @@ pub fn materialize(
     store_sha256: []const u8,
     name: []const u8,
     version: []const u8,
+) CellarError!Keg {
+    return materializeWithCellar(allocator, prefix, store_sha256, name, version, "");
+}
+
+/// Materialize with an explicit cellar type from the bottle metadata.
+/// When cellar_type is ":any" or ":any_skip_relocation", Mach-O patching
+/// and text-file prefix rewriting are skipped because the bottle is
+/// already relocatable.
+pub fn materializeWithCellar(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    store_sha256: []const u8,
+    name: []const u8,
+    version: []const u8,
+    cellar_type: []const u8,
 ) CellarError!Keg {
     // Build paths
     var store_buf: [512]u8 = undefined;
@@ -72,23 +88,31 @@ pub fn materialize(
 
     const new_prefix = atomic.maltPrefix();
 
-    // Build cellar replacement for @@HOMEBREW_CELLAR@@
-    var new_cellar_buf: [256]u8 = undefined;
-    const new_cellar = std.fmt.bufPrint(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;
+    // Relocatable bottles (cellar: ":any" or ":any_skip_relocation") do not
+    // need Mach-O patching or text-file prefix rewriting — they are built to
+    // work from any prefix without modification.
+    const skip_patching = std.mem.eql(u8, cellar_type, ":any") or
+        std.mem.eql(u8, cellar_type, ":any_skip_relocation");
 
-    // Walk cellar directory and patch each Mach-O binary
-    patchAllMachO(allocator, cellar_path, new_prefix, new_cellar) catch
-        return CellarError.PatchFailed;
+    if (!skip_patching) {
+        // Build cellar replacement for @@HOMEBREW_CELLAR@@
+        var new_cellar_buf: [256]u8 = undefined;
+        const new_cellar = std.fmt.bufPrint(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;
 
-    // Patch text files (scripts, .pc files, configs).
-    // Failures here mean .pc files and scripts will have wrong prefixes,
-    // causing build/runtime errors for dependents. Warn but don't abort.
-    _ = patcher.patchTextFiles(allocator, cellar_path, "/opt/homebrew", new_prefix) catch |e| {
-        std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
-    };
-    _ = patcher.patchTextFiles(allocator, cellar_path, "/usr/local", new_prefix) catch |e| {
-        std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
-    };
+        // Walk cellar directory and patch each Mach-O binary
+        patchAllMachO(allocator, cellar_path, new_prefix, new_cellar) catch
+            return CellarError.PatchFailed;
+
+        // Patch text files (scripts, .pc files, configs).
+        // Failures here mean .pc files and scripts will have wrong prefixes,
+        // causing build/runtime errors for dependents. Warn but don't abort.
+        _ = patcher.patchTextFiles(allocator, cellar_path, "/opt/homebrew", new_prefix) catch |e| {
+            std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
+        };
+        _ = patcher.patchTextFiles(allocator, cellar_path, "/usr/local", new_prefix) catch |e| {
+            std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
+        };
+    }
 
     // Ad-hoc codesign on arm64. Without this, binaries won't execute on Apple Silicon.
     if (codesign.isArm64()) {
