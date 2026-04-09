@@ -493,43 +493,37 @@ zig build universal                      # universal binary (arm64 + x86_64 via 
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
-
 ### Binary Size
 
-| Tool     | Size |
-| -------- | ---- |
+| Tool | Size |
+| ---- | ---- |
 | **malt** | 3.0M |
 | nanobrew | 1.4M |
 | zerobrew | 8.6M |
-| bru      | 1.8M |
-
+| bru | 1.8M |
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
-
 ### Cold Install
 
-| Package              | malt   | nanobrew | zerobrew | bru    | Homebrew |
-| -------------------- | ------ | -------- | -------- | ------ | -------- |
-| **tree** (0 deps)    | 0.011s | 0.681s   | 1.960s   | 0.819s | 3.833s   |
-| **wget** (6 deps)    | 0.003s | 4.222s   | 5.757s   | 0.004s | 4.481s   |
-| **ffmpeg** (11 deps) | 0.010s | 1.710s   | 4.522s   | 3.518s | 5.247s   |
-
+| Package | malt | nanobrew | zerobrew | bru | Homebrew |
+| ------- | ---- | -------- | -------- | --- | -------- |
+| **tree** (0 deps) | 0.014s | 0.654s | 1.941s | 0.632s | 3.884s |
+| **wget** (6 deps) | 0.004s | 8.328s | 8.363s | 0.005s | 5.692s |
+| **ffmpeg** (11 deps) | 0.016s | 2.057s | 5.067s | 4.386s | 9.082s |
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
-
 ### Warm Install
 
-| Package              | malt   | nanobrew | zerobrew | bru    |
-| -------------------- | ------ | -------- | -------- | ------ |
-| **tree** (0 deps)    | 0.002s | 0.005s   | 0.212s   | 0.026s |
-| **wget** (6 deps)    | 0.002s | 0.477s   | 0.529s   | 0.588s |
-| **ffmpeg** (11 deps) | 0.002s | 0.717s   | 2.232s   | 1.098s |
-
+| Package | malt | nanobrew | zerobrew | bru |
+| ------- | ---- | -------- | -------- | --- |
+| **tree** (0 deps) | 0.003s | 0.008s | 0.253s | 0.038s |
+| **wget** (6 deps) | 0.004s | 0.644s | 0.882s | 0.539s |
+| **ffmpeg** (11 deps) | 0.003s | 0.848s | 3.640s | 2.211s |
 <!-- BENCH:WARM:END -->
 
-> Benchmarks on Apple Silicon (GitHub Actions macos-14). Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
+> Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-09. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
 
 ---
 
