@@ -1,5 +1,5 @@
 //! malt — info command
-//! Show package info.
+//! Show package info (formulas and casks).
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
@@ -8,6 +8,7 @@ const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
+const cask_mod = @import("../core/cask.zig");
 const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -15,11 +16,17 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Parse flags and positional args
     var json_mode = false;
+    var force_cask = false;
+    var force_formula = false;
     var pkg_name: ?[]const u8 = null;
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
+        } else if (std.mem.eql(u8, arg, "--cask")) {
+            force_cask = true;
+        } else if (std.mem.eql(u8, arg, "--formula")) {
+            force_formula = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             output.setQuiet(true);
         } else if (arg.len > 0 and arg[0] != '-') {
@@ -43,21 +50,54 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer db.close();
     schema.initSchema(&db) catch return;
 
-    // Query installed info from kegs
-    var stmt = db.prepare(
-        "SELECT name, version, tap, cellar_path, pinned, installed_at FROM kegs WHERE name = ?1 LIMIT 1;",
-    ) catch return;
-    defer stmt.finalize();
-    stmt.bindText(1, name) catch return;
+    // Check formula first (unless --cask)
+    var formula_installed = false;
+    if (!force_cask) {
+        var stmt = db.prepare(
+            "SELECT name, version, tap, cellar_path, pinned, installed_at FROM kegs WHERE name = ?1 LIMIT 1;",
+        ) catch return;
+        defer stmt.finalize();
+        stmt.bindText(1, name) catch return;
 
-    const installed = stmt.step() catch false;
+        formula_installed = stmt.step() catch false;
 
+        if (formula_installed) {
+            const stdout = std.fs.File.stdout();
+            if (json_mode) {
+                try writeJsonInfo(allocator, &db, name, true, &stmt, stdout);
+            } else {
+                try writeHumanInfo(allocator, &db, name, true, &stmt, prefix, stdout);
+            }
+            return;
+        }
+    }
+
+    // Check cask (unless --formula)
+    if (!force_formula) {
+        const cask_installed = cask_mod.lookupInstalled(&db, name);
+        if (cask_installed != null) {
+            const stdout = std.fs.File.stdout();
+            if (json_mode) {
+                try writeJsonCaskInfo(allocator, &db, name, stdout);
+            } else {
+                try writeHumanCaskInfo(&db, name, stdout);
+            }
+            return;
+        }
+    }
+
+    // Not installed as either
     const stdout = std.fs.File.stdout();
-
     if (json_mode) {
-        try writeJsonInfo(allocator, &db, name, installed, &stmt, stdout);
+        var stmt = db.prepare(
+            "SELECT name, version, tap, cellar_path, pinned, installed_at FROM kegs WHERE name = ?1 LIMIT 1;",
+        ) catch return;
+        defer stmt.finalize();
+        try writeJsonInfo(allocator, &db, name, false, &stmt, stdout);
     } else {
-        try writeHumanInfo(allocator, &db, name, installed, &stmt, prefix, stdout);
+        var buf: [4096]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{s}: not installed\n", .{name}) catch return;
+        stdout.writeAll(line) catch {};
     }
 }
 
@@ -127,7 +167,7 @@ fn writeJsonInfo(
 
     try w.writeAll("{\"name\":\"");
     try w.writeAll(name);
-    try w.writeAll("\",\"installed\":");
+    try w.writeAll("\",\"type\":\"formula\",\"installed\":");
     try w.writeAll(if (installed) "true" else "false");
 
     if (installed) {
@@ -148,5 +188,99 @@ fn writeJsonInfo(
     }
 
     try w.writeAll("}\n");
+    stdout.writeAll(buf.items) catch {};
+}
+
+fn writeHumanCaskInfo(
+    db: *sqlite.Database,
+    name: []const u8,
+    stdout: std.fs.File,
+) !void {
+    var stmt = db.prepare(
+        "SELECT token, name, version, url, sha256, app_path, auto_updates, installed_at FROM casks WHERE token = ?1 LIMIT 1;",
+    ) catch return;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return;
+
+    const found = stmt.step() catch false;
+    if (!found) return;
+
+    var buf: [4096]u8 = undefined;
+
+    const token = if (stmt.columnText(0)) |t| std.mem.sliceTo(t, 0) else name;
+    const cask_name = if (stmt.columnText(1)) |n| std.mem.sliceTo(n, 0) else name;
+    const ver = if (stmt.columnText(2)) |v| std.mem.sliceTo(v, 0) else "unknown";
+    const url = if (stmt.columnText(3)) |u| std.mem.sliceTo(u, 0) else "N/A";
+    const app_path = if (stmt.columnText(5)) |p| std.mem.sliceTo(p, 0) else "N/A";
+    const auto_updates = stmt.columnBool(6);
+    const installed_at = if (stmt.columnText(7)) |d| std.mem.sliceTo(d, 0) else "N/A";
+
+    {
+        const line = std.fmt.bufPrint(&buf, "{s}: {s} (cask)\n", .{ token, ver }) catch return;
+        stdout.writeAll(line) catch {};
+    }
+    {
+        const line = std.fmt.bufPrint(&buf, "Name: {s}\n", .{cask_name}) catch return;
+        stdout.writeAll(line) catch {};
+    }
+    {
+        const line = std.fmt.bufPrint(&buf, "URL: {s}\n", .{url}) catch return;
+        stdout.writeAll(line) catch {};
+    }
+    {
+        const line = std.fmt.bufPrint(&buf, "App: {s}\n", .{app_path}) catch return;
+        stdout.writeAll(line) catch {};
+    }
+    if (auto_updates) {
+        stdout.writeAll("Auto-updates: yes\n") catch {};
+    }
+    {
+        const line = std.fmt.bufPrint(&buf, "Installed: {s}\n", .{installed_at}) catch return;
+        stdout.writeAll(line) catch {};
+    }
+}
+
+fn writeJsonCaskInfo(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    name: []const u8,
+    stdout: std.fs.File,
+) !void {
+    var stmt = db.prepare(
+        "SELECT token, name, version, url, sha256, app_path, auto_updates, installed_at FROM casks WHERE token = ?1 LIMIT 1;",
+    ) catch return;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return;
+
+    const found = stmt.step() catch false;
+    if (!found) return;
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+
+    const token = if (stmt.columnText(0)) |t| std.mem.sliceTo(t, 0) else name;
+    const cask_name = if (stmt.columnText(1)) |n| std.mem.sliceTo(n, 0) else name;
+    const ver = if (stmt.columnText(2)) |v| std.mem.sliceTo(v, 0) else "";
+    const url = if (stmt.columnText(3)) |u| std.mem.sliceTo(u, 0) else "";
+    const app_path = if (stmt.columnText(5)) |p| std.mem.sliceTo(p, 0) else "";
+    const auto_updates = stmt.columnBool(6);
+    const installed_at = if (stmt.columnText(7)) |d| std.mem.sliceTo(d, 0) else "";
+
+    try w.writeAll("{\"name\":\"");
+    try w.writeAll(token);
+    try w.writeAll("\",\"type\":\"cask\",\"installed\":true,\"version\":\"");
+    try w.writeAll(ver);
+    try w.writeAll("\",\"full_name\":\"");
+    try w.writeAll(cask_name);
+    try w.writeAll("\",\"url\":\"");
+    try w.writeAll(url);
+    try w.writeAll("\",\"app_path\":\"");
+    try w.writeAll(app_path);
+    try w.writeAll("\",\"auto_updates\":");
+    try w.writeAll(if (auto_updates) "true" else "false");
+    try w.writeAll(",\"installed_at\":\"");
+    try w.writeAll(installed_at);
+    try w.writeAll("\"}\n");
     stdout.writeAll(buf.items) catch {};
 }
