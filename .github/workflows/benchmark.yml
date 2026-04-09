@@ -1,0 +1,237 @@
+name: Benchmark
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Every Monday at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  benchmark:
+    name: macOS Benchmarks
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # --- Build all competitors ---
+
+      - name: Build malt
+        run: |
+          zig build -Doptimize=ReleaseSafe
+          ./zig-out/bin/malt --version
+
+      - name: Build nanobrew
+        run: |
+          git clone --depth 1 https://github.com/justrach/nanobrew.git /tmp/nanobrew
+          cd /tmp/nanobrew && zig build -Doptimize=ReleaseFast
+          sudo mkdir -p /opt/nanobrew
+          sudo chown -R $USER /opt/nanobrew
+          /tmp/nanobrew/zig-out/bin/nb init
+
+      - name: Build zerobrew
+        run: |
+          git clone --depth 1 https://github.com/lucasgelfond/zerobrew.git /tmp/zerobrew
+          cd /tmp/zerobrew && cargo build --release
+          sudo mkdir -p /opt/zerobrew
+          sudo chown -R $USER /opt/zerobrew
+          /tmp/zerobrew/target/release/zb init
+
+      - name: Install bru
+        run: |
+          curl -fsSL https://zieka.github.io/bru/install.sh | bash
+          echo "$HOME/.bru/bin" >> $GITHUB_PATH
+
+      # --- Benchmark tree (0 deps) ---
+
+      - name: Benchmark tree
+        id: tree
+        run: |
+          MT=./zig-out/bin/malt
+          NB=/tmp/nanobrew/zig-out/bin/nb
+          ZB=/tmp/zerobrew/target/release/zb
+
+          # malt
+          MT_COLD=$(TIMEFORMAT='%R'; { time $MT install tree 2>&1; } 2>&1 | tail -1)
+          $MT uninstall tree 2>/dev/null || true
+          MT_WARM=$(TIMEFORMAT='%R'; { time $MT install tree 2>&1; } 2>&1 | tail -1)
+          $MT uninstall tree 2>/dev/null || true
+
+          # nanobrew
+          NB_COLD=$(TIMEFORMAT='%R'; { time $NB install tree 2>&1; } 2>&1 | tail -1)
+          $NB remove tree 2>/dev/null || true
+          NB_WARM=$(TIMEFORMAT='%R'; { time $NB install tree 2>&1; } 2>&1 | tail -1)
+          $NB remove tree 2>/dev/null || true
+
+          # zerobrew
+          ZB_COLD=$(TIMEFORMAT='%R'; { time $ZB install tree 2>&1; } 2>&1 | tail -1)
+          $ZB uninstall tree 2>/dev/null || true
+          ZB_WARM=$(TIMEFORMAT='%R'; { time $ZB install tree 2>&1; } 2>&1 | tail -1)
+          $ZB uninstall tree 2>/dev/null || true
+
+          # bru
+          BRU_COLD=$(TIMEFORMAT='%R'; { time bru install tree 2>&1; } 2>&1 | tail -1)
+          bru uninstall tree 2>/dev/null || true
+          BRU_WARM=$(TIMEFORMAT='%R'; { time bru install tree 2>&1; } 2>&1 | tail -1)
+          bru uninstall tree 2>/dev/null || true
+
+          # homebrew
+          brew uninstall tree 2>/dev/null || true
+          BREW_TIME=$(TIMEFORMAT='%R'; { time brew install tree 2>&1; } 2>&1 | tail -1)
+          brew uninstall tree 2>/dev/null || true
+
+          {
+            echo "brew=${BREW_TIME}s"
+            echo "mt_cold=${MT_COLD}s"
+            echo "mt_warm=${MT_WARM}s"
+            echo "nb_cold=${NB_COLD}s"
+            echo "nb_warm=${NB_WARM}s"
+            echo "zb_cold=${ZB_COLD}s"
+            echo "zb_warm=${ZB_WARM}s"
+            echo "bru_cold=${BRU_COLD}s"
+            echo "bru_warm=${BRU_WARM}s"
+          } >> "$GITHUB_OUTPUT"
+
+      # --- Benchmark wget (6 deps) ---
+
+      - name: Benchmark wget
+        id: wget
+        run: |
+          MT=./zig-out/bin/malt
+          NB=/tmp/nanobrew/zig-out/bin/nb
+          ZB=/tmp/zerobrew/target/release/zb
+
+          # malt
+          MT_COLD=$(TIMEFORMAT='%R'; { time $MT install wget 2>&1; } 2>&1 | tail -1)
+          $MT uninstall wget 2>/dev/null || true
+          MT_WARM=$(TIMEFORMAT='%R'; { time $MT install wget 2>&1; } 2>&1 | tail -1)
+          $MT uninstall wget 2>/dev/null || true
+
+          # nanobrew
+          NB_COLD=$(TIMEFORMAT='%R'; { time $NB install wget 2>&1; } 2>&1 | tail -1)
+          $NB remove wget 2>/dev/null || true
+          NB_WARM=$(TIMEFORMAT='%R'; { time $NB install wget 2>&1; } 2>&1 | tail -1)
+          $NB remove wget 2>/dev/null || true
+
+          # zerobrew
+          ZB_COLD=$(TIMEFORMAT='%R'; { time $ZB install wget 2>&1; } 2>&1 | tail -1)
+          $ZB uninstall wget 2>/dev/null || true
+          ZB_WARM=$(TIMEFORMAT='%R'; { time $ZB install wget 2>&1; } 2>&1 | tail -1)
+          $ZB uninstall wget 2>/dev/null || true
+
+          # bru
+          BRU_COLD=$(TIMEFORMAT='%R'; { time bru install wget 2>&1; } 2>&1 | tail -1)
+          bru uninstall wget 2>/dev/null || true
+          BRU_WARM=$(TIMEFORMAT='%R'; { time bru install wget 2>&1; } 2>&1 | tail -1)
+          bru uninstall wget 2>/dev/null || true
+
+          # homebrew
+          brew uninstall wget 2>/dev/null || true
+          BREW_TIME=$(TIMEFORMAT='%R'; { time brew install wget 2>&1; } 2>&1 | tail -1)
+          brew uninstall wget 2>/dev/null || true
+
+          {
+            echo "brew=${BREW_TIME}s"
+            echo "mt_cold=${MT_COLD}s"
+            echo "mt_warm=${MT_WARM}s"
+            echo "nb_cold=${NB_COLD}s"
+            echo "nb_warm=${NB_WARM}s"
+            echo "zb_cold=${ZB_COLD}s"
+            echo "zb_warm=${ZB_WARM}s"
+            echo "bru_cold=${BRU_COLD}s"
+            echo "bru_warm=${BRU_WARM}s"
+          } >> "$GITHUB_OUTPUT"
+
+      # --- Benchmark ffmpeg (11 deps) ---
+
+      - name: Benchmark ffmpeg
+        id: ffmpeg
+        run: |
+          MT=./zig-out/bin/malt
+          NB=/tmp/nanobrew/zig-out/bin/nb
+          ZB=/tmp/zerobrew/target/release/zb
+
+          # malt
+          MT_COLD=$(TIMEFORMAT='%R'; { time $MT install ffmpeg 2>&1; } 2>&1 | tail -1)
+          $MT uninstall ffmpeg 2>/dev/null || true
+          MT_WARM=$(TIMEFORMAT='%R'; { time $MT install ffmpeg 2>&1; } 2>&1 | tail -1)
+          $MT uninstall ffmpeg 2>/dev/null || true
+
+          # nanobrew
+          NB_COLD=$(TIMEFORMAT='%R'; { time $NB install ffmpeg 2>&1; } 2>&1 | tail -1)
+          $NB remove ffmpeg 2>/dev/null || true
+          NB_WARM=$(TIMEFORMAT='%R'; { time $NB install ffmpeg 2>&1; } 2>&1 | tail -1)
+          $NB remove ffmpeg 2>/dev/null || true
+
+          # zerobrew
+          ZB_COLD=$(TIMEFORMAT='%R'; { time $ZB install ffmpeg 2>&1; } 2>&1 | tail -1)
+          $ZB uninstall ffmpeg 2>/dev/null || true
+          ZB_WARM=$(TIMEFORMAT='%R'; { time $ZB install ffmpeg 2>&1; } 2>&1 | tail -1)
+          $ZB uninstall ffmpeg 2>/dev/null || true
+
+          # bru
+          BRU_COLD=$(TIMEFORMAT='%R'; { time bru install ffmpeg 2>&1; } 2>&1 | tail -1)
+          bru uninstall ffmpeg 2>/dev/null || true
+          BRU_WARM=$(TIMEFORMAT='%R'; { time bru install ffmpeg 2>&1; } 2>&1 | tail -1)
+          bru uninstall ffmpeg 2>/dev/null || true
+
+          # homebrew
+          brew uninstall ffmpeg 2>/dev/null || true
+          BREW_TIME=$(TIMEFORMAT='%R'; { time brew install ffmpeg 2>&1; } 2>&1 | tail -1)
+          brew uninstall ffmpeg 2>/dev/null || true
+
+          {
+            echo "brew=${BREW_TIME}s"
+            echo "mt_cold=${MT_COLD}s"
+            echo "mt_warm=${MT_WARM}s"
+            echo "nb_cold=${NB_COLD}s"
+            echo "nb_warm=${NB_WARM}s"
+            echo "zb_cold=${ZB_COLD}s"
+            echo "zb_warm=${ZB_WARM}s"
+            echo "bru_cold=${BRU_COLD}s"
+            echo "bru_warm=${BRU_WARM}s"
+          } >> "$GITHUB_OUTPUT"
+
+      # --- Summary ---
+
+      - name: Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## Benchmark Results — macOS 14 (Apple Silicon)
+
+          ### tree (0 deps)
+          | Tool | Cold | Warm |
+          |------|------|------|
+          | **malt** | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.mt_warm }} |
+          | nanobrew | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.nb_warm }} |
+          | zerobrew | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.zb_warm }} |
+          | bru | ${{ steps.tree.outputs.bru_cold }} | ${{ steps.tree.outputs.bru_warm }} |
+          | Homebrew | ${{ steps.tree.outputs.brew }} | — |
+
+          ### wget (6 deps)
+          | Tool | Cold | Warm |
+          |------|------|------|
+          | **malt** | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.mt_warm }} |
+          | nanobrew | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.nb_warm }} |
+          | zerobrew | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.zb_warm }} |
+          | bru | ${{ steps.wget.outputs.bru_cold }} | ${{ steps.wget.outputs.bru_warm }} |
+          | Homebrew | ${{ steps.wget.outputs.brew }} | — |
+
+          ### ffmpeg (11 deps)
+          | Tool | Cold | Warm |
+          |------|------|------|
+          | **malt** | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.mt_warm }} |
+          | nanobrew | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.nb_warm }} |
+          | zerobrew | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.zb_warm }} |
+          | bru | ${{ steps.ffmpeg.outputs.bru_cold }} | ${{ steps.ffmpeg.outputs.bru_warm }} |
+          | Homebrew | ${{ steps.ffmpeg.outputs.brew }} | — |
+          EOF
