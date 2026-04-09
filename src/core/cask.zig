@@ -307,9 +307,8 @@ pub const CaskInstaller = struct {
 
         // Mount DMG (hdiutil attach -nobrowse -readonly -mountpoint {path} {dmg})
         const mount_argv = [_][]const u8{
-            "hdiutil", "attach",
-            "-nobrowse",
-            "-readonly",
+            "hdiutil",     "attach",
+            "-nobrowse",   "-readonly",
             "-mountpoint", mount_point,
             dmg_path,
         };
