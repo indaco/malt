@@ -174,14 +174,17 @@ List packages with newer versions available.
 mt outdated
 mt outdated --json
 mt outdated --cask
+mt outdated --formula
 ```
 
-| Flag     | Description              |
-| -------- | ------------------------ |
-| `--json` | Output as JSON           |
-| `--cask` | Show outdated casks only |
+| Flag            | Description                 |
+| --------------- | --------------------------- |
+| `--json`        | Output as JSON              |
+| `--formula`     | Show outdated formulas only |
+| `--cask`        | Show outdated casks only    |
+| `--quiet`, `-q` | Suppress status messages    |
 
-Compares installed versions against the latest from the Homebrew API. Checks both formulas and casks.
+Compares installed versions against the latest from the Homebrew API. Checks both formulas and casks by default.
 
 ```
 wget (1.24.5) < 1.25.0
@@ -203,23 +206,22 @@ mt list --json
 
 ### `mt info`
 
-Show detailed information about a package.
+Show detailed information about a formula or cask.
 
 ```bash
 mt info <package>
 mt info <package> --json
+mt info --cask <app>
+mt info --formula <name>
 ```
 
-```
-wget: Internet file retriever
-https://www.gnu.org/software/wget/
-/opt/malt/Cellar/wget/1.25.0 (12 files, 2.1MB)
-  Poured from bottle on 2026-04-08
-From: homebrew/core
-License: GPL-3.0-or-later
-Dependencies: libidn2, openssl@3
-Post-install hook: No
-```
+| Flag        | Description            |
+| ----------- | ---------------------- |
+| `--formula` | Show formula info only |
+| `--cask`    | Show cask info only    |
+| `--json`    | Output as JSON         |
+
+Auto-detects whether the package is a formula or cask. For formulas, shows version, tap, cellar path, and pinned status. For casks, shows version, download URL, app path, and auto-update status.
 
 ### `mt search`
 
@@ -493,34 +495,40 @@ zig build universal                      # universal binary (arm64 + x86_64 via 
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size |
+| -------- | ---- |
 | **malt** | 3.0M |
 | nanobrew | 1.4M |
 | zerobrew | 8.6M |
-| bru | 1.8M |
+| bru      | 1.8M |
+
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install
 
-| Package | malt | nanobrew | zerobrew | bru | Homebrew |
-| ------- | ---- | -------- | -------- | --- | -------- |
-| **tree** (0 deps) | 0.015s | 0.566s | 2.073s | 0.981s | 5.849s |
-| **wget** (6 deps) | 0.003s | 6.299s | 7.877s | 0.006s | 5.145s |
-| **ffmpeg** (11 deps) | 0.017s | 2.568s | 6.771s | 4.022s | 8.469s |
+| Package              | malt   | nanobrew | zerobrew | bru    | Homebrew |
+| -------------------- | ------ | -------- | -------- | ------ | -------- |
+| **tree** (0 deps)    | 0.015s | 0.566s   | 2.073s   | 0.981s | 5.849s   |
+| **wget** (6 deps)    | 0.003s | 6.299s   | 7.877s   | 0.006s | 5.145s   |
+| **ffmpeg** (11 deps) | 0.017s | 2.568s   | 6.771s   | 4.022s | 8.469s   |
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew | bru |
-| ------- | ---- | -------- | -------- | --- |
-| **tree** (0 deps) | 0.002s | 0.008s | 0.394s | 0.077s |
-| **wget** (6 deps) | 0.002s | 0.695s | 0.911s | 0.644s |
-| **ffmpeg** (11 deps) | 0.003s | 2.217s | 4.096s | 1.699s |
+| Package              | malt   | nanobrew | zerobrew | bru    |
+| -------------------- | ------ | -------- | -------- | ------ |
+| **tree** (0 deps)    | 0.002s | 0.008s   | 0.394s   | 0.077s |
+| **wget** (6 deps)    | 0.002s | 0.695s   | 0.911s   | 0.644s |
+| **ffmpeg** (11 deps) | 0.003s | 2.217s   | 4.096s   | 1.699s |
+
 <!-- BENCH:WARM:END -->
 
 > Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-09. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
