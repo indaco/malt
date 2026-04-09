@@ -16,12 +16,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     var json_mode = false;
     var cask_only = false;
+    var formula_only = false;
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
         } else if (std.mem.eql(u8, arg, "--cask")) {
             cask_only = true;
+        } else if (std.mem.eql(u8, arg, "--formula") or std.mem.eql(u8, arg, "--formulae")) {
+            formula_only = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             output.setQuiet(true);
         }
@@ -49,69 +52,73 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer http.deinit();
     var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
 
-    // Query all installed kegs
-    var stmt = db.prepare("SELECT name, version FROM kegs ORDER BY name;") catch return;
-    defer stmt.finalize();
-
     const stdout = std.fs.File.stdout();
 
-    if (json_mode) {
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(allocator);
-        const w = buf.writer(allocator);
-        try w.writeAll("[");
+    // Check outdated formulas (unless --cask)
+    if (!cask_only) {
+        var stmt = db.prepare("SELECT name, version FROM kegs ORDER BY name;") catch return;
+        defer stmt.finalize();
 
-        var first = true;
-        while (stmt.step() catch false) {
-            const name_ptr = stmt.columnText(0) orelse continue;
-            const ver_ptr = stmt.columnText(1);
-            const name_slice = std.mem.sliceTo(name_ptr, 0);
-            const ver_slice = if (ver_ptr) |v| std.mem.sliceTo(v, 0) else "0";
+        if (json_mode) {
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(allocator);
+            const w = buf.writer(allocator);
+            try w.writeAll("[");
 
-            const latest = getLatestVersion(allocator, &api, name_slice) orelse continue;
-            defer allocator.free(latest);
+            var first = true;
+            while (stmt.step() catch false) {
+                const name_ptr = stmt.columnText(0) orelse continue;
+                const ver_ptr = stmt.columnText(1);
+                const name_slice = std.mem.sliceTo(name_ptr, 0);
+                const ver_slice = if (ver_ptr) |v| std.mem.sliceTo(v, 0) else "0";
 
-            if (!std.mem.eql(u8, ver_slice, latest)) {
-                if (!first) try w.writeAll(",");
-                first = false;
-                try w.writeAll("{\"name\":\"");
-                try w.writeAll(name_slice);
-                try w.writeAll("\",\"installed\":\"");
-                try w.writeAll(ver_slice);
-                try w.writeAll("\",\"latest\":\"");
-                try w.writeAll(latest);
-                try w.writeAll("\"}");
+                const latest = getLatestVersion(allocator, &api, name_slice) orelse continue;
+                defer allocator.free(latest);
+
+                if (!std.mem.eql(u8, ver_slice, latest)) {
+                    if (!first) try w.writeAll(",");
+                    first = false;
+                    try w.writeAll("{\"name\":\"");
+                    try w.writeAll(name_slice);
+                    try w.writeAll("\",\"installed\":\"");
+                    try w.writeAll(ver_slice);
+                    try w.writeAll("\",\"latest\":\"");
+                    try w.writeAll(latest);
+                    try w.writeAll("\",\"type\":\"formula\"}");
+                }
             }
-        }
 
-        try w.writeAll("]\n");
-        stdout.writeAll(buf.items) catch {};
-    } else {
-        var found_any = false;
-        while (stmt.step() catch false) {
-            const name_ptr = stmt.columnText(0) orelse continue;
-            const ver_ptr = stmt.columnText(1);
-            const name_slice = std.mem.sliceTo(name_ptr, 0);
-            const ver_slice = if (ver_ptr) |v| std.mem.sliceTo(v, 0) else "0";
+            try w.writeAll("]\n");
+            stdout.writeAll(buf.items) catch {};
+        } else {
+            var found_any = false;
+            while (stmt.step() catch false) {
+                const name_ptr = stmt.columnText(0) orelse continue;
+                const ver_ptr = stmt.columnText(1);
+                const name_slice = std.mem.sliceTo(name_ptr, 0);
+                const ver_slice = if (ver_ptr) |v| std.mem.sliceTo(v, 0) else "0";
 
-            const latest = getLatestVersion(allocator, &api, name_slice) orelse continue;
-            defer allocator.free(latest);
+                const latest = getLatestVersion(allocator, &api, name_slice) orelse continue;
+                defer allocator.free(latest);
 
-            if (!std.mem.eql(u8, ver_slice, latest)) {
-                found_any = true;
-                var line_buf: [512]u8 = undefined;
-                const line = std.fmt.bufPrint(&line_buf, "{s} ({s}) < {s}\n", .{ name_slice, ver_slice, latest }) catch continue;
-                stdout.writeAll(line) catch {};
+                if (!std.mem.eql(u8, ver_slice, latest)) {
+                    found_any = true;
+                    var line_buf: [512]u8 = undefined;
+                    const line = std.fmt.bufPrint(&line_buf, "{s} ({s}) < {s}\n", .{ name_slice, ver_slice, latest }) catch continue;
+                    stdout.writeAll(line) catch {};
+                }
             }
-        }
 
-        if (!found_any and !cask_only and !output.isQuiet()) {
-            output.info("All formulas are up to date.", .{});
+            if (!found_any and !output.isQuiet()) {
+                output.info("All formulas are up to date.", .{});
+            }
         }
     }
 
-    // Check outdated casks
-    checkOutdatedCasks(allocator, &db, &api, json_mode);
+    // Check outdated casks (unless --formula)
+    if (!formula_only) {
+        checkOutdatedCasks(allocator, &db, &api, json_mode);
+    }
 }
 
 fn checkOutdatedCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, json_mode: bool) void {
