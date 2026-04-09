@@ -35,6 +35,9 @@ pub fn isVerbose() bool {
 pub fn isDryRun() bool {
     return dry_run;
 }
+pub fn isJson() bool {
+    return mode == .json;
+}
 
 /// Print info message: "==> {msg}" in cyan
 pub fn info(comptime fmt: []const u8, args: anytype) void {
