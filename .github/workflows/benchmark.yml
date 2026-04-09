@@ -46,10 +46,29 @@ jobs:
           sudo chown -R $USER /opt/zerobrew
           /tmp/zerobrew/target/release/zb init
 
-      - name: Install bru
+      - name: Build bru
         run: |
-          curl -fsSL https://zieka.github.io/bru/install.sh | bash
-          echo "$HOME/.bru/bin" >> $GITHUB_PATH
+          git clone --depth 1 https://github.com/zieka/bru.git /tmp/bru
+          cd /tmp/bru && zig build -Doptimize=ReleaseFast
+
+      # --- Binary sizes ---
+
+      - name: Measure binary sizes
+        id: sizes
+        run: |
+          MT_SIZE=$(ls -lh ./zig-out/bin/malt | awk '{print $5}')
+          NB_SIZE=$(ls -lh /tmp/nanobrew/zig-out/bin/nb | awk '{print $5}')
+          ZB_SIZE=$(ls -lh /tmp/zerobrew/target/release/zb | awk '{print $5}')
+          BRU_SIZE=$(ls -lh /tmp/bru/zig-out/bin/bru | awk '{print $5}')
+          BREW_SIZE=$(ls -lh "$(which brew)" | awk '{print $5}')
+
+          {
+            echo "mt=${MT_SIZE}"
+            echo "nb=${NB_SIZE}"
+            echo "zb=${ZB_SIZE}"
+            echo "bru=${BRU_SIZE}"
+            echo "brew=${BREW_SIZE}"
+          } >> "$GITHUB_OUTPUT"
 
       # --- Benchmark tree (0 deps) ---
 
@@ -59,6 +78,7 @@ jobs:
           MT=./zig-out/bin/malt
           NB=/tmp/nanobrew/zig-out/bin/nb
           ZB=/tmp/zerobrew/target/release/zb
+          BRU=/tmp/bru/zig-out/bin/bru
 
           # malt
           MT_COLD=$(TIMEFORMAT='%R'; { time $MT install tree 2>&1; } 2>&1 | tail -1)
@@ -79,10 +99,10 @@ jobs:
           $ZB uninstall tree 2>/dev/null || true
 
           # bru
-          BRU_COLD=$(TIMEFORMAT='%R'; { time bru install tree 2>&1; } 2>&1 | tail -1)
-          bru uninstall tree 2>/dev/null || true
-          BRU_WARM=$(TIMEFORMAT='%R'; { time bru install tree 2>&1; } 2>&1 | tail -1)
-          bru uninstall tree 2>/dev/null || true
+          BRU_COLD=$(TIMEFORMAT='%R'; { time $BRU install tree 2>&1; } 2>&1 | tail -1)
+          $BRU uninstall tree 2>/dev/null || true
+          BRU_WARM=$(TIMEFORMAT='%R'; { time $BRU install tree 2>&1; } 2>&1 | tail -1)
+          $BRU uninstall tree 2>/dev/null || true
 
           # homebrew
           brew uninstall tree 2>/dev/null || true
@@ -109,6 +129,7 @@ jobs:
           MT=./zig-out/bin/malt
           NB=/tmp/nanobrew/zig-out/bin/nb
           ZB=/tmp/zerobrew/target/release/zb
+          BRU=/tmp/bru/zig-out/bin/bru
 
           # malt
           MT_COLD=$(TIMEFORMAT='%R'; { time $MT install wget 2>&1; } 2>&1 | tail -1)
@@ -129,10 +150,10 @@ jobs:
           $ZB uninstall wget 2>/dev/null || true
 
           # bru
-          BRU_COLD=$(TIMEFORMAT='%R'; { time bru install wget 2>&1; } 2>&1 | tail -1)
-          bru uninstall wget 2>/dev/null || true
-          BRU_WARM=$(TIMEFORMAT='%R'; { time bru install wget 2>&1; } 2>&1 | tail -1)
-          bru uninstall wget 2>/dev/null || true
+          BRU_COLD=$(TIMEFORMAT='%R'; { time $BRU install wget 2>&1; } 2>&1 | tail -1)
+          $BRU uninstall wget 2>/dev/null || true
+          BRU_WARM=$(TIMEFORMAT='%R'; { time $BRU install wget 2>&1; } 2>&1 | tail -1)
+          $BRU uninstall wget 2>/dev/null || true
 
           # homebrew
           brew uninstall wget 2>/dev/null || true
@@ -159,6 +180,7 @@ jobs:
           MT=./zig-out/bin/malt
           NB=/tmp/nanobrew/zig-out/bin/nb
           ZB=/tmp/zerobrew/target/release/zb
+          BRU=/tmp/bru/zig-out/bin/bru
 
           # malt
           MT_COLD=$(TIMEFORMAT='%R'; { time $MT install ffmpeg 2>&1; } 2>&1 | tail -1)
@@ -179,10 +201,10 @@ jobs:
           $ZB uninstall ffmpeg 2>/dev/null || true
 
           # bru
-          BRU_COLD=$(TIMEFORMAT='%R'; { time bru install ffmpeg 2>&1; } 2>&1 | tail -1)
-          bru uninstall ffmpeg 2>/dev/null || true
-          BRU_WARM=$(TIMEFORMAT='%R'; { time bru install ffmpeg 2>&1; } 2>&1 | tail -1)
-          bru uninstall ffmpeg 2>/dev/null || true
+          BRU_COLD=$(TIMEFORMAT='%R'; { time $BRU install ffmpeg 2>&1; } 2>&1 | tail -1)
+          $BRU uninstall ffmpeg 2>/dev/null || true
+          BRU_WARM=$(TIMEFORMAT='%R'; { time $BRU install ffmpeg 2>&1; } 2>&1 | tail -1)
+          $BRU uninstall ffmpeg 2>/dev/null || true
 
           # homebrew
           brew uninstall ffmpeg 2>/dev/null || true
@@ -207,6 +229,15 @@ jobs:
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
           ## Benchmark Results — macOS 14 (Apple Silicon)
+
+          ### Binary Size
+          | Tool | Size |
+          |------|------|
+          | **malt** | ${{ steps.sizes.outputs.mt }} |
+          | nanobrew | ${{ steps.sizes.outputs.nb }} |
+          | zerobrew | ${{ steps.sizes.outputs.zb }} |
+          | bru | ${{ steps.sizes.outputs.bru }} |
+          | Homebrew | ${{ steps.sizes.outputs.brew }} |
 
           ### tree (0 deps)
           | Tool | Cold | Warm |
