@@ -16,9 +16,6 @@ malt is a macOS-only package manager written in Zig that consumes Homebrew's exi
   <b><a href="#install">Install</a></b> &middot;
   <b><a href="#quick-start">Quick Start</a></b> &middot;
   <b><a href="#command-reference">Command Reference</a></b> &middot;
-  <b><a href="#how-it-works">How It Works</a></b> &middot;
-  <b><a href="#safety-guarantees">Safety Guarantees</a></b> &middot;
-  <b><a href="#building">Building</a></b> &middot;
   <b><a href="#benchmarks">Benchmarks</a></b>
 </p>
 
