@@ -39,9 +39,9 @@ pub fn materialize(
 }
 
 /// Materialize with an explicit cellar type from the bottle metadata.
-/// When cellar_type is ":any" or ":any_skip_relocation", Mach-O patching
-/// and text-file prefix rewriting are skipped because the bottle is
-/// already relocatable.
+/// When cellar_type is ":any" or ":any_skip_relocation", Mach-O binary
+/// patching is skipped (relocatable bottle). Text placeholder substitution
+/// (@@HOMEBREW_PREFIX@@, @@HOMEBREW_CELLAR@@) always runs.
 pub fn materializeWithCellar(
     allocator: std.mem.Allocator,
     prefix: []const u8,
@@ -114,30 +114,32 @@ pub fn materializeWithCellar(
     const new_prefix = atomic.maltPrefix();
 
     // Relocatable bottles (cellar: ":any" or ":any_skip_relocation") do not
-    // need Mach-O patching or text-file prefix rewriting — they are built to
-    // work from any prefix without modification.
-    const skip_patching = std.mem.eql(u8, cellar_type, ":any") or
+    // need Mach-O binary patching — they are built to work from any prefix.
+    // However, @@HOMEBREW_PREFIX@@ / @@HOMEBREW_CELLAR@@ text placeholders
+    // must ALWAYS be substituted, even for relocatable bottles, because
+    // Homebrew performs this substitution unconditionally during bottle pour.
+    const skip_macho = std.mem.eql(u8, cellar_type, ":any") or
         std.mem.eql(u8, cellar_type, ":any_skip_relocation");
 
-    if (!skip_patching) {
-        // Build cellar replacement for @@HOMEBREW_CELLAR@@
-        var new_cellar_buf: [256]u8 = undefined;
-        const new_cellar = std.fmt.bufPrint(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;
+    // Build cellar replacement for @@HOMEBREW_CELLAR@@
+    var new_cellar_buf: [256]u8 = undefined;
+    const new_cellar = std.fmt.bufPrint(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;
 
+    if (!skip_macho) {
         // Walk cellar directory and patch each Mach-O binary
         patchAllMachO(allocator, cellar_path, new_prefix, new_cellar) catch
             return CellarError.PatchFailed;
-
-        // Patch text files (scripts, .pc files, configs).
-        // Failures here mean .pc files and scripts will have wrong prefixes,
-        // causing build/runtime errors for dependents. Warn but don't abort.
-        _ = patcher.patchTextFiles(allocator, cellar_path, "/opt/homebrew", new_prefix) catch |e| {
-            std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
-        };
-        _ = patcher.patchTextFiles(allocator, cellar_path, "/usr/local", new_prefix) catch |e| {
-            std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
-        };
     }
+
+    // Always patch text files — @@HOMEBREW_PREFIX@@ and @@HOMEBREW_CELLAR@@
+    // placeholders appear in scripts, .pc files, and configs regardless of
+    // whether the bottle is relocatable.
+    _ = patcher.patchTextFiles(allocator, cellar_path, "/opt/homebrew", new_prefix) catch |e| {
+        std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
+    };
+    _ = patcher.patchTextFiles(allocator, cellar_path, "/usr/local", new_prefix) catch |e| {
+        std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
+    };
 
     // Ad-hoc codesign on arm64. Without this, binaries won't execute on Apple Silicon.
     if (codesign.isArm64()) {
