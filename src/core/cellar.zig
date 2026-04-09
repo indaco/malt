@@ -59,8 +59,11 @@ pub fn materializeWithCellar(
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
         return CellarError.OutOfMemory;
 
-    // Find the actual keg subdirectory inside the store entry
-    // Bottles extract as: store/{sha256}/{name}/{version}/
+    // Find the actual keg subdirectory inside the store entry.
+    // Bottles extract as: store/{sha256}/{name}/{version}/ but the version
+    // directory may include a Homebrew revision suffix (e.g. "10.47_1" for
+    // formula version "10.47"). We first try an exact match, then scan for
+    // a directory that starts with the version string followed by "_".
     var keg_src_buf: [512]u8 = undefined;
     const keg_src = std.fmt.bufPrint(&keg_src_buf, "{s}/{s}/{s}", .{ store_path, name, version }) catch
         return CellarError.OutOfMemory;
@@ -74,9 +77,31 @@ pub fn materializeWithCellar(
         else => return CellarError.CloneFailed,
     };
 
-    // Try keg_src first, fall back to store_path if it doesn't exist
+    // Try keg_src first (exact version match), then scan for a revision
+    // suffix variant (e.g. "10.47_1"), fall back to store_path.
+    var keg_rev_buf: [512]u8 = undefined;
     const src = blk: {
-        std.fs.accessAbsolute(keg_src, .{}) catch break :blk store_path;
+        // 1. Exact match: {store}/{name}/{version}
+        std.fs.accessAbsolute(keg_src, .{}) catch {
+            // 2. Scan {store}/{name}/ for a dir starting with "{version}_"
+            var name_dir_buf: [512]u8 = undefined;
+            const name_dir_path = std.fmt.bufPrint(&name_dir_buf, "{s}/{s}", .{ store_path, name }) catch break :blk store_path;
+            var name_dir = std.fs.openDirAbsolute(name_dir_path, .{ .iterate = true }) catch break :blk store_path;
+            defer name_dir.close();
+            var it = name_dir.iterate();
+            while (it.next() catch null) |entry| {
+                if (entry.kind != .directory) continue;
+                // Match "{version}_..." (revision suffix)
+                if (entry.name.len > version.len and
+                    std.mem.eql(u8, entry.name[0..version.len], version) and
+                    entry.name[version.len] == '_')
+                {
+                    const rev_path = std.fmt.bufPrint(&keg_rev_buf, "{s}/{s}", .{ name_dir_path, entry.name }) catch break :blk store_path;
+                    break :blk rev_path;
+                }
+            }
+            break :blk store_path;
+        };
         break :blk keg_src;
     };
 
