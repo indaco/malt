@@ -78,13 +78,22 @@ fn pruneCache(cache_dir: []const u8, max_age_days: i64, dry_run: bool) u64 {
 
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
-        if (entry.kind == .directory) continue;
+        if (entry.kind == .directory) {
+            // Recurse into subdirectories (e.g. downloads/, api_cache/)
+            var sub_buf: [512]u8 = undefined;
+            const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ cache_dir, entry.name }) catch continue;
+            freed += pruneCache(sub_path, max_age_days, dry_run);
+            continue;
+        }
         const stat = dir.statFile(entry.name) catch continue;
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s));
         if (now - mtime_secs > max_age_secs) {
             freed += stat.size;
             if (!dry_run) {
                 dir.deleteFile(entry.name) catch {};
+            }
+            if (dry_run) {
+                output.info("  Would prune: {s}/{s} (age > {d} days)", .{ cache_dir, entry.name, max_age_days });
             }
         }
     }

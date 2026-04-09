@@ -151,14 +151,77 @@ fn writeJsonOutput(
     show_pinned: bool,
     stdout: std.fs.File,
 ) !void {
+    const start_ts = std.time.milliTimestamp();
+
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
-    try w.writeAll("{");
+    // Spec format: { "installed": [...], "formulae": [...], "casks": [...], "time_ms": N }
+    try w.writeAll("{\"installed\":[");
+
+    // Collect all installed items into the "installed" array
+    var first_installed = true;
 
     if (show_formula) {
-        try w.writeAll("\"formulae\":[");
+        const sql = if (show_pinned)
+            "SELECT name, version, pinned FROM kegs WHERE pinned = 1 ORDER BY name;"
+        else
+            "SELECT name, version, pinned FROM kegs ORDER BY name;";
+
+        var stmt = db.prepare(sql) catch {
+            try w.writeAll("]");
+            try writeTimeSuffix(w, start_ts);
+            try w.writeAll("}\n");
+            stdout.writeAll(buf.items) catch {};
+            return;
+        };
+        defer stmt.finalize();
+
+        while (stmt.step() catch false) {
+            const name = stmt.columnText(0) orelse continue;
+            const ver = stmt.columnText(1);
+            const pinned = stmt.columnBool(2);
+            if (!first_installed) try w.writeAll(",");
+            first_installed = false;
+            try w.writeAll("{\"name\":\"");
+            try w.writeAll(std.mem.sliceTo(name, 0));
+            try w.writeAll("\",\"version\":\"");
+            try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
+            try w.writeAll("\",\"type\":\"formula\",\"pinned\":");
+            try w.writeAll(if (pinned) "true" else "false");
+            try w.writeAll("}");
+        }
+    }
+
+    if (show_cask) {
+        var stmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch {
+            try w.writeAll("]");
+            try writeTimeSuffix(w, start_ts);
+            try w.writeAll("}\n");
+            stdout.writeAll(buf.items) catch {};
+            return;
+        };
+        defer stmt.finalize();
+
+        while (stmt.step() catch false) {
+            const token = stmt.columnText(0) orelse continue;
+            const ver = stmt.columnText(1);
+            if (!first_installed) try w.writeAll(",");
+            first_installed = false;
+            try w.writeAll("{\"name\":\"");
+            try w.writeAll(std.mem.sliceTo(token, 0));
+            try w.writeAll("\",\"version\":\"");
+            try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
+            try w.writeAll("\",\"type\":\"cask\"}");
+        }
+    }
+
+    try w.writeAll("]");
+
+    // Also emit legacy keys for backwards compatibility
+    if (show_formula) {
+        try w.writeAll(",\"formulae\":[");
         const sql = if (show_pinned)
             "SELECT name, version, pinned FROM kegs WHERE pinned = 1 ORDER BY name;"
         else
@@ -167,6 +230,7 @@ fn writeJsonOutput(
         var stmt = db.prepare(sql) catch {
             try w.writeAll("]");
             if (show_cask) try w.writeAll(",\"casks\":[]");
+            try writeTimeSuffix(w, start_ts);
             try w.writeAll("}\n");
             stdout.writeAll(buf.items) catch {};
             return;
@@ -195,7 +259,9 @@ fn writeJsonOutput(
         if (show_formula) try w.writeAll(",");
         try w.writeAll("\"casks\":[");
         var stmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch {
-            try w.writeAll("]}\n");
+            try w.writeAll("]");
+            try writeTimeSuffix(w, start_ts);
+            try w.writeAll("}\n");
             stdout.writeAll(buf.items) catch {};
             return;
         };
@@ -216,6 +282,16 @@ fn writeJsonOutput(
         try w.writeAll("]");
     }
 
+    try writeTimeSuffix(w, start_ts);
+
     try w.writeAll("}\n");
     stdout.writeAll(buf.items) catch {};
+}
+
+/// Write the ,"time_ms":N suffix for JSON output.
+fn writeTimeSuffix(w: anytype, start_ts: i64) !void {
+    const elapsed = std.time.milliTimestamp() - start_ts;
+    var time_buf: [32]u8 = undefined;
+    const time_str = std.fmt.bufPrint(&time_buf, ",\"time_ms\":{d}", .{elapsed}) catch return;
+    try w.writeAll(time_str);
 }

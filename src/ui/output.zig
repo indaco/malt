@@ -42,12 +42,13 @@ pub fn info(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const f = std.fs.File.stderr();
+    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ▸ " else "  > ";
     if (color.isColorEnabled()) {
         f.writeAll(color.Style.cyan.code()) catch {};
-        f.writeAll("  ▸ ") catch {};
+        f.writeAll(prefix) catch {};
         f.writeAll(color.Style.reset.code()) catch {};
     } else {
-        f.writeAll("  ▸ ") catch {};
+        f.writeAll(prefix) catch {};
     }
     f.writeAll(msg) catch {};
     f.writeAll("\n") catch {};
@@ -59,29 +60,31 @@ pub fn warn(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const f = std.fs.File.stderr();
+    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ⚠ " else "  ! ";
     if (color.isColorEnabled()) {
         f.writeAll(color.Style.yellow.code()) catch {};
-        f.writeAll("  ⚠ ") catch {};
+        f.writeAll(prefix) catch {};
         f.writeAll(color.Style.reset.code()) catch {};
     } else {
-        f.writeAll("  ⚠ ") catch {};
+        f.writeAll(prefix) catch {};
     }
     f.writeAll(msg) catch {};
     f.writeAll("\n") catch {};
 }
 
-/// Print success: "✓ {msg}" in green to stderr
+/// Print success: "ok {msg}" in green to stderr
 pub fn success(comptime fmt: []const u8, args: anytype) void {
     if (quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const f = std.fs.File.stderr();
+    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ✓ " else "  * ";
     if (color.isColorEnabled()) {
         f.writeAll(color.Style.green.code()) catch {};
-        f.writeAll("  ✓ ") catch {};
+        f.writeAll(prefix) catch {};
         f.writeAll(color.Style.reset.code()) catch {};
     } else {
-        f.writeAll("  ✓ ") catch {};
+        f.writeAll(prefix) catch {};
     }
     f.writeAll(msg) catch {};
     f.writeAll("\n") catch {};
@@ -92,12 +95,13 @@ pub fn err(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const f = std.fs.File.stderr();
+    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ✗ " else "  x ";
     if (color.isColorEnabled()) {
         f.writeAll(color.Style.red.code()) catch {};
-        f.writeAll("  ✗ ") catch {};
+        f.writeAll(prefix) catch {};
         f.writeAll(color.Style.reset.code()) catch {};
     } else {
-        f.writeAll("  ✗ ") catch {};
+        f.writeAll(prefix) catch {};
     }
     f.writeAll(msg) catch {};
     f.writeAll("\n") catch {};

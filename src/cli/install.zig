@@ -43,6 +43,9 @@ const DownloadJob = struct {
     is_dep: bool,
     keg_only: bool,
     formula_json: []const u8,
+    /// Cellar type from bottle metadata (e.g. ":any", ":any_skip_relocation").
+    /// Used to skip Mach-O patching for relocatable bottles.
+    cellar_type: []const u8,
     /// Set after download completes
     store_sha256: []const u8,
     succeeded: bool,
@@ -194,7 +197,20 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var all_jobs: std.ArrayList(DownloadJob) = .empty;
     defer all_jobs.deinit(allocator);
 
+    // Check for Ctrl-C before resolution phase
+    const main_mod = @import("../main.zig");
+    if (main_mod.isInterrupted()) {
+        output.warn("Interrupted before resolution.", .{});
+        return;
+    }
+
     for (packages.items) |pkg_name| {
+        // Check for Ctrl-C between packages during resolution
+        if (main_mod.isInterrupted()) {
+            output.warn("Interrupted during resolution.", .{});
+            return;
+        }
+
         // Handle tap formulas separately (they don't use GHCR)
         if (isTapFormula(pkg_name)) {
             installTapFormula(allocator, pkg_name, &db, &linker, prefix, dry_run, force) catch |e| {
@@ -286,7 +302,6 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // Check for Ctrl-C between download and materialize phases
-    const main_mod = @import("../main.zig");
     if (main_mod.isInterrupted()) {
         output.warn("Interrupted. Cleaning up...", .{});
         return;
@@ -373,6 +388,7 @@ fn collectFormulaJobs(
             .is_dep = true,
             .keg_only = dep_formula.keg_only,
             .formula_json = dep_json,
+            .cellar_type = dep_bottle.cellar,
             .store_sha256 = "",
             .succeeded = false,
         }) catch continue;
@@ -392,6 +408,7 @@ fn collectFormulaJobs(
         .is_dep = false,
         .keg_only = formula.keg_only,
         .formula_json = formula_json,
+        .cellar_type = bottle.cellar,
         .store_sha256 = "",
         .succeeded = false,
     }) catch return InstallError.DownloadFailed;
@@ -416,12 +433,13 @@ fn materializeAndLink(
     const reason: []const u8 = if (job.is_dep) "dependency" else "direct";
 
     output.info("Materializing {s} to cellar...", .{job.name});
-    const keg = cellar_mod.materialize(
+    const keg = cellar_mod.materializeWithCellar(
         allocator,
         prefix,
         job.store_sha256,
         job.name,
         job.version_str,
+        job.cellar_type,
     ) catch {
         output.err("Failed to materialize {s}", .{job.name});
         return;
