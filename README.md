@@ -6,24 +6,31 @@
 ![Zig 0.15.x](https://img.shields.io/badge/zig-0.15.x-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-malt is a macOS-only package manager written in Zig that consumes Homebrew's existing formula, bottle, cask, and tap ecosystem. It ships as a single binary (`malt`, ~2.8 MB) with sub-millisecond cold start. malt downloads pre-built bottles from the Homebrew infrastructure — it is a fast client for Homebrew's package registry, not a fork.
+malt is a macOS-only package manager written in Zig that consumes Homebrew's existing formula, bottle, cask, and tap ecosystem. It ships as a single binary (`malt`, ~2.8 MB) with sub-millisecond cold start. malt downloads pre-built bottles from the Homebrew infrastructure — it is a fast client for Homebrew's package registry, not a fork. Requires macOS 11 (Big Sur) or later on Apple Silicon or Intel.
 
 > **Experimental project.** malt is a human-in-the-loop AI experiment. The design specification, architecture decisions, implementation strategy, and quality assurance were directed by a human. All implementation code was written by AI — [Claude Code](https://claude.ai/code) and [ruflo](https://github.com/ruvnet/ruflo). Every commit, bug fix, and feature was reviewed and validated by the human operator before merging. This is an exploration of what's possible when a human architect drives an AI coder on a non-trivial systems project.
 
+<p align="center">
+  <b><a href="#features">Features</a></b> &middot;
+  <b><a href="#install">Install</a></b> &middot;
+  <b><a href="#quick-start">Quick Start</a></b> &middot;
+  <b><a href="#command-reference">Command Reference</a></b> &middot;
+  <b><a href="#how-it-works">How It Works</a></b> &middot;
+  <b><a href="#safety-guarantees">Safety Guarantees</a></b> &middot;
+  <b><a href="#building">Building</a></b>
+</p>
+
 ---
 
-## What malt is
+## Features
 
-- A performance-optimized installer for pre-built Homebrew bottles and casks on macOS (Apple Silicon + Intel)
-- A single static binary with zero runtime dependencies
-- Compatible with Homebrew's formula, cask, and tap ecosystem via the public Formulae API
-- Designed for developers who want fast, reliable package management without Homebrew's ~1.5s Ruby startup overhead
-
-## What malt is not
-
-- A full Homebrew replacement — it cannot execute Ruby `post_install` hooks, build from source, or evaluate the Homebrew DSL
-- A fork of Homebrew — malt is an independent client that uses the same package infrastructure
-- A Linux package manager — macOS only
+- **Isolated** — installs to its own prefix, never touches Homebrew's files
+- **Deduplicated storage** — identical files across versions are stored only once
+- **Parallel downloads** — fetches multiple packages at the same time
+- **Brew fallback** — hands off to Homebrew for anything it doesn't support
+- **Rollback** — revert to a previous version of any package
+- **Ephemeral run** — `malt run` launches a formula without installing it permanently
+- **Safe under concurrency** — multiple malt processes won't corrupt state
 
 ---
 
@@ -46,15 +53,15 @@ brew install malt
 
 ### From source
 
+Clone the repo and run the install script — it detects the local checkout and builds from source automatically:
+
 ```bash
 git clone https://github.com/indaco/malt.git
 cd malt
-zig build -Doptimize=ReleaseSafe
-sudo install -m 755 zig-out/bin/malt zig-out/bin/mt /usr/local/bin/
-sudo mkdir -p /opt/malt && sudo chown $USER /opt/malt
+./scripts/install.sh
 ```
 
-Requires [Zig 0.15.x](https://ziglang.org/download/). See [INSTALL.md](INSTALL.md) for build profiles, stripping, and universal binary instructions.
+Requires [Zig 0.15.x](https://ziglang.org/download/).
 
 > **Note:** `zig build` produces both `malt` and `mt` in `zig-out/bin/`. Both are identical — use whichever you prefer. All install methods (script, Homebrew, source) install both.
 
@@ -89,6 +96,8 @@ malt uninstall wget
 ---
 
 ## Command Reference
+
+> The examples below use `mt` (the shorter alias). All commands work identically with `malt`.
 
 ### `mt install`
 
@@ -134,7 +143,7 @@ Checks for dependent packages before removing. If dependents exist, refuses unle
 Upgrade installed packages to latest versions.
 
 ```bash
-mt upgrade <package>                     # upgrade specific cask
+mt upgrade <cask>                        # upgrade a specific cask
 mt upgrade --cask                        # upgrade all outdated casks
 ```
 
@@ -163,6 +172,11 @@ mt outdated
 mt outdated --json
 mt outdated --cask
 ```
+
+| Flag     | Description              |
+| -------- | ------------------------ |
+| `--json` | Output as JSON           |
+| `--cask` | Show outdated casks only |
 
 Compares installed versions against the latest from the Homebrew API. Checks both formulas and casks.
 
@@ -324,9 +338,9 @@ mt unlink <formula>                      # remove symlinks (keg stays installed)
 
 `link` scans for symlink conflicts before creating links. If conflicts are found, it reports them and aborts unless `--overwrite` is passed. `unlink` removes symlinks from `bin/`, `lib/`, etc. and the `opt/` symlink, but leaves the keg installed in the Cellar.
 
-### `mt version update`
+### `mt version`
 
-Self-update the `mt` binary from GitHub releases.
+Show the current version or self-update the binary.
 
 ```bash
 mt version                    # show current version
@@ -334,7 +348,7 @@ mt version update             # download and install latest
 mt version update --check     # check without installing
 ```
 
-Queries the GitHub releases API, downloads the correct binary for the current platform, and replaces the running binary in-place.
+`update` queries the GitHub releases API, downloads the correct binary for the current platform, and replaces the running binary in-place.
 
 ### Global Flags
 
@@ -353,7 +367,7 @@ Queries the GitHub releases API, downloads the correct binary for the current pl
 
 ### Directory Layout
 
-malt installs to `/opt/malt` — a deliberately short prefix (9 characters) that is always shorter than Homebrew's `/opt/homebrew` (14 chars on arm64) and `/usr/local` (10 chars on Intel). This guarantees Mach-O load command patching always has room to replace the original path.
+malt installs to `/opt/malt` — its own prefix, fully isolated from Homebrew. The shorter path guarantees that Mach-O load command patching always has room to replace the original Homebrew path.
 
 ```
 /opt/malt/
@@ -394,7 +408,7 @@ No intermediate archive file is written to disk. The SHA256 is verified against 
 
 Homebrew bottles contain hardcoded paths like `/opt/homebrew/Cellar/...` in Mach-O load commands. Since malt uses its own prefix, these paths must be rewritten.
 
-malt parses Mach-O headers using struct-aware parsing (not raw byte scanning), identifies all relevant load commands (`LC_ID_DYLIB`, `LC_LOAD_DYLIB`, `LC_RPATH`, etc.), and replaces paths in-place with null padding. On arm64, every patched binary is ad-hoc codesigned via `codesign --force --sign -`.
+malt parses Mach-O headers using struct-aware parsing (not raw byte scanning), identifies all relevant load commands (`LC_ID_DYLIB`, `LC_LOAD_DYLIB`, `LC_RPATH`, etc.), and replaces paths in-place, padding the remaining space with null bytes. On arm64, every patched binary is ad-hoc codesigned via `codesign --force --sign -`.
 
 Text files (`.pc` configs, shell scripts) containing `@@HOMEBREW_PREFIX@@` or `@@HOMEBREW_CELLAR@@` placeholders are also patched.
 
@@ -422,7 +436,7 @@ Every install follows a strict 9-step protocol. Failure at any step triggers cle
 - **Pre-flight checks** — dependencies resolved, disk space verified, link conflicts detected, and `post_install` hooks flagged before any download begins.
 - **Link conflict detection** — all target symlink paths scanned before creating any links. Conflicts abort the operation with a clear report.
 - **Atomic installs** — the 9-step protocol uses `errdefer` at every stage. Interrupted installs leave no partial state.
-- **Concurrent access** — advisory `flock()` with 30-second timeout prevents concurrent mutations. Read-only commands (`list`, `info`, `search`) do not acquire the lock.
+- **Concurrent access** — an advisory file lock with a 30-second timeout prevents concurrent mutations. Read-only commands (`list`, `info`, `search`) do not acquire the lock.
 - **Upgrade rollback** — new version is fully installed and verified before the old version is touched. On failure, old symlinks are restored.
 - **Store immutability** — store entries are never modified after commit. Patching happens on the Cellar clone. Only `malt gc` deletes store entries.
 
@@ -450,58 +464,6 @@ If `brew` is not found, malt prints:
 malt: 'services' is not a malt command and brew was not found.
 Install Homebrew: https://brew.sh
 ```
-
----
-
-## What's Not in v1
-
-| Feature              | Reason                                        | Workaround                              |
-| -------------------- | --------------------------------------------- | --------------------------------------- |
-| `post_install` hooks | Requires Ruby DSL interpreter                 | Detect and warn; suggest `brew install` |
-| Build from source    | Requires compilers, `./configure`, `make`     | Use bottles only; fall back to `brew`   |
-| Mac App Store (mas)  | Separate ecosystem, separate auth             | Out of scope                            |
-| Linux support        | ELF patching, different prefix, doubles scope | macOS only                              |
-| Services management  | launchctl integration is complex and fragile  | Delegate to `brew services`             |
-| Brewfile/bundle      | Nice-to-have, not critical for v1             | Delegate to `brew bundle`               |
-| Formula creation     | Authoring formulas requires Ruby              | Use Homebrew for formula authoring      |
-| Audit/linting        | Formula validation tools                      | Out of scope                            |
-
----
-
-## How malt Compares
-
-|                        | Homebrew            | zerobrew        | nanobrew          | bru                      | **malt**                   |
-| ---------------------- | ------------------- | --------------- | ----------------- | ------------------------ | -------------------------- |
-| **Language**           | Ruby                | Zig + Rust      | Zig               | Zig                      | Zig                        |
-| **Binary size**        | ~57 MB              | 7.9 MB          | 1.2 MB            | ~2 MB                    | ~2.8 MB                    |
-| **Prefix**             | `/opt/homebrew`     | `/opt/zerobrew` | `/opt/nanobrew`   | `/opt/homebrew` (shared) | `/opt/malt` (own)          |
-| **Drop-in**            | N/A                 | No              | No                | Yes                      | No                         |
-| **Brew fallback**      | N/A                 | No              | No                | Yes                      | Yes                        |
-| **Parallel downloads** | No                  | Yes             | Yes               | Yes                      | Yes                        |
-| **Mach-O patching**    | `install_name_tool` | Raw byte scan   | Partial           | Not needed               | Struct-aware (`std.macho`) |
-| **Lib symlinks**       | Full                | Full            | `bin`/`sbin` only | Full                     | Full                       |
-| **Content store**      | No                  | Yes             | Yes               | No                       | Yes                        |
-| **INSTALL_RECEIPT**    | Yes                 | No              | No                | Yes                      | Yes                        |
-| **Rollback**           | No                  | No              | Yes               | Yes                      | Yes                        |
-| **Ephemeral run**      | No                  | Yes (`zbx`)     | No                | No                       | Yes (`malt run`)           |
-| **Bundle/services**    | Yes                 | Partial         | Yes               | Yes                      | No (delegates to brew)     |
-| **Concurrent safety**  | Lock file           | Lock file       | None              | Unknown                  | flock + SQLite WAL         |
-
-**bru** is a transparent accelerator — same prefix as Homebrew, zero migration, but no isolation. **malt** takes the opposite approach — full isolation with its own prefix, content-addressable store, and struct-aware Mach-O patching for correctness.
-
-For a detailed comparison with specific issue references and design tradeoffs, see [docs/COMPARISON.md](docs/COMPARISON.md).
-
----
-
-## Roadmap
-
-1. **Phase 1: Core Install/Uninstall (MVP)** — `mt install` with dependency resolution, cask support, inline tap resolution, content-addressable store, Mach-O patching, atomic install protocol, `mt uninstall`, `mt list`, `mt info`, `mt search`.
-
-2. **Phase 2: Lifecycle Management** — `mt upgrade` with rollback safety, `mt outdated`, `mt update`, `mt cleanup`, `mt gc`, pinning support.
-
-3. **Phase 3: Health and Migration** — `mt doctor`, `mt migrate` (import from Homebrew), `mt tap`/`mt untap`, transparent `brew` fallback.
-
-4. **Phase 4: Advanced** — `post_install` hook support, Brewfile/bundle, mmap'd binary index for O(1) lookups, services management, build from source.
 
 ---
 
