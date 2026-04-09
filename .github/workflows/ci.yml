@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-macos:
+    name: Build & Test (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: Build (Debug)
+        run: zig build
+
+      - name: Build (ReleaseSafe)
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Run unit tests
+        run: zig build test
+
+      - name: Smoke test — version flag
+        run: ./zig-out/bin/malt --version
+
+      - name: Smoke test — help flag
+        run: ./zig-out/bin/malt --help
+
+      - name: Build universal binary
+        run: zig build universal -Doptimize=ReleaseSafe
+
+      - name: Upload macOS binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: malt-macos-arm64
+          path: zig-out/bin/malt
+          retention-days: 7
+
+  lint:
+    name: Lint
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: Check formatting
+        run: zig fmt --check src/ tests/
