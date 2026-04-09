@@ -144,15 +144,19 @@ Checks for dependent packages before removing. If dependents exist, refuses unle
 Upgrade installed packages to latest versions.
 
 ```bash
-mt upgrade <cask>                        # upgrade a specific cask
+mt upgrade <package>                     # upgrade a specific formula or cask
 mt upgrade --cask                        # upgrade all outdated casks
+mt upgrade --formula                     # upgrade all outdated formulas
+mt upgrade --dry-run                     # show what would be upgraded
 ```
 
-| Flag     | Description        |
-| -------- | ------------------ |
-| `--cask` | Upgrade casks only |
+| Flag        | Description               |
+| ----------- | ------------------------- |
+| `--cask`    | Upgrade casks only        |
+| `--formula` | Upgrade formulas only     |
+| `--dry-run` | Preview without upgrading |
 
-> **Note:** Formula upgrade is not yet implemented. Currently only cask upgrade is supported. For casks, the old version is uninstalled and the new version is installed fresh.
+Formula upgrades install the new version, verify it, switch symlinks atomically, and only remove the old version after success. On failure, the old version is restored automatically.
 
 ### `mt update`
 
@@ -267,6 +271,12 @@ mt doctor
 | Stale lock          | No lock file, or lock PID is running        | Warn: suggest removal       |
 | APFS volume         | `/opt/malt` is on APFS                      | Warn: clonefile unavailable |
 | API reachable       | HEAD to `formulae.brew.sh` returns 2xx      | Warn: offline               |
+| Orphaned store      | All store entries referenced by a keg       | Warn: suggest `mt gc`       |
+| Missing kegs        | All DB keg paths exist on disk              | Error: suggest reinstall    |
+| Broken symlinks     | All symlinks in bin/, lib/ etc. resolve     | Warn: suggest `mt cleanup`  |
+| Disk space          | > 1 GB free on prefix volume                | Warn: low disk space        |
+
+Exits with code 0 (all OK), 1 (warnings found), or 2 (errors found).
 
 ### `mt tap` / `mt untap`
 
