@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  create-release-notes:
+    name: release-notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    environment:
+      name: Release
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Update release with notes
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          gh release edit "$TAG_NAME" \
+            --title "$TAG_NAME" \
+            --draft=false \
+            --prerelease=false \
+            --latest \
+            --notes-file "${{ github.workspace }}/.changes/${TAG_NAME}.md"
+
+  goreleaser:
+    name: goreleaser
+    runs-on: macos-14
+    needs: create-release-notes
+    permissions:
+      contents: write
+    environment:
+      name: Release
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: Run tests
+        run: zig build test
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

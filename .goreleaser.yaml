@@ -32,26 +32,26 @@ checksum:
   algorithm: sha256
 
 changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
+  disable: true
 
-brews:
+homebrew_casks:
   - name: malt
     repository:
       owner: indaco
       name: homebrew-tap
+    directory: Casks
     homepage: https://github.com/indaco/malt
     description: A fast, Homebrew-compatible package manager for macOS
-    license: MIT
-    install: |
-      bin.install "malt"
-      bin.install_symlink "malt", "mt"
-    test: |
-      system "#{bin}/malt", "--version"
+    binaries:
+      - malt
+      - mt
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/malt"]
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/mt"]
+          end
 
 release:
   draft: true
