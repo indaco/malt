@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.1/.schema/devbox.schema.json",
+  "packages": ["zig@latest", "git@latest", "curl@latest"],
+  "shell": {
+    "scripts": {
+      "build": ["zig build -Doptimize=ReleaseSafe"],
+      "test": ["zig build test"],
+      "lint": ["zig build -Doptimize=Debug 2>&1"],
+      "universal": ["zig build universal"]
+    }
+  }
+}
