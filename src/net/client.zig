@@ -15,9 +15,6 @@ pub const HttpClient = struct {
     client: std.http.Client,
 
     /// Per-request timeout in nanoseconds. Default: 30 seconds.
-    /// Zig 0.15's std.http.Client has no built-in timeout API, so we
-    /// implement this via a watchdog thread that aborts the request
-    /// if the body read hasn't completed within the deadline.
     timeout_ns: u64 = DEFAULT_TIMEOUT_NS,
 
     const DEFAULT_TIMEOUT_NS: u64 = 30 * std.time.ns_per_s;
@@ -173,41 +170,36 @@ pub const HttpClient = struct {
         };
         defer if (decompress_buffer.len > 0) self.allocator.free(decompress_buffer);
 
-        var transfer_buffer: [64]u8 = undefined;
+        var transfer_buffer: [16384]u8 = undefined;
         var decompress: std.http.Decompress = undefined;
         var body_reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
 
-        // --- Timeout-aware body read ---
-        // Zig 0.15's std.http.Client lacks per-request timeouts.
-        // We spawn a watchdog thread that sets a deadline flag. The chunked
-        // read loop checks the flag between reads, aborting if exceeded.
-        var timed_out = std.atomic.Value(bool).init(false);
-        var request_done = std.atomic.Value(bool).init(false);
+        // Timeout watchdog: closes the underlying connection if the read
+        // stalls beyond the deadline. This is the only reliable way to
+        // abort a blocking streamRemaining call.
         const effective_timeout = if (max_bytes > MAX_METADATA_BYTES) BLOB_TIMEOUT_NS else self.timeout_ns;
-        const watchdog = std.Thread.spawn(.{}, watchdogFn, .{ &timed_out, &request_done, effective_timeout }) catch null;
+        var request_done = std.atomic.Value(bool).init(false);
+        const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
+            &request_done,
+            effective_timeout,
+            &req,
+        }) catch null;
         defer {
             request_done.store(true, .release);
             if (watchdog) |w| w.join();
         }
 
-        // Chunked stream with timeout + size limit checks.
-        // We stream in chunks (64 KB at a time) so we can check the
-        // timeout flag between chunks.
-        const chunk_size: usize = 65536;
-        var total_read: usize = 0;
-        while (total_read < max_bytes) {
-            // Check timeout between chunks
-            if (timed_out.load(.acquire)) return error.TimedOut;
+        // Read the full response body. streamRemaining handles internal
+        // buffering and decompression (gzip/deflate/zstd) correctly.
+        const total_read = body_reader.streamRemaining(&body_writer.writer) catch |e| switch (e) {
+            error.WriteFailed => return error.ReadFailed,
+            error.ReadFailed => return error.ReadFailed,
+        };
 
-            const remaining = max_bytes - total_read;
-            const this_chunk = @min(chunk_size, remaining);
-            const n = body_reader.stream(&body_writer.writer, std.Io.Limit.limited(this_chunk)) catch
-                return error.ReadFailed;
-            total_read += n;
-            if (n < this_chunk) break; // EOF reached within this chunk
-        }
+        // Signal watchdog that we finished before timeout
+        request_done.store(true, .release);
 
-        // If we read exactly the limit, the response may be truncated — reject it.
+        // If we read more than the limit, the response is too large.
         if (total_read >= max_bytes) return error.ResponseTooLarge;
 
         const body = try body_writer.toOwnedSlice();
@@ -219,12 +211,15 @@ pub const HttpClient = struct {
         };
     }
 
-    /// Watchdog thread: sleeps for the timeout duration, then sets timed_out.
-    /// Exits early if request_done is set (request completed before timeout).
+    /// Watchdog thread: sleeps for the timeout duration, then aborts the
+    /// request by closing its connection. This unblocks streamRemaining.
+    /// Watchdog thread: sleeps for the timeout duration, then marks
+    /// the connection as closing. This causes the next read to fail,
+    /// unblocking a stalled streamRemaining call.
     fn watchdogFn(
-        timed_out: *std.atomic.Value(bool),
         request_done: *std.atomic.Value(bool),
         timeout_ns: u64,
+        req: *std.http.Client.Request,
     ) void {
         var elapsed: u64 = 0;
         const interval: u64 = 1 * std.time.ns_per_s;
@@ -233,7 +228,9 @@ pub const HttpClient = struct {
             std.Thread.sleep(interval);
             elapsed += interval;
         }
-        // Timeout expired — signal the read loop to abort
-        timed_out.store(true, .release);
+        // Timeout expired — mark connection as closing to unblock reads
+        if (req.connection) |conn| {
+            conn.closing = true;
+        }
     }
 };
