@@ -239,30 +239,88 @@ jobs:
           | bru | ${{ steps.sizes.outputs.bru }} |
           | Homebrew | ${{ steps.sizes.outputs.brew }} |
 
-          ### tree (0 deps)
-          | Tool | Cold | Warm |
-          |------|------|------|
-          | **malt** | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.mt_warm }} |
-          | nanobrew | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.nb_warm }} |
-          | zerobrew | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.zb_warm }} |
-          | bru | ${{ steps.tree.outputs.bru_cold }} | ${{ steps.tree.outputs.bru_warm }} |
-          | Homebrew | ${{ steps.tree.outputs.brew }} | — |
+          ### Cold Install
+          | Package | malt | nanobrew | zerobrew | bru | Homebrew |
+          |---------|------|----------|----------|-----|----------|
+          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.bru_cold }} | ${{ steps.tree.outputs.brew }} |
+          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.bru_cold }} | ${{ steps.wget.outputs.brew }} |
+          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.bru_cold }} | ${{ steps.ffmpeg.outputs.brew }} |
 
-          ### wget (6 deps)
-          | Tool | Cold | Warm |
-          |------|------|------|
-          | **malt** | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.mt_warm }} |
-          | nanobrew | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.nb_warm }} |
-          | zerobrew | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.zb_warm }} |
-          | bru | ${{ steps.wget.outputs.bru_cold }} | ${{ steps.wget.outputs.bru_warm }} |
-          | Homebrew | ${{ steps.wget.outputs.brew }} | — |
-
-          ### ffmpeg (11 deps)
-          | Tool | Cold | Warm |
-          |------|------|------|
-          | **malt** | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.mt_warm }} |
-          | nanobrew | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.nb_warm }} |
-          | zerobrew | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.zb_warm }} |
-          | bru | ${{ steps.ffmpeg.outputs.bru_cold }} | ${{ steps.ffmpeg.outputs.bru_warm }} |
-          | Homebrew | ${{ steps.ffmpeg.outputs.brew }} | — |
+          ### Warm Install
+          | Package | malt | nanobrew | zerobrew | bru |
+          |---------|------|----------|----------|-----|
+          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_warm }} | ${{ steps.tree.outputs.nb_warm }} | ${{ steps.tree.outputs.zb_warm }} | ${{ steps.tree.outputs.bru_warm }} |
+          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_warm }} | ${{ steps.wget.outputs.nb_warm }} | ${{ steps.wget.outputs.zb_warm }} | ${{ steps.wget.outputs.bru_warm }} |
+          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_warm }} | ${{ steps.ffmpeg.outputs.nb_warm }} | ${{ steps.ffmpeg.outputs.zb_warm }} | ${{ steps.ffmpeg.outputs.bru_warm }} |
           EOF
+
+      - name: Update README
+        run: |
+          DATE=$(date -u +"%Y-%m-%d")
+
+          # Generate new size table
+          cat > /tmp/size_table.md << TABLE
+          <!-- BENCH:SIZE:START -->
+          ### Binary Size
+
+          | Tool | Size |
+          | ---- | ---- |
+          | **malt** | ${{ steps.sizes.outputs.mt }} |
+          | nanobrew | ${{ steps.sizes.outputs.nb }} |
+          | zerobrew | ${{ steps.sizes.outputs.zb }} |
+          | bru | ${{ steps.sizes.outputs.bru }} |
+          <!-- BENCH:SIZE:END -->
+          TABLE
+
+          # Generate cold install table
+          cat > /tmp/cold_table.md << TABLE
+          <!-- BENCH:COLD:START -->
+          ### Cold Install
+
+          | Package | malt | nanobrew | zerobrew | bru | Homebrew |
+          | ------- | ---- | -------- | -------- | --- | -------- |
+          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.bru_cold }} | ${{ steps.tree.outputs.brew }} |
+          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.bru_cold }} | ${{ steps.wget.outputs.brew }} |
+          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.bru_cold }} | ${{ steps.ffmpeg.outputs.brew }} |
+          <!-- BENCH:COLD:END -->
+          TABLE
+
+          # Generate warm install table
+          cat > /tmp/warm_table.md << TABLE
+          <!-- BENCH:WARM:START -->
+          ### Warm Install
+
+          | Package | malt | nanobrew | zerobrew | bru |
+          | ------- | ---- | -------- | -------- | --- |
+          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_warm }} | ${{ steps.tree.outputs.nb_warm }} | ${{ steps.tree.outputs.zb_warm }} | ${{ steps.tree.outputs.bru_warm }} |
+          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_warm }} | ${{ steps.wget.outputs.nb_warm }} | ${{ steps.wget.outputs.zb_warm }} | ${{ steps.wget.outputs.bru_warm }} |
+          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_warm }} | ${{ steps.ffmpeg.outputs.nb_warm }} | ${{ steps.ffmpeg.outputs.zb_warm }} | ${{ steps.ffmpeg.outputs.bru_warm }} |
+          <!-- BENCH:WARM:END -->
+          TABLE
+
+          # Strip leading whitespace from heredoc indentation
+          sed -i '' 's/^          //' /tmp/size_table.md /tmp/cold_table.md /tmp/warm_table.md
+
+          # Replace sections between markers
+          for marker in SIZE COLD WARM; do
+            file="/tmp/$(echo "$marker" | tr '[:upper:]' '[:lower:]')_table.md"
+            sed -i '' "/<!-- BENCH:${marker}:START -->/,/<!-- BENCH:${marker}:END -->/{
+              /<!-- BENCH:${marker}:START -->/{
+                r ${file}
+                d
+              }
+              /<!-- BENCH:${marker}:END -->/d
+              d
+            }" README.md
+          done
+
+          # Update date
+          sed -i '' "s/> Benchmarks on Apple Silicon.*/> Benchmarks on Apple Silicon (GitHub Actions macos-14), $DATE. Auto-updated weekly via [benchmark workflow](.github\/workflows\/benchmark.yml)./" README.md
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --cached --quiet || git commit -m "bench: update benchmark results $(date -u +%Y-%m-%d)"
+          git push

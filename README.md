@@ -18,7 +18,8 @@ malt is a macOS-only package manager written in Zig that consumes Homebrew's exi
   <b><a href="#command-reference">Command Reference</a></b> &middot;
   <b><a href="#how-it-works">How It Works</a></b> &middot;
   <b><a href="#safety-guarantees">Safety Guarantees</a></b> &middot;
-  <b><a href="#building">Building</a></b>
+  <b><a href="#building">Building</a></b> &middot;
+  <b><a href="#benchmarks">Benchmarks</a></b>
 </p>
 
 ---
@@ -487,6 +488,53 @@ zig build -Doptimize=ReleaseSafe         # release build (~2.8 MB)
 zig build test                           # run tests
 zig build universal                      # universal binary (arm64 + x86_64 via lipo)
 ```
+
+---
+
+## Benchmarks
+
+Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
+
+<!-- BENCH:SIZE:START -->
+
+### Binary Size
+
+| Tool     | Size |
+| -------- | ---- |
+| **malt** | 3.0M |
+| nanobrew | 1.4M |
+| zerobrew | 8.6M |
+| bru      | 1.8M |
+
+<!-- BENCH:SIZE:END -->
+
+<!-- BENCH:COLD:START -->
+
+### Cold Install
+
+| Package              | malt   | nanobrew | zerobrew | bru    | Homebrew |
+| -------------------- | ------ | -------- | -------- | ------ | -------- |
+| **tree** (0 deps)    | 0.011s | 0.681s   | 1.960s   | 0.819s | 3.833s   |
+| **wget** (6 deps)    | 0.003s | 4.222s   | 5.757s   | 0.004s | 4.481s   |
+| **ffmpeg** (11 deps) | 0.010s | 1.710s   | 4.522s   | 3.518s | 5.247s   |
+
+<!-- BENCH:COLD:END -->
+
+<!-- BENCH:WARM:START -->
+
+### Warm Install
+
+| Package              | malt   | nanobrew | zerobrew | bru    |
+| -------------------- | ------ | -------- | -------- | ------ |
+| **tree** (0 deps)    | 0.002s | 0.005s   | 0.212s   | 0.026s |
+| **wget** (6 deps)    | 0.002s | 0.477s   | 0.529s   | 0.588s |
+| **ffmpeg** (11 deps) | 0.002s | 0.717s   | 2.232s   | 1.098s |
+
+<!-- BENCH:WARM:END -->
+
+> Benchmarks on Apple Silicon (GitHub Actions macos-14). Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
+
+---
 
 ## Contributing
 
