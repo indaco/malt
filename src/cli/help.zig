@@ -33,6 +33,8 @@ fn helpFor(command: []const u8) []const u8 {
         .{ "migrate", migrate_help },
         .{ "rollback", rollback_help },
         .{ "run", run_help },
+        .{ "link", link_help },
+        .{ "unlink", unlink_help2 },
     });
     return map.get(command) orelse "No help available.\n";
 }
@@ -97,8 +99,9 @@ const outdated_help =
     \\
     \\Flags:
     \\  --json         Output as JSON
-    \\  --formula      Formulas only
-    \\  --cask         Casks only
+    \\  --formula      Show outdated formulas only
+    \\  --cask         Show outdated casks only
+    \\  --quiet, -q    Suppress status messages
     \\
 ;
 
@@ -120,9 +123,11 @@ const list_help =
 const info_help =
     \\Usage: malt info <package> [flags]
     \\
-    \\Show detailed information about a package.
+    \\Show detailed information about a formula or cask.
     \\
     \\Flags:
+    \\  --formula      Show formula info only
+    \\  --cask         Show cask info only
     \\  --json         Output as JSON
     \\
 ;
@@ -220,5 +225,24 @@ const run_help =
     \\
     \\Example:
     \\  malt run jq -- --version
+    \\
+;
+
+const link_help =
+    \\Usage: malt link <formula> [flags]
+    \\
+    \\Create symlinks for an installed keg in the prefix (bin/, lib/, etc.).
+    \\
+    \\Flags:
+    \\  --overwrite    Replace existing symlinks
+    \\  --force, -f    Same as --overwrite
+    \\
+;
+
+const unlink_help2 =
+    \\Usage: malt unlink <formula>
+    \\
+    \\Remove symlinks for an installed keg from the prefix.
+    \\The keg remains installed in the Cellar.
     \\
 ;
