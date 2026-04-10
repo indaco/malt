@@ -440,16 +440,20 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // ── Parallel materialize phase ──────────────────────────────────
     //
-    // Each worker is independent: it runs clonefile + Mach-O patching +
-    // codesign on its own keg path, which never overlaps with any other
-    // job's output. All shared-state operations (linker conflict check,
-    // SQLite INSERTs, `std.StringHashMap(void)` for failed_kegs) are
+    // Each materialize step (clonefile + Mach-O patch + codesign) is
+    // independent — workers never touch each other's keg paths. Shared
+    // state (linker conflict check, SQLite INSERTs, `failed_kegs`) is
     // deferred to the serial link phase below.
     //
-    // The old flow ran `materializeAndLink` serially per job, which on a
-    // cold ffmpeg install added up to ~3 s of back-to-back materialize
-    // work. Parallelising this phase is the last major win that closes
-    // the gap to nanobrew's `fullInstallOne` thread pool.
+    // The old flow ran `materializeAndLink` serially per job, which on
+    // cold installs of large formulae like ffmpeg (11 deps) added up to
+    // ~3 s of back-to-back materialize work.
+    //
+    // **Bounded** pool — max 4 workers. Unbounded parallelism (one
+    // thread per job) turned into page-cache thrashing and codesign
+    // subprocess contention on warm ffmpeg, regressing that workload
+    // ~160 ms. Four workers preserves the cold-install speedup (I/O
+    // and subprocess wait overlap) while keeping cache pressure low.
     const mats = allocator.alloc(MaterializeResult, all_jobs.items.len) catch
         return InstallError.CellarFailed;
     defer {
@@ -461,22 +465,32 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     for (mats) |*m| m.* = .{ .ok = false, .keg_path = &[_]u8{}, .err = null };
 
     {
-        const mat_threads = allocator.alloc(std.Thread, all_jobs.items.len) catch
+        const max_workers: usize = 4;
+        const worker_count = @min(max_workers, all_jobs.items.len);
+
+        var pool_ctx: MaterializePool = .{
+            .next_idx = std.atomic.Value(usize).init(0),
+            .jobs = all_jobs.items,
+            .prefix = prefix,
+            .results = mats,
+        };
+
+        const pool_threads = allocator.alloc(std.Thread, worker_count) catch
             return InstallError.CellarFailed;
-        defer allocator.free(mat_threads);
+        defer allocator.free(pool_threads);
 
         var spawned: usize = 0;
-        for (all_jobs.items, 0..) |*job, i| {
-            if (!job.succeeded) continue;
-            if (std.Thread.spawn(.{}, materializeWorker, .{ job, prefix, &mats[i] })) |t| {
-                mat_threads[spawned] = t;
+        for (0..worker_count) |_| {
+            if (std.Thread.spawn(.{}, materializePoolWorker, .{&pool_ctx})) |t| {
+                pool_threads[spawned] = t;
                 spawned += 1;
             } else |_| {
-                // Fall back to inline materialize on spawn failure.
-                materializeWorker(job, prefix, &mats[i]);
+                // Fall back to inline execution if spawn fails. The pool
+                // loop will pick up remaining jobs on this thread.
+                materializePoolWorker(&pool_ctx);
             }
         }
-        for (mat_threads[0..spawned]) |t| t.join();
+        for (pool_threads[0..spawned]) |t| t.join();
     }
 
     // ── Serial link + record phase ──────────────────────────────────
@@ -744,16 +758,41 @@ const MaterializeResult = struct {
     err: ?cellar_mod.CellarError,
 };
 
-/// Thread entry-point for the parallel materialize phase. Runs the
-/// clonefile + Mach-O patching + codesign pipeline for one job and
-/// stores the result in `result`. Thread-safe because each worker
-/// operates on its own keg path (different name/version) and the
-/// cellar module's I/O paths never overlap between jobs.
+/// Shared state for a bounded work-stealing thread pool that executes
+/// the materialize phase. `next_idx` hands out jobs atomically so
+/// workers grab the next available job until the queue is drained —
+/// natural load-balancing without waves.
+const MaterializePool = struct {
+    next_idx: std.atomic.Value(usize),
+    jobs: []DownloadJob,
+    prefix: []const u8,
+    results: []MaterializeResult,
+};
+
+/// Thread entry-point for the bounded materialize pool. Each worker
+/// loops grabbing the next job index atomically and running
+/// `materializeOne` on it until the index passes the end of the jobs
+/// array. The pool is capped at 4 workers (see the call site in
+/// `execute`) to keep file-I/O and codesign-subprocess contention low.
+fn materializePoolWorker(pool: *MaterializePool) void {
+    while (true) {
+        const idx = pool.next_idx.fetchAdd(1, .acq_rel);
+        if (idx >= pool.jobs.len) return;
+        const job = &pool.jobs[idx];
+        if (!job.succeeded) continue;
+        materializeOne(job, pool.prefix, &pool.results[idx]);
+    }
+}
+
+/// Runs the clonefile + Mach-O patching + codesign pipeline for one
+/// job and stores the result. Thread-safe because each call operates
+/// on its own keg path (different name/version) and the cellar
+/// module's I/O paths never overlap between jobs.
 ///
-/// Uses a per-worker arena for short-lived allocations (walker,
-/// patcher buffers, etc.) and `std.heap.c_allocator` for the single
-/// long-lived output — the keg path — so it survives arena teardown.
-fn materializeWorker(
+/// Uses a per-call arena for short-lived allocations (walker, patcher
+/// buffers, etc.) and `std.heap.c_allocator` for the single long-lived
+/// output — the keg path — so it survives arena teardown.
+fn materializeOne(
     job: *DownloadJob,
     prefix: []const u8,
     result: *MaterializeResult,
