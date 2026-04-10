@@ -35,6 +35,7 @@ fn helpFor(command: []const u8) []const u8 {
         .{ "run", run_help },
         .{ "link", link_help },
         .{ "unlink", unlink_help2 },
+        .{ "completions", completions_help },
     });
     return map.get(command) orelse "No help available.\n";
 }
@@ -244,5 +245,23 @@ const unlink_help2 =
     \\
     \\Remove symlinks for an installed keg from the prefix.
     \\The keg remains installed in the Cellar.
+    \\
+;
+
+const completions_help =
+    \\Usage: malt completions <shell>
+    \\
+    \\Generate a shell completion script. The script is printed to stdout
+    \\so it can be eval'd for the current shell or redirected to a file.
+    \\
+    \\Shells:
+    \\  bash    Source with: eval "$(malt completions bash)"
+    \\  zsh     Source with: eval "$(malt completions zsh)"
+    \\  fish    Source with: malt completions fish | source
+    \\
+    \\Permanent install:
+    \\  bash    malt completions bash > /usr/local/etc/bash_completion.d/malt
+    \\  zsh     malt completions zsh  > "${fpath[1]}/_malt"
+    \\  fish    malt completions fish > ~/.config/fish/completions/malt.fish
     \\
 ;

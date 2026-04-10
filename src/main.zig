@@ -33,6 +33,7 @@ const rollback = @import("cli/rollback.zig");
 const link_cmd = @import("cli/link.zig");
 const run_cmd = @import("cli/run.zig");
 const version_update = @import("cli/version_update.zig");
+const completions = @import("cli/completions.zig");
 
 const version_mod = @import("version.zig");
 const version = version_mod.value;
@@ -58,6 +59,7 @@ const Command = enum {
     unlink,
     run,
     version_cmd,
+    completions,
     help,
     version,
 };
@@ -84,6 +86,7 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
     .{ "link", .link },
     .{ "unlink", .unlink },
     .{ "run", .run },
+    .{ "completions", .completions },
     .{ "help", .help },
     .{ "--help", .help },
     .{ "-h", .help },
@@ -178,6 +181,7 @@ pub fn main() !void {
             .link => try link_cmd.executeLink(allocator, cmd_args),
             .unlink => try link_cmd.executeUnlink(allocator, cmd_args),
             .run => try run_cmd.execute(allocator, cmd_args),
+            .completions => try completions.execute(allocator, cmd_args),
             .version_cmd => {
                 // "mt version" — check for "mt version update" subcommand
                 if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
@@ -221,6 +225,7 @@ fn printUsage() void {
         \\  link          Create symlinks for an installed keg
         \\  unlink        Remove symlinks (keg stays installed)
         \\  run           Run a package binary without installing
+        \\  completions   Generate shell completion scripts (bash, zsh, fish)
         \\  version       Show version (use 'version update' to self-update)
         \\
         \\Global flags:
