@@ -102,7 +102,16 @@ fn progressBridge(ctx: *anyopaque, bytes_so_far: u64, content_length: ?u64) void
 }
 
 /// Download a bottle and commit to store. Runs in a worker thread.
-fn downloadWorker(_: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, store: *store_mod.Store, job: *DownloadJob) void {
+/// `http_pool` is shared across all download workers — each worker
+/// borrows a client for the duration of a single blob download and
+/// releases it so another worker can reuse the same TLS context.
+fn downloadWorker(
+    _: std.mem.Allocator,
+    ghcr: *ghcr_mod.GhcrClient,
+    http_pool: *client_mod.HttpClientPool,
+    store: *store_mod.Store,
+    job: *DownloadJob,
+) void {
     // Each thread gets its own arena — the parent arena is not thread-safe.
     var thread_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer thread_arena.deinit();
@@ -142,8 +151,14 @@ fn downloadWorker(_: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, store: *stor
         .func = &progressBridge,
     };
 
+    // Borrow a client from the shared pool for the duration of this
+    // download. The pool blocks if all clients are in use by other
+    // workers, then hands us one with its TLS context already warm.
+    const http = http_pool.acquire();
+    defer http_pool.release(http);
+
     // Download
-    _ = bottle_mod.download(allocator, ghcr, repo, digest, job.sha256, tmp_dir, progress_cb) catch {
+    _ = bottle_mod.download(allocator, ghcr, http, repo, digest, job.sha256, tmp_dir, progress_cb) catch {
         bar.finish();
         output.err("  Download failed: {s}", .{job.name});
         atomic.cleanupTempDir(tmp_dir);
@@ -254,9 +269,22 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer lk.release();
 
-    // Set up HTTP client
+    // Set up HTTP client (single-threaded main-thread use — formula
+    // lookups, cask probe, top-level `fetchFormula`). Worker threads
+    // borrow from the pool below instead of touching this instance.
     var http = client_mod.HttpClient.init(allocator);
     defer http.deinit();
+
+    // Shared HTTP client pool for worker threads. Each worker
+    // (download + parallel resolve) borrows an idle client for the
+    // duration of one request so TLS contexts are reused across
+    // calls. 4 slots is the same budget the P5 materialize pool uses
+    // and is enough to saturate cold installs on typical machines.
+    var http_pool = client_mod.HttpClientPool.init(allocator, 4) catch {
+        output.err("Failed to initialise HTTP client pool", .{});
+        return InstallError.DownloadFailed;
+    };
+    defer http_pool.deinit();
 
     // Set up API client
     var cache_dir_buf: [512]u8 = undefined;
@@ -320,7 +348,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
 
             // Collect jobs for this formula + its deps
-            collectFormulaJobs(allocator, pkg_name, formula_json, &api, &db, &store, force, &all_jobs) catch |e| {
+            collectFormulaJobs(allocator, pkg_name, formula_json, &api, &http_pool, &db, &store, force, &all_jobs) catch |e| {
                 output.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
                 continue;
             };
@@ -417,9 +445,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 continue;
             }
             const t = std.Thread.spawn(.{}, downloadWorker, .{
-                allocator, &ghcr, &store, job,
+                allocator, &ghcr, &http_pool, &store, job,
             }) catch {
-                downloadWorker(allocator, &ghcr, &store, job);
+                downloadWorker(allocator, &ghcr, &http_pool, &store, job);
                 continue;
             };
             threads.append(allocator, t) catch {
@@ -593,21 +621,26 @@ fn findFailedDep(
     return null;
 }
 
-/// Thread entry-point for parallel dep formula fetching. Builds a
-/// throw-away `BrewApi` backed by a worker-local `HttpClient` because
-/// `std.http.Client` is not thread-safe across calls, then fetches the
-/// formula JSON for one dep and stores it in `result`. On any failure
-/// leaves `result.*` as `null`; the caller treats null as "skip this
-/// dep" the same way the old serial loop's `catch continue` did.
+/// Thread entry-point for parallel dep formula fetching. Borrows a
+/// client from the shared `HttpClientPool` for the duration of the
+/// fetch, builds a throw-away `BrewApi` around it, and stores the
+/// result. On any failure leaves `result.*` as `null`; the caller
+/// treats null as "skip this dep" the same way the old serial loop's
+/// `catch continue` did.
+///
+/// Why the pool: creating a fresh `HttpClient` per worker paid a full
+/// TLS context + cert store setup per dep. For cold installs of
+/// packages with many deps (ffmpeg has 11) that overhead compounds.
 fn fetchFormulaWorker(
     allocator: std.mem.Allocator,
+    pool: *client_mod.HttpClientPool,
     cache_dir: []const u8,
     dep_name: []const u8,
     result: *?[]const u8,
 ) void {
-    var local_http = client_mod.HttpClient.init(allocator);
-    defer local_http.deinit();
-    var local_api = api_mod.BrewApi.init(allocator, &local_http, cache_dir);
+    const http = pool.acquire();
+    defer pool.release(http);
+    var local_api = api_mod.BrewApi.init(allocator, http, cache_dir);
     result.* = local_api.fetchFormula(dep_name) catch null;
 }
 
@@ -618,6 +651,7 @@ fn collectFormulaJobs(
     pkg_name: []const u8,
     formula_json: []const u8,
     api: *api_mod.BrewApi,
+    http_pool: *client_mod.HttpClientPool,
     db: *sqlite.Database,
     store: *store_mod.Store,
     force: bool,
@@ -639,12 +673,11 @@ fn collectFormulaJobs(
     // Resolve dependencies
     const deps = deps_mod.resolve(allocator, formula.name, api, db) catch &.{};
 
-    // Fetch every dep's formula JSON **in parallel**. Each worker gets its
-    // own HttpClient + throw-away BrewApi because `std.http.Client` is not
-    // thread-safe. On a cold install the serial version paid the full
-    // network round-trip for each dep back-to-back; at 300-500 ms per fetch
-    // and 6-11 deps for typical packages that was the dominant remaining
-    // cold-install cost after the watchdog fix.
+    // Fetch every dep's formula JSON **in parallel**. Each worker
+    // borrows a client from the shared `http_pool` for the duration
+    // of its request so TLS contexts are reused across deps — the
+    // previous per-worker `HttpClient.init` paid a full cert-store
+    // load per dep, which added up on cold installs with many deps.
     const dep_jsons = allocator.alloc(?[]const u8, deps.len) catch return InstallError.DownloadFailed;
     defer allocator.free(dep_jsons);
     @memset(dep_jsons, null);
@@ -657,13 +690,13 @@ fn collectFormulaJobs(
         for (deps, 0..) |dep, i| {
             if (dep.already_installed) continue;
             if (std.Thread.spawn(.{}, fetchFormulaWorker, .{
-                allocator, api.cache_dir, dep.name, &dep_jsons[i],
+                allocator, http_pool, api.cache_dir, dep.name, &dep_jsons[i],
             })) |t| {
                 threads[spawned] = t;
                 spawned += 1;
             } else |_| {
                 // Spawn failure → fall back to inline fetch.
-                fetchFormulaWorker(allocator, api.cache_dir, dep.name, &dep_jsons[i]);
+                fetchFormulaWorker(allocator, http_pool, api.cache_dir, dep.name, &dep_jsons[i]);
             }
         }
         for (threads[0..spawned]) |t| t.join();

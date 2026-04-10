@@ -332,3 +332,77 @@ pub const HttpClient = struct {
         };
     }
 };
+
+/// Thread-safe pool of `HttpClient` instances with borrow/return
+/// semantics. Workers call `acquire()` to get exclusive access to an
+/// idle client, use it synchronously, then call `release()` so another
+/// worker can take it.
+///
+/// Why a pool: `std.http.Client` is *not* thread-safe across
+/// concurrent calls, but creating a fresh one per request pays the
+/// TLS context + cert store + connection setup cost every time. On a
+/// cold `ffmpeg` install that was ~15 HttpClient creations back to
+/// back (formula fetches + GHCR token + 12 blob downloads), each
+/// paying its own handshake. A 4-slot pool keeps per-connection
+/// reuse for the hot phase while preserving the no-sharing invariant.
+///
+/// All methods are safe to call from multiple threads.
+pub const HttpClientPool = struct {
+    allocator: std.mem.Allocator,
+    clients: []HttpClient,
+    busy: []bool,
+    mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition,
+
+    pub fn init(allocator: std.mem.Allocator, size: usize) !HttpClientPool {
+        const clients = try allocator.alloc(HttpClient, size);
+        errdefer allocator.free(clients);
+        const busy = try allocator.alloc(bool, size);
+        errdefer allocator.free(busy);
+        @memset(busy, false);
+        for (clients) |*c| c.* = HttpClient.init(allocator);
+        return .{
+            .allocator = allocator,
+            .clients = clients,
+            .busy = busy,
+            .mutex = .{},
+            .cond = .{},
+        };
+    }
+
+    pub fn deinit(self: *HttpClientPool) void {
+        for (self.clients) |*c| c.deinit();
+        self.allocator.free(self.clients);
+        self.allocator.free(self.busy);
+    }
+
+    /// Block until an idle client is available, mark it busy, return
+    /// a pointer the caller can use exclusively until `release`.
+    pub fn acquire(self: *HttpClientPool) *HttpClient {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        while (true) {
+            for (self.busy, 0..) |b, i| {
+                if (!b) {
+                    self.busy[i] = true;
+                    return &self.clients[i];
+                }
+            }
+            self.cond.wait(&self.mutex);
+        }
+    }
+
+    /// Return a previously-acquired client to the pool. The pointer
+    /// must have come from `acquire` on the same pool; calling with
+    /// a foreign pointer is a programmer error.
+    pub fn release(self: *HttpClientPool, client: *HttpClient) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const base = @intFromPtr(self.clients.ptr);
+        const addr = @intFromPtr(client);
+        const idx = (addr - base) / @sizeOf(HttpClient);
+        std.debug.assert(idx < self.clients.len);
+        self.busy[idx] = false;
+        self.cond.signal();
+    }
+};
