@@ -41,7 +41,7 @@ const all_commands = [_][]const u8{
     "tap",        "untap",     "gc",          "migrate",
     "autoremove", "rollback",  "link",        "unlink",
     "run",        "version",   "completions", "backup",
-    "restore",
+    "restore",    "purge",
 };
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
