@@ -38,6 +38,7 @@ fn helpFor(command: []const u8) []const u8 {
         .{ "completions", completions_help },
         .{ "backup", backup_help },
         .{ "restore", restore_help },
+        .{ "purge", purge_help },
     });
     return map.get(command) orelse "No help available.\n";
 }
@@ -287,6 +288,39 @@ const backup_help =
     \\  malt backup
     \\  malt backup -o ~/dotfiles/packages.txt
     \\  malt backup --versions -o - > snapshot.txt
+    \\
+;
+
+const purge_help =
+    \\Usage: malt purge [flags]
+    \\
+    \\Completely wipe a malt installation from disk. Destructive: removes
+    \\every package, the content-addressable store, linked binaries, the
+    \\cache, and the sqlite database.
+    \\
+    \\By default the command is interactive and requires typing the word
+    \\`purge` to confirm. Use `--dry-run` to preview, `--yes` for scripts.
+    \\
+    \\Flags:
+    \\  --backup, -b <path>  Write a `mt restore`-compatible manifest of
+    \\                       the currently-installed packages before
+    \\                       deleting anything.
+    \\  --keep-cache         Do not delete the cache directory (keeps
+    \\                       downloaded bottles for a later reinstall).
+    \\  --remove-binary      Also unlink /usr/local/bin/mt and
+    \\                       /usr/local/bin/malt. Opt-in because these
+    \\                       live outside the prefix.
+    \\  --yes, -y            Skip the typed confirmation (for CI).
+    \\  --dry-run            Preview every target without touching disk.
+    \\
+    \\Examples:
+    \\  malt purge --dry-run
+    \\  malt purge --backup ~/malt-snapshot.txt
+    \\  malt purge --keep-cache --yes
+    \\  malt purge --remove-binary --yes
+    \\
+    \\For per-package removal use `mt uninstall <name>`; for cache-only
+    \\cleanup use `mt cleanup`.
     \\
 ;
 
