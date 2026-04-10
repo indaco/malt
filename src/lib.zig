@@ -21,3 +21,4 @@ pub const output = @import("ui/output.zig");
 pub const progress = @import("ui/progress.zig");
 pub const version = @import("version.zig");
 pub const completions = @import("cli/completions.zig");
+pub const backup = @import("cli/backup.zig");

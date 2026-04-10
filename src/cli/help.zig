@@ -36,6 +36,8 @@ fn helpFor(command: []const u8) []const u8 {
         .{ "link", link_help },
         .{ "unlink", unlink_help2 },
         .{ "completions", completions_help },
+        .{ "backup", backup_help },
+        .{ "restore", restore_help },
     });
     return map.get(command) orelse "No help available.\n";
 }
@@ -263,5 +265,44 @@ const completions_help =
     \\  bash    malt completions bash > /usr/local/etc/bash_completion.d/malt
     \\  zsh     malt completions zsh  > "${fpath[1]}/_malt"
     \\  fish    malt completions fish > ~/.config/fish/completions/malt.fish
+    \\
+;
+
+const backup_help =
+    \\Usage: malt backup [flags]
+    \\
+    \\Dump the list of directly-installed formulae and casks to a plain-text
+    \\file that `malt restore` can consume to reproduce the environment on
+    \\another machine.
+    \\
+    \\By default the file is written to the current directory with a
+    \\timestamped name, e.g. `malt-backup-2026-04-10T14-32-05.txt`.
+    \\
+    \\Flags:
+    \\  --output, -o <path>  Write to a specific file (use `-` for stdout)
+    \\  --versions           Pin each entry to its current version (@ver)
+    \\  --quiet, -q          Suppress non-error output
+    \\
+    \\Examples:
+    \\  malt backup
+    \\  malt backup -o ~/dotfiles/packages.txt
+    \\  malt backup --versions -o - > snapshot.txt
+    \\
+;
+
+const restore_help =
+    \\Usage: malt restore <file> [flags]
+    \\
+    \\Read a backup file produced by `malt backup` and install every entry
+    \\it lists. Formulae and casks are installed in a single batched run each
+    \\so dependency resolution and parallel downloads apply normally.
+    \\
+    \\Flags:
+    \\  --dry-run     Print the list of packages that would be installed
+    \\  --force       Pass --force to the underlying install
+    \\  --quiet, -q   Suppress non-error output
+    \\
+    \\Example:
+    \\  malt restore malt-backup-2026-04-10T14-32-05.txt
     \\
 ;

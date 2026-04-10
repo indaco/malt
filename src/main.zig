@@ -34,6 +34,8 @@ const link_cmd = @import("cli/link.zig");
 const run_cmd = @import("cli/run.zig");
 const version_update = @import("cli/version_update.zig");
 const completions = @import("cli/completions.zig");
+const backup = @import("cli/backup.zig");
+const restore = @import("cli/restore.zig");
 
 const version_mod = @import("version.zig");
 const version = version_mod.value;
@@ -60,6 +62,8 @@ const Command = enum {
     run,
     version_cmd,
     completions,
+    backup,
+    restore,
     help,
     version,
 };
@@ -87,6 +91,8 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
     .{ "unlink", .unlink },
     .{ "run", .run },
     .{ "completions", .completions },
+    .{ "backup", .backup },
+    .{ "restore", .restore },
     .{ "help", .help },
     .{ "--help", .help },
     .{ "-h", .help },
@@ -182,6 +188,8 @@ pub fn main() !void {
             .unlink => try link_cmd.executeUnlink(allocator, cmd_args),
             .run => try run_cmd.execute(allocator, cmd_args),
             .completions => try completions.execute(allocator, cmd_args),
+            .backup => try backup.execute(allocator, cmd_args),
+            .restore => try restore.execute(allocator, cmd_args),
             .version_cmd => {
                 // "mt version" — check for "mt version update" subcommand
                 if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
@@ -226,6 +234,8 @@ fn printUsage() void {
         \\  unlink        Remove symlinks (keg stays installed)
         \\  run           Run a package binary without installing
         \\  completions   Generate shell completion scripts (bash, zsh, fish)
+        \\  backup        Dump installed packages to a restorable text file
+        \\  restore       Reinstall every package listed in a backup file
         \\  version       Show version (use 'version update' to self-update)
         \\
         \\Global flags:
