@@ -361,6 +361,24 @@ mt version update --check     # check without installing
 
 `update` queries the GitHub releases API, downloads the correct binary for the current platform, and replaces the running binary in-place.
 
+### `mt completions`
+
+Generate a shell completion script for `bash`, `zsh`, or `fish`. The script is printed to stdout, so it can be eval'd immediately or redirected to a file for permanent install.
+
+```bash
+# Temporary (current shell only)
+eval "$(malt completions bash)"
+eval "$(malt completions zsh)"       # run AFTER `compinit`
+malt completions fish | source
+
+# Permanent
+malt completions bash > /usr/local/etc/bash_completion.d/malt
+malt completions zsh  > "${fpath[1]}/_malt"
+malt completions fish > ~/.config/fish/completions/malt.fish
+```
+
+Completes subcommands (for both `malt` and `mt`), per-command flags, global flags, and the positional shell name for `completions` itself. Unknown shell names exit non-zero with an error.
+
 ### Global Flags
 
 | Flag              | Description                                   |
