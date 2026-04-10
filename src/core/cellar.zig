@@ -10,10 +10,24 @@ const atomic = @import("../fs/atomic.zig");
 pub const CellarError = error{
     CloneFailed,
     PatchFailed,
+    PathTooLong,
     CodesignFailed,
     RemoveFailed,
     OutOfMemory,
 };
+
+/// Human-readable description for a CellarError tag.
+/// Used by `mt install` when surfacing a materialize failure.
+pub fn describeError(err: CellarError) []const u8 {
+    return switch (err) {
+        CellarError.CloneFailed => "APFS clonefile or copy failed",
+        CellarError.PatchFailed => "Mach-O or text-file path patching failed",
+        CellarError.PathTooLong => "new prefix path is longer than the bottle was built with",
+        CellarError.CodesignFailed => "codesign re-signing failed",
+        CellarError.RemoveFailed => "cellar directory removal failed",
+        CellarError.OutOfMemory => "out of memory",
+    };
+}
 
 pub const Keg = struct {
     name: []const u8,
@@ -23,10 +37,13 @@ pub const Keg = struct {
 
 /// Materialize a keg from the store to the Cellar.
 /// 1. clonefile store/{sha256}/... → Cellar/{name}/{version}/
-/// 2. Patch Mach-O load commands (both /opt/homebrew and /usr/local prefixes)
-///    — skipped when cellar_type is ":any" or ":any_skip_relocation" (relocatable bottle)
-/// 3. Patch text files (@@HOMEBREW_PREFIX@@ etc.)
-/// 4. Ad-hoc codesign on arm64
+/// 2. Patch Mach-O placeholder tokens (@@HOMEBREW_PREFIX@@ / @@HOMEBREW_CELLAR@@)
+///    — ALWAYS runs, even for ":any" relocatable bottles, because placeholders
+///    in LC_LOAD_DYLIB / LC_RPATH must be substituted at pour time.
+/// 3. Patch Mach-O absolute paths (/opt/homebrew, /usr/local)
+///    — skipped when cellar_type is ":any" or ":any_skip_relocation".
+/// 4. Patch text files (@@HOMEBREW_PREFIX@@ etc.)
+/// 5. Ad-hoc codesign on arm64
 /// Uses errdefer to clean up Cellar entry on failure.
 pub fn materialize(
     allocator: std.mem.Allocator,
@@ -113,22 +130,31 @@ pub fn materializeWithCellar(
 
     const new_prefix = atomic.maltPrefix();
 
-    // Relocatable bottles (cellar: ":any" or ":any_skip_relocation") do not
-    // need Mach-O binary patching — they are built to work from any prefix.
-    // However, @@HOMEBREW_PREFIX@@ / @@HOMEBREW_CELLAR@@ text placeholders
-    // must ALWAYS be substituted, even for relocatable bottles, because
-    // Homebrew performs this substitution unconditionally during bottle pour.
-    const skip_macho = std.mem.eql(u8, cellar_type, ":any") or
-        std.mem.eql(u8, cellar_type, ":any_skip_relocation");
-
     // Build cellar replacement for @@HOMEBREW_CELLAR@@
     var new_cellar_buf: [256]u8 = undefined;
     const new_cellar = std.fmt.bufPrint(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;
 
-    if (!skip_macho) {
-        // Walk cellar directory and patch each Mach-O binary
-        patchAllMachO(allocator, cellar_path, new_prefix, new_cellar) catch
-            return CellarError.PatchFailed;
+    // Pass 1: placeholder substitution — ALWAYS runs, regardless of cellar_type.
+    // `@@HOMEBREW_PREFIX@@` / `@@HOMEBREW_CELLAR@@` tokens appear in LC_LOAD_DYLIB,
+    // LC_RPATH, etc. even in `:any` bottles (zig, curl, rust, llvm@* all do this)
+    // and must be rewritten or the resulting binaries will fail with
+    // `dyld: Symbol not found`.
+    patchMachOPlaceholders(allocator, cellar_path, new_prefix, new_cellar) catch |e| switch (e) {
+        CellarError.PathTooLong => return CellarError.PathTooLong,
+        else => return CellarError.PatchFailed,
+    };
+
+    // Pass 2: absolute-path rewrite — skipped for relocatable bottles, which
+    // Homebrew guarantees to only use `@rpath`/`@loader_path` or the placeholder
+    // tokens handled above.
+    const skip_absolute_rewrite = std.mem.eql(u8, cellar_type, ":any") or
+        std.mem.eql(u8, cellar_type, ":any_skip_relocation");
+
+    if (!skip_absolute_rewrite) {
+        patchMachOAbsolutePaths(allocator, cellar_path, new_prefix) catch |e| switch (e) {
+            CellarError.PathTooLong => return CellarError.PathTooLong,
+            else => return CellarError.PatchFailed,
+        };
     }
 
     // Always patch text files — @@HOMEBREW_PREFIX@@ and @@HOMEBREW_CELLAR@@
@@ -161,9 +187,53 @@ pub fn materializeWithCellar(
     };
 }
 
-/// Walk a directory and patch all Mach-O binaries with prefix replacements.
-/// Returns PatchFailed if any binary has paths that are too long for in-place patching.
-fn patchAllMachO(allocator: std.mem.Allocator, dir_path: []const u8, new_prefix: []const u8, new_cellar: []const u8) CellarError!void {
+/// Walk a directory and patch the `@@HOMEBREW_PREFIX@@` / `@@HOMEBREW_CELLAR@@`
+/// tokens in every Mach-O load command. This ALWAYS runs, including for `:any`
+/// relocatable bottles — see call-site comment.
+///
+/// Returns `PathTooLong` if the substituted path would not fit in the existing
+/// load-command slot (the new MALT_PREFIX is longer than what the bottle was
+/// built for). Returns `PatchFailed` for any other patcher error.
+fn patchMachOPlaceholders(
+    allocator: std.mem.Allocator,
+    dir_path: []const u8,
+    new_prefix: []const u8,
+    new_cellar: []const u8,
+) CellarError!void {
+    try walkMachOAndPatch(allocator, dir_path, &.{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix },
+        .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar },
+    });
+}
+
+/// Walk a directory and rewrite `/opt/homebrew` / `/usr/local` to the current
+/// MALT_PREFIX in every Mach-O load command. Skipped for `:any` bottles by the
+/// caller (those only use rpath + placeholder tokens).
+fn patchMachOAbsolutePaths(
+    allocator: std.mem.Allocator,
+    dir_path: []const u8,
+    new_prefix: []const u8,
+) CellarError!void {
+    try walkMachOAndPatch(allocator, dir_path, &.{
+        .{ .old = "/opt/homebrew", .new = new_prefix },
+        .{ .old = "/usr/local", .new = new_prefix },
+    });
+}
+
+const Replacement = struct {
+    old: []const u8,
+    new: []const u8,
+};
+
+/// Shared Mach-O walker: for every file that looks like a Mach-O, run each
+/// replacement in order. `PathTooLong` is surfaced as a real error; other
+/// per-file errors are skipped so a single bad binary does not fail the whole
+/// materialize.
+fn walkMachOAndPatch(
+    allocator: std.mem.Allocator,
+    dir_path: []const u8,
+    replacements: []const Replacement,
+) CellarError!void {
     var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
 
@@ -176,7 +246,7 @@ fn patchAllMachO(allocator: std.mem.Allocator, dir_path: []const u8, new_prefix:
         const full_path = std.fs.path.join(allocator, &.{ dir_path, entry.path }) catch continue;
         defer allocator.free(full_path);
 
-        // Check if Mach-O by reading magic
+        // Check if Mach-O by reading magic.
         const file = std.fs.openFileAbsolute(full_path, .{}) catch continue;
         var magic_buf: [4]u8 = undefined;
         const n = file.readAll(&magic_buf) catch {
@@ -189,25 +259,12 @@ fn patchAllMachO(allocator: std.mem.Allocator, dir_path: []const u8, new_prefix:
         const parser_mod = @import("../macho/parser.zig");
         if (!parser_mod.isMachO(&magic_buf)) continue;
 
-        // Patch all known prefix patterns in this Mach-O.
-        // PathTooLong is a real error — surface it so the caller knows the
-        // binary cannot be relocated in-place.
-        _ = patcher.patchPaths(allocator, full_path, "/opt/homebrew", new_prefix) catch |e| switch (e) {
-            error.PathTooLong => return CellarError.PatchFailed,
-            else => continue,
-        };
-        _ = patcher.patchPaths(allocator, full_path, "/usr/local", new_prefix) catch |e| switch (e) {
-            error.PathTooLong => return CellarError.PatchFailed,
-            else => continue,
-        };
-        _ = patcher.patchPaths(allocator, full_path, "@@HOMEBREW_PREFIX@@", new_prefix) catch |e| switch (e) {
-            error.PathTooLong => return CellarError.PatchFailed,
-            else => continue,
-        };
-        _ = patcher.patchPaths(allocator, full_path, "@@HOMEBREW_CELLAR@@", new_cellar) catch |e| switch (e) {
-            error.PathTooLong => return CellarError.PatchFailed,
-            else => continue,
-        };
+        for (replacements) |r| {
+            _ = patcher.patchPaths(allocator, full_path, r.old, r.new) catch |e| switch (e) {
+                error.PathTooLong => return CellarError.PathTooLong,
+                else => continue,
+            };
+        }
     }
 }
 
