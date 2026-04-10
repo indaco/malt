@@ -169,10 +169,20 @@ pub fn materializeWithCellar(
     // Always patch text files — @@HOMEBREW_PREFIX@@ and @@HOMEBREW_CELLAR@@
     // placeholders appear in scripts, .pc files, and configs regardless of
     // whether the bottle is relocatable.
-    _ = patcher.patchTextFiles(allocator, cellar_path, "/opt/homebrew", new_prefix) catch |e| {
-        std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
+    //
+    // One call now covers all four replacements: the walker visits each
+    // file exactly once and applies every substitution in a single
+    // read/write cycle. The previous implementation walked the cellar
+    // twice and re-scanned every file for `@@HOMEBREW_PREFIX@@` /
+    // `@@HOMEBREW_CELLAR@@` on the second pass even though the first
+    // pass had already rewritten them.
+    const text_replacements = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix },
+        .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar },
+        .{ .old = "/opt/homebrew", .new = new_prefix },
+        .{ .old = "/usr/local", .new = new_prefix },
     };
-    _ = patcher.patchTextFiles(allocator, cellar_path, "/usr/local", new_prefix) catch |e| {
+    _ = patcher.patchTextFiles(allocator, cellar_path, &text_replacements) catch |e| {
         std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
     };
 

@@ -94,23 +94,32 @@ pub fn patchPaths(
     return .{ .patched_count = patched, .skipped_count = skipped };
 }
 
-/// Patch text files in a directory tree.
-/// Replaces old_prefix and @@HOMEBREW_PREFIX@@/@@HOMEBREW_CELLAR@@ placeholders.
+/// A single (needle → replacement) pair for `patchTextFiles`.
+pub const Replacement = struct {
+    old: []const u8,
+    new: []const u8,
+};
+
+/// Patch text files in a directory tree with a batch of replacements.
+///
+/// All replacements are applied to each file in a single read/write cycle.
+/// The previous implementation required one full walk of the cellar per
+/// replacement pair — `/opt/homebrew` and `/usr/local` each did their own
+/// walk, and each walk ran the `@@HOMEBREW_PREFIX@@` / `@@HOMEBREW_CELLAR@@`
+/// substitutions on every file. With the new API, `cellar.zig` passes all
+/// four replacements in one call and each file is opened once.
 pub fn patchTextFiles(
     allocator: std.mem.Allocator,
     dir_path: []const u8,
-    old_prefix: []const u8,
-    new_prefix: []const u8,
+    replacements: []const Replacement,
 ) !u32 {
+    if (replacements.len == 0) return 0;
+
     var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return 0;
     defer dir.close();
 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
-
-    // Build cellar replacement
-    var cellar_buf: [256]u8 = undefined;
-    const new_cellar = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{new_prefix}) catch return 0;
 
     var count: u32 = 0;
 
@@ -135,40 +144,37 @@ pub fn patchTextFiles(
         const check_len = @min(content.len, 8192);
         if (std.mem.indexOfScalar(u8, content[0..check_len], 0) != null) continue;
 
-        // Perform replacements
+        // Apply each replacement in sequence. `current` always points to
+        // either `content` or a freshly allocated buffer from replaceAll;
+        // when replaceAll returns a different pointer we free the previous
+        // buffer (unless it was the immutable `content` slice).
+        var current: []const u8 = content;
         var modified = false;
-        const result = replaceAll(allocator, content, "@@HOMEBREW_PREFIX@@", new_prefix) catch continue;
-
-        if (result.ptr != content.ptr) modified = true;
-
-        const result2 = replaceAll(allocator, result, "@@HOMEBREW_CELLAR@@", new_cellar) catch {
-            if (modified) allocator.free(result);
-            continue;
-        };
-        if (result2.ptr != result.ptr) {
-            if (result.ptr != content.ptr) allocator.free(result);
-            modified = true;
+        var patch_failed = false;
+        for (replacements) |r| {
+            const next = replaceAll(allocator, current, r.old, r.new) catch {
+                patch_failed = true;
+                break;
+            };
+            if (next.ptr != current.ptr) {
+                if (current.ptr != content.ptr) allocator.free(current);
+                current = next;
+                modified = true;
+            }
         }
-
-        const result3 = replaceAll(allocator, result2, old_prefix, new_prefix) catch {
-            if (result2.ptr != content.ptr) allocator.free(result2);
+        if (patch_failed) {
+            if (current.ptr != content.ptr) allocator.free(current);
             continue;
-        };
-        if (result3.ptr != result2.ptr) {
-            if (result2.ptr != content.ptr) allocator.free(result2);
-            modified = true;
         }
 
         if (modified) {
-            defer if (result3.ptr != content.ptr) allocator.free(result3);
+            defer if (current.ptr != content.ptr) allocator.free(current);
             // Write back
             file.seekTo(0) catch continue;
-            file.writeAll(result3) catch continue;
+            file.writeAll(current) catch continue;
             // Truncate if new content is shorter
-            file.setEndPos(result3.len) catch {};
+            file.setEndPos(current.len) catch {};
             count += 1;
-        } else {
-            if (result3.ptr != content.ptr) allocator.free(result3);
         }
     }
 
@@ -180,48 +186,60 @@ fn hasPrefix(path: []const u8, prefix: []const u8) bool {
     return std.mem.eql(u8, path[0..prefix.len], prefix);
 }
 
-/// Replace all occurrences of needle with replacement in haystack.
-/// Returns the original slice if no changes, or a new allocation if changes were made.
+/// Replace all occurrences of `needle` with `replacement` in `haystack`.
+/// Returns the original slice (same pointer) if there were no matches, or
+/// a caller-owned allocation with the substitution applied. Uses
+/// `std.mem.indexOfPos` which is memchr-based and significantly faster
+/// than a naive byte-by-byte `mem.eql` loop for small needles — the old
+/// implementation showed up as ~60 samples on `mem.eqlBytes` in the
+/// warm-ffmpeg profile.
 fn replaceAll(allocator: std.mem.Allocator, haystack: []const u8, needle: []const u8, replacement: []const u8) ![]const u8 {
     if (needle.len == 0) return haystack;
 
-    // Count occurrences
-    var occ_count: usize = 0;
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) {
-        if (std.mem.eql(u8, haystack[i .. i + needle.len], needle)) {
-            occ_count += 1;
-            i += needle.len;
-        } else {
-            i += 1;
-        }
+    // Fast path: no matches at all → return the original slice unchanged.
+    const first = std.mem.indexOf(u8, haystack, needle) orelse return haystack;
+
+    // Count the remaining matches so we can preallocate exactly.
+    // (indexOfPos is O(n) per call; the total work is one linear pass.)
+    var match_count: usize = 1;
+    var probe = first + needle.len;
+    while (std.mem.indexOfPos(u8, haystack, probe, needle)) |p| {
+        match_count += 1;
+        probe = p + needle.len;
     }
 
-    if (occ_count == 0) return haystack;
-
-    // Build result
-    const new_len = haystack.len - (occ_count * needle.len) + (occ_count * replacement.len);
+    const rep_len = replacement.len;
+    const ndl_len = needle.len;
+    const new_len = haystack.len + match_count * rep_len - match_count * ndl_len;
     const buf = try allocator.alloc(u8, new_len);
+    errdefer allocator.free(buf);
 
+    // Second pass: copy segments between matches and write the replacement
+    // at each match position. Uses indexOfPos for the fast scan.
     var src: usize = 0;
     var dst: usize = 0;
-    while (src + needle.len <= haystack.len) {
-        if (std.mem.eql(u8, haystack[src .. src + needle.len], needle)) {
-            @memcpy(buf[dst .. dst + replacement.len], replacement);
-            dst += replacement.len;
-            src += needle.len;
-        } else {
-            buf[dst] = haystack[src];
-            dst += 1;
-            src += 1;
+    var match = first;
+    while (true) {
+        // Copy the segment leading up to `match`.
+        const segment_len = match - src;
+        if (segment_len > 0) {
+            @memcpy(buf[dst .. dst + segment_len], haystack[src..match]);
+            dst += segment_len;
         }
-    }
-    // Copy remaining bytes
-    while (src < haystack.len) {
-        buf[dst] = haystack[src];
-        dst += 1;
-        src += 1;
+        // Emit replacement.
+        @memcpy(buf[dst .. dst + rep_len], replacement);
+        dst += rep_len;
+        src = match + ndl_len;
+
+        match = std.mem.indexOfPos(u8, haystack, src, needle) orelse break;
     }
 
+    // Tail: everything after the last match.
+    if (src < haystack.len) {
+        @memcpy(buf[dst .. dst + (haystack.len - src)], haystack[src..]);
+        dst += haystack.len - src;
+    }
+
+    std.debug.assert(dst == new_len);
     return buf;
 }

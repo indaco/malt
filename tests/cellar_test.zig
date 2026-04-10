@@ -470,7 +470,12 @@ test "patchTextFiles replaces all placeholder occurrences" {
         f.close();
     }
 
-    const count = try patcher.patchTextFiles(testing.allocator, dir, "/unused", "/opt/malt");
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" },
+        .{ .old = "@@HOMEBREW_CELLAR@@", .new = "/opt/malt/Cellar" },
+        .{ .old = "/unused", .new = "/opt/malt" },
+    };
+    const count = try patcher.patchTextFiles(testing.allocator, dir, &replacements);
     try testing.expect(count > 0);
 
     const content = try readFile(testing.allocator, file_path);
