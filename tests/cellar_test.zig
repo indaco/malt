@@ -650,6 +650,173 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
     try testing.expect(found_exact);
 }
 
+/// Build a minimal universal (fat) Mach-O binary with two arch slices
+/// (arm64 + x86_64), each of which contains a single LC_RPATH load command
+/// carrying the supplied rpath.
+///
+/// Layout:
+///
+///     fat_header       @  0: magic(4)=0xCAFEBABE (big), nfat_arch(4)=2 (big)
+///     fat_arch[0]      @  8: cputype=arm64,  offset=48,  size=288
+///     fat_arch[1]      @ 28: cputype=x86_64, offset=336, size=288
+///     arm64 slice      @ 48: mach_header_64 (32) + LC_RPATH slot (256)
+///     x86_64 slice     @336: mach_header_64 (32) + LC_RPATH slot (256)
+///     total = 624 bytes
+fn buildFatMachOWithRpath(
+    allocator: std.mem.Allocator,
+    rpath: []const u8,
+) ![]u8 {
+    const macho = std.macho;
+    const header_size = @sizeOf(macho.mach_header_64);
+    const cmdsize: u32 = 256;
+    const slice_bytes: u32 = header_size + cmdsize; // 288
+
+    const fat_header_size: usize = 8;
+    const fat_arch_size: usize = 20;
+    const slice0_offset: u32 = @intCast(fat_header_size + 2 * fat_arch_size); // 48
+    const slice1_offset: u32 = slice0_offset + slice_bytes; // 336
+    const total: usize = slice1_offset + slice_bytes; // 624
+
+    const buf = try allocator.alloc(u8, total);
+    @memset(buf, 0);
+
+    // --- fat_header (big-endian) ---
+    std.mem.writeInt(u32, buf[0..4], 0xCAFEBABE, .big); // FAT_MAGIC
+    std.mem.writeInt(u32, buf[4..8], 2, .big); // nfat_arch
+
+    // --- fat_arch[0]: arm64 ---
+    std.mem.writeInt(u32, buf[8..12], 0x0100000C, .big); // cputype = arm64
+    std.mem.writeInt(u32, buf[12..16], 0, .big); // cpusubtype
+    std.mem.writeInt(u32, buf[16..20], slice0_offset, .big); // offset
+    std.mem.writeInt(u32, buf[20..24], slice_bytes, .big); // size
+    std.mem.writeInt(u32, buf[24..28], 14, .big); // align (2^14 is conventional)
+
+    // --- fat_arch[1]: x86_64 ---
+    std.mem.writeInt(u32, buf[28..32], 0x01000007, .big); // cputype = x86_64
+    std.mem.writeInt(u32, buf[32..36], 0, .big); // cpusubtype
+    std.mem.writeInt(u32, buf[36..40], slice1_offset, .big); // offset
+    std.mem.writeInt(u32, buf[40..44], slice_bytes, .big); // size
+    std.mem.writeInt(u32, buf[44..48], 14, .big); // align
+
+    // --- Two identical Mach-O 64 slices ---
+    const lc_rpath: u32 = 0x1c | 0x80000000;
+    const rpath_cmd_size: usize = 12;
+    std.debug.assert(rpath.len + 1 <= cmdsize - rpath_cmd_size);
+
+    for ([_]u32{ slice0_offset, slice1_offset }) |sl| {
+        // mach_header_64 — only the fields the parser actually reads.
+        const hdr = std.mem.bytesAsValue(
+            macho.mach_header_64,
+            buf[sl..][0..header_size],
+        );
+        hdr.* = .{
+            .magic = macho.MH_MAGIC_64,
+            .ncmds = 1,
+            .sizeofcmds = cmdsize,
+        };
+
+        // LC_RPATH command (cmd, cmdsize, path offset) + padded path string.
+        const lc_off = sl + header_size;
+        std.mem.writeInt(u32, buf[lc_off..][0..4], lc_rpath, .little);
+        std.mem.writeInt(u32, buf[lc_off + 4 ..][0..4], cmdsize, .little);
+        std.mem.writeInt(u32, buf[lc_off + 8 ..][0..4], @intCast(rpath_cmd_size), .little);
+        @memcpy(buf[lc_off + rpath_cmd_size ..][0..rpath.len], rpath);
+    }
+
+    return buf;
+}
+
+test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice" {
+    // Short prefix (well within the 13-byte budget).
+    const prefix_str = try std.fmt.allocPrint(
+        testing.allocator,
+        "/tmp/mp-{x}",
+        .{std.crypto.random.int(u32)},
+    );
+    defer testing.allocator.free(prefix_str);
+
+    const prefix: [:0]const u8 = try testing.allocator.allocSentinel(u8, prefix_str.len, 0);
+    defer testing.allocator.free(prefix);
+    @memcpy(@constCast(prefix), prefix_str);
+    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+
+    try std.fs.makeDirAbsolute(prefix);
+    try setupMaltDirs(testing.allocator, prefix);
+
+    // Drop a fat Mach-O fixture into the store.
+    const sha = "p9fat";
+    const name = "fatfake";
+    const version = "1.0";
+    const keg_bin_dir = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/store/{s}/{s}/{s}/bin",
+        .{ prefix, sha, name, version },
+    );
+    defer testing.allocator.free(keg_bin_dir);
+    try std.fs.cwd().makePath(keg_bin_dir);
+
+    const bin_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/fatbin",
+        .{keg_bin_dir},
+    );
+    defer testing.allocator.free(bin_path);
+
+    const fixture = try buildFatMachOWithRpath(
+        testing.allocator,
+        "@@HOMEBREW_PREFIX@@/lib/fat",
+    );
+    defer testing.allocator.free(fixture);
+    {
+        const f = try std.fs.createFileAbsolute(bin_path, .{});
+        defer f.close();
+        try f.writeAll(fixture);
+    }
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const keg = try cellar_mod.materializeWithCellar(
+        testing.allocator,
+        prefix,
+        sha,
+        name,
+        version,
+        ":any",
+    );
+    defer testing.allocator.free(keg.path);
+
+    // Re-parse the patched fat binary and assert BOTH slices are clean.
+    const out_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/bin/fatbin",
+        .{keg.path},
+    );
+    defer testing.allocator.free(out_path);
+
+    const data = try readFile(testing.allocator, out_path);
+    defer testing.allocator.free(data);
+
+    var parsed = try parser.parse(testing.allocator, data);
+    defer parsed.deinit();
+
+    // Must see TWO rpath entries — one per arch slice.
+    try testing.expectEqual(@as(usize, 2), parsed.paths.len);
+
+    var expected_buf: [256]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "{s}/lib/fat", .{prefix});
+
+    for (parsed.paths) |lcp| {
+        try testing.expect(std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_PREFIX@@") == null);
+        try testing.expectEqualStrings(expected, lcp.path);
+    }
+
+    // Additional belt-and-suspenders check: the raw file bytes contain no
+    // `@@HOMEBREW_` at all, ruling out the possibility that one slice was
+    // patched and the other left alone.
+    try testing.expect(std.mem.indexOf(u8, data, "@@HOMEBREW_") == null);
+}
+
 test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" {
     // Same fixture strategy, different token.
     const prefix_str = try std.fmt.allocPrint(

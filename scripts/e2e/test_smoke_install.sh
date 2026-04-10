@@ -170,61 +170,29 @@ for pkg in "${PACKAGES[@]}"; do
     fi
 done
 
-# ── 4. No unresolved @@HOMEBREW_ tokens in the running-arch Mach-O slice ──
+# ── 4. No unresolved @@HOMEBREW_ tokens in ANY Mach-O slice ───────────────
 #
-# We specifically scan the slice that matches the current architecture.
-# malt's Mach-O patcher processes one slice per file (the one that matches
-# the build host's arch), so fat binaries may still have unpatched tokens
-# in the *other* arch's slice. That is a latent bug worth fixing separately
-# but it does NOT affect runtime on the machine running this smoke test —
-# dyld only loads the matching slice.
-case "$(uname -m)" in
-    arm64)  HOST_ARCH=arm64 ;;
-    x86_64) HOST_ARCH=x86_64 ;;
-    *)      HOST_ARCH="" ;;  # unknown — scan unfiltered as a fallback
-esac
-
-log "scanning Cellar for unpatched @@HOMEBREW_* placeholders (arch: ${HOST_ARCH:-any}) …"
+# Since P9, malt patches EVERY arch slice of a fat Mach-O, not just the host
+# arch. This scan therefore uses plain `otool -l` (no -arch filter) so a
+# regression that re-introduces the single-slice behaviour will trip here.
+log "scanning Cellar for unpatched @@HOMEBREW_* placeholders (all arch slices) …"
 bad_count=0
 first_bad=""
-other_arch_count=0
 
 while IFS= read -r -d '' f; do
-    # Only consider Mach-O files.
     if ! file "$f" 2>/dev/null | grep -q 'Mach-O'; then
         continue
     fi
-
-    # Hard check: the host-arch slice must be clean.
-    if [ -n "$HOST_ARCH" ]; then
-        if otool -arch "$HOST_ARCH" -l "$f" 2>/dev/null | grep -q '@@HOMEBREW_'; then
-            bad_count=$((bad_count + 1))
-            [ -z "$first_bad" ] && first_bad="$f"
-        fi
-        # Soft check: any *other* arch slice with remaining tokens is a
-        # known-latent fat-binary patching limitation — warn but don't fail.
-        if otool -l "$f" 2>/dev/null | grep -q '@@HOMEBREW_'; then
-            if ! otool -arch "$HOST_ARCH" -l "$f" 2>/dev/null | grep -q '@@HOMEBREW_'; then
-                other_arch_count=$((other_arch_count + 1))
-            fi
-        fi
-    else
-        # No arch filter available — treat every finding as a hard failure.
-        if otool -l "$f" 2>/dev/null | grep -q '@@HOMEBREW_'; then
-            bad_count=$((bad_count + 1))
-            [ -z "$first_bad" ] && first_bad="$f"
-        fi
+    if otool -l "$f" 2>/dev/null | grep -q '@@HOMEBREW_'; then
+        bad_count=$((bad_count + 1))
+        [ -z "$first_bad" ] && first_bad="$f"
     fi
 done < <(find "$PREFIX/Cellar" -type f -print0 2>/dev/null)
 
 if [ "$bad_count" -eq 0 ]; then
-    pass "zero Mach-O files with unpatched @@HOMEBREW_* placeholders in the ${HOST_ARCH:-all} slice(s)"
+    pass "zero Mach-O files with unpatched @@HOMEBREW_* placeholders (all slices)"
 else
-    fail "$bad_count Mach-O file(s) still contain @@HOMEBREW_ tokens in the $HOST_ARCH slice (first: $first_bad)"
-fi
-
-if [ "$other_arch_count" -gt 0 ]; then
-    info "$other_arch_count fat-binary file(s) carry unpatched tokens in a non-$HOST_ARCH slice — latent cross-arch bug, not a runtime failure on this host"
+    fail "$bad_count Mach-O file(s) still contain @@HOMEBREW_ tokens (first: $first_bad)"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────
