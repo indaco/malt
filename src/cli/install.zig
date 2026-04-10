@@ -21,6 +21,26 @@ const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
 const help = @import("help.zig");
 
+/// Maximum safe byte length for MALT_PREFIX.
+///
+/// Homebrew bottles hard-code `/opt/homebrew` (13 bytes) in LC_LOAD_DYLIB
+/// load-command paths. `malt` rewrites that prefix in place during
+/// materialize, and the replacement path must not be longer than the
+/// original or the load command will not fit its pre-allocated slot and
+/// dyld will refuse to load the binary.
+///
+/// Keeping MALT_PREFIX ≤ 13 bytes guarantees the rewrite always fits,
+/// matching the rationale called out in README.md (§"Directory Layout").
+pub const max_prefix_len: usize = "/opt/homebrew".len;
+
+pub const PrefixError = error{PrefixTooLong};
+
+/// Refuse to proceed when MALT_PREFIX exceeds `max_prefix_len`. Exposed so
+/// `mt doctor` can reuse the same rule.
+pub fn checkPrefixLength(prefix: []const u8) PrefixError!void {
+    if (prefix.len > max_prefix_len) return error.PrefixTooLong;
+}
+
 pub const InstallError = error{
     NoPackages,
     DatabaseError,
@@ -186,6 +206,24 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Initialize infrastructure
     const prefix = atomic.maltPrefix();
+
+    // Pre-flight: refuse the install if MALT_PREFIX is longer than the
+    // Mach-O in-place patching budget. We catch this BEFORE any network
+    // activity so users do not spend minutes downloading bottles that are
+    // guaranteed to fail at patch time.
+    checkPrefixLength(prefix) catch |err| switch (err) {
+        error.PrefixTooLong => {
+            output.err(
+                "MALT_PREFIX '{s}' is {d} bytes, which exceeds the {d}-byte budget for Mach-O in-place patching.",
+                .{ prefix, prefix.len, max_prefix_len },
+            );
+            output.err("Homebrew bottles hard-code `/opt/homebrew` (13 bytes) in LC_LOAD_DYLIB", .{});
+            output.err("entries, and malt replaces that prefix in place — the replacement must", .{});
+            output.err("not be longer or dyld will fail to load the binaries at runtime.", .{});
+            output.err("Set MALT_PREFIX to a shorter path (e.g. /opt/malt or /tmp/mt) and retry.", .{});
+            return InstallError.PrefixTooLong;
+        },
+    };
 
     // Ensure required directories exist (Step 0)
     ensureDirs(prefix);

@@ -11,6 +11,7 @@ const clonefile = @import("../fs/clonefile.zig");
 const output = @import("../ui/output.zig");
 const color = @import("../ui/color.zig");
 const help = @import("help.zig");
+const install_mod = @import("install.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "doctor")) return;
@@ -93,6 +94,23 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else {
             printCheck("Stale lock", .ok, null);
         }
+    }
+
+    // 3b. Prefix length — Mach-O in-place patching budget.
+    //     A long MALT_PREFIX cannot fit inside the load-command slot and will
+    //     silently break every bottle that hard-codes /opt/homebrew paths.
+    install_mod.checkPrefixLength(prefix) catch {
+        var pl_buf: [256]u8 = undefined;
+        const pl_msg = std.fmt.bufPrint(
+            &pl_buf,
+            "MALT_PREFIX '{s}' is {d} bytes, exceeds {d}-byte Mach-O patch budget. Set MALT_PREFIX to a shorter path.",
+            .{ prefix, prefix.len, install_mod.max_prefix_len },
+        ) catch "MALT_PREFIX exceeds the Mach-O patch budget. Set MALT_PREFIX to a shorter path.";
+        printCheck("Prefix length", .err_status, pl_msg);
+        errors += 1;
+    };
+    if (prefix.len <= install_mod.max_prefix_len) {
+        printCheck("Prefix length", .ok, null);
     }
 
     // 4. APFS volume
