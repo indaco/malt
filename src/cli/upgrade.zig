@@ -23,7 +23,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     var cask_only = false;
     var formula_only = false;
-    var dry_run = false;
+    var dry_run = output.isDryRun();
     var pkg_name: ?[]const u8 = null;
 
     for (args) |arg| {

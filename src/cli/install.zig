@@ -148,7 +148,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer packages.deinit(allocator);
     var force_cask = false;
     var force_formula = false;
-    var dry_run = false;
+    // Honour the global `--dry-run` flag consumed by main.zig, while still
+    // allowing programmatic callers to pass `--dry-run` directly in `args`.
+    var dry_run = output.isDryRun();
     var force = false;
 
     for (args) |arg| {
