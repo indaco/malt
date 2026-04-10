@@ -296,11 +296,21 @@ pub const HttpClient = struct {
 
     /// Watchdog thread: waits until either the main thread signals
     /// `request_done` (request finished normally) or the timeout elapses.
-    /// On timeout, marks the connection as closing so the next read
-    /// fails and unblocks a stalled `streamRemaining` call.
+    /// On timeout, marks the connection dead AND hard-shuts-down the
+    /// underlying TCP socket so any in-flight `readv` / `writev` on
+    /// the main thread returns immediately.
+    ///
+    /// **Important:** setting `conn.closing = true` alone is not
+    /// enough to interrupt a blocked read. That flag only influences
+    /// the *next* read — a `readv` already parked in the kernel
+    /// waiting on TLS bytes stays parked indefinitely. This used to
+    /// hang malt for minutes if a dep formula fetch hit a stalled
+    /// TLS connection (observed once during cold-ffmpeg bench runs).
+    /// `posix.shutdown(fd, .both)` forces the kernel to wake the
+    /// blocked syscall with an error, unblocking the main thread.
     ///
     /// Uses `ResetEvent.timedWait` so the main thread can wake us
-    /// immediately on completion — there is no polling overhead.
+    /// immediately on successful completion — no polling overhead.
     fn watchdogFn(
         request_done: *std.Thread.ResetEvent,
         timeout_ns: u64,
@@ -310,6 +320,13 @@ pub const HttpClient = struct {
             error.Timeout => {
                 if (req.connection) |conn| {
                     conn.closing = true;
+                    // Shut down both halves so any blocked read AND
+                    // any in-flight write fail immediately. Errors
+                    // are ignored — we're tearing down the connection
+                    // anyway and a "socket already closed" race is
+                    // harmless here.
+                    const fd = conn.stream_reader.getStream().handle;
+                    std.posix.shutdown(fd, .both) catch {};
                 }
             },
         };
