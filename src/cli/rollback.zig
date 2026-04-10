@@ -21,7 +21,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const name = args[0];
-    var dry_run = false;
+    var dry_run = output.isDryRun();
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--dry-run")) dry_run = true;
     }
