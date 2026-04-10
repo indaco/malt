@@ -84,7 +84,7 @@ pub const bash_script =
     \\    words=("${COMP_WORDS[@]}")
     \\    cword=$COMP_CWORD
     \\
-    \\    local commands="install uninstall remove upgrade update outdated list ls info search cleanup doctor tap untap gc migrate autoremove rollback link unlink run version completions backup restore help"
+    \\    local commands="install uninstall remove upgrade update outdated list ls info search cleanup doctor tap untap gc migrate autoremove rollback link unlink run version completions backup restore purge help"
     \\    local global_flags="--verbose -v --quiet -q --json --dry-run --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
@@ -125,6 +125,7 @@ pub const bash_script =
     \\        install)          cmd_flags="--cask --formula --dry-run --force --quiet -q --json" ;;
     \\        backup)           cmd_flags="--output -o --versions --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
+    \\        purge)            cmd_flags="--backup -b --keep-cache --remove-binary --yes -y --dry-run" ;;
     \\        uninstall|remove) cmd_flags="--force --zap --dry-run" ;;
     \\        upgrade)          cmd_flags="--all --cask --formula --dry-run" ;;
     \\        outdated)         cmd_flags="--json --formula --cask --quiet -q" ;;
@@ -194,6 +195,7 @@ pub const zsh_script =
     \\        'completions:Generate shell completion scripts'
     \\        'backup:Dump installed packages to a restorable text file'
     \\        'restore:Reinstall every package listed in a backup file'
+    \\        'purge:Completely wipe the malt installation from disk'
     \\        'help:Show help'
     \\    )
     \\
@@ -299,6 +301,14 @@ pub const zsh_script =
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
     \\                        '*:file:_files'
     \\                    ;;
+    \\                purge)
+    \\                    _arguments \
+    \\                        '(--backup -b)'{--backup,-b}'[Write a restorable manifest before deleting]:path:_files' \
+    \\                        '--keep-cache[Leave the cache directory intact]' \
+    \\                        '--remove-binary[Also unlink /usr/local/bin/{mt,malt}]' \
+    \\                        '(--yes -y)'{--yes,-y}'[Skip the typed confirmation]' \
+    \\                        '--dry-run[Preview every target without deleting]'
+    \\                    ;;
     \\                version)
     \\                    _values 'subcommand' 'update[Self-update the binary]'
     \\                    ;;
@@ -391,6 +401,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a completions -d 'Generate shell completion scripts'
     \\    complete -c $__malt_bin -n __malt_needs_command -a backup      -d 'Dump installed packages to a text file'
     \\    complete -c $__malt_bin -n __malt_needs_command -a restore     -d 'Reinstall every package in a backup file'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a purge       -d 'Completely wipe the malt installation'
     \\    complete -c $__malt_bin -n __malt_needs_command -a help        -d 'Show help'
     \\
     \\    # install
@@ -467,6 +478,13 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command restore' -l dry-run -d 'Preview without installing'
     \\    complete -c $__malt_bin -n '__malt_using_command restore' -l force   -d 'Pass --force to install'
     \\    complete -c $__malt_bin -n '__malt_using_command restore' -F
+    \\
+    \\    # purge
+    \\    complete -c $__malt_bin -n '__malt_using_command purge' -s b -l backup        -r -d 'Write a restorable manifest before deleting'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l keep-cache       -d 'Leave the cache directory intact'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l remove-binary    -d 'Also unlink /usr/local/bin/{mt,malt}'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge' -s y -l yes             -d 'Skip the typed confirmation'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l dry-run          -d 'Preview every target without deleting'
     \\
     \\    # version — sub-subcommand
     \\    complete -c $__malt_bin -n '__malt_using_command version' -f -a 'update' -d 'Self-update'

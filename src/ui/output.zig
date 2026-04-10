@@ -110,6 +110,45 @@ pub fn err(comptime fmt: []const u8, args: anytype) void {
     f.writeAll("\n") catch {};
 }
 
+/// Internal: write a single styled line to stderr with no icon prefix.
+/// `style` is `null` for plain text. Respects `--quiet`.
+fn lineStyled(style: ?color.Style, comptime fmt: []const u8, args: anytype) void {
+    if (quiet) return;
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    const f = std.fs.File.stderr();
+    if (style != null and color.isColorEnabled()) {
+        f.writeAll(style.?.code()) catch {};
+        f.writeAll(msg) catch {};
+        f.writeAll(color.Style.reset.code()) catch {};
+    } else {
+        f.writeAll(msg) catch {};
+    }
+    f.writeAll("\n") catch {};
+}
+
+/// Yellow line with no prefix — for multi-line warning blocks (banners,
+/// tables) where a repeated `⚠` icon is more noise than signal.
+pub fn warnPlain(comptime fmt: []const u8, args: anytype) void {
+    lineStyled(.yellow, fmt, args);
+}
+
+/// Plain (un-styled, un-prefixed) line — for body text in multi-line
+/// output where color would compete with a warning block above it.
+pub fn plain(comptime fmt: []const u8, args: anytype) void {
+    lineStyled(null, fmt, args);
+}
+
+/// Dim/faint line with no prefix — for low-priority context lines.
+pub fn dimPlain(comptime fmt: []const u8, args: anytype) void {
+    lineStyled(.dim, fmt, args);
+}
+
+/// Bold line with no prefix — for headline values (totals, summaries).
+pub fn boldPlain(comptime fmt: []const u8, args: anytype) void {
+    lineStyled(.bold, fmt, args);
+}
+
 /// Print a dim/faint info message for low-priority status lines.
 pub fn dim(comptime fmt: []const u8, args: anytype) void {
     if (quiet) return;
@@ -127,6 +166,30 @@ pub fn dim(comptime fmt: []const u8, args: anytype) void {
         f.writeAll(msg) catch {};
     }
     f.writeAll("\n") catch {};
+}
+
+/// Read a single line from stdin and return true iff the trimmed input
+/// matches `expected` exactly.  Prints `prompt` to stderr first.
+///
+/// Returns false when stdin is not a TTY so that destructive commands
+/// refuse to run unattended without an explicit `--yes` opt-in.
+pub fn confirmTyped(expected: []const u8, prompt: []const u8) bool {
+    if (!std.posix.isatty(std.posix.STDIN_FILENO)) return false;
+
+    const f = std.fs.File.stderr();
+    if (color.isColorEnabled()) {
+        f.writeAll(color.Style.bold.code()) catch {};
+        f.writeAll(prompt) catch {};
+        f.writeAll(color.Style.reset.code()) catch {};
+    } else {
+        f.writeAll(prompt) catch {};
+    }
+
+    var buf: [128]u8 = undefined;
+    const n = std.posix.read(std.posix.STDIN_FILENO, &buf) catch return false;
+    if (n == 0) return false;
+    const input = std.mem.trim(u8, buf[0..n], " \t\r\n");
+    return std.mem.eql(u8, input, expected);
 }
 
 /// Write JSON to stdout

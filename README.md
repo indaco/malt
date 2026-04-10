@@ -347,6 +347,32 @@ mt restore my-setup.txt --force          # pass --force to the underlying instal
 
 Formulas and casks are batched into two `mt install` invocations, so dependency resolution, parallel downloads, and the atomic install protocol all apply. Lines prefixed with `#` and blank lines are ignored, and entries with a `@<version>` suffix are installed at that exact version.
 
+### `mt purge`
+
+Completely wipe a malt installation from disk — every package, the content-addressable store, linked binaries, the cache, and the SQLite database.
+
+```bash
+mt purge                                 # interactive, requires typing `purge`
+mt purge --dry-run                       # preview every target with sizes
+mt purge --backup ~/malt-snapshot.txt    # dump restorable manifest first
+mt purge --keep-cache                    # leave cache/ intact (faster reinstall)
+mt purge --remove-binary --yes           # also unlink /usr/local/bin/{mt,malt}
+```
+
+| Flag                    | Description                                                                                        |
+| ----------------------- | -------------------------------------------------------------------------------------------------- |
+| `--backup`, `-b` _path_ | Write a `mt restore`-compatible manifest of installed packages **before** any deletion             |
+| `--keep-cache`          | Preserve the cache directory (downloaded bottles stay on disk for a later reinstall)               |
+| `--remove-binary`       | Also unlink `/usr/local/bin/mt` and `/usr/local/bin/malt` (opt-in — these live outside the prefix) |
+| `--yes`, `-y`           | Skip the typed confirmation (required for non-interactive / CI use)                                |
+| `--dry-run`             | Preview every target without touching disk                                                         |
+
+Interactive by default: prints a warning banner with every target and its size, then requires you to type the literal word `purge` (not `y`) to proceed. Refuses to run when stdin is not a TTY unless `--yes` is passed, so a stray `echo y | mt purge` cannot trigger a wipe.
+
+Acquires `{prefix}/db/malt.lock` before deleting so concurrent malt processes cannot race, and releases the lock before removing the `db/` directory itself. Honours `MALT_PREFIX` and `MALT_CACHE`, so pointing those at a throwaway path is the safe way to test the command end-to-end.
+
+Use `mt uninstall <name>` for per-package removal, `mt cleanup` for cache-only cleanup, and `mt autoremove` / `mt gc` for orphan removal — `mt purge` is specifically the nuclear option for uninstalling malt entirely.
+
 ### `mt rollback`
 
 Revert a formula to its previous version using the content-addressable store.

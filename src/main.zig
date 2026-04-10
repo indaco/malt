@@ -36,6 +36,7 @@ const version_update = @import("cli/version_update.zig");
 const completions = @import("cli/completions.zig");
 const backup = @import("cli/backup.zig");
 const restore = @import("cli/restore.zig");
+const purge = @import("cli/purge.zig");
 
 const version_mod = @import("version.zig");
 const version = version_mod.value;
@@ -64,6 +65,7 @@ const Command = enum {
     completions,
     backup,
     restore,
+    purge,
     help,
     version,
 };
@@ -93,6 +95,7 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
     .{ "completions", .completions },
     .{ "backup", .backup },
     .{ "restore", .restore },
+    .{ "purge", .purge },
     .{ "help", .help },
     .{ "--help", .help },
     .{ "-h", .help },
@@ -190,6 +193,7 @@ pub fn main() !void {
             .completions => try completions.execute(allocator, cmd_args),
             .backup => try backup.execute(allocator, cmd_args),
             .restore => try restore.execute(allocator, cmd_args),
+            .purge => try purge.execute(allocator, cmd_args),
             .version_cmd => {
                 // "mt version" — check for "mt version update" subcommand
                 if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
@@ -236,6 +240,7 @@ fn printUsage() void {
         \\  completions   Generate shell completion scripts (bash, zsh, fish)
         \\  backup        Dump installed packages to a restorable text file
         \\  restore       Reinstall every package listed in a backup file
+        \\  purge         Completely wipe the malt installation from disk
         \\  version       Show version (use 'version update' to self-update)
         \\
         \\Global flags:
