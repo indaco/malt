@@ -241,15 +241,21 @@ pub const HttpClient = struct {
         // Timeout watchdog: closes the underlying connection if the read
         // stalls beyond the deadline. This is the only reliable way to
         // abort a blocking read call.
+        //
+        // `request_done` is a one-shot event so the main thread can wake
+        // the watchdog immediately on completion. The previous polling
+        // implementation slept in 1 s ticks and could stall `join()` by
+        // up to a full second per request — that was the entire warm
+        // install floor (see docs/perf/results.md).
         const effective_timeout = if (max_bytes > MAX_METADATA_BYTES) BLOB_TIMEOUT_NS else self.timeout_ns;
-        var request_done = std.atomic.Value(bool).init(false);
+        var request_done: std.Thread.ResetEvent = .{};
         const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
             &request_done,
             effective_timeout,
             &req,
         }) catch null;
         defer {
-            request_done.store(true, .release);
+            request_done.set();
             if (watchdog) |w| w.join();
         }
 
@@ -267,7 +273,7 @@ pub const HttpClient = struct {
                 error.ReadFailed => return error.ReadFailed,
             };
 
-            request_done.store(true, .release);
+            request_done.set();
             if (total_read >= max_bytes) return error.ResponseTooLarge;
         } else {
             const total_read = body_reader.streamRemaining(&body_writer.writer) catch |e| switch (e) {
@@ -275,7 +281,7 @@ pub const HttpClient = struct {
                 error.ReadFailed => return error.ReadFailed,
             };
 
-            request_done.store(true, .release);
+            request_done.set();
             if (total_read >= max_bytes) return error.ResponseTooLarge;
         }
 
@@ -288,26 +294,24 @@ pub const HttpClient = struct {
         };
     }
 
-    /// Watchdog thread: sleeps for the timeout duration, then aborts the
-    /// request by closing its connection. This unblocks streamRemaining.
-    /// Watchdog thread: sleeps for the timeout duration, then marks
-    /// the connection as closing. This causes the next read to fail,
-    /// unblocking a stalled streamRemaining call.
+    /// Watchdog thread: waits until either the main thread signals
+    /// `request_done` (request finished normally) or the timeout elapses.
+    /// On timeout, marks the connection as closing so the next read
+    /// fails and unblocks a stalled `streamRemaining` call.
+    ///
+    /// Uses `ResetEvent.timedWait` so the main thread can wake us
+    /// immediately on completion — there is no polling overhead.
     fn watchdogFn(
-        request_done: *std.atomic.Value(bool),
+        request_done: *std.Thread.ResetEvent,
         timeout_ns: u64,
         req: *std.http.Client.Request,
     ) void {
-        var elapsed: u64 = 0;
-        const interval: u64 = 1 * std.time.ns_per_s;
-        while (elapsed < timeout_ns) {
-            if (request_done.load(.acquire)) return;
-            std.Thread.sleep(interval);
-            elapsed += interval;
-        }
-        // Timeout expired — mark connection as closing to unblock reads
-        if (req.connection) |conn| {
-            conn.closing = true;
-        }
+        request_done.timedWait(timeout_ns) catch |err| switch (err) {
+            error.Timeout => {
+                if (req.connection) |conn| {
+                    conn.closing = true;
+                }
+            },
+        };
     }
 };
