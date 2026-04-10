@@ -1,5 +1,17 @@
 const std = @import("std");
 
+/// Optional progress reporting for long downloads.
+/// `bytes_so_far`: total bytes received so far (after decompression).
+/// `content_length`: total expected bytes from HTTP header, or null if unknown.
+pub const ProgressCallback = struct {
+    context: *anyopaque,
+    func: *const fn (context: *anyopaque, bytes_so_far: u64, content_length: ?u64) void,
+
+    pub fn report(self: ProgressCallback, bytes_so_far: u64, content_length: ?u64) void {
+        self.func(self.context, bytes_so_far, content_length);
+    }
+};
+
 pub const Response = struct {
     status: u16,
     body: []const u8,
@@ -62,8 +74,9 @@ pub const HttpClient = struct {
         self: *HttpClient,
         url: []const u8,
         extra_headers: []const std.http.Header,
+        progress: ?ProgressCallback,
     ) !Response {
-        return self.doGetWithRetry(url, extra_headers, MAX_BLOB_BYTES);
+        return self.doGetWithRetry(url, extra_headers, MAX_BLOB_BYTES, progress);
     }
 
     /// Perform a HEAD request and return only the HTTP status code.
@@ -96,12 +109,57 @@ pub const HttpClient = struct {
     const MAX_RETRIES = 3;
     const RETRY_DELAYS_MS = [_]u64{ 1000, 2000, 4000 };
 
+    /// Writer wrapper that counts bytes written and fires a progress callback.
+    /// Delegates all writes to the inner Allocating writer while tracking byte count.
+    const CountingWriter = struct {
+        inner: *std.Io.Writer.Allocating,
+        bytes_written: u64,
+        progress: ProgressCallback,
+        content_length: ?u64,
+        writer: std.Io.Writer = .{
+            .buffer = &.{},
+            .vtable = &.{
+                .drain = drain,
+                .sendFile = sendFile,
+                .flush = flush,
+                .rebase = rebase,
+            },
+        },
+
+        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *CountingWriter = @fieldParentPtr("writer", w);
+            const n = self.inner.writer.vtable.drain(&self.inner.writer, data, splat) catch
+                return error.WriteFailed;
+            self.bytes_written += n;
+            self.progress.report(self.bytes_written, self.content_length);
+            return n;
+        }
+
+        fn sendFile(w: *std.Io.Writer, file_reader: *std.fs.File.Reader, limit: std.io.Limit) std.Io.Writer.FileError!usize {
+            const self: *CountingWriter = @fieldParentPtr("writer", w);
+            const n = self.inner.writer.vtable.sendFile(&self.inner.writer, file_reader, limit) catch |e| return e;
+            self.bytes_written += n;
+            self.progress.report(self.bytes_written, self.content_length);
+            return n;
+        }
+
+        fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+            const self: *CountingWriter = @fieldParentPtr("writer", w);
+            return self.inner.writer.vtable.flush(&self.inner.writer);
+        }
+
+        fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
+            const self: *CountingWriter = @fieldParentPtr("writer", w);
+            return self.inner.writer.vtable.rebase(&self.inner.writer, preserve, capacity);
+        }
+    };
+
     fn doGet(
         self: *HttpClient,
         url: []const u8,
         extra_headers: []const std.http.Header,
     ) !Response {
-        return self.doGetWithRetry(url, extra_headers, MAX_METADATA_BYTES);
+        return self.doGetWithRetry(url, extra_headers, MAX_METADATA_BYTES, null);
     }
 
     fn doGetWithRetry(
@@ -109,10 +167,11 @@ pub const HttpClient = struct {
         url: []const u8,
         extra_headers: []const std.http.Header,
         max_bytes: usize,
+        progress: ?ProgressCallback,
     ) !Response {
         var attempt: usize = 0;
         while (true) {
-            const result = self.doGetLimited(url, extra_headers, max_bytes);
+            const result = self.doGetLimited(url, extra_headers, max_bytes, progress);
             if (result) |resp| {
                 // Retry on transient server errors
                 if (resp.status == 429 or resp.status == 503 or resp.status == 504) {
@@ -141,6 +200,7 @@ pub const HttpClient = struct {
         url: []const u8,
         extra_headers: []const std.http.Header,
         max_bytes: usize,
+        progress: ?ProgressCallback,
     ) !Response {
         const uri = try std.Uri.parse(url);
 
@@ -155,6 +215,10 @@ pub const HttpClient = struct {
         var response = try req.receiveHead(&redirect_buf);
 
         const status: u16 = @intFromEnum(response.head.status);
+
+        // Content-Length from HTTP headers (may be null for chunked transfer).
+        // Note: this reflects the *compressed* size when content-encoding is set.
+        const content_length: ?u64 = response.head.content_length;
 
         // Read response body with decompression (servers may send gzip).
         // Enforce MAX_RESPONSE_BYTES to prevent OOM from oversized responses.
@@ -176,7 +240,7 @@ pub const HttpClient = struct {
 
         // Timeout watchdog: closes the underlying connection if the read
         // stalls beyond the deadline. This is the only reliable way to
-        // abort a blocking streamRemaining call.
+        // abort a blocking read call.
         const effective_timeout = if (max_bytes > MAX_METADATA_BYTES) BLOB_TIMEOUT_NS else self.timeout_ns;
         var request_done = std.atomic.Value(bool).init(false);
         const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
@@ -189,18 +253,31 @@ pub const HttpClient = struct {
             if (watchdog) |w| w.join();
         }
 
-        // Read the full response body. streamRemaining handles internal
-        // buffering and decompression (gzip/deflate/zstd) correctly.
-        const total_read = body_reader.streamRemaining(&body_writer.writer) catch |e| switch (e) {
-            error.WriteFailed => return error.ReadFailed,
-            error.ReadFailed => return error.ReadFailed,
-        };
+        // Read the full response body with optional progress reporting.
+        // When a progress callback is provided, we wrap the writer to count bytes.
+        if (progress) |p| {
+            var counting = CountingWriter{
+                .inner = &body_writer,
+                .bytes_written = 0,
+                .progress = p,
+                .content_length = content_length,
+            };
+            const total_read = body_reader.streamRemaining(&counting.writer) catch |e| switch (e) {
+                error.WriteFailed => return error.ReadFailed,
+                error.ReadFailed => return error.ReadFailed,
+            };
 
-        // Signal watchdog that we finished before timeout
-        request_done.store(true, .release);
+            request_done.store(true, .release);
+            if (total_read >= max_bytes) return error.ResponseTooLarge;
+        } else {
+            const total_read = body_reader.streamRemaining(&body_writer.writer) catch |e| switch (e) {
+                error.WriteFailed => return error.ReadFailed,
+                error.ReadFailed => return error.ReadFailed,
+            };
 
-        // If we read more than the limit, the response is too large.
-        if (total_read >= max_bytes) return error.ResponseTooLarge;
+            request_done.store(true, .release);
+            if (total_read >= max_bytes) return error.ResponseTooLarge;
+        }
 
         const body = try body_writer.toOwnedSlice();
 

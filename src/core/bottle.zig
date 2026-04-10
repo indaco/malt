@@ -2,9 +2,11 @@
 //! Bottle download, SHA256 verification, and extraction pipeline.
 
 const std = @import("std");
-const ghcr_mod = @import("../net/ghcr.zig");
-const atomic = @import("../fs/atomic.zig");
+
 const archive = @import("../fs/archive.zig");
+const atomic = @import("../fs/atomic.zig");
+const client_mod = @import("../net/client.zig");
+const ghcr_mod = @import("../net/ghcr.zig");
 
 pub const BottleError = error{
     DownloadFailed,
@@ -28,12 +30,13 @@ pub fn download(
     digest: []const u8,
     expected_sha256: []const u8,
     dest_dir: []const u8,
+    progress: ?client_mod.ProgressCallback,
 ) BottleError!BottleResult {
     // Download blob into memory
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
 
-    ghcr.downloadBlob(allocator, repo, digest, &body) catch return BottleError.DownloadFailed;
+    ghcr.downloadBlob(allocator, repo, digest, &body, progress) catch return BottleError.DownloadFailed;
 
     // Compute SHA256 of downloaded data
     var hash: [32]u8 = undefined;
