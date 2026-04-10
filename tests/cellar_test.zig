@@ -5,6 +5,7 @@ const std = @import("std");
 const testing = std.testing;
 const cellar_mod = @import("malt").cellar;
 const patcher = @import("malt").patcher;
+const parser = @import("malt").parser;
 const install_mod = @import("malt").install;
 
 // libc setenv/unsetenv — available because tests link with libc
@@ -479,4 +480,259 @@ test "patchTextFiles replaces all placeholder occurrences" {
     try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_CELLAR@@") == null);
     try testing.expect(std.mem.indexOf(u8, content, "/opt/malt") != null);
     try testing.expect(std.mem.indexOf(u8, content, "/opt/malt/Cellar") != null);
+}
+
+// ---------------------------------------------------------------------------
+// P1 — REGRESSION GUARD: @@HOMEBREW_PREFIX@@ must be rewritten in Mach-O
+// load commands even when cellar_type is ":any" (relocatable bottle).
+//
+// Before the fix, the materializer skipped Mach-O patching entirely for
+// ":any" bottles, leaving @@HOMEBREW_* placeholder tokens in LC_LOAD_DYLIB
+// and LC_RPATH unresolved. Zig, rust, curl and all llvm@* bottles then
+// failed at runtime with `dyld: Symbol not found`.
+//
+// This test builds a minimal but *parser-valid* Mach-O fixture containing
+// one LC_RPATH whose path is `@@HOMEBREW_PREFIX@@/lib/test`, materializes it
+// as a ":any" bottle, re-parses the patched output, and asserts both the
+// negative (no placeholder remains) and the positive (the new prefix is
+// present) invariants.
+// ---------------------------------------------------------------------------
+
+/// Build a minimal valid Mach-O 64 binary with one LC_RPATH load command.
+/// The `cmdsize` is padded to 256 bytes so the load-command slot is large
+/// enough to accept any reasonable replacement prefix.
+fn buildMinimalMachOWithRpath(
+    allocator: std.mem.Allocator,
+    rpath: []const u8,
+) ![]u8 {
+    const macho = std.macho;
+    const header_size = @sizeOf(macho.mach_header_64);
+    const cmdsize: u32 = 256;
+    const total = header_size + cmdsize;
+
+    const buf = try allocator.alloc(u8, total);
+    @memset(buf, 0);
+
+    // Only set the fields we actually care about. std.macho struct fields
+    // use primitive integer types, not typed enums — we write the raw
+    // constants (MH_EXECUTE = 2, LC_RPATH = 0x1c) directly.
+    const hdr = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    hdr.* = .{
+        .magic = macho.MH_MAGIC_64,
+        .ncmds = 1,
+        .sizeofcmds = cmdsize,
+    };
+
+    // LC_RPATH header: cmd(4), cmdsize(4), path(4) + padded path string.
+    // We write the bytes directly rather than through rpath_command because
+    // the field layout varies across Zig releases and we only need three u32s.
+    // LC_RPATH = 0x1c OR'd with LC_REQ_DYLD (0x80000000). The parser matches
+    // on the full LC enum value including the LC_REQ_DYLD flag bit.
+    const lc_rpath: u32 = 0x1c | 0x80000000;
+    const rpath_cmd_size: usize = 12;
+    std.mem.writeInt(u32, buf[header_size..][0..4], lc_rpath, .little);
+    std.mem.writeInt(u32, buf[header_size + 4 ..][0..4], cmdsize, .little);
+    std.mem.writeInt(u32, buf[header_size + 8 ..][0..4], @intCast(rpath_cmd_size), .little); // path offset
+
+    // Copy the rpath string into the slot; trailing bytes stay as NULs.
+    std.debug.assert(rpath.len + 1 <= cmdsize - rpath_cmd_size);
+    @memcpy(buf[header_size + rpath_cmd_size ..][0..rpath.len], rpath);
+
+    return buf;
+}
+
+test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" {
+    // Use a SHORT test prefix so the rewritten path definitely fits in the
+    // original load-command slot. `/tmp/mp-{hex}` is ~14 bytes.
+    const prefix_str = try std.fmt.allocPrint(
+        testing.allocator,
+        "/tmp/mp-{x}",
+        .{std.crypto.random.int(u32)},
+    );
+    defer testing.allocator.free(prefix_str);
+
+    const prefix: [:0]const u8 = try testing.allocator.allocSentinel(u8, prefix_str.len, 0);
+    defer testing.allocator.free(prefix);
+    @memcpy(@constCast(prefix), prefix_str);
+    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+
+    try std.fs.makeDirAbsolute(prefix);
+    try setupMaltDirs(testing.allocator, prefix);
+
+    // Place a synthetic Mach-O inside the store tree.
+    const sha = "p1test";
+    const name = "relfake";
+    const version = "1.0";
+    const keg_bin_dir = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/store/{s}/{s}/{s}/bin",
+        .{ prefix, sha, name, version },
+    );
+    defer testing.allocator.free(keg_bin_dir);
+    try std.fs.cwd().makePath(keg_bin_dir);
+
+    const bin_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/fakebin",
+        .{keg_bin_dir},
+    );
+    defer testing.allocator.free(bin_path);
+
+    const fixture = try buildMinimalMachOWithRpath(
+        testing.allocator,
+        "@@HOMEBREW_PREFIX@@/lib/test",
+    );
+    defer testing.allocator.free(fixture);
+    {
+        const f = try std.fs.createFileAbsolute(bin_path, .{});
+        defer f.close();
+        try f.writeAll(fixture);
+    }
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    // The exact bug scenario: `:any` bottle that would have skipped Mach-O
+    // patching before P1.
+    const keg = try cellar_mod.materializeWithCellar(
+        testing.allocator,
+        prefix,
+        sha,
+        name,
+        version,
+        ":any",
+    );
+    defer testing.allocator.free(keg.path);
+
+    // Re-parse the patched binary and validate the load-command path.
+    const out_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/bin/fakebin",
+        .{keg.path},
+    );
+    defer testing.allocator.free(out_path);
+
+    const data = try readFile(testing.allocator, out_path);
+    defer testing.allocator.free(data);
+
+    var parsed = try parser.parse(testing.allocator, data);
+    defer parsed.deinit();
+
+    // Must have at least one LC_RPATH.
+    try testing.expect(parsed.paths.len >= 1);
+
+    // Negative invariant: no placeholder tokens anywhere.
+    for (parsed.paths) |lcp| {
+        try testing.expect(std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_PREFIX@@") == null);
+        try testing.expect(std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_CELLAR@@") == null);
+    }
+
+    // Positive invariant: at least one load command now holds the new prefix.
+    var found_new_prefix = false;
+    for (parsed.paths) |lcp| {
+        if (std.mem.indexOf(u8, lcp.path, prefix) != null) {
+            found_new_prefix = true;
+            break;
+        }
+    }
+    try testing.expect(found_new_prefix);
+
+    // Spot-check the specific expected result.
+    var expected_buf: [256]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "{s}/lib/test", .{prefix});
+    var found_exact = false;
+    for (parsed.paths) |lcp| {
+        if (std.mem.eql(u8, lcp.path, expected)) {
+            found_exact = true;
+            break;
+        }
+    }
+    try testing.expect(found_exact);
+}
+
+test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" {
+    // Same fixture strategy, different token.
+    const prefix_str = try std.fmt.allocPrint(
+        testing.allocator,
+        "/tmp/mp-{x}",
+        .{std.crypto.random.int(u32)},
+    );
+    defer testing.allocator.free(prefix_str);
+
+    const prefix: [:0]const u8 = try testing.allocator.allocSentinel(u8, prefix_str.len, 0);
+    defer testing.allocator.free(prefix);
+    @memcpy(@constCast(prefix), prefix_str);
+    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+
+    try std.fs.makeDirAbsolute(prefix);
+    try setupMaltDirs(testing.allocator, prefix);
+
+    const sha = "p1cellar";
+    const name = "cellarfake";
+    const version = "2.0";
+    const keg_bin_dir = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/store/{s}/{s}/{s}/bin",
+        .{ prefix, sha, name, version },
+    );
+    defer testing.allocator.free(keg_bin_dir);
+    try std.fs.cwd().makePath(keg_bin_dir);
+
+    const bin_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/fakelib",
+        .{keg_bin_dir},
+    );
+    defer testing.allocator.free(bin_path);
+
+    const fixture = try buildMinimalMachOWithRpath(
+        testing.allocator,
+        "@@HOMEBREW_CELLAR@@/openssl@3/3.0/lib",
+    );
+    defer testing.allocator.free(fixture);
+    {
+        const f = try std.fs.createFileAbsolute(bin_path, .{});
+        defer f.close();
+        try f.writeAll(fixture);
+    }
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const keg = try cellar_mod.materializeWithCellar(
+        testing.allocator,
+        prefix,
+        sha,
+        name,
+        version,
+        ":any_skip_relocation",
+    );
+    defer testing.allocator.free(keg.path);
+
+    const out_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/bin/fakelib",
+        .{keg.path},
+    );
+    defer testing.allocator.free(out_path);
+
+    const data = try readFile(testing.allocator, out_path);
+    defer testing.allocator.free(data);
+
+    var parsed = try parser.parse(testing.allocator, data);
+    defer parsed.deinit();
+
+    var expected_buf: [256]u8 = undefined;
+    const expected = try std.fmt.bufPrint(
+        &expected_buf,
+        "{s}/Cellar/openssl@3/3.0/lib",
+        .{prefix},
+    );
+
+    var found = false;
+    for (parsed.paths) |lcp| {
+        try testing.expect(std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_CELLAR@@") == null);
+        if (std.mem.eql(u8, lcp.path, expected)) found = true;
+    }
+    try testing.expect(found);
 }
