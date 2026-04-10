@@ -310,6 +310,43 @@ mt migrate --dry-run
 
 Scans the Homebrew Cellar, resolves each installed package via the API, and installs it through malt. Does **not** modify the Homebrew installation. Packages requiring `post_install` hooks are skipped with a report.
 
+### `mt backup`
+
+Dump the list of directly-installed formulas and casks to a plain-text file for later restoration on the same or another machine.
+
+```bash
+mt backup                                # writes malt-backup-<timestamp>.txt to cwd
+mt backup --output my-setup.txt          # custom path
+mt backup -o -                           # write to stdout
+mt backup --versions                     # pin each entry to its installed version
+```
+
+| Flag             | Description                                         |
+| ---------------- | --------------------------------------------------- |
+| `--output`, `-o` | Destination path (`-` for stdout)                   |
+| `--versions`     | Append `@<version>` to each entry for exact pinning |
+| `--quiet`, `-q`  | Suppress status messages                            |
+
+Only directly-installed formulas are recorded — transitive dependencies are resolved again on restore. The file format is plain text, one entry per line (`formula <name>` or `cask <token>`), with `#` comments. It is safe to hand-edit before restoring.
+
+### `mt restore`
+
+Reinstall every entry in a backup file produced by `mt backup`.
+
+```bash
+mt restore my-setup.txt
+mt restore my-setup.txt --dry-run        # preview what would be installed
+mt restore my-setup.txt --force          # pass --force to the underlying installs
+```
+
+| Flag            | Description                                        |
+| --------------- | -------------------------------------------------- |
+| `--dry-run`     | Print the list of packages without installing      |
+| `--force`       | Forward `--force` to `mt install` for each package |
+| `--quiet`, `-q` | Suppress status messages                           |
+
+Formulas and casks are batched into two `mt install` invocations, so dependency resolution, parallel downloads, and the atomic install protocol all apply. Lines prefixed with `#` and blank lines are ignored, and entries with a `@<version>` suffix are installed at that exact version.
+
 ### `mt rollback`
 
 Revert a formula to its previous version using the content-addressable store.
