@@ -122,20 +122,20 @@ pub fn materializeWithCellar(
         break :blk keg_src;
     };
 
-    // Clone from store to Cellar
-    clonefile.cloneTree(src, cellar_path) catch return CellarError.CloneFailed;
-
-    // errdefer: remove cellar entry on any failure from this point.
-    // Also remove the now-empty `Cellar/{name}/` parent dir if we just created
-    // it and no other versions live there — keeps failed installs from
-    // leaving orphan directories behind.
+    // errdefer: remove cellar entry on any failure from this point — including
+    // `cloneTree` itself, which would otherwise leave the freshly-created
+    // `Cellar/{name}/` parent dir behind as an empty orphan.
     //
+    // `deleteTreeAbsolute` is a no-op when the target doesn't exist yet, and
     // `deleteDirAbsolute` only succeeds when the directory is empty, so
     // installed sibling versions are left untouched.
     errdefer {
         std.fs.deleteTreeAbsolute(cellar_path) catch {};
         std.fs.deleteDirAbsolute(parent) catch {};
     }
+
+    // Clone from store to Cellar
+    clonefile.cloneTree(src, cellar_path) catch return CellarError.CloneFailed;
 
     const new_prefix = atomic.maltPrefix();
 
