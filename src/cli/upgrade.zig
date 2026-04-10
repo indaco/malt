@@ -193,7 +193,7 @@ fn upgradeFormula(
         };
 
         output.info("  Downloading {s}...", .{name});
-        _ = bottle_mod.download(allocator, &ghcr, repo, digest, bottle.sha256, tmp_dir) catch {
+        _ = bottle_mod.download(allocator, &ghcr, repo, digest, bottle.sha256, tmp_dir, null) catch {
             output.err("  Download failed: {s}", .{name});
             atomic.cleanupTempDir(tmp_dir);
             allocator.free(tmp_dir);
@@ -212,7 +212,7 @@ fn upgradeFormula(
     }
 
     // Step 5: Materialize new version to Cellar
-    output.info("Materializing {s} to cellar...", .{name});
+    output.dim("Materializing {s} to cellar...", .{name});
     const new_keg = cellar_mod.materialize(
         allocator,
         prefix,

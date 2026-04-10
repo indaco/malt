@@ -2,6 +2,7 @@
 //! Cask JSON parsing and installation (DMG, PKG, ZIP).
 
 const std = @import("std");
+
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
 
@@ -127,9 +128,10 @@ pub const CaskInstaller = struct {
     allocator: std.mem.Allocator,
     prefix: [:0]const u8,
     db: *sqlite.Database,
+    progress: ?client_mod.ProgressCallback,
 
     pub fn init(allocator: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]const u8) CaskInstaller {
-        return .{ .allocator = allocator, .db = db, .prefix = prefix };
+        return .{ .allocator = allocator, .db = db, .prefix = prefix, .progress = null };
     }
 
     /// Install a cask. Downloads, verifies SHA256, and installs based on artifact type.
@@ -148,7 +150,7 @@ pub const CaskInstaller = struct {
         };
 
         // Download to cache
-        const cache_path = self.downloadToCache(cask, cache_dir) catch
+        const cache_path = self.downloadToCache(cask, cache_dir, self.progress) catch
             return CaskError.DownloadFailed;
         errdefer {
             std.fs.cwd().deleteFile(cache_path) catch {};
@@ -237,7 +239,7 @@ pub const CaskInstaller = struct {
 
     // --- Private helpers ---
 
-    fn downloadToCache(self: *CaskInstaller, cask: *const Cask, cache_dir: []const u8) ![]const u8 {
+    fn downloadToCache(self: *CaskInstaller, cask: *const Cask, cache_dir: []const u8, progress: ?client_mod.ProgressCallback) ![]const u8 {
         const ext_str = switch (artifactTypeFromUrl(cask.url)) {
             .dmg => ".dmg",
             .zip => ".zip",
@@ -251,7 +253,7 @@ pub const CaskInstaller = struct {
         var http = client_mod.HttpClient.init(self.allocator);
         defer http.deinit();
 
-        var resp = try http.getWithHeaders(cask.url, &.{});
+        var resp = try http.getWithHeaders(cask.url, &.{}, progress);
         defer resp.deinit();
 
         if (resp.status != 200) return error.DownloadFailed;
