@@ -12,6 +12,7 @@ const output = @import("../ui/output.zig");
 const color = @import("../ui/color.zig");
 const help = @import("help.zig");
 const install_mod = @import("install.zig");
+const parser = @import("../macho/parser.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "doctor")) return;
@@ -245,6 +246,57 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
+    // 8b. Unpatched Mach-O placeholders — scan Cellar/**/* for binaries whose
+    //     LC_LOAD_DYLIB / LC_RPATH load commands still contain literal
+    //     @@HOMEBREW_PREFIX@@ or @@HOMEBREW_CELLAR@@ tokens. These fail at
+    //     runtime with `dyld: Symbol not found`.
+    blk_mach: {
+        var cellar_root_buf: [512]u8 = undefined;
+        const cellar_root = std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{prefix}) catch break :blk_mach;
+
+        var cellar_dir = std.fs.openDirAbsolute(cellar_root, .{ .iterate = true }) catch {
+            // No Cellar yet — nothing to scan.
+            printCheck("Mach-O placeholders", .ok, null);
+            break :blk_mach;
+        };
+        defer cellar_dir.close();
+
+        var walker = cellar_dir.walk(allocator) catch {
+            printCheck("Mach-O placeholders", .warn_status, "Could not walk Cellar tree");
+            warnings += 1;
+            break :blk_mach;
+        };
+        defer walker.deinit();
+
+        var bad_count: u32 = 0;
+        var first_bad_buf: [256]u8 = undefined;
+        var first_bad_len: usize = 0;
+
+        while (walker.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            if (hasUnpatchedPlaceholder(allocator, &cellar_dir, entry.path) catch false) {
+                bad_count += 1;
+                if (first_bad_len == 0) {
+                    const s = std.fmt.bufPrint(&first_bad_buf, "{s}", .{entry.path}) catch continue;
+                    first_bad_len = s.len;
+                }
+            }
+        }
+
+        if (bad_count > 0) {
+            var msg_buf_m: [512]u8 = undefined;
+            const msg_m = std.fmt.bufPrint(
+                &msg_buf_m,
+                "{d} Mach-O file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Reinstall the affected packages.",
+                .{ bad_count, first_bad_buf[0..first_bad_len] },
+            ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
+            printCheck("Mach-O placeholders", .err_status, msg_m);
+            errors += 1;
+        } else {
+            printCheck("Mach-O placeholders", .ok, null);
+        }
+    }
+
     // 9. Disk space — warn if < 1 GB free on the malt prefix volume
     blk9: {
         const mount_c = @cImport(@cInclude("sys/mount.h"));
@@ -282,6 +334,43 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     } else {
         output.info("Your malt installation is healthy", .{});
     }
+}
+
+/// True if `rel_path` inside `base_dir` is a Mach-O binary with at least one
+/// load command that still contains `@@HOMEBREW_PREFIX@@` or
+/// `@@HOMEBREW_CELLAR@@`. Any I/O or parser error is treated as "not bad" —
+/// doctor's placeholder check is best-effort.
+fn hasUnpatchedPlaceholder(
+    allocator: std.mem.Allocator,
+    base_dir: *std.fs.Dir,
+    rel_path: []const u8,
+) !bool {
+    var file = base_dir.openFile(rel_path, .{}) catch return false;
+    defer file.close();
+
+    var magic: [4]u8 = undefined;
+    const n = file.readAll(&magic) catch return false;
+    if (n < 4) return false;
+    if (!parser.isMachO(&magic)) return false;
+
+    // Re-read the full file — parser needs the whole buffer.
+    const stat = file.stat() catch return false;
+    if (stat.size > 512 * 1024 * 1024) return false; // skip pathologically large files
+    const data = allocator.alloc(u8, stat.size) catch return false;
+    defer allocator.free(data);
+
+    file.seekTo(0) catch return false;
+    const read = file.readAll(data) catch return false;
+    if (read < data.len) return false;
+
+    var macho = parser.parse(allocator, data) catch return false;
+    defer macho.deinit();
+
+    for (macho.paths) |lcp| {
+        if (std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_PREFIX@@") != null) return true;
+        if (std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_CELLAR@@") != null) return true;
+    }
+    return false;
 }
 
 const CheckStatus = enum { ok, warn_status, err_status };
