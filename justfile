@@ -14,6 +14,10 @@ build-release:
 build-universal:
     zig build universal -Doptimize=ReleaseSafe
 
+# Install malt globally (builds from source, installs to /usr/local/bin)
+install:
+    ./scripts/install.sh
+
 # Run unit tests
 test:
     zig build test
