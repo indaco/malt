@@ -524,6 +524,24 @@ fn findFailedDep(
     return null;
 }
 
+/// Thread entry-point for parallel dep formula fetching. Builds a
+/// throw-away `BrewApi` backed by a worker-local `HttpClient` because
+/// `std.http.Client` is not thread-safe across calls, then fetches the
+/// formula JSON for one dep and stores it in `result`. On any failure
+/// leaves `result.*` as `null`; the caller treats null as "skip this
+/// dep" the same way the old serial loop's `catch continue` did.
+fn fetchFormulaWorker(
+    allocator: std.mem.Allocator,
+    cache_dir: []const u8,
+    dep_name: []const u8,
+    result: *?[]const u8,
+) void {
+    var local_http = client_mod.HttpClient.init(allocator);
+    defer local_http.deinit();
+    var local_api = api_mod.BrewApi.init(allocator, &local_http, cache_dir);
+    result.* = local_api.fetchFormula(dep_name) catch null;
+}
+
 /// Collect download jobs for a formula and all its dependencies.
 /// Appends to the shared jobs list for parallel download.
 fn collectFormulaJobs(
@@ -552,11 +570,42 @@ fn collectFormulaJobs(
     // Resolve dependencies
     const deps = deps_mod.resolve(allocator, formula.name, api, db) catch &.{};
 
-    // Add deps as jobs
-    for (deps) |dep| {
-        if (dep.already_installed) continue;
+    // Fetch every dep's formula JSON **in parallel**. Each worker gets its
+    // own HttpClient + throw-away BrewApi because `std.http.Client` is not
+    // thread-safe. On a cold install the serial version paid the full
+    // network round-trip for each dep back-to-back; at 300-500 ms per fetch
+    // and 6-11 deps for typical packages that was the dominant remaining
+    // cold-install cost after the watchdog fix.
+    const dep_jsons = allocator.alloc(?[]const u8, deps.len) catch return InstallError.DownloadFailed;
+    defer allocator.free(dep_jsons);
+    @memset(dep_jsons, null);
 
-        const dep_json = api.fetchFormula(dep.name) catch continue;
+    if (deps.len > 0) {
+        const threads = allocator.alloc(std.Thread, deps.len) catch return InstallError.DownloadFailed;
+        defer allocator.free(threads);
+
+        var spawned: usize = 0;
+        for (deps, 0..) |dep, i| {
+            if (dep.already_installed) continue;
+            if (std.Thread.spawn(.{}, fetchFormulaWorker, .{
+                allocator, api.cache_dir, dep.name, &dep_jsons[i],
+            })) |t| {
+                threads[spawned] = t;
+                spawned += 1;
+            } else |_| {
+                // Spawn failure → fall back to inline fetch.
+                fetchFormulaWorker(allocator, api.cache_dir, dep.name, &dep_jsons[i]);
+            }
+        }
+        for (threads[0..spawned]) |t| t.join();
+    }
+
+    // Add deps as jobs — serial post-processing (parse + dedup + append)
+    // using the JSONs we fetched above.
+    for (deps, 0..) |dep, i| {
+        if (dep.already_installed) continue;
+        const dep_json = dep_jsons[i] orelse continue;
+
         var dep_formula = formula_mod.parseFormula(allocator, dep_json) catch {
             allocator.free(dep_json);
             continue;
