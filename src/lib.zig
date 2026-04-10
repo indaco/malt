@@ -23,3 +23,5 @@ pub const version = @import("version.zig");
 pub const completions = @import("cli/completions.zig");
 pub const backup = @import("cli/backup.zig");
 pub const purge = @import("cli/purge.zig");
+pub const install = @import("cli/install.zig");
+pub const doctor = @import("cli/doctor.zig");

@@ -5,6 +5,7 @@ const std = @import("std");
 const testing = std.testing;
 const cellar_mod = @import("malt").cellar;
 const patcher = @import("malt").patcher;
+const install_mod = @import("malt").install;
 
 // libc setenv/unsetenv — available because tests link with libc
 const c = struct {
@@ -329,6 +330,129 @@ test "binary files are skipped by text patching without error" {
 // ---------------------------------------------------------------------------
 // patchTextFiles direct test
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// P4 — Pre-flight MALT_PREFIX length check
+// ---------------------------------------------------------------------------
+
+test "checkPrefixLength accepts prefixes within the Mach-O patch budget" {
+    try install_mod.checkPrefixLength("/opt/malt");
+    try install_mod.checkPrefixLength("/opt/homebrew"); // exactly 13 bytes — boundary
+    try install_mod.checkPrefixLength("/tmp/mt");
+}
+
+test "checkPrefixLength rejects prefixes that overflow the budget" {
+    try testing.expectError(
+        error.PrefixTooLong,
+        install_mod.checkPrefixLength("/var/folders/abc/def/ghi/jkl/mno/prefix"),
+    );
+    try testing.expectError(
+        error.PrefixTooLong,
+        install_mod.checkPrefixLength("/opt/homebrew/"), // 14 bytes — just over
+    );
+}
+
+test "max_prefix_len matches the /opt/homebrew budget" {
+    try testing.expectEqual(@as(usize, "/opt/homebrew".len), install_mod.max_prefix_len);
+}
+
+// ---------------------------------------------------------------------------
+// P5 — CellarError.describeError covers every tag
+// ---------------------------------------------------------------------------
+
+test "describeError returns a non-empty, distinct message for every CellarError" {
+    const cases = [_]cellar_mod.CellarError{
+        cellar_mod.CellarError.CloneFailed,
+        cellar_mod.CellarError.PatchFailed,
+        cellar_mod.CellarError.PathTooLong,
+        cellar_mod.CellarError.CodesignFailed,
+        cellar_mod.CellarError.RemoveFailed,
+        cellar_mod.CellarError.OutOfMemory,
+    };
+    var seen: [cases.len][]const u8 = undefined;
+    for (cases, 0..) |e, i| {
+        const msg = cellar_mod.describeError(e);
+        try testing.expect(msg.len > 0);
+        // Every tag must map to a distinct description.
+        for (seen[0..i]) |prev| {
+            try testing.expect(!std.mem.eql(u8, msg, prev));
+        }
+        seen[i] = msg;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P8 — Empty Cellar/{name}/ parent dir is cleaned up on failed materialize
+// ---------------------------------------------------------------------------
+
+test "failed materialize cleans up empty Cellar/{name}/ parent dir" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        std.fs.deleteTreeAbsolute(prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+
+    try setupMaltDirs(testing.allocator, prefix);
+
+    // No bottle fixture — the materialize call must fail (nothing to clone),
+    // which is what exercises the errdefer.
+    _ = setMaltPrefix(prefix);
+    defer restoreMaltPrefix("");
+
+    const result = cellar_mod.materializeWithCellar(
+        testing.allocator,
+        prefix,
+        "no-such-sha",
+        "ghost",
+        "0.0.1",
+        ":any",
+    );
+    try testing.expectError(cellar_mod.CellarError.CloneFailed, result);
+
+    // Cellar/ghost/ must not exist on disk after the failure.
+    var parent_buf: [512]u8 = undefined;
+    const parent = try std.fmt.bufPrint(&parent_buf, "{s}/Cellar/ghost", .{prefix});
+    const parent_exists = blk: {
+        std.fs.accessAbsolute(parent, .{}) catch break :blk false;
+        break :blk true;
+    };
+    try testing.expect(!parent_exists);
+}
+
+test "failed materialize leaves sibling versions untouched" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        std.fs.deleteTreeAbsolute(prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+
+    try setupMaltDirs(testing.allocator, prefix);
+
+    // Pre-populate Cellar/keeper/1.0/ — this simulates an existing installed
+    // version that a later failed materialize of keeper 2.0 must NOT delete.
+    const keeper_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/keeper/1.0", .{prefix});
+    defer testing.allocator.free(keeper_dir);
+    try std.fs.cwd().makePath(keeper_dir);
+
+    _ = setMaltPrefix(prefix);
+    defer restoreMaltPrefix("");
+
+    const result = cellar_mod.materializeWithCellar(
+        testing.allocator,
+        prefix,
+        "missing-sha",
+        "keeper",
+        "2.0",
+        ":any",
+    );
+    try testing.expectError(cellar_mod.CellarError.CloneFailed, result);
+
+    // Cellar/keeper/1.0 must still be there — the errdefer may delete the
+    // empty parent, but it must NOT recurse into a non-empty one.
+    var alive_buf: [512]u8 = undefined;
+    const alive = try std.fmt.bufPrint(&alive_buf, "{s}/Cellar/keeper/1.0", .{prefix});
+    try std.fs.accessAbsolute(alive, .{});
+}
 
 test "patchTextFiles replaces all placeholder occurrences" {
     const dir = try createTestDir(testing.allocator);
