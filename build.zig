@@ -59,6 +59,8 @@ pub fn build(b: *std.Build) void {
         "tests/version_update_test.zig",
         "tests/cask_test.zig",
         "tests/cellar_test.zig",
+        "tests/progress_test.zig",
+        "tests/progress_e2e_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");
