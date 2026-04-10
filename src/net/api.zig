@@ -70,14 +70,24 @@ pub const BrewApi = struct {
     // --- internal ---
 
     fn fetchCached(self: *BrewApi, key: []const u8, url: []const u8, prefix: []const u8) ApiError![]const u8 {
-        // Try to read from cache
+        // Fast path: if a prior lookup already learned this name is a 404
+        // (e.g. cask-ambiguity probe for a formula), bail before we hit
+        // the network. Without this, `malt install <formula>` did one
+        // real HTTP round-trip on every single run because 404s were
+        // never cached.
+        if (self.readNotFoundCache(key, prefix)) return ApiError.NotFound;
+
+        // Try the normal success cache.
         if (self.readCache(key, prefix)) |cached| return cached;
 
         // Cache miss or expired — fetch from API
         var resp = self.http.get(url) catch return ApiError.ApiUnreachable;
         defer resp.deinit();
 
-        if (resp.status == 404) return ApiError.NotFound;
+        if (resp.status == 404) {
+            self.writeNotFoundCache(key, prefix);
+            return ApiError.NotFound;
+        }
         if (resp.status != 200) return ApiError.ApiUnreachable;
 
         // Save to cache (best effort)
@@ -127,6 +137,41 @@ pub const BrewApi = struct {
         const file = std.fs.cwd().createFile(cache_path, .{}) catch return;
         defer file.close();
         file.writeAll(data) catch {};
+    }
+
+    /// Check for a cached 404 marker. Returns true if a fresh marker
+    /// exists for this key — callers should treat that as `NotFound`
+    /// and skip the network. Uses the same TTL as success responses
+    /// so the cache auto-refreshes if the upstream ever starts
+    /// returning 200.
+    fn readNotFoundCache(self: *BrewApi, key: []const u8, prefix: []const u8) bool {
+        var path_buf: [512]u8 = undefined;
+        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return false;
+
+        const stat = std.fs.cwd().statFile(cache_path) catch return false;
+        const now = std.time.timestamp();
+        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s));
+        if (now - mtime_secs > CACHE_TTL_SECS) return false;
+        return true;
+    }
+
+    /// Write a zero-byte marker file to record that this key 404s. The
+    /// file's mtime is the TTL anchor — `readNotFoundCache` checks it
+    /// against `CACHE_TTL_SECS`. Best-effort; failures are silent so a
+    /// missing cache dir never breaks an install.
+    fn writeNotFoundCache(self: *const BrewApi, key: []const u8, prefix: []const u8) void {
+        var dir_buf: [512]u8 = undefined;
+        const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
+        std.fs.makeDirAbsolute(dir_path) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return,
+        };
+
+        var path_buf: [512]u8 = undefined;
+        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return;
+
+        const file = std.fs.cwd().createFile(cache_path, .{}) catch return;
+        file.close();
     }
 
     /// Maximum cache size (200 MB). Entries are evicted by age (oldest first).
