@@ -60,36 +60,72 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
     return ParseError.InvalidMagic;
 }
 
+/// Parse every arch slice in a fat Mach-O and return the union of their
+/// load-command paths.
+///
+/// Before: this only parsed the slice matching the host CPU and ignored the
+/// rest. That silently left the other arch's LC_LOAD_DYLIB / LC_RPATH paths
+/// unpatched, so running e.g. an arm64 install on an Intel Mac (or vice
+/// versa) would fail with `dyld: Symbol not found` on the first fat-bottle
+/// it touched. (P9 — cross-arch fat-binary patching.)
+///
+/// Each `LoadCommandPath` already carries the absolute file offset of its
+/// path string (parseMachO64 is given the slice's `base_offset`), so the
+/// patcher can rewrite every arch's load commands in a single pass over
+/// the full file buffer.
+///
+/// Unrecognised or truncated slices are skipped rather than aborting the
+/// whole parse — some fat archives carry legacy arches (PPC, arm64e, arm64_32)
+/// whose parseMachO64 call can legitimately return InvalidMagic /
+/// UnsupportedArch / TruncatedFile.
 fn parseFat(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
     if (data.len < 8) return ParseError.TruncatedFile;
 
-    // Fat header is big-endian
+    // Fat header is big-endian: magic (4), nfat_arch (4).
     const nfat_arch = std.mem.readInt(u32, data[4..8], .big);
 
-    // Find the slice for the current architecture
-    const target_cputype: u32 = if (@import("builtin").cpu.arch == .aarch64)
-        0x0100000C // CPU_TYPE_ARM64
-    else
-        0x01000007; // CPU_TYPE_X86_64
+    var all_paths: std.ArrayList(LoadCommandPath) = .empty;
+    errdefer all_paths.deinit(allocator);
 
     var offset: usize = 8;
     var i: u32 = 0;
     while (i < nfat_arch) : (i += 1) {
         if (offset + 20 > data.len) return ParseError.TruncatedFile;
 
-        const cputype = std.mem.readInt(u32, data[offset..][0..4], .big);
+        // fat_arch layout: cputype(4), cpusubtype(4), offset(4), size(4), align(4).
         const slice_offset = std.mem.readInt(u32, data[offset + 8 ..][0..4], .big);
         const slice_size = std.mem.readInt(u32, data[offset + 12 ..][0..4], .big);
 
-        if (cputype == target_cputype) {
-            if (slice_offset + slice_size > data.len) return ParseError.TruncatedFile;
-            return parseMachO64(allocator, data[slice_offset .. slice_offset + slice_size], slice_offset);
-        }
+        offset += 20;
 
-        offset += 20; // sizeof(fat_arch)
+        if (slice_offset + slice_size > data.len) return ParseError.TruncatedFile;
+
+        // Parse this slice. Skip unrecognised slices (legacy arches etc.)
+        // rather than failing the whole file.
+        const slice_result = parseMachO64(
+            allocator,
+            data[slice_offset .. slice_offset + slice_size],
+            slice_offset,
+        ) catch |e| switch (e) {
+            ParseError.InvalidMagic,
+            ParseError.UnsupportedArch,
+            ParseError.TruncatedFile,
+            => continue,
+            ParseError.InvalidLoadCommand => continue,
+            ParseError.OutOfMemory => return e,
+        };
+        // Transfer the slice's LoadCommandPath values (struct-by-value) into
+        // the aggregated list, then free the slice's container. The `path`
+        // byte slices inside each LoadCommandPath still reference the outer
+        // `data` buffer which outlives this call.
+        defer allocator.free(slice_result.paths);
+        all_paths.appendSlice(allocator, slice_result.paths) catch return ParseError.OutOfMemory;
     }
 
-    return ParseError.UnsupportedArch;
+    return .{
+        .paths = all_paths.toOwnedSlice(allocator) catch return ParseError.OutOfMemory,
+        .allocator = allocator,
+    };
 }
 
 fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usize) ParseError!MachO {

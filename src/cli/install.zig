@@ -21,6 +21,26 @@ const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
 const help = @import("help.zig");
 
+/// Maximum safe byte length for MALT_PREFIX.
+///
+/// Homebrew bottles hard-code `/opt/homebrew` (13 bytes) in LC_LOAD_DYLIB
+/// load-command paths. `malt` rewrites that prefix in place during
+/// materialize, and the replacement path must not be longer than the
+/// original or the load command will not fit its pre-allocated slot and
+/// dyld will refuse to load the binary.
+///
+/// Keeping MALT_PREFIX ≤ 13 bytes guarantees the rewrite always fits,
+/// matching the rationale called out in README.md (§"Directory Layout").
+pub const max_prefix_len: usize = "/opt/homebrew".len;
+
+pub const PrefixError = error{PrefixTooLong};
+
+/// Refuse to proceed when MALT_PREFIX exceeds `max_prefix_len`. Exposed so
+/// `mt doctor` can reuse the same rule.
+pub fn checkPrefixLength(prefix: []const u8) PrefixError!void {
+    if (prefix.len > max_prefix_len) return error.PrefixTooLong;
+}
+
 pub const InstallError = error{
     NoPackages,
     DatabaseError,
@@ -33,6 +53,14 @@ pub const InstallError = error{
     CellarFailed,
     LinkFailed,
     RecordFailed,
+    /// At least one package in a multi-package install failed to materialize
+    /// or was skipped because an ancestor dep failed. Returned from `execute`
+    /// so `main` exits non-zero.
+    PartialFailure,
+    /// MALT_PREFIX is longer than the Mach-O in-place patching budget. Set
+    /// before any network activity so the user can fix it without waiting on
+    /// a multi-gigabyte download that will inevitably fail.
+    PrefixTooLong,
 };
 
 /// A bottle download job for parallel processing.
@@ -178,6 +206,24 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Initialize infrastructure
     const prefix = atomic.maltPrefix();
+
+    // Pre-flight: refuse the install if MALT_PREFIX is longer than the
+    // Mach-O in-place patching budget. We catch this BEFORE any network
+    // activity so users do not spend minutes downloading bottles that are
+    // guaranteed to fail at patch time.
+    checkPrefixLength(prefix) catch |err| switch (err) {
+        error.PrefixTooLong => {
+            output.err(
+                "MALT_PREFIX '{s}' is {d} bytes, which exceeds the {d}-byte budget for Mach-O in-place patching.",
+                .{ prefix, prefix.len, max_prefix_len },
+            );
+            output.err("Homebrew bottles hard-code `/opt/homebrew` (13 bytes) in LC_LOAD_DYLIB", .{});
+            output.err("entries, and malt replaces that prefix in place — the replacement must", .{});
+            output.err("not be longer or dyld will fail to load the binaries at runtime.", .{});
+            output.err("Set MALT_PREFIX to a shorter path (e.g. /opt/malt or /tmp/mt) and retry.", .{});
+            return InstallError.PrefixTooLong;
+        },
+    };
 
     // Ensure required directories exist (Step 0)
     ensureDirs(prefix);
@@ -393,19 +439,89 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // ── Sequential materialize + link phase ──────────────────────────
+    //
+    // Failures are tracked so we can:
+    //   1. Exit non-zero when any requested package (or its dep) fails (P2).
+    //   2. Skip later jobs whose dependencies we already know to be broken,
+    //      rather than leaving a cellar full of half-working kegs (P3).
+    var failed_kegs = std.StringHashMap(void).init(allocator);
+    defer failed_kegs.deinit();
+    var failed_count: usize = 0;
+
     for (all_jobs.items) |*job| {
         if (main_mod.isInterrupted()) {
             output.warn("Interrupted. Stopping install.", .{});
-            return;
+            break;
         }
 
         if (!job.succeeded) {
             output.err("Download failed for {s}, skipping", .{job.name});
+            failed_kegs.put(job.name, {}) catch {};
+            failed_count += 1;
             continue;
         }
 
-        materializeAndLink(allocator, job, &db, &linker, prefix);
+        // Skip if any runtime dep has already failed — installing on top of a
+        // broken dep graph produces a keg that dyld cannot resolve at runtime.
+        if (findFailedDep(&failed_kegs, job.formula_json)) |failed_dep| {
+            output.warn(
+                "Skipping {s}: dependency {s} failed to install",
+                .{ job.name, failed_dep },
+            );
+            failed_kegs.put(job.name, {}) catch {};
+            failed_count += 1;
+            continue;
+        }
+
+        materializeAndLink(allocator, job, &db, &linker, prefix) catch {
+            // The underlying error was already logged with a tag by
+            // materializeAndLink — just record that this job failed so its
+            // dependents in the rest of the loop get skipped above.
+            failed_kegs.put(job.name, {}) catch {};
+            failed_count += 1;
+            continue;
+        };
     }
+
+    if (failed_count > 0) {
+        const pkg_word: []const u8 = if (failed_count == 1) "package" else "packages";
+        output.err(
+            "{d} {s} failed to install. See errors above.",
+            .{ failed_count, pkg_word },
+        );
+        return InstallError.PartialFailure;
+    }
+}
+
+/// Return the first dep name of `formula_json` that appears in `failed_kegs`,
+/// or null if none did. Used to short-circuit jobs whose dependency graph is
+/// already broken so we do not leave half-installed kegs behind.
+///
+/// Errors during parse are treated as "no known failed dep" — we would rather
+/// attempt the install and let materialize surface the real problem than
+/// silently skip over a parser hiccup.
+fn findFailedDep(
+    failed_kegs: *std.StringHashMap(void),
+    formula_json: []const u8,
+) ?[]const u8 {
+    var tmp_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer tmp_arena.deinit();
+    const a = tmp_arena.allocator();
+
+    var parsed = formula_mod.parseFormula(a, formula_json) catch return null;
+    defer parsed.deinit();
+
+    for (parsed.dependencies) |dep_name| {
+        if (failed_kegs.contains(dep_name)) {
+            // The slice `dep_name` lives inside the temp arena which is about
+            // to be freed. Look up the same key inside the map's storage to
+            // return a slice with a stable lifetime (the map owns its keys
+            // indirectly via the job.name slices stored at insert time).
+            if (failed_kegs.getKey(dep_name)) |stable| return stable;
+            return dep_name;
+        }
+    }
+    return null;
 }
 
 /// Collect download jobs for a formula and all its dependencies.
@@ -517,13 +633,18 @@ fn collectFormulaJobs(
 }
 
 /// Materialize a downloaded bottle to the cellar, link, and record in DB.
+///
+/// Returns an error on any failure instead of silently swallowing it, so
+/// `runInstall` can track failed packages and exit non-zero. The per-error
+/// `output.err` messages carry a human-readable tag via
+/// `cellar_mod.describeError`.
 fn materializeAndLink(
     allocator: std.mem.Allocator,
     job: *DownloadJob,
     db: *sqlite.Database,
     linker: *linker_mod.Linker,
     prefix: []const u8,
-) void {
+) !void {
     const reason: []const u8 = if (job.is_dep) "dependency" else "direct";
 
     // Animated spinner while materialize runs. Materialize is synchronous and
@@ -541,17 +662,20 @@ fn materializeAndLink(
         job.name,
         job.version_str,
         job.cellar_type,
-    ) catch {
+    ) catch |err| {
         spinner.stop();
-        output.err("Failed to materialize {s}", .{job.name});
-        return;
+        output.err(
+            "Failed to materialize {s}: {s} ({s})",
+            .{ job.name, @errorName(err), cellar_mod.describeError(err) },
+        );
+        return err;
     };
     spinner.stop();
     // Parse formula for DB recording
-    var formula = formula_mod.parseFormula(allocator, job.formula_json) catch {
-        output.err("Failed to parse formula for {s}", .{job.name});
+    var formula = formula_mod.parseFormula(allocator, job.formula_json) catch |err| {
+        output.err("Failed to parse formula for {s}: {s}", .{ job.name, @errorName(err) });
         cellar_mod.remove(prefix, job.name, job.version_str) catch {};
-        return;
+        return InstallError.CellarFailed;
     };
     defer formula.deinit();
 
@@ -565,33 +689,34 @@ fn materializeAndLink(
             }
             output.err("Use --force to overwrite, or uninstall the conflicting package first.", .{});
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
-            return;
+            return InstallError.LinkFailed;
         }
     }
 
     // Link + record
     if (!job.keg_only) {
-        const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch {
-            output.err("Failed to record {s} in database", .{job.name});
+        const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch |err| {
+            output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
-            return;
+            return InstallError.RecordFailed;
         };
 
-        linker.link(keg.path, job.name, keg_id) catch {
-            output.warn("Some links for {s} could not be created", .{job.name});
+        linker.link(keg.path, job.name, keg_id) catch |err| {
+            output.err("Failed to link {s}: {s}", .{ job.name, @errorName(err) });
             // Rollback: unlink what was partially created + remove DB record + cellar
             linker.unlink(keg_id) catch {};
             deleteKeg(db, keg_id);
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
-            return;
+            return InstallError.LinkFailed;
         };
         linker.linkOpt(job.name, job.version_str) catch {};
         recordDeps(db, keg_id, &formula);
     } else {
         output.info("{s} is keg-only; not linking", .{job.name});
-        const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch {
+        const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch |err| {
+            output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
-            return;
+            return InstallError.RecordFailed;
         };
         linker.linkOpt(job.name, job.version_str) catch {};
         recordDeps(db, keg_id, &formula);
