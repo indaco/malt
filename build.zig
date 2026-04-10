@@ -67,6 +67,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_step = b.step("test", "Run all unit tests");
+    const test_bin_step = b.step("test-bin", "Install test binaries for coverage (kcov)");
 
     // Shared library module — single root that re-exports all source modules.
     // This avoids "file exists in multiple modules" errors from Zig's module system.
@@ -89,7 +90,12 @@ pub fn build(b: *std.Build) void {
     malt_lib.addOptions("version_string", version_options);
 
     inline for (test_modules) |test_file| {
+        // e.g. "tests/formula_test.zig" → "formula_test" (so each test binary
+        // has a unique install name, which `test-bin` / kcov need).
+        const test_name = comptime std.fs.path.stem(std.fs.path.basename(test_file));
+
         const t = b.addTest(.{
+            .name = test_name,
             .root_module = b.createModule(.{
                 .root_source_file = b.path(test_file),
                 .target = target,
@@ -105,6 +111,13 @@ pub fn build(b: *std.Build) void {
 
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);
+
+        // Only installed when the user asks for `zig build test-bin`
+        // (used by the coverage recipe and the coverage CI job).
+        const install_t = b.addInstallArtifact(t, .{
+            .dest_dir = .{ .override = .{ .custom = "test-bin" } },
+        });
+        test_bin_step.dependOn(&install_t.step);
     }
 
     // --- Universal binary step (macOS only) ---
