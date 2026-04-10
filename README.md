@@ -5,6 +5,7 @@
 ![macOS only](https://img.shields.io/badge/platform-macOS-blue)
 ![Zig 0.15.x](https://img.shields.io/badge/zig-0.15.x-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
+[![codecov](https://codecov.io/gh/indaco/malt/branch/main/graph/badge.svg)](https://codecov.io/gh/indaco/malt)
 [![Built with Devbox](https://www.jetify.com/img/devbox/shield_galaxy.svg)](https://www.jetify.com/devbox/docs/contributor-quickstart/)
 
 malt is a macOS-only package manager written in Zig that consumes Homebrew's existing formula, bottle, cask, and tap ecosystem. It ships as a single binary (`malt`, ~3 MB) with sub-millisecond cold start. malt downloads pre-built bottles from the Homebrew infrastructure — it is a fast client for Homebrew's package registry, not a fork. Requires macOS 11 (Big Sur) or later on Apple Silicon or Intel.
