@@ -73,7 +73,14 @@ pub const LockFile = struct {
     }
 
     /// Release the advisory lock and close the file descriptor.
+    ///
+    /// Truncates the file to 0 bytes before unlocking so subsequent
+    /// `holderPid` calls (and therefore `mt doctor`) see the lock as
+    /// vacated instead of reporting a stale PID. The file itself is
+    /// left in place — removing it would race against other processes
+    /// that may already have it open.
     pub fn release(self: *LockFile) void {
+        std.posix.ftruncate(self.fd, 0) catch {};
         std.posix.flock(self.fd, std.posix.LOCK.UN) catch {};
         std.posix.close(self.fd);
     }
