@@ -675,14 +675,26 @@ fn collectFormulaJobs(
 
     // Fetch every dep's formula JSON **in parallel**. Each worker
     // borrows a client from the shared `http_pool` for the duration
-    // of its request so TLS contexts are reused across deps — the
-    // previous per-worker `HttpClient.init` paid a full cert-store
-    // load per dep, which added up on cold installs with many deps.
+    // of its request so TLS contexts are reused across deps.
+    //
+    // Thread-safety: the caller's allocator is typically a
+    // non-thread-safe `GeneralPurposeAllocator`, so we wrap it in a
+    // `ThreadSafeAllocator` for the parallel section. Without this,
+    // concurrent workers would race on allocator bookkeeping and
+    // occasionally return corrupted response buffers (observed as
+    // sporadic `InvalidJson` failures on random deps of large
+    // formulae like ffmpeg). After `join()` the parallel phase is
+    // over and the serial post-processing can use the unwrapped
+    // `allocator` again — pointers allocated through the wrapper
+    // remain valid because both go to the same underlying GPA.
     const dep_jsons = allocator.alloc(?[]const u8, deps.len) catch return InstallError.DownloadFailed;
     defer allocator.free(dep_jsons);
     @memset(dep_jsons, null);
 
     if (deps.len > 0) {
+        var ts_allocator: std.heap.ThreadSafeAllocator = .{ .child_allocator = allocator };
+        const worker_alloc = ts_allocator.allocator();
+
         const threads = allocator.alloc(std.Thread, deps.len) catch return InstallError.DownloadFailed;
         defer allocator.free(threads);
 
@@ -690,13 +702,13 @@ fn collectFormulaJobs(
         for (deps, 0..) |dep, i| {
             if (dep.already_installed) continue;
             if (std.Thread.spawn(.{}, fetchFormulaWorker, .{
-                allocator, http_pool, api.cache_dir, dep.name, &dep_jsons[i],
+                worker_alloc, http_pool, api.cache_dir, dep.name, &dep_jsons[i],
             })) |t| {
                 threads[spawned] = t;
                 spawned += 1;
             } else |_| {
                 // Spawn failure → fall back to inline fetch.
-                fetchFormulaWorker(allocator, http_pool, api.cache_dir, dep.name, &dep_jsons[i]);
+                fetchFormulaWorker(worker_alloc, http_pool, api.cache_dir, dep.name, &dep_jsons[i]);
             }
         }
         for (threads[0..spawned]) |t| t.join();
