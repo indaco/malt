@@ -1,12 +1,15 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.1/.schema/devbox.schema.json",
-  "packages": ["zig@latest", "git@latest", "curl@latest"],
+  "packages": ["zig@latest", "git@latest", "curl@latest", "just@latest"],
   "shell": {
     "scripts": {
-      "build": ["zig build -Doptimize=ReleaseSafe"],
-      "test": ["zig build test"],
-      "lint": ["zig build -Doptimize=Debug 2>&1"],
-      "universal": ["zig build universal"]
+      "dev": ["just build"],
+      "build": ["just build-release"],
+      "test": ["just test"],
+      "fmt": ["just fmt"],
+      "fmt-check": ["just fmt-check"],
+      "lint": ["just lint"],
+      "universal": ["just build-universal"]
     }
   }
 }
