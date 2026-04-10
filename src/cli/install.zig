@@ -438,17 +438,58 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    // ── Sequential materialize + link phase ──────────────────────────
+    // ── Parallel materialize phase ──────────────────────────────────
     //
-    // Failures are tracked so we can:
-    //   1. Exit non-zero when any requested package (or its dep) fails (P2).
-    //   2. Skip later jobs whose dependencies we already know to be broken,
-    //      rather than leaving a cellar full of half-working kegs (P3).
+    // Each worker is independent: it runs clonefile + Mach-O patching +
+    // codesign on its own keg path, which never overlaps with any other
+    // job's output. All shared-state operations (linker conflict check,
+    // SQLite INSERTs, `std.StringHashMap(void)` for failed_kegs) are
+    // deferred to the serial link phase below.
+    //
+    // The old flow ran `materializeAndLink` serially per job, which on a
+    // cold ffmpeg install added up to ~3 s of back-to-back materialize
+    // work. Parallelising this phase is the last major win that closes
+    // the gap to nanobrew's `fullInstallOne` thread pool.
+    const mats = allocator.alloc(MaterializeResult, all_jobs.items.len) catch
+        return InstallError.CellarFailed;
+    defer {
+        for (mats) |m| {
+            if (m.keg_path.len > 0) std.heap.c_allocator.free(m.keg_path);
+        }
+        allocator.free(mats);
+    }
+    for (mats) |*m| m.* = .{ .ok = false, .keg_path = &[_]u8{}, .err = null };
+
+    {
+        const mat_threads = allocator.alloc(std.Thread, all_jobs.items.len) catch
+            return InstallError.CellarFailed;
+        defer allocator.free(mat_threads);
+
+        var spawned: usize = 0;
+        for (all_jobs.items, 0..) |*job, i| {
+            if (!job.succeeded) continue;
+            if (std.Thread.spawn(.{}, materializeWorker, .{ job, prefix, &mats[i] })) |t| {
+                mat_threads[spawned] = t;
+                spawned += 1;
+            } else |_| {
+                // Fall back to inline materialize on spawn failure.
+                materializeWorker(job, prefix, &mats[i]);
+            }
+        }
+        for (mat_threads[0..spawned]) |t| t.join();
+    }
+
+    // ── Serial link + record phase ──────────────────────────────────
+    //
+    // Runs in dep order (the jobs list came out of `collectFormulaJobs`
+    // dep-sorted) so `findFailedDep` correctly propagates failures down
+    // the graph. Linker conflict checks and SQLite writes are not
+    // thread-safe, so this phase cannot be parallelised.
     var failed_kegs = std.StringHashMap(void).init(allocator);
     defer failed_kegs.deinit();
     var failed_count: usize = 0;
 
-    for (all_jobs.items) |*job| {
+    for (all_jobs.items, 0..) |*job, i| {
         if (main_mod.isInterrupted()) {
             output.warn("Interrupted. Stopping install.", .{});
             break;
@@ -461,21 +502,35 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             continue;
         }
 
-        // Skip if any runtime dep has already failed — installing on top of a
-        // broken dep graph produces a keg that dyld cannot resolve at runtime.
-        if (findFailedDep(&failed_kegs, job.formula_json)) |failed_dep| {
-            output.warn(
-                "Skipping {s}: dependency {s} failed to install",
-                .{ job.name, failed_dep },
+        if (!mats[i].ok) {
+            const err = mats[i].err orelse cellar_mod.CellarError.CloneFailed;
+            output.err(
+                "Failed to materialize {s}: {s} ({s})",
+                .{ job.name, @errorName(err), cellar_mod.describeError(err) },
             );
             failed_kegs.put(job.name, {}) catch {};
             failed_count += 1;
             continue;
         }
 
-        materializeAndLink(allocator, job, &db, &linker, prefix) catch {
+        // Skip if any runtime dep has already failed — installing on top of a
+        // broken dep graph produces a keg that dyld cannot resolve at runtime.
+        // The keg has already been materialised into the Cellar by a worker;
+        // remove it before continuing so we do not leave orphans behind.
+        if (findFailedDep(&failed_kegs, job.formula_json)) |failed_dep| {
+            output.warn(
+                "Skipping {s}: dependency {s} failed to install",
+                .{ job.name, failed_dep },
+            );
+            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
+            failed_kegs.put(job.name, {}) catch {};
+            failed_count += 1;
+            continue;
+        }
+
+        linkAndRecord(allocator, job, mats[i].keg_path, &db, &linker, prefix) catch {
             // The underlying error was already logged with a tag by
-            // materializeAndLink — just record that this job failed so its
+            // linkAndRecord — just record that this job failed so its
             // dependents in the rest of the loop get skipped above.
             failed_kegs.put(job.name, {}) catch {};
             failed_count += 1;
@@ -681,45 +736,71 @@ fn collectFormulaJobs(
     output.info("Resolved {s} {s} ({d} {s})", .{ formula.name, formula.version, jobs.items.len, pkg_word });
 }
 
-/// Materialize a downloaded bottle to the cellar, link, and record in DB.
-///
-/// Returns an error on any failure instead of silently swallowing it, so
-/// `runInstall` can track failed packages and exit non-zero. The per-error
-/// `output.err` messages carry a human-readable tag via
-/// `cellar_mod.describeError`.
-fn materializeAndLink(
-    allocator: std.mem.Allocator,
-    job: *DownloadJob,
-    db: *sqlite.Database,
-    linker: *linker_mod.Linker,
-    prefix: []const u8,
-) !void {
-    const reason: []const u8 = if (job.is_dep) "dependency" else "direct";
+/// Result of a parallel materialize worker. `keg_path` is owned via
+/// `std.heap.c_allocator` (thread-safe) and must be freed by the caller.
+const MaterializeResult = struct {
+    ok: bool,
+    keg_path: []const u8,
+    err: ?cellar_mod.CellarError,
+};
 
-    // Animated spinner while materialize runs. Materialize is synchronous and
-    // can take a while for large packages (e.g. ansible), so a background-
-    // animated spinner gives clearer "still working" feedback than a static line.
-    var msg_buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(&msg_buf, "Materializing {s} to cellar...", .{job.name}) catch "Materializing...";
-    var spinner = progress_mod.Spinner.init(msg);
-    spinner.start();
+/// Thread entry-point for the parallel materialize phase. Runs the
+/// clonefile + Mach-O patching + codesign pipeline for one job and
+/// stores the result in `result`. Thread-safe because each worker
+/// operates on its own keg path (different name/version) and the
+/// cellar module's I/O paths never overlap between jobs.
+///
+/// Uses a per-worker arena for short-lived allocations (walker,
+/// patcher buffers, etc.) and `std.heap.c_allocator` for the single
+/// long-lived output — the keg path — so it survives arena teardown.
+fn materializeWorker(
+    job: *DownloadJob,
+    prefix: []const u8,
+    result: *MaterializeResult,
+) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const tmp_allocator = arena.allocator();
 
     const keg = cellar_mod.materializeWithCellar(
-        allocator,
+        tmp_allocator,
         prefix,
         job.store_sha256,
         job.name,
         job.version_str,
         job.cellar_type,
     ) catch |err| {
-        spinner.stop();
-        output.err(
-            "Failed to materialize {s}: {s} ({s})",
-            .{ job.name, @errorName(err), cellar_mod.describeError(err) },
-        );
-        return err;
+        result.* = .{ .ok = false, .keg_path = &[_]u8{}, .err = err };
+        return;
     };
-    spinner.stop();
+
+    // Dup keg.path to a long-lived thread-safe allocator because the
+    // arena is about to deinit.
+    const durable_path = std.heap.c_allocator.dupe(u8, keg.path) catch {
+        result.* = .{ .ok = false, .keg_path = &[_]u8{}, .err = cellar_mod.CellarError.OutOfMemory };
+        return;
+    };
+
+    result.* = .{ .ok = true, .keg_path = durable_path, .err = null };
+}
+
+/// Main-thread link + record phase for a single job that already had
+/// its bottle materialised into the Cellar by a worker. Parses the
+/// formula JSON, checks symlink conflicts, creates symlinks, and
+/// writes the keg + dependency rows into the DB.
+///
+/// Must run serially — linker conflict checking reads the current
+/// symlink state and SQLite writes are not safe from multiple writers.
+fn linkAndRecord(
+    allocator: std.mem.Allocator,
+    job: *DownloadJob,
+    keg_path: []const u8,
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    prefix: []const u8,
+) !void {
+    const reason: []const u8 = if (job.is_dep) "dependency" else "direct";
+
     // Parse formula for DB recording
     var formula = formula_mod.parseFormula(allocator, job.formula_json) catch |err| {
         output.err("Failed to parse formula for {s}: {s}", .{ job.name, @errorName(err) });
@@ -730,7 +811,7 @@ fn materializeAndLink(
 
     // Check for symlink conflicts before linking
     if (!job.keg_only) {
-        const conflicts = linker.checkConflicts(keg.path) catch &.{};
+        const conflicts = linker.checkConflicts(keg_path) catch &.{};
         if (conflicts.len > 0) {
             output.err("{s}: {d} symlink conflict(s) detected:", .{ job.name, conflicts.len });
             for (conflicts) |conflict| {
@@ -744,13 +825,13 @@ fn materializeAndLink(
 
     // Link + record
     if (!job.keg_only) {
-        const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch |err| {
+        const keg_id = recordKeg(db, &formula, job.store_sha256, keg_path, reason) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
         };
 
-        linker.link(keg.path, job.name, keg_id) catch |err| {
+        linker.link(keg_path, job.name, keg_id) catch |err| {
             output.err("Failed to link {s}: {s}", .{ job.name, @errorName(err) });
             // Rollback: unlink what was partially created + remove DB record + cellar
             linker.unlink(keg_id) catch {};
@@ -762,7 +843,7 @@ fn materializeAndLink(
         recordDeps(db, keg_id, &formula);
     } else {
         output.info("{s} is keg-only; not linking", .{job.name});
-        const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch |err| {
+        const keg_id = recordKeg(db, &formula, job.store_sha256, keg_path, reason) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
