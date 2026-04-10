@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const parser = @import("parser.zig");
 
 pub const CodesignError = error{
     CodesignFailed,
@@ -57,52 +56,4 @@ pub fn adHocSignAll(allocator: std.mem.Allocator, paths: []const []const u8) Cod
         },
         else => return CodesignError.CodesignFailed,
     }
-}
-
-/// Find all Mach-O binaries in a directory and codesign them in one
-/// batched subprocess call. Skips non-Mach-O files silently.
-pub fn signAllMachOInDir(dir_path: []const u8, allocator: std.mem.Allocator) !void {
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
-
-    var walker = try dir.walk(allocator);
-    defer walker.deinit();
-
-    // Collect the full paths of every Mach-O file under `dir_path`, then
-    // hand them to `adHocSignAll` as a single batch. See that function
-    // for why this is dramatically cheaper than signing one at a time.
-    var paths: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (paths.items) |p| allocator.free(p);
-        paths.deinit(allocator);
-    }
-
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
-
-        // Read first 4 bytes to check magic
-        const file = dir.openFile(entry.path, .{}) catch continue;
-        defer file.close();
-
-        var magic_buf: [4]u8 = undefined;
-        const bytes_read = file.readAll(&magic_buf) catch continue;
-        if (bytes_read < 4) continue;
-
-        if (parser.isMachO(&magic_buf)) {
-            const full_path = std.fs.path.join(allocator, &.{ dir_path, entry.path }) catch continue;
-            paths.append(allocator, full_path) catch {
-                allocator.free(full_path);
-                continue;
-            };
-        }
-    }
-
-    if (paths.items.len == 0) return;
-
-    adHocSignAll(allocator, paths.items) catch |e| {
-        // Log the batch failure; one bad binary shouldn't fail the whole
-        // materialize — the old per-file loop silently skipped individual
-        // failures, keep the same permissive contract.
-        std.log.warn("codesign batch failed for {s}: {s}", .{ dir_path, @errorName(e) });
-    };
 }

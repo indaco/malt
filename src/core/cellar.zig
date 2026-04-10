@@ -143,39 +143,56 @@ pub fn materializeWithCellar(
     var new_cellar_buf: [256]u8 = undefined;
     const new_cellar = std.fmt.bufPrint(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;
 
-    // Pass 1: placeholder substitution — ALWAYS runs, regardless of cellar_type.
-    // `@@HOMEBREW_PREFIX@@` / `@@HOMEBREW_CELLAR@@` tokens appear in LC_LOAD_DYLIB,
-    // LC_RPATH, etc. even in `:any` bottles (zig, curl, rust, llvm@* all do this)
-    // and must be rewritten or the resulting binaries will fail with
-    // `dyld: Symbol not found`.
-    patchMachOPlaceholders(allocator, cellar_path, new_prefix, new_cellar) catch |e| switch (e) {
+    // Build the full Mach-O replacement list in one shot. `@@HOMEBREW_*@@`
+    // placeholders are patched for every bottle (they appear even in `:any`
+    // bottles — zig, curl, rust, llvm@* all use them in LC_LOAD_DYLIB /
+    // LC_RPATH load commands). The absolute-path rewrites are skipped for
+    // `:any` and `:any_skip_relocation` bottles, where Homebrew guarantees
+    // only `@rpath` / `@loader_path` + placeholder tokens.
+    //
+    // Passing all the replacements in one call means the walker visits
+    // each file exactly once and opens it exactly once per active
+    // replacement, instead of walking the cellar twice.
+    const skip_absolute_rewrite = std.mem.eql(u8, cellar_type, ":any") or
+        std.mem.eql(u8, cellar_type, ":any_skip_relocation");
+
+    var macho_reps_buf: [4]Replacement = undefined;
+    macho_reps_buf[0] = .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix };
+    macho_reps_buf[1] = .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar };
+    var macho_reps_len: usize = 2;
+    if (!skip_absolute_rewrite) {
+        macho_reps_buf[2] = .{ .old = "/opt/homebrew", .new = new_prefix };
+        macho_reps_buf[3] = .{ .old = "/usr/local", .new = new_prefix };
+        macho_reps_len = 4;
+    }
+
+    // `walkMachOAndPatch` collects the full paths of every Mach-O file
+    // it actually modified (i.e. where at least one replacement rewrote
+    // bytes). Those are the only files whose ad-hoc signature got
+    // invalidated, so they are the only files we need to re-sign. For a
+    // bottle whose binaries don't reference `/opt/homebrew` at all
+    // (e.g. `tree`), this list comes back empty and the expensive
+    // codesign subprocess is skipped entirely.
+    var modified_macho_paths: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (modified_macho_paths.items) |p| allocator.free(p);
+        modified_macho_paths.deinit(allocator);
+    }
+
+    walkMachOAndPatch(
+        allocator,
+        cellar_path,
+        macho_reps_buf[0..macho_reps_len],
+        &modified_macho_paths,
+    ) catch |e| switch (e) {
         CellarError.PathTooLong => return CellarError.PathTooLong,
         else => return CellarError.PatchFailed,
     };
 
-    // Pass 2: absolute-path rewrite — skipped for relocatable bottles, which
-    // Homebrew guarantees to only use `@rpath`/`@loader_path` or the placeholder
-    // tokens handled above.
-    const skip_absolute_rewrite = std.mem.eql(u8, cellar_type, ":any") or
-        std.mem.eql(u8, cellar_type, ":any_skip_relocation");
-
-    if (!skip_absolute_rewrite) {
-        patchMachOAbsolutePaths(allocator, cellar_path, new_prefix) catch |e| switch (e) {
-            CellarError.PathTooLong => return CellarError.PathTooLong,
-            else => return CellarError.PatchFailed,
-        };
-    }
-
     // Always patch text files — @@HOMEBREW_PREFIX@@ and @@HOMEBREW_CELLAR@@
     // placeholders appear in scripts, .pc files, and configs regardless of
-    // whether the bottle is relocatable.
-    //
-    // One call now covers all four replacements: the walker visits each
-    // file exactly once and applies every substitution in a single
-    // read/write cycle. The previous implementation walked the cellar
-    // twice and re-scanned every file for `@@HOMEBREW_PREFIX@@` /
-    // `@@HOMEBREW_CELLAR@@` on the second pass even though the first
-    // pass had already rewritten them.
+    // whether the bottle is relocatable. Text files don't carry code
+    // signatures so they don't feed back into the codesign list.
     const text_replacements = [_]patcher.Replacement{
         .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix },
         .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar },
@@ -186,9 +203,13 @@ pub fn materializeWithCellar(
         std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
     };
 
-    // Ad-hoc codesign on arm64. Without this, binaries won't execute on Apple Silicon.
-    if (codesign.isArm64()) {
-        codesign.signAllMachOInDir(cellar_path, allocator) catch |e| {
+    // Ad-hoc codesign on arm64. We only sign the Mach-O files we actually
+    // modified above — unpatched binaries keep their original ad-hoc
+    // signature, so re-signing them is pure waste. For bottles without any
+    // homebrew path references (tree, etc.), the modified list is empty
+    // and the ~15 ms codesign subprocess is skipped entirely.
+    if (codesign.isArm64() and modified_macho_paths.items.len > 0) {
+        codesign.adHocSignAll(allocator, modified_macho_paths.items) catch |e| {
             std.log.warn("codesigning failed for {s}: {s}", .{ cellar_path, @errorName(e) });
         };
     }
@@ -206,52 +227,30 @@ pub fn materializeWithCellar(
     };
 }
 
-/// Walk a directory and patch the `@@HOMEBREW_PREFIX@@` / `@@HOMEBREW_CELLAR@@`
-/// tokens in every Mach-O load command. This ALWAYS runs, including for `:any`
-/// relocatable bottles — see call-site comment.
-///
-/// Returns `PathTooLong` if the substituted path would not fit in the existing
-/// load-command slot (the new MALT_PREFIX is longer than what the bottle was
-/// built for). Returns `PatchFailed` for any other patcher error.
-fn patchMachOPlaceholders(
-    allocator: std.mem.Allocator,
-    dir_path: []const u8,
-    new_prefix: []const u8,
-    new_cellar: []const u8,
-) CellarError!void {
-    try walkMachOAndPatch(allocator, dir_path, &.{
-        .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix },
-        .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar },
-    });
-}
-
-/// Walk a directory and rewrite `/opt/homebrew` / `/usr/local` to the current
-/// MALT_PREFIX in every Mach-O load command. Skipped for `:any` bottles by the
-/// caller (those only use rpath + placeholder tokens).
-fn patchMachOAbsolutePaths(
-    allocator: std.mem.Allocator,
-    dir_path: []const u8,
-    new_prefix: []const u8,
-) CellarError!void {
-    try walkMachOAndPatch(allocator, dir_path, &.{
-        .{ .old = "/opt/homebrew", .new = new_prefix },
-        .{ .old = "/usr/local", .new = new_prefix },
-    });
-}
-
 const Replacement = struct {
     old: []const u8,
     new: []const u8,
 };
 
-/// Shared Mach-O walker: for every file that looks like a Mach-O, run each
-/// replacement in order. `PathTooLong` is surfaced as a real error; other
-/// per-file errors are skipped so a single bad binary does not fail the whole
-/// materialize.
+/// Walk a cellar directory, apply every replacement in `replacements` to
+/// every Mach-O file found, and collect the paths of files that were
+/// actually mutated into `modified_out` so the caller can re-codesign
+/// only those.
+///
+/// `modified_out` is a caller-owned list; each appended entry is a
+/// freshly duplicated allocation (caller frees). Files whose load
+/// commands don't contain any of the needles are left untouched and
+/// are *not* added to the list — their ad-hoc signature is still valid
+/// and they don't need re-signing.
+///
+/// `PathTooLong` is surfaced as a real error (MALT_PREFIX exceeded the
+/// in-place patching budget); other per-file errors are skipped so a
+/// single bad binary does not fail the whole materialize.
 fn walkMachOAndPatch(
     allocator: std.mem.Allocator,
     dir_path: []const u8,
     replacements: []const Replacement,
+    modified_out: *std.ArrayList([]const u8),
 ) CellarError!void {
     var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
@@ -259,11 +258,14 @@ fn walkMachOAndPatch(
     var walker = dir.walk(allocator) catch return;
     defer walker.deinit();
 
+    const parser_mod = @import("../macho/parser.zig");
+
     while (walker.next() catch null) |entry| {
         if (entry.kind != .file) continue;
 
         const full_path = std.fs.path.join(allocator, &.{ dir_path, entry.path }) catch continue;
-        defer allocator.free(full_path);
+        var keep_path = false;
+        defer if (!keep_path) allocator.free(full_path);
 
         // Check if Mach-O by reading magic.
         const file = std.fs.openFileAbsolute(full_path, .{}) catch continue;
@@ -275,14 +277,24 @@ fn walkMachOAndPatch(
         file.close();
         if (n < 4) continue;
 
-        const parser_mod = @import("../macho/parser.zig");
         if (!parser_mod.isMachO(&magic_buf)) continue;
 
+        var any_modified = false;
         for (replacements) |r| {
-            _ = patcher.patchPaths(allocator, full_path, r.old, r.new) catch |e| switch (e) {
+            const result = patcher.patchPaths(allocator, full_path, r.old, r.new) catch |e| switch (e) {
                 error.PathTooLong => return CellarError.PathTooLong,
                 else => continue,
             };
+            if (result.patched_count > 0) any_modified = true;
+        }
+
+        if (any_modified) {
+            // Transfer ownership of `full_path` into the modified list.
+            // On append failure, let the defer free it and carry on —
+            // we'd rather silently over-sign (i.e. not sign a file we
+            // mutated) than abort the whole materialize for an OOM.
+            modified_out.append(allocator, full_path) catch continue;
+            keep_path = true;
         }
     }
 }
