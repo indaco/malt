@@ -84,7 +84,7 @@ pub const bash_script =
     \\    words=("${COMP_WORDS[@]}")
     \\    cword=$COMP_CWORD
     \\
-    \\    local commands="install uninstall remove upgrade update outdated list ls info search cleanup doctor tap untap gc migrate autoremove rollback link unlink run version completions help"
+    \\    local commands="install uninstall remove upgrade update outdated list ls info search cleanup doctor tap untap gc migrate autoremove rollback link unlink run version completions backup restore help"
     \\    local global_flags="--verbose -v --quiet -q --json --dry-run --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
@@ -123,6 +123,8 @@ pub const bash_script =
     \\    local cmd_flags=""
     \\    case "$cmd" in
     \\        install)          cmd_flags="--cask --formula --dry-run --force --quiet -q --json" ;;
+    \\        backup)           cmd_flags="--output -o --versions --quiet -q" ;;
+    \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        uninstall|remove) cmd_flags="--force --zap --dry-run" ;;
     \\        upgrade)          cmd_flags="--all --cask --formula --dry-run" ;;
     \\        outdated)         cmd_flags="--json --formula --cask --quiet -q" ;;
@@ -190,6 +192,8 @@ pub const zsh_script =
     \\        'run:Run a package binary without installing'
     \\        'version:Show version or self-update'
     \\        'completions:Generate shell completion scripts'
+    \\        'backup:Dump installed packages to a restorable text file'
+    \\        'restore:Reinstall every package listed in a backup file'
     \\        'help:Show help'
     \\    )
     \\
@@ -282,6 +286,19 @@ pub const zsh_script =
     \\                completions)
     \\                    _values 'shell' bash zsh fish
     \\                    ;;
+    \\                backup)
+    \\                    _arguments \
+    \\                        '(--output -o)'{--output,-o}'[Write to a specific file]:path:_files' \
+    \\                        '--versions[Pin each entry to its current version]' \
+    \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]'
+    \\                    ;;
+    \\                restore)
+    \\                    _arguments \
+    \\                        '--dry-run[Preview without installing]' \
+    \\                        '--force[Pass --force to the install]' \
+    \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
+    \\                        '*:file:_files'
+    \\                    ;;
     \\                version)
     \\                    _values 'subcommand' 'update[Self-update the binary]'
     \\                    ;;
@@ -372,6 +389,8 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a run         -d 'Run package binary without installing'
     \\    complete -c $__malt_bin -n __malt_needs_command -a version     -d 'Show version or self-update'
     \\    complete -c $__malt_bin -n __malt_needs_command -a completions -d 'Generate shell completion scripts'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a backup      -d 'Dump installed packages to a text file'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a restore     -d 'Reinstall every package in a backup file'
     \\    complete -c $__malt_bin -n __malt_needs_command -a help        -d 'Show help'
     \\
     \\    # install
@@ -439,6 +458,15 @@ pub const fish_script =
     \\
     \\    # completions — shell name as positional
     \\    complete -c $__malt_bin -n '__malt_using_command completions' -f -a 'bash zsh fish'
+    \\
+    \\    # backup
+    \\    complete -c $__malt_bin -n '__malt_using_command backup' -s o -l output   -r -d 'Output file (use - for stdout)'
+    \\    complete -c $__malt_bin -n '__malt_using_command backup'      -l versions    -d 'Pin each entry to its current version'
+    \\
+    \\    # restore — positional backup file
+    \\    complete -c $__malt_bin -n '__malt_using_command restore' -l dry-run -d 'Preview without installing'
+    \\    complete -c $__malt_bin -n '__malt_using_command restore' -l force   -d 'Pass --force to install'
+    \\    complete -c $__malt_bin -n '__malt_using_command restore' -F
     \\
     \\    # version — sub-subcommand
     \\    complete -c $__malt_bin -n '__malt_using_command version' -f -a 'update' -d 'Self-update'
