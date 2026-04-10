@@ -18,6 +18,7 @@ const ghcr_mod = @import("../net/ghcr.zig");
 const api_mod = @import("../net/api.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const progress_mod = @import("../ui/progress.zig");
 const help = @import("help.zig");
 
 pub const InstallError = error{
@@ -46,10 +47,31 @@ const DownloadJob = struct {
     /// Cellar type from bottle metadata (e.g. ":any", ":any_skip_relocation").
     /// Used to skip Mach-O patching for relocatable bottles.
     cellar_type: []const u8,
+    /// Alignment width for progress bar labels (max name length across all jobs).
+    label_width: u8,
+    /// Line index within the multi-progress group.
+    line_index: u8,
+    /// Shared multi-progress state for coordinated rendering.
+    multi: ?*progress_mod.MultiProgress,
+    /// Progress bar owned by the main thread. Created before workers are spawned
+    /// so every reserved line is drawn immediately, avoiding an empty row when a
+    /// later worker thread is scheduled before an earlier one.
+    bar: ?*progress_mod.ProgressBar,
     /// Set after download completes
     store_sha256: []const u8,
     succeeded: bool,
 };
+
+/// Bridge between ProgressCallback and ProgressBar.
+fn progressBridge(ctx: *anyopaque, bytes_so_far: u64, content_length: ?u64) void {
+    const bar: *progress_mod.ProgressBar = @ptrCast(@alignCast(ctx));
+    if (content_length) |total| {
+        if (bar.total == 0) bar.total = total;
+    }
+    // Clamp to total to prevent >100% when Content-Length reflects compressed size
+    const clamped = if (bar.total > 0) @min(bytes_so_far, bar.total) else bytes_so_far;
+    bar.update(clamped);
+}
 
 /// Download a bottle and commit to store. Runs in a worker thread.
 fn downloadWorker(_: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, store: *store_mod.Store, job: *DownloadJob) void {
@@ -83,15 +105,24 @@ fn downloadWorker(_: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, store: *stor
     // Create temp dir
     const tmp_dir = atomic.createTempDir(allocator, job.name) catch return;
 
-    output.info("  Downloading {s}...", .{job.name});
+    // The progress bar was created and pre-rendered by the main thread so that
+    // every reserved line has content even before this worker starts producing
+    // bytes. We just feed updates into it via the progress callback.
+    const bar = job.bar orelse return;
+    const progress_cb = client_mod.ProgressCallback{
+        .context = @ptrCast(bar),
+        .func = &progressBridge,
+    };
 
     // Download
-    _ = bottle_mod.download(allocator, ghcr, repo, digest, job.sha256, tmp_dir) catch {
+    _ = bottle_mod.download(allocator, ghcr, repo, digest, job.sha256, tmp_dir, progress_cb) catch {
+        bar.finish();
         output.err("  Download failed: {s}", .{job.name});
         atomic.cleanupTempDir(tmp_dir);
         allocator.free(tmp_dir);
         return;
     };
+    bar.finish();
 
     // Commit to store
     store.commitFrom(job.sha256, tmp_dir) catch {
@@ -105,7 +136,6 @@ fn downloadWorker(_: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, store: *stor
         std.log.warn("refcount increment failed for {s}: {s}", .{ job.sha256, @errorName(e) });
     };
 
-    output.info("  Downloaded {s} ✓", .{job.name});
     job.store_sha256 = job.sha256;
     job.succeeded = true;
 }
@@ -265,6 +295,17 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // ── Parallel download phase ──────────────────────────────────────
+
+    // Compute max label width for aligned progress bars
+    var max_name_len: u8 = 0;
+    for (all_jobs.items) |job| {
+        const len: u8 = @intCast(@min(job.name.len, 255));
+        if (len > max_name_len) max_name_len = len;
+    }
+    for (all_jobs.items) |*job| {
+        job.label_width = max_name_len;
+    }
+
     var to_download: u32 = 0;
     for (all_jobs.items) |*job| {
         if (store.exists(job.sha256)) {
@@ -276,14 +317,55 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     if (to_download > 0) {
-        output.info("Downloading {d} bottle(s)...", .{to_download});
+        if (to_download == 1) {
+            output.info("Downloading 1 bottle...", .{});
+        } else {
+            output.info("Downloading {d} bottles...", .{to_download});
+        }
+
+        // Set up multi-progress: assign line indices and create coordinator
+        var download_index: u8 = 0;
+        for (all_jobs.items) |*job| {
+            if (!job.succeeded) {
+                job.line_index = download_index;
+                download_index += 1;
+            }
+        }
+        var multi = progress_mod.MultiProgress.init(download_index);
+
+        // Allocate all progress bars in the main thread so we can render an
+        // initial frame on every reserved line BEFORE spawning workers. This
+        // avoids a blank row when a later worker thread is scheduled before
+        // an earlier one. Bars live in a stable slice so the pointers we
+        // hand to worker threads remain valid.
+        var bars: []progress_mod.ProgressBar = &.{};
+        if (allocator.alloc(progress_mod.ProgressBar, download_index)) |s| {
+            bars = s;
+        } else |_| {}
+        defer if (bars.len > 0) allocator.free(bars);
+
+        var bar_idx: usize = 0;
+        for (all_jobs.items) |*job| {
+            if (job.succeeded) continue;
+            job.multi = &multi;
+            if (bar_idx < bars.len) {
+                bars[bar_idx] = progress_mod.ProgressBar.init(job.name, 0);
+                bars[bar_idx].label_width = max_name_len;
+                bars[bar_idx].line_index = job.line_index;
+                bars[bar_idx].multi = &multi;
+                job.bar = &bars[bar_idx];
+                // Draw the initial frame now so this line is not blank while
+                // the worker is waiting to be scheduled.
+                bars[bar_idx].update(0);
+                bar_idx += 1;
+            }
+        }
 
         var threads: std.ArrayList(std.Thread) = .empty;
         defer threads.deinit(allocator);
 
         for (all_jobs.items) |*job| {
             if (job.succeeded) {
-                output.info("  {s} (cached)", .{job.name});
                 continue;
             }
             const t = std.Thread.spawn(.{}, downloadWorker, .{
@@ -299,6 +381,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
 
         for (threads.items) |t| t.join();
+        multi.finish();
     }
 
     // Check for Ctrl-C between download and materialize phases
@@ -389,6 +472,10 @@ fn collectFormulaJobs(
             .keg_only = dep_formula.keg_only,
             .formula_json = dep_json,
             .cellar_type = dep_bottle.cellar,
+            .label_width = 0,
+            .line_index = 0,
+            .multi = null,
+            .bar = null,
             .store_sha256 = "",
             .succeeded = false,
         }) catch continue;
@@ -409,6 +496,10 @@ fn collectFormulaJobs(
         .keg_only = formula.keg_only,
         .formula_json = formula_json,
         .cellar_type = bottle.cellar,
+        .label_width = 0,
+        .line_index = 0,
+        .multi = null,
+        .bar = null,
         .store_sha256 = "",
         .succeeded = false,
     }) catch return InstallError.DownloadFailed;
@@ -419,7 +510,8 @@ fn collectFormulaJobs(
         output.warn("The package may not work correctly without it. Consider: brew install {s}", .{formula.name});
     }
 
-    output.info("Resolved {s} {s} ({d} packages)", .{ formula.name, formula.version, jobs.items.len });
+    const pkg_word: []const u8 = if (jobs.items.len == 1) "package" else "packages";
+    output.info("Resolved {s} {s} ({d} {s})", .{ formula.name, formula.version, jobs.items.len, pkg_word });
 }
 
 /// Materialize a downloaded bottle to the cellar, link, and record in DB.
@@ -432,7 +524,14 @@ fn materializeAndLink(
 ) void {
     const reason: []const u8 = if (job.is_dep) "dependency" else "direct";
 
-    output.info("Materializing {s} to cellar...", .{job.name});
+    // Animated spinner while materialize runs. Materialize is synchronous and
+    // can take a while for large packages (e.g. ansible), so a background-
+    // animated spinner gives clearer "still working" feedback than a static line.
+    var msg_buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "Materializing {s} to cellar...", .{job.name}) catch "Materializing...";
+    var spinner = progress_mod.Spinner.init(msg);
+    spinner.start();
+
     const keg = cellar_mod.materializeWithCellar(
         allocator,
         prefix,
@@ -441,9 +540,11 @@ fn materializeAndLink(
         job.version_str,
         job.cellar_type,
     ) catch {
+        spinner.stop();
         output.err("Failed to materialize {s}", .{job.name});
         return;
     };
+    spinner.stop();
     // Parse formula for DB recording
     var formula = formula_mod.parseFormula(allocator, job.formula_json) catch {
         output.err("Failed to parse formula for {s}", .{job.name});
@@ -549,10 +650,19 @@ fn installCask(
     const prefix = atomic.maltPrefix();
     var installer = cask_mod.CaskInstaller.init(allocator, db, prefix);
 
+    // Progress bar for cask download
+    var bar = progress_mod.ProgressBar.init(cask.token, 0);
+    installer.progress = .{
+        .context = @ptrCast(&bar),
+        .func = &progressBridge,
+    };
+
     const app_path = installer.install(&cask) catch {
+        bar.finish();
         output.err("Failed to install cask {s}", .{cask.token});
         return InstallError.CaskNotFound;
     };
+    bar.finish();
 
     // Record in DB with install path
     cask_mod.recordInstall(db, &cask, app_path) catch {

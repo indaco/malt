@@ -110,6 +110,25 @@ pub fn err(comptime fmt: []const u8, args: anytype) void {
     f.writeAll("\n") catch {};
 }
 
+/// Print a dim/faint info message for low-priority status lines.
+pub fn dim(comptime fmt: []const u8, args: anytype) void {
+    if (quiet) return;
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    const f = std.fs.File.stderr();
+    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ▸ " else "  > ";
+    if (color.isColorEnabled()) {
+        f.writeAll(color.Style.dim.code()) catch {};
+        f.writeAll(prefix) catch {};
+        f.writeAll(msg) catch {};
+        f.writeAll(color.Style.reset.code()) catch {};
+    } else {
+        f.writeAll(prefix) catch {};
+        f.writeAll(msg) catch {};
+    }
+    f.writeAll("\n") catch {};
+}
+
 /// Write JSON to stdout
 pub fn jsonOutput(allocator: std.mem.Allocator, value: anytype) !void {
     var list: std.ArrayList(u8) = .empty;

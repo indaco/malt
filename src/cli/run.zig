@@ -118,7 +118,7 @@ fn ephemeralRun(
 
     // Download
     output.info("Downloading {s} {s}...", .{ pkg_name, formula.version });
-    _ = bottle_mod.download(allocator, &ghcr, repo, digest, bottle.sha256, tmp_dir) catch {
+    _ = bottle_mod.download(allocator, &ghcr, repo, digest, bottle.sha256, tmp_dir, null) catch {
         output.err("Failed to download {s}", .{pkg_name});
         return;
     };

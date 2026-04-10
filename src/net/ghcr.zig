@@ -2,6 +2,7 @@
 //! Token management and blob fetching for GitHub Container Registry.
 
 const std = @import("std");
+
 const client_mod = @import("client.zig");
 
 pub const GhcrError = error{
@@ -88,6 +89,7 @@ pub const GhcrClient = struct {
         repo: []const u8,
         digest: []const u8,
         body_out: *std.ArrayList(u8),
+        progress: ?client_mod.ProgressCallback,
     ) GhcrError!void {
         // Get token through the mutex-protected cache (avoids redundant fetches)
         const token = self.fetchToken(repo) catch return GhcrError.TokenFetchFailed;
@@ -110,7 +112,7 @@ pub const GhcrClient = struct {
             .{ .name = "Authorization", .value = auth_value },
         };
 
-        var resp = http.getWithHeaders(url, &headers) catch
+        var resp = http.getWithHeaders(url, &headers, progress) catch
             return GhcrError.DownloadFailed;
         defer resp.deinit();
 

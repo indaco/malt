@@ -344,7 +344,7 @@ fn downloadBottle(
     output.info("    Downloading {s}...", .{name});
 
     // Download
-    _ = bottle_mod.download(allocator, ghcr, repo, digest, sha256, tmp_dir) catch {
+    _ = bottle_mod.download(allocator, ghcr, repo, digest, sha256, tmp_dir, null) catch {
         output.err("    Download failed: {s}", .{name});
         atomic.cleanupTempDir(tmp_dir);
         allocator.free(tmp_dir);
