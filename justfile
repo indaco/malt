@@ -32,18 +32,39 @@ lint:
     zig build
     zig build test
 
+# Pre-commit hook: auto-format staged .zig files in place and re-stage them
+# so the formatted version is what actually lands in the commit.
+# Note: if you `git add -p` partial hunks of a file, this will pick up the
+# unstaged hunks too — a known limitation of format-on-commit hooks.
+pre-commit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    files=()
+    while IFS= read -r f; do
+        files+=("$f")
+    done < <(git diff --cached --name-only --diff-filter=ACM | grep -E '\.zig$' || true)
+    if [ ${#files[@]} -eq 0 ]; then
+        exit 0
+    fi
+    zig fmt "${files[@]}"
+    git add "${files[@]}"
+    echo "Auto-formatted ${#files[@]} staged .zig file(s)."
+
 # Pre-push hook: everything that CI checks
 pre-push: fmt-check test
     @echo "All pre-push checks passed."
 
-# Install git hooks
+# Install git hooks (pre-commit + pre-push)
 hooks-install:
+    @echo '#!/bin/sh' > .git/hooks/pre-commit
+    @echo 'just pre-commit' >> .git/hooks/pre-commit
+    @chmod +x .git/hooks/pre-commit
     @echo '#!/bin/sh' > .git/hooks/pre-push
     @echo 'just pre-push' >> .git/hooks/pre-push
     @chmod +x .git/hooks/pre-push
-    @echo "pre-push hook installed."
+    @echo "pre-commit and pre-push hooks installed."
 
 # Remove git hooks
 hooks-uninstall:
-    @rm -f .git/hooks/pre-push
-    @echo "pre-push hook removed."
+    @rm -f .git/hooks/pre-commit .git/hooks/pre-push
+    @echo "pre-commit and pre-push hooks removed."
