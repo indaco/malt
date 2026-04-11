@@ -70,7 +70,8 @@ cd malt
 
 Requires [Zig 0.15.x](https://ziglang.org/download/).
 
-> **Note:** `zig build` produces both `malt` and `mt` in `zig-out/bin/`. Both are identical — use whichever you prefer. All install methods (script, Homebrew, source) install both.
+> [!NOTE]
+> `zig build` produces both `malt` and `mt` in `zig-out/bin/`. Both are identical — use whichever you prefer. All install methods (script, Homebrew, source) install both.
 
 ---
 
@@ -128,7 +129,7 @@ mt install <package> [<package> ...]     # multiple packages
 | `--quiet`, `-q` | Suppress all output except errors               |
 | `--json`        | Output result as JSON                           |
 
-> [Note]
+> [!INFO]
 > malt does not execute Ruby `post_install` hooks. Formulae that define one (e.g. `node`, `postgresql@16`) are skipped before any download with a message pointing you at `brew install <formula>` — nothing is written to the store, Cellar, or prefix for that package. Its dependencies in the same invocation are also skipped, since they would otherwise be orphaned until another install pulls them in.
 
 ### `mt uninstall`
@@ -603,11 +604,11 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 ### Cold Install
 
-| Package              | malt   | nanobrew | zerobrew | bru     | Homebrew |
-| -------------------- | ------ | -------- | -------- | ------- | -------- |
-| **tree** (0 deps)    | 0.910s | 0.612s   | 1.806s   | 0.750s‡ | 3.419s   |
-| **wget** (6 deps)    | 4.574s | 5.601s   | 6.414s   | 0.529s‡ | 3.682s   |
-| **ffmpeg** (11 deps) | 4.502s | 2.810s   | 5.851s   | 3.042s‡ | 15.632s  |
+| Package              | malt   | nanobrew | zerobrew | bru    | Homebrew |
+| -------------------- | ------ | -------- | -------- | ------ | -------- |
+| **tree** (0 deps)    | 0.910s | 0.612s   | 1.806s   | 0.750s | 3.419s   |
+| **wget** (6 deps)    | 4.574s | 5.601s   | 6.414s   | 0.529s | 3.682s   |
+| **ffmpeg** (11 deps) | 4.502s | 2.810s   | 5.851s   | 3.042s | 15.632s  |
 
 <!-- BENCH:COLD:END -->
 
