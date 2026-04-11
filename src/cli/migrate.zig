@@ -148,6 +148,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             keg_name,
             &api,
             &ghcr,
+            &http,
             &store,
             &linker,
             &db,
@@ -202,6 +203,7 @@ fn migrateKeg(
     keg_name: []const u8,
     api: *api_mod.BrewApi,
     ghcr: *ghcr_mod.GhcrClient,
+    http: *client_mod.HttpClient,
     store: *store_mod.Store,
     linker: *linker_mod.Linker,
     db: *sqlite.Database,
@@ -245,7 +247,7 @@ fn migrateKeg(
 
     // 5. Download bottle via GHCR (skip if already in store)
     if (!store.exists(bottle.sha256)) {
-        if (!downloadBottle(allocator, ghcr, store, bottle.url, bottle.sha256, keg_name)) {
+        if (!downloadBottle(allocator, ghcr, http, store, bottle.url, bottle.sha256, keg_name)) {
             formula.deinit();
             allocator.free(formula_json);
             return .failed_download;
@@ -314,6 +316,7 @@ fn migrateKeg(
 fn downloadBottle(
     allocator: std.mem.Allocator,
     ghcr: *ghcr_mod.GhcrClient,
+    http: *client_mod.HttpClient,
     store: *store_mod.Store,
     bottle_url: []const u8,
     sha256: []const u8,
@@ -344,7 +347,7 @@ fn downloadBottle(
     output.info("    Downloading {s}...", .{name});
 
     // Download
-    _ = bottle_mod.download(allocator, ghcr, repo, digest, sha256, tmp_dir, null) catch {
+    _ = bottle_mod.download(allocator, ghcr, http, repo, digest, sha256, tmp_dir, null) catch {
         output.err("    Download failed: {s}", .{name});
         atomic.cleanupTempDir(tmp_dir);
         allocator.free(tmp_dir);

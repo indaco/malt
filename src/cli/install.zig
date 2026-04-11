@@ -102,7 +102,16 @@ fn progressBridge(ctx: *anyopaque, bytes_so_far: u64, content_length: ?u64) void
 }
 
 /// Download a bottle and commit to store. Runs in a worker thread.
-fn downloadWorker(_: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, store: *store_mod.Store, job: *DownloadJob) void {
+/// `http_pool` is shared across all download workers — each worker
+/// borrows a client for the duration of a single blob download and
+/// releases it so another worker can reuse the same TLS context.
+fn downloadWorker(
+    _: std.mem.Allocator,
+    ghcr: *ghcr_mod.GhcrClient,
+    http_pool: *client_mod.HttpClientPool,
+    store: *store_mod.Store,
+    job: *DownloadJob,
+) void {
     // Each thread gets its own arena — the parent arena is not thread-safe.
     var thread_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer thread_arena.deinit();
@@ -142,8 +151,14 @@ fn downloadWorker(_: std.mem.Allocator, ghcr: *ghcr_mod.GhcrClient, store: *stor
         .func = &progressBridge,
     };
 
+    // Borrow a client from the shared pool for the duration of this
+    // download. The pool blocks if all clients are in use by other
+    // workers, then hands us one with its TLS context already warm.
+    const http = http_pool.acquire();
+    defer http_pool.release(http);
+
     // Download
-    _ = bottle_mod.download(allocator, ghcr, repo, digest, job.sha256, tmp_dir, progress_cb) catch {
+    _ = bottle_mod.download(allocator, ghcr, http, repo, digest, job.sha256, tmp_dir, progress_cb) catch {
         bar.finish();
         output.err("  Download failed: {s}", .{job.name});
         atomic.cleanupTempDir(tmp_dir);
@@ -254,9 +269,22 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer lk.release();
 
-    // Set up HTTP client
+    // Set up HTTP client (single-threaded main-thread use — formula
+    // lookups, cask probe, top-level `fetchFormula`). Worker threads
+    // borrow from the pool below instead of touching this instance.
     var http = client_mod.HttpClient.init(allocator);
     defer http.deinit();
+
+    // Shared HTTP client pool for worker threads. Each worker
+    // (download + parallel resolve) borrows an idle client for the
+    // duration of one request so TLS contexts are reused across
+    // calls. 4 slots is the same budget the P5 materialize pool uses
+    // and is enough to saturate cold installs on typical machines.
+    var http_pool = client_mod.HttpClientPool.init(allocator, 4) catch {
+        output.err("Failed to initialise HTTP client pool", .{});
+        return InstallError.DownloadFailed;
+    };
+    defer http_pool.deinit();
 
     // Set up API client
     var cache_dir_buf: [512]u8 = undefined;
@@ -320,7 +348,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
 
             // Collect jobs for this formula + its deps
-            collectFormulaJobs(allocator, pkg_name, formula_json, &api, &db, &store, force, &all_jobs) catch |e| {
+            collectFormulaJobs(allocator, pkg_name, formula_json, &api, &http_pool, &db, &store, force, &all_jobs) catch |e| {
                 output.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
                 continue;
             };
@@ -417,9 +445,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 continue;
             }
             const t = std.Thread.spawn(.{}, downloadWorker, .{
-                allocator, &ghcr, &store, job,
+                allocator, &ghcr, &http_pool, &store, job,
             }) catch {
-                downloadWorker(allocator, &ghcr, &store, job);
+                downloadWorker(allocator, &ghcr, &http_pool, &store, job);
                 continue;
             };
             threads.append(allocator, t) catch {
@@ -438,17 +466,72 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    // ── Sequential materialize + link phase ──────────────────────────
+    // ── Parallel materialize phase ──────────────────────────────────
     //
-    // Failures are tracked so we can:
-    //   1. Exit non-zero when any requested package (or its dep) fails (P2).
-    //   2. Skip later jobs whose dependencies we already know to be broken,
-    //      rather than leaving a cellar full of half-working kegs (P3).
+    // Each materialize step (clonefile + Mach-O patch + codesign) is
+    // independent — workers never touch each other's keg paths. Shared
+    // state (linker conflict check, SQLite INSERTs, `failed_kegs`) is
+    // deferred to the serial link phase below.
+    //
+    // The old flow ran `materializeAndLink` serially per job, which on
+    // cold installs of large formulae like ffmpeg (11 deps) added up to
+    // ~3 s of back-to-back materialize work.
+    //
+    // **Bounded** pool — max 4 workers. Unbounded parallelism (one
+    // thread per job) turned into page-cache thrashing and codesign
+    // subprocess contention on warm ffmpeg, regressing that workload
+    // ~160 ms. Four workers preserves the cold-install speedup (I/O
+    // and subprocess wait overlap) while keeping cache pressure low.
+    const mats = allocator.alloc(MaterializeResult, all_jobs.items.len) catch
+        return InstallError.CellarFailed;
+    defer {
+        for (mats) |m| {
+            if (m.keg_path.len > 0) std.heap.c_allocator.free(m.keg_path);
+        }
+        allocator.free(mats);
+    }
+    for (mats) |*m| m.* = .{ .ok = false, .keg_path = &[_]u8{}, .err = null };
+
+    {
+        const max_workers: usize = 4;
+        const worker_count = @min(max_workers, all_jobs.items.len);
+
+        var pool_ctx: MaterializePool = .{
+            .next_idx = std.atomic.Value(usize).init(0),
+            .jobs = all_jobs.items,
+            .prefix = prefix,
+            .results = mats,
+        };
+
+        const pool_threads = allocator.alloc(std.Thread, worker_count) catch
+            return InstallError.CellarFailed;
+        defer allocator.free(pool_threads);
+
+        var spawned: usize = 0;
+        for (0..worker_count) |_| {
+            if (std.Thread.spawn(.{}, materializePoolWorker, .{&pool_ctx})) |t| {
+                pool_threads[spawned] = t;
+                spawned += 1;
+            } else |_| {
+                // Fall back to inline execution if spawn fails. The pool
+                // loop will pick up remaining jobs on this thread.
+                materializePoolWorker(&pool_ctx);
+            }
+        }
+        for (pool_threads[0..spawned]) |t| t.join();
+    }
+
+    // ── Serial link + record phase ──────────────────────────────────
+    //
+    // Runs in dep order (the jobs list came out of `collectFormulaJobs`
+    // dep-sorted) so `findFailedDep` correctly propagates failures down
+    // the graph. Linker conflict checks and SQLite writes are not
+    // thread-safe, so this phase cannot be parallelised.
     var failed_kegs = std.StringHashMap(void).init(allocator);
     defer failed_kegs.deinit();
     var failed_count: usize = 0;
 
-    for (all_jobs.items) |*job| {
+    for (all_jobs.items, 0..) |*job, i| {
         if (main_mod.isInterrupted()) {
             output.warn("Interrupted. Stopping install.", .{});
             break;
@@ -461,21 +544,35 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             continue;
         }
 
-        // Skip if any runtime dep has already failed — installing on top of a
-        // broken dep graph produces a keg that dyld cannot resolve at runtime.
-        if (findFailedDep(&failed_kegs, job.formula_json)) |failed_dep| {
-            output.warn(
-                "Skipping {s}: dependency {s} failed to install",
-                .{ job.name, failed_dep },
+        if (!mats[i].ok) {
+            const err = mats[i].err orelse cellar_mod.CellarError.CloneFailed;
+            output.err(
+                "Failed to materialize {s}: {s} ({s})",
+                .{ job.name, @errorName(err), cellar_mod.describeError(err) },
             );
             failed_kegs.put(job.name, {}) catch {};
             failed_count += 1;
             continue;
         }
 
-        materializeAndLink(allocator, job, &db, &linker, prefix) catch {
+        // Skip if any runtime dep has already failed — installing on top of a
+        // broken dep graph produces a keg that dyld cannot resolve at runtime.
+        // The keg has already been materialised into the Cellar by a worker;
+        // remove it before continuing so we do not leave orphans behind.
+        if (findFailedDep(&failed_kegs, job.formula_json)) |failed_dep| {
+            output.warn(
+                "Skipping {s}: dependency {s} failed to install",
+                .{ job.name, failed_dep },
+            );
+            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
+            failed_kegs.put(job.name, {}) catch {};
+            failed_count += 1;
+            continue;
+        }
+
+        linkAndRecord(allocator, job, mats[i].keg_path, &db, &linker, prefix) catch {
             // The underlying error was already logged with a tag by
-            // materializeAndLink — just record that this job failed so its
+            // linkAndRecord — just record that this job failed so its
             // dependents in the rest of the loop get skipped above.
             failed_kegs.put(job.name, {}) catch {};
             failed_count += 1;
@@ -524,6 +621,29 @@ fn findFailedDep(
     return null;
 }
 
+/// Thread entry-point for parallel dep formula fetching. Borrows a
+/// client from the shared `HttpClientPool` for the duration of the
+/// fetch, builds a throw-away `BrewApi` around it, and stores the
+/// result. On any failure leaves `result.*` as `null`; the caller
+/// treats null as "skip this dep" the same way the old serial loop's
+/// `catch continue` did.
+///
+/// Why the pool: creating a fresh `HttpClient` per worker paid a full
+/// TLS context + cert store setup per dep. For cold installs of
+/// packages with many deps (ffmpeg has 11) that overhead compounds.
+fn fetchFormulaWorker(
+    allocator: std.mem.Allocator,
+    pool: *client_mod.HttpClientPool,
+    cache_dir: []const u8,
+    dep_name: []const u8,
+    result: *?[]const u8,
+) void {
+    const http = pool.acquire();
+    defer pool.release(http);
+    var local_api = api_mod.BrewApi.init(allocator, http, cache_dir);
+    result.* = local_api.fetchFormula(dep_name) catch null;
+}
+
 /// Collect download jobs for a formula and all its dependencies.
 /// Appends to the shared jobs list for parallel download.
 fn collectFormulaJobs(
@@ -531,6 +651,7 @@ fn collectFormulaJobs(
     pkg_name: []const u8,
     formula_json: []const u8,
     api: *api_mod.BrewApi,
+    http_pool: *client_mod.HttpClientPool,
     db: *sqlite.Database,
     store: *store_mod.Store,
     force: bool,
@@ -552,11 +673,53 @@ fn collectFormulaJobs(
     // Resolve dependencies
     const deps = deps_mod.resolve(allocator, formula.name, api, db) catch &.{};
 
-    // Add deps as jobs
-    for (deps) |dep| {
-        if (dep.already_installed) continue;
+    // Fetch every dep's formula JSON **in parallel**. Each worker
+    // borrows a client from the shared `http_pool` for the duration
+    // of its request so TLS contexts are reused across deps.
+    //
+    // Thread-safety: the caller's allocator is typically a
+    // non-thread-safe `GeneralPurposeAllocator`, so we wrap it in a
+    // `ThreadSafeAllocator` for the parallel section. Without this,
+    // concurrent workers would race on allocator bookkeeping and
+    // occasionally return corrupted response buffers (observed as
+    // sporadic `InvalidJson` failures on random deps of large
+    // formulae like ffmpeg). After `join()` the parallel phase is
+    // over and the serial post-processing can use the unwrapped
+    // `allocator` again — pointers allocated through the wrapper
+    // remain valid because both go to the same underlying GPA.
+    const dep_jsons = allocator.alloc(?[]const u8, deps.len) catch return InstallError.DownloadFailed;
+    defer allocator.free(dep_jsons);
+    @memset(dep_jsons, null);
 
-        const dep_json = api.fetchFormula(dep.name) catch continue;
+    if (deps.len > 0) {
+        var ts_allocator: std.heap.ThreadSafeAllocator = .{ .child_allocator = allocator };
+        const worker_alloc = ts_allocator.allocator();
+
+        const threads = allocator.alloc(std.Thread, deps.len) catch return InstallError.DownloadFailed;
+        defer allocator.free(threads);
+
+        var spawned: usize = 0;
+        for (deps, 0..) |dep, i| {
+            if (dep.already_installed) continue;
+            if (std.Thread.spawn(.{}, fetchFormulaWorker, .{
+                worker_alloc, http_pool, api.cache_dir, dep.name, &dep_jsons[i],
+            })) |t| {
+                threads[spawned] = t;
+                spawned += 1;
+            } else |_| {
+                // Spawn failure → fall back to inline fetch.
+                fetchFormulaWorker(worker_alloc, http_pool, api.cache_dir, dep.name, &dep_jsons[i]);
+            }
+        }
+        for (threads[0..spawned]) |t| t.join();
+    }
+
+    // Add deps as jobs — serial post-processing (parse + dedup + append)
+    // using the JSONs we fetched above.
+    for (deps, 0..) |dep, i| {
+        if (dep.already_installed) continue;
+        const dep_json = dep_jsons[i] orelse continue;
+
         var dep_formula = formula_mod.parseFormula(allocator, dep_json) catch {
             allocator.free(dep_json);
             continue;
@@ -632,45 +795,96 @@ fn collectFormulaJobs(
     output.info("Resolved {s} {s} ({d} {s})", .{ formula.name, formula.version, jobs.items.len, pkg_word });
 }
 
-/// Materialize a downloaded bottle to the cellar, link, and record in DB.
-///
-/// Returns an error on any failure instead of silently swallowing it, so
-/// `runInstall` can track failed packages and exit non-zero. The per-error
-/// `output.err` messages carry a human-readable tag via
-/// `cellar_mod.describeError`.
-fn materializeAndLink(
-    allocator: std.mem.Allocator,
-    job: *DownloadJob,
-    db: *sqlite.Database,
-    linker: *linker_mod.Linker,
-    prefix: []const u8,
-) !void {
-    const reason: []const u8 = if (job.is_dep) "dependency" else "direct";
+/// Result of a parallel materialize worker. `keg_path` is owned via
+/// `std.heap.c_allocator` (thread-safe) and must be freed by the caller.
+const MaterializeResult = struct {
+    ok: bool,
+    keg_path: []const u8,
+    err: ?cellar_mod.CellarError,
+};
 
-    // Animated spinner while materialize runs. Materialize is synchronous and
-    // can take a while for large packages (e.g. ansible), so a background-
-    // animated spinner gives clearer "still working" feedback than a static line.
-    var msg_buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(&msg_buf, "Materializing {s} to cellar...", .{job.name}) catch "Materializing...";
-    var spinner = progress_mod.Spinner.init(msg);
-    spinner.start();
+/// Shared state for a bounded work-stealing thread pool that executes
+/// the materialize phase. `next_idx` hands out jobs atomically so
+/// workers grab the next available job until the queue is drained —
+/// natural load-balancing without waves.
+const MaterializePool = struct {
+    next_idx: std.atomic.Value(usize),
+    jobs: []DownloadJob,
+    prefix: []const u8,
+    results: []MaterializeResult,
+};
+
+/// Thread entry-point for the bounded materialize pool. Each worker
+/// loops grabbing the next job index atomically and running
+/// `materializeOne` on it until the index passes the end of the jobs
+/// array. The pool is capped at 4 workers (see the call site in
+/// `execute`) to keep file-I/O and codesign-subprocess contention low.
+fn materializePoolWorker(pool: *MaterializePool) void {
+    while (true) {
+        const idx = pool.next_idx.fetchAdd(1, .acq_rel);
+        if (idx >= pool.jobs.len) return;
+        const job = &pool.jobs[idx];
+        if (!job.succeeded) continue;
+        materializeOne(job, pool.prefix, &pool.results[idx]);
+    }
+}
+
+/// Runs the clonefile + Mach-O patching + codesign pipeline for one
+/// job and stores the result. Thread-safe because each call operates
+/// on its own keg path (different name/version) and the cellar
+/// module's I/O paths never overlap between jobs.
+///
+/// Uses a per-call arena for short-lived allocations (walker, patcher
+/// buffers, etc.) and `std.heap.c_allocator` for the single long-lived
+/// output — the keg path — so it survives arena teardown.
+fn materializeOne(
+    job: *DownloadJob,
+    prefix: []const u8,
+    result: *MaterializeResult,
+) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const tmp_allocator = arena.allocator();
 
     const keg = cellar_mod.materializeWithCellar(
-        allocator,
+        tmp_allocator,
         prefix,
         job.store_sha256,
         job.name,
         job.version_str,
         job.cellar_type,
     ) catch |err| {
-        spinner.stop();
-        output.err(
-            "Failed to materialize {s}: {s} ({s})",
-            .{ job.name, @errorName(err), cellar_mod.describeError(err) },
-        );
-        return err;
+        result.* = .{ .ok = false, .keg_path = &[_]u8{}, .err = err };
+        return;
     };
-    spinner.stop();
+
+    // Dup keg.path to a long-lived thread-safe allocator because the
+    // arena is about to deinit.
+    const durable_path = std.heap.c_allocator.dupe(u8, keg.path) catch {
+        result.* = .{ .ok = false, .keg_path = &[_]u8{}, .err = cellar_mod.CellarError.OutOfMemory };
+        return;
+    };
+
+    result.* = .{ .ok = true, .keg_path = durable_path, .err = null };
+}
+
+/// Main-thread link + record phase for a single job that already had
+/// its bottle materialised into the Cellar by a worker. Parses the
+/// formula JSON, checks symlink conflicts, creates symlinks, and
+/// writes the keg + dependency rows into the DB.
+///
+/// Must run serially — linker conflict checking reads the current
+/// symlink state and SQLite writes are not safe from multiple writers.
+fn linkAndRecord(
+    allocator: std.mem.Allocator,
+    job: *DownloadJob,
+    keg_path: []const u8,
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    prefix: []const u8,
+) !void {
+    const reason: []const u8 = if (job.is_dep) "dependency" else "direct";
+
     // Parse formula for DB recording
     var formula = formula_mod.parseFormula(allocator, job.formula_json) catch |err| {
         output.err("Failed to parse formula for {s}: {s}", .{ job.name, @errorName(err) });
@@ -681,7 +895,7 @@ fn materializeAndLink(
 
     // Check for symlink conflicts before linking
     if (!job.keg_only) {
-        const conflicts = linker.checkConflicts(keg.path) catch &.{};
+        const conflicts = linker.checkConflicts(keg_path) catch &.{};
         if (conflicts.len > 0) {
             output.err("{s}: {d} symlink conflict(s) detected:", .{ job.name, conflicts.len });
             for (conflicts) |conflict| {
@@ -695,13 +909,13 @@ fn materializeAndLink(
 
     // Link + record
     if (!job.keg_only) {
-        const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch |err| {
+        const keg_id = recordKeg(db, &formula, job.store_sha256, keg_path, reason) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
         };
 
-        linker.link(keg.path, job.name, keg_id) catch |err| {
+        linker.link(keg_path, job.name, keg_id) catch |err| {
             output.err("Failed to link {s}: {s}", .{ job.name, @errorName(err) });
             // Rollback: unlink what was partially created + remove DB record + cellar
             linker.unlink(keg_id) catch {};
@@ -713,7 +927,7 @@ fn materializeAndLink(
         recordDeps(db, keg_id, &formula);
     } else {
         output.info("{s} is keg-only; not linking", .{job.name});
-        const keg_id = recordKeg(db, &formula, job.store_sha256, keg.path, reason) catch |err| {
+        const keg_id = recordKeg(db, &formula, job.store_sha256, keg_path, reason) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
