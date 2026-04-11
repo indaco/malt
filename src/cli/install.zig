@@ -61,10 +61,17 @@ pub const InstallError = error{
     /// before any network activity so the user can fix it without waiting on
     /// a multi-gigabyte download that will inevitably fail.
     PrefixTooLong,
+    /// Formula defines a Ruby `post_install` hook that malt cannot execute.
+    /// Raised before any dep resolution or job queueing so nothing is
+    /// downloaded, materialised, or linked for the affected package.
+    PostInstallUnsupported,
 };
 
 /// A bottle download job for parallel processing.
-const DownloadJob = struct {
+///
+/// Public so integration tests can construct an empty jobs list and assert
+/// that `collectFormulaJobs` early-return branches leave it untouched.
+pub const DownloadJob = struct {
     name: []const u8,
     version_str: []const u8,
     sha256: []const u8,
@@ -349,7 +356,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
             // Collect jobs for this formula + its deps
             collectFormulaJobs(allocator, pkg_name, formula_json, &api, &http_pool, &db, &store, force, &all_jobs) catch |e| {
-                output.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
+                // `PostInstallUnsupported` already printed its own user-facing
+                // message inside `collectFormulaJobs`; do not pile a generic
+                // "Failed to resolve" error on top of it.
+                if (e != InstallError.PostInstallUnsupported) {
+                    output.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
+                }
                 continue;
             };
         } else {
@@ -646,7 +658,11 @@ fn fetchFormulaWorker(
 
 /// Collect download jobs for a formula and all its dependencies.
 /// Appends to the shared jobs list for parallel download.
-fn collectFormulaJobs(
+///
+/// Public so integration tests can exercise the early-abort branches
+/// (already-installed, post_install_defined) with a real SQLite DB and
+/// without a live Homebrew API connection.
+pub fn collectFormulaJobs(
     allocator: std.mem.Allocator,
     pkg_name: []const u8,
     formula_json: []const u8,
@@ -668,6 +684,19 @@ fn collectFormulaJobs(
         output.info("{s} is already installed", .{formula.name});
         formula.deinit();
         return;
+    }
+
+    // Refuse formulae that define a Ruby `post_install` hook — malt cannot
+    // execute Ruby, and running the bottle without the hook leaves the
+    // package in a subtly broken state (configs not generated, caches not
+    // primed, etc.). Abort BEFORE any dep resolution or job queueing so
+    // no bottle is downloaded, materialised, or linked for this formula
+    // or its transitive deps in this invocation.
+    if (formula.post_install_defined) {
+        output.warn("{s} defines a post_install script that malt cannot execute.", .{formula.name});
+        output.warn("Skipping {s}. Install it with: brew install {s}", .{ formula.name, formula.name });
+        formula.deinit();
+        return InstallError.PostInstallUnsupported;
     }
 
     // Resolve dependencies
@@ -784,12 +813,6 @@ fn collectFormulaJobs(
         .store_sha256 = "",
         .succeeded = false,
     }) catch return InstallError.DownloadFailed;
-
-    // Warn if formula defines post_install — malt cannot run Ruby post-install scripts
-    if (formula.post_install_defined) {
-        output.warn("{s} defines a post_install script that malt cannot execute.", .{formula.name});
-        output.warn("The package may not work correctly without it. Consider: brew install {s}", .{formula.name});
-    }
 
     const pkg_word: []const u8 = if (jobs.items.len == 1) "package" else "packages";
     output.info("Resolved {s} {s} ({d} {s})", .{ formula.name, formula.version, jobs.items.len, pkg_word });
