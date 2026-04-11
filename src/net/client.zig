@@ -241,15 +241,21 @@ pub const HttpClient = struct {
         // Timeout watchdog: closes the underlying connection if the read
         // stalls beyond the deadline. This is the only reliable way to
         // abort a blocking read call.
+        //
+        // `request_done` is a one-shot event so the main thread can wake
+        // the watchdog immediately on completion. The previous polling
+        // implementation slept in 1 s ticks and could stall `join()` by
+        // up to a full second per request — that was the entire warm
+        // install floor (see docs/perf/results.md).
         const effective_timeout = if (max_bytes > MAX_METADATA_BYTES) BLOB_TIMEOUT_NS else self.timeout_ns;
-        var request_done = std.atomic.Value(bool).init(false);
+        var request_done: std.Thread.ResetEvent = .{};
         const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
             &request_done,
             effective_timeout,
             &req,
         }) catch null;
         defer {
-            request_done.store(true, .release);
+            request_done.set();
             if (watchdog) |w| w.join();
         }
 
@@ -267,7 +273,7 @@ pub const HttpClient = struct {
                 error.ReadFailed => return error.ReadFailed,
             };
 
-            request_done.store(true, .release);
+            request_done.set();
             if (total_read >= max_bytes) return error.ResponseTooLarge;
         } else {
             const total_read = body_reader.streamRemaining(&body_writer.writer) catch |e| switch (e) {
@@ -275,7 +281,7 @@ pub const HttpClient = struct {
                 error.ReadFailed => return error.ReadFailed,
             };
 
-            request_done.store(true, .release);
+            request_done.set();
             if (total_read >= max_bytes) return error.ResponseTooLarge;
         }
 
@@ -288,26 +294,115 @@ pub const HttpClient = struct {
         };
     }
 
-    /// Watchdog thread: sleeps for the timeout duration, then aborts the
-    /// request by closing its connection. This unblocks streamRemaining.
-    /// Watchdog thread: sleeps for the timeout duration, then marks
-    /// the connection as closing. This causes the next read to fail,
-    /// unblocking a stalled streamRemaining call.
+    /// Watchdog thread: waits until either the main thread signals
+    /// `request_done` (request finished normally) or the timeout elapses.
+    /// On timeout, marks the connection dead AND hard-shuts-down the
+    /// underlying TCP socket so any in-flight `readv` / `writev` on
+    /// the main thread returns immediately.
+    ///
+    /// **Important:** setting `conn.closing = true` alone is not
+    /// enough to interrupt a blocked read. That flag only influences
+    /// the *next* read — a `readv` already parked in the kernel
+    /// waiting on TLS bytes stays parked indefinitely. This used to
+    /// hang malt for minutes if a dep formula fetch hit a stalled
+    /// TLS connection (observed once during cold-ffmpeg bench runs).
+    /// `posix.shutdown(fd, .both)` forces the kernel to wake the
+    /// blocked syscall with an error, unblocking the main thread.
+    ///
+    /// Uses `ResetEvent.timedWait` so the main thread can wake us
+    /// immediately on successful completion — no polling overhead.
     fn watchdogFn(
-        request_done: *std.atomic.Value(bool),
+        request_done: *std.Thread.ResetEvent,
         timeout_ns: u64,
         req: *std.http.Client.Request,
     ) void {
-        var elapsed: u64 = 0;
-        const interval: u64 = 1 * std.time.ns_per_s;
-        while (elapsed < timeout_ns) {
-            if (request_done.load(.acquire)) return;
-            std.Thread.sleep(interval);
-            elapsed += interval;
+        request_done.timedWait(timeout_ns) catch |err| switch (err) {
+            error.Timeout => {
+                if (req.connection) |conn| {
+                    conn.closing = true;
+                    // Shut down both halves so any blocked read AND
+                    // any in-flight write fail immediately. Errors
+                    // are ignored — we're tearing down the connection
+                    // anyway and a "socket already closed" race is
+                    // harmless here.
+                    const fd = conn.stream_reader.getStream().handle;
+                    std.posix.shutdown(fd, .both) catch {};
+                }
+            },
+        };
+    }
+};
+
+/// Thread-safe pool of `HttpClient` instances with borrow/return
+/// semantics. Workers call `acquire()` to get exclusive access to an
+/// idle client, use it synchronously, then call `release()` so another
+/// worker can take it.
+///
+/// Why a pool: `std.http.Client` is *not* thread-safe across
+/// concurrent calls, but creating a fresh one per request pays the
+/// TLS context + cert store + connection setup cost every time. On a
+/// cold `ffmpeg` install that was ~15 HttpClient creations back to
+/// back (formula fetches + GHCR token + 12 blob downloads), each
+/// paying its own handshake. A 4-slot pool keeps per-connection
+/// reuse for the hot phase while preserving the no-sharing invariant.
+///
+/// All methods are safe to call from multiple threads.
+pub const HttpClientPool = struct {
+    allocator: std.mem.Allocator,
+    clients: []HttpClient,
+    busy: []bool,
+    mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition,
+
+    pub fn init(allocator: std.mem.Allocator, size: usize) !HttpClientPool {
+        const clients = try allocator.alloc(HttpClient, size);
+        errdefer allocator.free(clients);
+        const busy = try allocator.alloc(bool, size);
+        errdefer allocator.free(busy);
+        @memset(busy, false);
+        for (clients) |*c| c.* = HttpClient.init(allocator);
+        return .{
+            .allocator = allocator,
+            .clients = clients,
+            .busy = busy,
+            .mutex = .{},
+            .cond = .{},
+        };
+    }
+
+    pub fn deinit(self: *HttpClientPool) void {
+        for (self.clients) |*c| c.deinit();
+        self.allocator.free(self.clients);
+        self.allocator.free(self.busy);
+    }
+
+    /// Block until an idle client is available, mark it busy, return
+    /// a pointer the caller can use exclusively until `release`.
+    pub fn acquire(self: *HttpClientPool) *HttpClient {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        while (true) {
+            for (self.busy, 0..) |b, i| {
+                if (!b) {
+                    self.busy[i] = true;
+                    return &self.clients[i];
+                }
+            }
+            self.cond.wait(&self.mutex);
         }
-        // Timeout expired — mark connection as closing to unblock reads
-        if (req.connection) |conn| {
-            conn.closing = true;
-        }
+    }
+
+    /// Return a previously-acquired client to the pool. The pointer
+    /// must have come from `acquire` on the same pool; calling with
+    /// a foreign pointer is a programmer error.
+    pub fn release(self: *HttpClientPool, client: *HttpClient) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const base = @intFromPtr(self.clients.ptr);
+        const addr = @intFromPtr(client);
+        const idx = (addr - base) / @sizeOf(HttpClient);
+        std.debug.assert(idx < self.clients.len);
+        self.busy[idx] = false;
+        self.cond.signal();
     }
 };

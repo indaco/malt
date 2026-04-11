@@ -23,9 +23,14 @@ pub const BottleResult = struct {
 
 /// Download a bottle from GHCR, verify SHA256, and extract to tmp.
 /// Returns the SHA256 and path to extracted contents.
+///
+/// `http` is a caller-owned HttpClient (typically borrowed from a
+/// `HttpClientPool`); it must not be used concurrently by any other
+/// thread for the duration of this call.
 pub fn download(
     allocator: std.mem.Allocator,
     ghcr: *ghcr_mod.GhcrClient,
+    http: *client_mod.HttpClient,
     repo: []const u8,
     digest: []const u8,
     expected_sha256: []const u8,
@@ -36,7 +41,7 @@ pub fn download(
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
 
-    ghcr.downloadBlob(allocator, repo, digest, &body, progress) catch return BottleError.DownloadFailed;
+    ghcr.downloadBlob(allocator, http, repo, digest, &body, progress) catch return BottleError.DownloadFailed;
 
     // Compute SHA256 of downloaded data
     var hash: [32]u8 = undefined;

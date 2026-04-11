@@ -193,7 +193,7 @@ fn upgradeFormula(
         };
 
         output.info("  Downloading {s}...", .{name});
-        _ = bottle_mod.download(allocator, &ghcr, repo, digest, bottle.sha256, tmp_dir, null) catch {
+        _ = bottle_mod.download(allocator, &ghcr, http, repo, digest, bottle.sha256, tmp_dir, null) catch {
             output.err("  Download failed: {s}", .{name});
             atomic.cleanupTempDir(tmp_dir);
             allocator.free(tmp_dir);

@@ -12,6 +12,13 @@ jobs:
   benchmark:
     name: macOS Benchmarks
     runs-on: macos-14
+    env:
+      # Wipe the malt prefix between cold runs so the published numbers
+      # reflect a real network download, not a store-cache hit. Fail loud
+      # if any install returns non-zero so a broken install path can never
+      # silently publish fake timings.
+      BENCH_TRUE_COLD: "1"
+      BENCH_FAIL_FAST: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -23,205 +30,47 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # --- Build all competitors ---
+      # ---------------------------------------------------------------
+      # Each step below delegates to scripts/bench.sh, which is also the
+      # supported way to reproduce these numbers locally:
+      #
+      #   BENCH_TRUE_COLD=1 ./scripts/bench.sh
+      #
+      # The first step builds malt + the other tools and benches `tree`;
+      # the rest reuse those builds via SKIP_BUILD=1.
+      # ---------------------------------------------------------------
 
-      - name: Build malt
-        run: |
-          zig build -Doptimize=ReleaseSafe
-          ./zig-out/bin/malt --version
-
-      - name: Build nanobrew
-        run: |
-          git clone --depth 1 https://github.com/justrach/nanobrew.git /tmp/nanobrew
-          cd /tmp/nanobrew && zig build -Doptimize=ReleaseFast
-          sudo mkdir -p /opt/nanobrew
-          sudo chown -R $USER /opt/nanobrew
-          /tmp/nanobrew/zig-out/bin/nb init
-
-      - name: Build zerobrew
-        run: |
-          git clone --depth 1 https://github.com/lucasgelfond/zerobrew.git /tmp/zerobrew
-          cd /tmp/zerobrew && cargo build --release
-          sudo mkdir -p /opt/zerobrew
-          sudo chown -R $USER /opt/zerobrew
-          /tmp/zerobrew/target/release/zb init
-
-      - name: Build bru
-        run: |
-          git clone --depth 1 https://github.com/zieka/bru.git /tmp/bru
-          cd /tmp/bru && zig build -Doptimize=ReleaseFast
-
-      # --- Binary sizes ---
-
-      - name: Measure binary sizes
-        id: sizes
-        run: |
-          MT_SIZE=$(ls -lh ./zig-out/bin/malt | awk '{print $5}')
-          NB_SIZE=$(ls -lh /tmp/nanobrew/zig-out/bin/nb | awk '{print $5}')
-          ZB_SIZE=$(ls -lh /tmp/zerobrew/target/release/zb | awk '{print $5}')
-          BRU_SIZE=$(ls -lh /tmp/bru/zig-out/bin/bru | awk '{print $5}')
-          BREW_SIZE=$(ls -lh "$(which brew)" | awk '{print $5}')
-
-          {
-            echo "mt=${MT_SIZE}"
-            echo "nb=${NB_SIZE}"
-            echo "zb=${ZB_SIZE}"
-            echo "bru=${BRU_SIZE}"
-            echo "brew=${BREW_SIZE}"
-          } >> "$GITHUB_OUTPUT"
-
-      # --- Benchmark tree (0 deps) ---
-
-      - name: Benchmark tree
+      - name: Benchmark tree (also builds malt + other tools)
         id: tree
-        run: |
-          MT=./zig-out/bin/malt
-          NB=/tmp/nanobrew/zig-out/bin/nb
-          ZB=/tmp/zerobrew/target/release/zb
-          BRU=/tmp/bru/zig-out/bin/bru
-
-          # malt
-          MT_COLD=$(TIMEFORMAT='%R'; { time $MT install tree 2>&1; } 2>&1 | tail -1)
-          $MT uninstall tree 2>/dev/null || true
-          MT_WARM=$(TIMEFORMAT='%R'; { time $MT install tree 2>&1; } 2>&1 | tail -1)
-          $MT uninstall tree 2>/dev/null || true
-
-          # nanobrew
-          NB_COLD=$(TIMEFORMAT='%R'; { time $NB install tree 2>&1; } 2>&1 | tail -1)
-          $NB remove tree 2>/dev/null || true
-          NB_WARM=$(TIMEFORMAT='%R'; { time $NB install tree 2>&1; } 2>&1 | tail -1)
-          $NB remove tree 2>/dev/null || true
-
-          # zerobrew
-          ZB_COLD=$(TIMEFORMAT='%R'; { time $ZB install tree 2>&1; } 2>&1 | tail -1)
-          $ZB uninstall tree 2>/dev/null || true
-          ZB_WARM=$(TIMEFORMAT='%R'; { time $ZB install tree 2>&1; } 2>&1 | tail -1)
-          $ZB uninstall tree 2>/dev/null || true
-
-          # bru
-          BRU_COLD=$(TIMEFORMAT='%R'; { time $BRU install tree 2>&1; } 2>&1 | tail -1)
-          $BRU uninstall tree 2>/dev/null || true
-          BRU_WARM=$(TIMEFORMAT='%R'; { time $BRU install tree 2>&1; } 2>&1 | tail -1)
-          $BRU uninstall tree 2>/dev/null || true
-
-          # homebrew
-          brew uninstall tree 2>/dev/null || true
-          BREW_TIME=$(TIMEFORMAT='%R'; { time brew install tree 2>&1; } 2>&1 | tail -1)
-          brew uninstall tree 2>/dev/null || true
-
-          {
-            echo "brew=${BREW_TIME}s"
-            echo "mt_cold=${MT_COLD}s"
-            echo "mt_warm=${MT_WARM}s"
-            echo "nb_cold=${NB_COLD}s"
-            echo "nb_warm=${NB_WARM}s"
-            echo "zb_cold=${ZB_COLD}s"
-            echo "zb_warm=${ZB_WARM}s"
-            echo "bru_cold=${BRU_COLD}s"
-            echo "bru_warm=${BRU_WARM}s"
-          } >> "$GITHUB_OUTPUT"
-
-      # --- Benchmark wget (6 deps) ---
+        run: ./scripts/bench.sh tree
 
       - name: Benchmark wget
         id: wget
-        run: |
-          MT=./zig-out/bin/malt
-          NB=/tmp/nanobrew/zig-out/bin/nb
-          ZB=/tmp/zerobrew/target/release/zb
-          BRU=/tmp/bru/zig-out/bin/bru
-
-          # malt
-          MT_COLD=$(TIMEFORMAT='%R'; { time $MT install wget 2>&1; } 2>&1 | tail -1)
-          $MT uninstall wget 2>/dev/null || true
-          MT_WARM=$(TIMEFORMAT='%R'; { time $MT install wget 2>&1; } 2>&1 | tail -1)
-          $MT uninstall wget 2>/dev/null || true
-
-          # nanobrew
-          NB_COLD=$(TIMEFORMAT='%R'; { time $NB install wget 2>&1; } 2>&1 | tail -1)
-          $NB remove wget 2>/dev/null || true
-          NB_WARM=$(TIMEFORMAT='%R'; { time $NB install wget 2>&1; } 2>&1 | tail -1)
-          $NB remove wget 2>/dev/null || true
-
-          # zerobrew
-          ZB_COLD=$(TIMEFORMAT='%R'; { time $ZB install wget 2>&1; } 2>&1 | tail -1)
-          $ZB uninstall wget 2>/dev/null || true
-          ZB_WARM=$(TIMEFORMAT='%R'; { time $ZB install wget 2>&1; } 2>&1 | tail -1)
-          $ZB uninstall wget 2>/dev/null || true
-
-          # bru
-          BRU_COLD=$(TIMEFORMAT='%R'; { time $BRU install wget 2>&1; } 2>&1 | tail -1)
-          $BRU uninstall wget 2>/dev/null || true
-          BRU_WARM=$(TIMEFORMAT='%R'; { time $BRU install wget 2>&1; } 2>&1 | tail -1)
-          $BRU uninstall wget 2>/dev/null || true
-
-          # homebrew
-          brew uninstall wget 2>/dev/null || true
-          BREW_TIME=$(TIMEFORMAT='%R'; { time brew install wget 2>&1; } 2>&1 | tail -1)
-          brew uninstall wget 2>/dev/null || true
-
-          {
-            echo "brew=${BREW_TIME}s"
-            echo "mt_cold=${MT_COLD}s"
-            echo "mt_warm=${MT_WARM}s"
-            echo "nb_cold=${NB_COLD}s"
-            echo "nb_warm=${NB_WARM}s"
-            echo "zb_cold=${ZB_COLD}s"
-            echo "zb_warm=${ZB_WARM}s"
-            echo "bru_cold=${BRU_COLD}s"
-            echo "bru_warm=${BRU_WARM}s"
-          } >> "$GITHUB_OUTPUT"
-
-      # --- Benchmark ffmpeg (11 deps) ---
+        run: SKIP_BUILD=1 ./scripts/bench.sh wget
 
       - name: Benchmark ffmpeg
         id: ffmpeg
-        run: |
-          MT=./zig-out/bin/malt
-          NB=/tmp/nanobrew/zig-out/bin/nb
-          ZB=/tmp/zerobrew/target/release/zb
-          BRU=/tmp/bru/zig-out/bin/bru
+        run: SKIP_BUILD=1 ./scripts/bench.sh ffmpeg
 
-          # malt
-          MT_COLD=$(TIMEFORMAT='%R'; { time $MT install ffmpeg 2>&1; } 2>&1 | tail -1)
-          $MT uninstall ffmpeg 2>/dev/null || true
-          MT_WARM=$(TIMEFORMAT='%R'; { time $MT install ffmpeg 2>&1; } 2>&1 | tail -1)
-          $MT uninstall ffmpeg 2>/dev/null || true
+      # --- Race detection -----------------------------------------------------
+      #
+      # Single-sample benchmarks miss low-rate races in the parallel install
+      # pipeline. The P3 `fetchFormulaWorker` allocator race passed ~90% of
+      # cold ffmpeg runs and slipped through five subsequent PRs before the
+      # post-P7 head-to-head bench finally caught it.
+      #
+      # `BENCH_STRESS=20` runs malt cold install 20 times and exits non-zero
+      # on any single failure. With a 10% race, detection rate is ~88%; a 20%
+      # race is detected ~99% of the time. ffmpeg has the most deps (11) and
+      # exercises the parallel paths hardest, so it's the target here — costs
+      # ~80 seconds of CI time (20 runs × ~4 s each) in exchange for almost
+      # certain detection of the kind of bug `BENCH_FAIL_FAST=1` cannot catch.
+      #
+      # This step runs *before* the README update, so a race failure prevents
+      # the workflow from publishing misleading numbers to `main`.
 
-          # nanobrew
-          NB_COLD=$(TIMEFORMAT='%R'; { time $NB install ffmpeg 2>&1; } 2>&1 | tail -1)
-          $NB remove ffmpeg 2>/dev/null || true
-          NB_WARM=$(TIMEFORMAT='%R'; { time $NB install ffmpeg 2>&1; } 2>&1 | tail -1)
-          $NB remove ffmpeg 2>/dev/null || true
-
-          # zerobrew
-          ZB_COLD=$(TIMEFORMAT='%R'; { time $ZB install ffmpeg 2>&1; } 2>&1 | tail -1)
-          $ZB uninstall ffmpeg 2>/dev/null || true
-          ZB_WARM=$(TIMEFORMAT='%R'; { time $ZB install ffmpeg 2>&1; } 2>&1 | tail -1)
-          $ZB uninstall ffmpeg 2>/dev/null || true
-
-          # bru
-          BRU_COLD=$(TIMEFORMAT='%R'; { time $BRU install ffmpeg 2>&1; } 2>&1 | tail -1)
-          $BRU uninstall ffmpeg 2>/dev/null || true
-          BRU_WARM=$(TIMEFORMAT='%R'; { time $BRU install ffmpeg 2>&1; } 2>&1 | tail -1)
-          $BRU uninstall ffmpeg 2>/dev/null || true
-
-          # homebrew
-          brew uninstall ffmpeg 2>/dev/null || true
-          BREW_TIME=$(TIMEFORMAT='%R'; { time brew install ffmpeg 2>&1; } 2>&1 | tail -1)
-          brew uninstall ffmpeg 2>/dev/null || true
-
-          {
-            echo "brew=${BREW_TIME}s"
-            echo "mt_cold=${MT_COLD}s"
-            echo "mt_warm=${MT_WARM}s"
-            echo "nb_cold=${NB_COLD}s"
-            echo "nb_warm=${NB_WARM}s"
-            echo "zb_cold=${ZB_COLD}s"
-            echo "zb_warm=${ZB_WARM}s"
-            echo "bru_cold=${BRU_COLD}s"
-            echo "bru_warm=${BRU_WARM}s"
-          } >> "$GITHUB_OUTPUT"
+      - name: Stress-test malt cold install (ffmpeg ×20)
+        run: BENCH_STRESS=20 SKIP_BUILD=1 SKIP_OTHERS=1 SKIP_BREW=1 ./scripts/bench.sh ffmpeg
 
       # --- Summary ---
 
@@ -233,18 +82,17 @@ jobs:
           ### Binary Size
           | Tool | Size |
           |------|------|
-          | **malt** | ${{ steps.sizes.outputs.mt }} |
-          | nanobrew | ${{ steps.sizes.outputs.nb }} |
-          | zerobrew | ${{ steps.sizes.outputs.zb }} |
-          | bru | ${{ steps.sizes.outputs.bru }} |
-          | Homebrew | ${{ steps.sizes.outputs.brew }} |
+          | **malt** | ${{ steps.tree.outputs.mt_size }} |
+          | nanobrew | ${{ steps.tree.outputs.nb_size }} |
+          | zerobrew | ${{ steps.tree.outputs.zb_size }} |
+          | bru | ${{ steps.tree.outputs.bru_size }} |
 
           ### Cold Install
           | Package | malt | nanobrew | zerobrew | bru | Homebrew |
           |---------|------|----------|----------|-----|----------|
-          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.bru_cold }} | ${{ steps.tree.outputs.brew }} |
-          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.bru_cold }} | ${{ steps.wget.outputs.brew }} |
-          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.bru_cold }} | ${{ steps.ffmpeg.outputs.brew }} |
+          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.bru_cold }} | ${{ steps.tree.outputs.brew_cold }} |
+          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.bru_cold }} | ${{ steps.wget.outputs.brew_cold }} |
+          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.bru_cold }} | ${{ steps.ffmpeg.outputs.brew_cold }} |
 
           ### Warm Install
           | Package | malt | nanobrew | zerobrew | bru |
@@ -265,23 +113,28 @@ jobs:
 
           | Tool | Size |
           | ---- | ---- |
-          | **malt** | ${{ steps.sizes.outputs.mt }} |
-          | nanobrew | ${{ steps.sizes.outputs.nb }} |
-          | zerobrew | ${{ steps.sizes.outputs.zb }} |
-          | bru | ${{ steps.sizes.outputs.bru }} |
+          | **malt** | ${{ steps.tree.outputs.mt_size }} |
+          | nanobrew | ${{ steps.tree.outputs.nb_size }} |
+          | zerobrew | ${{ steps.tree.outputs.zb_size }} |
+          | bru | ${{ steps.tree.outputs.bru_size }} |
           <!-- BENCH:SIZE:END -->
           TABLE
 
-          # Generate cold install table
+          # Generate cold install table.
+          # The `‡` suffix on bru's cold cells is intentional: bru caches
+          # bottles under ~/.bru/ and ~/Library/Caches/bru/, outside the
+          # wiped /tmp/bru prefix, so its "cold" numbers reflect warm
+          # cache + materialise rather than a real network fetch. The
+          # matching footnote lives in README.md outside the markers.
           cat > /tmp/cold_table.md << TABLE
           <!-- BENCH:COLD:START -->
           ### Cold Install
 
           | Package | malt | nanobrew | zerobrew | bru | Homebrew |
           | ------- | ---- | -------- | -------- | --- | -------- |
-          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.bru_cold }} | ${{ steps.tree.outputs.brew }} |
-          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.bru_cold }} | ${{ steps.wget.outputs.brew }} |
-          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.bru_cold }} | ${{ steps.ffmpeg.outputs.brew }} |
+          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.bru_cold }}‡ | ${{ steps.tree.outputs.brew_cold }} |
+          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.bru_cold }}‡ | ${{ steps.wget.outputs.brew_cold }} |
+          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.bru_cold }}‡ | ${{ steps.ffmpeg.outputs.brew_cold }} |
           <!-- BENCH:COLD:END -->
           TABLE
 

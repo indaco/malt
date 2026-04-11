@@ -39,7 +39,14 @@ pub const GhcrClient = struct {
 
     /// Fetch an anonymous GHCR token for a repository.
     /// repo format: "homebrew/core/wget" -> scope=repository:homebrew/core/wget:pull
-    pub fn fetchToken(self: *GhcrClient, repo: []const u8) GhcrError![]const u8 {
+    ///
+    /// `http` is a caller-owned client — typically borrowed from a
+    /// `HttpClientPool` so the TLS context is reused across requests.
+    pub fn fetchToken(
+        self: *GhcrClient,
+        http: *client_mod.HttpClient,
+        repo: []const u8,
+    ) GhcrError![]const u8 {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -61,12 +68,7 @@ pub const GhcrClient = struct {
         const url = std.fmt.bufPrint(&url_buf, "https://ghcr.io/token?scope=repository:{s}:pull", .{repo}) catch
             return GhcrError.OutOfMemory;
 
-        // Use a short-lived HTTP client to avoid sharing the parent's
-        // std.http.Client across threads (it is not thread-safe).
-        var local_http = client_mod.HttpClient.init(self.allocator);
-        defer local_http.deinit();
-
-        var resp = local_http.get(url) catch return GhcrError.TokenFetchFailed;
+        var resp = http.get(url) catch return GhcrError.TokenFetchFailed;
         defer resp.deinit();
 
         if (resp.status != 200) return GhcrError.TokenFetchFailed;
@@ -82,21 +84,21 @@ pub const GhcrClient = struct {
     }
 
     /// Download a blob from GHCR, handling 401 -> token -> retry.
-    /// Thread-safe: uses mutex-protected token cache and per-thread HTTP client.
+    /// `http` is a caller-owned client (typically borrowed from a
+    /// `HttpClientPool`) — the caller is responsible for ensuring no
+    /// other thread is using the same client concurrently. The token
+    /// cache inside this struct remains mutex-protected.
     pub fn downloadBlob(
         self: *GhcrClient,
         allocator: std.mem.Allocator,
+        http: *client_mod.HttpClient,
         repo: []const u8,
         digest: []const u8,
         body_out: *std.ArrayList(u8),
         progress: ?client_mod.ProgressCallback,
     ) GhcrError!void {
         // Get token through the mutex-protected cache (avoids redundant fetches)
-        const token = self.fetchToken(repo) catch return GhcrError.TokenFetchFailed;
-
-        // Each download gets its own HTTP client (thread-safe)
-        var http = client_mod.HttpClient.init(allocator);
-        defer http.deinit();
+        const token = self.fetchToken(http, repo) catch return GhcrError.TokenFetchFailed;
 
         // Build URL: https://ghcr.io/v2/{repo}/blobs/{digest}
         var url_buf: [512]u8 = undefined;

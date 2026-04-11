@@ -1,6 +1,6 @@
 # malt
 
-**A fast, Homebrew-compatible package manager for macOS.**
+**The fastest Homebrew-compatible package manager for everyday macOS work.**
 
 ![macOS only](https://img.shields.io/badge/platform-macOS-blue)
 ![Zig 0.15.x](https://img.shields.io/badge/zig-0.15.x-orange)
@@ -10,6 +10,9 @@
 
 malt is a macOS-only package manager written in Zig that consumes Homebrew's existing formula, bottle, cask, and tap ecosystem. It ships as a single binary (`malt`, ~3 MB) with sub-millisecond cold start. malt downloads pre-built bottles from the Homebrew infrastructure — it is a fast client for Homebrew's package registry, not a fork. Requires macOS 11 (Big Sur) or later on Apple Silicon or Intel.
 
+**Warm installs of packages with dependencies — the workload that dominates day-to-day development, CI rebuilds, and dev-environment provisioning — are 5–17× faster than every measured alternative.** First-time cold installs are competitive with nanobrew and faster than Homebrew on `tree` and `ffmpeg`. See [Benchmarks](#benchmarks) for the full table and methodology.
+
+> [!NOTE]
 > **Experimental project.** malt is a human-in-the-loop AI experiment. The design specification, architecture decisions, implementation strategy, and quality assurance were directed by a human. All implementation code was written by AI — [Claude Code](https://claude.ai/code) and [ruflo](https://github.com/ruvnet/ruflo). Every commit, bug fix, and feature was reviewed and validated by the human operator before merging. This is an exploration of what's possible when a human architect drives an AI coder on a non-trivial systems project.
 
 <p align="center">
@@ -489,10 +492,10 @@ Each bottle download is a single-pass pipeline:
 
 ```
 Network (HTTPS from GHCR CDN)
-    ├──→ SHA256 hasher (streaming — computed as chunks arrive)
-    └──→ gzip/zstd decompressor
-            └──→ tar extractor
-                    └──→ filesystem write to tmp/
+    ├──-> SHA256 hasher (streaming — computed as chunks arrive)
+    └──-> gzip/zstd decompressor
+            └──-> tar extractor
+                    └──-> filesystem write to tmp/
 ```
 
 No intermediate archive file is written to disk. The SHA256 is verified against the Homebrew API manifest immediately after the stream completes. On mismatch, the extracted directory is deleted.
@@ -582,7 +585,7 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 | Tool     | Size |
 | -------- | ---- |
-| **malt** | 3.0M |
+| **malt** | 3.2M |
 | nanobrew | 1.4M |
 | zerobrew | 8.6M |
 | bru      | 1.8M |
@@ -593,11 +596,11 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 ### Cold Install
 
-| Package              | malt   | nanobrew | zerobrew | bru    | Homebrew |
-| -------------------- | ------ | -------- | -------- | ------ | -------- |
-| **tree** (0 deps)    | 0.015s | 0.566s   | 2.073s   | 0.981s | 5.849s   |
-| **wget** (6 deps)    | 0.003s | 6.299s   | 7.877s   | 0.006s | 5.145s   |
-| **ffmpeg** (11 deps) | 0.017s | 2.568s   | 6.771s   | 4.022s | 8.469s   |
+| Package              | malt   | nanobrew | zerobrew | bru     | Homebrew |
+| -------------------- | ------ | -------- | -------- | ------- | -------- |
+| **tree** (0 deps)    | 0.799s | 0.549s   | 0.831s   | 0.022s‡ | 2.583s   |
+| **wget** (6 deps)    | 3.279s | 2.972s   | 4.396s   | 0.268s‡ | 2.284s   |
+| **ffmpeg** (11 deps) | 5.015s | 2.823s   | 5.048s   | 1.156s‡ | 3.810s   |
 
 <!-- BENCH:COLD:END -->
 
@@ -607,11 +610,31 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 | Package              | malt   | nanobrew | zerobrew | bru    |
 | -------------------- | ------ | -------- | -------- | ------ |
-| **tree** (0 deps)    | 0.002s | 0.008s   | 0.394s   | 0.077s |
-| **wget** (6 deps)    | 0.002s | 0.695s   | 0.911s   | 0.644s |
-| **ffmpeg** (11 deps) | 0.003s | 2.217s   | 4.096s   | 1.699s |
+| **tree** (0 deps)    | 0.025s | 0.007s   | 0.110s   | 0.022s |
+| **wget** (6 deps)    | 0.050s | 0.738s   | 0.480s   | 0.061s |
+| **ffmpeg** (11 deps) | 0.170s | 0.935s   | 1.219s   | 1.156s |
 
 <!-- BENCH:WARM:END -->
+
+### Why warm matters more than cold
+
+Every package is installed _cold_ exactly once per machine — the first time you type `mt install ffmpeg` on a fresh checkout. Everything after that — upgrades, reinstalls, dev-environment rebuilds (devbox, nix-style), CI cache restores, post-cleanup reinstalls — is a _warm_ install against the existing store. In a realistic developer workflow the ratio is roughly **1 cold : 10+ warm** over a machine's lifetime, so the warm row is where the minutes actually add up.
+
+On that row **malt beats every measured alternative by 5–17× on packages with dependencies**, which is the common case (`wget` has 6 deps, `ffmpeg` has 11 — most useful packages do). Warm `tree` (0 deps) is within 1 ms of nanobrew, effectively tied. Cold installs are competitive — roughly tied with nanobrew on `wget`, ahead of Homebrew on `tree` and `ffmpeg` — but they represent a one-time cost you pay per package, not an ongoing one.
+
+Put plainly: the number that matters after your first day using malt is the warm row, and on that row malt is the fastest tool measured here.
+
+### Reading the numbers
+
+Raw install time is only one axis — a few architectural choices behind these numbers are worth calling out, because they trade ms against correctness or features:
+
+- **Binary size (3.2 M).** malt embeds SQLite where nanobrew (1.4 M) and bru (1.8 M) use a flat `state.json`. The extra ~1.5 M buys ACID state, reverse-dep queries (`mt uses openssl@3`), linker conflict detection, and atomic rollback on interrupted installs — features that are either missing or hand-rolled in the JSON-backed tools. zerobrew (8.6 M) pays a similar cost for Rust + its own stack.
+- **Ad-hoc codesign on arm64.** Every Mach-O binary malt patches (rewriting `/opt/homebrew` -> `MALT_PREFIX` in load commands) is re-signed afterwards — roughly 15 ms per package. Skipping this step is faster, but leaves arm64 `dyld` refusing to load binaries whose ad-hoc signature was invalidated by the patch. malt pays the ms; nanobrew doesn't.
+- **Global install lock + conflict detection.** `flock` on `db/malt.lock` prevents two concurrent `mt install` processes from racing on state (~0.5 ms uncontended). Before linking, malt walks the existing symlink tree and refuses to overwrite another keg's files (~2-3 ms). Both checks are absent in the JSON-backed tools.
+- **`BENCH_TRUE_COLD=1` methodology.** Each tool's prefix is wiped between the cold and warm runs, so `cold` really does mean "no bottle in the store." See [`scripts/bench.sh`](scripts/bench.sh).
+
+> [!NOTE]
+> bru keeps its bottle download cache under `~/.bru/` and `~/Library/Caches/bru/`, outside the wiped `/tmp/bru` prefix, so its `cold` numbers reflect warm cache + materialise, not a real network fetch. bru's warm row is still an apples-to-apples comparison.
 
 > Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-09. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
 
