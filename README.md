@@ -23,6 +23,10 @@ malt is a macOS-only package manager written in Zig that consumes Homebrew's exi
   <b><a href="#benchmarks">Benchmarks</a></b>
 </p>
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/indaco/gh-assets/main/malt/demo.gif" alt="malt install jq tree ripgrep — demo" width="800">
+</p>
+
 ---
 
 ## Features
