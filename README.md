@@ -580,40 +580,34 @@ zig build universal                      # universal binary (arm64 + x86_64 via 
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
-
 ### Binary Size
 
-| Tool     | Size |
-| -------- | ---- |
+| Tool | Size |
+| ---- | ---- |
 | **malt** | 3.2M |
 | nanobrew | 1.4M |
 | zerobrew | 8.6M |
-| bru      | 1.8M |
-
+| bru | 1.8M |
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
-
 ### Cold Install
 
-| Package              | malt   | nanobrew | zerobrew | bru     | Homebrew |
-| -------------------- | ------ | -------- | -------- | ------- | -------- |
-| **tree** (0 deps)    | 0.799s | 0.549s   | 0.831s   | 0.022s‡ | 2.583s   |
-| **wget** (6 deps)    | 3.279s | 2.972s   | 4.396s   | 0.268s‡ | 2.284s   |
-| **ffmpeg** (11 deps) | 5.015s | 2.823s   | 5.048s   | 1.156s‡ | 3.810s   |
-
+| Package | malt | nanobrew | zerobrew | bru | Homebrew |
+| ------- | ---- | -------- | -------- | --- | -------- |
+| **tree** (0 deps) | 0.910s | 0.612s | 1.806s | 0.750s‡ | 3.419s |
+| **wget** (6 deps) | 4.574s | 5.601s | 6.414s | 0.529s‡ | 3.682s |
+| **ffmpeg** (11 deps) | 4.502s | 2.810s | 5.851s | 3.042s‡ | 15.632s |
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
-
 ### Warm Install
 
-| Package              | malt   | nanobrew | zerobrew | bru    |
-| -------------------- | ------ | -------- | -------- | ------ |
-| **tree** (0 deps)    | 0.025s | 0.007s   | 0.110s   | 0.022s |
-| **wget** (6 deps)    | 0.050s | 0.738s   | 0.480s   | 0.061s |
-| **ffmpeg** (11 deps) | 0.170s | 0.935s   | 1.219s   | 1.156s |
-
+| Package | malt | nanobrew | zerobrew | bru |
+| ------- | ---- | -------- | -------- | --- |
+| **tree** (0 deps) | 0.022s | 0.008s | 0.243s | 0.039s |
+| **wget** (6 deps) | 0.034s | 0.532s | 0.667s | 0.054s |
+| **ffmpeg** (11 deps) | 0.151s | 0.760s | 2.182s | 1.004s |
 <!-- BENCH:WARM:END -->
 
 ### Why warm matters more than cold
@@ -636,7 +630,7 @@ Raw install time is only one axis — a few architectural choices behind these n
 > [!NOTE]
 > bru keeps its bottle download cache under `~/.bru/` and `~/Library/Caches/bru/`, outside the wiped `/tmp/bru` prefix, so its `cold` numbers reflect warm cache + materialise, not a real network fetch. bru's warm row is still an apples-to-apples comparison.
 
-> Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-09. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
+> Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-11. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
 
 ---
 
