@@ -97,7 +97,7 @@ pub const BrewApi = struct {
         return self.allocator.dupe(u8, resp.body) catch return ApiError.OutOfMemory;
     }
 
-    fn readCache(self: *BrewApi, key: []const u8, prefix: []const u8) ?[]const u8 {
+    pub fn readCache(self: *BrewApi, key: []const u8, prefix: []const u8) ?[]const u8 {
         var path_buf: [512]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return null;
 
@@ -123,7 +123,7 @@ pub const BrewApi = struct {
         return content;
     }
 
-    fn writeCache(self: *const BrewApi, key: []const u8, prefix: []const u8, data: []const u8) void {
+    pub fn writeCache(self: *const BrewApi, key: []const u8, prefix: []const u8, data: []const u8) void {
         var dir_buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.fs.makeDirAbsolute(dir_path) catch |e| switch (e) {
@@ -144,7 +144,7 @@ pub const BrewApi = struct {
     /// and skip the network. Uses the same TTL as success responses
     /// so the cache auto-refreshes if the upstream ever starts
     /// returning 200.
-    fn readNotFoundCache(self: *BrewApi, key: []const u8, prefix: []const u8) bool {
+    pub fn readNotFoundCache(self: *BrewApi, key: []const u8, prefix: []const u8) bool {
         var path_buf: [512]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return false;
 
@@ -159,7 +159,7 @@ pub const BrewApi = struct {
     /// file's mtime is the TTL anchor — `readNotFoundCache` checks it
     /// against `CACHE_TTL_SECS`. Best-effort; failures are silent so a
     /// missing cache dir never breaks an install.
-    fn writeNotFoundCache(self: *const BrewApi, key: []const u8, prefix: []const u8) void {
+    pub fn writeNotFoundCache(self: *const BrewApi, key: []const u8, prefix: []const u8) void {
         var dir_buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.fs.makeDirAbsolute(dir_path) catch |e| switch (e) {

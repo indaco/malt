@@ -42,7 +42,7 @@ pub fn isApfs(path: []const u8) bool {
     return std.mem.eql(u8, fs_name, "apfs");
 }
 
-fn copyTreeFallback(src_path: []const u8, dst_path: []const u8) !void {
+pub fn copyTreeFallback(src_path: []const u8, dst_path: []const u8) !void {
     // Open source directory.
     var src_dir = std.fs.openDirAbsolute(src_path, .{ .iterate = true }) catch return error.FileNotFound;
     defer src_dir.close();
