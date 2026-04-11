@@ -609,7 +609,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 /// Errors during parse are treated as "no known failed dep" — we would rather
 /// attempt the install and let materialize surface the real problem than
 /// silently skip over a parser hiccup.
-fn findFailedDep(
+pub fn findFailedDep(
     failed_kegs: *std.StringHashMap(void),
     formula_json: []const u8,
 ) ?[]const u8 {
@@ -1150,7 +1150,7 @@ fn ensureDirs(prefix: []const u8) void {
 }
 
 /// Build GHCR repo path from formula name, replacing @ with /
-fn buildGhcrRepo(buf: []u8, name: []const u8) ![]const u8 {
+pub fn buildGhcrRepo(buf: []u8, name: []const u8) ![]const u8 {
     // Replace @ with / for versioned formulas (openssl@3 -> homebrew/core/openssl/3)
     var pos: usize = 0;
     const prefix_str = "homebrew/core/";
@@ -1167,7 +1167,7 @@ fn buildGhcrRepo(buf: []u8, name: []const u8) ![]const u8 {
 }
 
 /// Check if a package name is a tap formula (user/repo/formula format).
-fn isTapFormula(name: []const u8) bool {
+pub fn isTapFormula(name: []const u8) bool {
     var slash_count: u32 = 0;
     for (name) |ch| {
         if (ch == '/') slash_count += 1;
@@ -1176,7 +1176,7 @@ fn isTapFormula(name: []const u8) bool {
 }
 
 /// Parse a tap formula name into user, repo, formula components.
-fn parseTapName(name: []const u8) ?struct { user: []const u8, repo: []const u8, formula: []const u8 } {
+pub fn parseTapName(name: []const u8) ?struct { user: []const u8, repo: []const u8, formula: []const u8 } {
     const first_slash = std.mem.indexOfScalar(u8, name, '/') orelse return null;
     const rest = name[first_slash + 1 ..];
     const second_slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
@@ -1437,13 +1437,13 @@ fn installTapFormula(
 
 /// Minimal Ruby formula parser for GoReleaser-style formulas.
 /// Extracts version, URL, and SHA256 for the current platform.
-const RubyFormulaInfo = struct {
+pub const RubyFormulaInfo = struct {
     version: []const u8,
     url: []const u8,
     sha256: []const u8,
 };
 
-fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
+pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     const is_arm = @import("../macho/codesign.zig").isArm64();
 
     var version: ?[]const u8 = null;
@@ -1530,7 +1530,7 @@ fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     return null;
 }
 
-fn extractQuoted(line: []const u8, prefix: []const u8) ?[]const u8 {
+pub fn extractQuoted(line: []const u8, prefix: []const u8) ?[]const u8 {
     const start = std.mem.indexOf(u8, line, prefix) orelse return null;
     const value_start = start + prefix.len;
     if (value_start >= line.len) return null;

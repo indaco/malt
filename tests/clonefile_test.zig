@@ -1,0 +1,179 @@
+//! malt — APFS clonefile tests
+//!
+//! These exercise the copy-tree and isApfs helpers with real temp dirs.
+//! On the common macOS dev box the prefix volume IS APFS, so cloneTree
+//! takes the fast path; on non-APFS volumes we still hit the fallback.
+
+const std = @import("std");
+const testing = std.testing;
+const clonefile = @import("malt").clonefile;
+
+fn tmpRoot(comptime tag: []const u8) []const u8 {
+    return "/tmp/malt_clonefile_test_" ++ tag;
+}
+
+fn setupSourceTree(root: []const u8) !void {
+    std.fs.deleteTreeAbsolute(root) catch {};
+    try std.fs.makeDirAbsolute(root);
+    var src_buf: [512]u8 = undefined;
+    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
+    try std.fs.makeDirAbsolute(src);
+
+    // A regular file.
+    var f_buf: [512]u8 = undefined;
+    const fpath = try std.fmt.bufPrint(&f_buf, "{s}/hello.txt", .{src});
+    const f = try std.fs.cwd().createFile(fpath, .{});
+    defer f.close();
+    try f.writeAll("hi\n");
+
+    // A nested file.
+    var sub_buf: [512]u8 = undefined;
+    const sub = try std.fmt.bufPrint(&sub_buf, "{s}/inner", .{src});
+    try std.fs.makeDirAbsolute(sub);
+    var sub_f_buf: [512]u8 = undefined;
+    const sf_path = try std.fmt.bufPrint(&sub_f_buf, "{s}/world.txt", .{sub});
+    const sf = try std.fs.cwd().createFile(sf_path, .{});
+    defer sf.close();
+    try sf.writeAll("nested\n");
+}
+
+test "isApfs returns a plausible bool for the repo tmp dir" {
+    // Just assert it runs without crashing. The actual bool depends on
+    // the host filesystem.
+    const apfs = clonefile.isApfs("/tmp");
+    _ = apfs;
+}
+
+test "isApfs returns true for a path that cannot be stat'd (fallback assumption)" {
+    // The implementation defensively returns `true` when statfs fails so
+    // callers assume APFS and try clonefile first. An impossible path is
+    // the simplest way to take that branch.
+    try testing.expect(clonefile.isApfs("/this/does/not/exist/ever"));
+}
+
+test "cloneTree duplicates a small directory tree" {
+    const root = tmpRoot("basic");
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+    try setupSourceTree(root);
+
+    var src_buf: [512]u8 = undefined;
+    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
+    var dst_buf: [512]u8 = undefined;
+    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst", .{root});
+
+    try clonefile.cloneTree(src, dst);
+
+    // Verify the cloned top-level file exists with the same contents.
+    var verify_buf: [512]u8 = undefined;
+    const cloned = try std.fmt.bufPrint(&verify_buf, "{s}/hello.txt", .{dst});
+    const f = try std.fs.cwd().openFile(cloned, .{});
+    defer f.close();
+    var contents: [16]u8 = undefined;
+    const n = try f.readAll(&contents);
+    try testing.expectEqualStrings("hi\n", contents[0..n]);
+
+    // And the nested file.
+    var nested_buf: [512]u8 = undefined;
+    const nested = try std.fmt.bufPrint(&nested_buf, "{s}/inner/world.txt", .{dst});
+    const nf = try std.fs.cwd().openFile(nested, .{});
+    defer nf.close();
+    var nb: [16]u8 = undefined;
+    const nn = try nf.readAll(&nb);
+    try testing.expectEqualStrings("nested\n", nb[0..nn]);
+}
+
+test "cloneTree fails with AlreadyExists when dst already exists" {
+    const root = tmpRoot("exists");
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+    try setupSourceTree(root);
+
+    var src_buf: [512]u8 = undefined;
+    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
+    var dst_buf: [512]u8 = undefined;
+    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst", .{root});
+
+    // Pre-create dst — clonefile(2) EEXIST → CloneError.AlreadyExists on APFS.
+    // On non-APFS filesystems the fallback may overwrite gracefully, so we
+    // only assert the error on APFS.
+    try std.fs.makeDirAbsolute(dst);
+    const result = clonefile.cloneTree(src, dst);
+    if (clonefile.isApfs("/tmp")) {
+        try testing.expectError(clonefile.CloneError.AlreadyExists, result);
+    } else {
+        // Non-APFS takes the fallback path, which makeDir's idempotently.
+        result catch {};
+    }
+}
+
+test "cloneTree errors on a missing source when the fallback path is taken" {
+    // Force the fallback branch by targeting a dst path whose parent does
+    // not exist. clonefile(2) will fail with ENOENT → IoError. We also
+    // cover the non-APFS fallback with a missing src below.
+    const result = clonefile.cloneTree(
+        "/definitely/not/a/real/path",
+        "/tmp/malt_clonefile_test_missing_dst",
+    );
+    try testing.expectError(clonefile.CloneError.IoError, result);
+}
+
+// --- copyTreeFallback tests (exercise the non-APFS path explicitly) ---
+
+test "copyTreeFallback duplicates files, subdirs, and symlinks" {
+    const root = tmpRoot("fallback");
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+    try setupSourceTree(root);
+
+    var src_buf: [512]u8 = undefined;
+    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
+    var dst_buf: [512]u8 = undefined;
+    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst_fallback", .{root});
+
+    // Add a symlink into the source tree so the sym_link branch runs.
+    var link_path_buf: [512]u8 = undefined;
+    const link_path = try std.fmt.bufPrint(&link_path_buf, "{s}/link.txt", .{src});
+    std.fs.cwd().symLink("hello.txt", link_path, .{}) catch {};
+
+    try clonefile.copyTreeFallback(src, dst);
+
+    // Verify the top-level file is present.
+    var check_buf: [512]u8 = undefined;
+    const check = try std.fmt.bufPrint(&check_buf, "{s}/hello.txt", .{dst});
+    const f = try std.fs.cwd().openFile(check, .{});
+    defer f.close();
+    var contents: [16]u8 = undefined;
+    const n = try f.readAll(&contents);
+    try testing.expectEqualStrings("hi\n", contents[0..n]);
+
+    // And the nested file.
+    var nested_buf: [512]u8 = undefined;
+    const nested = try std.fmt.bufPrint(&nested_buf, "{s}/inner/world.txt", .{dst});
+    const nf = try std.fs.cwd().openFile(nested, .{});
+    defer nf.close();
+}
+
+test "copyTreeFallback is idempotent when the destination already exists" {
+    const root = tmpRoot("fallback_idem");
+    defer std.fs.deleteTreeAbsolute(root) catch {};
+    try setupSourceTree(root);
+
+    var src_buf: [512]u8 = undefined;
+    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
+    var dst_buf: [512]u8 = undefined;
+    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst_idem", .{root});
+
+    try std.fs.makeDirAbsolute(dst);
+    try clonefile.copyTreeFallback(src, dst);
+
+    // Verify the nested file was still copied.
+    var check_buf: [512]u8 = undefined;
+    const check = try std.fmt.bufPrint(&check_buf, "{s}/inner/world.txt", .{dst});
+    const f = try std.fs.cwd().openFile(check, .{});
+    defer f.close();
+}
+
+test "copyTreeFallback errors when source directory does not exist" {
+    try testing.expectError(
+        error.FileNotFound,
+        clonefile.copyTreeFallback("/not/a/real/source/dir", "/tmp/malt_clonefile_nowhere"),
+    );
+}
