@@ -644,6 +644,7 @@ Raw install time is only one axis — a few architectural choices behind these n
 > [!NOTE]
 > bru keeps its bottle download cache under `~/.bru/` and `~/Library/Caches/bru/`, outside the wiped `/tmp/bru` prefix, so its `cold` numbers reflect warm cache + materialise, not a real network fetch. bru's warm row is still an apples-to-apples comparison.
 
+> [!INFO]
 > Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-11. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
 
 ---
