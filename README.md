@@ -129,7 +129,7 @@ mt install <package> [<package> ...]     # multiple packages
 | `--quiet`, `-q` | Suppress all output except errors               |
 | `--json`        | Output result as JSON                           |
 
-> [!INFO]
+> [!IMPORTANT]
 > malt does not execute Ruby `post_install` hooks. Formulae that define one (e.g. `node`, `postgresql@16`) are skipped before any download with a message pointing you at `brew install <formula>` — nothing is written to the store, Cellar, or prefix for that package. Its dependencies in the same invocation are also skipped, since they would otherwise be orphaned until another install pulls them in.
 
 ### `mt uninstall`
@@ -644,7 +644,7 @@ Raw install time is only one axis — a few architectural choices behind these n
 > [!NOTE]
 > bru keeps its bottle download cache under `~/.bru/` and `~/Library/Caches/bru/`, outside the wiped `/tmp/bru` prefix, so its `cold` numbers reflect warm cache + materialise, not a real network fetch. bru's warm row is still an apples-to-apples comparison.
 
-> [!INFO]
+> [!NOTE]
 > Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-11. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
 
 ---
