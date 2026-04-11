@@ -124,6 +124,9 @@ mt install <package> [<package> ...]     # multiple packages
 | `--quiet`, `-q` | Suppress all output except errors               |
 | `--json`        | Output result as JSON                           |
 
+> [Note]
+> malt does not execute Ruby `post_install` hooks. Formulae that define one (e.g. `node`, `postgresql@16`) are skipped before any download with a message pointing you at `brew install <formula>` — nothing is written to the store, Cellar, or prefix for that package. Its dependencies in the same invocation are also skipped, since they would otherwise be orphaned until another install pulls them in.
+
 ### `mt uninstall`
 
 Remove installed packages.
@@ -529,7 +532,7 @@ Every install follows a strict 9-step protocol. Failure at any step triggers cle
 ## Safety Guarantees
 
 - **SHA256 verification** — streaming hash computed during download, verified before extraction. No unverified data touches the store.
-- **Pre-flight checks** — dependencies resolved, disk space verified, link conflicts detected, and `post_install` hooks flagged before any download begins.
+- **Pre-flight checks** — dependencies resolved, disk space verified, link conflicts detected, and formulae requiring `post_install` hooks rejected before any download begins. No bottle is fetched, no file is written under the prefix, and no DB row is created for a skipped formula.
 - **Link conflict detection** — all target symlink paths scanned before creating any links. Conflicts abort the operation with a clear report.
 - **Atomic installs** — the 9-step protocol uses `errdefer` at every stage. Interrupted installs leave no partial state.
 - **Concurrent access** — an advisory file lock with a 30-second timeout prevents concurrent mutations. Read-only commands (`list`, `info`, `search`) do not acquire the lock.
