@@ -68,3 +68,140 @@ test "patcher hasPrefix helper via patchPaths on non-existent file" {
     const result = patcher.patchPaths(testing.allocator, "/nonexistent/path/to/binary", "/opt/homebrew", "/opt/malt");
     try testing.expectError(error.OpenFailed, result);
 }
+
+// --- Parser edge cases (truncated + dylib/rpath load commands) ---
+
+test "parse rejects truncated header" {
+    // < sizeof(mach_header_64) bytes after magic check → TruncatedFile
+    var buf: [8]u8 = undefined;
+    std.mem.writeInt(u32, buf[0..4], macho.MH_MAGIC_64, .little);
+    @memset(buf[4..], 0);
+    try testing.expectError(parser.ParseError.TruncatedFile, parser.parse(testing.allocator, &buf));
+}
+
+test "parse a Mach-O 64 with an LC_LOAD_DYLIB load command extracts the path" {
+    // Build a minimal binary: mach_header_64 + dylib_command + padded name.
+    const lc_size = @sizeOf(macho.dylib_command);
+    const path_str = "/opt/homebrew/lib/libfoo.dylib\x00";
+    // dylib_command.cmdsize must cover the whole LC including the path.
+    const name_offset: u32 = @intCast(lc_size);
+    const cmdsize: u32 = @intCast(lc_size + path_str.len);
+    const cmdsize_aligned: u32 = (cmdsize + 7) & ~@as(u32, 7);
+
+    const header_size = @sizeOf(macho.mach_header_64);
+    const total_len = header_size + cmdsize_aligned;
+
+    const buf = try testing.allocator.alloc(u8, total_len);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+
+    const header = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    header.* = .{
+        .magic = macho.MH_MAGIC_64,
+        .ncmds = 1,
+        .sizeofcmds = cmdsize_aligned,
+    };
+
+    const dy = std.mem.bytesAsValue(macho.dylib_command, buf[header_size..][0..lc_size]);
+    dy.* = .{
+        .cmd = .LOAD_DYLIB,
+        .cmdsize = cmdsize_aligned,
+        .dylib = .{
+            .name = name_offset,
+            .timestamp = 0,
+            .current_version = 0,
+            .compatibility_version = 0,
+        },
+    };
+
+    // Write the path bytes right after the dylib_command struct.
+    @memcpy(
+        buf[header_size + lc_size ..][0..path_str.len],
+        path_str,
+    );
+
+    var m = try parser.parse(testing.allocator, buf);
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 1), m.paths.len);
+    try testing.expectEqualStrings("/opt/homebrew/lib/libfoo.dylib", m.paths[0].path);
+    try testing.expectEqual(
+        @as(u32, @intFromEnum(macho.LC.LOAD_DYLIB)),
+        m.paths[0].cmd,
+    );
+}
+
+test "parse a Mach-O 64 with an LC_RPATH command extracts the path" {
+    const lc_size = @sizeOf(macho.rpath_command);
+    const path_str = "@executable_path/../lib\x00";
+    const rpath_offset: u32 = @intCast(lc_size);
+    const cmdsize: u32 = @intCast(lc_size + path_str.len);
+    const cmdsize_aligned: u32 = (cmdsize + 7) & ~@as(u32, 7);
+
+    const header_size = @sizeOf(macho.mach_header_64);
+    const total_len = header_size + cmdsize_aligned;
+
+    const buf = try testing.allocator.alloc(u8, total_len);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+
+    const header = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    header.* = .{
+        .magic = macho.MH_MAGIC_64,
+        .ncmds = 1,
+        .sizeofcmds = cmdsize_aligned,
+    };
+
+    const rp = std.mem.bytesAsValue(macho.rpath_command, buf[header_size..][0..lc_size]);
+    rp.* = .{
+        .cmd = .RPATH,
+        .cmdsize = cmdsize_aligned,
+        .path = rpath_offset,
+    };
+    @memcpy(
+        buf[header_size + lc_size ..][0..path_str.len],
+        path_str,
+    );
+
+    var m = try parser.parse(testing.allocator, buf);
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 1), m.paths.len);
+    try testing.expectEqualStrings("@executable_path/../lib", m.paths[0].path);
+}
+
+test "parse rejects a truncated fat header" {
+    // Only 4 bytes — not enough for the nfat_arch field.
+    var buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &buf, macho.FAT_MAGIC, .big);
+    try testing.expectError(parser.ParseError.TruncatedFile, parser.parse(testing.allocator, &buf));
+}
+
+test "parse rejects a fat archive whose slice extends beyond data" {
+    // Build a fat header claiming one arch whose slice is out of bounds.
+    var buf: [28]u8 = undefined;
+    @memset(&buf, 0);
+    std.mem.writeInt(u32, buf[0..4], macho.FAT_MAGIC, .big);
+    std.mem.writeInt(u32, buf[4..8], 1, .big); // nfat_arch = 1
+    // fat_arch entry starts at offset 8: cputype, cpusubtype, offset, size, align.
+    std.mem.writeInt(u32, buf[16..20], 100, .big); // offset = 100 (past EOF)
+    std.mem.writeInt(u32, buf[20..24], 200, .big); // size = 200
+    try testing.expectError(parser.ParseError.TruncatedFile, parser.parse(testing.allocator, &buf));
+}
+
+test "parse rejects a cmdsize shorter than the generic load_command" {
+    const header_size = @sizeOf(macho.mach_header_64);
+    const lc_size = @sizeOf(macho.load_command);
+    const buf = try testing.allocator.alloc(u8, header_size + lc_size);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+
+    const header = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    header.* = .{
+        .magic = macho.MH_MAGIC_64,
+        .ncmds = 1,
+        .sizeofcmds = lc_size,
+    };
+
+    const lc = std.mem.bytesAsValue(macho.load_command, buf[header_size..][0..lc_size]);
+    lc.* = .{ .cmd = .LOAD_DYLIB, .cmdsize = 1 }; // bogus tiny cmdsize
+    try testing.expectError(parser.ParseError.InvalidLoadCommand, parser.parse(testing.allocator, buf));
+}
