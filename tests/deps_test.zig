@@ -172,13 +172,15 @@ const TempCacheDir = struct {
     }
 };
 
+/// Free the slice returned by `deps_mod.resolve()`. Each `ResolvedDep.name`
+/// is heap-allocated by resolve(), and so is the outer slice.
+fn freeResolved(alloc: std.mem.Allocator, r: []deps_mod.ResolvedDep) void {
+    for (r) |d| alloc.free(d.name);
+    alloc.free(r);
+}
+
 test "resolve walks a small BFS dep graph and dedups via visited" {
-    // resolve() leaks duped dep strings on the BFS visited-dedup path; run
-    // this test under an arena so Zig's leak detector doesn't flag it.
-    // The leak fix lives on a separate branch (fix/deps-resolve-leak).
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const alloc = testing.allocator;
 
     var dir = try TempCacheDir.init("resolve_bfs");
     defer dir.deinit();
@@ -198,6 +200,7 @@ test "resolve walks a small BFS dep graph and dedups via visited" {
     defer tdb.deinit();
 
     const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db);
+    defer freeResolved(alloc, result);
 
     // Expect both beta and gamma to appear, in BFS order.
     try testing.expectEqual(@as(usize, 2), result.len);
@@ -208,9 +211,7 @@ test "resolve walks a small BFS dep graph and dedups via visited" {
 }
 
 test "resolve marks already-installed kegs and skips their sub-deps" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const alloc = testing.allocator;
 
     var dir = try TempCacheDir.init("resolve_installed");
     defer dir.deinit();
@@ -230,6 +231,7 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
     _ = try insertKeg(&tdb.db, "beta", "dependency");
 
     const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db);
+    defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 1), result.len);
     try testing.expectEqualStrings("beta", result[0].name);
@@ -237,9 +239,7 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
 }
 
 test "resolve returns empty when root formula JSON is missing from cache" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const alloc = testing.allocator;
 
     var dir = try TempCacheDir.init("resolve_missing_root");
     defer dir.deinit();
@@ -264,13 +264,12 @@ test "resolve returns empty when root formula JSON is missing from cache" {
     // resolve's getDeps catches errors and returns &.{}, so resolve returns
     // an empty list (no deps to walk).
     const result = try deps_mod.resolve(alloc, "nope", &api, &tdb.db);
+    defer freeResolved(alloc, result);
     try testing.expectEqual(@as(usize, 0), result.len);
 }
 
 test "resolve handles a dep whose sub-fetch fails by falling through" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    const alloc = testing.allocator;
 
     var dir = try TempCacheDir.init("resolve_dep_missing");
     defer dir.deinit();
@@ -292,6 +291,7 @@ test "resolve handles a dep whose sub-fetch fails by falling through" {
     defer tdb.deinit();
 
     const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db);
+    defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 1), result.len);
     try testing.expectEqualStrings("missing", result[0].name);
