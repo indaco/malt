@@ -68,6 +68,10 @@ pub fn build(b: *std.Build) void {
         "tests/deps_leak_test.zig",
         "tests/api_test.zig",
         "tests/clonefile_test.zig",
+        "tests/dsl_lexer_test.zig",
+        "tests/dsl_parser_test.zig",
+        "tests/dsl_sandbox_test.zig",
+        "tests/dsl_interpreter_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");

@@ -1,0 +1,21 @@
+  ▸ Resolved ffmpeg 8.1 (1 package)
+  ▸ Materializing ffmpeg to cellar...
+  ✓ ffmpeg 8.1 installed
+        0.67 real         0.37 user         0.17 sys
+            38993920  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               24433  page reclaims
+                  30  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 523  voluntary context switches
+                1370  involuntary context switches
+          3778793963  instructions retired
+           727631280  cycles elapsed
+            36831640  peak memory footprint

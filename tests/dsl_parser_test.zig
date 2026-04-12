@@ -1,0 +1,683 @@
+//! malt -- DSL parser tests
+//! Tests for AST construction from Ruby subset source.
+
+const std = @import("std");
+const testing = std.testing;
+const malt = @import("malt");
+const dsl = malt.dsl;
+const Lexer = dsl.lexer.Lexer;
+const Parser = dsl.parser.Parser;
+const Node = dsl.ast.Node;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn testArena() std.heap.ArenaAllocator {
+    return std.heap.ArenaAllocator.init(testing.allocator);
+}
+
+fn parseSource(arena: *std.heap.ArenaAllocator, src: []const u8) ![]const *const Node {
+    const alloc = arena.allocator();
+    var lex = Lexer.init(src);
+    var p = Parser.init(alloc, &lex);
+    return p.parseBlock();
+}
+
+// ---------------------------------------------------------------------------
+// Simple method calls
+// ---------------------------------------------------------------------------
+
+test "parser: bare method call with string arg" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "ohai \"hello\"");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("ohai", mc.method);
+    try testing.expect(mc.receiver == null);
+    try testing.expectEqual(@as(usize, 1), mc.args.len);
+
+    // The arg should be a string literal
+    const arg = mc.args[0].kind.string_literal;
+    try testing.expectEqual(@as(usize, 1), arg.parts.len);
+    try testing.expectEqualStrings("hello", arg.parts[0].literal);
+}
+
+test "parser: method call with parens and multiple args" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "system(\"make\", \"install\")");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("system", mc.method);
+    try testing.expect(mc.receiver == null);
+    try testing.expectEqual(@as(usize, 2), mc.args.len);
+}
+
+test "parser: bare method call with multiple args" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "system \"make\", \"install\"");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("system", mc.method);
+    try testing.expectEqual(@as(usize, 2), mc.args.len);
+}
+
+// ---------------------------------------------------------------------------
+// Path join
+// ---------------------------------------------------------------------------
+
+test "parser: path join with slash" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "bin/\"foo\"");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    // bin/"foo" parsed as: identifier bin, then / triggers path_join
+    // The parser first sees `bin` as identifier then the method chain
+    // catches the slash. Let's check the node kind.
+    switch (nodes[0].kind) {
+        .path_join => |pj| {
+            try testing.expectEqualStrings("bin", pj.left.kind.identifier);
+            try testing.expectEqualStrings("foo", pj.right.kind.string_literal.parts[0].literal);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Assignment
+// ---------------------------------------------------------------------------
+
+test "parser: variable assignment" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "x = bin/\"foo\"");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const assign = nodes[0].kind.assignment;
+    try testing.expectEqualStrings("x", assign.name);
+
+    // Value should be a path_join
+    switch (assign.value.kind) {
+        .path_join => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Postfix if / unless
+// ---------------------------------------------------------------------------
+
+test "parser: postfix if" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "ohai \"msg\" if true");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .postfix_if => |pf| {
+            // body is the method call
+            try testing.expectEqualStrings("ohai", pf.body.kind.method_call.method);
+            // condition is true
+            try testing.expect(pf.condition.kind.bool_literal);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parser: postfix unless" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "rm \"path\" unless true");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .postfix_unless => |pu| {
+            try testing.expectEqualStrings("rm", pu.body.kind.method_call.method);
+            try testing.expect(pu.condition.kind.bool_literal);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Array literal
+// ---------------------------------------------------------------------------
+
+test "parser: array literal" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "[1, 2, 3]");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const arr = nodes[0].kind.array_literal;
+    try testing.expectEqual(@as(usize, 3), arr.len);
+    try testing.expectEqual(@as(i64, 1), arr[0].kind.int_literal);
+    try testing.expectEqual(@as(i64, 2), arr[1].kind.int_literal);
+    try testing.expectEqual(@as(i64, 3), arr[2].kind.int_literal);
+}
+
+// ---------------------------------------------------------------------------
+// if/else/end block
+// ---------------------------------------------------------------------------
+
+test "parser: if else end" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src =
+        \\if true
+        \\  ohai "yes"
+        \\else
+        \\  ohai "no"
+        \\end
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .if_else => |ie| {
+            try testing.expect(ie.condition.kind.bool_literal);
+            try testing.expectEqual(@as(usize, 1), ie.then_body.len);
+            try testing.expect(ie.else_body != null);
+            try testing.expectEqual(@as(usize, 1), ie.else_body.?.len);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parser: if without else" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src =
+        \\if true
+        \\  ohai "yes"
+        \\end
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const ie = nodes[0].kind.if_else;
+    try testing.expect(ie.else_body == null);
+}
+
+// ---------------------------------------------------------------------------
+// unless block
+// ---------------------------------------------------------------------------
+
+test "parser: unless block" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src =
+        \\unless false
+        \\  ohai "yes"
+        \\end
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .unless_statement => |us| {
+            try testing.expect(!us.condition.kind.bool_literal);
+            try testing.expectEqual(@as(usize, 1), us.body.len);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// each loop with block
+// ---------------------------------------------------------------------------
+
+test "parser: each loop with brace block" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src = "[1, 2].each { |x| ohai \"hello\" }";
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .each_loop => |el| {
+            try testing.expectEqual(@as(usize, 1), el.params.len);
+            try testing.expectEqualStrings("x", el.params[0]);
+            try testing.expectEqual(@as(usize, 1), el.body.len);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parser: each loop with do/end block" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src =
+        \\[1, 2].each do |x|
+        \\  ohai "hello"
+        \\end
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .each_loop => |el| {
+            try testing.expectEqual(@as(usize, 1), el.params.len);
+            try testing.expectEqualStrings("x", el.params[0]);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// begin/rescue
+// ---------------------------------------------------------------------------
+
+test "parser: begin rescue block" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src =
+        \\begin
+        \\  system "might_fail"
+        \\rescue
+        \\  ohai "rescued"
+        \\end
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .begin_rescue => |br| {
+            try testing.expectEqual(@as(usize, 1), br.body.len);
+            try testing.expectEqual(@as(usize, 1), br.rescue_body.len);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Receiver method call
+// ---------------------------------------------------------------------------
+
+test "parser: receiver method call" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "prefix.mkpath");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("mkpath", mc.method);
+    try testing.expect(mc.receiver != null);
+    try testing.expectEqualStrings("prefix", mc.receiver.?.kind.identifier);
+}
+
+// ---------------------------------------------------------------------------
+// Literals
+// ---------------------------------------------------------------------------
+
+test "parser: bool literals" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "true");
+    try testing.expect(nodes[0].kind.bool_literal);
+
+    const nodes2 = try parseSource(&arena, "false");
+    try testing.expect(!nodes2[0].kind.bool_literal);
+}
+
+test "parser: nil literal" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "nil");
+    switch (nodes[0].kind) {
+        .nil_literal => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parser: integer literal" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "42");
+    try testing.expectEqual(@as(i64, 42), nodes[0].kind.int_literal);
+}
+
+test "parser: hex integer parsed correctly" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "0xFF");
+    try testing.expectEqual(@as(i64, 255), nodes[0].kind.int_literal);
+}
+
+test "parser: octal integer parsed correctly" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "0o755");
+    try testing.expectEqual(@as(i64, 493), nodes[0].kind.int_literal);
+}
+
+// ---------------------------------------------------------------------------
+// Multiple statements
+// ---------------------------------------------------------------------------
+
+test "parser: multiple statements" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src =
+        \\ohai "hello"
+        \\ohai "world"
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 2), nodes.len);
+}
+
+// ---------------------------------------------------------------------------
+// Hash literal
+// ---------------------------------------------------------------------------
+
+test "parser: hash literal" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "{ \"a\" => 1 }");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .hash_literal => |entries| {
+            try testing.expectEqual(@as(usize, 1), entries.len);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Raise statement
+// ---------------------------------------------------------------------------
+
+test "parser: raise statement" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "raise \"boom\"");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .raise_statement => |rs| {
+            try testing.expect(rs.message != null);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Logical operators
+// ---------------------------------------------------------------------------
+
+test "parser: logical AND" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "x.exist? && y.exist?");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .logical_and => |la| {
+            // left is x.exist? (method_call)
+            try testing.expectEqualStrings("exist?", la.left.kind.method_call.method);
+            // right is y.exist? (method_call)
+            try testing.expectEqualStrings("exist?", la.right.kind.method_call.method);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parser: logical OR" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "a || b");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .logical_or => |lo| {
+            try testing.expectEqualStrings("a", lo.left.kind.identifier);
+            try testing.expectEqualStrings("b", lo.right.kind.identifier);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parser: logical NOT" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "!x.exist?");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .logical_not => |operand| {
+            try testing.expectEqualStrings("exist?", operand.kind.method_call.method);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parser: logical AND with NOT on right" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "a.exist? && !b.symlink?");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .logical_and => |la| {
+            try testing.expectEqualStrings("exist?", la.left.kind.method_call.method);
+            // right should be logical_not
+            switch (la.right.kind) {
+                .logical_not => |operand| {
+                    try testing.expectEqualStrings("symlink?", operand.kind.method_call.method);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// %w word arrays
+// ---------------------------------------------------------------------------
+
+test "parser: percent_w word array" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "%w[foo bar baz]");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .array_literal => |elems| {
+            try testing.expectEqual(@as(usize, 3), elems.len);
+            try testing.expectEqualStrings("foo", elems[0].kind.string_literal.parts[0].literal);
+            try testing.expectEqualStrings("bar", elems[1].kind.string_literal.parts[0].literal);
+            try testing.expectEqualStrings("baz", elems[2].kind.string_literal.parts[0].literal);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parser: percent_w each loop" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src = "%w[a b c].each do |x|\nohai x\nend";
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .each_loop => |el| {
+            // iterable should be an array_literal
+            switch (el.iterable.kind) {
+                .array_literal => |arr| {
+                    try testing.expectEqual(@as(usize, 3), arr.len);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+            try testing.expectEqual(@as(usize, 1), el.params.len);
+            try testing.expectEqualStrings("x", el.params[0]);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dir[] and ENV[]
+// ---------------------------------------------------------------------------
+
+test "parser: Dir glob pattern" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "Dir[\"*.txt\"]");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("Dir.glob", mc.method);
+    try testing.expectEqual(@as(usize, 1), mc.args.len);
+}
+
+test "parser: ENV read" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "ENV[\"HOME\"]");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("ENV.get", mc.method);
+    try testing.expectEqual(@as(usize, 1), mc.args.len);
+}
+
+test "parser: ENV write" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "ENV[\"FOO\"] = \"bar\"");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("ENV.set", mc.method);
+    try testing.expectEqual(@as(usize, 2), mc.args.len);
+}
+
+// ---------------------------------------------------------------------------
+// String interpolation in parser
+// ---------------------------------------------------------------------------
+
+test "parser: string with interpolation" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "\"hello #{name}\"");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const sl = nodes[0].kind.string_literal;
+    // Should have 2 parts: literal "hello " and interpolation of `name`
+    try testing.expectEqual(@as(usize, 2), sl.parts.len);
+    try testing.expectEqualStrings("hello ", sl.parts[0].literal);
+    switch (sl.parts[1]) {
+        .interpolation => |node| {
+            try testing.expectEqualStrings("name", node.kind.identifier);
+        },
+        .literal => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Postfix unless with NOT
+// ---------------------------------------------------------------------------
+
+test "parser: postfix unless with logical not" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "rm \"path\" unless !path.exist?");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .postfix_unless => |pu| {
+            try testing.expectEqualStrings("rm", pu.body.kind.method_call.method);
+            // condition should be logical_not
+            switch (pu.condition.kind) {
+                .logical_not => |operand| {
+                    try testing.expectEqualStrings("exist?", operand.kind.method_call.method);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path join with interpolated string
+// ---------------------------------------------------------------------------
+
+test "parser: path join with interpolated string" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "HOMEBREW_PREFIX/\"share/man/#{man}\"");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    switch (nodes[0].kind) {
+        .path_join => |pj| {
+            try testing.expectEqualStrings("HOMEBREW_PREFIX", pj.left.kind.identifier);
+            // right should be a string literal with interpolation parts
+            const sl = pj.right.kind.string_literal;
+            try testing.expect(sl.parts.len >= 2);
+            try testing.expectEqualStrings("share/man/", sl.parts[0].literal);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-line system call
+// ---------------------------------------------------------------------------
+
+test "parser: multi-line system call with continuation" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src = "system \"cmd\", \"--flag\",\n  \"arg\"";
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("system", mc.method);
+    try testing.expectEqual(@as(usize, 3), mc.args.len);
+}

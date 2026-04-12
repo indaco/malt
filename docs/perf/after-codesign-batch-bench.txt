@@ -1,0 +1,23 @@
+▸ prefixes: malt=/tmp/mt-b nb=/tmp/nb zb=/tmp/zb bru=/tmp/bru (BENCH_TRUE_COLD=1)
+▸ skip build malt (SKIP_BUILD=1, binary present)
+▸ benchmark: tree
+▸ wiping /tmp/mt-b (true cold: malt)
+▸ benchmark: wget
+▸ wiping /tmp/mt-b (true cold: malt)
+
+Binary Size
+  malt       3.2M
+  nanobrew   1.4M
+  zerobrew   8.6M
+  bru        1.8M
+
+Cold Install
+  Package        malt       nanobrew   zerobrew   bru        brew      
+  tree           0.810s     —        —        —        —       
+  wget           3.888s     —        —        —        —       
+
+Warm Install
+  Package        malt       nanobrew   zerobrew   bru       
+  tree           0.026s     —        —        —       
+  wget           0.067s     —        —        —       
+✓ done

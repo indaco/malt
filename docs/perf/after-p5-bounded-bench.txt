@@ -1,0 +1,36 @@
+▸ prefixes: malt=/tmp/mt-b nb=/tmp/nb zb=/tmp/zb bru=/tmp/bru (BENCH_TRUE_COLD=1)
+▸ skip build malt (SKIP_BUILD=1, binary present)
+▸ benchmark: tree
+▸ wiping /tmp/mt-b (true cold: malt)
+▸ wiping /tmp/nb (true cold: nanobrew)
+▸ wiping /tmp/zb (true cold: zerobrew)
+▸ wiping /tmp/bru (true cold: bru)
+▸ benchmark: wget
+▸ wiping /tmp/mt-b (true cold: malt)
+▸ wiping /tmp/nb (true cold: nanobrew)
+▸ wiping /tmp/zb (true cold: zerobrew)
+▸ wiping /tmp/bru (true cold: bru)
+▸ benchmark: ffmpeg
+▸ wiping /tmp/mt-b (true cold: malt)
+▸ wiping /tmp/nb (true cold: nanobrew)
+▸ wiping /tmp/zb (true cold: zerobrew)
+▸ wiping /tmp/bru (true cold: bru)
+
+Binary Size
+  malt       3.2M
+  nanobrew   1.4M
+  zerobrew   8.6M
+  bru        1.8M
+
+Cold Install
+  Package        malt       nanobrew   zerobrew   bru        brew      
+  tree           0.799s     0.549s     0.831s     0.022s     2.583s    
+  wget           3.279s     2.972s     4.396s     0.268s     2.284s    
+  ffmpeg         5.015s     2.823s     5.048s     1.156s     3.810s    
+
+Warm Install
+  Package        malt       nanobrew   zerobrew   bru       
+  tree           0.025s     0.007s     0.110s     0.022s    
+  wget           0.050s     0.738s     0.480s     0.061s    
+  ffmpeg         0.170s     0.935s     1.219s     1.156s    
+✓ done

@@ -1,0 +1,175 @@
+Analysis of sampling malt (pid 72414) every 1 millisecond
+Process:         malt [72414]
+Path:            /private/tmp/*/malt
+Load Address:    0x100b9c000
+Identifier:      malt
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  zsh [72409]
+Target Type:     live task
+
+Date/Time:       2026-04-10 23:07:03.328 +0200
+Launch Time:     2026-04-10 23:07:03.282 +0200
+OS Version:      macOS 26.4.1 (25E253)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+----
+
+Call graph:
+    84 Thread_2006992   DispatchQueue_1: com.apple.main-thread  (serial)
+      84 start  (in dyld) + 6992  [0x18fa33da4]
+        84 main  (in malt) + 6196  [0x100d2ec38]  start.zig:602
+          83 cli.install.execute  (in malt) + 9696  [0x100ce9568]  install.zig:476
+          + 73 cli.install.materializeAndLink  (in malt) + 2016  [0x100ce42dc]  install.zig:707
+          + ! 44 core.cellar.materializeWithCellar  (in malt) + 2412  [0x100ce6490]  cellar.zig:191
+          + ! : 41 macho.codesign.signAllMachOInDir  (in malt) + 1936  [0x100d39fb8]  codesign.zig:102
+          + ! : | 40 process.Child.wait  (in malt) + 796  [0x100ccbd90]  Child.zig:342
+          + ! : | + 40 __wait4  (in libsystem_kernel.dylib) + 8  [0x18fdb3478]
+          + ! : | 1 process.Child.wait  (in malt) + 316  [0x100ccbbb0]  Child.zig:335
+          + ! : |   1 fs.File.Reader.readVec  (in malt) + 168  [0x100d5e1dc]  File.zig:1346
+          + ! : |     1 fs.File.Reader.readVecStreaming  (in malt) + 156  [0x100d79b0c]  File.zig:1423
+          + ! : |       1 posix.readv  (in malt) + 48  [0x100d79c14]  posix.zig:946
+          + ! : |         1 readv  (in libsystem_kernel.dylib) + 8  [0x18fdbac54]
+          + ! : 3 macho.codesign.signAllMachOInDir  (in malt) + 464  [0x100d399f8]  codesign.zig:84
+          + ! :   3 fs.Dir.openFileZ  (in malt) + 164  [0x100d33a28]  Dir.zig:904
+          + ! :     3 posix.openatZ  (in malt) + 76  [0x100d503ec]  posix.zig:1844
+          + ! :       3 openat  (in libsystem_kernel.dylib) + 76  [0x18fdc81b4]
+          + ! :         3 __openat  (in libsystem_kernel.dylib) + 8  [0x18fdad5b0]
+          + ! 27 core.cellar.materializeWithCellar  (in malt) + 2352  [0x100ce6454]  cellar.zig:185
+          + ! : 13 macho.patcher.patchTextFiles  (in malt) + 652  [0x100d38e18]  patcher.zig:140
+          + ! : | 13 posix.read  (in malt) + 60  [0x100d407e0]  posix.zig:882
+          + ! : |   13 read  (in libsystem_kernel.dylib) + 8  [0x18fdac91c]
+          + ! : 5 macho.patcher.patchTextFiles  (in malt) + 388  [0x100d38d10]  patcher.zig:130
+          + ! : | 5 fs.Dir.openFileZ  (in malt) + 164  [0x100d33a28]  Dir.zig:904
+          + ! : |   5 posix.openatZ  (in malt) + 76  [0x100d503ec]  posix.zig:1844
+          + ! : |     5 openat  (in libsystem_kernel.dylib) + 76  [0x18fdc81b4]
+          + ! : |       5 __openat  (in libsystem_kernel.dylib) + 8  [0x18fdad5b0]
+          + ! : 4 macho.patcher.patchTextFiles  (in malt) + 984  [0x100d38f64]  patcher.zig:155
+          + ! : | 3 mem.indexOfPos__anon_11500  (in malt) + 684  [0x100d30a8c]  mem.zig:1532
+          + ! : | + 1 mem.eqlBytes  (in malt) + 16  [0x100d303a4]  mem.zig:0
+          + ! : | + 1 mem.eqlBytes  (in malt) + 24  [0x100d303ac]  mem.zig:733
+          + ! : | + 1 mem.eqlBytes  (in malt) + 212  [0x100d30468]  mem.zig:741
+          + ! : | 1 mem.indexOfPos__anon_11500  (in malt) + 696  [0x100d30a98]  mem.zig:1535
+          + ! : 2 macho.patcher.patchTextFiles  (in malt) + 1508  [0x100d39170]  patcher.zig:155
+          + ! : | 1 mem.indexOfPos__anon_11500  (in malt) + 684  [0x100d30a8c]  mem.zig:1532
+          + ! : | + 1 mem.eqlBytes  (in malt) + 40  [0x100d303bc]  mem.zig:736
+          + ! : | 1 mem.indexOfPos__anon_11500  (in malt) + 688  [0x100d30a90]  mem.zig:1535
+          + ! : 2 macho.patcher.patchTextFiles  (in malt) + 2208  [0x100d3942c]  patcher.zig:176
+          + ! : | 2 posix.ftruncate  (in malt) + 36  [0x100d305b0]  posix.zig:1104
+          + ! : |   2 ftruncate  (in libsystem_kernel.dylib) + 8  [0x18fdaf45c]
+          + ! : 1 macho.patcher.patchTextFiles  (in malt) + 1100  [0x100d38fd8]  patcher.zig:155
+          + ! :   1 mem.indexOfPos__anon_11500  (in malt) + 684  [0x100d30a8c]  mem.zig:1532
+          + ! :     1 mem.eqlBytes  (in malt) + 244  [0x100d30488]  mem.zig:742
+          + ! 2 core.cellar.materializeWithCellar  (in malt) + 2200  [0x100ce63bc]  cellar.zig:163
+          + !   2 core.cellar.patchMachOAbsolutePaths  (in malt) + 76  [0x100d3a624]  cellar.zig:236
+          + !     1 core.cellar.walkMachOAndPatch  (in malt) + 484  [0x100d5110c]  cellar.zig:269
+          + !     | 1 fs.openFileAbsolute  (in malt) + 220  [0x100cd5e38]  fs.zig:270
+          + !     |   1 fs.Dir.openFileZ  (in malt) + 164  [0x100d33a28]  Dir.zig:904
+          + !     |     1 posix.openatZ  (in malt) + 76  [0x100d503ec]  posix.zig:1844
+          + !     |       1 openat  (in libsystem_kernel.dylib) + 76  [0x18fdc81b4]
+          + !     |         1 __openat  (in libsystem_kernel.dylib) + 8  [0x18fdad5b0]
+          + !     1 core.cellar.walkMachOAndPatch  (in malt) + 1308  [0x100d51444]  cellar.zig:282
+          + !       1 posix.read  (in malt) + 60  [0x100d407e0]  posix.zig:882
+          + !         1 read  (in libsystem_kernel.dylib) + 8  [0x18fdac91c]
+          + 9 cli.install.materializeAndLink  (in malt) + 7888  [0x100ce59cc]  install.zig:753
+          + ! 4 core.linker.Linker.link  (in malt) + 1396  [0x100cd08a8]  linker.zig:85
+          + ! : 4 posix.renameat  (in malt) + 476  [0x100d33dcc]  posix.zig:2734
+          + ! :   4 renameat  (in libsystem_kernel.dylib) + 16  [0x18fdbd714]
+          + ! :     4 __renameat  (in libsystem_kernel.dylib) + 8  [0x18fdb98fc]
+          + ! 2 core.linker.Linker.link  (in malt) + 1328  [0x100cd0864]  linker.zig:85
+          + ! : 1 fs.Dir.deleteFile  (in malt) + 68  [0x100cd00a8]  Dir.zig:1669
+          + ! : | 1 mem.indexOfScalarPos__anon_12354  (in malt) + 480  [0x100d3338c]  mem.zig:1316
+          + ! : 1 fs.Dir.deleteFile  (in malt) + 208  [0x100cd0134]  Dir.zig:1670
+          + ! :   1 posix.unlinkatZ  (in malt) + 12  [0x100d4fe10]  posix.zig:2577
+          + ! :     1 unlinkat  (in libsystem_kernel.dylib) + 16  [0x18fdb5ad0]
+          + ! :       1 __unlinkat  (in libsystem_kernel.dylib) + 8  [0x18fdb5af4]
+          + ! 2 core.linker.Linker.link  (in malt) + 1632  [0x100cd0994]  linker.zig:85
+          + ! : 2 db.sqlite.Statement.step  (in malt) + 24  [0x100ccfcb4]  sqlite.zig:41
+          + ! :   2 sqlite3_step  (in malt) + 712  [0x100ba3b18]  sqlite3.c:91565
+          + ! :     2 sqlite3VdbeExec  (in malt) + 61972  [0x100bee010]  sqlite3.c:94859
+          + ! :       2 sqlite3VdbeHalt  (in malt) + 1492  [0x100bd95a0]  sqlite3.c:88506
+          + ! :         2 vdbeCommit  (in malt) + 1764  [0x100bda628]  sqlite3.c:88096
+          + ! :           2 sqlite3BtreeCommitPhaseOne  (in malt) + 236  [0x100ba7664]  sqlite3.c:75065
+          + ! :             2 sqlite3PagerCommitPhaseOne  (in malt) + 356  [0x100ba7014]  sqlite3.c:63814
+          + ! :               1 pagerWalFrames  (in malt) + 1100  [0x100bc3f94]  sqlite3.c:60537
+          + ! :               | 1 unixWrite  (in malt) + 148  [0x100bb6100]  sqlite3.c:42133
+          + ! :               |   1 pwrite  (in libsystem_kernel.dylib) + 8  [0x18fdaf430]
+          + ! :               1 pagerWalFrames  (in malt) + 3344  [0x100bc4858]  sqlite3.c:60537
+          + ! :                 1 unixSync  (in malt) + 160  [0x100bb6414]  sqlite3.c:42361
+          + ! :                   1 fsync  (in libsystem_kernel.dylib) + 8  [0x18fdaf804]
+          + ! 1 core.linker.Linker.link  (in malt) + 1352  [0x100cd087c]  linker.zig:85
+          + !   1 fs.Dir.symLink  (in malt) + 460  [0x100ccd030]  Dir.zig:1837
+          + !     1 symlinkat  (in libsystem_kernel.dylib) + 8  [0x18fdbb124]
+          + 1 cli.install.materializeAndLink  (in malt) + 3932  [0x100ce4a58]  install.zig:733
+          +   1 core.linker.Linker.checkConflicts  (in malt) + 296  [0x100ce2d64]  linker.zig:30
+          +     1 fs.Dir.openDir  (in malt) + 260  [0x100ccf6b4]  Dir.zig:1498
+          +       1 posix.openatZ  (in malt) + 76  [0x100d503ec]  posix.zig:1844
+          +         1 openat  (in libsystem_kernel.dylib) + 76  [0x18fdc81b4]
+          +           1 __openat  (in libsystem_kernel.dylib) + 8  [0x18fdad5b0]
+          1 cli.install.execute  (in malt) + 9940  [0x100ce965c]  install.zig:239
+            1 sqlite3Close  (in malt) + 736  [0x100bb1700]  sqlite3.c:182825
+              1 sqlite3LeaveMutexAndCloseZombie  (in malt) + 464  [0x100ba8240]  sqlite3.c:182912
+                1 sqlite3BtreeClose  (in malt) + 440  [0x100bdbd58]  sqlite3.c:73730
+                  1 sqlite3PagerClose  (in malt) + 328  [0x100bc2518]  sqlite3.c:61499
+                    1 sqlite3WalClose  (in malt) + 280  [0x100bcfc80]  sqlite3.c:67664
+                      1 unixShmUnmap  (in malt) + 404  [0x100bb89c4]  sqlite3.c:43844
+                        1 unixShmPurge  (in malt) + 476  [0x100bbd18c]  sqlite3.c:43133
+                          1 unixShmPurge  (in malt) + 536  [0x100bbd1c8]  sqlite3.c:43135
+                            1 close  (in libsystem_kernel.dylib) + 8  [0x18fdac8f0]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        __wait4  (in libsystem_kernel.dylib)        40
+        read  (in libsystem_kernel.dylib)        14
+        __openat  (in libsystem_kernel.dylib)        10
+        mem.eqlBytes  (in malt)        5
+
+Binary Images:
+       0x100b9c000 -        0x100e58667 +malt (0) <5FB351C5-4FCD-3C2C-9C7C-FA569F24759C> /tmp/*/malt
+       0x18f98c000 -        0x18f9deb4b  libobjc.A.dylib (951.7) <2E858E25-1FF6-3DA6-84F6-911630620512> /usr/lib/libobjc.A.dylib
+       0x18f9df000 -        0x18fa13b34  libdyld.dylib (1376.6) <2C3C5F75-3686-39A1-9202-BD4D2133379D> /usr/lib/system/libdyld.dylib
+       0x18fa14000 -        0x18fab9ec7  dyld (1.0.0 - 1376.6) <9F682DCF-340C-3BFA-BCDD-DD702F30313E> /usr/lib/dyld
+       0x18faba000 -        0x18fabd228  libsystem_blocks.dylib (96) <2EA73169-CF76-3DD1-9869-F23C8B338022> /usr/lib/system/libsystem_blocks.dylib
+       0x18fabe000 -        0x18fb1251f  libxpc.dylib (3102.100.102) <618039C8-9965-3782-A7D2-90FD4C3DD66F> /usr/lib/system/libxpc.dylib
+       0x18fb13000 -        0x18fb339bf  libsystem_trace.dylib (1861.100.19) <08629650-54FC-3AA6-910E-EACA563804D0> /usr/lib/system/libsystem_trace.dylib
+       0x18fb34000 -        0x18fbe1daf  libcorecrypto.dylib (1922.101.2) <D1EC203E-9B2E-391B-8DE3-7C58F0589437> /usr/lib/system/libcorecrypto.dylib
+       0x18fbe2000 -        0x18fc321d7  libsystem_malloc.dylib (812.100.31) <2AD21BE3-FFDB-31D5-A3D7-2F7F672D6E92> /usr/lib/system/libsystem_malloc.dylib
+       0x18fc33000 -        0x18fc7a23f  libdispatch.dylib (1542.100.32) <E17AA23F-DB2A-3302-B14C-F6B08C540FCF> /usr/lib/system/libdispatch.dylib
+       0x18fc7b000 -        0x18fc7dffb  libsystem_featureflags.dylib (103) <0DE01F76-4B36-35A2-98F9-43DD147EDD95> /usr/lib/system/libsystem_featureflags.dylib
+       0x18fc7e000 -        0x18fcfeef7  libsystem_c.dylib (1752.100.10) <66EBD321-6899-3863-BA24-5CFC3076A0CB> /usr/lib/system/libsystem_c.dylib
+       0x18fcff000 -        0x18fd8fae7  libc++.1.dylib (2100.43) <1E9541EC-C564-38CB-BED6-46F708E8D863> /usr/lib/libc++.1.dylib
+       0x18fd90000 -        0x18fdaa75f  libc++abi.dylib (2100.43) <E8D325ED-3B97-325E-B494-B1B0FF93D133> /usr/lib/libc++abi.dylib
+       0x18fdab000 -        0x18fde828f  libsystem_kernel.dylib (12377.101.15) <51565B39-F595-3E96-A217-FEF29815057A> /usr/lib/system/libsystem_kernel.dylib
+       0x18fde9000 -        0x18fdf5b3b  libsystem_pthread.dylib (539.100.4) <E7A73008-0C09-31E3-9DD9-0C61652F0E85> /usr/lib/system/libsystem_pthread.dylib
+       0x18fdf6000 -        0x18fdfe8f3  libsystem_platform.dylib (375.100.10) <D93EC420-F465-3A3A-916D-A04AF9B023EB> /usr/lib/system/libsystem_platform.dylib
+       0x18fdff000 -        0x18fe2e6eb  libsystem_info.dylib (600) <201FD67C-3DF6-3788-B132-A69CAA2AA3D7> /usr/lib/system/libsystem_info.dylib
+       0x193dc4000 -        0x193dcde5f  libsystem_darwin.dylib (1752.100.10) <D5BA0CAB-F283-3620-AAA9-1EEB718E1BA8> /usr/lib/system/libsystem_darwin.dylib
+       0x19422f000 -        0x194240f5b  libsystem_notify.dylib (348.100.7) <9F46F30B-B7C0-3DD7-AC38-57B78C7971FF> /usr/lib/system/libsystem_notify.dylib
+       0x1964f9000 -        0x196513f5b  libsystem_networkextension.dylib (2226.101.1) <85169C7B-48DD-3542-AD38-F1B88EA2A95A> /usr/lib/system/libsystem_networkextension.dylib
+       0x196596000 -        0x1965adfdf  libsystem_asl.dylib (406) <6427D987-7938-3278-8C14-10FB9C06BBD5> /usr/lib/system/libsystem_asl.dylib
+       0x198151000 -        0x198159387  libsystem_symptoms.dylib (2169.100.30) <28B6E34E-9C7D-3437-A3F1-A3C979DE579A> /usr/lib/system/libsystem_symptoms.dylib
+       0x19c3ec000 -        0x19c42425f  libsystem_containermanager.dylib (725.100.37) <14750F95-BB3A-3654-8610-A05A454643A8> /usr/lib/system/libsystem_containermanager.dylib
+       0x19d7fc000 -        0x19d8005d7  libsystem_configuration.dylib (1405.100.8) <634F597D-F8BD-3C00-B967-86047FC15D14> /usr/lib/system/libsystem_configuration.dylib
+       0x19d801000 -        0x19d8078cf  libsystem_sandbox.dylib (2680.100.174) <AF76231D-EADC-3399-9414-6AD90FB4EA89> /usr/lib/system/libsystem_sandbox.dylib
+       0x19ee47000 -        0x19ee4a1fb  libquarantine.dylib (196.100.8) <268FEB6E-A237-3050-BFFF-AE3A66B7EAD4> /usr/lib/system/libquarantine.dylib
+       0x19f5e6000 -        0x19f5ecd03  libsystem_coreservices.dylib (191.4.5) <7129349D-04F9-3C3C-BF37-3082C1468654> /usr/lib/system/libsystem_coreservices.dylib
+       0x19fb6b000 -        0x19fba8a77  libsystem_m.dylib (3312.100.1) <83B173CD-7F32-3901-8E67-C0B2676BE015> /usr/lib/system/libsystem_m.dylib
+       0x19fbaa000 -        0x19fbad527  libmacho.dylib (1376.6) <9729ECEA-0A08-32E3-8BDB-B42FC15FF258> /usr/lib/system/libmacho.dylib
+       0x19fbc7000 -        0x19fbd43a7  libcommonCrypto.dylib (600035) <710EC5FA-F77C-3646-A9E3-C037C42E1539> /usr/lib/system/libcommonCrypto.dylib
+       0x19fbd5000 -        0x19fbdeca3  libunwind.dylib (2100.2) <FB0518B9-DF0F-3A03-A74B-AF1B21C26F8B> /usr/lib/system/libunwind.dylib
+       0x19fbe7000 -        0x19fbf17ff  libcopyfile.dylib (240) <0B7FF027-5579-3CBF-A12B-68A4FD36641C> /usr/lib/system/libcopyfile.dylib
+       0x19fbf2000 -        0x19fbf5987  libcompiler_rt.dylib (103.3) <65E29E6E-7042-3F73-A1D2-F2C4EBCD7524> /usr/lib/system/libcompiler_rt.dylib
+       0x19fbf6000 -        0x19fbfa78b  libsystem_collections.dylib (1752.100.10) <B81193DE-3BEC-3340-86D0-DB7F3683D135> /usr/lib/system/libsystem_collections.dylib
+       0x19fbfb000 -        0x19fbfe4cf  libsystem_secinit.dylib (168.100.7) <A6B77B36-195D-33F8-8058-FE0B5BFA9D37> /usr/lib/system/libsystem_secinit.dylib
+       0x19fbff000 -        0x19fc01bf7  libremovefile.dylib (85.100.6) <BD89B1A3-0D06-3881-B5E1-EFC6CFBDFCC1> /usr/lib/system/libremovefile.dylib
+       0x19fc02000 -        0x19fc02f27  libkeymgr.dylib (31) <DE8F8219-0072-35C2-8932-C065491ED15D> /usr/lib/system/libkeymgr.dylib
+       0x19fc03000 -        0x19fc0be3f  libsystem_dnssd.dylib (2881.100.56.0.1) <DEC8BDD2-366C-3BF9-A123-35744DB06354> /usr/lib/system/libsystem_dnssd.dylib
+       0x19fc0c000 -        0x19fc1109b  libcache.dylib (95) <4D6833A3-C910-3A76-AA8A-303F698B36BF> /usr/lib/system/libcache.dylib
+       0x19fc12000 -        0x19fc13ce3  libSystem.B.dylib (1356) <E05F5341-06B7-365E-8014-E9CD64C352FE> /usr/lib/libSystem.B.dylib
+       0x2924f5000 -        0x2924fc349  libRosetta.dylib (367.5) <2FC1EF06-04C4-35FC-8DC3-BEA1E9FBD63F> /usr/lib/libRosetta.dylib
+       0x2941d2000 -        0x2941d5a4b  libsystem_darwindirectory.dylib (122) <CCAA2170-32DD-34BD-A927-32DF30893969> /usr/lib/system/libsystem_darwindirectory.dylib
+       0x2941d6000 -        0x2941df5a7  libsystem_eligibility.dylib (319.101.1) <2D19994A-87BB-34B8-A343-CB8DD47FF110> /usr/lib/system/libsystem_eligibility.dylib
+       0x2941e0000 -        0x2941e78db  libsystem_sanitizers.dylib (26) <FCB93D2F-4437-3089-A43F-A19BC23DD65B> /usr/lib/system/libsystem_sanitizers.dylib
+       0x2941e8000 -        0x2941e8bb7  libsystem_trial.dylib (474.2.18) <5BB81430-4E33-3160-94D2-1FFB2B614DB2> /usr/lib/system/libsystem_trial.dylib

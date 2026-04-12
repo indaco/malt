@@ -1,0 +1,52 @@
+▸ prefixes: malt=/tmp/mt-b nb=/tmp/nb zb=/tmp/zb bru=/tmp/bru (BENCH_TRUE_COLD=1)
+▸ skip build malt (SKIP_BUILD=1, binary present)
+▸ benchmark: tree
+▸ wiping /tmp/mt-b (true cold: malt)
+▸ wiping /tmp/nb (true cold: nanobrew)
+▸ wiping /tmp/zb (true cold: zerobrew)
+▸ wiping /tmp/bru (true cold: bru)
+▸ benchmark: wget
+▸ wiping /tmp/mt-b (true cold: malt)
+▸ wiping /tmp/nb (true cold: nanobrew)
+▸ wiping /tmp/zb (true cold: zerobrew)
+▸ wiping /tmp/bru (true cold: bru)
+▸ benchmark: ffmpeg
+▸ wiping /tmp/mt-b (true cold: malt)
+⚠ /tmp/malt-bench/build/bin/malt install ffmpeg FAILED (exit=1); output:
+      ▸ Resolved ffmpeg 8.1 (11 packages)
+      ▸ Downloading 11 bottles...
+      ✓ dav1d 1.5.3 installed
+      ✓ lame 3.100 installed
+      ✓ libvmaf 3.1.0 installed
+      ✓ libvpx 1.16.0 installed
+      ✓ openssl@3 3.6.2 installed
+      ✓ opus 1.6.1 installed
+      ✓ sdl2 2.32.10 installed
+      ✗ Failed to parse formula for svt-av1: InvalidJson
+      ✓ x264 r3222 installed
+      ✓ ca-certificates 2026-03-19 installed
+      ⚠ Skipping ffmpeg: dependency svt-av1 failed to install
+      ✗ 2 packages failed to install. See errors above.
+    error: PartialFailure
+▸ wiping /tmp/nb (true cold: nanobrew)
+▸ wiping /tmp/zb (true cold: zerobrew)
+▸ wiping /tmp/bru (true cold: bru)
+
+Binary Size
+  malt       3.2M
+  nanobrew   1.4M
+  zerobrew   8.6M
+  bru        1.8M
+
+Cold Install
+  Package        malt       nanobrew   zerobrew   bru        brew      
+  tree           0.603s     0.538s     0.919s     0.024s     2.921s    
+  wget           2.861s     3.064s     4.627s     0.272s     2.271s    
+  ffmpeg         FAILs      2.648s     4.782s     1.126s     3.699s    
+
+Warm Install
+  Package        malt       nanobrew   zerobrew   bru       
+  tree           0.010s     0.007s     0.111s     0.020s    
+  wget           0.043s     0.763s     0.895s     0.059s    
+  ffmpeg         0.667s     0.918s     1.206s     1.106s    
+✓ done

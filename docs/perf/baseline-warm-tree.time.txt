@@ -1,0 +1,21 @@
+  ▸ Resolved tree 2.3.2 (1 package)
+  ▸ Materializing tree to cellar...
+  ✓ tree 2.3.2 installed
+        1.08 real         0.02 user         0.01 sys
+            13844480  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                1773  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                  18  messages sent
+                  34  messages received
+                   0  signals received
+                  26  voluntary context switches
+                  75  involuntary context switches
+           134025099  instructions retired
+            50968849  cycles elapsed
+             4424208  peak memory footprint

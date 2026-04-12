@@ -25,3 +25,4 @@ pub const backup = @import("cli/backup.zig");
 pub const purge = @import("cli/purge.zig");
 pub const install = @import("cli/install.zig");
 pub const doctor = @import("cli/doctor.zig");
+pub const dsl = @import("core/dsl/root.zig");
