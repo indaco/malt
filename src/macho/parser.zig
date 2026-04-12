@@ -138,16 +138,24 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
     var paths: std.ArrayList(LoadCommandPath) = .empty;
     errdefer paths.deinit(allocator);
 
+    // Sanity check: reject obviously corrupt headers (ncmds > 10,000 is unreasonable)
+    if (header.ncmds > 10_000) return ParseError.InvalidLoadCommand;
+
     var cmd_offset: usize = header_size;
     var cmd_idx: u32 = 0;
     while (cmd_idx < header.ncmds) : (cmd_idx += 1) {
-        if (cmd_offset + @sizeOf(macho.load_command) > data.len) return ParseError.TruncatedFile;
+        const lc_end = @addWithOverflow(cmd_offset, @sizeOf(macho.load_command));
+        if (lc_end[1] != 0 or lc_end[0] > data.len) return ParseError.TruncatedFile;
 
         // Read the generic load_command to get cmd + cmdsize
         const lc = std.mem.bytesAsValue(macho.load_command, data[cmd_offset..][0..@sizeOf(macho.load_command)]);
         const cmdsize = lc.cmdsize;
 
-        if (cmdsize < @sizeOf(macho.load_command) or cmd_offset + cmdsize > data.len)
+        // Overflow-safe bounds check: reject corrupt cmdsize values
+        if (cmdsize < @sizeOf(macho.load_command))
+            return ParseError.InvalidLoadCommand;
+        const cmd_end = @addWithOverflow(cmd_offset, cmdsize);
+        if (cmd_end[1] != 0 or cmd_end[0] > data.len)
             return ParseError.InvalidLoadCommand;
 
         const cmd_int = @intFromEnum(lc.cmd);
