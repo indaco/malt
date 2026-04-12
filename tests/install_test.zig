@@ -1,10 +1,9 @@
 //! malt — install command tests
 //!
 //! Covers the early-abort branches of `collectFormulaJobs` that can be
-//! exercised without a live Homebrew API. A formula with a Ruby
-//! `post_install` hook must be rejected BEFORE any dep resolution or job
-//! queueing so nothing is downloaded, materialised, or linked for it —
-//! this test is the regression guard for that behaviour.
+//! exercised without a live Homebrew API, and verifies that formulae
+//! with a `post_install` hook are now allowed through the job-collection
+//! phase (the DSL interpreter handles post_install after materialisation).
 
 const std = @import("std");
 const testing = std.testing;
@@ -13,31 +12,30 @@ const install = malt.install;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 
-const post_install_formula_json =
-    \\{
-    \\  "name": "needs-ruby",
-    \\  "full_name": "needs-ruby",
-    \\  "tap": "homebrew/core",
-    \\  "desc": "Fixture formula with a post_install hook",
-    \\  "homepage": "",
-    \\  "license": "MIT",
-    \\  "revision": 0,
-    \\  "keg_only": false,
-    \\  "post_install_defined": true,
-    \\  "versions": { "stable": "1.0" },
-    \\  "dependencies": ["openssl@3"],
-    \\  "oldnames": [],
-    \\  "bottle": {
-    \\    "stable": {
-    \\      "root_url": "https://ghcr.io/v2/homebrew/core/needs-ruby/blobs",
-    \\      "files": {
-    \\        "arm64_sequoia": { "cellar": ":any", "url": "https://ghcr.io/v2/needs-ruby", "sha256": "deadbeef" },
-    \\        "x86_64_linux":  { "cellar": ":any", "url": "https://ghcr.io/v2/needs-ruby", "sha256": "deadbeef" }
-    \\      }
-    \\    }
-    \\  }
-    \\}
-;
+/// Fixture formula with `post_install_defined: true` and no dependencies.
+/// Empty deps ensure the parallel-fetch phase is skipped so the test can
+/// pass `undefined` for the HttpClientPool without crashing.
+fn postInstallFormulaJson() []const u8 {
+    return "{\"name\":\"needs-ruby\"," ++
+        "\"full_name\":\"needs-ruby\"," ++
+        "\"tap\":\"homebrew/core\"," ++
+        "\"desc\":\"Fixture formula with a post_install hook\"," ++
+        "\"homepage\":\"\",\"revision\":0," ++
+        "\"keg_only\":false,\"post_install_defined\":true," ++
+        "\"versions\":{\"stable\":\"1.0\"}," ++
+        "\"dependencies\":[],\"oldnames\":[]," ++
+        "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/needs-ruby/blobs\"," ++
+        "\"files\":{" ++
+        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
+        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
+        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
+        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
+        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
+        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
+        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}," ++
+        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/needs-ruby\",\"sha256\":\"deadbeef\"}" ++
+        "}}}}";
+}
 
 /// Opens a fresh temp-dir SQLite DB with the current schema applied.
 /// The caller is responsible for closing the returned DB and removing
@@ -72,45 +70,50 @@ fn testArena() std.heap.ArenaAllocator {
     return std.heap.ArenaAllocator.init(testing.allocator);
 }
 
-test "collectFormulaJobs rejects a formula with a post_install hook" {
+test "collectFormulaJobs queues a formula with a post_install hook" {
     var arena = testArena();
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var tdb = try TempDb.init("postinstall_reject");
+    var tdb = try TempDb.init("postinstall_accept");
     defer tdb.deinit();
 
-    // The post_install branch returns BEFORE the BrewApi / HttpClientPool
-    // are ever touched, so passing `undefined` here is safe. If the
-    // implementation ever starts reading them earlier, this test will
-    // crash loudly and alert us to the regression — which is exactly
-    // the guarantee we want.
-    var api: malt.api.BrewApi = undefined;
-    var http_pool: malt.client.HttpClientPool = undefined;
+    // The fixture has no dependencies, so the parallel-fetch phase is
+    // skipped and the API / pool pointers are never dereferenced.
+    const json = postInstallFormulaJson();
+
+    const cache_dir = "/tmp/malt_install_test_postinstall_accept_cache";
+    std.fs.makeDirAbsolute(cache_dir) catch {};
+    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
+
+    var http = try malt.client.HttpClientPool.init(alloc, 1);
+    defer http.deinit();
+    var real_http = malt.client.HttpClient.init(alloc);
+    defer real_http.deinit();
+    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+
     var store_inst: malt.store.Store = undefined;
 
     var jobs: std.ArrayList(install.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
-    const result = install.collectFormulaJobs(
+    try install.collectFormulaJobs(
         alloc,
         "needs-ruby",
-        post_install_formula_json,
+        json,
         &api,
-        &http_pool,
+        &http,
         &tdb.db,
         &store_inst,
         false,
         &jobs,
     );
 
-    try testing.expectError(install.InstallError.PostInstallUnsupported, result);
-
-    // No job — neither the main formula nor any dep — may be queued,
-    // because queued jobs flow straight into the download + materialise
-    // pipeline inside execute(). An empty list is the whole guarantee
-    // the user is paying for.
-    try testing.expectEqual(@as(usize, 0), jobs.items.len);
+    // The formula must now be queued — the DSL interpreter handles
+    // post_install after materialisation, so the guard no longer rejects.
+    try testing.expectEqual(@as(usize, 1), jobs.items.len);
+    try testing.expectEqualStrings("needs-ruby", jobs.items[0].name);
+    try testing.expect(jobs.items[0].post_install_defined);
 }
 
 // --- Pure helper tests (no DB / network) ---
@@ -555,7 +558,7 @@ test "collectFormulaJobs surfaces FormulaNotFound for unparseable JSON" {
     );
 }
 
-test "collectFormulaJobs rejection leaves the DB untouched" {
+test "collectFormulaJobs with post_install leaves the DB untouched" {
     var arena = testArena();
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -563,8 +566,18 @@ test "collectFormulaJobs rejection leaves the DB untouched" {
     var tdb = try TempDb.init("postinstall_db");
     defer tdb.deinit();
 
-    var api: malt.api.BrewApi = undefined;
-    var http_pool: malt.client.HttpClientPool = undefined;
+    const json = postInstallFormulaJson();
+
+    const cache_dir = "/tmp/malt_install_test_postinstall_db_cache";
+    std.fs.makeDirAbsolute(cache_dir) catch {};
+    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
+
+    var http = try malt.client.HttpClientPool.init(alloc, 1);
+    defer http.deinit();
+    var real_http = malt.client.HttpClient.init(alloc);
+    defer real_http.deinit();
+    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+
     var store_inst: malt.store.Store = undefined;
 
     var jobs: std.ArrayList(install.DownloadJob) = .empty;
@@ -573,17 +586,17 @@ test "collectFormulaJobs rejection leaves the DB untouched" {
     _ = install.collectFormulaJobs(
         alloc,
         "needs-ruby",
-        post_install_formula_json,
+        json,
         &api,
-        &http_pool,
+        &http,
         &tdb.db,
         &store_inst,
         false,
         &jobs,
     ) catch {};
 
-    // kegs table must still be empty: aborting must not have recorded
-    // anything about the rejected formula.
+    // collectFormulaJobs only queues download jobs — it never writes to
+    // the DB. The kegs table must still be empty.
     var stmt = try tdb.db.prepare("SELECT COUNT(*) FROM kegs;");
     defer stmt.finalize();
     const has_row = try stmt.step();
