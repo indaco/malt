@@ -55,12 +55,13 @@ const install_help =
     \\  malt install <user>/<tap>/<formula>    inline tap
     \\
     \\Flags:
-    \\  --cask         Force cask installation
-    \\  --formula      Force formula installation
-    \\  --dry-run      Show what would be installed
-    \\  --force        Overwrite existing installations
-    \\  --quiet, -q    Suppress non-error output
-    \\  --json         Output result as JSON
+    \\  --cask             Force cask installation
+    \\  --formula          Force formula installation
+    \\  --dry-run          Show what would be installed
+    \\  --force            Overwrite existing installations
+    \\  --use-system-ruby  Execute post_install scripts via system Ruby (experimental)
+    \\  --quiet, -q        Suppress non-error output
+    \\  --json             Output result as JSON
     \\
 ;
 
@@ -205,7 +206,8 @@ const migrate_help =
     \\Does NOT modify the Homebrew installation.
     \\
     \\Flags:
-    \\  --dry-run      Show what would be migrated
+    \\  --dry-run          Show what would be migrated
+    \\  --use-system-ruby  Execute post_install scripts via system Ruby (experimental)
     \\
 ;
 
