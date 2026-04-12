@@ -19,6 +19,8 @@ const api_mod = @import("../net/api.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const codesign = @import("../macho/codesign.zig");
+const ruby_sub = @import("../core/ruby_subprocess.zig");
+const dsl = @import("../core/dsl/root.zig");
 const help = @import("help.zig");
 
 /// Result of migrating a single keg.
@@ -36,8 +38,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "migrate")) return;
 
     var dry_run = output.isDryRun();
+    var use_system_ruby = false;
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--dry-run")) dry_run = true;
+        if (std.mem.eql(u8, arg, "--use-system-ruby")) use_system_ruby = true;
         if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) output.setQuiet(true);
     }
 
@@ -153,6 +157,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             &linker,
             &db,
             prefix,
+            use_system_ruby,
         );
 
         switch (result) {
@@ -208,6 +213,7 @@ fn migrateKeg(
     linker: *linker_mod.Linker,
     db: *sqlite.Database,
     prefix: []const u8,
+    use_system_ruby: bool,
 ) KegResult {
     // 1. Check if already installed in malt
     if (isInstalled(db, keg_name)) {
@@ -227,15 +233,7 @@ fn migrateKeg(
         return .failed_api;
     };
 
-    // 3. Check for post_install — these cannot be fully migrated
-    if (formula.post_install_defined) {
-        output.warn("  {s}: defines post_install script, skipping", .{keg_name});
-        formula.deinit();
-        allocator.free(formula_json);
-        return .skipped_post_install;
-    }
-
-    // 4. Resolve bottle for this platform
+    // 3. Resolve bottle for this platform
     const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
         output.warn("  {s}: no bottle available for this platform", .{keg_name});
         formula.deinit();
@@ -306,6 +304,78 @@ fn migrateKeg(
         };
         linker.linkOpt(formula.name, formula.version) catch {};
         recordDeps(db, keg_id, &formula);
+    }
+
+    // Execute post_install: try DSL interpreter first, fall back to
+    // system Ruby subprocess when --use-system-ruby is set.
+    if (formula.post_install_defined) post_install: {
+        const tap_path = ruby_sub.findHomebrewCoreTap();
+        var rb_buf: [1024]u8 = undefined;
+        const rb_path = if (tap_path) |tp| ruby_sub.resolveFormulaRbPath(&rb_buf, tp, formula.name) else null;
+
+        if (rb_path) |src_path| {
+            if (ruby_sub.extractPostInstallBody(allocator, src_path)) |post_install_src| {
+                defer allocator.free(post_install_src);
+
+                var flog = dsl.FallbackLog.init(allocator);
+                defer flog.deinit();
+
+                dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {
+                    if (flog.hasFatal()) {
+                        output.warn("  post_install DSL failed for {s} (fatal)", .{formula.name});
+                        break :post_install;
+                    }
+                    if (use_system_ruby) {
+                        output.warn("  post_install DSL incomplete for {s}, falling back to system Ruby...", .{formula.name});
+                        ruby_sub.runPostInstall(allocator, formula.name, formula.version, prefix) catch |e| {
+                            output.warn("  post_install subprocess failed for {s}: {s}", .{ formula.name, @errorName(e) });
+                            output.warn("  The package is migrated but may not be fully configured.", .{});
+                        };
+                    } else {
+                        output.warn("  {s}: post_install partially skipped (use --use-system-ruby to attempt via Ruby)", .{formula.name});
+                    }
+                    break :post_install;
+                };
+                output.info("  post_install completed for {s}", .{formula.name});
+                break :post_install;
+            }
+        }
+
+        // No local .rb source — try fetching from GitHub
+        if (ruby_sub.fetchPostInstallFromGitHub(allocator, formula.name)) |post_install_src| {
+            defer allocator.free(post_install_src);
+
+            var flog2 = dsl.FallbackLog.init(allocator);
+            defer flog2.deinit();
+
+            dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog2) catch {
+                if (flog2.hasFatal()) {
+                    output.warn("  post_install DSL failed for {s} (fatal)", .{formula.name});
+                    break :post_install;
+                }
+                if (use_system_ruby) {
+                    ruby_sub.runPostInstall(allocator, formula.name, formula.version, prefix) catch |e| {
+                        output.warn("  post_install subprocess failed for {s}: {s}", .{ formula.name, @errorName(e) });
+                    };
+                } else {
+                    output.warn("  {s}: post_install partially skipped (use --use-system-ruby to attempt via Ruby)", .{formula.name});
+                }
+                break :post_install;
+            };
+            output.info("  post_install completed for {s}", .{formula.name});
+            break :post_install;
+        }
+
+        // No source available at all — fall back to subprocess
+        if (use_system_ruby) {
+            output.warn("  Running post_install for {s} via system Ruby...", .{formula.name});
+            ruby_sub.runPostInstall(allocator, formula.name, formula.version, prefix) catch |e| {
+                output.warn("  post_install failed for {s}: {s}", .{ formula.name, @errorName(e) });
+                output.warn("  The package is migrated but may not be fully configured.", .{});
+            };
+        } else {
+            output.warn("  {s}: post_install skipped (formula source not found; use --use-system-ruby or brew install {s})", .{ formula.name, formula.name });
+        }
     }
 
     output.success("  {s} {s} migrated", .{ formula.name, formula.version });
