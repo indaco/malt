@@ -20,7 +20,6 @@ const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
 const ruby_sub = @import("../core/ruby_subprocess.zig");
-const dsl = @import("../core/dsl/root.zig");
 const help = @import("help.zig");
 
 /// Maximum safe byte length for MALT_PREFIX.
@@ -592,91 +591,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             continue;
         };
 
-        // Execute post_install: try DSL interpreter first, fall back to
-        // system Ruby subprocess when --use-system-ruby is set.
-        if (job.post_install_defined) post_install: {
-            // Try to locate the .rb source file for DSL extraction
-            const tap_path = ruby_sub.findHomebrewCoreTap();
-            var rb_buf: [1024]u8 = undefined;
-            const rb_path = if (tap_path) |tp| ruby_sub.resolveFormulaRbPath(&rb_buf, tp, job.name) else null;
-
-            if (rb_path) |src_path| {
-                if (ruby_sub.extractPostInstallBody(allocator, src_path)) |post_install_src| {
-                    defer allocator.free(post_install_src);
-
-                    // Re-parse formula for DSL context
-                    var formula = formula_mod.parseFormula(allocator, job.formula_json) catch {
-                        output.warn("post_install: failed to parse formula for {s}", .{job.name});
-                        break :post_install;
-                    };
-                    defer formula.deinit();
-
-                    var flog = dsl.FallbackLog.init(allocator);
-                    defer flog.deinit();
-
-                    dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {
-                        if (flog.hasFatal()) {
-                            output.warn("post_install DSL failed for {s} (fatal)", .{job.name});
-                            break :post_install;
-                        }
-                        // Non-fatal — try subprocess fallback
-                        if (use_system_ruby) {
-                            output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{job.name});
-                            ruby_sub.runPostInstall(allocator, job.name, job.version_str, prefix) catch |e| {
-                                output.warn("post_install subprocess failed for {s}: {s}", .{ job.name, @errorName(e) });
-                                output.warn("The package is installed but may not be fully configured.", .{});
-                            };
-                        } else {
-                            output.warn("{s}: post_install partially skipped (use --use-system-ruby to attempt via Ruby)", .{job.name});
-                        }
-                        break :post_install;
-                    };
-                    output.info("post_install completed for {s}", .{job.name});
-                    break :post_install;
-                }
-            }
-
-            // No local .rb source — try fetching from GitHub
-            if (ruby_sub.fetchPostInstallFromGitHub(allocator, job.name)) |post_install_src| {
-                defer allocator.free(post_install_src);
-
-                var formula = formula_mod.parseFormula(allocator, job.formula_json) catch {
-                    output.warn("post_install: failed to parse formula for {s}", .{job.name});
-                    break :post_install;
-                };
-                defer formula.deinit();
-
-                var flog = dsl.FallbackLog.init(allocator);
-                defer flog.deinit();
-
-                dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {
-                    if (flog.hasFatal()) {
-                        output.warn("post_install DSL failed for {s} (fatal)", .{job.name});
-                        break :post_install;
-                    }
-                    if (use_system_ruby) {
-                        output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{job.name});
-                        ruby_sub.runPostInstall(allocator, job.name, job.version_str, prefix) catch |e| {
-                            output.warn("post_install subprocess failed for {s}: {s}", .{ job.name, @errorName(e) });
-                        };
-                    } else {
-                        output.warn("{s}: post_install partially skipped (use --use-system-ruby to attempt via Ruby)", .{job.name});
-                    }
-                    break :post_install;
-                };
-                output.info("post_install completed for {s}", .{job.name});
-                break :post_install;
-            }
-
-            // No source available at all — fall back to subprocess
+        // Execute post_install via system Ruby when --use-system-ruby is set.
+        if (job.post_install_defined) {
             if (use_system_ruby) {
-                output.warn("Running post_install for {s} via system Ruby...", .{job.name});
+                output.warn("Running post_install for {s} via system Ruby (experimental)...", .{job.name});
                 ruby_sub.runPostInstall(allocator, job.name, job.version_str, prefix) catch |e| {
                     output.warn("post_install failed for {s}: {s}", .{ job.name, @errorName(e) });
                     output.warn("The package is installed but may not be fully configured.", .{});
                 };
             } else {
-                output.warn("{s}: post_install skipped (formula source not found; use --use-system-ruby or brew install {s})", .{ job.name, job.name });
+                output.warn("{s}: post_install skipped (use --use-system-ruby or brew install {s})", .{ job.name, job.name });
             }
         }
     }
