@@ -1,11 +1,43 @@
 const std = @import("std");
 
 /// Extracts a tar.gz archive from the given input reader into output_dir.
-pub fn extractTarGz(input: *std.Io.Reader, output_dir: std.fs.Dir) !void {
-    // gzip decompressor needs a window buffer of at least max_window_len
-    var window_buf: [std.compress.flate.max_window_len]u8 = undefined;
-    var decompressor = std.compress.flate.Decompress.init(input, .gzip, &window_buf);
-    try std.tar.pipeToFileSystem(output_dir, &decompressor.reader, .{});
+/// Uses the system `tar` command to avoid Zig stdlib flate decompressor
+/// panics on corrupt/truncated gzip streams (Zig issue: unreachable in
+/// Writer.rebase when the inflate state machine encounters malformed data).
+pub fn extractTarGz(_: *std.Io.Reader, output_dir: std.fs.Dir) !void {
+    // We need the absolute path of the output dir and the archive file.
+    // The archive is always written to {output_dir}/bottle.tar.gz by the
+    // download step before extractTarGz is called.
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = output_dir.realpath(".", &path_buf) catch return error.ExtractionFailed;
+
+    var archive_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const archive_path = std.fmt.bufPrint(&archive_buf, "{s}/bottle.tar.gz", .{dir_path}) catch
+        return error.ExtractionFailed;
+
+    // Verify the archive exists and has gzip magic bytes
+    const archive_file = std.fs.openFileAbsolute(archive_path, .{}) catch return error.ExtractionFailed;
+    var magic: [2]u8 = undefined;
+    const n = archive_file.readAll(&magic) catch {
+        archive_file.close();
+        return error.ExtractionFailed;
+    };
+    archive_file.close();
+    if (n < 2 or magic[0] != 0x1f or magic[1] != 0x8b) {
+        return error.ExtractionFailed;
+    }
+
+    // Use system tar — immune to Zig flate decompressor panics
+    const argv = [_][]const u8{ "tar", "xzf", archive_path, "-C", dir_path };
+    var child = std.process.Child.init(&argv, std.heap.c_allocator);
+    child.spawn() catch return error.ExtractionFailed;
+    const term = child.wait() catch return error.ExtractionFailed;
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) return error.ExtractionFailed;
+        },
+        else => return error.ExtractionFailed,
+    }
 }
 
 /// Extracts a tar.zst archive from the given input reader into output_dir.
