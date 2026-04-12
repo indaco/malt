@@ -18,6 +18,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "doctor")) return;
 
     const prefix = atomic.maltPrefix();
+
+    // Check for --post-install-status flag
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--post-install-status")) {
+            checkPostInstallStatus(allocator, prefix);
+            return;
+        }
+    }
+
     var warnings: u32 = 0;
     var errors: u32 = 0;
 
@@ -333,6 +342,104 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         std.process.exit(1);
     } else {
         output.info("Your malt installation is healthy", .{});
+    }
+}
+
+/// Check post_install DSL support status for installed formulae.
+/// Called when `malt doctor --post-install-status` is passed.
+fn checkPostInstallStatus(allocator: std.mem.Allocator, prefix: []const u8) void {
+    const ruby_sub = @import("../core/ruby_subprocess.zig");
+    const dsl = @import("../core/dsl/root.zig");
+    const formula_mod = @import("../core/formula.zig");
+    const api_mod = @import("../net/api.zig");
+    const client_mod = @import("../net/client.zig");
+
+    output.info("Post-install DSL status:", .{});
+
+    // Open DB to get installed packages
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return;
+    var db = sqlite.Database.open(db_path) catch return;
+    defer db.close();
+
+    var stmt = db.prepare("SELECT name, version FROM kegs;") catch return;
+    defer stmt.finalize();
+
+    var native_count: u32 = 0;
+    var partial_count: u32 = 0;
+    var no_pi_count: u32 = 0;
+    var total: u32 = 0;
+
+    // Check each installed formula
+    var http = client_mod.HttpClient.init(allocator);
+    defer http.deinit();
+
+    var cache_buf: [512]u8 = undefined;
+    const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch return;
+    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+
+    while (stmt.step() catch false) {
+        const name_raw = stmt.columnText(0) orelse continue;
+        const name = std.mem.sliceTo(name_raw, 0);
+        total += 1;
+
+        // Fetch formula JSON to check post_install_defined
+        const formula_json = api.fetchFormula(name) catch {
+            no_pi_count += 1;
+            continue;
+        };
+        var formula = formula_mod.parseFormula(allocator, formula_json) catch {
+            allocator.free(formula_json);
+            no_pi_count += 1;
+            continue;
+        };
+        defer formula.deinit();
+
+        if (!formula.post_install_defined) {
+            no_pi_count += 1;
+            continue;
+        }
+
+        // Has post_install — try to get source and test-parse it
+        const tap_path = ruby_sub.findHomebrewCoreTap();
+        var rb_buf: [1024]u8 = undefined;
+        const rb_path = if (tap_path) |tp| ruby_sub.resolveFormulaRbPath(&rb_buf, tp, name) else null;
+
+        const post_install_src = if (rb_path) |src_path|
+            ruby_sub.extractPostInstallBody(allocator, src_path)
+        else
+            ruby_sub.fetchPostInstallFromGitHub(allocator, name);
+
+        if (post_install_src) |src| {
+            defer allocator.free(src);
+
+            var flog = dsl.FallbackLog.init(allocator);
+            defer flog.deinit();
+
+            // Dry-run the DSL (don't actually execute, just parse)
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var lexer = dsl.lexer.Lexer.init(src);
+            var prs = dsl.parser.Parser.init(a, &lexer);
+            _ = prs.parseBlock() catch {
+                partial_count += 1;
+                output.warn("  {s}: parse error", .{name});
+                continue;
+            };
+            native_count += 1;
+            output.success("  {s}: DSL supported (parseable)", .{name});
+        } else {
+            partial_count += 1;
+            output.warn("  {s}: source not available", .{name});
+        }
+    }
+
+    output.info("", .{});
+    output.info("Installed: {d} total, {d} without post_install, {d} with post_install", .{ total, no_pi_count, native_count + partial_count });
+    if (native_count + partial_count > 0) {
+        output.info("DSL parseable: {d}/{d} ({d}%)", .{ native_count, native_count + partial_count, if (native_count + partial_count > 0) 100 * native_count / (native_count + partial_count) else 0 });
     }
 }
 
