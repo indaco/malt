@@ -682,40 +682,34 @@ zig build universal                      # universal binary (arm64 + x86_64 via 
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
-
 ### Binary Size
 
-| Tool     | Size   |
-| -------- | ------ |
+| Tool | Size |
+| ---- | ---- |
 | **malt** | 3.3 MB |
 | nanobrew | 1.4 MB |
 | zerobrew | 8.6 MB |
-| bru      | 1.8 MB |
-
+| bru | 1.8 MB |
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
-
 ### Cold Install
 
-| Package              | malt   | nanobrew | zerobrew | bru     | Homebrew |
-| -------------------- | ------ | -------- | -------- | ------- | -------- |
-| **tree** (0 deps)    | 0.853s | 0.754s   | 2.878s   | 0.821s‡ | 5.457s   |
-| **wget** (6 deps)    | 5.121s | 6.353s   | 8.877s   | 0.538s‡ | 4.817s   |
-| **ffmpeg** (11 deps) | 4.886s | 4.195s   | 9.946s   | 4.793s‡ | 20.466s  |
-
+| Package | malt | nanobrew | zerobrew | bru | Homebrew |
+| ------- | ---- | -------- | -------- | --- | -------- |
+| **tree** (0 deps) | 0.802s | 0.451s | 2.379s | 0.891s‡ | 4.677s |
+| **wget** (6 deps) | 3.557s | 6.182s | 6.986s | 0.344s‡ | 5.098s |
+| **ffmpeg** (11 deps) | 4.547s | 4.476s | 8.452s | 4.742s‡ | 22.850s |
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
-
 ### Warm Install
 
-| Package              | malt   | nanobrew | zerobrew | bru    |
-| -------------------- | ------ | -------- | -------- | ------ |
-| **tree** (0 deps)    | 0.015s | 0.007s   | 0.313s   | 0.046s |
-| **wget** (6 deps)    | 0.031s | 0.685s   | 0.862s   | 0.084s |
-| **ffmpeg** (11 deps) | 0.090s | 1.184s   | 4.004s   | 1.994s |
-
+| Package | malt | nanobrew | zerobrew | bru |
+| ------- | ---- | -------- | -------- | --- |
+| **tree** (0 deps) | 0.015s | 0.012s | 0.405s | 0.049s |
+| **wget** (6 deps) | 0.040s | 0.696s | 0.865s | 0.097s |
+| **ffmpeg** (11 deps) | 0.134s | 1.589s | 3.405s | 1.690s |
 <!-- BENCH:WARM:END -->
 
 > [!NOTE]
