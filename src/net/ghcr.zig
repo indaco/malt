@@ -125,7 +125,7 @@ pub const GhcrClient = struct {
 };
 
 /// Extract the "token" field from a JSON response like {"token":"..."}
-fn extractTokenField(allocator: std.mem.Allocator, json_bytes: []const u8) ![]const u8 {
+pub fn extractTokenField(allocator: std.mem.Allocator, json_bytes: []const u8) ![]const u8 {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
     defer parsed.deinit();
 

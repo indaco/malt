@@ -1174,7 +1174,7 @@ fn installCask(
 }
 
 /// Record a keg in the database. Returns the keg_id.
-fn recordKeg(
+pub fn recordKeg(
     db: *sqlite.Database,
     formula: *const formula_mod.Formula,
     store_sha256: []const u8,
@@ -1210,7 +1210,7 @@ fn recordKeg(
 }
 
 /// Delete a keg record from the database (rollback helper).
-fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
+pub fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
     var stmt = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return;
     defer stmt.finalize();
     stmt.bindInt(1, keg_id) catch return;
@@ -1218,7 +1218,7 @@ fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
 }
 
 /// Record dependencies for a keg.
-fn recordDeps(db: *sqlite.Database, keg_id: i64, formula: *const formula_mod.Formula) void {
+pub fn recordDeps(db: *sqlite.Database, keg_id: i64, formula: *const formula_mod.Formula) void {
     for (formula.dependencies) |dep_name| {
         var stmt = db.prepare(
             "INSERT OR IGNORE INTO dependencies (keg_id, dep_name, dep_type) VALUES (?1, ?2, 'runtime');",
@@ -1241,7 +1241,7 @@ fn getLastInsertId(db: *sqlite.Database) !i64 {
 }
 
 /// Check if a formula is already installed.
-fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
+pub fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
     var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return false;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return false;
@@ -1249,7 +1249,7 @@ fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
 }
 
 /// Ensure all required directories under prefix exist.
-fn ensureDirs(prefix: []const u8) void {
+pub fn ensureDirs(prefix: []const u8) void {
     // Create the prefix directory itself first (e.g. /opt/malt)
     std.fs.makeDirAbsolute(prefix) catch |e| switch (e) {
         error.PathAlreadyExists => {},
