@@ -323,6 +323,7 @@ fn migrateKeg(
                 dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {
                     if (flog.hasFatal()) {
                         output.warn("  post_install DSL failed for {s} (fatal)", .{formula.name});
+                        flog.printFatal(formula.name);
                         break :post_install;
                     }
                     if (use_system_ruby) {
@@ -349,6 +350,7 @@ fn migrateKeg(
             dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog2) catch {
                 if (flog2.hasFatal()) {
                     output.warn("  post_install DSL failed for {s} (fatal)", .{formula.name});
+                    flog2.printFatal(formula.name);
                     break :post_install;
                 }
                 if (use_system_ruby) {

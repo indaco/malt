@@ -35,9 +35,23 @@ test "eql within the same tag compares value payloads" {
     try testing.expect((Value{ .symbol = "k" }).eql(Value{ .symbol = "k" }));
 }
 
-test "eql returns false for arrays and hashes (reference equality only)" {
-    try testing.expect(!(Value{ .array = &.{} }).eql(Value{ .array = &.{} }));
-    try testing.expect(!(Value{ .hash = &.{} }).eql(Value{ .hash = &.{} }));
+test "eql performs structural equality on arrays and hashes" {
+    // Empty arrays / hashes are structurally equal.
+    try testing.expect((Value{ .array = &.{} }).eql(Value{ .array = &.{} }));
+    try testing.expect((Value{ .hash = &.{} }).eql(Value{ .hash = &.{} }));
+
+    // Element-wise comparison recurses through eql.
+    const a1 = [_]Value{ .{ .int = 1 }, .{ .string = "x" } };
+    const a2 = [_]Value{ .{ .int = 1 }, .{ .string = "x" } };
+    const a3 = [_]Value{ .{ .int = 1 }, .{ .string = "y" } };
+    try testing.expect((Value{ .array = &a1 }).eql(Value{ .array = &a2 }));
+    try testing.expect(!(Value{ .array = &a1 }).eql(Value{ .array = &a3 }));
+
+    const h1 = [_]Value.HashPair{.{ .key = .{ .symbol = "k" }, .value = .{ .int = 1 } }};
+    const h2 = [_]Value.HashPair{.{ .key = .{ .symbol = "k" }, .value = .{ .int = 1 } }};
+    const h3 = [_]Value.HashPair{.{ .key = .{ .symbol = "k" }, .value = .{ .int = 2 } }};
+    try testing.expect((Value{ .hash = &h1 }).eql(Value{ .hash = &h2 }));
+    try testing.expect(!(Value{ .hash = &h1 }).eql(Value{ .hash = &h3 }));
 }
 
 test "asString returns raw bytes for string/pathname/symbol" {

@@ -81,6 +81,10 @@ pub const LockFile = struct {
     /// that may already have it open.
     pub fn release(self: *LockFile) void {
         std.posix.ftruncate(self.fd, 0) catch {};
+        // fsync before unlock so a crash between truncate and close can't
+        // leave a stale PID in the lock file — `doctor` would otherwise
+        // report a phantom holder.
+        std.posix.fsync(self.fd) catch {};
         std.posix.flock(self.fd, std.posix.LOCK.UN) catch {};
         std.posix.close(self.fd);
     }

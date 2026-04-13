@@ -1496,3 +1496,38 @@ test "coverage: Formula lookup with pkgetc" {
     const err = try runSnippet(&arena, "x = Formula[\"ca-certificates\"].pkgetc", prefix);
     try testing.expect(err == null);
 }
+
+test "parse_error: malformed source populates fallback log with location" {
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const json = try minimalJson(alloc, "testpkg", "1.0");
+    var f = try formula_mod.parseFormula(alloc, json);
+    defer f.deinit();
+
+    var flog = dsl.FallbackLog.init(alloc);
+    defer flog.deinit();
+
+    // Stray `]` with no matching open — a guaranteed parser error.
+    const result = dsl.executePostInstall(alloc, &f, "ohai \"hi\"\n]\n", prefix, &flog);
+    try testing.expectError(dsl.DslError.ParseError, result);
+
+    // The diagnostics from Parser.diagnostics should now be on the log
+    // tagged as parse_error and carrying their source location, so the
+    // CLI can print "<formula>:<line>:<col>: <message>" for the user.
+    try testing.expect(flog.hasFatal());
+
+    var saw_parse_error = false;
+    for (flog.entries.items) |entry| {
+        if (entry.reason == .parse_error) {
+            saw_parse_error = true;
+            try testing.expect(entry.loc != null);
+            try testing.expect(entry.loc.?.line >= 1);
+        }
+    }
+    try testing.expect(saw_parse_error);
+}

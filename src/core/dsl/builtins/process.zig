@@ -55,21 +55,28 @@ pub fn devToolsLocate(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError
     if (args.len == 0) return Value{ .nil = {} };
     const cmd_name = args[0].asString(ctx.allocator) catch return Value{ .nil = {} };
 
-    // Search PATH for the command
+    // Reusable scratch buffer — every probe writes through this one stack
+    // slot instead of allocating a fresh slice per iteration. The PATH
+    // split itself uses tokenizeScalar (zero-alloc) so no caching needed.
+    var probe: [std.fs.max_path_bytes]u8 = undefined;
+
+    // Search PATH for the command.
     const path_env = std.posix.getenv("PATH") orelse "/usr/bin:/bin:/usr/sbin:/sbin";
     var path_iter = std.mem.tokenizeScalar(u8, path_env, ':');
     while (path_iter.next()) |dir| {
-        const full = std.fs.path.join(ctx.allocator, &.{ dir, cmd_name }) catch continue;
+        const full = std.fmt.bufPrint(&probe, "{s}/{s}", .{ dir, cmd_name }) catch continue;
         std.fs.cwd().access(full, .{}) catch continue;
-        return Value{ .pathname = full };
+        const owned = ctx.allocator.dupe(u8, full) catch return BuiltinError.OutOfMemory;
+        return Value{ .pathname = owned };
     }
 
-    // Fallback: try common locations
+    // Fallback: try common locations.
     const fallbacks = [_][]const u8{ "/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/" };
     for (fallbacks) |prefix| {
-        const full = std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ prefix, cmd_name }) catch continue;
+        const full = std.fmt.bufPrint(&probe, "{s}{s}", .{ prefix, cmd_name }) catch continue;
         std.fs.cwd().access(full, .{}) catch continue;
-        return Value{ .pathname = full };
+        const owned = ctx.allocator.dupe(u8, full) catch return BuiltinError.OutOfMemory;
+        return Value{ .pathname = owned };
     }
 
     return Value{ .pathname = cmd_name };

@@ -59,22 +59,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var found_formula = false;
     var found_cask = false;
 
-    // Search formulas
+    // Search formulas/casks via the cache-aware existence probe. On a warm
+    // cache this is just a `statFile` — the previous `fetchFormula` path
+    // always opened and read the (potentially 40 KiB) cached JSON body
+    // even though we only needed to know whether the key existed.
     if (search_formula) {
-        const json_bytes = api.fetchFormula(search_query) catch null;
-        if (json_bytes) |bytes| {
-            defer allocator.free(bytes);
-            found_formula = true;
-        }
+        found_formula = api.exists(search_query, .formula) catch false;
     }
 
-    // Search casks
     if (search_cask) {
-        const json_bytes = api.fetchCask(search_query) catch null;
-        if (json_bytes) |bytes| {
-            defer allocator.free(bytes);
-            found_cask = true;
-        }
+        found_cask = api.exists(search_query, .cask) catch false;
     }
 
     // Output results

@@ -162,7 +162,8 @@ pub const CaskInstaller = struct {
             return CaskError.Sha256Mismatch;
 
         // Determine target: /Applications or ~/Applications
-        const app_dir = applicationsDir();
+        var app_dir_buf: [512]u8 = undefined;
+        const app_dir = applicationsDir(&app_dir_buf);
 
         // Install based on type
         const app_path = switch (artifact_type) {
@@ -196,6 +197,12 @@ pub const CaskInstaller = struct {
 
         const path_ptr = stmt.columnText(0);
         if (path_ptr) |p| {
+            // sqlite3_column_text returns a null-terminated UTF-8 string per
+            // the SQLite C API contract, so `sliceTo(.., 0)` is safe here.
+            // There is an inherent TOCTOU window between this read and the
+            // `deleteTreeAbsolute` below — accepted because cask uninstall
+            // is a single-user operation and the bundle is protected by
+            // filesystem permissions.
             const app_path = std.mem.sliceTo(p, 0);
 
             // Check if the app is running (best-effort)
@@ -288,12 +295,7 @@ pub const CaskInstaller = struct {
         var hash: [32]u8 = undefined;
         hasher.final(&hash);
 
-        var hex_buf: [64]u8 = undefined;
-        const hex_chars = "0123456789abcdef";
-        for (hash, 0..) |b, i| {
-            hex_buf[i * 2] = hex_chars[b >> 4];
-            hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
-        }
+        const hex_buf = std.fmt.bytesToHex(hash, .lower);
         if (!std.mem.eql(u8, &hex_buf, expected_hash)) return error.Sha256Mismatch;
     }
 
@@ -463,15 +465,17 @@ fn isAppRunning(app_path: []const u8) bool {
 }
 
 /// Determine the applications directory.
-/// Uses /Applications if writable, otherwise ~/Applications.
-fn applicationsDir() []const u8 {
+/// Uses /Applications if writable, otherwise ~/Applications formatted into `out`.
+/// The caller owns `out`; the returned slice is either a compile-time literal
+/// (no aliasing) or a slice of `out` (lives as long as `out`).
+fn applicationsDir(out: []u8) []const u8 {
     // Check if /Applications is writable
     const test_path = "/Applications/.malt_write_test";
     const file = std.fs.createFileAbsolute(test_path, .{}) catch {
         // Fallback to ~/Applications
         if (std.posix.getenv("HOME")) |home| {
-            var buf: [512]u8 = undefined;
-            const home_apps = std.fmt.bufPrint(&buf, "{s}/Applications", .{std.mem.sliceTo(home, 0)}) catch return "/Applications";
+            const home_slice = std.mem.sliceTo(home, 0);
+            const home_apps = std.fmt.bufPrint(out, "{s}/Applications", .{home_slice}) catch return "/Applications";
             std.fs.makeDirAbsolute(home_apps) catch |e| switch (e) {
                 error.PathAlreadyExists => {},
                 else => return "/Applications",

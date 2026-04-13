@@ -561,6 +561,19 @@ test "devToolsLocate returns nil for empty args" {
     try testing.expect(v == .nil);
 }
 
+test "devToolsLocate returns a heap-owned pathname (caller can free)" {
+    // Regression for the per-iteration alloc cleanup: the result on both
+    // the PATH-hit and fallback branches is now allocator.dupe-d, so the
+    // caller can rely on `Value.pathname` being heap-owned.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const v = try process.devToolsLocate(arenaCtx(&arena, "/tmp/malt"), null, &.{.{ .string = "sh" }});
+    try testing.expect(v == .pathname);
+    try testing.expect(std.mem.endsWith(u8, v.pathname, "/sh"));
+    // arena.deinit() will free it without panicking — that's the contract
+    // we want to lock in.
+}
+
 test "osMac is true, osLinux is false, cpuArch is arm64 or x86_64" {
     const ctx = mkCtx("/tmp/malt");
     try testing.expect((try process.osMac(ctx, null, &.{})).bool);

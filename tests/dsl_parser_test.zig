@@ -529,6 +529,21 @@ test "parser: percent_w word array" {
     }
 }
 
+test "parser: percent_w empty array" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // Edge case for the bulk-allocation rewrite — a zero-element %w must
+    // produce an empty array_literal without trying to alloc(0) and own
+    // a phantom slice.
+    const nodes = try parseSource(&arena, "%w[]");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    switch (nodes[0].kind) {
+        .array_literal => |elems| try testing.expectEqual(@as(usize, 0), elems.len),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "parser: percent_w each loop" {
     var arena = testArena();
     defer arena.deinit();

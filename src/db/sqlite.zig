@@ -10,6 +10,7 @@ pub const SqliteError = error{
     ConstraintViolation,
     Busy,
     Corrupt,
+    PathTooLong,
 };
 
 /// Map a raw SQLite result code to the appropriate SqliteError.
@@ -106,7 +107,7 @@ pub const Database = struct {
         // SQLite requires a null-terminated path. Copy into a stack buffer
         // and add the sentinel, since callers may pass bufPrint output.
         var path_buf: [512]u8 = undefined;
-        if (path.len >= path_buf.len) return SqliteError.OpenFailed;
+        if (path.len >= path_buf.len) return SqliteError.PathTooLong;
         @memcpy(path_buf[0..path.len], path);
         path_buf[path.len] = 0;
         const c_path: [*:0]const u8 = path_buf[0..path.len :0];

@@ -46,16 +46,10 @@ pub fn download(
     // Compute SHA256 of downloaded data
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(body.items, &hash, .{});
-    var hex_buf: [64]u8 = undefined;
-    const hex_chars = "0123456789abcdef";
-    for (hash, 0..) |b, i| {
-        hex_buf[i * 2] = hex_chars[b >> 4];
-        hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
-    }
-    const computed_hex: []const u8 = &hex_buf;
+    const computed_hex = std.fmt.bytesToHex(hash, .lower);
 
     // Verify SHA256
-    if (!std.mem.eql(u8, computed_hex, expected_sha256)) {
+    if (!std.mem.eql(u8, &computed_hex, expected_sha256)) {
         // Clean up dest_dir on mismatch
         std.fs.deleteTreeAbsolute(dest_dir) catch {};
         return BottleError.Sha256Mismatch;

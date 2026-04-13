@@ -84,28 +84,14 @@ fn writeHumanOutput(
             const pinned = stmt.columnBool(2);
             const name_slice = std.mem.sliceTo(name, 0);
 
-            if (color.isColorEnabled()) {
-                stdout.writeAll(color.Style.cyan.code()) catch {};
-                stdout.writeAll("  ▸ ") catch {};
-                stdout.writeAll(color.Style.reset.code()) catch {};
-            } else {
-                stdout.writeAll("  ▸ ") catch {};
-            }
+            writeBulletPrefix(stdout);
             stdout.writeAll(name_slice) catch {};
             if (show_versions) {
                 const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "?";
-                const use_color = color.isColorEnabled();
-                if (use_color) stdout.writeAll(color.Style.dim.code()) catch {};
-                stdout.writeAll(" (") catch {};
-                stdout.writeAll(ver_slice) catch {};
-                stdout.writeAll(")") catch {};
-                if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
+                writeStyledSpan(stdout, color.Style.dim, " (", ver_slice, ")");
             }
             if (pinned) {
-                const use_color = color.isColorEnabled();
-                if (use_color) stdout.writeAll(color.Style.yellow.code()) catch {};
-                stdout.writeAll(" [pinned]") catch {};
-                if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
+                writeStyledSpan(stdout, color.Style.yellow, " [pinned]", "", "");
             }
             stdout.writeAll("\n") catch {};
         }
@@ -121,26 +107,43 @@ fn writeHumanOutput(
             const ver = stmt.columnText(1);
             const token_slice = std.mem.sliceTo(token, 0);
 
-            if (color.isColorEnabled()) {
-                stdout.writeAll(color.Style.cyan.code()) catch {};
-                stdout.writeAll("  ▸ ") catch {};
-                stdout.writeAll(color.Style.reset.code()) catch {};
-            } else {
-                stdout.writeAll("  ▸ ") catch {};
-            }
+            writeBulletPrefix(stdout);
             stdout.writeAll(token_slice) catch {};
             if (show_versions) {
                 const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "?";
-                const use_color = color.isColorEnabled();
-                if (use_color) stdout.writeAll(color.Style.dim.code()) catch {};
-                stdout.writeAll(" (") catch {};
-                stdout.writeAll(ver_slice) catch {};
-                stdout.writeAll(")") catch {};
-                if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
+                writeStyledSpan(stdout, color.Style.dim, " (", ver_slice, ")");
             }
             stdout.writeAll("\n") catch {};
         }
     }
+}
+
+/// Emit the leading cyan bullet + space, honouring `NO_COLOR`.
+fn writeBulletPrefix(stdout: std.fs.File) void {
+    if (color.isColorEnabled()) {
+        stdout.writeAll(color.Style.cyan.code()) catch {};
+        stdout.writeAll("  ▸ ") catch {};
+        stdout.writeAll(color.Style.reset.code()) catch {};
+    } else {
+        stdout.writeAll("  ▸ ") catch {};
+    }
+}
+
+/// Emit `open + body + close`, wrapping the whole thing in `style` / reset
+/// when colour is enabled. `open` or `close` may be empty.
+fn writeStyledSpan(
+    stdout: std.fs.File,
+    style: color.Style,
+    open: []const u8,
+    body: []const u8,
+    close: []const u8,
+) void {
+    const use_color = color.isColorEnabled();
+    if (use_color) stdout.writeAll(style.code()) catch {};
+    stdout.writeAll(open) catch {};
+    stdout.writeAll(body) catch {};
+    stdout.writeAll(close) catch {};
+    if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
 }
 
 fn writeJsonOutput(

@@ -259,9 +259,16 @@ pub fn runtimeStateName(s: RuntimeState) []const u8 {
 pub fn queryRuntime(allocator: std.mem.Allocator, label: []const u8) RuntimeState {
     if (builtin.os.tag != .macos) return .not_loaded;
 
+    // `launchctl list` output is at most a few hundred lines (one per
+    // registered service); on a typical Mac it's well under 50 KiB. Cap
+    // at 4 MiB so a runaway launchd state can't push us into multi-MB
+    // allocations. Streaming line-by-line via std.Io.Reader would shave
+    // a sub-millisecond parse cost but the codebase doesn't otherwise
+    // use that API, so the complexity isn't worth it for this cold path.
     const result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &.{ "launchctl", "list" },
+        .max_output_bytes = 4 * 1024 * 1024,
     }) catch return .not_loaded;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);

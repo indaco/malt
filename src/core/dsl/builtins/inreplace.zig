@@ -40,9 +40,15 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
         return Value{ .nil = {} };
     };
 
-    // Write back atomically via temp file + rename
-    writeAtomic(path, new_content) catch {
-        // Fallback: direct overwrite
+    // Write back atomically via temp file + rename. If the atomic write
+    // fails (e.g. ENOSPC in the target directory), fall back to a direct
+    // overwrite and log the fallback so the user is aware that the write
+    // did *not* use the atomic path.
+    writeAtomic(path, new_content) catch |e| {
+        const stderr = std.fs.File.stderr();
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "malt: inreplace atomic write failed ({s}); falling back to direct overwrite\n", .{@errorName(e)}) catch return Value{ .nil = {} };
+        stderr.writeAll(msg) catch {};
         writeDirectly(path, new_content);
     };
 

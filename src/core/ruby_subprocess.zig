@@ -18,46 +18,49 @@ pub const RubyError = error{
     OutOfMemory,
 };
 
-/// Detect a usable Ruby interpreter. Returns the absolute path or null.
-fn detectRuby(allocator: std.mem.Allocator) ?[]const u8 {
-    // Static candidate paths tried in priority order.
+/// Detect a usable Ruby interpreter. Returns a caller-owned absolute path
+/// or null. Caller must free the returned slice with `allocator.free`.
+///
+/// Previously this function returned static slices for the hardcoded
+/// candidates and `allocator.dupe`d slices for the rbenv/asdf/PATH
+/// branches — the only call site never freed, so the heap branches
+/// leaked. Unifying the contract on "always heap-owned" lets the caller
+/// pair every successful return with one `defer allocator.free(...)`.
+///
+/// Public for testability; not part of the stable surface.
+pub fn detectRuby(allocator: std.mem.Allocator) ?[]const u8 {
     const candidates = [_][]const u8{
         "/opt/homebrew/opt/ruby/bin/ruby",
         "/usr/local/opt/ruby/bin/ruby",
         "/usr/bin/ruby",
     };
-
     for (candidates) |path| {
         std.fs.accessAbsolute(path, .{}) catch continue;
-        return path;
+        return allocator.dupe(u8, path) catch return null;
     }
 
-    // Try user-local version managers: rbenv, asdf
+    // Reusable scratch for path joining — avoids per-iteration heap churn.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    // User-local version managers: rbenv, asdf
     if (std.posix.getenv("HOME")) |home| {
-        const shim_suffixes = [_][]const u8{
-            "/.rbenv/shims/ruby",
-            "/.asdf/shims/ruby",
-        };
+        const shim_suffixes = [_][]const u8{ "/.rbenv/shims/ruby", "/.asdf/shims/ruby" };
         for (shim_suffixes) |suffix| {
-            var buf: [512]u8 = undefined;
             const path = std.fmt.bufPrint(&buf, "{s}{s}", .{ home, suffix }) catch continue;
             std.fs.accessAbsolute(path, .{}) catch continue;
-            // Allocate a stable copy the caller can rely on.
-            const dup = allocator.dupe(u8, path) catch continue;
-            return dup;
+            return allocator.dupe(u8, path) catch return null;
         }
     }
 
-    // Search PATH
-    const path_env = std.posix.getenv("PATH") orelse return null;
-    var it = std.mem.splitScalar(u8, path_env, ':');
-    while (it.next()) |dir| {
-        if (dir.len == 0) continue;
-        var buf: [512]u8 = undefined;
-        const candidate = std.fmt.bufPrint(&buf, "{s}/ruby", .{dir}) catch continue;
-        std.fs.accessAbsolute(candidate, .{}) catch continue;
-        const dup = allocator.dupe(u8, candidate) catch continue;
-        return dup;
+    // PATH search
+    if (std.posix.getenv("PATH")) |path_env| {
+        var it = std.mem.splitScalar(u8, path_env, ':');
+        while (it.next()) |dir| {
+            if (dir.len == 0) continue;
+            const candidate = std.fmt.bufPrint(&buf, "{s}/ruby", .{dir}) catch continue;
+            std.fs.accessAbsolute(candidate, .{}) catch continue;
+            return allocator.dupe(u8, candidate) catch return null;
+        }
     }
 
     return null;
@@ -364,7 +367,7 @@ pub fn runPostInstall(
     version: []const u8,
     prefix: []const u8,
 ) RubyError!void {
-    // 1. Find Ruby
+    // 1. Find Ruby (caller-owned heap slice — see detectRuby contract).
     const ruby_path = detectRuby(allocator) orelse {
         output.err("No Ruby interpreter found. Tried:", .{});
         output.err("  /opt/homebrew/opt/ruby/bin/ruby", .{});
@@ -374,6 +377,7 @@ pub fn runPostInstall(
         output.err("  PATH search", .{});
         return RubyError.RubyNotFound;
     };
+    defer allocator.free(ruby_path);
 
     // 2. Find homebrew-core tap
     const tap_path = findHomebrewCoreTap() orelse {
@@ -402,15 +406,28 @@ pub fn runPostInstall(
         return RubyError.OutOfMemory;
     defer allocator.free(script);
 
-    // 6. Write temp file
+    // 6. Write temp file with an exclusive-create to defeat tmp-file races.
+    // The path includes the PID and a 128-bit random suffix so concurrent
+    // post_install runs for the same (or a different) formula cannot collide,
+    // and an attacker cannot pre-create the target to redirect execution.
     var tmp_path_buf: [256]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/tmp/malt_post_install_{s}.rb", .{name}) catch
-        return RubyError.ScriptWriteFailed;
+    var rand_bytes: [16]u8 = undefined;
+    std.crypto.random.bytes(&rand_bytes);
+    const hex = std.fmt.bytesToHex(rand_bytes, .lower);
+    const pid = std.c.getpid();
+    const tmp_path = std.fmt.bufPrint(
+        &tmp_path_buf,
+        "/tmp/malt_post_install_{s}_{d}_{s}.rb",
+        .{ name, pid, hex[0..] },
+    ) catch return RubyError.ScriptWriteFailed;
 
-    const tmp_file = std.fs.createFileAbsolute(tmp_path, .{}) catch
-        return RubyError.ScriptWriteFailed;
+    const tmp_file = std.fs.createFileAbsolute(tmp_path, .{
+        .exclusive = true,
+        .mode = 0o600,
+    }) catch return RubyError.ScriptWriteFailed;
     tmp_file.writeAll(script) catch {
         tmp_file.close();
+        std.fs.deleteFileAbsolute(tmp_path) catch {};
         return RubyError.ScriptWriteFailed;
     };
     tmp_file.close();
