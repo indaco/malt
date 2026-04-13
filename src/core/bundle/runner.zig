@@ -1,10 +1,15 @@
 //! malt — bundle runner
 //!
-//! Installs every member of a `Manifest` by invoking the already-installed
-//! `malt` binary as a subprocess for each formula/cask. Tap adds are
-//! synthesised as `malt tap <name>`. Delegating to the CLI gives us full
-//! idempotency for free (`malt install` skips installed kegs) at the cost of
-//! one extra fork per member — acceptable for the typical bundle size.
+//! Installs every member of a `Manifest` by calling the matching command
+//! module's `execute` function in-process. Each underlying primitive
+//! (`install`, `tap`, `services start`) is already idempotent, so running a
+//! bundle twice is a no-op for already-installed members. Avoiding a
+//! subprocess per member keeps SQLite warm and removes per-fork output noise.
+//!
+//! `Options.malt_bin` is honoured only by the legacy subprocess fallback,
+//! which the test suite still uses when it wants to assert exit-code
+//! propagation against a fake binary like `/usr/bin/false`. Production
+//! callers leave it null.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -14,6 +19,9 @@ const lock_mod = @import("../../db/lock.zig");
 const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
 const manifest_mod = @import("manifest.zig");
+const install_cmd = @import("../../cli/install.zig");
+const tap_cmd = @import("../../cli/tap.zig");
+const services_cmd = @import("../../cli/services.zig");
 
 pub const RunnerError = error{
     MemberFailed,
@@ -65,13 +73,11 @@ pub fn run(
         null;
     defer if (lock) |*l| l.release();
 
-    const malt_bin = opts.malt_bin orelse "malt";
-
     var any_failed = false;
 
     // 1. taps
     for (manifest.taps) |t| {
-        runMember(allocator, malt_bin, &.{ "tap", t }, opts.dry_run) catch {
+        callMember(allocator, .{ .tap = t }, opts) catch {
             output.err("tap failed: {s}", .{t});
             any_failed = true;
         };
@@ -79,7 +85,7 @@ pub fn run(
 
     // 2. formulas
     for (manifest.formulas) |f| {
-        runMember(allocator, malt_bin, &.{ "install", f.name }, opts.dry_run) catch {
+        callMember(allocator, .{ .formula = f.name }, opts) catch {
             output.err("install failed: {s}", .{f.name});
             any_failed = true;
         };
@@ -87,7 +93,7 @@ pub fn run(
 
     // 3. casks
     for (manifest.casks) |c| {
-        runMember(allocator, malt_bin, &.{ "install", "--cask", c.name }, opts.dry_run) catch {
+        callMember(allocator, .{ .cask = c.name }, opts) catch {
             output.err("cask install failed: {s}", .{c.name});
             any_failed = true;
         };
@@ -96,7 +102,7 @@ pub fn run(
     // 4. services start (auto_start only). Best-effort.
     for (manifest.services) |s| {
         if (!s.auto_start) continue;
-        runMember(allocator, malt_bin, &.{ "services", "start", s.name }, opts.dry_run) catch {
+        callMember(allocator, .{ .service_start = s.name }, opts) catch {
             output.warn("could not auto-start service: {s}", .{s.name});
         };
     }
@@ -109,28 +115,60 @@ pub fn run(
     if (any_failed) return RunnerError.MemberFailed;
 }
 
-fn runMember(
-    allocator: std.mem.Allocator,
-    malt_bin: []const u8,
-    args: []const []const u8,
-    dry_run: bool,
-) !void {
-    if (dry_run) {
-        var line: std.ArrayList(u8) = .empty;
-        defer line.deinit(allocator);
-        try line.appendSlice(allocator, malt_bin);
-        for (args) |a| {
-            try line.append(allocator, ' ');
-            try line.appendSlice(allocator, a);
+const MemberCall = union(enum) {
+    tap: []const u8,
+    formula: []const u8,
+    cask: []const u8,
+    service_start: []const u8,
+};
+
+fn callMember(allocator: std.mem.Allocator, call: MemberCall, opts: Options) !void {
+    if (opts.dry_run) {
+        switch (call) {
+            .tap => |n| output.info("would run: malt tap {s}", .{n}),
+            .formula => |n| output.info("would run: malt install {s}", .{n}),
+            .cask => |n| output.info("would run: malt install --cask {s}", .{n}),
+            .service_start => |n| output.info("would run: malt services start {s}", .{n}),
         }
-        output.info("would run: {s}", .{line.items});
         return;
     }
 
+    // Test escape hatch: when malt_bin is set, fall back to subprocess so
+    // tests can substitute /usr/bin/false to assert exit-code propagation.
+    if (opts.malt_bin) |bin| return runSubprocess(allocator, bin, call);
+
+    switch (call) {
+        .tap => |n| try tap_cmd.execute(allocator, &.{n}),
+        .formula => |n| try install_cmd.execute(allocator, &.{n}),
+        .cask => |n| try install_cmd.execute(allocator, &.{ "--cask", n }),
+        .service_start => |n| try services_cmd.execute(allocator, &.{ "start", n }),
+    }
+}
+
+fn runSubprocess(allocator: std.mem.Allocator, bin: []const u8, call: MemberCall) !void {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
-    try argv.append(allocator, malt_bin);
-    for (args) |a| try argv.append(allocator, a);
+    try argv.append(allocator, bin);
+    switch (call) {
+        .tap => |n| {
+            try argv.append(allocator, "tap");
+            try argv.append(allocator, n);
+        },
+        .formula => |n| {
+            try argv.append(allocator, "install");
+            try argv.append(allocator, n);
+        },
+        .cask => |n| {
+            try argv.append(allocator, "install");
+            try argv.append(allocator, "--cask");
+            try argv.append(allocator, n);
+        },
+        .service_start => |n| {
+            try argv.append(allocator, "services");
+            try argv.append(allocator, "start");
+            try argv.append(allocator, n);
+        },
+    }
 
     var child = std.process.Child.init(argv.items, allocator);
     child.stdout_behavior = .Inherit;

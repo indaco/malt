@@ -140,3 +140,51 @@ test "parse formula with post_install_defined true" {
     defer formula.deinit();
     try testing.expect(formula.post_install_defined);
 }
+
+test "parse formula with service block" {
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const json =
+        \\{
+        \\  "name": "postgresql@16",
+        \\  "full_name": "postgresql@16",
+        \\  "tap": "homebrew/core",
+        \\  "desc": "Postgres",
+        \\  "homepage": "",
+        \\  "revision": 0,
+        \\  "keg_only": false,
+        \\  "post_install_defined": false,
+        \\  "versions": { "stable": "16.4" },
+        \\  "dependencies": [],
+        \\  "oldnames": [],
+        \\  "bottle": {},
+        \\  "service": {
+        \\    "run": ["/opt/malt/opt/postgresql@16/bin/postgres", "-D", "/opt/malt/var/postgresql@16"],
+        \\    "working_dir": "/opt/malt/var/postgresql@16",
+        \\    "log_path": "/opt/malt/var/log/postgresql@16.log",
+        \\    "error_log_path": "/opt/malt/var/log/postgresql@16.err",
+        \\    "keep_alive": true,
+        \\    "run_at_load": true
+        \\  }
+        \\}
+    ;
+    var formula = try formula_mod.parseFormula(alloc, json);
+    defer formula.deinit();
+    const svc = formula.service orelse return error.TestExpectedSomething;
+    try testing.expectEqual(@as(usize, 3), svc.run.len);
+    try testing.expectEqualStrings("/opt/malt/opt/postgresql@16/bin/postgres", svc.run[0]);
+    try testing.expectEqualStrings("/opt/malt/var/postgresql@16", svc.working_dir.?);
+    try testing.expect(svc.keep_alive);
+}
+
+test "formula without service block has null service" {
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var formula = try formula_mod.parseFormula(alloc, minimal_json);
+    defer formula.deinit();
+    try testing.expect(formula.service == null);
+}

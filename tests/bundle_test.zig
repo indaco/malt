@@ -115,3 +115,54 @@ test "round-trip: parse Brewfile fixture, run dry, no panic" {
 
     try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true });
 }
+
+test "real-world Brewfile shapes parse without error" {
+    // Regression canary: shapes pulled from popular public dotfiles repos.
+    // We assert parse + dry-run succeed; we do not assert specific counts so
+    // the fixture can grow without churn.
+    const fixture =
+        \\tap "homebrew/cask"
+        \\tap "homebrew/cask-fonts"
+        \\tap "homebrew/services"
+        \\
+        \\# Core CLI tools
+        \\brew "git"
+        \\brew "wget"
+        \\brew "curl"
+        \\brew "jq"
+        \\brew "ripgrep"
+        \\brew "fzf"
+        \\brew "tmux"
+        \\brew "neovim"
+        \\
+        \\# Versioned + service flags
+        \\brew "postgresql@16", restart_service: true
+        \\brew "redis", restart_service: :changed
+        \\brew "node@20", link: true
+        \\
+        \\# App Store apps
+        \\mas "Xcode", id: 497799835
+        \\mas "Things 3", id: 904280696
+        \\
+        \\# VS Code extensions
+        \\vscode "ms-python.python"
+        \\vscode "rust-lang.rust-analyzer"
+        \\
+        \\# Casks
+        \\cask "ghostty"
+        \\cask "visual-studio-code"
+        \\cask "font-fira-code"
+    ;
+
+    var t = try TempDb.init("realworld");
+    defer t.deinit();
+
+    var m = try malt.bundle_brewfile.parse(testing.allocator, fixture);
+    defer m.deinit();
+
+    try testing.expect(m.taps.len >= 3);
+    try testing.expect(m.formulas.len >= 8);
+    try testing.expect(m.casks.len >= 3);
+
+    try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true });
+}

@@ -117,7 +117,9 @@ fn cmdLogs(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     const stdout = std.fs.File.stdout();
     var write_buf: [4096]u8 = undefined;
     var stdout_writer = stdout.writer(&write_buf);
-    try supervisor.tailLog(allocator, path, tail_n, &stdout_writer.interface);
+    const w = &stdout_writer.interface;
+    try supervisor.tailLog(allocator, path, tail_n, w);
+    try w.flush();
 }
 
 fn openDb() !sqlite.Database {

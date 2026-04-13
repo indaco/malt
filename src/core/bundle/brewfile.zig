@@ -233,6 +233,13 @@ fn expectBool(s: []const u8, cursor: *usize) BrewfileError!bool {
         cursor.* += 5;
         return false;
     }
+    // Ruby symbols like :changed / :always are commonly used with
+    // `restart_service:` — treat any symbol as truthy (consume the token).
+    if (cursor.* < s.len and s[cursor.*] == ':') {
+        cursor.* += 1;
+        _ = nextIdent(s, cursor) orelse return BrewfileError.UnexpectedToken;
+        return true;
+    }
     return BrewfileError.UnexpectedToken;
 }
 

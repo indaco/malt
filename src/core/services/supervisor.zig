@@ -5,10 +5,26 @@
 //! source of truth for registered services; launchctl owns their runtime
 //! state.
 //!
-//! Linux/Windows return `OsNotSupported` at runtime. The actual plist write
-//! and launchctl invocation are implemented; the kegs/formulas side of the
-//! integration (registering a service when a formula carries a `service:`
-//! field) is deferred to a follow-up.
+//! Assumptions and constraints:
+//!
+//! - **Domain**: services are loaded into the per-user `gui/<uid>` domain.
+//!   This works without sudo and survives logout, but plists run as the
+//!   logged-in user. A `--system` flag (PID 1 domain, requires root) is
+//!   intentionally not yet supported.
+//! - **Plist path**: must be absolute (launchctl rejects relative paths).
+//!   `register` always writes to `{prefix}/var/malt/services/{label}/service.plist`,
+//!   which is absolute by construction since `MALT_PREFIX` is normalized
+//!   upstream.
+//! - **Label uniqueness**: launchd uses the plist `Label` as the unique key.
+//!   We use the service `name` directly as the label; callers should
+//!   namespace via the formula name (e.g. `postgresql@16`) to avoid clashes.
+//! - **OS gate**: `register`/`start`/`stop`/`restart` return `OsNotSupported`
+//!   on non-macOS. `list`/`status`/`logs`/`tailLog` work everywhere because
+//!   they only touch the DB and the local filesystem.
+//! - **Formula integration**: registering a service when a formula carries a
+//!   `service:` field happens in `cli/install.zig` after a successful keg
+//!   write. `cli/uninstall.zig` calls `stopAndUnregister` before deleting
+//!   files.
 
 const std = @import("std");
 const builtin = @import("builtin");
