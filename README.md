@@ -668,24 +668,22 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 ### Cold Install
 
-| Package              | malt   | nanobrew | zerobrew | bru     | Homebrew |
-| -------------------- | ------ | -------- | -------- | ------- | -------- |
-| **tree** (0 deps)    | 0.954s | 0.573s   | 2.062s   | 0.780s‡ | 4.334s   |
-| **wget** (6 deps)    | 2.958s | 5.357s   | 6.422s   | 0.579s‡ | 4.115s   |
-| **ffmpeg** (11 deps) | 3.942s | 3.043s   | 7.378s   | 3.515s‡ | 18.673s  |
-
+| Package | malt | nanobrew | zerobrew | bru | Homebrew |
+| ------- | ---- | -------- | -------- | --- | -------- |
+| **tree** (0 deps) | 0.853s | 0.754s | 2.878s | 0.821s‡ | 5.457s |
+| **wget** (6 deps) | 5.121s | 6.353s | 8.877s | 0.538s‡ | 4.817s |
+| **ffmpeg** (11 deps) | 4.886s | 4.195s | 9.946s | 4.793s‡ | 20.466s |
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
 
 ### Warm Install
 
-| Package              | malt   | nanobrew | zerobrew | bru    |
-| -------------------- | ------ | -------- | -------- | ------ |
-| **tree** (0 deps)    | 0.007s | 0.012s   | 0.318s   | 0.052s |
-| **wget** (6 deps)    | 0.077s | 0.630s   | 0.947s   | 0.080s |
-| **ffmpeg** (11 deps) | 0.079s | 0.898s   | 2.715s   | 1.132s |
-
+| Package | malt | nanobrew | zerobrew | bru |
+| ------- | ---- | -------- | -------- | --- |
+| **tree** (0 deps) | 0.015s | 0.007s | 0.313s | 0.046s |
+| **wget** (6 deps) | 0.031s | 0.685s | 0.862s | 0.084s |
+| **ffmpeg** (11 deps) | 0.090s | 1.184s | 4.004s | 1.994s |
 <!-- BENCH:WARM:END -->
 
 ### Why warm matters more than cold
@@ -709,7 +707,7 @@ Raw install time is only one axis — a few architectural choices behind these n
 > bru keeps its bottle download cache under `~/.bru/` and `~/Library/Caches/bru/`, outside the wiped `/tmp/bru` prefix, so its `cold` numbers reflect warm cache + materialise, not a real network fetch. bru's warm row is still an apples-to-apples comparison.
 
 > [!NOTE]
-> Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-12. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
+> Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-13. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
 
 ---
 
