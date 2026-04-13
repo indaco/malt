@@ -636,6 +636,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                     dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {
                         if (flog.hasFatal()) {
                             output.warn("post_install DSL failed for {s} (fatal)", .{job.name});
+                            flog.printFatal(job.name);
                             break :post_install;
                         }
                         if (use_system_ruby) {
@@ -669,6 +670,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {
                     if (flog.hasFatal()) {
                         output.warn("post_install DSL failed for {s} (fatal)", .{job.name});
+                        flog.printFatal(job.name);
                         break :post_install;
                     }
                     if (use_system_ruby) {

@@ -638,7 +638,20 @@ pub fn executePostInstall(
 
     var lexer = lexer_mod.Lexer.init(ruby_source);
     var parser = parser_mod.Parser.init(a, &lexer);
-    const nodes = try parser.parseBlock();
+    const nodes = parser.parseBlock() catch |e| {
+        // Surface accumulated parse diagnostics through the fallback log
+        // so the CLI can print them with file:line context. Without this
+        // the diagnostics ArrayList was filled and then dropped on return.
+        for (parser.diagnostics.items) |d| {
+            flog.log(.{
+                .formula = formula.name,
+                .reason = .parse_error,
+                .detail = d.message,
+                .loc = d.loc,
+            });
+        }
+        return e;
+    };
 
     var ctx = ExecContext.init(a, formula, malt_prefix, flog);
     var interp = Interpreter.init(&ctx);

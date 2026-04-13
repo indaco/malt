@@ -23,7 +23,7 @@ test "hasErrors is true once any entry is logged" {
     try testing.expect(!log.hasFatal()); // unknown_method is non-fatal
 }
 
-test "hasFatal picks up sandbox_violation and system_command_failed" {
+test "hasFatal picks up sandbox_violation, system_command_failed and parse_error" {
     var log_a = FallbackLog.init(testing.allocator);
     defer log_a.deinit();
     log_a.log(.{ .formula = "f", .reason = .sandbox_violation, .detail = "d", .loc = null });
@@ -38,6 +38,25 @@ test "hasFatal picks up sandbox_violation and system_command_failed" {
     defer log_c.deinit();
     log_c.log(.{ .formula = "f", .reason = .unsupported_node, .detail = "d", .loc = null });
     try testing.expect(!log_c.hasFatal());
+
+    var log_d = FallbackLog.init(testing.allocator);
+    defer log_d.deinit();
+    log_d.log(.{ .formula = "f", .reason = .parse_error, .detail = "expected end", .loc = .{ .line = 4, .col = 1 } });
+    try testing.expect(log_d.hasFatal());
+}
+
+test "printFatal does not crash on empty / fatal / non-fatal mixes" {
+    // We can't easily intercept stderr, but we can at least exercise the
+    // formatting branches (with-loc / no-loc / non-fatal-skipped) and
+    // confirm none of them panic or write through a stale buffer.
+    var log = FallbackLog.init(testing.allocator);
+    defer log.deinit();
+    log.printFatal("empty"); // empty list, no-op
+
+    log.log(.{ .formula = "wget", .reason = .unknown_method, .detail = "skip me", .loc = null });
+    log.log(.{ .formula = "wget", .reason = .parse_error, .detail = "unexpected token", .loc = .{ .line = 12, .col = 4 } });
+    log.log(.{ .formula = "wget", .reason = .sandbox_violation, .detail = "/etc/passwd", .loc = null });
+    log.printFatal("wget");
 }
 
 test "toJson emits an empty array for no entries" {
