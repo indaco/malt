@@ -26,9 +26,11 @@ pub fn validatePath(
         return SandboxError.PathSandboxViolation;
     }
 
-    // Check allowed prefixes
-    if (std.mem.startsWith(u8, target_path, cellar_path)) return;
-    if (std.mem.startsWith(u8, target_path, malt_prefix)) return;
+    // Check allowed prefixes with a proper path-component boundary so that
+    // `/opt/malt/Cellar/foo/1.0evil` is not accepted as a prefix match of
+    // `/opt/malt/Cellar/foo/1.0`.
+    if (pathHasPrefix(target_path, cellar_path)) return;
+    if (pathHasPrefix(target_path, malt_prefix)) return;
 
     return SandboxError.PathSandboxViolation;
 }
@@ -50,10 +52,10 @@ pub fn validateResolved(
         return; // Path doesn't exist yet — literal validation passed
     };
 
-    // Re-validate the resolved path
+    // Re-validate the resolved path with the same boundary rules.
     if (containsDotDot(resolved)) return SandboxError.PathSandboxViolation;
-    if (!std.mem.startsWith(u8, resolved, cellar_path) and
-        !std.mem.startsWith(u8, resolved, malt_prefix))
+    if (!pathHasPrefix(resolved, cellar_path) and
+        !pathHasPrefix(resolved, malt_prefix))
     {
         return SandboxError.PathSandboxViolation;
     }
@@ -65,4 +67,19 @@ fn containsDotDot(path: []const u8) bool {
         if (std.mem.eql(u8, component, "..")) return true;
     }
     return false;
+}
+
+/// Return true iff `path` is equal to `prefix` or extends it along a
+/// path-component boundary. Guards against substring matches such as
+/// `prefix="/opt/malt"` vs `path="/opt/malthack"` where a plain
+/// `std.mem.startsWith` would incorrectly return true.
+fn pathHasPrefix(path: []const u8, prefix: []const u8) bool {
+    if (prefix.len == 0) return false;
+    if (!std.mem.startsWith(u8, path, prefix)) return false;
+    if (path.len == prefix.len) return true;
+    // prefix already ends in '/' (e.g. "/opt/malt/") — boundary already covered.
+    if (prefix[prefix.len - 1] == '/') return true;
+    // Next char in path must be the separator; otherwise it's a substring,
+    // not a path-component prefix.
+    return path[prefix.len] == '/';
 }

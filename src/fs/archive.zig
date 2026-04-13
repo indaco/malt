@@ -1,5 +1,13 @@
 const std = @import("std");
 
+/// `c_allocator` is used for `std.process.Child` internals (argv/env
+/// bookkeeping) throughout this module. Callers may be running under an
+/// arena, but the child process allocates a handful of bytes that live only
+/// for the duration of the spawn and are freed via the child's own deinit —
+/// routing them through the caller's arena would give the arena a growing
+/// pool of noise for zero benefit. Kept on libc alloc for clarity.
+const child_allocator = std.heap.c_allocator;
+
 /// Extracts a tar.gz archive from the given input reader into output_dir.
 /// Uses the system `tar` command to avoid Zig stdlib flate decompressor
 /// panics on corrupt/truncated gzip streams (Zig issue: unreachable in
@@ -29,7 +37,7 @@ pub fn extractTarGz(_: *std.Io.Reader, output_dir: std.fs.Dir) !void {
 
     // Use system tar — immune to Zig flate decompressor panics
     const argv = [_][]const u8{ "tar", "xzf", archive_path, "-C", dir_path };
-    var child = std.process.Child.init(&argv, std.heap.c_allocator);
+    var child = std.process.Child.init(&argv, child_allocator);
     child.spawn() catch return error.ExtractionFailed;
     const term = child.wait() catch return error.ExtractionFailed;
     switch (term) {
@@ -52,7 +60,7 @@ pub fn extractTarZst(input: *std.Io.Reader, output_dir: std.fs.Dir) !void {
 /// with std.tar, so we shell out to the system tar (always available on macOS).
 pub fn extractTarXzFile(archive_path: []const u8, dest_dir: []const u8) !void {
     const argv = [_][]const u8{ "tar", "xf", archive_path, "-C", dest_dir };
-    var child = std.process.Child.init(&argv, std.heap.c_allocator);
+    var child = std.process.Child.init(&argv, child_allocator);
     child.spawn() catch return error.ExtractionFailed;
     const term = child.wait() catch return error.ExtractionFailed;
     switch (term) {

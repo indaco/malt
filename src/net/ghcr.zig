@@ -76,9 +76,15 @@ pub const GhcrClient = struct {
         // Parse JSON to extract "token" field
         const token = extractTokenField(self.allocator, resp.body) catch
             return GhcrError.InvalidResponse;
+        errdefer self.allocator.free(token);
+
+        // Duping the repo must succeed; otherwise we'd leave `cached_token`
+        // set without a matching `cached_repo`, and the next request would
+        // silently treat the cache as "wrong repo" and refetch on every call.
+        const repo_dup = self.allocator.dupe(u8, repo) catch return GhcrError.OutOfMemory;
 
         self.cached_token = token;
-        self.cached_repo = self.allocator.dupe(u8, repo) catch null;
+        self.cached_repo = repo_dup;
         self.token_expiry = now + 270; // 4.5 min buffer before 5 min expiry
         return token;
     }

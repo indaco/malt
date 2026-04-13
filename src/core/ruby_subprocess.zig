@@ -402,15 +402,28 @@ pub fn runPostInstall(
         return RubyError.OutOfMemory;
     defer allocator.free(script);
 
-    // 6. Write temp file
+    // 6. Write temp file with an exclusive-create to defeat tmp-file races.
+    // The path includes the PID and a 128-bit random suffix so concurrent
+    // post_install runs for the same (or a different) formula cannot collide,
+    // and an attacker cannot pre-create the target to redirect execution.
     var tmp_path_buf: [256]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "/tmp/malt_post_install_{s}.rb", .{name}) catch
-        return RubyError.ScriptWriteFailed;
+    var rand_bytes: [16]u8 = undefined;
+    std.crypto.random.bytes(&rand_bytes);
+    const hex = std.fmt.bytesToHex(rand_bytes, .lower);
+    const pid = std.c.getpid();
+    const tmp_path = std.fmt.bufPrint(
+        &tmp_path_buf,
+        "/tmp/malt_post_install_{s}_{d}_{s}.rb",
+        .{ name, pid, hex[0..] },
+    ) catch return RubyError.ScriptWriteFailed;
 
-    const tmp_file = std.fs.createFileAbsolute(tmp_path, .{}) catch
-        return RubyError.ScriptWriteFailed;
+    const tmp_file = std.fs.createFileAbsolute(tmp_path, .{
+        .exclusive = true,
+        .mode = 0o600,
+    }) catch return RubyError.ScriptWriteFailed;
     tmp_file.writeAll(script) catch {
         tmp_file.close();
+        std.fs.deleteFileAbsolute(tmp_path) catch {};
         return RubyError.ScriptWriteFailed;
     };
     tmp_file.close();

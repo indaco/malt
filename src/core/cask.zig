@@ -162,7 +162,8 @@ pub const CaskInstaller = struct {
             return CaskError.Sha256Mismatch;
 
         // Determine target: /Applications or ~/Applications
-        const app_dir = applicationsDir();
+        var app_dir_buf: [512]u8 = undefined;
+        const app_dir = applicationsDir(&app_dir_buf);
 
         // Install based on type
         const app_path = switch (artifact_type) {
@@ -463,15 +464,17 @@ fn isAppRunning(app_path: []const u8) bool {
 }
 
 /// Determine the applications directory.
-/// Uses /Applications if writable, otherwise ~/Applications.
-fn applicationsDir() []const u8 {
+/// Uses /Applications if writable, otherwise ~/Applications formatted into `out`.
+/// The caller owns `out`; the returned slice is either a compile-time literal
+/// (no aliasing) or a slice of `out` (lives as long as `out`).
+fn applicationsDir(out: []u8) []const u8 {
     // Check if /Applications is writable
     const test_path = "/Applications/.malt_write_test";
     const file = std.fs.createFileAbsolute(test_path, .{}) catch {
         // Fallback to ~/Applications
         if (std.posix.getenv("HOME")) |home| {
-            var buf: [512]u8 = undefined;
-            const home_apps = std.fmt.bufPrint(&buf, "{s}/Applications", .{std.mem.sliceTo(home, 0)}) catch return "/Applications";
+            const home_slice = std.mem.sliceTo(home, 0);
+            const home_apps = std.fmt.bufPrint(out, "{s}/Applications", .{home_slice}) catch return "/Applications";
             std.fs.makeDirAbsolute(home_apps) catch |e| switch (e) {
                 error.PathAlreadyExists => {},
                 else => return "/Applications",

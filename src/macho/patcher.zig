@@ -61,9 +61,15 @@ pub fn patchPaths(
             return PatchError.PathTooLong;
         }
 
-        // Write replacement at the offset
+        // Write replacement at the offset. The addition is done with
+        // overflow checking so a malformed Mach-O with an offset near
+        // `usize.max` can't wrap around and pass the in-bounds check.
         const offset = lcp.path_offset;
-        if (offset + lcp.max_path_len > data.len) {
+        const end = std.math.add(usize, offset, lcp.max_path_len) catch {
+            skipped += 1;
+            continue;
+        };
+        if (end > data.len) {
             skipped += 1;
             continue;
         }
