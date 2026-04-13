@@ -18,14 +18,70 @@ test "parseArgs returns defaults for an empty argv" {
     try testing.expectEqual(false, opts.yes);
     try testing.expectEqual(false, opts.remove_binary);
     try testing.expectEqual(@as(?[]const u8, null), opts.backup_path);
+    try testing.expect(opts.scope.isEmpty());
 }
 
-test "parseArgs recognises every long flag" {
-    const argv = [_][]const u8{ "--keep-cache", "--yes", "--remove-binary" };
+test "parseArgs recognises every wipe-only long flag" {
+    const argv = [_][]const u8{ "--wipe", "--keep-cache", "--yes", "--remove-binary" };
     const opts = try purge.parseArgs(&argv);
+    try testing.expect(opts.scope.wipe);
     try testing.expect(opts.keep_cache);
     try testing.expect(opts.yes);
     try testing.expect(opts.remove_binary);
+}
+
+test "parseArgs sets each scope flag independently" {
+    {
+        const opts = try purge.parseArgs(&[_][]const u8{"--store-orphans"});
+        try testing.expect(opts.scope.store_orphans);
+    }
+    {
+        const opts = try purge.parseArgs(&[_][]const u8{"--unused-deps"});
+        try testing.expect(opts.scope.unused_deps);
+    }
+    {
+        const opts = try purge.parseArgs(&[_][]const u8{"--cache"});
+        try testing.expect(opts.scope.cache);
+        try testing.expectEqual(@as(i64, 30), opts.cache_days);
+    }
+    {
+        const opts = try purge.parseArgs(&[_][]const u8{"--cache=7"});
+        try testing.expect(opts.scope.cache);
+        try testing.expectEqual(@as(i64, 7), opts.cache_days);
+    }
+    {
+        const opts = try purge.parseArgs(&[_][]const u8{"--downloads"});
+        try testing.expect(opts.scope.downloads);
+    }
+    {
+        const opts = try purge.parseArgs(&[_][]const u8{"--stale-casks"});
+        try testing.expect(opts.scope.stale_casks);
+    }
+    {
+        const opts = try purge.parseArgs(&[_][]const u8{"--old-versions"});
+        try testing.expect(opts.scope.old_versions);
+    }
+}
+
+test "--housekeeping expands to the four safe scopes" {
+    const opts = try purge.parseArgs(&[_][]const u8{"--housekeeping"});
+    try testing.expect(opts.scope.store_orphans);
+    try testing.expect(opts.scope.unused_deps);
+    try testing.expect(opts.scope.cache);
+    try testing.expect(opts.scope.stale_casks);
+    // Destructive scopes stay opt-in.
+    try testing.expect(!opts.scope.downloads);
+    try testing.expect(!opts.scope.old_versions);
+    try testing.expect(!opts.scope.wipe);
+}
+
+test "--cache=<bad-int> is rejected" {
+    try testing.expectError(purge.Error.InvalidArgs, purge.parseArgs(&[_][]const u8{"--cache=abc"}));
+}
+
+test "--wipe combined with another scope is an error" {
+    const argv = [_][]const u8{ "--wipe", "--store-orphans" };
+    try testing.expectError(purge.Error.InvalidArgs, purge.parseArgs(&argv));
 }
 
 test "parseArgs recognises short aliases" {
