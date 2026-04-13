@@ -71,7 +71,7 @@ INSERT INTO services(name, keg_name, plist_path, auto_start, last_status)
 VALUES ('smoke-echo', 'smoke-echo', '$PLIST', 0, 'registered');
 SQL
 
-echo "=== list (expect smoke-echo, registered)"
+echo "=== list (expect smoke-echo, not-loaded)"
 "$BIN" services list
 
 echo "=== start"
@@ -87,7 +87,7 @@ echo "=== status"
 echo "=== stop"
 "$BIN" services stop smoke-echo
 
-echo "=== final list (expect status=stopped)"
+echo "=== final list (expect status=not-loaded after bootout)"
 "$BIN" services list
 
 echo

@@ -79,8 +79,14 @@ fn cmdList(allocator: std.mem.Allocator, db: *sqlite.Database) !void {
         return;
     }
     for (items) |s| {
+        const runtime = supervisor.queryRuntime(allocator, s.name);
         const as: []const u8 = if (s.auto_start) "auto" else "manual";
-        output.plain("{s}\t{s}\t{s}\t{s}", .{ s.name, s.last_status, as, s.keg_name });
+        output.plain("{s}\t{s}\t{s}\t{s}", .{
+            s.name,
+            supervisor.runtimeStateName(runtime),
+            as,
+            s.keg_name,
+        });
     }
 }
 
@@ -91,7 +97,8 @@ fn cmdStatus(allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const [
         output.err("no such service: {s}", .{name});
         return ServicesError.SupervisorError;
     }
-    output.info("service {s} is registered", .{name});
+    const runtime = supervisor.queryRuntime(allocator, name);
+    output.info("service {s}: {s}", .{ name, supervisor.runtimeStateName(runtime) });
 }
 
 fn cmdLogs(allocator: std.mem.Allocator, rest: []const []const u8) !void {

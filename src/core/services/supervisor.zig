@@ -243,6 +243,45 @@ fn setStatus(db: *sqlite.Database, name: []const u8, status: []const u8) Supervi
     _ = stmt.step() catch return SupervisorError.DatabaseError;
 }
 
+pub const RuntimeState = enum { not_loaded, loaded, running };
+
+pub fn runtimeStateName(s: RuntimeState) []const u8 {
+    return switch (s) {
+        .not_loaded => "not-loaded",
+        .loaded => "loaded",
+        .running => "running",
+    };
+}
+
+/// Query launchctl for the runtime state of `label`. Returns `.not_loaded`
+/// on any failure (missing label, non-macOS, launchctl error) so callers can
+/// degrade to the DB-recorded status without aborting.
+pub fn queryRuntime(allocator: std.mem.Allocator, label: []const u8) RuntimeState {
+    if (builtin.os.tag != .macos) return .not_loaded;
+
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "launchctl", "list" },
+    }) catch return .not_loaded;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    // Skip header (PID Status Label).
+    _ = lines.next();
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        const pid_field = fields.next() orelse continue;
+        _ = fields.next() orelse continue; // status code
+        const lbl = fields.next() orelse continue;
+        if (!std.mem.eql(u8, lbl, label)) continue;
+        if (pid_field.len == 1 and pid_field[0] == '-') return .loaded;
+        return .running;
+    }
+    return .not_loaded;
+}
+
 pub fn hasService(db: *sqlite.Database, name: []const u8) bool {
     var stmt = db.prepare("SELECT 1 FROM services WHERE name = ?;") catch return false;
     defer stmt.finalize();
