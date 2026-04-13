@@ -185,7 +185,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         if (orphan_count > 0) {
             var msg_buf2: [256]u8 = undefined;
-            const msg2 = std.fmt.bufPrint(&msg_buf2, "{d} orphaned store entry(s). Run: mt gc", .{orphan_count}) catch "Orphaned store entries found. Run: mt gc";
+            const msg2 = std.fmt.bufPrint(&msg_buf2, "{d} orphaned store entry(s). Run: mt purge --store-orphans", .{orphan_count}) catch "Orphaned store entries found. Run: mt purge --store-orphans";
             printCheck("Orphaned store entries", .warn_status, msg2);
             warnings += 1;
         } else {
@@ -247,7 +247,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         if (broken_count > 0) {
             var msg_buf4: [256]u8 = undefined;
-            const msg4 = std.fmt.bufPrint(&msg_buf4, "{d} broken symlink(s). Run: mt cleanup", .{broken_count}) catch "Broken symlinks found. Run: mt cleanup";
+            const msg4 = std.fmt.bufPrint(&msg_buf4, "{d} broken symlink(s). Run: mt purge --housekeeping", .{broken_count}) catch "Broken symlinks found. Run: mt purge --housekeeping";
             printCheck("Broken symlinks", .warn_status, msg4);
             warnings += 1;
         } else {
