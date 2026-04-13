@@ -197,6 +197,12 @@ pub const CaskInstaller = struct {
 
         const path_ptr = stmt.columnText(0);
         if (path_ptr) |p| {
+            // sqlite3_column_text returns a null-terminated UTF-8 string per
+            // the SQLite C API contract, so `sliceTo(.., 0)` is safe here.
+            // There is an inherent TOCTOU window between this read and the
+            // `deleteTreeAbsolute` below — accepted because cask uninstall
+            // is a single-user operation and the bundle is protected by
+            // filesystem permissions.
             const app_path = std.mem.sliceTo(p, 0);
 
             // Check if the app is running (best-effort)

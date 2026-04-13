@@ -66,7 +66,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             if (json_mode) {
                 try writeJsonInfo(allocator, &db, name, true, &stmt, stdout);
             } else {
-                try writeHumanInfo(allocator, &db, name, true, &stmt, prefix, stdout);
+                try writeHumanInfo(name, true, &stmt, prefix, stdout);
             }
             return;
         }
@@ -102,16 +102,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn writeHumanInfo(
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
     name: []const u8,
     installed: bool,
     stmt: *sqlite.Statement,
     prefix: []const u8,
     stdout: std.fs.File,
 ) !void {
-    _ = allocator;
-    _ = db;
     var buf: [4096]u8 = undefined;
 
     if (installed) {

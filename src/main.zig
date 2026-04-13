@@ -157,7 +157,7 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, arg, "--dry-run")) {
             output.setDryRun(true);
         } else {
-            filtered.append(allocator, arg) catch {};
+            try filtered.append(allocator, arg);
         }
     }
 
