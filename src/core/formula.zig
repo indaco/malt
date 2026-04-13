@@ -17,6 +17,19 @@ pub const BottleFile = struct {
     sha256: []const u8,
 };
 
+/// Optional service definition lifted from the upstream Homebrew formula's
+/// `service` block. Strings borrow from `Formula._parsed`.
+pub const ServiceDef = struct {
+    /// Argv passed to launchd's ProgramArguments. Always non-empty when the
+    /// service block is present.
+    run: []const []const u8,
+    working_dir: ?[]const u8 = null,
+    log_path: ?[]const u8 = null,
+    error_log_path: ?[]const u8 = null,
+    keep_alive: bool = true,
+    run_at_load: bool = true,
+};
+
 pub const Formula = struct {
     name: []const u8,
     full_name: []const u8,
@@ -32,6 +45,9 @@ pub const Formula = struct {
     bottle_files: ?std.json.ArrayHashMap(BottleFile),
     bottle_root_url: ?[]const u8,
     oldnames: []const []const u8,
+    /// Optional launchd service block. Populated when the upstream formula
+    /// JSON contains a `service` object with at least a `run` array.
+    service: ?ServiceDef = null,
 
     /// Holds the parsed JSON tree. Must stay alive as long as the Formula
     /// is in use because string fields point into the JSON source buffer.
@@ -136,6 +152,49 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
     // oldnames (may be absent)
     const oldnames = try getStringArray(allocator, root, "oldnames");
 
+    // service block (optional — Homebrew formulas opt in)
+    var service_def: ?ServiceDef = null;
+    if (root.get("service")) |sv| {
+        if (sv == .object) {
+            const so = sv.object;
+            const run_val = so.get("run");
+            if (run_val) |rv| {
+                const items: ?[]std.json.Value = switch (rv) {
+                    .array => |a| a.items,
+                    .string => |s| blk: {
+                        const one = try allocator.alloc(std.json.Value, 1);
+                        one[0] = .{ .string = s };
+                        break :blk one;
+                    },
+                    else => null,
+                };
+                if (items) |arr| if (arr.len > 0) {
+                    const run = try allocator.alloc([]const u8, arr.len);
+                    for (arr, 0..) |item, i| {
+                        run[i] = switch (item) {
+                            .string => |s| s,
+                            else => "",
+                        };
+                    }
+                    service_def = .{
+                        .run = run,
+                        .working_dir = getString(so, "working_dir"),
+                        .log_path = getString(so, "log_path"),
+                        .error_log_path = getString(so, "error_log_path"),
+                        .keep_alive = if (so.get("keep_alive")) |k|
+                            (k == .bool and k.bool)
+                        else
+                            true,
+                        .run_at_load = if (so.get("run_at_load")) |k|
+                            (k == .bool and k.bool)
+                        else
+                            true,
+                    };
+                };
+            }
+        }
+    }
+
     // bottle.stable.root_url and bottle.stable.files
     var bottle_root_url: ?[]const u8 = null;
     var bottle_files: ?std.json.ArrayHashMap(BottleFile) = null;
@@ -188,6 +247,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         .bottle_files = bottle_files,
         .bottle_root_url = bottle_root_url,
         .oldnames = oldnames,
+        .service = service_def,
         ._parsed = parsed,
     };
 }

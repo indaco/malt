@@ -11,6 +11,7 @@ const linker = @import("../core/linker.zig");
 const cellar = @import("../core/cellar.zig");
 const store = @import("../core/store.zig");
 const cask_mod = @import("../core/cask.zig");
+const supervisor_mod = @import("../core/services/supervisor.zig");
 const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -102,6 +103,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     output.info("Uninstalling {s} {s}...", .{ name, version });
+
+    // Stop and unregister any associated launchd service before tearing down
+    // files. The service name we register matches the formula name.
+    supervisor_mod.stopAndUnregister(allocator, &db, name);
 
     // Unlink symlinks
     var lnk = linker.Linker.init(allocator, &db, prefix);

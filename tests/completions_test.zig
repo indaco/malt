@@ -40,7 +40,8 @@ const all_commands = [_][]const u8{
     "info",    "search",    "doctor",   "tap",
     "untap",   "migrate",   "rollback", "link",
     "unlink",  "run",       "version",  "completions",
-    "backup",  "restore",   "purge",
+    "backup",  "restore",   "purge",    "services",
+    "bundle",
 };
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {

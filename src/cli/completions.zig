@@ -84,7 +84,7 @@ pub const bash_script =
     \\    words=("${COMP_WORDS[@]}")
     \\    cword=$COMP_CWORD
     \\
-    \\    local commands="install uninstall remove upgrade update outdated list ls info search doctor tap untap migrate rollback link unlink run version completions backup restore purge help"
+    \\    local commands="install uninstall remove upgrade update outdated list ls info search doctor tap untap migrate rollback link unlink run version completions backup restore purge services bundle help"
     \\    local global_flags="--verbose -v --quiet -q --json --dry-run --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
@@ -118,6 +118,18 @@ pub const bash_script =
     \\                return 0
     \\            fi
     \\            ;;
+    \\        services)
+    \\            if [[ "$cur" != -* ]]; then
+    \\                COMPREPLY=( $(compgen -W "list start stop restart status logs" -- "$cur") )
+    \\                return 0
+    \\            fi
+    \\            ;;
+    \\        bundle)
+    \\            if [[ "$cur" != -* ]]; then
+    \\                COMPREPLY=( $(compgen -W "install create list remove export import" -- "$cur") )
+    \\                return 0
+    \\            fi
+    \\            ;;
     \\    esac
     \\
     \\    local cmd_flags=""
@@ -134,6 +146,8 @@ pub const bash_script =
     \\        search)           cmd_flags="--formula --cask --json" ;;
     \\        migrate|rollback) cmd_flags="--dry-run" ;;
     \\        link)             cmd_flags="--overwrite --force -f" ;;
+    \\        services)         cmd_flags="--tail --stderr --system --json" ;;
+    \\        bundle)           cmd_flags="--dry-run --format --from-installed --purge" ;;
     \\    esac
     \\
     \\    if [[ "$cur" == -* ]]; then
@@ -192,6 +206,8 @@ pub const zsh_script =
     \\        'backup:Dump installed packages to a restorable text file'
     \\        'restore:Reinstall every package listed in a backup file'
     \\        'purge:Housekeeping or full wipe (requires a scope flag)'
+    \\        'services:Manage long-running launchd services'
+    \\        'bundle:Install or export a Brewfile/Maltfile.json bundle'
     \\        'help:Show help'
     \\    )
     \\
@@ -311,6 +327,24 @@ pub const zsh_script =
     \\                version)
     \\                    _values 'subcommand' 'update[Self-update the binary]'
     \\                    ;;
+    \\                services)
+    \\                    _values 'subcommand' \
+    \\                        'list[Show registered services and runtime state]' \
+    \\                        'start[Bootstrap a service under launchd]' \
+    \\                        'stop[Boot a service out of launchd]' \
+    \\                        'restart[stop then start]' \
+    \\                        'status[Show registered + runtime state]' \
+    \\                        'logs[Tail a service log file]'
+    \\                    ;;
+    \\                bundle)
+    \\                    _values 'subcommand' \
+    \\                        'install[Install members of a Brewfile/Maltfile.json]' \
+    \\                        'create[Write currently-installed set to a bundle file]' \
+    \\                        'list[List bundles registered in the database]' \
+    \\                        'remove[Unregister a bundle]' \
+    \\                        'export[Print bundle to stdout]' \
+    \\                        'import[Register a bundle definition without installing]'
+    \\                    ;;
     \\            esac
     \\            ;;
     \\    esac
@@ -398,6 +432,8 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a backup      -d 'Dump installed packages to a text file'
     \\    complete -c $__malt_bin -n __malt_needs_command -a restore     -d 'Reinstall every package in a backup file'
     \\    complete -c $__malt_bin -n __malt_needs_command -a purge       -d 'Housekeeping or full wipe (requires a scope)'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a services    -d 'Manage long-running launchd services'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a bundle      -d 'Install or export a Brewfile/Maltfile.json'
     \\    complete -c $__malt_bin -n __malt_needs_command -a help        -d 'Show help'
     \\
     \\    # install
@@ -486,6 +522,28 @@ pub const fish_script =
     \\
     \\    # version — sub-subcommand
     \\    complete -c $__malt_bin -n '__malt_using_command version' -f -a 'update' -d 'Self-update'
+    \\
+    \\    # services — sub-subcommands
+    \\    complete -c $__malt_bin -n '__malt_using_command services' -f -a 'list'    -d 'Show registered services'
+    \\    complete -c $__malt_bin -n '__malt_using_command services' -f -a 'start'   -d 'Bootstrap a service under launchd'
+    \\    complete -c $__malt_bin -n '__malt_using_command services' -f -a 'stop'    -d 'Boot a service out of launchd'
+    \\    complete -c $__malt_bin -n '__malt_using_command services' -f -a 'restart' -d 'Stop then start'
+    \\    complete -c $__malt_bin -n '__malt_using_command services' -f -a 'status'  -d 'Show runtime + DB state'
+    \\    complete -c $__malt_bin -n '__malt_using_command services' -f -a 'logs'    -d 'Tail a service log'
+    \\    complete -c $__malt_bin -n '__malt_using_command services' -l tail   -d 'Number of trailing log lines'
+    \\    complete -c $__malt_bin -n '__malt_using_command services' -l stderr -d 'Read stderr instead of stdout'
+    \\
+    \\    # bundle — sub-subcommands
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'install' -d 'Install Brewfile/Maltfile.json members'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'create'  -d 'Write installed set to a bundle file'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'list'    -d 'List registered bundles'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'remove'  -d 'Unregister a bundle'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'export'  -d 'Print bundle to stdout'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'import'  -d 'Register a bundle without installing'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l dry-run        -d 'Preview without installing'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l format -r -a 'brewfile json' -d 'Output format'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l from-installed -d 'Populate from installed packages'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l purge          -d 'Also uninstall members on remove'
     \\end
     \\
     \\set -e __malt_bin

@@ -93,13 +93,53 @@ pub fn initSchema(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (1);");
 
     try db.commit();
+
+    try migrate(db);
 }
 
 /// Run any pending schema migrations.
 pub fn migrate(db: *sqlite.Database) sqlite.SqliteError!void {
     const ver = try currentVersion(db);
-    _ = ver;
-    // No migrations yet beyond v1
+    if (ver < 2) try migrateV1toV2(db);
+}
+
+fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    try db.exec(
+        \\CREATE TABLE IF NOT EXISTS services (
+        \\    name             TEXT PRIMARY KEY,
+        \\    keg_name         TEXT NOT NULL,
+        \\    plist_path       TEXT NOT NULL,
+        \\    auto_start       INTEGER NOT NULL DEFAULT 0,
+        \\    last_started_at  INTEGER,
+        \\    last_status      TEXT
+        \\);
+    );
+
+    try db.exec(
+        \\CREATE TABLE IF NOT EXISTS bundles (
+        \\    name           TEXT PRIMARY KEY,
+        \\    manifest_path  TEXT,
+        \\    created_at     INTEGER NOT NULL,
+        \\    version        INTEGER NOT NULL
+        \\);
+    );
+
+    try db.exec(
+        \\CREATE TABLE IF NOT EXISTS bundle_members (
+        \\    bundle_name  TEXT NOT NULL REFERENCES bundles(name) ON DELETE CASCADE,
+        \\    kind         TEXT NOT NULL,
+        \\    ref          TEXT NOT NULL,
+        \\    spec         TEXT,
+        \\    PRIMARY KEY (bundle_name, kind, ref)
+        \\);
+    );
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (2);");
+
+    try db.commit();
 }
 
 /// Query the current schema version.
