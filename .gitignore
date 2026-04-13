@@ -8,3 +8,5 @@ coverage/
 .claude-flow
 .swarm
 .mcp.json
+
+docs/
