@@ -213,3 +213,28 @@ test "sandbox: prefix exact match valid" {
         prefix,
     );
 }
+
+// Regression: `std.mem.startsWith` without a path-component boundary would
+// accept look-alike siblings of the malt prefix such as `/opt/malthack`.
+// The fix requires either an exact match or a '/' separator after the prefix.
+test "sandbox: lookalike malt prefix rejected" {
+    const result = sandbox.validatePath(
+        "/opt/malthack/etc/passwd",
+        cellar,
+        prefix,
+    );
+    try testing.expectError(SandboxError.PathSandboxViolation, result);
+}
+
+// And: the same attack against a standalone cellar (no matching malt_prefix
+// overlap) must be rejected too. Uses a disjoint malt_prefix so the cellar
+// rule is the only thing that could accept the path.
+test "sandbox: lookalike cellar prefix rejected when prefixes disjoint" {
+    const disjoint_prefix = "/var/empty";
+    const result = sandbox.validatePath(
+        "/opt/malt/Cellar/foo/1.0evil/x",
+        cellar,
+        disjoint_prefix,
+    );
+    try testing.expectError(SandboxError.PathSandboxViolation, result);
+}

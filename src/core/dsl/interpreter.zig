@@ -308,13 +308,20 @@ pub const Interpreter = struct {
             // Check for class method patterns: File.exist?, Dir.glob, Pathname.new
             if (receiver_node.kind == .identifier) {
                 const class_name = receiver_node.kind.identifier;
-                var compound_buf: [64]u8 = undefined;
-                const compound = std.fmt.bufPrint(&compound_buf, "{s}.{s}", .{ class_name, mc.method }) catch mc.method;
-                if (builtins_root.bare_builtins.get(compound)) |func| {
-                    return func(builtin_ctx, null, args_slice) catch |e| {
-                        return mapBuiltinError(e);
-                    };
-                }
+                // 256 bytes accommodates every builtin key currently registered
+                // (longest is a handful of chars). If an identifier is longer
+                // than the buffer we simply skip class-dispatch rather than
+                // silently falling back to `mc.method` and looking up the
+                // wrong builtin — that used to shadow dispatch for any Ruby
+                // identifier > ~30 chars.
+                var compound_buf: [256]u8 = undefined;
+                if (std.fmt.bufPrint(&compound_buf, "{s}.{s}", .{ class_name, mc.method })) |compound| {
+                    if (builtins_root.bare_builtins.get(compound)) |func| {
+                        return func(builtin_ctx, null, args_slice) catch |e| {
+                            return mapBuiltinError(e);
+                        };
+                    }
+                } else |_| {}
             }
 
             // Check for nested class::module patterns: Hardware::CPU.arch, OS.mac?
@@ -323,15 +330,16 @@ pub const Interpreter = struct {
                 const recv_mc = receiver_node.kind.method_call;
                 if (recv_mc.receiver) |inner_recv| {
                     if (inner_recv.kind == .identifier) {
-                        var compound_buf: [64]u8 = undefined;
-                        const compound = std.fmt.bufPrint(&compound_buf, "{s}::{s}.{s}", .{
+                        var compound_buf: [256]u8 = undefined;
+                        if (std.fmt.bufPrint(&compound_buf, "{s}::{s}.{s}", .{
                             inner_recv.kind.identifier, recv_mc.method, mc.method,
-                        }) catch mc.method;
-                        if (builtins_root.bare_builtins.get(compound)) |func| {
-                            return func(builtin_ctx, null, args_slice) catch |e| {
-                                return mapBuiltinError(e);
-                            };
-                        }
+                        })) |compound| {
+                            if (builtins_root.bare_builtins.get(compound)) |func| {
+                                return func(builtin_ctx, null, args_slice) catch |e| {
+                                    return mapBuiltinError(e);
+                                };
+                            }
+                        } else |_| {}
                     }
                 }
             }
@@ -630,7 +638,20 @@ pub fn executePostInstall(
 
     var lexer = lexer_mod.Lexer.init(ruby_source);
     var parser = parser_mod.Parser.init(a, &lexer);
-    const nodes = try parser.parseBlock();
+    const nodes = parser.parseBlock() catch |e| {
+        // Surface accumulated parse diagnostics through the fallback log
+        // so the CLI can print them with file:line context. Without this
+        // the diagnostics ArrayList was filled and then dropped on return.
+        for (parser.diagnostics.items) |d| {
+            flog.log(.{
+                .formula = formula.name,
+                .reason = .parse_error,
+                .detail = d.message,
+                .loc = d.loc,
+            });
+        }
+        return e;
+    };
 
     var ctx = ExecContext.init(a, formula, malt_prefix, flog);
     var interp = Interpreter.init(&ctx);

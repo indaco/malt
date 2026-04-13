@@ -114,3 +114,35 @@ test "atomicRename moves a file within the same filesystem" {
 test "cleanupTempDir is a no-op on a non-existent path" {
     atomic.cleanupTempDir("/tmp/malt_atomic_nonexistent_12345");
 }
+
+test "atomicRename moves a directory tree within the same filesystem" {
+    const base = "/tmp/malt_atomic_rename_dir";
+    std.fs.deleteTreeAbsolute(base) catch {};
+    std.fs.makeDirAbsolute(base) catch {};
+    defer std.fs.deleteTreeAbsolute(base) catch {};
+
+    const src = "/tmp/malt_atomic_rename_dir/src";
+    const dst = "/tmp/malt_atomic_rename_dir/dst";
+    try std.fs.makeDirAbsolute(src);
+
+    // Put a file inside so an accidental copy+delete fallback would be
+    // observable — a plain `rename(2)` on a same-FS directory must not
+    // drop child entries.
+    const child = "/tmp/malt_atomic_rename_dir/src/inner.txt";
+    {
+        const f = try std.fs.createFileAbsolute(child, .{});
+        defer f.close();
+        try f.writeAll("payload");
+    }
+
+    try atomic.atomicRename(src, dst);
+    try testing.expectError(error.FileNotFound, std.fs.openDirAbsolute(src, .{}));
+
+    var moved = try std.fs.openDirAbsolute(dst, .{});
+    defer moved.close();
+    const inner = try moved.openFile("inner.txt", .{});
+    defer inner.close();
+    var buf: [16]u8 = undefined;
+    const n = try inner.readAll(&buf);
+    try testing.expectEqualStrings("payload", buf[0..n]);
+}

@@ -23,19 +23,20 @@ pub fn remove(db: *sqlite.Database, name: []const u8) !void {
 
 pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
     var taps: std.ArrayList(TapInfo) = .empty;
-    var stmt = db.prepare("SELECT name, url FROM taps;") catch return taps.toOwnedSlice(allocator) catch &.{};
+    errdefer taps.deinit(allocator);
+
+    var stmt = try db.prepare("SELECT name, url FROM taps;");
     defer stmt.finalize();
 
-    while (stmt.step() catch null) |has_row| {
-        if (!has_row) break;
+    while (try stmt.step()) {
         const n = stmt.columnText(0) orelse continue;
         const u = stmt.columnText(1) orelse continue;
-        const name_owned = allocator.dupe(u8, std.mem.sliceTo(n, 0)) catch continue;
-        const url_owned = allocator.dupe(u8, std.mem.sliceTo(u, 0)) catch continue;
-        taps.append(allocator, .{ .name = name_owned, .url = url_owned }) catch continue;
+        const name_owned = try allocator.dupe(u8, std.mem.sliceTo(n, 0));
+        const url_owned = try allocator.dupe(u8, std.mem.sliceTo(u, 0));
+        try taps.append(allocator, .{ .name = name_owned, .url = url_owned });
     }
 
-    return taps.toOwnedSlice(allocator) catch &.{};
+    return taps.toOwnedSlice(allocator);
 }
 
 /// Resolve a tap formula — builds the full tap formula name.

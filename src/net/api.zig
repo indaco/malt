@@ -60,6 +60,48 @@ pub const BrewApi = struct {
         return self.fetchCached(token, url, "cask_");
     }
 
+    pub const Kind = enum { formula, cask };
+
+    /// Existence probe that reuses the same cache layout as `fetchFormula` /
+    /// `fetchCask` without ever reading the cached body. On a warm 5-minute
+    /// cache this is a single `statFile` call; on a miss it falls through to
+    /// the regular fetch path so the caller's subsequent install still finds
+    /// the body on disk. Returns `false` for names that 404; `InvalidName` /
+    /// `ApiUnreachable` are propagated.
+    pub fn exists(self: *BrewApi, name: []const u8, kind: Kind) ApiError!bool {
+        try validateName(name);
+        const prefix: []const u8 = switch (kind) {
+            .formula => "formula_",
+            .cask => "cask_",
+        };
+
+        if (self.readNotFoundCache(name, prefix)) return false;
+        if (self.cachedFresh(name, prefix)) return true;
+
+        // Cache miss — do a real fetch so the body is cached for any
+        // follow-up `install`. We own the result but don't need it.
+        const body = (switch (kind) {
+            .formula => self.fetchFormula(name),
+            .cask => self.fetchCask(name),
+        }) catch |e| switch (e) {
+            ApiError.NotFound => return false,
+            else => return e,
+        };
+        self.allocator.free(body);
+        return true;
+    }
+
+    /// Return true iff a fresh 200 cache entry exists for `key` — same
+    /// TTL rule as `readCache`, but without reading the body.
+    fn cachedFresh(self: *BrewApi, key: []const u8, prefix: []const u8) bool {
+        var path_buf: [512]u8 = undefined;
+        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return false;
+        const stat = std.fs.cwd().statFile(cache_path) catch return false;
+        const now = std.time.timestamp();
+        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s));
+        return now - mtime_secs <= CACHE_TTL_SECS;
+    }
+
     /// Invalidate all cached API responses.
     pub fn invalidateCache(self: *BrewApi) void {
         var api_path_buf: [512]u8 = undefined;

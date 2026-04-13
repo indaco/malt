@@ -107,16 +107,24 @@ pub const Parser = struct {
             const name = self.current.lexeme;
             const loc = self.currentLoc();
 
-            // Peek ahead to see if next non-newline token is =
+            // Peek ahead to see if next non-newline token is =. All
+            // lexer state that `next()` may mutate must be saved here,
+            // including the heredoc fields — otherwise a peek that
+            // straddles a heredoc boundary would clobber the lexer's
+            // mid-collection state.
             const saved_pos = self.lexer.pos;
             const saved_line = self.lexer.line;
             const saved_col = self.lexer.col;
             const saved_lwv = self.lexer.last_was_value;
+            const saved_ht = self.lexer.heredoc_terminator;
+            const saved_hc = self.lexer.heredoc_collecting;
             const next_tok = self.lexer.next();
             self.lexer.pos = saved_pos;
             self.lexer.line = saved_line;
             self.lexer.col = saved_col;
             self.lexer.last_was_value = saved_lwv;
+            self.lexer.heredoc_terminator = saved_ht;
+            self.lexer.heredoc_collecting = saved_hc;
 
             if (next_tok.kind == .equals) {
                 self.advanceToken(); // consume identifier
@@ -322,28 +330,42 @@ pub const Parser = struct {
                 });
             },
             .percent_w => {
-                // %w[word1 word2 ...] — split by whitespace into string array
+                // %w[word1 word2 ...] — split by whitespace into a string
+                // array. Pre-count and bulk-allocate so a typical %w[...]
+                // costs three allocs (StringParts, Nodes, *Node slice)
+                // instead of 1+2*N from the previous per-word loop.
                 const content = self.current.lexeme;
                 self.advanceToken();
-                var elems: std.ArrayList(*const Node) = .empty;
-                var it = std.mem.tokenizeAny(u8, content, " \t\n\r");
-                while (it.next()) |word| {
-                    const word_node = self.allocNode(.{
+
+                var counter = std.mem.tokenizeAny(u8, content, " \t\n\r");
+                var n: usize = 0;
+                while (counter.next()) |_| n += 1;
+                if (n == 0) {
+                    const empty: []const *const Node = &.{};
+                    return self.allocNode(.{
                         .loc = loc,
-                        .kind = .{ .string_literal = .{
-                            .parts = blk: {
-                                const parts = self.allocator.alloc(ast.StringPart, 1) catch return DslError.OutOfMemory;
-                                parts[0] = .{ .literal = word };
-                                break :blk parts;
-                            },
-                        } },
-                    }) catch return DslError.OutOfMemory;
-                    elems.append(self.allocator, word_node) catch return DslError.OutOfMemory;
+                        .kind = .{ .array_literal = empty },
+                    });
                 }
-                const slice = elems.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+
+                const parts = self.allocator.alloc(ast.StringPart, n) catch return DslError.OutOfMemory;
+                const nodes = self.allocator.alloc(Node, n) catch return DslError.OutOfMemory;
+                const elems = self.allocator.alloc(*const Node, n) catch return DslError.OutOfMemory;
+
+                var it = std.mem.tokenizeAny(u8, content, " \t\n\r");
+                var i: usize = 0;
+                while (it.next()) |word| : (i += 1) {
+                    parts[i] = .{ .literal = word };
+                    nodes[i] = .{
+                        .loc = loc,
+                        .kind = .{ .string_literal = .{ .parts = parts[i .. i + 1] } },
+                    };
+                    elems[i] = &nodes[i];
+                }
+
                 return self.allocNode(.{
                     .loc = loc,
-                    .kind = .{ .array_literal = slice },
+                    .kind = .{ .array_literal = elems },
                 });
             },
             .heredoc_start => {

@@ -168,3 +168,17 @@ test "extractPostInstallBody captures the body between def post_install and matc
     try testing.expect(std.mem.indexOf(u8, body.?, "end\n") == null or
         std.mem.lastIndexOf(u8, body.?, "end") == null);
 }
+
+test "detectRuby returns a heap-owned slice that the caller can free" {
+    // On any machine that has Ruby available, the contract requires the
+    // returned slice to be allocator-owned so the call site can pair it
+    // with `defer allocator.free`. We can't assert the path itself
+    // (machine-dependent), but we *can* verify that freeing the result
+    // does not double-free or fault — which only holds if every branch
+    // returns heap memory rather than a mix of static and heap slices.
+    if (ruby.detectRuby(testing.allocator)) |path| {
+        defer testing.allocator.free(path);
+        try testing.expect(path.len > 0);
+        try testing.expect(std.mem.startsWith(u8, path, "/"));
+    }
+}

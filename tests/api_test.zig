@@ -231,6 +231,46 @@ test "readCache returns null when no cache entry exists" {
     try testing.expect(api.readCache("nope", "formula_") == null);
 }
 
+test "exists returns true when a fresh success cache entry is present" {
+    var http = client_mod.HttpClient.init(testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("exists_hit");
+    defer dir.deinit();
+
+    try dir.writeCacheFile("formula_node.json", "{\"name\":\"node\"}");
+    try dir.writeCacheFile("cask_firefox.json", "{\"token\":\"firefox\"}");
+
+    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    try testing.expect(try api.exists("node", .formula));
+    try testing.expect(try api.exists("firefox", .cask));
+}
+
+test "exists returns false when a fresh 404 marker is present" {
+    var http = client_mod.HttpClient.init(testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("exists_404");
+    defer dir.deinit();
+
+    try dir.writeCacheFile("formula_ghost.404", "");
+    try dir.writeCacheFile("cask_phantom.404", "");
+
+    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    try testing.expect(!(try api.exists("ghost", .formula)));
+    try testing.expect(!(try api.exists("phantom", .cask)));
+}
+
+test "exists rejects invalid names before any cache lookup" {
+    var http = client_mod.HttpClient.init(testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("exists_invalid");
+    defer dir.deinit();
+
+    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    try testing.expectError(api_mod.ApiError.InvalidName, api.exists("", .formula));
+    try testing.expectError(api_mod.ApiError.InvalidName, api.exists("bad name", .cask));
+    try testing.expectError(api_mod.ApiError.InvalidName, api.exists("..", .formula));
+}
+
 test "readNotFoundCache returns false for stale marker" {
     var http = client_mod.HttpClient.init(testing.allocator);
     defer http.deinit();

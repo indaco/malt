@@ -40,8 +40,11 @@ pub const Linker = struct {
             while (iter.next() catch null) |entry| {
                 if (entry.kind == .directory) continue;
 
-                // Check if a symlink already exists at the target location
-                var link_target_buf: [std.fs.max_path_bytes]u8 = undefined;
+                // Check if a symlink already exists at the target location.
+                // 1 KiB fits every path malt produces under its prefix — the
+                // previous `max_path_bytes` (~4 KiB) was stack-wasteful when
+                // scanning kegs with many files.
+                var link_target_buf: [1024]u8 = undefined;
                 const link_target = prefix_dir.readLink(entry.name, &link_target_buf) catch continue;
 
                 // If the existing symlink points into a different keg, it's a conflict
@@ -69,12 +72,11 @@ pub const Linker = struct {
         const cellar_marker = "Cellar/";
         const idx = std.mem.indexOf(u8, path, cellar_marker) orelse return null;
         const after = path[idx + cellar_marker.len ..];
-        // Find second slash (end of name/version)
+        // Find the slash between <name> and <ver>, then the slash after <ver>.
         const first_slash = std.mem.indexOfScalar(u8, after, '/') orelse return after;
         const rest = after[first_slash + 1 ..];
         const second_slash = std.mem.indexOfScalar(u8, rest, '/') orelse return after;
-        _ = second_slash;
-        return path[idx .. idx + cellar_marker.len + first_slash + 1 + (std.mem.indexOfScalar(u8, rest, '/') orelse rest.len)];
+        return path[idx .. idx + cellar_marker.len + first_slash + 1 + second_slash];
     }
 
     /// Create symlinks for all files in a keg, recording in DB.

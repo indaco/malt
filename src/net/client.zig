@@ -29,6 +29,15 @@ pub const HttpClient = struct {
     /// Per-request timeout in nanoseconds. Default: 30 seconds.
     timeout_ns: u64 = DEFAULT_TIMEOUT_NS,
 
+    /// Lazily-allocated decompression windows, reused across requests. These
+    /// are sized for the worst case per encoding (zstd ~128 KiB, flate
+    /// 32 KiB); previously every request allocated a fresh buffer and freed
+    /// it on return, which cost ~160 KiB of allocator churn per API call.
+    /// A single HttpClient is borrowed from a pool per thread, so the buffer
+    /// is never accessed concurrently.
+    zstd_window: ?[]u8 = null,
+    flate_window: ?[]u8 = null,
+
     const DEFAULT_TIMEOUT_NS: u64 = 30 * std.time.ns_per_s;
     /// Blob downloads (bottles, cask DMGs) get a much longer timeout.
     const BLOB_TIMEOUT_NS: u64 = 600 * std.time.ns_per_s; // 10 minutes
@@ -41,7 +50,23 @@ pub const HttpClient = struct {
     }
 
     pub fn deinit(self: *HttpClient) void {
+        if (self.zstd_window) |w| self.allocator.free(w);
+        if (self.flate_window) |w| self.allocator.free(w);
         self.client.deinit();
+    }
+
+    fn getZstdWindow(self: *HttpClient) ![]u8 {
+        if (self.zstd_window) |w| return w;
+        const w = try self.allocator.alloc(u8, std.compress.zstd.default_window_len);
+        self.zstd_window = w;
+        return w;
+    }
+
+    fn getFlateWindow(self: *HttpClient) ![]u8 {
+        if (self.flate_window) |w| return w;
+        const w = try self.allocator.alloc(u8, std.compress.flate.max_window_len);
+        self.flate_window = w;
+        return w;
     }
 
     /// Perform a GET request and return the response status and body.
@@ -109,12 +134,20 @@ pub const HttpClient = struct {
     const MAX_RETRIES = 3;
     const RETRY_DELAYS_MS = [_]u64{ 1000, 2000, 4000 };
 
-    /// Writer wrapper that counts bytes written and fires a progress callback.
-    /// Delegates all writes to the inner Allocating writer while tracking byte count.
+    /// Writer wrapper that counts bytes written, enforces an upper bound, and
+    /// optionally fires a progress callback. The bound is checked on every
+    /// write so oversized responses are rejected mid-stream instead of after
+    /// the full body has been buffered.
+    ///
+    /// When the limit would be exceeded, `drain`/`sendFile` return
+    /// `error.WriteFailed`; callers (`streamRemaining`) can then inspect
+    /// `bytes_written` to distinguish "too large" from a real write error.
     const CountingWriter = struct {
         inner: *std.Io.Writer.Allocating,
         bytes_written: u64,
-        progress: ProgressCallback,
+        max_bytes: u64,
+        limit_exceeded: bool,
+        progress: ?ProgressCallback,
         content_length: ?u64,
         writer: std.Io.Writer = .{
             .buffer = &.{},
@@ -126,12 +159,20 @@ pub const HttpClient = struct {
             },
         },
 
+        fn report(self: *CountingWriter) void {
+            if (self.progress) |p| p.report(self.bytes_written, self.content_length);
+        }
+
         fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
             const self: *CountingWriter = @fieldParentPtr("writer", w);
             const n = self.inner.writer.vtable.drain(&self.inner.writer, data, splat) catch
                 return error.WriteFailed;
             self.bytes_written += n;
-            self.progress.report(self.bytes_written, self.content_length);
+            self.report();
+            if (self.bytes_written > self.max_bytes) {
+                self.limit_exceeded = true;
+                return error.WriteFailed;
+            }
             return n;
         }
 
@@ -139,7 +180,11 @@ pub const HttpClient = struct {
             const self: *CountingWriter = @fieldParentPtr("writer", w);
             const n = self.inner.writer.vtable.sendFile(&self.inner.writer, file_reader, limit) catch |e| return e;
             self.bytes_written += n;
-            self.progress.report(self.bytes_written, self.content_length);
+            self.report();
+            if (self.bytes_written > self.max_bytes) {
+                self.limit_exceeded = true;
+                return error.WriteFailed;
+            }
             return n;
         }
 
@@ -225,14 +270,13 @@ pub const HttpClient = struct {
         var body_writer: std.Io.Writer.Allocating = .init(self.allocator);
         errdefer body_writer.deinit();
 
-        // Allocate decompression buffers based on content encoding
+        // Pooled decompression windows (see HttpClient.zstd_window / flate_window).
         const decompress_buffer: []u8 = switch (response.head.content_encoding) {
             .identity => &.{},
-            .zstd => try self.allocator.alloc(u8, std.compress.zstd.default_window_len),
-            .deflate, .gzip => try self.allocator.alloc(u8, std.compress.flate.max_window_len),
+            .zstd => try self.getZstdWindow(),
+            .deflate, .gzip => try self.getFlateWindow(),
             .compress => return error.ReadFailed,
         };
-        defer if (decompress_buffer.len > 0) self.allocator.free(decompress_buffer);
 
         var transfer_buffer: [16384]u8 = undefined;
         var decompress: std.http.Decompress = undefined;
@@ -259,31 +303,33 @@ pub const HttpClient = struct {
             if (watchdog) |w| w.join();
         }
 
-        // Read the full response body with optional progress reporting.
-        // When a progress callback is provided, we wrap the writer to count bytes.
-        if (progress) |p| {
-            var counting = CountingWriter{
-                .inner = &body_writer,
-                .bytes_written = 0,
-                .progress = p,
-                .content_length = content_length,
-            };
-            const total_read = body_reader.streamRemaining(&counting.writer) catch |e| switch (e) {
-                error.WriteFailed => return error.ReadFailed,
-                error.ReadFailed => return error.ReadFailed,
-            };
+        // Read the full response body through a CountingWriter that enforces
+        // `max_bytes` per-write. This rejects oversized responses mid-stream
+        // instead of after the whole body is already buffered (and the old
+        // code's only check was post-hoc, which defeats the purpose on a
+        // 2 GB/500 MB body).
+        var counting = CountingWriter{
+            .inner = &body_writer,
+            .bytes_written = 0,
+            .max_bytes = max_bytes,
+            .limit_exceeded = false,
+            .progress = progress,
+            .content_length = content_length,
+        };
+        _ = body_reader.streamRemaining(&counting.writer) catch |e| switch (e) {
+            error.WriteFailed => {
+                request_done.set();
+                if (counting.limit_exceeded) return error.ResponseTooLarge;
+                return error.ReadFailed;
+            },
+            error.ReadFailed => {
+                request_done.set();
+                return error.ReadFailed;
+            },
+        };
 
-            request_done.set();
-            if (total_read >= max_bytes) return error.ResponseTooLarge;
-        } else {
-            const total_read = body_reader.streamRemaining(&body_writer.writer) catch |e| switch (e) {
-                error.WriteFailed => return error.ReadFailed,
-                error.ReadFailed => return error.ReadFailed,
-            };
-
-            request_done.set();
-            if (total_read >= max_bytes) return error.ResponseTooLarge;
-        }
+        request_done.set();
+        if (counting.limit_exceeded) return error.ResponseTooLarge;
 
         const body = try body_writer.toOwnedSlice();
 

@@ -72,6 +72,10 @@ pub const TokenKind = enum {
     // Structure
     newline,
     eof,
+
+    // Lexer error surface (currently only unterminated heredoc); carries the
+    // partial lexeme so the parser can point at the offending position.
+    @"error",
 };
 
 pub const Token = struct {
@@ -358,12 +362,13 @@ pub const Lexer = struct {
             // line_start used above for heredoc boundary detection
         }
 
-        // Unterminated heredoc — return what we have
+        // Unterminated heredoc — surface as an error token so the parser
+        // can report it instead of silently treating EOF as a valid string.
         self.heredoc_collecting = false;
         self.heredoc_terminator = null;
         self.last_was_value = true;
         return .{
-            .kind = .heredoc_body,
+            .kind = .@"error",
             .lexeme = self.source[start..self.pos],
             .line = start_line,
             .col = start_col,
