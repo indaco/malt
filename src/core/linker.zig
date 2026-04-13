@@ -40,8 +40,11 @@ pub const Linker = struct {
             while (iter.next() catch null) |entry| {
                 if (entry.kind == .directory) continue;
 
-                // Check if a symlink already exists at the target location
-                var link_target_buf: [std.fs.max_path_bytes]u8 = undefined;
+                // Check if a symlink already exists at the target location.
+                // 1 KiB fits every path malt produces under its prefix — the
+                // previous `max_path_bytes` (~4 KiB) was stack-wasteful when
+                // scanning kegs with many files.
+                var link_target_buf: [1024]u8 = undefined;
                 const link_target = prefix_dir.readLink(entry.name, &link_target_buf) catch continue;
 
                 // If the existing symlink points into a different keg, it's a conflict

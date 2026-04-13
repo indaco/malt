@@ -34,7 +34,13 @@ pub const FallbackLog = struct {
     }
 
     pub fn log(self: *FallbackLog, entry: FallbackEntry) void {
-        self.entries.append(self.allocator, entry) catch {};
+        self.entries.append(self.allocator, entry) catch {
+            // This log is the user's only window into sandbox violations
+            // and unsupported constructs; if it's dropping entries under
+            // memory pressure the user deserves to know.
+            const f = std.fs.File.stderr();
+            f.writeAll("malt: fallback log dropped an entry due to OOM\n") catch {};
+        };
     }
 
     pub fn hasErrors(self: *const FallbackLog) bool {

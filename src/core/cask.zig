@@ -289,12 +289,7 @@ pub const CaskInstaller = struct {
         var hash: [32]u8 = undefined;
         hasher.final(&hash);
 
-        var hex_buf: [64]u8 = undefined;
-        const hex_chars = "0123456789abcdef";
-        for (hash, 0..) |b, i| {
-            hex_buf[i * 2] = hex_chars[b >> 4];
-            hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
-        }
+        const hex_buf = std.fmt.bytesToHex(hash, .lower);
         if (!std.mem.eql(u8, &hex_buf, expected_hash)) return error.Sha256Mismatch;
     }
 

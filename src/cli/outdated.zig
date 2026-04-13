@@ -117,12 +117,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Check outdated casks (unless --formula)
     if (!formula_only) {
-        checkOutdatedCasks(allocator, &db, &api, json_mode);
+        try checkOutdatedCasks(allocator, &db, &api, json_mode);
     }
 }
 
-fn checkOutdatedCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, json_mode: bool) void {
-    var stmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch return;
+fn checkOutdatedCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, json_mode: bool) !void {
+    var stmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch |e| {
+        output.err("Failed to query casks: {s}", .{@errorName(e)});
+        return e;
+    };
     defer stmt.finalize();
 
     const stdout = std.fs.File.stdout();

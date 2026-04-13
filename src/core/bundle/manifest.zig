@@ -76,9 +76,8 @@ pub fn parseJson(parent: std.mem.Allocator, json_text: []const u8) ManifestError
 
     if (obj.get("version")) |v| {
         if (v != .integer) return ManifestError.MalformedJson;
-        const n = v.integer;
-        if (n != @as(i64, SCHEMA_VERSION)) return ManifestError.UnsupportedVersion;
-        manifest.version = @intCast(n);
+        if (v.integer != @as(i64, SCHEMA_VERSION)) return ManifestError.UnsupportedVersion;
+        manifest.version = SCHEMA_VERSION;
     }
 
     if (obj.get("name")) |v| {

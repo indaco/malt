@@ -39,15 +39,24 @@ pub fn isJson() bool {
     return mode == .json;
 }
 
-/// Print info message: "==> {msg}" in cyan
-pub fn info(comptime fmt: []const u8, args: anytype) void {
-    if (quiet) return;
+/// Shared implementation for info/warn/success/err. Writes a coloured prefix
+/// (or a plain-text fallback), the formatted message, and a newline to
+/// stderr. `respects_quiet` lets `err` bypass the quiet flag.
+fn writePrefixed(
+    comptime fmt: []const u8,
+    args: anytype,
+    style: color.Style,
+    emoji_prefix: []const u8,
+    plain_prefix: []const u8,
+    respects_quiet: bool,
+) void {
+    if (respects_quiet and quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const f = std.fs.File.stderr();
-    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ▸ " else "  > ";
+    const prefix: []const u8 = if (color.isEmojiEnabled()) emoji_prefix else plain_prefix;
     if (color.isColorEnabled()) {
-        f.writeAll(color.Style.cyan.code()) catch {};
+        f.writeAll(style.code()) catch {};
         f.writeAll(prefix) catch {};
         f.writeAll(color.Style.reset.code()) catch {};
     } else {
@@ -55,59 +64,26 @@ pub fn info(comptime fmt: []const u8, args: anytype) void {
     }
     f.writeAll(msg) catch {};
     f.writeAll("\n") catch {};
+}
+
+/// Print info message: "==> {msg}" in cyan
+pub fn info(comptime fmt: []const u8, args: anytype) void {
+    writePrefixed(fmt, args, color.Style.cyan, "  ▸ ", "  > ", true);
 }
 
 /// Print warning: "Warning: {msg}" in yellow
 pub fn warn(comptime fmt: []const u8, args: anytype) void {
-    if (quiet) return;
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    const f = std.fs.File.stderr();
-    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ⚠ " else "  ! ";
-    if (color.isColorEnabled()) {
-        f.writeAll(color.Style.yellow.code()) catch {};
-        f.writeAll(prefix) catch {};
-        f.writeAll(color.Style.reset.code()) catch {};
-    } else {
-        f.writeAll(prefix) catch {};
-    }
-    f.writeAll(msg) catch {};
-    f.writeAll("\n") catch {};
+    writePrefixed(fmt, args, color.Style.yellow, "  ⚠ ", "  ! ", true);
 }
 
 /// Print success: "ok {msg}" in green to stderr
 pub fn success(comptime fmt: []const u8, args: anytype) void {
-    if (quiet) return;
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    const f = std.fs.File.stderr();
-    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ✓ " else "  * ";
-    if (color.isColorEnabled()) {
-        f.writeAll(color.Style.green.code()) catch {};
-        f.writeAll(prefix) catch {};
-        f.writeAll(color.Style.reset.code()) catch {};
-    } else {
-        f.writeAll(prefix) catch {};
-    }
-    f.writeAll(msg) catch {};
-    f.writeAll("\n") catch {};
+    writePrefixed(fmt, args, color.Style.green, "  ✓ ", "  * ", true);
 }
 
 /// Print error: "Error: {msg}" in red to stderr
 pub fn err(comptime fmt: []const u8, args: anytype) void {
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    const f = std.fs.File.stderr();
-    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ✗ " else "  x ";
-    if (color.isColorEnabled()) {
-        f.writeAll(color.Style.red.code()) catch {};
-        f.writeAll(prefix) catch {};
-        f.writeAll(color.Style.reset.code()) catch {};
-    } else {
-        f.writeAll(prefix) catch {};
-    }
-    f.writeAll(msg) catch {};
-    f.writeAll("\n") catch {};
+    writePrefixed(fmt, args, color.Style.red, "  ✗ ", "  x ", false);
 }
 
 /// Internal: write a single styled line to stderr with no icon prefix.

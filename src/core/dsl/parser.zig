@@ -107,16 +107,24 @@ pub const Parser = struct {
             const name = self.current.lexeme;
             const loc = self.currentLoc();
 
-            // Peek ahead to see if next non-newline token is =
+            // Peek ahead to see if next non-newline token is =. All
+            // lexer state that `next()` may mutate must be saved here,
+            // including the heredoc fields — otherwise a peek that
+            // straddles a heredoc boundary would clobber the lexer's
+            // mid-collection state.
             const saved_pos = self.lexer.pos;
             const saved_line = self.lexer.line;
             const saved_col = self.lexer.col;
             const saved_lwv = self.lexer.last_was_value;
+            const saved_ht = self.lexer.heredoc_terminator;
+            const saved_hc = self.lexer.heredoc_collecting;
             const next_tok = self.lexer.next();
             self.lexer.pos = saved_pos;
             self.lexer.line = saved_line;
             self.lexer.col = saved_col;
             self.lexer.last_was_value = saved_lwv;
+            self.lexer.heredoc_terminator = saved_ht;
+            self.lexer.heredoc_collecting = saved_hc;
 
             if (next_tok.kind == .equals) {
                 self.advanceToken(); // consume identifier

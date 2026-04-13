@@ -43,9 +43,29 @@ pub const Value = union(enum) {
             .nil => true,
             .pathname => |p| std.mem.eql(u8, p, other.pathname),
             .symbol => |s| std.mem.eql(u8, s, other.symbol),
-            .array => false, // Reference equality only
-            .hash => false,
+            .array => |a| arraysEqual(a, other.array),
+            .hash => |h| hashesEqual(h, other.hash),
         };
+    }
+
+    fn arraysEqual(a: []const Value, b: []const Value) bool {
+        if (a.len != b.len) return false;
+        for (a, b) |x, y| {
+            if (!x.eql(y)) return false;
+        }
+        return true;
+    }
+
+    fn hashesEqual(a: []const HashPair, b: []const HashPair) bool {
+        if (a.len != b.len) return false;
+        // Order-sensitive compare. Ruby hashes are order-preserving, and
+        // the parser emits pairs in source order, so structural equality
+        // on the underlying slice matches user expectations for if/unless.
+        for (a, b) |pa, pb| {
+            if (!pa.key.eql(pb.key)) return false;
+            if (!pa.value.eql(pb.value)) return false;
+        }
+        return true;
     }
 
     /// Coerce to string for interpolation and path operations.
