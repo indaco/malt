@@ -143,7 +143,7 @@ pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8
 }
 
 /// Extract post_install body from Ruby source text (in-memory version).
-fn extractPostInstallFromSource(allocator: std.mem.Allocator, source: []const u8) ?[]const u8 {
+pub fn extractPostInstallFromSource(allocator: std.mem.Allocator, source: []const u8) ?[]const u8 {
     const marker = "def post_install";
     const start_idx = std.mem.indexOf(u8, source, marker) orelse return null;
     const body_start = std.mem.indexOfScalarPos(u8, source, start_idx, '\n') orelse return null;
@@ -261,7 +261,7 @@ pub fn extractPostInstallBody(allocator: std.mem.Allocator, rb_path: []const u8)
 
 /// Generate the Ruby wrapper script that provides a FormulaStub sandbox
 /// and evaluates the post_install body.
-fn generateWrapper(
+pub fn generateWrapper(
     allocator: std.mem.Allocator,
     name: []const u8,
     version: []const u8,
