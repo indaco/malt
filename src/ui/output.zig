@@ -39,20 +39,17 @@ pub fn isJson() bool {
     return mode == .json;
 }
 
-/// Shared implementation for info/warn/success/err. Writes a coloured prefix
-/// (or a plain-text fallback), the formatted message, and a newline to
-/// stderr. `respects_quiet` lets `err` bypass the quiet flag.
-fn writePrefixed(
-    comptime fmt: []const u8,
-    args: anytype,
+/// Shared implementation for info/warn/success/err. Takes an already-formatted
+/// message slice so this function is concrete (non-generic) — a single copy
+/// ends up in the binary regardless of how many call sites exist. Passing a
+/// generic `anytype` body through here instead would monomorphize per caller
+/// and roughly double the emitted code.
+fn writePrefixedLine(
+    msg: []const u8,
     style: color.Style,
     emoji_prefix: []const u8,
     plain_prefix: []const u8,
-    respects_quiet: bool,
 ) void {
-    if (respects_quiet and quiet) return;
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const f = std.fs.File.stderr();
     const prefix: []const u8 = if (color.isEmojiEnabled()) emoji_prefix else plain_prefix;
     if (color.isColorEnabled()) {
@@ -68,22 +65,33 @@ fn writePrefixed(
 
 /// Print info message: "==> {msg}" in cyan
 pub fn info(comptime fmt: []const u8, args: anytype) void {
-    writePrefixed(fmt, args, color.Style.cyan, "  ▸ ", "  > ", true);
+    if (quiet) return;
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    writePrefixedLine(msg, color.Style.cyan, "  ▸ ", "  > ");
 }
 
 /// Print warning: "Warning: {msg}" in yellow
 pub fn warn(comptime fmt: []const u8, args: anytype) void {
-    writePrefixed(fmt, args, color.Style.yellow, "  ⚠ ", "  ! ", true);
+    if (quiet) return;
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    writePrefixedLine(msg, color.Style.yellow, "  ⚠ ", "  ! ");
 }
 
 /// Print success: "ok {msg}" in green to stderr
 pub fn success(comptime fmt: []const u8, args: anytype) void {
-    writePrefixed(fmt, args, color.Style.green, "  ✓ ", "  * ", true);
+    if (quiet) return;
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    writePrefixedLine(msg, color.Style.green, "  ✓ ", "  * ");
 }
 
 /// Print error: "Error: {msg}" in red to stderr
 pub fn err(comptime fmt: []const u8, args: anytype) void {
-    writePrefixed(fmt, args, color.Style.red, "  ✗ ", "  x ", false);
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    writePrefixedLine(msg, color.Style.red, "  ✗ ", "  x ");
 }
 
 /// Internal: write a single styled line to stderr with no icon prefix.
