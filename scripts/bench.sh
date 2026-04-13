@@ -295,8 +295,14 @@ time_brew_install() {
 size_of() {
   if [ -f "$1" ]; then
     # Path is an internally-controlled binary; ls -lh matches the workflow.
+    # Normalize bare unit suffix (e.g. "3.3M") to "3.3 MB" for README/CLI.
     # shellcheck disable=SC2012
-    ls -lh "$1" | awk '{print $5}'
+    ls -lh "$1" | awk '{
+      s = $5
+      if (s ~ /[0-9]$/)       { print s " B" }
+      else if (s ~ /[KMGT]$/) { print substr(s,1,length(s)-1) " " substr(s,length(s)) "B" }
+      else                    { print s }
+    }'
   else
     echo "n/a"
   fi
