@@ -112,6 +112,16 @@ hooks-uninstall:
     @echo "pre-commit and pre-push hooks removed."
 
 # ---------------------------------------------------------------------------
+# Benchmarks
+# ---------------------------------------------------------------------------
+
+# Run local benchmarks against malt + peer tools (tree, wget, ffmpeg by default).
+# Pass package names or env vars (BENCH_TRUE_COLD=1, SKIP_OTHERS=1, etc).
+[group('bench')]
+bench *args:
+    ./scripts/bench.sh {{args}}
+
+# ---------------------------------------------------------------------------
 # Docs & media
 # ---------------------------------------------------------------------------
 

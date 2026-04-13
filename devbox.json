@@ -11,7 +11,8 @@
       "fmt": ["just fmt"],
       "fmt-check": ["just fmt-check"],
       "lint": ["just lint"],
-      "universal": ["just build-universal"]
+      "universal": ["just build-universal"],
+      "bench": ["just bench"]
     }
   }
 }
