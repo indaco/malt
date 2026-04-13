@@ -21,10 +21,30 @@ Set PlaybackSpeed 1.0
 # Let bash settle before the first keystroke.
 Sleep 500ms
 
+Type "# Install a few common formulae in parallel"
+Sleep 400ms
+Enter
+Sleep 800ms
+
 Type "malt install jq tree ripgrep"
 Sleep 400ms
 Enter
-Sleep 15s
+Sleep 7s
+
+Type "# Now a package with post_install — configured natively, no Ruby needed"
+Sleep 400ms
+Enter
+Sleep 800ms
+
+Type "malt install node"
+Sleep 400ms
+Enter
+Sleep 12s
+
+Type "# List installed kegs with their versions"
+Sleep 400ms
+Enter
+Sleep 800ms
 
 Type "malt list --versions"
 Sleep 400ms

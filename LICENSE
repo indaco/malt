@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 indaco
+Copyright (c) 2026 indaco (Mirco Veltri)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -48,5 +48,9 @@ malt uses or interacts with the following projects:
 ### Homebrew-core
 - License: BSD-2-Clause
 - https://github.com/Homebrew/homebrew-core/blob/master/LICENSE.txt
-- Formula metadata is consumed via the public API. No formula definitions
-  are bundled.
+- Formula metadata is consumed via the public API. Formula source files
+  (`.rb`) may be fetched at runtime from the public GitHub repository when
+  a local tap clone is not available, for the sole purpose of extracting
+  and executing the user-facing `post_install` block on behalf of the user.
+  No formula definitions are bundled in the malt binary or distributed
+  with it.
