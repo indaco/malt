@@ -171,6 +171,13 @@ jobs:
           sed -i '' "s/> Benchmarks on Apple Silicon.*/> Benchmarks on Apple Silicon (GitHub Actions macos-14), $DATE. Auto-updated weekly via [benchmark workflow](.github\/workflows\/benchmark.yml)./" README.md
 
       - name: Commit results
+        # Only publish the README refresh when the workflow runs against
+        # the canonical branch. A manual `workflow_dispatch` against any
+        # PR or feature branch should still produce numbers in the job
+        # log, but must not overwrite README.md or push — which would
+        # otherwise create the format-vs-numbers conflict we saw on
+        # `refactor/zig-hardening`.
+        if: github.ref == 'refs/heads/main'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
