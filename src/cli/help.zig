@@ -25,11 +25,8 @@ fn helpFor(command: []const u8) []const u8 {
         .{ "list", list_help },
         .{ "info", info_help },
         .{ "search", search_help },
-        .{ "cleanup", cleanup_help },
-        .{ "gc", gc_help },
         .{ "doctor", doctor_help },
         .{ "tap", tap_help },
-        .{ "autoremove", autoremove_help },
         .{ "migrate", migrate_help },
         .{ "rollback", rollback_help },
         .{ "run", run_help },
@@ -149,28 +146,6 @@ const search_help =
     \\
 ;
 
-const cleanup_help =
-    \\Usage: malt cleanup [flags]
-    \\
-    \\Remove old package versions and prune caches.
-    \\
-    \\Flags:
-    \\  --dry-run      Show what would be removed
-    \\  --prune=<days> Cache age threshold (default: 30)
-    \\  -s             Scrub entire download cache
-    \\
-;
-
-const gc_help =
-    \\Usage: malt gc [flags]
-    \\
-    \\Garbage collect unreferenced store entries.
-    \\
-    \\Flags:
-    \\  --dry-run      Show what would be removed
-    \\
-;
-
 const doctor_help =
     \\Usage: malt doctor
     \\
@@ -185,17 +160,6 @@ const tap_help =
     \\
     \\Manage taps. Without arguments, lists registered taps.
     \\Taps are auto-resolved during install, so explicit tap is optional.
-    \\
-;
-
-const autoremove_help =
-    \\Usage: malt autoremove [flags]
-    \\
-    \\Remove orphaned dependencies no longer needed by any
-    \\directly-installed package.
-    \\
-    \\Flags:
-    \\  --dry-run      Show what would be removed
     \\
 ;
 
@@ -294,35 +258,39 @@ const backup_help =
 ;
 
 const purge_help =
-    \\Usage: malt purge [flags]
+    \\Usage: malt purge <scope> [<scope>...] [flags]
     \\
-    \\Completely wipe a malt installation from disk. Destructive: removes
-    \\every package, the content-addressable store, linked binaries, the
-    \\cache, and the sqlite database.
+    \\Unified housekeeping and full-wipe command. At least one scope flag
+    \\is required — running `malt purge` with no scope is an error.
     \\
-    \\By default the command is interactive and requires typing the word
-    \\`purge` to confirm. Use `--dry-run` to preview, `--yes` for scripts.
+    \\Scopes (one or more required):
+    \\  --store-orphans      Refcount-0 blobs in {prefix}/store
+    \\  --unused-deps        Indirect-install kegs no other package needs
+    \\  --cache[=DAYS]       Cache files older than DAYS (default 30)
+    \\  --downloads          Wipe {cache}/downloads entirely        (typed confirm)
+    \\  --stale-casks        Cask cache + Caskroom for uninstalled casks
+    \\  --old-versions       Non-latest versions in {prefix}/Cellar (typed confirm)
+    \\  --housekeeping       = --store-orphans --unused-deps --cache --stale-casks
+    \\  --wipe               Nuclear: every malt artefact on disk    (typed confirm)
     \\
-    \\Flags:
-    \\  --backup, -b <path>  Write a `mt restore`-compatible manifest of
-    \\                       the currently-installed packages before
-    \\                       deleting anything.
-    \\  --keep-cache         Do not delete the cache directory (keeps
-    \\                       downloaded bottles for a later reinstall).
-    \\  --remove-binary      Also unlink /usr/local/bin/mt and
-    \\                       /usr/local/bin/malt. Opt-in because these
-    \\                       live outside the prefix.
-    \\  --yes, -y            Skip the typed confirmation (for CI).
-    \\  --dry-run            Preview every target without touching disk.
+    \\Shared flags:
+    \\  --dry-run, -n        Preview only
+    \\  --yes, -y            Skip every typed confirmation prompt
+    \\  --quiet, -q          Suppress per-item output
+    \\  --backup, -b <path>  Write a `mt restore`-compatible manifest first
+    \\
+    \\--wipe-only flags:
+    \\  --keep-cache         Do not delete the cache directory
+    \\  --remove-binary      Also unlink /usr/local/bin/{mt,malt}
     \\
     \\Examples:
-    \\  malt purge --dry-run
-    \\  malt purge --backup ~/malt-snapshot.txt
-    \\  malt purge --keep-cache --yes
-    \\  malt purge --remove-binary --yes
+    \\  malt purge --housekeeping
+    \\  malt purge --store-orphans --dry-run
+    \\  malt purge --cache=60 --stale-casks
+    \\  malt purge --old-versions --yes
+    \\  malt purge --wipe --backup ~/malt-snapshot.txt --remove-binary --yes
     \\
-    \\For per-package removal use `mt uninstall <name>`; for cache-only
-    \\cleanup use `mt cleanup`.
+    \\For per-package removal use `mt uninstall <name>`.
     \\
 ;
 

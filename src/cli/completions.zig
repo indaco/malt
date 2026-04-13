@@ -84,7 +84,7 @@ pub const bash_script =
     \\    words=("${COMP_WORDS[@]}")
     \\    cword=$COMP_CWORD
     \\
-    \\    local commands="install uninstall remove upgrade update outdated list ls info search cleanup doctor tap untap gc migrate autoremove rollback link unlink run version completions backup restore purge services bundle help"
+    \\    local commands="install uninstall remove upgrade update outdated list ls info search doctor tap untap migrate rollback link unlink run version completions backup restore purge services bundle help"
     \\    local global_flags="--verbose -v --quiet -q --json --dry-run --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
@@ -137,15 +137,14 @@ pub const bash_script =
     \\        install)          cmd_flags="--cask --formula --dry-run --force --quiet -q --json" ;;
     \\        backup)           cmd_flags="--output -o --versions --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
-    \\        purge)            cmd_flags="--backup -b --keep-cache --remove-binary --yes -y --dry-run" ;;
+    \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
     \\        uninstall|remove) cmd_flags="--force --zap --dry-run" ;;
     \\        upgrade)          cmd_flags="--all --cask --formula --dry-run" ;;
     \\        outdated)         cmd_flags="--json --formula --cask --quiet -q" ;;
     \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --json --quiet -q" ;;
     \\        info)             cmd_flags="--formula --cask --json" ;;
     \\        search)           cmd_flags="--formula --cask --json" ;;
-    \\        cleanup)          cmd_flags="--dry-run --prune= -s" ;;
-    \\        gc|autoremove|migrate|rollback) cmd_flags="--dry-run" ;;
+    \\        migrate|rollback) cmd_flags="--dry-run" ;;
     \\        link)             cmd_flags="--overwrite --force -f" ;;
     \\        services)         cmd_flags="--tail --stderr --system --json" ;;
     \\        bundle)           cmd_flags="--dry-run --format --from-installed --purge" ;;
@@ -194,13 +193,10 @@ pub const zsh_script =
     \\        'ls:List installed packages (alias for list)'
     \\        'info:Show detailed package information'
     \\        'search:Search formulas and casks'
-    \\        'cleanup:Remove old versions and prune caches'
     \\        'doctor:System health check'
     \\        'tap:Manage taps'
     \\        'untap:Remove a tap'
-    \\        'gc:Garbage collect unreferenced store entries'
     \\        'migrate:Import existing Homebrew installation'
-    \\        'autoremove:Remove orphaned dependencies'
     \\        'rollback:Revert a package to its previous version'
     \\        'link:Create symlinks for an installed keg'
     \\        'unlink:Remove symlinks (keg stays installed)'
@@ -209,7 +205,7 @@ pub const zsh_script =
     \\        'completions:Generate shell completion scripts'
     \\        'backup:Dump installed packages to a restorable text file'
     \\        'restore:Reinstall every package listed in a backup file'
-    \\        'purge:Completely wipe the malt installation from disk'
+    \\        'purge:Housekeeping or full wipe (requires a scope flag)'
     \\        'services:Manage long-running launchd services'
     \\        'bundle:Install or export a Brewfile/Maltfile.json bundle'
     \\        'help:Show help'
@@ -286,13 +282,7 @@ pub const zsh_script =
     \\                        '--json[Output as JSON]' \
     \\                        '*::query:'
     \\                    ;;
-    \\                cleanup)
-    \\                    _arguments \
-    \\                        '--dry-run[Show what would be removed]' \
-    \\                        '--prune=-[Cache age threshold]:days:' \
-    \\                        '-s[Scrub entire download cache]'
-    \\                    ;;
-    \\                gc|autoremove|migrate|rollback)
+    \\                migrate|rollback)
     \\                    _arguments '--dry-run[Preview without executing]'
     \\                    ;;
     \\                link)
@@ -319,11 +309,20 @@ pub const zsh_script =
     \\                    ;;
     \\                purge)
     \\                    _arguments \
+    \\                        '--store-orphans[Refcount-0 store blobs]' \
+    \\                        '--unused-deps[Orphaned dependency kegs]' \
+    \\                        '--cache=-[Prune cache files older than N days]::days:' \
+    \\                        '--cache[Prune cache files older than 30 days]' \
+    \\                        '--downloads[Wipe the downloads cache]' \
+    \\                        '--stale-casks[Remove cache + Caskroom for uninstalled casks]' \
+    \\                        '--old-versions[Remove non-latest Cellar versions]' \
+    \\                        '--housekeeping[All safe scopes at once]' \
+    \\                        '--wipe[Nuclear: remove every malt artefact]' \
     \\                        '(--backup -b)'{--backup,-b}'[Write a restorable manifest before deleting]:path:_files' \
-    \\                        '--keep-cache[Leave the cache directory intact]' \
-    \\                        '--remove-binary[Also unlink /usr/local/bin/{mt,malt}]' \
-    \\                        '(--yes -y)'{--yes,-y}'[Skip the typed confirmation]' \
-    \\                        '--dry-run[Preview every target without deleting]'
+    \\                        '--keep-cache[--wipe only: leave the cache directory intact]' \
+    \\                        '--remove-binary[--wipe only: also unlink /usr/local/bin/{mt,malt}]' \
+    \\                        '(--yes -y)'{--yes,-y}'[Skip every typed confirmation]' \
+    \\                        '(--dry-run -n)'{--dry-run,-n}'[Preview without removing]'
     \\                    ;;
     \\                version)
     \\                    _values 'subcommand' 'update[Self-update the binary]'
@@ -420,13 +419,10 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a ls          -d 'List installed packages (alias)'
     \\    complete -c $__malt_bin -n __malt_needs_command -a info        -d 'Show detailed package information'
     \\    complete -c $__malt_bin -n __malt_needs_command -a search      -d 'Search formulas and casks'
-    \\    complete -c $__malt_bin -n __malt_needs_command -a cleanup     -d 'Remove old versions, prune caches'
     \\    complete -c $__malt_bin -n __malt_needs_command -a doctor      -d 'System health check'
     \\    complete -c $__malt_bin -n __malt_needs_command -a tap         -d 'Manage taps'
     \\    complete -c $__malt_bin -n __malt_needs_command -a untap       -d 'Remove a tap'
-    \\    complete -c $__malt_bin -n __malt_needs_command -a gc          -d 'Garbage collect store entries'
     \\    complete -c $__malt_bin -n __malt_needs_command -a migrate     -d 'Import existing Homebrew'
-    \\    complete -c $__malt_bin -n __malt_needs_command -a autoremove  -d 'Remove orphaned dependencies'
     \\    complete -c $__malt_bin -n __malt_needs_command -a rollback    -d 'Revert package to previous version'
     \\    complete -c $__malt_bin -n __malt_needs_command -a link        -d 'Create symlinks for a keg'
     \\    complete -c $__malt_bin -n __malt_needs_command -a unlink      -d 'Remove symlinks (keg stays)'
@@ -435,7 +431,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a completions -d 'Generate shell completion scripts'
     \\    complete -c $__malt_bin -n __malt_needs_command -a backup      -d 'Dump installed packages to a text file'
     \\    complete -c $__malt_bin -n __malt_needs_command -a restore     -d 'Reinstall every package in a backup file'
-    \\    complete -c $__malt_bin -n __malt_needs_command -a purge       -d 'Completely wipe the malt installation'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a purge       -d 'Housekeeping or full wipe (requires a scope)'
     \\    complete -c $__malt_bin -n __malt_needs_command -a services    -d 'Manage long-running launchd services'
     \\    complete -c $__malt_bin -n __malt_needs_command -a bundle      -d 'Install or export a Brewfile/Maltfile.json'
     \\    complete -c $__malt_bin -n __malt_needs_command -a help        -d 'Show help'
@@ -488,14 +484,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l cask    -d 'Casks only'
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l json    -d 'JSON output'
     \\
-    \\    # cleanup
-    \\    complete -c $__malt_bin -n '__malt_using_command cleanup' -l dry-run -d 'Preview'
-    \\    complete -c $__malt_bin -n '__malt_using_command cleanup' -l prune   -d 'Cache age threshold (days)'
-    \\    complete -c $__malt_bin -n '__malt_using_command cleanup' -s s       -d 'Scrub entire download cache'
-    \\
-    \\    # gc / autoremove / migrate / rollback
-    \\    complete -c $__malt_bin -n '__malt_using_command gc'         -l dry-run -d 'Preview'
-    \\    complete -c $__malt_bin -n '__malt_using_command autoremove' -l dry-run -d 'Preview'
+    \\    # migrate / rollback
     \\    complete -c $__malt_bin -n '__malt_using_command migrate'    -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l dry-run -d 'Preview'
     \\
@@ -515,12 +504,21 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command restore' -l force   -d 'Pass --force to install'
     \\    complete -c $__malt_bin -n '__malt_using_command restore' -F
     \\
-    \\    # purge
+    \\    # purge — scope flags
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l store-orphans    -d 'Refcount-0 store blobs'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l unused-deps      -d 'Orphaned dependency kegs'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l cache            -d 'Prune cache files older than 30 days (or N via --cache=N)'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l downloads        -d 'Wipe the downloads cache (typed confirm)'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l stale-casks      -d 'Cask cache + Caskroom for uninstalled casks'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l old-versions     -d 'Non-latest Cellar versions (typed confirm)'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l housekeeping     -d 'All safe scopes at once'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l wipe             -d 'Nuclear: every malt artefact (typed confirm)'
+    \\    # purge — shared / wipe-only flags
     \\    complete -c $__malt_bin -n '__malt_using_command purge' -s b -l backup        -r -d 'Write a restorable manifest before deleting'
-    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l keep-cache       -d 'Leave the cache directory intact'
-    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l remove-binary    -d 'Also unlink /usr/local/bin/{mt,malt}'
-    \\    complete -c $__malt_bin -n '__malt_using_command purge' -s y -l yes             -d 'Skip the typed confirmation'
-    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l dry-run          -d 'Preview every target without deleting'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l keep-cache       -d '--wipe only: leave the cache directory intact'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l remove-binary    -d '--wipe only: also unlink /usr/local/bin/{mt,malt}'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge' -s y -l yes             -d 'Skip every typed confirmation'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge' -s n -l dry-run          -d 'Preview without removing'
     \\
     \\    # version — sub-subcommand
     \\    complete -c $__malt_bin -n '__malt_using_command version' -f -a 'update' -d 'Self-update'

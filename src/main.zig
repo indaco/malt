@@ -23,12 +23,9 @@ const outdated = @import("cli/outdated.zig");
 const list = @import("cli/list.zig");
 const info = @import("cli/info.zig");
 const search = @import("cli/search.zig");
-const cleanup = @import("cli/cleanup.zig");
 const doctor = @import("cli/doctor.zig");
 const tap = @import("cli/tap.zig");
-const gc = @import("cli/gc.zig");
 const migrate = @import("cli/migrate.zig");
-const autoremove = @import("cli/autoremove.zig");
 const rollback = @import("cli/rollback.zig");
 const link_cmd = @import("cli/link.zig");
 const run_cmd = @import("cli/run.zig");
@@ -52,13 +49,10 @@ const Command = enum {
     list,
     info,
     search,
-    cleanup,
     doctor,
     tap,
     untap,
-    gc,
     migrate,
-    autoremove,
     rollback,
     link,
     unlink,
@@ -85,13 +79,10 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
     .{ "ls", .list },
     .{ "info", .info },
     .{ "search", .search },
-    .{ "cleanup", .cleanup },
     .{ "doctor", .doctor },
     .{ "tap", .tap },
     .{ "untap", .untap },
-    .{ "gc", .gc },
     .{ "migrate", .migrate },
-    .{ "autoremove", .autoremove },
     .{ "rollback", .rollback },
     .{ "link", .link },
     .{ "unlink", .unlink },
@@ -186,12 +177,9 @@ pub fn main() !void {
             .list => try list.execute(allocator, cmd_args),
             .info => try info.execute(allocator, cmd_args),
             .search => try search.execute(allocator, cmd_args),
-            .cleanup => try cleanup.execute(allocator, cmd_args),
             .doctor => try doctor.execute(allocator, cmd_args),
             .tap, .untap => try tap.execute(allocator, cmd_args),
-            .gc => try gc.execute(allocator, cmd_args),
             .migrate => try migrate.execute(allocator, cmd_args),
-            .autoremove => try autoremove.execute(allocator, cmd_args),
             .rollback => try rollback.execute(allocator, cmd_args),
             .link => try link_cmd.executeLink(allocator, cmd_args),
             .unlink => try link_cmd.executeUnlink(allocator, cmd_args),
@@ -235,12 +223,9 @@ fn printUsage() void {
         \\  list          List installed packages
         \\  info          Show detailed package information
         \\  search        Search formulas and casks
-        \\  cleanup       Remove old versions and prune caches
         \\  doctor        System health check
         \\  tap/untap     Manage taps
-        \\  gc            Garbage collect unreferenced store entries
         \\  migrate       Import existing Homebrew installation
-        \\  autoremove    Remove orphaned dependencies
         \\  rollback      Revert a package to its previous version
         \\  link          Create symlinks for an installed keg
         \\  unlink        Remove symlinks (keg stays installed)
@@ -248,7 +233,9 @@ fn printUsage() void {
         \\  completions   Generate shell completion scripts (bash, zsh, fish)
         \\  backup        Dump installed packages to a restorable text file
         \\  restore       Reinstall every package listed in a backup file
-        \\  purge         Completely wipe the malt installation from disk
+        \\  purge         Housekeeping or full wipe (--store-orphans, --unused-deps,
+        \\                --cache, --downloads, --stale-casks, --old-versions,
+        \\                --housekeeping, --wipe)
         \\  services      Manage long-running launchd services (start/stop/status/logs)
         \\  bundle        Install or export a Brewfile/Maltfile.json set of packages
         \\  version       Show version (use 'version update' to self-update)
