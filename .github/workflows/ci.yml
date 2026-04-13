@@ -3,8 +3,16 @@ name: CI
 on:
   push:
     branches: [main]
+    paths:
+      - "**/*.zig"
+      - "**/*.zon"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "**/*.zig"
+      - "**/*.zon"
+      - ".github/workflows/ci.yml"
 
 jobs:
   build-macos:
