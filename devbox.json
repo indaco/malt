@@ -6,6 +6,8 @@
       "dev": ["just build"],
       "build": ["just build-release"],
       "test": ["just test"],
+      "coverage": ["just coverage"],
+      "install": ["just install"],
       "fmt": ["just fmt"],
       "fmt-check": ["just fmt-check"],
       "lint": ["just lint"],
