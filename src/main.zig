@@ -37,6 +37,8 @@ const completions = @import("cli/completions.zig");
 const backup = @import("cli/backup.zig");
 const restore = @import("cli/restore.zig");
 const purge = @import("cli/purge.zig");
+const services = @import("cli/services.zig");
+const bundle = @import("cli/bundle.zig");
 
 const version_mod = @import("version.zig");
 const version = version_mod.value;
@@ -66,6 +68,8 @@ const Command = enum {
     backup,
     restore,
     purge,
+    services,
+    bundle,
     help,
     version,
 };
@@ -96,6 +100,8 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
     .{ "backup", .backup },
     .{ "restore", .restore },
     .{ "purge", .purge },
+    .{ "services", .services },
+    .{ "bundle", .bundle },
     .{ "help", .help },
     .{ "--help", .help },
     .{ "-h", .help },
@@ -194,6 +200,8 @@ pub fn main() !void {
             .backup => try backup.execute(allocator, cmd_args),
             .restore => try restore.execute(allocator, cmd_args),
             .purge => try purge.execute(allocator, cmd_args),
+            .services => try services.execute(allocator, cmd_args),
+            .bundle => try bundle.execute(allocator, cmd_args),
             .version_cmd => {
                 // "mt version" — check for "mt version update" subcommand
                 if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
@@ -241,6 +249,8 @@ fn printUsage() void {
         \\  backup        Dump installed packages to a restorable text file
         \\  restore       Reinstall every package listed in a backup file
         \\  purge         Completely wipe the malt installation from disk
+        \\  services      Manage long-running launchd services (start/stop/status/logs)
+        \\  bundle        Install or export a Brewfile/Maltfile.json set of packages
         \\  version       Show version (use 'version update' to self-update)
         \\
         \\Global flags:

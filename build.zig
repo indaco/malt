@@ -76,6 +76,8 @@ pub fn build(b: *std.Build) void {
         "tests/bundle_manifest_test.zig",
         "tests/bundle_brewfile_test.zig",
         "tests/services_plist_test.zig",
+        "tests/services_test.zig",
+        "tests/bundle_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");
