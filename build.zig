@@ -72,6 +72,10 @@ pub fn build(b: *std.Build) void {
         "tests/dsl_parser_test.zig",
         "tests/dsl_sandbox_test.zig",
         "tests/dsl_interpreter_test.zig",
+        "tests/db_schema_v2_test.zig",
+        "tests/bundle_manifest_test.zig",
+        "tests/bundle_brewfile_test.zig",
+        "tests/services_plist_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");
@@ -97,6 +101,7 @@ pub fn build(b: *std.Build) void {
     malt_lib.addIncludePath(b.path("c/"));
     malt_lib.addOptions("version_string", version_options);
 
+    @setEvalBranchQuota(4000);
     inline for (test_modules) |test_file| {
         // e.g. "tests/formula_test.zig" → "formula_test" (so each test binary
         // has a unique install name, which `test-bin` / kcov need).
