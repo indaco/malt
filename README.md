@@ -147,7 +147,7 @@ mt uninstall <package> --force           # ignore dependents check
 | `--force`, `-f` | Remove even if other packages depend on it |
 | `--cask`        | Force cask uninstall                       |
 
-Checks for dependent packages before removing. If dependents exist, refuses unless `--force` is passed. For casks, checks if the application is running and refuses unless `--force` is passed. Store entries are preserved for `mt gc`.
+Checks for dependent packages before removing. If dependents exist, refuses unless `--force` is passed. For casks, checks if the application is running and refuses unless `--force` is passed. Store entries are preserved for `mt purge --store-orphans`.
 
 ### `mt upgrade`
 
@@ -246,28 +246,6 @@ mt search <query> --cask
 mt search <query> --json
 ```
 
-### `mt cleanup`
-
-Remove old package versions and prune caches.
-
-```bash
-mt cleanup
-mt cleanup --dry-run
-mt cleanup --prune=<days>               # cache age threshold (default: 30)
-mt cleanup -s                           # scrub entire download cache
-```
-
-### `mt gc`
-
-Garbage collect unreferenced store entries.
-
-```bash
-mt gc
-mt gc --dry-run
-```
-
-Scans `store/` for entries not referenced by any installed keg. Removes them to reclaim disk space.
-
 ### `mt doctor`
 
 System health check.
@@ -276,19 +254,70 @@ System health check.
 mt doctor
 ```
 
-| Check               | Pass                                        | Fail                        |
-| ------------------- | ------------------------------------------- | --------------------------- |
-| SQLite integrity    | `PRAGMA integrity_check` returns `ok`       | Error: database corrupt     |
-| Directory structure | All required directories exist under prefix | Warn: missing directory     |
-| Stale lock          | No lock file, or lock PID is running        | Warn: suggest removal       |
-| APFS volume         | `/opt/malt` is on APFS                      | Warn: clonefile unavailable |
-| API reachable       | HEAD to `formulae.brew.sh` returns 2xx      | Warn: offline               |
-| Orphaned store      | All store entries referenced by a keg       | Warn: suggest `mt gc`       |
-| Missing kegs        | All DB keg paths exist on disk              | Error: suggest reinstall    |
-| Broken symlinks     | All symlinks in bin/, lib/ etc. resolve     | Warn: suggest `mt cleanup`  |
-| Disk space          | > 1 GB free on prefix volume                | Warn: low disk space        |
+| Check               | Pass                                        | Fail                                     |
+| ------------------- | ------------------------------------------- | ---------------------------------------- |
+| SQLite integrity    | `PRAGMA integrity_check` returns `ok`       | Error: database corrupt                  |
+| Directory structure | All required directories exist under prefix | Warn: missing directory                  |
+| Stale lock          | No lock file, or lock PID is running        | Warn: suggest removal                    |
+| APFS volume         | `/opt/malt` is on APFS                      | Warn: clonefile unavailable              |
+| API reachable       | HEAD to `formulae.brew.sh` returns 2xx      | Warn: offline                            |
+| Orphaned store      | All store entries referenced by a keg       | Warn: suggest `mt purge --store-orphans` |
+| Missing kegs        | All DB keg paths exist on disk              | Error: suggest reinstall                 |
+| Broken symlinks     | All symlinks in bin/, lib/ etc. resolve     | Warn: suggest `mt purge --housekeeping`  |
+| Disk space          | > 1 GB free on prefix volume                | Warn: low disk space                     |
 
 Exits with code 0 (all OK), 1 (warnings found), or 2 (errors found).
+
+### `mt purge`
+
+Unified housekeeping and full-wipe command. A scope flag selects what to remove — `mt purge` with no scope is an error.
+
+```bash
+# Housekeeping
+mt purge --store-orphans                 # refcount-0 store blobs (was: mt gc)
+mt purge --unused-deps                   # orphaned dep kegs    (was: mt autoremove)
+mt purge --cache=30                      # cache files older than N days
+mt purge --stale-casks                   # cache + Caskroom for uninstalled casks
+mt purge --housekeeping                  # all four safe scopes at once
+
+# Destructive (typed-confirm unless --yes)
+mt purge --downloads                     # wipe {cache}/downloads entirely
+mt purge --old-versions                  # remove non-latest Cellar versions
+mt purge --wipe                          # nuclear: every malt artefact on disk
+
+# Combine, preview, gate
+mt purge --store-orphans --cache=7 --dry-run
+mt purge --wipe --backup ~/snapshot.txt --remove-binary --yes
+```
+
+| Scope             | Removes                                                 | Confirm gate        |
+| ----------------- | ------------------------------------------------------- | ------------------- |
+| `--store-orphans` | Refcount-0 blobs in `{prefix}/store`                    | none                |
+| `--unused-deps`   | Indirect-install kegs no other package needs            | none                |
+| `--cache[=DAYS]`  | Cache files older than DAYS (default 30)                | none                |
+| `--downloads`     | Entire `{cache}/downloads` directory                    | type `downloads`    |
+| `--stale-casks`   | Cask cache + Caskroom entries for uninstalled casks     | none                |
+| `--old-versions`  | Non-latest version directories in `{prefix}/Cellar`     | type `old-versions` |
+| `--housekeeping`  | = `--store-orphans --unused-deps --cache --stale-casks` | none                |
+| `--wipe`          | Every malt artefact on disk (mutually exclusive)        | type `purge`        |
+
+| Shared flag             | Description                                                      |
+| ----------------------- | ---------------------------------------------------------------- |
+| `--dry-run`, `-n`       | Preview every removal without touching disk                      |
+| `--yes`, `-y`           | Skip every typed-confirmation prompt                             |
+| `--quiet`, `-q`         | Suppress per-item output                                         |
+| `--backup`, `-b` _path_ | Write a `mt restore`-compatible manifest **before** any deletion |
+
+| `--wipe`-only flag | Description                                                                  |
+| ------------------ | ---------------------------------------------------------------------------- |
+| `--keep-cache`     | Preserve the cache directory (downloaded bottles stay on disk for reinstall) |
+| `--remove-binary`  | Also unlink `/usr/local/bin/{mt,malt}` (opt-in — they live outside prefix)   |
+
+`--wipe` cannot be combined with any other scope flag — it already supersedes them. For everything except `--wipe`, multiple scopes can be passed in a single invocation and run sequentially under one lock acquisition.
+
+Acquires `{prefix}/db/malt.lock` before any destructive scope runs so concurrent malt processes cannot race; for `--wipe`, the lock is released before removing the `db/` directory itself. Honours `MALT_PREFIX` and `MALT_CACHE`, so pointing those at a throwaway path is the safe way to test the command end-to-end.
+
+Use `mt uninstall <name>` for per-package removal — `mt purge` deals exclusively with housekeeping artefacts and full uninstalls.
 
 ### `mt tap` / `mt untap`
 
@@ -299,17 +328,6 @@ mt tap <user>/<repo>                    # register a tap
 mt tap                                  # list registered taps
 mt untap <user>/<repo>                  # remove a tap
 ```
-
-### `mt autoremove`
-
-Remove orphaned dependencies no longer needed by any directly-installed package.
-
-```bash
-mt autoremove
-mt autoremove --dry-run
-```
-
-Finds kegs installed as dependencies that are no longer required by any directly-installed package, and removes them.
 
 ### `mt migrate`
 
@@ -358,32 +376,6 @@ mt restore my-setup.txt --force          # pass --force to the underlying instal
 | `--quiet`, `-q` | Suppress status messages                           |
 
 Formulas and casks are batched into two `mt install` invocations, so dependency resolution, parallel downloads, and the atomic install protocol all apply. Lines prefixed with `#` and blank lines are ignored, and entries with a `@<version>` suffix are installed at that exact version.
-
-### `mt purge`
-
-Completely wipe a malt installation from disk — every package, the content-addressable store, linked binaries, the cache, and the SQLite database.
-
-```bash
-mt purge                                 # interactive, requires typing `purge`
-mt purge --dry-run                       # preview every target with sizes
-mt purge --backup ~/malt-snapshot.txt    # dump restorable manifest first
-mt purge --keep-cache                    # leave cache/ intact (faster reinstall)
-mt purge --remove-binary --yes           # also unlink /usr/local/bin/{mt,malt}
-```
-
-| Flag                    | Description                                                                                        |
-| ----------------------- | -------------------------------------------------------------------------------------------------- |
-| `--backup`, `-b` _path_ | Write a `mt restore`-compatible manifest of installed packages **before** any deletion             |
-| `--keep-cache`          | Preserve the cache directory (downloaded bottles stay on disk for a later reinstall)               |
-| `--remove-binary`       | Also unlink `/usr/local/bin/mt` and `/usr/local/bin/malt` (opt-in — these live outside the prefix) |
-| `--yes`, `-y`           | Skip the typed confirmation (required for non-interactive / CI use)                                |
-| `--dry-run`             | Preview every target without touching disk                                                         |
-
-Interactive by default: prints a warning banner with every target and its size, then requires you to type the literal word `purge` (not `y`) to proceed. Refuses to run when stdin is not a TTY unless `--yes` is passed, so a stray `echo y | mt purge` cannot trigger a wipe.
-
-Acquires `{prefix}/db/malt.lock` before deleting so concurrent malt processes cannot race, and releases the lock before removing the `db/` directory itself. Honours `MALT_PREFIX` and `MALT_CACHE`, so pointing those at a throwaway path is the safe way to test the command end-to-end.
-
-Use `mt uninstall <name>` for per-package removal, `mt cleanup` for cache-only cleanup, and `mt autoremove` / `mt gc` for orphan removal — `mt purge` is specifically the nuclear option for uninstalling malt entirely.
 
 ### `mt rollback`
 
@@ -490,7 +482,7 @@ malt installs to `/opt/malt` — its own prefix, fully isolated from Homebrew. T
 
 ### Content-Addressable Store
 
-Bottles are stored by their SHA256 hash. The same bottle is never downloaded or extracted twice. Multiple installed kegs can reference the same store entry. Store entries are immutable — only `mt gc` removes them.
+Bottles are stored by their SHA256 hash. The same bottle is never downloaded or extracted twice. Multiple installed kegs can reference the same store entry. Store entries are immutable — only `mt purge --store-orphans` removes them.
 
 Kegs in `Cellar/` are materialized from `store/` via APFS `clonefile()`, which creates a copy-on-write clone at zero disk cost. On non-APFS volumes, a regular recursive copy is used as fallback.
 
@@ -542,7 +534,7 @@ Every install follows a strict 9-step protocol. Failure at any step triggers cle
 - **Atomic installs** — the 9-step protocol uses `errdefer` at every stage. Interrupted installs leave no partial state.
 - **Concurrent access** — an advisory file lock with a 30-second timeout prevents concurrent mutations. Read-only commands (`list`, `info`, `search`) do not acquire the lock.
 - **Upgrade rollback** — new version is fully installed and verified before the old version is touched. On failure, old symlinks are restored.
-- **Store immutability** — store entries are never modified after commit. Patching happens on the Cellar clone. Only `malt gc` deletes store entries.
+- **Store immutability** — store entries are never modified after commit. Patching happens on the Cellar clone. Only `mt purge --store-orphans` deletes store entries.
 
 ---
 
@@ -588,34 +580,40 @@ zig build universal                      # universal binary (arm64 + x86_64 via 
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size |
+| -------- | ---- |
 | **malt** | 3.3M |
 | nanobrew | 1.4M |
 | zerobrew | 8.6M |
-| bru | 1.8M |
+| bru      | 1.8M |
+
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install
 
-| Package | malt | nanobrew | zerobrew | bru | Homebrew |
-| ------- | ---- | -------- | -------- | --- | -------- |
-| **tree** (0 deps) | 0.853s | 0.754s | 2.878s | 0.821s‡ | 5.457s |
-| **wget** (6 deps) | 5.121s | 6.353s | 8.877s | 0.538s‡ | 4.817s |
-| **ffmpeg** (11 deps) | 4.886s | 4.195s | 9.946s | 4.793s‡ | 20.466s |
+| Package              | malt   | nanobrew | zerobrew | bru     | Homebrew |
+| -------------------- | ------ | -------- | -------- | ------- | -------- |
+| **tree** (0 deps)    | 0.853s | 0.754s   | 2.878s   | 0.821s‡ | 5.457s   |
+| **wget** (6 deps)    | 5.121s | 6.353s   | 8.877s   | 0.538s‡ | 4.817s   |
+| **ffmpeg** (11 deps) | 4.886s | 4.195s   | 9.946s   | 4.793s‡ | 20.466s  |
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew | bru |
-| ------- | ---- | -------- | -------- | --- |
-| **tree** (0 deps) | 0.015s | 0.007s | 0.313s | 0.046s |
-| **wget** (6 deps) | 0.031s | 0.685s | 0.862s | 0.084s |
-| **ffmpeg** (11 deps) | 0.090s | 1.184s | 4.004s | 1.994s |
+| Package              | malt   | nanobrew | zerobrew | bru    |
+| -------------------- | ------ | -------- | -------- | ------ |
+| **tree** (0 deps)    | 0.015s | 0.007s   | 0.313s   | 0.046s |
+| **wget** (6 deps)    | 0.031s | 0.685s   | 0.862s   | 0.084s |
+| **ffmpeg** (11 deps) | 0.090s | 1.184s   | 4.004s   | 1.994s |
+
 <!-- BENCH:WARM:END -->
 
 ### Why warm matters more than cold
