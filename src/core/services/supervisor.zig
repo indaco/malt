@@ -1,0 +1,322 @@
+//! malt — services supervisor
+//!
+//! Thin wrapper over launchd (macOS) that drives service lifecycle through
+//! `launchctl bootstrap`/`bootout`. The DB (schema v2 `services` table) is the
+//! source of truth for registered services; launchctl owns their runtime
+//! state.
+//!
+//! Assumptions and constraints:
+//!
+//! - **Domain**: services are loaded into the per-user `gui/<uid>` domain.
+//!   This works without sudo and survives logout, but plists run as the
+//!   logged-in user. A `--system` flag (PID 1 domain, requires root) is
+//!   intentionally not yet supported.
+//! - **Plist path**: must be absolute (launchctl rejects relative paths).
+//!   `register` always writes to `{prefix}/var/malt/services/{label}/service.plist`,
+//!   which is absolute by construction since `MALT_PREFIX` is normalized
+//!   upstream.
+//! - **Label uniqueness**: launchd uses the plist `Label` as the unique key.
+//!   We use the service `name` directly as the label; callers should
+//!   namespace via the formula name (e.g. `postgresql@16`) to avoid clashes.
+//! - **OS gate**: `register`/`start`/`stop`/`restart` return `OsNotSupported`
+//!   on non-macOS. `list`/`status`/`logs`/`tailLog` work everywhere because
+//!   they only touch the DB and the local filesystem.
+//! - **Formula integration**: registering a service when a formula carries a
+//!   `service:` field happens in `cli/install.zig` after a successful keg
+//!   write. `cli/uninstall.zig` calls `stopAndUnregister` before deleting
+//!   files.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const sqlite = @import("../../db/sqlite.zig");
+const plist_mod = @import("plist.zig");
+const atomic = @import("../../fs/atomic.zig");
+const output = @import("../../ui/output.zig");
+
+pub const SupervisorError = error{
+    OsNotSupported,
+    ServiceNotFound,
+    LaunchctlFailed,
+    IoFailed,
+    DatabaseError,
+    OutOfMemory,
+};
+
+pub fn describeError(err: SupervisorError) []const u8 {
+    return switch (err) {
+        SupervisorError.OsNotSupported => "services are only supported on macOS for now",
+        SupervisorError.ServiceNotFound => "service not registered",
+        SupervisorError.LaunchctlFailed => "launchctl command failed",
+        SupervisorError.IoFailed => "filesystem error while managing service",
+        SupervisorError.DatabaseError => "database error while managing service",
+        SupervisorError.OutOfMemory => "out of memory",
+    };
+}
+
+pub const ServiceInfo = struct {
+    name: []const u8,
+    keg_name: []const u8,
+    plist_path: []const u8,
+    auto_start: bool,
+    last_status: []const u8,
+};
+
+/// Returns the services directory: `{prefix}/var/malt/services`.
+pub fn servicesDir(allocator: std.mem.Allocator) SupervisorError![]const u8 {
+    const prefix = atomic.maltPrefix();
+    return std.fmt.allocPrint(allocator, "{s}/var/malt/services", .{prefix}) catch
+        return SupervisorError.OutOfMemory;
+}
+
+pub fn serviceDir(allocator: std.mem.Allocator, name: []const u8) SupervisorError![]const u8 {
+    const prefix = atomic.maltPrefix();
+    return std.fmt.allocPrint(allocator, "{s}/var/malt/services/{s}", .{ prefix, name }) catch
+        return SupervisorError.OutOfMemory;
+}
+
+pub fn logPath(allocator: std.mem.Allocator, name: []const u8, stream: enum { stdout, stderr }) SupervisorError![]const u8 {
+    const dir = try serviceDir(allocator, name);
+    defer allocator.free(dir);
+    const file = switch (stream) {
+        .stdout => "stdout.log",
+        .stderr => "stderr.log",
+    };
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, file }) catch
+        return SupervisorError.OutOfMemory;
+}
+
+/// List services from the `services` table.
+pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) SupervisorError![]ServiceInfo {
+    var stmt = db.prepare("SELECT name, keg_name, plist_path, auto_start, last_status FROM services ORDER BY name;") catch
+        return SupervisorError.DatabaseError;
+    defer stmt.finalize();
+
+    var buf: std.ArrayList(ServiceInfo) = .empty;
+    errdefer buf.deinit(allocator);
+
+    while (stmt.step() catch return SupervisorError.DatabaseError) {
+        const name_p = stmt.columnText(0) orelse continue;
+        const keg_p = stmt.columnText(1) orelse continue;
+        const plist_p = stmt.columnText(2) orelse continue;
+        const status_p = stmt.columnText(4);
+
+        const info: ServiceInfo = .{
+            .name = allocator.dupe(u8, std.mem.sliceTo(name_p, 0)) catch return SupervisorError.OutOfMemory,
+            .keg_name = allocator.dupe(u8, std.mem.sliceTo(keg_p, 0)) catch return SupervisorError.OutOfMemory,
+            .plist_path = allocator.dupe(u8, std.mem.sliceTo(plist_p, 0)) catch return SupervisorError.OutOfMemory,
+            .auto_start = stmt.columnBool(3),
+            .last_status = if (status_p) |p| allocator.dupe(u8, std.mem.sliceTo(p, 0)) catch return SupervisorError.OutOfMemory else allocator.dupe(u8, "unknown") catch return SupervisorError.OutOfMemory,
+        };
+        buf.append(allocator, info) catch return SupervisorError.OutOfMemory;
+    }
+
+    return buf.toOwnedSlice(allocator) catch return SupervisorError.OutOfMemory;
+}
+
+pub fn freeServiceInfos(allocator: std.mem.Allocator, services: []ServiceInfo) void {
+    for (services) |s| {
+        allocator.free(s.name);
+        allocator.free(s.keg_name);
+        allocator.free(s.plist_path);
+        allocator.free(s.last_status);
+    }
+    allocator.free(services);
+}
+
+/// Register a new service row. The plist file is written to disk; the
+/// launchctl bootstrap happens on `start`.
+pub fn register(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    spec: plist_mod.ServiceSpec,
+    keg_name: []const u8,
+    auto_start: bool,
+) SupervisorError!void {
+    if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
+
+    const dir = try serviceDir(allocator, spec.label);
+    defer allocator.free(dir);
+    std.fs.makeDirAbsolute(dir) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        error.FileNotFound => {
+            // Create the full parent path.
+            std.fs.cwd().makePath(dir) catch return SupervisorError.IoFailed;
+        },
+        else => return SupervisorError.IoFailed,
+    };
+
+    const plist_path = std.fmt.allocPrint(allocator, "{s}/service.plist", .{dir}) catch
+        return SupervisorError.OutOfMemory;
+    defer allocator.free(plist_path);
+
+    var file = std.fs.createFileAbsolute(plist_path, .{ .truncate = true }) catch
+        return SupervisorError.IoFailed;
+    defer file.close();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    plist_mod.render(spec, buf.writer(allocator)) catch return SupervisorError.IoFailed;
+    file.writeAll(buf.items) catch return SupervisorError.IoFailed;
+
+    var stmt = db.prepare(
+        \\INSERT OR REPLACE INTO services(name, keg_name, plist_path, auto_start, last_status)
+        \\VALUES (?, ?, ?, ?, 'registered');
+    ) catch return SupervisorError.DatabaseError;
+    defer stmt.finalize();
+    stmt.bindText(1, spec.label) catch return SupervisorError.DatabaseError;
+    stmt.bindText(2, keg_name) catch return SupervisorError.DatabaseError;
+    stmt.bindText(3, plist_path) catch return SupervisorError.DatabaseError;
+    stmt.bindInt(4, if (auto_start) 1 else 0) catch return SupervisorError.DatabaseError;
+    _ = stmt.step() catch return SupervisorError.DatabaseError;
+}
+
+fn runLaunchctl(allocator: std.mem.Allocator, argv: []const []const u8) SupervisorError!void {
+    if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
+
+    var child = std.process.Child.init(argv, allocator);
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    const term = child.spawnAndWait() catch return SupervisorError.LaunchctlFailed;
+    switch (term) {
+        .Exited => |code| if (code != 0) return SupervisorError.LaunchctlFailed,
+        else => return SupervisorError.LaunchctlFailed,
+    }
+}
+
+fn userDomain(allocator: std.mem.Allocator) ![]const u8 {
+    const uid = std.c.getuid();
+    return std.fmt.allocPrint(allocator, "gui/{d}", .{uid});
+}
+
+fn lookupPlistPath(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) SupervisorError![]const u8 {
+    var stmt = db.prepare("SELECT plist_path FROM services WHERE name = ?;") catch
+        return SupervisorError.DatabaseError;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return SupervisorError.DatabaseError;
+    if (!(stmt.step() catch return SupervisorError.DatabaseError)) return SupervisorError.ServiceNotFound;
+    const p = stmt.columnText(0) orelse return SupervisorError.ServiceNotFound;
+    return allocator.dupe(u8, std.mem.sliceTo(p, 0)) catch return SupervisorError.OutOfMemory;
+}
+
+pub fn start(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) SupervisorError!void {
+    if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
+    const plist_path = try lookupPlistPath(allocator, db, name);
+    defer allocator.free(plist_path);
+    const domain = userDomain(allocator) catch return SupervisorError.OutOfMemory;
+    defer allocator.free(domain);
+
+    try runLaunchctl(allocator, &.{ "launchctl", "bootstrap", domain, plist_path });
+    setStatus(db, name, "running") catch {};
+}
+
+pub fn stop(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) SupervisorError!void {
+    if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
+    const plist_path = try lookupPlistPath(allocator, db, name);
+    defer allocator.free(plist_path);
+    const domain = userDomain(allocator) catch return SupervisorError.OutOfMemory;
+    defer allocator.free(domain);
+
+    try runLaunchctl(allocator, &.{ "launchctl", "bootout", domain, plist_path });
+    setStatus(db, name, "stopped") catch {};
+}
+
+pub fn restart(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) SupervisorError!void {
+    stop(allocator, db, name) catch {};
+    try start(allocator, db, name);
+}
+
+pub fn stopAndUnregister(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) void {
+    stop(allocator, db, name) catch {};
+    var stmt = db.prepare("DELETE FROM services WHERE name = ?;") catch return;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return;
+    _ = stmt.step() catch {};
+}
+
+fn setStatus(db: *sqlite.Database, name: []const u8, status: []const u8) SupervisorError!void {
+    var stmt = db.prepare("UPDATE services SET last_status = ? WHERE name = ?;") catch
+        return SupervisorError.DatabaseError;
+    defer stmt.finalize();
+    stmt.bindText(1, status) catch return SupervisorError.DatabaseError;
+    stmt.bindText(2, name) catch return SupervisorError.DatabaseError;
+    _ = stmt.step() catch return SupervisorError.DatabaseError;
+}
+
+pub const RuntimeState = enum { not_loaded, loaded, running };
+
+pub fn runtimeStateName(s: RuntimeState) []const u8 {
+    return switch (s) {
+        .not_loaded => "not-loaded",
+        .loaded => "loaded",
+        .running => "running",
+    };
+}
+
+/// Query launchctl for the runtime state of `label`. Returns `.not_loaded`
+/// on any failure (missing label, non-macOS, launchctl error) so callers can
+/// degrade to the DB-recorded status without aborting.
+pub fn queryRuntime(allocator: std.mem.Allocator, label: []const u8) RuntimeState {
+    if (builtin.os.tag != .macos) return .not_loaded;
+
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "launchctl", "list" },
+    }) catch return .not_loaded;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    // Skip header (PID Status Label).
+    _ = lines.next();
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        const pid_field = fields.next() orelse continue;
+        _ = fields.next() orelse continue; // status code
+        const lbl = fields.next() orelse continue;
+        if (!std.mem.eql(u8, lbl, label)) continue;
+        if (pid_field.len == 1 and pid_field[0] == '-') return .loaded;
+        return .running;
+    }
+    return .not_loaded;
+}
+
+pub fn hasService(db: *sqlite.Database, name: []const u8) bool {
+    var stmt = db.prepare("SELECT 1 FROM services WHERE name = ?;") catch return false;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return false;
+    return stmt.step() catch false;
+}
+
+pub fn tailLog(allocator: std.mem.Allocator, path: []const u8, n: usize, writer: anytype) SupervisorError!void {
+    const f = std.fs.openFileAbsolute(path, .{}) catch return SupervisorError.IoFailed;
+    defer f.close();
+    const stat = f.stat() catch return SupervisorError.IoFailed;
+
+    // Read whole file if small; otherwise last 64 KiB.
+    const read_size: usize = @min(stat.size, 64 * 1024);
+    const buf = allocator.alloc(u8, read_size) catch return SupervisorError.OutOfMemory;
+    defer allocator.free(buf);
+    const seek_from: u64 = if (stat.size > read_size) stat.size - read_size else 0;
+    f.seekTo(seek_from) catch return SupervisorError.IoFailed;
+    const read = f.readAll(buf) catch return SupervisorError.IoFailed;
+    const slice = buf[0..read];
+
+    // Walk backwards, counting newlines.
+    var newlines: usize = 0;
+    var start_at: usize = slice.len;
+    var i: usize = slice.len;
+    while (i > 0) : (i -= 1) {
+        if (slice[i - 1] == '\n') {
+            newlines += 1;
+            if (newlines > n) {
+                start_at = i;
+                break;
+            }
+        }
+    } else {
+        start_at = 0;
+    }
+    writer.writeAll(slice[start_at..]) catch return SupervisorError.IoFailed;
+}

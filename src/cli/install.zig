@@ -21,6 +21,8 @@ const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
 const ruby_sub = @import("../core/ruby_subprocess.zig");
 const dsl = @import("../core/dsl/root.zig");
+const supervisor_mod = @import("../core/services/supervisor.zig");
+const plist_mod = @import("../core/services/plist.zig");
 const help = @import("help.zig");
 
 /// Maximum safe byte length for MALT_PREFIX.
@@ -1049,7 +1051,50 @@ fn linkAndRecord(
         linker.linkOpt(job.name, job.version_str) catch {};
         recordDeps(db, keg_id, &formula);
     }
+    maybeRegisterService(allocator, db, &formula, prefix);
     output.success("{s} {s} installed", .{ job.name, job.version_str });
+}
+
+/// Register a launchd service when the formula carries a `service:` block.
+/// Best-effort: failures only emit a warning so they don't fail the install.
+fn maybeRegisterService(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    formula: *const formula_mod.Formula,
+    prefix: []const u8,
+) void {
+    const def = formula.service orelse return;
+    if (def.run.len == 0) return;
+
+    var label_buf: [256]u8 = undefined;
+    const label = std.fmt.bufPrint(&label_buf, "com.malt.{s}", .{formula.name}) catch return;
+
+    var stdout_buf: [512]u8 = undefined;
+    var stderr_buf: [512]u8 = undefined;
+    const stdout_path = def.log_path orelse
+        (std.fmt.bufPrint(&stdout_buf, "{s}/var/log/{s}.out", .{ prefix, formula.name }) catch return);
+    const stderr_path = def.error_log_path orelse
+        (std.fmt.bufPrint(&stderr_buf, "{s}/var/log/{s}.err", .{ prefix, formula.name }) catch return);
+
+    // Ensure the log directory exists.
+    var log_dir_buf: [512]u8 = undefined;
+    if (std.fmt.bufPrint(&log_dir_buf, "{s}/var/log", .{prefix})) |dir| {
+        std.fs.cwd().makePath(dir) catch {};
+    } else |_| {}
+
+    const spec: plist_mod.ServiceSpec = .{
+        .label = label,
+        .program_args = def.run,
+        .working_dir = def.working_dir,
+        .stdout_path = stdout_path,
+        .stderr_path = stderr_path,
+        .run_at_load = def.run_at_load,
+        .keep_alive = def.keep_alive,
+    };
+
+    supervisor_mod.register(allocator, db, spec, formula.name, false) catch |err| {
+        output.warn("could not register service for {s}: {s}", .{ formula.name, @errorName(err) });
+    };
 }
 
 /// Install a cask (DMG, ZIP, or PKG).
