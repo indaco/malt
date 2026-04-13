@@ -116,7 +116,8 @@ hooks-uninstall:
 # ---------------------------------------------------------------------------
 
 # Run local benchmarks against malt + peer tools (tree, wget, ffmpeg by default).
-# Pass package names or env vars (BENCH_TRUE_COLD=1, SKIP_OTHERS=1, etc).
+# Pass extra package names as args; set env vars on the command itself
+# (e.g. `BENCH_TRUE_COLD=1 just bench`, `SKIP_OTHERS=1 just bench wget`).
 [group('bench')]
 bench *args:
     ./scripts/bench.sh {{args}}
