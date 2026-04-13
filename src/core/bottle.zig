@@ -114,7 +114,11 @@ pub fn verify(allocator: std.mem.Allocator, file_path: []const u8, expected_sha2
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(data, &hash, .{});
     var hex_buf: [64]u8 = undefined;
-    const computed_hex = std.fmt.bufPrint(&hex_buf, "{s}", .{std.fmt.fmtSliceHexLower(&hash)}) catch return false;
+    const hex_chars = "0123456789abcdef";
+    for (hash, 0..) |byte, i| {
+        hex_buf[i * 2] = hex_chars[byte >> 4];
+        hex_buf[i * 2 + 1] = hex_chars[byte & 0x0f];
+    }
 
-    return std.mem.eql(u8, computed_hex, expected_sha256);
+    return std.mem.eql(u8, &hex_buf, expected_sha256);
 }
