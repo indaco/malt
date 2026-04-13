@@ -47,6 +47,10 @@ pub const Options = struct {
     /// Override the binary used for member installs. When null, `malt` from
     /// $PATH is used.
     malt_bin: ?[]const u8 = null,
+    /// Override the install prefix used for the bundle lockfile. Tests use
+    /// this to keep the lock under their per-test temp directory; production
+    /// callers leave it null (which falls back to `MALT_PREFIX`).
+    prefix: ?[]const u8 = null,
 };
 
 pub fn run(
@@ -58,7 +62,8 @@ pub fn run(
     const bundle_name = if (manifest.name.len > 0) manifest.name else "unnamed";
 
     // Bundles directory + advisory lock for idempotency.
-    const bundles_dir = std.fmt.allocPrint(allocator, "{s}/var/malt/bundles", .{atomic.maltPrefix()}) catch
+    const prefix: []const u8 = opts.prefix orelse atomic.maltPrefix();
+    const bundles_dir = std.fmt.allocPrint(allocator, "{s}/var/malt/bundles", .{prefix}) catch
         return RunnerError.OutOfMemory;
     defer allocator.free(bundles_dir);
     std.fs.cwd().makePath(bundles_dir) catch {};

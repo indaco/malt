@@ -62,7 +62,7 @@ test "dry-run runner does not fork and skips DB write" {
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true });
+    try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
 
     var stmt = try t.db.prepare("SELECT COUNT(*) FROM bundles;");
     defer stmt.finalize();
@@ -83,6 +83,7 @@ test "non-dry runner with mocked malt_bin records bundle even on member failure"
     const result = runner.run(testing.allocator, &t.db, m, .{
         .dry_run = false,
         .malt_bin = "/usr/bin/false",
+        .prefix = t.dir,
     });
     try testing.expectError(runner.RunnerError.MemberFailed, result);
 
@@ -113,7 +114,7 @@ test "round-trip: parse Brewfile fixture, run dry, no panic" {
     var m = try malt.bundle_brewfile.parse(testing.allocator, fixture);
     defer m.deinit();
 
-    try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true });
+    try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
 }
 
 test "real-world Brewfile shapes parse without error" {
@@ -164,5 +165,5 @@ test "real-world Brewfile shapes parse without error" {
     try testing.expect(m.formulas.len >= 8);
     try testing.expect(m.casks.len >= 3);
 
-    try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true });
+    try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
 }
