@@ -37,6 +37,8 @@ malt is a macOS-only package manager written in Zig that consumes Homebrew's exi
 - **Brew fallback** — hands off to Homebrew for anything it doesn't support
 - **Rollback** — revert to a previous version of any package
 - **Ephemeral run** — `malt run` launches a formula without installing it permanently
+- **Services** — `malt services` manages long-running launchd processes, `brew services`-compatible
+- **Bundles** — `malt bundle install` reads existing `Brewfile`s with no conversion
 - **Safe under concurrency** — multiple malt processes won't corrupt state
 
 ---
@@ -359,6 +361,68 @@ mt restore my-setup.txt --force          # pass --force to the underlying instal
 
 Formulas and casks are batched into two `mt install` invocations, so dependency resolution, parallel downloads, and the atomic install protocol all apply. Lines prefixed with `#` and blank lines are ignored, and entries with a `@<version>` suffix are installed at that exact version.
 
+### `mt services`
+
+Manage long-running background processes via launchd. Equivalent to `brew services`.
+
+```bash
+mt services list                         # show registered services + runtime state
+mt services start postgresql@16          # bootstrap into the user launchd domain
+mt services stop  postgresql@16
+mt services restart postgresql@16
+mt services status postgresql@16         # combined DB + launchctl state
+mt services logs postgresql@16 --tail 50 # last 50 lines of stdout
+mt services logs postgresql@16 --stderr  # read stderr instead
+```
+
+| Subcommand | Description                                                                |
+| ---------- | -------------------------------------------------------------------------- |
+| `list`     | Show every registered service with `running` / `loaded` / `stopped`        |
+| `start`    | Generate and `launchctl bootstrap` the service into `gui/<uid>`            |
+| `stop`     | `launchctl bootout` the service                                            |
+| `restart`  | `stop` then `start`                                                        |
+| `status`   | Combined DB record + live `launchctl list` state                           |
+| `logs`     | Tail `stdout.log` (or `stderr.log` with `--stderr`); `--tail N` sets count |
+
+Services are registered automatically when an installed formula carries a `service` block (e.g. `postgresql@16`, `redis`). State lives at `{prefix}/var/malt/services/<name>/` (plist + log files) and in the SQLite `services` table. Currently macOS-only — Linux/Windows return `OsNotSupported`.
+
+### `mt bundle`
+
+Group-install and export sets of packages. Drop-in for `brew bundle`: reads existing `Brewfile`s with no conversion.
+
+```bash
+mt bundle install                            # ./Brewfile or ./Maltfile.json
+mt bundle install path/to/Brewfile           # explicit file
+mt bundle install --dry-run                  # print what would happen
+mt bundle create                             # snapshot installed → ./Brewfile
+mt bundle create --format json my.json       # JSON output
+mt bundle export                             # print current install to stdout
+mt bundle export --format json my-bundle     # named bundle, JSON
+mt bundle list                               # registered bundles
+mt bundle remove devtools                    # unregister (does not uninstall)
+mt bundle import path/to/Brewfile            # register without installing
+```
+
+| Subcommand | Description                                                                |
+| ---------- | -------------------------------------------------------------------------- |
+| `install`  | Install every member; idempotent — already-installed members are skipped   |
+| `create`   | Write the currently-installed set to a bundle file                         |
+| `list`     | List bundles registered in the database                                    |
+| `remove`   | Unregister a bundle (use `--purge` to also uninstall its members)          |
+| `export`   | Print bundle (or current install) to stdout in `brewfile` or `json` format |
+| `import`   | Register a bundle definition without installing                            |
+
+| Flag               | Description                                           |
+| ------------------ | ----------------------------------------------------- |
+| `--dry-run`        | Print every member action without forking             |
+| `--format <fmt>`   | `brewfile` (default) or `json`                        |
+| `--from-installed` | (`create`) populate from currently-installed packages |
+| `--purge`          | (`remove`) also uninstall each member                 |
+
+**Bundlefile lookup order** (when no path is given): `./Brewfile` → `./Maltfile.json` → `~/.config/malt/Brewfile` → `~/.config/malt/Maltfile.json`.
+
+**Brewfile compatibility**: malt parses the standard directive set (`tap`, `brew`, `cask`, `mas`, `vscode`) including hash options (`version:`, `restart_service:`, `link:`) and Ruby symbols (`restart_service: :changed`). Conditionals (`if OS.mac?`) and `do … end` blocks are rejected with a clear error pointing to `Maltfile.json` for power-user cases.
+
 ### `mt purge`
 
 Completely wipe a malt installation from disk — every package, the content-addressable store, linked binaries, the cache, and the SQLite database.
@@ -560,12 +624,12 @@ Every install follows a strict 9-step protocol. Failure at any step triggers cle
 
 ## Transparent Fallback
 
-For commands not implemented by malt (e.g., `mt services`, `mt bundle`), malt checks if `brew` is installed and silently delegates the command to it.
+For commands not implemented by malt, malt checks if `brew` is installed and silently delegates the command to it.
 
 If `brew` is not found, malt prints:
 
 ```
-malt: 'services' is not a malt command and brew was not found.
+malt: '<cmd>' is not a malt command and brew was not found.
 Install Homebrew: https://brew.sh
 ```
 
@@ -588,34 +652,40 @@ zig build universal                      # universal binary (arm64 + x86_64 via 
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size |
+| -------- | ---- |
 | **malt** | 3.3M |
 | nanobrew | 1.4M |
 | zerobrew | 8.6M |
-| bru | 1.8M |
+| bru      | 1.8M |
+
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install
 
-| Package | malt | nanobrew | zerobrew | bru | Homebrew |
-| ------- | ---- | -------- | -------- | --- | -------- |
-| **tree** (0 deps) | 0.954s | 0.573s | 2.062s | 0.780s‡ | 4.334s |
-| **wget** (6 deps) | 2.958s | 5.357s | 6.422s | 0.579s‡ | 4.115s |
-| **ffmpeg** (11 deps) | 3.942s | 3.043s | 7.378s | 3.515s‡ | 18.673s |
+| Package              | malt   | nanobrew | zerobrew | bru     | Homebrew |
+| -------------------- | ------ | -------- | -------- | ------- | -------- |
+| **tree** (0 deps)    | 0.954s | 0.573s   | 2.062s   | 0.780s‡ | 4.334s   |
+| **wget** (6 deps)    | 2.958s | 5.357s   | 6.422s   | 0.579s‡ | 4.115s   |
+| **ffmpeg** (11 deps) | 3.942s | 3.043s   | 7.378s   | 3.515s‡ | 18.673s  |
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew | bru |
-| ------- | ---- | -------- | -------- | --- |
-| **tree** (0 deps) | 0.007s | 0.012s | 0.318s | 0.052s |
-| **wget** (6 deps) | 0.077s | 0.630s | 0.947s | 0.080s |
-| **ffmpeg** (11 deps) | 0.079s | 0.898s | 2.715s | 1.132s |
+| Package              | malt   | nanobrew | zerobrew | bru    |
+| -------------------- | ------ | -------- | -------- | ------ |
+| **tree** (0 deps)    | 0.007s | 0.012s   | 0.318s   | 0.052s |
+| **wget** (6 deps)    | 0.077s | 0.630s   | 0.947s   | 0.080s |
+| **ffmpeg** (11 deps) | 0.079s | 0.898s   | 2.715s   | 1.132s |
+
 <!-- BENCH:WARM:END -->
 
 ### Why warm matters more than cold
