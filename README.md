@@ -686,7 +686,7 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 | Tool | Size |
 | ---- | ---- |
-| **malt** | 3.4 MB |
+| **malt** | 3.3 MB |
 | nanobrew | 1.4 MB |
 | zerobrew | 8.6 MB |
 | bru | 1.8 MB |
@@ -697,9 +697,9 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 | Package | malt | nanobrew | zerobrew | bru | Homebrew |
 | ------- | ---- | -------- | -------- | --- | -------- |
-| **tree** (0 deps) | 0.945s | 0.460s | 2.119s | 0.991s‡ | 4.315s |
-| **wget** (6 deps) | 4.959s | 6.913s | 6.537s | 0.358s‡ | 4.617s |
-| **ffmpeg** (11 deps) | 4.191s | 3.737s | 8.299s | 3.926s‡ | 20.207s |
+| **tree** (0 deps) | 0.695s | 0.631s | 2.030s | 0.806s‡ | 4.444s |
+| **wget** (6 deps) | 5.434s | 6.822s | 6.697s | 0.769s‡ | 4.319s |
+| **ffmpeg** (11 deps) | 4.226s | 3.510s | 6.822s | 3.748s‡ | 20.516s |
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
@@ -707,13 +707,13 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 | Package | malt | nanobrew | zerobrew | bru |
 | ------- | ---- | -------- | -------- | --- |
-| **tree** (0 deps) | 0.069s | 0.010s | 0.398s | 0.041s |
-| **wget** (6 deps) | 0.024s | 0.585s | 0.692s | 0.074s |
-| **ffmpeg** (11 deps) | 0.100s | 1.548s | 3.270s | 1.767s |
+| **tree** (0 deps) | 0.007s | 0.005s | 0.340s | 0.047s |
+| **wget** (6 deps) | 0.029s | 0.636s | 0.722s | 0.100s |
+| **ffmpeg** (11 deps) | 0.085s | 1.079s | 2.731s | 1.220s |
 <!-- BENCH:WARM:END -->
 
 > [!NOTE]
-> Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-13. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
+> Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-14. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
 
 ### Why warm matters more than cold
 
