@@ -112,6 +112,7 @@ malt uninstall wget
 
 ## Command Reference
 
+> [!NOTE]
 > The examples below use `mt` (the shorter alias). All commands work identically with `malt`.
 
 ### `mt install`
@@ -137,7 +138,7 @@ mt install <package> [<package> ...]     # multiple packages
 | `--quiet`, `-q`     | Suppress all output except errors                 |
 | `--json`            | Output result as JSON                             |
 
-> [!INFO]
+> [!NOTE]
 > **Post-install scripts run natively.** malt includes a built-in interpreter that executes Homebrew `post_install` blocks in Zig — no Ruby required. Packages like `node`, `openssl`, `fontconfig`, and `docbook` are fully configured at install time. For the small number of scripts the interpreter doesn't cover, add `--use-system-ruby` to delegate to any available Ruby, or use `brew install` as a fallback. See [Post-Install DSL Interpreter](#post-install-dsl-interpreter) for details.
 
 ### `mt uninstall`
@@ -252,6 +253,16 @@ mt search <query>
 mt search <query> --formula
 mt search <query> --cask
 mt search <query> --json
+```
+
+### `mt uses`
+
+Show installed packages that depend on a given formula. Default is direct dependents only; `--recursive` walks the transitive closure.
+
+```bash
+mt uses <formula>
+mt uses --recursive <formula>
+mt uses <formula> --json
 ```
 
 ### `mt doctor`
