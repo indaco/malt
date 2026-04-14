@@ -8,22 +8,14 @@ const std = @import("std");
 /// pool of noise for zero benefit. Kept on libc alloc for clarity.
 const child_allocator = std.heap.c_allocator;
 
-/// Extracts a tar.gz archive from the given input reader into output_dir.
-/// Uses the system `tar` command to avoid Zig stdlib flate decompressor
-/// panics on corrupt/truncated gzip streams (Zig issue: unreachable in
-/// Writer.rebase when the inflate state machine encounters malformed data).
-pub fn extractTarGz(_: *std.Io.Reader, output_dir: std.fs.Dir) !void {
-    // We need the absolute path of the output dir and the archive file.
-    // The archive is always written to {output_dir}/bottle.tar.gz by the
-    // download step before extractTarGz is called.
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_path = output_dir.realpath(".", &path_buf) catch return error.ExtractionFailed;
-
-    var archive_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const archive_path = std.fmt.bufPrint(&archive_buf, "{s}/bottle.tar.gz", .{dir_path}) catch
-        return error.ExtractionFailed;
-
-    // Verify the archive exists and has gzip magic bytes
+/// Extract a tar.gz archive from `archive_path` into `dest_dir`. Uses the
+/// system `tar` command to avoid Zig stdlib flate decompressor panics on
+/// corrupt/truncated gzip streams (Zig issue: unreachable in Writer.rebase
+/// when the inflate state machine encounters malformed data). The archive
+/// is validated to start with the gzip magic (0x1f 0x8b) before spawning
+/// tar, which gives a clear error on truncated downloads or wrong-mime
+/// responses (e.g. HTML error pages saved with a .tar.gz extension).
+pub fn extractTarGz(archive_path: []const u8, dest_dir: []const u8) !void {
     const archive_file = std.fs.openFileAbsolute(archive_path, .{}) catch return error.ExtractionFailed;
     var magic: [2]u8 = undefined;
     const n = archive_file.readAll(&magic) catch {
@@ -35,8 +27,7 @@ pub fn extractTarGz(_: *std.Io.Reader, output_dir: std.fs.Dir) !void {
         return error.ExtractionFailed;
     }
 
-    // Use system tar — immune to Zig flate decompressor panics
-    const argv = [_][]const u8{ "tar", "xzf", archive_path, "-C", dir_path };
+    const argv = [_][]const u8{ "tar", "xzf", archive_path, "-C", dest_dir };
     var child = std.process.Child.init(&argv, child_allocator);
     child.spawn() catch return error.ExtractionFailed;
     const term = child.wait() catch return error.ExtractionFailed;

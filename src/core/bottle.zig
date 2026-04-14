@@ -74,15 +74,7 @@ pub fn download(
     tmp_file.close();
 
     // Extract
-    var out_dir = std.fs.openDirAbsolute(dest_dir, .{}) catch return BottleError.IoError;
-    defer out_dir.close();
-
-    const archive_file = std.fs.openFileAbsolute(tmp_path, .{}) catch return BottleError.ExtractionFailed;
-    defer archive_file.close();
-
-    var read_buf: [8192]u8 = undefined;
-    var reader = archive_file.reader(&read_buf);
-    archive.extractTarGz(&reader.interface, out_dir) catch return BottleError.ExtractionFailed;
+    archive.extractTarGz(tmp_path, dest_dir) catch return BottleError.ExtractionFailed;
 
     // Remove the temp archive file
     std.fs.deleteFileAbsolute(tmp_path) catch {};
