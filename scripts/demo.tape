@@ -41,6 +41,16 @@ Sleep 400ms
 Enter
 Sleep 12s
 
+Type "# Install from a third-party tap — no separate 'tap' step needed"
+Sleep 400ms
+Enter
+Sleep 800ms
+
+Type "malt install goreleaser/tap/goreleaser"
+Sleep 400ms
+Enter
+Sleep 8s
+
 Type "# List installed kegs with their versions"
 Sleep 400ms
 Enter

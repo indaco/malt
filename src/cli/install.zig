@@ -20,6 +20,7 @@ const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
 const ruby_sub = @import("../core/ruby_subprocess.zig");
+const tap_mod = @import("../core/tap.zig");
 const dsl = @import("../core/dsl/root.zig");
 const supervisor_mod = @import("../core/services/supervisor.zig");
 const plist_mod = @import("../core/services/plist.zig");
@@ -1467,8 +1468,18 @@ fn installTapFormula(
         else => return InstallError.CellarFailed,
     };
 
-    // Write archive to temp file
+    // Pick the archive extension from the final URL. We only support the two
+    // formats common in Homebrew taps (.tar.gz, .tar.xz); anything else is
+    // rejected with a clear message rather than silently renamed to .tar.gz
+    // and fed to tar, which just produced a generic `Failed to extract`
+    // before.
+    const is_gz = std.mem.endsWith(u8, final_url, ".tar.gz") or std.mem.endsWith(u8, final_url, ".tgz");
     const is_xz = std.mem.endsWith(u8, final_url, ".tar.xz");
+    if (!is_gz and !is_xz) {
+        output.err("Unsupported archive format for {s}: {s}", .{ parts.formula, final_url });
+        output.err("Supported formats: .tar.gz, .tar.xz. Please open an issue if this is a widely-used tap.", .{});
+        return InstallError.DownloadFailed;
+    }
     const ext = if (is_xz) ".tar.xz" else ".tar.gz";
     var tmp_buf: [512]u8 = undefined;
     const tmp_archive = std.fmt.bufPrint(&tmp_buf, "{s}/tmp/tap_download{s}", .{ prefix, ext }) catch
@@ -1491,15 +1502,7 @@ fn installTapFormula(
             return InstallError.CellarFailed;
         };
     } else {
-        var out_dir = std.fs.openDirAbsolute(cellar_path, .{}) catch return InstallError.CellarFailed;
-        defer out_dir.close();
-
-        const archive_file = std.fs.openFileAbsolute(tmp_archive, .{}) catch return InstallError.CellarFailed;
-        defer archive_file.close();
-
-        var read_buf: [8192]u8 = undefined;
-        var file_reader = archive_file.reader(&read_buf);
-        archive_mod.extractTarGz(&file_reader.interface, out_dir) catch {
+        archive_mod.extractTarGz(tmp_archive, cellar_path) catch {
             output.err("Failed to extract archive for {s}", .{parts.formula});
             return InstallError.CellarFailed;
         };
@@ -1559,6 +1562,13 @@ fn installTapFormula(
         _ = stmt.step() catch return InstallError.RecordFailed;
 
         keg_id = getLastInsertId(db) catch return InstallError.RecordFailed;
+
+        // Register the tap so `mt tap` lists it and `mt untap` can remove
+        // it. Homebrew auto-taps on install; we mirror that. INSERT OR
+        // IGNORE inside tap_mod.add keeps this idempotent.
+        var tap_url_buf: [256]u8 = undefined;
+        const tap_url = std.fmt.bufPrint(&tap_url_buf, "https://github.com/{s}", .{tap_name}) catch return InstallError.RecordFailed;
+        tap_mod.add(db, tap_name, tap_url) catch {};
     }
 
     linker.link(cellar_path, parts.formula, keg_id) catch {

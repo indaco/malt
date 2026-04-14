@@ -38,7 +38,17 @@ fn validateComponent(part: []const u8) TapNameError!void {
 }
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "tap")) return;
+    return run(allocator, args, .add);
+}
+
+pub fn executeUntap(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    return run(allocator, args, .remove);
+}
+
+const Action = enum { add, remove };
+
+fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !void {
+    if (help.showIfRequested(args, if (action == .add) "tap" else "untap")) return;
 
     const prefix = atomic.maltPrefix();
 
@@ -52,6 +62,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     schema.initSchema(&db) catch return;
 
     if (args.len == 0) {
+        if (action == .remove) {
+            output.err("Usage: mt untap user/repo", .{});
+            return;
+        }
         // List taps
         const taps = tap_mod.list(allocator, &db) catch {
             output.err("Failed to list taps", .{});
@@ -75,26 +89,27 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const name = args[0];
-
-    // Check if this is untap (called via main.zig dispatch)
-    // The main dispatch sends both "tap" and "untap" here
-    // We detect untap by checking if the name is already tapped
-    // For explicit untap, we'd need the parent command info
-    // For now: if tap already exists, remove it; else add it
-    // Better: check a flag or use separate logic
-
-    // Simple approach: "mt tap user/repo" adds, "mt untap user/repo" also comes here
-    // We'll just add the tap
     validateTapName(name) catch {
         output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{name});
         return;
     };
 
-    var url_buf: [256]u8 = undefined;
-    const url = std.fmt.bufPrint(&url_buf, "https://github.com/{s}", .{name}) catch return;
-    tap_mod.add(&db, name, url) catch {
-        output.err("Failed to add tap {s}", .{name});
-        return;
-    };
-    output.info("Tapped {s}", .{name});
+    switch (action) {
+        .add => {
+            var url_buf: [256]u8 = undefined;
+            const url = std.fmt.bufPrint(&url_buf, "https://github.com/{s}", .{name}) catch return;
+            tap_mod.add(&db, name, url) catch {
+                output.err("Failed to add tap {s}", .{name});
+                return;
+            };
+            output.info("Tapped {s}", .{name});
+        },
+        .remove => {
+            tap_mod.remove(&db, name) catch {
+                output.err("Failed to untap {s}", .{name});
+                return;
+            };
+            output.info("Untapped {s}", .{name});
+        },
+    }
 }

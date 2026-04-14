@@ -37,22 +37,52 @@ test "extractTarGz decompresses a real tar.gz produced by system tar" {
         f.close();
     }
 
-    // Produce bottle.tar.gz in base (what extractTarGz expects).
-    try runTar(&.{ "tar", "czf", "/tmp/malt_archive_targz_ok/bottle.tar.gz", "-C", base, "src" });
+    const archive_path = base ++ "/payload.tar.gz";
+    try runTar(&.{ "tar", "czf", archive_path, "-C", base, "src" });
 
     // Remove the src dir so we can observe extraction re-creating it.
-    try std.fs.deleteTreeAbsolute("/tmp/malt_archive_targz_ok/src");
+    try std.fs.deleteTreeAbsolute(base ++ "/src");
 
-    var reader_buf: [64]u8 = undefined;
-    var reader = std.Io.Reader.fixed(&reader_buf); // extractTarGz ignores reader contents
-    try archive.extractTarGz(&reader, dir);
+    try archive.extractTarGz(archive_path, base);
 
-    // hello.txt is now back.
     const f = try dir.openFile("src/hello.txt", .{});
     defer f.close();
     var out: [8]u8 = undefined;
     const n = try f.readAll(&out);
     try testing.expectEqualStrings("hi", out[0..n]);
+}
+
+// Regression: the tap-formula install path writes its archive to
+// `{prefix}/tmp/tap_download.tar.gz` (not `bottle.tar.gz`) and extracts
+// into the cellar. The previous `extractTarGz` hardcoded the archive
+// lookup to `{dest_dir}/bottle.tar.gz`, so `mt install user/tap/formula`
+// silently failed with `CellarFailed`. Covers both halves of the fix:
+// caller-supplied archive path, caller-supplied dest dir.
+test "extractTarGz extracts an archive living outside the destination dir" {
+    const src_dir = "/tmp/malt_archive_targz_split_src";
+    const dest_dir = "/tmp/malt_archive_targz_split_dest";
+    std.fs.deleteTreeAbsolute(src_dir) catch {};
+    std.fs.deleteTreeAbsolute(dest_dir) catch {};
+    try std.fs.makeDirAbsolute(src_dir);
+    try std.fs.makeDirAbsolute(dest_dir);
+    defer std.fs.deleteTreeAbsolute(src_dir) catch {};
+    defer std.fs.deleteTreeAbsolute(dest_dir) catch {};
+
+    // Build payload in src_dir and tarball it into src_dir/tap_download.tar.gz.
+    try std.fs.makeDirAbsolute(src_dir ++ "/payload");
+    {
+        const f = try std.fs.createFileAbsolute(src_dir ++ "/payload/bin", .{});
+        try f.writeAll("#!/bin/sh\n");
+        f.close();
+    }
+    const archive_path = src_dir ++ "/tap_download.tar.gz";
+    try runTar(&.{ "tar", "czf", archive_path, "-C", src_dir, "payload" });
+
+    try archive.extractTarGz(archive_path, dest_dir);
+
+    // The payload landed in dest_dir, not next to the archive.
+    const f = try std.fs.openFileAbsolute(dest_dir ++ "/payload/bin", .{});
+    defer f.close();
 }
 
 test "extractTarGz rejects a non-gzip archive" {
@@ -61,14 +91,13 @@ test "extractTarGz rejects a non-gzip archive" {
     defer dir.close();
     defer std.fs.deleteTreeAbsolute(base) catch {};
 
-    // Write a 'bottle.tar.gz' with the wrong magic bytes.
-    const f = try dir.createFile("bottle.tar.gz", .{});
+    // Write an archive file with wrong magic bytes.
+    const archive_path = base ++ "/payload.tar.gz";
+    const f = try std.fs.createFileAbsolute(archive_path, .{});
     try f.writeAll("NOPE, not gzip");
     f.close();
 
-    var rb: [16]u8 = undefined;
-    var reader = std.Io.Reader.fixed(&rb);
-    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(&reader, dir));
+    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(archive_path, base));
 }
 
 test "extractTarGz rejects a missing archive" {
@@ -77,7 +106,5 @@ test "extractTarGz rejects a missing archive" {
     defer dir.close();
     defer std.fs.deleteTreeAbsolute(base) catch {};
 
-    var rb: [16]u8 = undefined;
-    var reader = std.Io.Reader.fixed(&rb);
-    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(&reader, dir));
+    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(base ++ "/nope.tar.gz", base));
 }
