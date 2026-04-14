@@ -18,6 +18,14 @@ builds:
 universal_binaries:
   - replace: true
     name_template: malt
+    # Drop the `mt` alias next to the universal binary so it ends up
+    # inside the release tarball. Matches what `zig build` produces,
+    # what install.sh creates via symlink, and what the homebrew_casks
+    # stanza below already declares — the release tarball was the
+    # only distribution path that shipped `malt` without `mt`.
+    hooks:
+      post:
+        - cmd: cp "{{ .Path }}" "{{ dir .Path }}/mt"
 
 archives:
   - formats: ["tar.gz"]
@@ -25,6 +33,11 @@ archives:
     files:
       - README.md
       - LICENSE
+      # Pick up the `mt` copy produced by the universal-binaries
+      # post-hook above. `dst: "."` lands it next to `malt` at the
+      # archive root instead of inside an `mt/` subdir.
+      - src: "dist/*_darwin_all*/mt"
+        dst: "."
     wrap_in_directory: true
 
 checksum:

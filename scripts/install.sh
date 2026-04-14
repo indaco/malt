@@ -99,7 +99,11 @@ else
   info "Latest version: ${VERSION}"
 
   # ── Download ────────────────────────────────────────────────────
-  ARCHIVE_NAME="malt_${VERSION}_Darwin_${ARCH_LABEL}.tar.gz"
+  # GoReleaser publishes a single universal binary as `_darwin_all`
+  # (lowercase os, arch literal `all`). `$ARCH_LABEL` is only used
+  # for the "Detected macOS …" banner; the tarball name no longer
+  # depends on the host arch.
+  ARCHIVE_NAME="malt_${VERSION}_darwin_all.tar.gz"
   DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${ARCHIVE_NAME}"
 
   TMPDIR=$(mktemp -d)
