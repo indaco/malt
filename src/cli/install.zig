@@ -1468,8 +1468,18 @@ fn installTapFormula(
         else => return InstallError.CellarFailed,
     };
 
-    // Write archive to temp file
+    // Pick the archive extension from the final URL. We only support the two
+    // formats common in Homebrew taps (.tar.gz, .tar.xz); anything else is
+    // rejected with a clear message rather than silently renamed to .tar.gz
+    // and fed to tar, which just produced a generic `Failed to extract`
+    // before.
+    const is_gz = std.mem.endsWith(u8, final_url, ".tar.gz") or std.mem.endsWith(u8, final_url, ".tgz");
     const is_xz = std.mem.endsWith(u8, final_url, ".tar.xz");
+    if (!is_gz and !is_xz) {
+        output.err("Unsupported archive format for {s}: {s}", .{ parts.formula, final_url });
+        output.err("Supported formats: .tar.gz, .tar.xz. Please open an issue if this is a widely-used tap.", .{});
+        return InstallError.DownloadFailed;
+    }
     const ext = if (is_xz) ".tar.xz" else ".tar.gz";
     var tmp_buf: [512]u8 = undefined;
     const tmp_archive = std.fmt.bufPrint(&tmp_buf, "{s}/tmp/tap_download{s}", .{ prefix, ext }) catch
