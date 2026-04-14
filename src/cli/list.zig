@@ -160,135 +160,119 @@ fn writeJsonOutput(
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
-    // Spec format: { "installed": [...], "formulae": [...], "casks": [...], "time_ms": N }
+    try buildListJson(db, w, show_formula, show_cask, show_pinned, start_ts);
+    stdout.writeAll(buf.items) catch {};
+}
+
+/// Build the `{ "installed": [...], "formulae": [...], "casks": [...], "time_ms": N }`
+/// payload into `w`. Kept `pub` so tests can assert on the exact bytes without
+/// going through a real file. On per-section SQLite failures we emit an empty
+/// array for that section rather than truncating the whole document.
+pub fn buildListJson(
+    db: *sqlite.Database,
+    w: anytype,
+    show_formula: bool,
+    show_cask: bool,
+    show_pinned: bool,
+    start_ts: i64,
+) !void {
     try w.writeAll("{\"installed\":[");
-
-    // Collect all installed items into the "installed" array
-    var first_installed = true;
-
-    if (show_formula) {
-        const sql = if (show_pinned)
-            "SELECT name, version, pinned FROM kegs WHERE pinned = 1 ORDER BY name;"
-        else
-            "SELECT name, version, pinned FROM kegs ORDER BY name;";
-
-        var stmt = db.prepare(sql) catch {
-            try w.writeAll("]");
-            try writeTimeSuffix(w, start_ts);
-            try w.writeAll("}\n");
-            stdout.writeAll(buf.items) catch {};
-            return;
-        };
-        defer stmt.finalize();
-
-        while (stmt.step() catch false) {
-            const name = stmt.columnText(0) orelse continue;
-            const ver = stmt.columnText(1);
-            const pinned = stmt.columnBool(2);
-            if (!first_installed) try w.writeAll(",");
-            first_installed = false;
-            try w.writeAll("{\"name\":\"");
-            try w.writeAll(std.mem.sliceTo(name, 0));
-            try w.writeAll("\",\"version\":\"");
-            try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
-            try w.writeAll("\",\"type\":\"formula\",\"pinned\":");
-            try w.writeAll(if (pinned) "true" else "false");
-            try w.writeAll("}");
-        }
-    }
-
-    if (show_cask) {
-        var stmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch {
-            try w.writeAll("]");
-            try writeTimeSuffix(w, start_ts);
-            try w.writeAll("}\n");
-            stdout.writeAll(buf.items) catch {};
-            return;
-        };
-        defer stmt.finalize();
-
-        while (stmt.step() catch false) {
-            const token = stmt.columnText(0) orelse continue;
-            const ver = stmt.columnText(1);
-            if (!first_installed) try w.writeAll(",");
-            first_installed = false;
-            try w.writeAll("{\"name\":\"");
-            try w.writeAll(std.mem.sliceTo(token, 0));
-            try w.writeAll("\",\"version\":\"");
-            try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
-            try w.writeAll("\",\"type\":\"cask\"}");
-        }
-    }
-
+    var first = true;
+    if (show_formula) try writeFormulaRows(db, w, show_pinned, .installed, &first);
+    if (show_cask) try writeCaskRows(db, w, .installed, &first);
     try w.writeAll("]");
 
-    // Also emit legacy keys for backwards compatibility
     if (show_formula) {
         try w.writeAll(",\"formulae\":[");
-        const sql = if (show_pinned)
-            "SELECT name, version, pinned FROM kegs WHERE pinned = 1 ORDER BY name;"
-        else
-            "SELECT name, version, pinned FROM kegs ORDER BY name;";
-
-        var stmt = db.prepare(sql) catch {
-            try w.writeAll("]");
-            if (show_cask) try w.writeAll(",\"casks\":[]");
-            try writeTimeSuffix(w, start_ts);
-            try w.writeAll("}\n");
-            stdout.writeAll(buf.items) catch {};
-            return;
-        };
-        defer stmt.finalize();
-
-        var first = true;
-        while (stmt.step() catch false) {
-            const name = stmt.columnText(0) orelse continue;
-            const ver = stmt.columnText(1);
-            const pinned = stmt.columnBool(2);
-            if (!first) try w.writeAll(",");
-            first = false;
-            try w.writeAll("{\"name\":\"");
-            try w.writeAll(std.mem.sliceTo(name, 0));
-            try w.writeAll("\",\"version\":\"");
-            try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
-            try w.writeAll("\",\"pinned\":");
-            try w.writeAll(if (pinned) "true" else "false");
-            try w.writeAll("}");
-        }
+        var legacy_first = true;
+        try writeFormulaRows(db, w, show_pinned, .legacy, &legacy_first);
         try w.writeAll("]");
     }
 
     if (show_cask) {
-        if (show_formula) try w.writeAll(",");
-        try w.writeAll("\"casks\":[");
-        var stmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch {
-            try w.writeAll("]");
-            try writeTimeSuffix(w, start_ts);
-            try w.writeAll("}\n");
-            stdout.writeAll(buf.items) catch {};
-            return;
-        };
-        defer stmt.finalize();
-
-        var first = true;
-        while (stmt.step() catch false) {
-            const token = stmt.columnText(0) orelse continue;
-            const ver = stmt.columnText(1);
-            if (!first) try w.writeAll(",");
-            first = false;
-            try w.writeAll("{\"token\":\"");
-            try w.writeAll(std.mem.sliceTo(token, 0));
-            try w.writeAll("\",\"version\":\"");
-            try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
-            try w.writeAll("\"}");
-        }
+        try w.writeAll(",\"casks\":[");
+        var legacy_first = true;
+        try writeCaskRows(db, w, .legacy, &legacy_first);
         try w.writeAll("]");
     }
 
     try writeTimeSuffix(w, start_ts);
-
     try w.writeAll("}\n");
-    stdout.writeAll(buf.items) catch {};
+}
+
+const RowShape = enum { installed, legacy };
+
+fn writeFormulaRows(
+    db: *sqlite.Database,
+    w: anytype,
+    show_pinned: bool,
+    shape: RowShape,
+    first: *bool,
+) !void {
+    const sql = if (show_pinned)
+        "SELECT name, version, pinned FROM kegs WHERE pinned = 1 ORDER BY name;"
+    else
+        "SELECT name, version, pinned FROM kegs ORDER BY name;";
+
+    var stmt = db.prepare(sql) catch return;
+    defer stmt.finalize();
+
+    while (stmt.step() catch false) {
+        const name = stmt.columnText(0) orelse continue;
+        const ver = stmt.columnText(1);
+        const pinned = stmt.columnBool(2);
+        if (!first.*) try w.writeAll(",");
+        first.* = false;
+        try w.writeAll("{\"name\":\"");
+        try w.writeAll(std.mem.sliceTo(name, 0));
+        try w.writeAll("\",\"version\":\"");
+        try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
+        switch (shape) {
+            .installed => {
+                try w.writeAll("\",\"type\":\"formula\",\"pinned\":");
+                try w.writeAll(if (pinned) "true" else "false");
+                try w.writeAll("}");
+            },
+            .legacy => {
+                try w.writeAll("\",\"pinned\":");
+                try w.writeAll(if (pinned) "true" else "false");
+                try w.writeAll("}");
+            },
+        }
+    }
+}
+
+fn writeCaskRows(
+    db: *sqlite.Database,
+    w: anytype,
+    shape: RowShape,
+    first: *bool,
+) !void {
+    var stmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch return;
+    defer stmt.finalize();
+
+    while (stmt.step() catch false) {
+        const token = stmt.columnText(0) orelse continue;
+        const ver = stmt.columnText(1);
+        if (!first.*) try w.writeAll(",");
+        first.* = false;
+        switch (shape) {
+            .installed => {
+                try w.writeAll("{\"name\":\"");
+                try w.writeAll(std.mem.sliceTo(token, 0));
+                try w.writeAll("\",\"version\":\"");
+                try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
+                try w.writeAll("\",\"type\":\"cask\"}");
+            },
+            .legacy => {
+                try w.writeAll("{\"token\":\"");
+                try w.writeAll(std.mem.sliceTo(token, 0));
+                try w.writeAll("\",\"version\":\"");
+                try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
+                try w.writeAll("\"}");
+            },
+        }
+    }
 }
 
 /// Write the ,"time_ms":N suffix for JSON output.

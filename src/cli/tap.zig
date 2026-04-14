@@ -9,6 +9,34 @@ const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
+pub const TapNameError = error{InvalidTapName};
+
+/// Reject malformed `user/repo` inputs before they're formatted into a
+/// GitHub URL or stored as a tap name. No security boundary (no shell
+/// expansion, no path traversal reaches disk) — this is just an early,
+/// clear "bad input" rather than a confusing failure later.
+///
+/// Rules: exactly one `/`, each side 1–64 chars of [A-Za-z0-9._-], and
+/// neither side starts with `.` (rules out `..` traversal and hidden
+/// components).
+pub fn validateTapName(name: []const u8) TapNameError!void {
+    const slash = std.mem.indexOfScalar(u8, name, '/') orelse return TapNameError.InvalidTapName;
+    if (std.mem.indexOfScalarPos(u8, name, slash + 1, '/') != null) return TapNameError.InvalidTapName;
+    try validateComponent(name[0..slash]);
+    try validateComponent(name[slash + 1 ..]);
+}
+
+fn validateComponent(part: []const u8) TapNameError!void {
+    if (part.len == 0 or part.len > 64) return TapNameError.InvalidTapName;
+    if (part[0] == '.') return TapNameError.InvalidTapName;
+    for (part) |ch| {
+        switch (ch) {
+            'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '-' => {},
+            else => return TapNameError.InvalidTapName,
+        }
+    }
+}
+
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "tap")) return;
 
@@ -57,17 +85,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Simple approach: "mt tap user/repo" adds, "mt untap user/repo" also comes here
     // We'll just add the tap
-    var url_buf: [256]u8 = undefined;
+    validateTapName(name) catch {
+        output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{name});
+        return;
+    };
 
-    // Parse user/repo format
-    if (std.mem.indexOfScalar(u8, name, '/')) |_| {
-        const url = std.fmt.bufPrint(&url_buf, "https://github.com/{s}", .{name}) catch return;
-        tap_mod.add(&db, name, url) catch {
-            output.err("Failed to add tap {s}", .{name});
-            return;
-        };
-        output.info("Tapped {s}", .{name});
-    } else {
-        output.err("Invalid tap format. Use: mt tap user/repo", .{});
-    }
+    var url_buf: [256]u8 = undefined;
+    const url = std.fmt.bufPrint(&url_buf, "https://github.com/{s}", .{name}) catch return;
+    tap_mod.add(&db, name, url) catch {
+        output.err("Failed to add tap {s}", .{name});
+        return;
+    };
+    output.info("Tapped {s}", .{name});
 }
