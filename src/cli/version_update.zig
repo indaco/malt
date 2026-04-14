@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const client_mod = @import("../net/client.zig");
+const archive = @import("../fs/archive.zig");
 const output = @import("../ui/output.zig");
 
 const CURRENT_VERSION = @import("../version.zig").value;
@@ -40,17 +41,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer parsed.deinit();
 
-    const obj = parsed.value.object;
-    const tag_val = obj.get("tag_name") orelse {
-        output.err("No tag_name in release", .{});
-        return;
-    };
-    const tag = switch (tag_val) {
-        .string => |s| s,
+    const obj = switch (parsed.value) {
+        .object => |o| o,
         else => {
-            output.err("Invalid tag_name", .{});
+            output.err("Release payload was not a JSON object", .{});
             return;
         },
+    };
+    const tag = strField(obj, "tag_name") orelse {
+        output.err("No tag_name in release", .{});
+        return;
     };
 
     // Strip leading "v" from tag
@@ -68,9 +68,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    // Find the right asset for this platform
+    // Find the right asset for this platform.
     const arch_str = if (builtin.cpu.arch == .aarch64) "arm64" else "x86_64";
-    const os_str = "Darwin";
 
     const assets_val = obj.get("assets") orelse {
         output.err("No assets in release", .{});
@@ -84,35 +83,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         },
     };
 
-    var download_url: ?[]const u8 = null;
-    for (assets.items) |asset| {
-        switch (asset) {
-            .object => |asset_obj| {
-                const name_val = asset_obj.get("name") orelse continue;
-                const asset_name = switch (name_val) {
-                    .string => |s| s,
-                    else => continue,
-                };
-
-                // Look for a matching binary (e.g., malt_0.2.0_Darwin_arm64.tar.gz)
-                if (std.mem.indexOf(u8, asset_name, os_str) != null and
-                    std.mem.indexOf(u8, asset_name, arch_str) != null and
-                    std.mem.endsWith(u8, asset_name, ".tar.gz"))
-                {
-                    const url_val = asset_obj.get("browser_download_url") orelse continue;
-                    download_url = switch (url_val) {
-                        .string => |s| s,
-                        else => continue,
-                    };
-                    break;
-                }
-            },
-            else => continue,
-        }
-    }
-
-    const url = download_url orelse {
-        output.err("No matching binary found for {s} {s}", .{ os_str, arch_str });
+    const url = pickAssetUrl(assets, arch_str) orelse {
+        output.err("No matching binary found for darwin {s}", .{arch_str});
         return;
     };
 
@@ -153,29 +125,32 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer std.fs.deleteTreeAbsolute(tmp_dir) catch {};
 
-    const archive = @import("../fs/archive.zig");
-    archive.extractTarXzFile(tmp_path, tmp_dir) catch {
-        // Try tar.gz extraction via system tar as fallback
-        const argv = [_][]const u8{ "tar", "xf", tmp_path, "-C", tmp_dir };
-        var child = std.process.Child.init(&argv, std.heap.page_allocator);
-        child.spawn() catch {
-            output.err("Failed to extract update", .{});
-            return;
-        };
-        _ = child.wait() catch {};
+    archive.extractTarGz(tmp_path, tmp_dir) catch {
+        output.err("Failed to extract update", .{});
+        return;
     };
 
-    // Find the mt binary in the extracted contents
-    var mt_buf: [256]u8 = undefined;
-    const new_binary = std.fmt.bufPrint(&mt_buf, "{s}/mt", .{tmp_dir}) catch return;
-
-    std.fs.accessAbsolute(new_binary, .{}) catch {
-        output.err("Binary 'mt' not found in release archive", .{});
+    // Locate the replacement binary inside the extracted tree.
+    //
+    // GoReleaser wraps the binary in a versioned directory (e.g.
+    // `malt_0.3.1_darwin_all/malt`) and emits it under the long name
+    // `malt`, regardless of whether the user invoked `malt` or `mt`.
+    // Walk the extracted tree and take the first file whose basename
+    // matches either alias so both install layouts keep working.
+    //
+    // Separate stack buffers for `new_binary` and `self_exe` — the
+    // previous code shared one, and `selfExePath` overwrites the
+    // buffer, making the eventual copy a no-op `copy(self_exe,
+    // self_exe)` that silently failed to replace the binary.
+    var new_binary_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const new_binary = findReleaseBinary(allocator, tmp_dir, &new_binary_buf) orelse {
+        output.err("Binary 'malt' not found in release archive", .{});
         return;
     };
 
     // Find where the current binary lives
-    const self_exe = std.fs.selfExePath(&mt_buf) catch {
+    var self_exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const self_exe = std.fs.selfExePath(&self_exe_buf) catch {
         output.err("Cannot determine current binary path", .{});
         return;
     };
@@ -197,4 +172,87 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     output.info("Updated to {s}", .{latest});
+}
+
+/// Pick the right release asset download URL for the running machine.
+///
+/// The published tarballs follow GoReleaser's default naming scheme,
+/// which the old matcher got wrong on two axes: case (we're given
+/// `Darwin`, GoReleaser emits `darwin`) and architecture (the release
+/// is a single universal binary suffixed `_all`, not `_arm64`/`_x86_64`).
+///
+/// Accept both the traditional per-arch suffix and the universal
+/// `all` build, lowercasing the comparison so future releases that
+/// tweak the template don't silently break self-update again. Exposed
+/// so tests can pin the matching rules without spinning up an HTTP
+/// fixture.
+pub fn pickAssetUrl(assets: std.json.Array, arch_str: []const u8) ?[]const u8 {
+    for (assets.items) |asset| {
+        const obj = switch (asset) {
+            .object => |o| o,
+            else => continue,
+        };
+        const name = strField(obj, "name") orelse continue;
+        if (!matchesAssetName(name, arch_str)) continue;
+        return strField(obj, "browser_download_url");
+    }
+    return null;
+}
+
+/// True when `name` is a darwin tarball that covers the running arch
+/// (either a per-arch binary or a universal one). ASCII lowercasing
+/// matches GoReleaser's own normalization; package managers don't
+/// publish mixed-case release artifact names in practice.
+pub fn matchesAssetName(name: []const u8, arch_str: []const u8) bool {
+    if (!std.mem.endsWith(u8, name, ".tar.gz")) return false;
+
+    var lower_buf: [256]u8 = undefined;
+    if (name.len > lower_buf.len) return false;
+    const lower = std.ascii.lowerString(lower_buf[0..name.len], name);
+
+    if (std.mem.indexOf(u8, lower, "darwin") == null) return false;
+    if (std.mem.indexOf(u8, lower, arch_str) != null) return true;
+    // Universal binary covers every darwin arch.
+    if (std.mem.indexOf(u8, lower, "_all") != null) return true;
+    if (std.mem.indexOf(u8, lower, "universal") != null) return true;
+    return false;
+}
+
+/// Walk the extracted release tree and return the absolute path to
+/// the first file named `malt` or `mt`. `out_buf` is filled with the
+/// full path and a slice into it is returned; the caller keeps
+/// ownership of the buffer.
+///
+/// `allocator` is borrowed for `Dir.walk`'s internal path-tracking
+/// arena only — nothing produced by this function outlives the call.
+/// Returns null if the binary isn't present, which means the release
+/// packaging changed shape; callers should surface a clear error
+/// rather than silently no-op.
+pub fn findReleaseBinary(
+    allocator: std.mem.Allocator,
+    tmp_dir: []const u8,
+    out_buf: []u8,
+) ?[]const u8 {
+    var dir = std.fs.openDirAbsolute(tmp_dir, .{ .iterate = true }) catch return null;
+    defer dir.close();
+
+    var walker = dir.walk(allocator) catch return null;
+    defer walker.deinit();
+
+    while (walker.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const base = std.fs.path.basename(entry.path);
+        if (!std.mem.eql(u8, base, "malt") and !std.mem.eql(u8, base, "mt")) continue;
+        const full = std.fmt.bufPrint(out_buf, "{s}/{s}", .{ tmp_dir, entry.path }) catch return null;
+        return full;
+    }
+    return null;
+}
+
+fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const v = obj.get(key) orelse return null;
+    return switch (v) {
+        .string => |s| s,
+        else => null,
+    };
 }
