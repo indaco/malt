@@ -46,6 +46,39 @@ pub fn extractTarZst(input: *std.Io.Reader, output_dir: std.fs.Dir) !void {
     try std.tar.pipeToFileSystem(output_dir, &decompressor.reader, .{});
 }
 
+/// Extract a .zip archive to `dest_dir`. Used by the tap-install path
+/// for formulae whose upstream release artifacts are zip-packed (e.g.
+/// every HashiCorp tool, and a handful of other popular user taps).
+/// Shells out to the system `unzip` — always present on macOS, and
+/// its behavior on binary-only archives is boring and well understood.
+/// Validates the PKZip magic `PK\x03\x04` up front so an HTML error
+/// page saved as .zip gives a clean error instead of propagating up
+/// from unzip's own output.
+pub fn extractZip(archive_path: []const u8, dest_dir: []const u8) !void {
+    const archive_file = std.fs.openFileAbsolute(archive_path, .{}) catch return error.ExtractionFailed;
+    var magic: [4]u8 = undefined;
+    const n = archive_file.readAll(&magic) catch {
+        archive_file.close();
+        return error.ExtractionFailed;
+    };
+    archive_file.close();
+    if (n < 4 or magic[0] != 'P' or magic[1] != 'K' or magic[2] != 0x03 or magic[3] != 0x04) {
+        return error.ExtractionFailed;
+    }
+
+    // -q: quiet, -o: overwrite without prompting, -d: destination dir.
+    const argv = [_][]const u8{ "unzip", "-q", "-o", archive_path, "-d", dest_dir };
+    var child = std.process.Child.init(&argv, child_allocator);
+    child.spawn() catch return error.ExtractionFailed;
+    const term = child.wait() catch return error.ExtractionFailed;
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) return error.ExtractionFailed;
+        },
+        else => return error.ExtractionFailed,
+    }
+}
+
 /// Extracts a tar.xz archive file to a directory using the system `tar` command.
 /// Zig 0.15's xz decompressor uses the legacy I/O API which doesn't integrate
 /// with std.tar, so we shell out to the system tar (always available on macOS).

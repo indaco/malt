@@ -108,3 +108,67 @@ test "extractTarGz rejects a missing archive" {
 
     try testing.expectError(error.ExtractionFailed, archive.extractTarGz(base ++ "/nope.tar.gz", base));
 }
+
+fn runCmd(argv: []const []const u8) !void {
+    var child = std.process.Child.init(argv, std.heap.c_allocator);
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| if (code != 0) return error.CmdFailed,
+        else => return error.CmdFailed,
+    }
+}
+
+test "extractZip decompresses a real zip produced by system zip" {
+    const base = "/tmp/malt_archive_zip_ok";
+    var dir = try resetDir(base);
+    defer dir.close();
+    defer std.fs.deleteTreeAbsolute(base) catch {};
+
+    // Build a payload mirroring what a HashiCorp-style release contains:
+    // a single executable at the archive root, no nested directory. The
+    // binary-finding walker in the tap-install path depends on exactly
+    // this shape.
+    {
+        const f = try dir.createFile("terraform", .{ .mode = 0o755 });
+        try f.writeAll("#!/bin/sh\necho hi\n");
+        f.close();
+    }
+    const archive_path = base ++ "/payload.zip";
+    try runCmd(&.{ "zip", "-j", "-q", archive_path, base ++ "/terraform" });
+    try std.fs.deleteFileAbsolute(base ++ "/terraform");
+
+    try archive.extractZip(archive_path, base);
+
+    const f = try dir.openFile("terraform", .{});
+    defer f.close();
+    var buf: [32]u8 = undefined;
+    const n = try f.readAll(&buf);
+    try testing.expect(n > 0);
+    try testing.expect(std.mem.startsWith(u8, buf[0..n], "#!/bin/sh"));
+}
+
+test "extractZip rejects a non-zip archive" {
+    const base = "/tmp/malt_archive_zip_badmagic";
+    var dir = try resetDir(base);
+    defer dir.close();
+    defer std.fs.deleteTreeAbsolute(base) catch {};
+
+    const archive_path = base ++ "/payload.zip";
+    const f = try std.fs.createFileAbsolute(archive_path, .{});
+    try f.writeAll("NOPE, not a zip");
+    f.close();
+
+    try testing.expectError(error.ExtractionFailed, archive.extractZip(archive_path, base));
+}
+
+test "extractZip rejects a missing archive" {
+    const base = "/tmp/malt_archive_zip_missing";
+    var dir = try resetDir(base);
+    defer dir.close();
+    defer std.fs.deleteTreeAbsolute(base) catch {};
+
+    try testing.expectError(error.ExtractionFailed, archive.extractZip(base ++ "/nope.zip", base));
+}
