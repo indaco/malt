@@ -203,4 +203,10 @@ pub fn build(b: *std.Build) void {
 
     const install_universal = b.addInstallBinFile(universal_output, "malt");
     universal_step.dependOn(&install_universal.step);
+
+    // Ship the `mt` alias alongside the universal binary so the
+    // release tarball contains both names — matches the default
+    // `zig build` install layout and what the README promises.
+    const install_universal_mt = b.addInstallBinFile(universal_output, "mt");
+    universal_step.dependOn(&install_universal_mt.step);
 }
