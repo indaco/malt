@@ -36,6 +36,7 @@ fn helpFor(command: []const u8) []const u8 {
         .{ "backup", backup_help },
         .{ "restore", restore_help },
         .{ "purge", purge_help },
+        .{ "uses", uses_help },
     });
     return map.get(command) orelse "No help available.\n";
 }
@@ -308,5 +309,24 @@ const restore_help =
     \\
     \\Example:
     \\  malt restore malt-backup-2026-04-10T14-32-05.txt
+    \\
+;
+
+const uses_help =
+    \\Usage: malt uses <formula> [flags]
+    \\
+    \\Show installed packages that depend on <formula>. By default only
+    \\direct dependents are shown — pass --recursive for the transitive
+    \\closure.
+    \\
+    \\Flags:
+    \\  --recursive, -r   Include transitive dependents
+    \\  --json            Output as JSON
+    \\  --quiet, -q       Suppress status messages
+    \\
+    \\Examples:
+    \\  malt uses openssl@3
+    \\  malt uses --recursive icu4c@78
+    \\  malt --json uses node@20
     \\
 ;

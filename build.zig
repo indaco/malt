@@ -100,6 +100,7 @@ pub fn build(b: *std.Build) void {
         "tests/list_test.zig",
         "tests/search_test.zig",
         "tests/info_test.zig",
+        "tests/uses_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");
