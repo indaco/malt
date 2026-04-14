@@ -8,97 +8,347 @@ const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
+const formula_mod = @import("../core/formula.zig");
 const cask_mod = @import("../core/cask.zig");
 const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "info")) return;
 
-    // Parse flags and positional args
-    var json_mode = false;
+    // Parse flags and positional args. Note: `--json` and `--quiet`
+    // are consumed by the global arg parser in `main.zig` and stored
+    // on the `output` module — they never appear in `args` here,
+    // which is why this loop does not scan for them.
     var force_cask = false;
     var force_formula = false;
     var pkg_name: ?[]const u8 = null;
 
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--json")) {
-            json_mode = true;
-        } else if (std.mem.eql(u8, arg, "--cask")) {
+        if (std.mem.eql(u8, arg, "--cask")) {
             force_cask = true;
         } else if (std.mem.eql(u8, arg, "--formula")) {
             force_formula = true;
-        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
-            output.setQuiet(true);
         } else if (arg.len > 0 and arg[0] != '-') {
             if (pkg_name == null) pkg_name = arg;
         }
     }
+
+    const json_mode = output.isJson();
 
     const name = pkg_name orelse {
         output.err("Usage: mt info <package>", .{});
         return;
     };
 
-    // Open DB
+    // Open DB (optional). On a fresh machine the prefix's `db/` dir
+    // may not exist yet — SQLite's OPEN_CREATE creates the file but
+    // not intermediate directories, so the first-ever open fails.
+    // `info` is purely informational: if we can't read local state
+    // we fall through to the "not installed" output rather than
+    // erroring, which matches what a populated DB would report for
+    // a package that has never been installed.
     const prefix = atomic.maltPrefix();
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return;
-    var db = sqlite.Database.open(db_path) catch {
-        output.err("Failed to open database", .{});
-        return;
-    };
-    defer db.close();
-    schema.initSchema(&db) catch return;
+    var db_opt: ?sqlite.Database = openDb(prefix);
+    defer if (db_opt) |*d| d.close();
 
-    // Check formula first (unless --cask)
-    var formula_installed = false;
-    if (!force_cask) {
-        var stmt = db.prepare(
-            "SELECT name, version, tap, cellar_path, pinned, installed_at FROM kegs WHERE name = ?1 LIMIT 1;",
-        ) catch return;
-        defer stmt.finalize();
-        stmt.bindText(1, name) catch return;
-
-        formula_installed = stmt.step() catch false;
-
-        if (formula_installed) {
-            const stdout = std.fs.File.stdout();
-            if (json_mode) {
-                try writeJsonInfo(allocator, &db, name, true, &stmt, stdout);
-            } else {
-                try writeHumanInfo(name, true, &stmt, prefix, stdout);
-            }
-            return;
-        }
-    }
-
-    // Check cask (unless --formula)
-    if (!force_formula) {
-        const cask_installed = cask_mod.lookupInstalled(&db, name);
-        if (cask_installed != null) {
-            const stdout = std.fs.File.stdout();
-            if (json_mode) {
-                try writeJsonCaskInfo(allocator, &db, name, stdout);
-            } else {
-                try writeHumanCaskInfo(&db, name, stdout);
-            }
-            return;
-        }
-    }
-
-    // Not installed as either
     const stdout = std.fs.File.stdout();
-    if (json_mode) {
-        var stmt = db.prepare(
-            "SELECT name, version, tap, cellar_path, pinned, installed_at FROM kegs WHERE name = ?1 LIMIT 1;",
-        ) catch return;
-        defer stmt.finalize();
-        try writeJsonInfo(allocator, &db, name, false, &stmt, stdout);
-    } else {
-        var buf: [4096]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "{s}: not installed\n", .{name}) catch return;
-        stdout.writeAll(line) catch {};
+
+    if (db_opt) |*db| {
+        schema.initSchema(db) catch {};
+        if (!force_cask and try emitInstalledFormula(allocator, db, name, prefix, stdout, json_mode)) return;
+        if (!force_formula and try emitInstalledCask(allocator, db, name, stdout, json_mode)) return;
     }
+
+    // Not locally installed — fall back to Homebrew API metadata so
+    // the output matches `brew info`'s discovery UX (description,
+    // homepage, version, dependencies) instead of just "not
+    // installed". We only reach this path when the local DB lookup
+    // missed or the DB was absent entirely.
+    if (try emitApiMetadata(allocator, name, stdout, json_mode, force_cask, force_formula)) return;
+
+    try emitNotFound(allocator, name, stdout, json_mode);
+}
+
+/// If `name` is an installed formula, write its info row and return
+/// true (caller stops). Returns false when the lookup misses so the
+/// caller can try the cask path.
+fn emitInstalledFormula(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    name: []const u8,
+    prefix: []const u8,
+    stdout: std.fs.File,
+    json_mode: bool,
+) !bool {
+    var stmt = db.prepare(
+        "SELECT name, version, tap, cellar_path, pinned, installed_at FROM kegs WHERE name = ?1 LIMIT 1;",
+    ) catch return false;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return false;
+
+    const installed = stmt.step() catch false;
+    if (!installed) return false;
+
+    if (json_mode) {
+        try writeJsonInfo(allocator, db, name, true, &stmt, stdout);
+    } else {
+        try writeHumanInfo(name, true, &stmt, prefix, stdout);
+    }
+    return true;
+}
+
+/// Cask counterpart to `emitInstalledFormula`.
+fn emitInstalledCask(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    name: []const u8,
+    stdout: std.fs.File,
+    json_mode: bool,
+) !bool {
+    if (cask_mod.lookupInstalled(db, name) == null) return false;
+    if (json_mode) {
+        try writeJsonCaskInfo(allocator, db, name, stdout);
+    } else {
+        try writeHumanCaskInfo(db, name, stdout);
+    }
+    return true;
+}
+
+/// Terminal output for a package the user asked about that is
+/// neither installed locally nor known to the Homebrew API.
+fn emitNotFound(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    stdout: std.fs.File,
+    json_mode: bool,
+) !void {
+    if (json_mode) {
+        try writeJsonNotInstalled(allocator, name, stdout);
+        return;
+    }
+    var buf: [4096]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "{s}: not installed\n", .{name}) catch return;
+    stdout.writeAll(line) catch {};
+}
+
+/// Fetch Homebrew API metadata for a not-locally-installed package and
+/// emit it. Tries formula first (unless `--cask`), then cask (unless
+/// `--formula`). Returns true on any hit so the caller knows to stop.
+/// Silently returns false on network / parse failures — offline machines
+/// should still fall through cleanly to the "not installed" shape.
+fn emitApiMetadata(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    stdout: std.fs.File,
+    json_mode: bool,
+    force_cask: bool,
+    force_formula: bool,
+) !bool {
+    const cache_dir = atomic.maltCacheDir(allocator) catch return false;
+    defer allocator.free(cache_dir);
+
+    var http = client_mod.HttpClient.init(allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+
+    if (!force_cask) {
+        if (try emitApiFormula(allocator, &api, name, stdout, json_mode)) return true;
+    }
+    if (!force_formula) {
+        if (try emitApiCask(allocator, &api, name, stdout, json_mode)) return true;
+    }
+    return false;
+}
+
+fn emitApiFormula(
+    allocator: std.mem.Allocator,
+    api: *api_mod.BrewApi,
+    name: []const u8,
+    stdout: std.fs.File,
+    json_mode: bool,
+) !bool {
+    const body = api.fetchFormula(name) catch return false;
+    defer allocator.free(body);
+
+    var f = formula_mod.parseFormula(allocator, body) catch return false;
+    defer f.deinit();
+
+    if (json_mode) try writeApiFormulaJson(allocator, &f, stdout) else try writeApiFormulaHuman(&f, stdout);
+    return true;
+}
+
+fn emitApiCask(
+    allocator: std.mem.Allocator,
+    api: *api_mod.BrewApi,
+    name: []const u8,
+    stdout: std.fs.File,
+    json_mode: bool,
+) !bool {
+    const body = api.fetchCask(name) catch return false;
+    defer allocator.free(body);
+
+    var c = cask_mod.parseCask(allocator, body) catch return false;
+    defer c.deinit();
+
+    if (json_mode) try writeApiCaskJson(allocator, &c, stdout) else try writeApiCaskHuman(&c, stdout);
+    return true;
+}
+
+fn writeApiFormulaHuman(f: *const formula_mod.Formula, stdout: std.fs.File) !void {
+    var buf: [4096]u8 = undefined;
+    try encodeApiFormulaHuman(stdout, &buf, f, output.isQuiet());
+}
+
+fn writeApiCaskHuman(c: *const cask_mod.Cask, stdout: std.fs.File) !void {
+    var buf: [4096]u8 = undefined;
+    try encodeApiCaskHuman(stdout, &buf, c, output.isQuiet());
+}
+
+fn writeApiFormulaJson(
+    allocator: std.mem.Allocator,
+    f: *const formula_mod.Formula,
+    stdout: std.fs.File,
+) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try encodeApiFormulaJson(buf.writer(allocator), f);
+    stdout.writeAll(buf.items) catch {};
+}
+
+fn writeApiCaskJson(
+    allocator: std.mem.Allocator,
+    c: *const cask_mod.Cask,
+    stdout: std.fs.File,
+) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try encodeApiCaskJson(buf.writer(allocator), c);
+    stdout.writeAll(buf.items) catch {};
+}
+
+// --- pure encoders (testable) -----------------------------------------------
+//
+// The four `encode*` fns below are the isolated pieces that turn a
+// parsed `Formula` / `Cask` into bytes. They take any writer target
+// — `std.fs.File` in the CLI, `ArrayList` in tests — so the emission
+// shape (install hint wording, JSON keys, line order) can be asserted
+// without touching the filesystem.
+
+pub fn encodeApiFormulaHuman(
+    w: anytype,
+    scratch: []u8,
+    f: *const formula_mod.Formula,
+    quiet: bool,
+) !void {
+    try writeLine(w, scratch, "{s}: stable {s}\n", .{ f.name, f.version });
+    if (f.desc.len != 0) try writeLine(w, scratch, "{s}\n", .{f.desc});
+    if (f.homepage.len != 0) try writeLine(w, scratch, "{s}\n", .{f.homepage});
+    try encodeInstallHint(w, scratch, f.name, quiet);
+    if (f.tap.len != 0) try writeLine(w, scratch, "From: {s}\n", .{f.tap});
+    if (f.dependencies.len != 0) {
+        w.writeAll("Dependencies: ") catch {};
+        for (f.dependencies, 0..) |dep, i| {
+            if (i != 0) w.writeAll(", ") catch {};
+            w.writeAll(dep) catch {};
+        }
+        w.writeAll("\n") catch {};
+    }
+}
+
+pub fn encodeApiCaskHuman(
+    w: anytype,
+    scratch: []u8,
+    c: *const cask_mod.Cask,
+    quiet: bool,
+) !void {
+    try writeLine(w, scratch, "{s}: {s} (cask)\n", .{ c.token, c.version });
+    if (c.name.len != 0) try writeLine(w, scratch, "Name: {s}\n", .{c.name});
+    if (c.desc.len != 0) try writeLine(w, scratch, "{s}\n", .{c.desc});
+    if (c.homepage.len != 0) try writeLine(w, scratch, "{s}\n", .{c.homepage});
+    try encodeInstallHint(w, scratch, c.token, quiet);
+    if (c.url.len != 0) try writeLine(w, scratch, "URL: {s}\n", .{c.url});
+}
+
+pub fn encodeApiFormulaJson(w: anytype, f: *const formula_mod.Formula) !void {
+    try w.print(
+        "{{\"name\":\"{s}\",\"type\":\"formula\",\"installed\":false,\"version\":\"{s}\",\"desc\":\"{s}\",\"homepage\":\"{s}\",\"tap\":\"{s}\",\"dependencies\":[",
+        .{ f.name, f.version, f.desc, f.homepage, f.tap },
+    );
+    for (f.dependencies, 0..) |dep, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.print("\"{s}\"", .{dep});
+    }
+    try w.writeAll("]}\n");
+}
+
+pub fn encodeApiCaskJson(w: anytype, c: *const cask_mod.Cask) !void {
+    try w.print(
+        "{{\"name\":\"{s}\",\"type\":\"cask\",\"installed\":false,\"version\":\"{s}\",\"full_name\":\"{s}\",\"desc\":\"{s}\",\"homepage\":\"{s}\",\"url\":\"{s}\"}}\n",
+        .{ c.token, c.version, c.name, c.desc, c.homepage, c.url },
+    );
+}
+
+/// Emit the "Not installed" line and (unless `quiet`) a runnable
+/// install hint. Only triggered on the API-metadata path, where we
+/// know the package actually exists upstream — suggesting `malt
+/// install` for something the Homebrew API doesn't recognise would
+/// just lead the user in a loop. Both `malt` and its short alias
+/// `mt` are surfaced so readers of this line learn the alias exists
+/// without having to consult --help.
+pub fn encodeInstallHint(
+    w: anytype,
+    scratch: []u8,
+    name: []const u8,
+    quiet: bool,
+) !void {
+    if (quiet) {
+        try w.writeAll("Not installed\n");
+        return;
+    }
+    writeLine(
+        w,
+        scratch,
+        "Not installed. Run: malt install {s}  (or: mt install {s})\n",
+        .{ name, name },
+    ) catch {
+        try w.writeAll("Not installed\n");
+    };
+}
+
+/// Convenience: format a line into `scratch` and write it to `w`.
+/// Same safety profile as the existing `bufPrint` + `writeAll`
+/// pattern used elsewhere in this file — avoids duplicating the
+/// 4 KiB stack buffer at every call site.
+fn writeLine(w: anytype, scratch: []u8, comptime fmt: []const u8, args: anytype) !void {
+    const line = std.fmt.bufPrint(scratch, fmt, args) catch return;
+    try w.writeAll(line);
+}
+
+/// Open the malt database if present. Returns `null` for any failure
+/// (missing parent directory, permission error, corrupt file) so the
+/// caller can degrade to a stateless response instead of bailing.
+pub fn openDb(prefix: []const u8) ?sqlite.Database {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return null;
+    return sqlite.Database.open(db_path) catch null;
+}
+
+/// Minimal JSON shape for the "no installed record" case. Mirrors the
+/// `installed=false` branch of `writeJsonInfo` without needing a live
+/// sqlite statement — used when the DB is missing or the package has
+/// simply never been installed.
+fn writeJsonNotInstalled(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    stdout: std.fs.File,
+) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll("{\"name\":\"");
+    try w.writeAll(name);
+    try w.writeAll("\",\"type\":\"formula\",\"installed\":false}\n");
+    stdout.writeAll(buf.items) catch {};
 }
 
 fn writeHumanInfo(
