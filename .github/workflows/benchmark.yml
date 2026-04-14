@@ -125,7 +125,8 @@ jobs:
           # bottles under ~/.bru/ and ~/Library/Caches/bru/, outside the
           # wiped /tmp/bru prefix, so its "cold" numbers reflect warm
           # cache + materialise rather than a real network fetch. The
-          # matching footnote lives in README.md outside the markers.
+          # matching explanation lives in README.md's Methodology
+          # paragraph (outside the markers).
           cat > /tmp/cold_table.md << TABLE
           <!-- BENCH:COLD:START -->
           ### Cold Install

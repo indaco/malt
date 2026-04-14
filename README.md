@@ -743,7 +743,12 @@ malt trades a few ms against correctness and features that the lighter tools ski
 - **Ad-hoc codesign on arm64 (~15 ms/pkg)** — every Mach-O patched to rewrite `/opt/homebrew` → `MALT_PREFIX` is re-signed so `dyld` will load it.
 - **Global install lock + pre-link conflict check (~3 ms)** — `flock` on `db/malt.lock` + a symlink-tree walk refusing to overwrite another keg's files.
 
-**Methodology.** `BENCH_TRUE_COLD=1` wipes each tool's prefix between cold and warm runs, so "cold" really means "no bottle in the store." See [`scripts/bench.sh`](scripts/bench.sh). One caveat: bru keeps its download cache under `~/.bru/` and `~/Library/Caches/bru/`, outside the wiped prefix, so bru's cold numbers reflect warm cache + materialise rather than a real network fetch. bru's warm row is apples-to-apples.
+> [!NOTE]
+> **Methodology.**
+>
+> `BENCH_TRUE_COLD=1` wipes each tool's prefix between cold and warm runs, so "cold" really means "no bottle in the store." See [`scripts/bench.sh`](scripts/bench.sh).
+>
+> **bru caveat (cells marked `‡`).** bru keeps its download cache under `~/.bru/` and `~/Library/Caches/bru/`, outside the wiped prefix, so its cold numbers reflect warm cache + materialise rather than a real network fetch. bru's warm row is apples-to-apples.
 
 ---
 
