@@ -20,6 +20,7 @@ const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
 const ruby_sub = @import("../core/ruby_subprocess.zig");
+const tap_mod = @import("../core/tap.zig");
 const dsl = @import("../core/dsl/root.zig");
 const supervisor_mod = @import("../core/services/supervisor.zig");
 const plist_mod = @import("../core/services/plist.zig");
@@ -1491,15 +1492,7 @@ fn installTapFormula(
             return InstallError.CellarFailed;
         };
     } else {
-        var out_dir = std.fs.openDirAbsolute(cellar_path, .{}) catch return InstallError.CellarFailed;
-        defer out_dir.close();
-
-        const archive_file = std.fs.openFileAbsolute(tmp_archive, .{}) catch return InstallError.CellarFailed;
-        defer archive_file.close();
-
-        var read_buf: [8192]u8 = undefined;
-        var file_reader = archive_file.reader(&read_buf);
-        archive_mod.extractTarGz(&file_reader.interface, out_dir) catch {
+        archive_mod.extractTarGz(tmp_archive, cellar_path) catch {
             output.err("Failed to extract archive for {s}", .{parts.formula});
             return InstallError.CellarFailed;
         };
@@ -1559,6 +1552,13 @@ fn installTapFormula(
         _ = stmt.step() catch return InstallError.RecordFailed;
 
         keg_id = getLastInsertId(db) catch return InstallError.RecordFailed;
+
+        // Register the tap so `mt tap` lists it and `mt untap` can remove
+        // it. Homebrew auto-taps on install; we mirror that. INSERT OR
+        // IGNORE inside tap_mod.add keeps this idempotent.
+        var tap_url_buf: [256]u8 = undefined;
+        const tap_url = std.fmt.bufPrint(&tap_url_buf, "https://github.com/{s}", .{tap_name}) catch return InstallError.RecordFailed;
+        tap_mod.add(db, tap_name, tap_url) catch {};
     }
 
     linker.link(cellar_path, parts.formula, keg_id) catch {
