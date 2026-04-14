@@ -81,14 +81,25 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer cask.deinit(allocator);
 
     if (search_formula and search_cask) {
+        // malt's main allocator is an `ArenaAllocator` which is not
+        // safe to call concurrently — two threads racing on the same
+        // arena can see misaligned returns and corrupted free lists
+        // (observed on release builds as "thread panic: incorrect
+        // alignment" inside `std.http.Client.Connection.Tls.create`).
+        // Wrap it with a mutex-guarded allocator for the parallel
+        // section; results flow back to the caller's allocator via
+        // `dupe`, so the safe wrapper can go out of scope after join.
+        var safe: std.heap.ThreadSafeAllocator = .{ .child_allocator = allocator };
+        const shared = safe.allocator();
+
         var cask_task: KindTask = .{
-            .allocator = allocator,
+            .allocator = shared,
             .cache_dir = cache_dir,
             .kind = .cask,
             .query = search_query,
         };
         const worker = std.Thread.spawn(.{}, KindTask.run, .{&cask_task}) catch null;
-        formula = runKindIsolated(allocator, cache_dir, .formula, search_query);
+        formula = runKindIsolated(shared, cache_dir, .formula, search_query);
         if (worker) |w| {
             w.join();
             cask = cask_task.result;
