@@ -9,6 +9,22 @@ const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const help = @import("help.zig");
 
+/// Results for a single kind (formula or cask) of a search query.
+///
+/// `index` and `matches` are separately owned because `matches` elements
+/// are slices *into* `index` — freeing `index` invalidates them. Callers
+/// must deinit via `deinit` to release both in the right order.
+const KindResults = struct {
+    exact: bool = false,
+    index: ?[]const u8 = null,
+    matches: []const []const u8 = &.{},
+
+    fn deinit(self: *KindResults, allocator: std.mem.Allocator) void {
+        if (self.matches.len != 0) allocator.free(self.matches);
+        if (self.index) |b| allocator.free(b);
+    }
+};
+
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "search")) return;
 
@@ -53,59 +69,111 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer http.deinit();
     var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
 
+    var formula = if (search_formula) runKind(allocator, &api, .formula, search_query) else KindResults{};
+    defer formula.deinit(allocator);
+    var cask = if (search_cask) runKind(allocator, &api, .cask, search_query) else KindResults{};
+    defer cask.deinit(allocator);
+
     const stdout = std.fs.File.stdout();
-
-    // Track whether anything was found (for "not found" messages)
-    var found_formula = false;
-    var found_cask = false;
-
-    // Search formulas/casks via the cache-aware existence probe. On a warm
-    // cache this is just a `statFile` — the previous `fetchFormula` path
-    // always opened and read the (potentially 40 KiB) cached JSON body
-    // even though we only needed to know whether the key existed.
-    if (search_formula) {
-        found_formula = api.exists(search_query, .formula) catch false;
-    }
-
-    if (search_cask) {
-        found_cask = api.exists(search_query, .cask) catch false;
-    }
-
-    // Output results
     if (json_mode) {
-        var out_buf: std.ArrayList(u8) = .empty;
-        defer out_buf.deinit(allocator);
-        const w = out_buf.writer(allocator);
-
-        try w.writeAll("{");
-        if (search_formula) {
-            try w.writeAll("\"formulae\":[");
-            if (found_formula) {
-                try w.writeAll("{\"name\":\"");
-                try w.writeAll(search_query);
-                try w.writeAll("\"}");
-            }
-            try w.writeAll("]");
-        }
-        if (search_cask) {
-            if (search_formula) try w.writeAll(",");
-            try w.writeAll("\"casks\":[");
-            if (found_cask) {
-                try w.writeAll("{\"token\":\"");
-                try w.writeAll(search_query);
-                try w.writeAll("\"}");
-            }
-            try w.writeAll("]");
-        }
-        try w.writeAll("}\n");
-        stdout.writeAll(out_buf.items) catch {};
+        try emitJson(allocator, stdout, search_formula, search_cask, formula, cask, search_query);
     } else {
-        if (found_formula) writeResult(stdout, search_query, "formula");
-        if (found_cask) writeResult(stdout, search_query, "cask");
+        emitHuman(stdout, formula, cask, search_query);
+    }
+}
 
-        if (!found_formula and !found_cask and !output.isQuiet()) {
-            output.info("No results found for \"{s}\"", .{search_query});
-        }
+/// Run the exact + substring search for one kind. Errors from the API
+/// are swallowed into empty results — `mt search` is best-effort and a
+/// transient network failure should not abort the whole command.
+fn runKind(
+    allocator: std.mem.Allocator,
+    api: *api_mod.BrewApi,
+    kind: api_mod.BrewApi.Kind,
+    query: []const u8,
+) KindResults {
+    var r: KindResults = .{};
+    r.exact = api.exists(query, kind) catch false;
+    if (api.fetchNamesIndex(kind)) |idx| {
+        r.index = idx;
+        r.matches = api_mod.findNameMatches(allocator, idx, query) catch &.{};
+    } else |_| {}
+    return r;
+}
+
+fn emitHuman(
+    stdout: std.fs.File,
+    formula: KindResults,
+    cask: KindResults,
+    query: []const u8,
+) void {
+    writeHuman(stdout, "formula", formula, query);
+    writeHuman(stdout, "cask", cask, query);
+
+    const any = formula.exact or cask.exact or
+        formula.matches.len != 0 or cask.matches.len != 0;
+    if (!any and !output.isQuiet()) {
+        output.info("No results found for \"{s}\"", .{query});
+    }
+}
+
+/// Write substring matches for one kind, with the exact match (if any)
+/// pinned to the top and deduped against the substring list. The index
+/// may not yet include a brand-new formula the API already serves, so
+/// relying on substring membership alone to surface exact matches would
+/// under-report on the day of a new release.
+fn writeHuman(
+    stdout: std.fs.File,
+    kind: []const u8,
+    r: KindResults,
+    query: []const u8,
+) void {
+    if (r.exact) writeResult(stdout, query, kind);
+    for (r.matches) |m| {
+        if (r.exact and std.mem.eql(u8, m, query)) continue;
+        writeResult(stdout, m, kind);
+    }
+}
+
+fn emitJson(
+    allocator: std.mem.Allocator,
+    stdout: std.fs.File,
+    search_formula: bool,
+    search_cask: bool,
+    formula: KindResults,
+    cask: KindResults,
+    query: []const u8,
+) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+
+    try w.writeAll("{");
+    if (search_formula) {
+        try w.writeAll("\"formulae\":[");
+        try writeJson(w, "name", formula, query);
+        try w.writeAll("]");
+    }
+    if (search_cask) {
+        if (search_formula) try w.writeAll(",");
+        try w.writeAll("\"casks\":[");
+        try writeJson(w, "token", cask, query);
+        try w.writeAll("]");
+    }
+    try w.writeAll("}\n");
+    stdout.writeAll(buf.items) catch {};
+}
+
+fn writeJson(w: anytype, field: []const u8, r: KindResults, query: []const u8) !void {
+    var first = true;
+    if (r.exact) {
+        try w.print("{{\"{s}\":\"{s}\"}}", .{ field, query });
+        first = false;
+    }
+    for (r.matches) |m| {
+        if (r.exact and std.mem.eql(u8, m, query)) continue;
+        if (!first) try w.writeAll(",");
+        try w.print("{{\"{s}\":\"{s}\"}}", .{ field, m });
+        first = false;
     }
 }
 

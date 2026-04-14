@@ -7,6 +7,11 @@ const client_mod = @import("client.zig");
 const BASE_URL = "https://formulae.brew.sh/api";
 const CACHE_TTL_SECS: i64 = 300; // 5 minutes
 
+/// Names-index TTL. The full Homebrew name list changes on the order of days
+/// (new formulae merged, tokens renamed), so a 24 h window avoids burning
+/// ~40 MiB of fetch per search while still picking up changes within a day.
+pub const INDEX_TTL_SECS: i64 = 24 * 60 * 60;
+
 pub const ApiError = error{
     NotFound,
     ApiUnreachable,
@@ -27,6 +32,89 @@ pub fn validateName(name: []const u8) ApiError!void {
             else => return ApiError.InvalidName,
         }
     }
+}
+
+/// Parse a Homebrew formula.json / cask.json body and emit a newline-
+/// delimited list of names (formulae) or tokens (casks). The caller owns
+/// the returned bytes. Uses `ignore_unknown_fields` so the parser skips
+/// the megabytes of metadata we don't need — only the name/token string
+/// per entry is retained.
+pub fn extractNames(
+    allocator: std.mem.Allocator,
+    kind: BrewApi.Kind,
+    json_body: []const u8,
+) ![]const u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    switch (kind) {
+        .formula => {
+            const Entry = struct { name: []const u8 };
+            const parsed = try std.json.parseFromSliceLeaky(
+                []Entry,
+                a,
+                json_body,
+                .{ .ignore_unknown_fields = true },
+            );
+            for (parsed) |e| {
+                if (e.name.len == 0) continue;
+                try out.appendSlice(allocator, e.name);
+                try out.append(allocator, '\n');
+            }
+        },
+        .cask => {
+            const Entry = struct { token: []const u8 };
+            const parsed = try std.json.parseFromSliceLeaky(
+                []Entry,
+                a,
+                json_body,
+                .{ .ignore_unknown_fields = true },
+            );
+            for (parsed) |e| {
+                if (e.token.len == 0) continue;
+                try out.appendSlice(allocator, e.token);
+                try out.append(allocator, '\n');
+            }
+        },
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+/// Case-insensitive substring scan over a newline-delimited names index.
+/// Returns a list of slices into `index` (caller-owned container, elements
+/// are borrowed — caller must keep `index` alive for their lifetime).
+///
+/// Matches brew's `search <term>` UX: a single substring test per entry,
+/// no ranking. Queries are lowercased once, the index once, and compared
+/// with `indexOf`. For a ~200 KiB combined index this is well under 1 ms.
+pub fn findNameMatches(
+    allocator: std.mem.Allocator,
+    index: []const u8,
+    query: []const u8,
+) ![][]const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    // Pre-lowercase the query once. Names from the Homebrew index are
+    // already lowercase by convention, so the scan is effectively
+    // case-insensitive without an extra transform per candidate.
+    var qbuf: [128]u8 = undefined;
+    if (query.len == 0 or query.len > qbuf.len) return out.toOwnedSlice(allocator);
+    const qlower = std.ascii.lowerString(qbuf[0..query.len], query);
+
+    var it = std.mem.splitScalar(u8, index, '\n');
+    while (it.next()) |name| {
+        if (name.len == 0) continue;
+        if (std.mem.indexOf(u8, name, qlower) != null) {
+            try out.append(allocator, name);
+        }
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 pub const BrewApi = struct {
@@ -100,6 +188,75 @@ pub const BrewApi = struct {
         const now = std.time.timestamp();
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s));
         return now - mtime_secs <= CACHE_TTL_SECS;
+    }
+
+    /// Fetch the newline-delimited names index for all formulae or casks.
+    /// Caller-owned bytes. Backed by a 24 h on-disk cache: the one-time
+    /// parse of the ~28 MiB / ~14 MiB Homebrew JSON dump produces a
+    /// ~130 KiB / ~70 KiB plain-text list, which substring search can
+    /// then linear-scan in well under 1 ms.
+    pub fn fetchNamesIndex(self: *BrewApi, kind: Kind) ApiError![]const u8 {
+        const key: []const u8 = switch (kind) {
+            .formula => "formula",
+            .cask => "cask",
+        };
+        if (self.readNamesIndex(key)) |cached| return cached;
+
+        const url: []const u8 = switch (kind) {
+            .formula => BASE_URL ++ "/formula.json",
+            .cask => BASE_URL ++ "/cask.json",
+        };
+        var resp = self.http.get(url) catch return ApiError.ApiUnreachable;
+        defer resp.deinit();
+        if (resp.status != 200) return ApiError.ApiUnreachable;
+
+        const index = extractNames(self.allocator, kind, resp.body) catch |e| switch (e) {
+            error.OutOfMemory => return ApiError.OutOfMemory,
+            else => return ApiError.InvalidResponse,
+        };
+        self.writeNamesIndex(key, index);
+        return index;
+    }
+
+    /// Return the cached names index for `key` if fresh, else null.
+    fn readNamesIndex(self: *BrewApi, key: []const u8) ?[]const u8 {
+        var path_buf: [512]u8 = undefined;
+        const p = std.fmt.bufPrint(&path_buf, "{s}/api/names_{s}.txt", .{ self.cache_dir, key }) catch return null;
+
+        const stat = std.fs.cwd().statFile(p) catch return null;
+        const now = std.time.timestamp();
+        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s));
+        if (now - mtime_secs > INDEX_TTL_SECS) return null;
+
+        const file = std.fs.cwd().openFile(p, .{}) catch return null;
+        defer file.close();
+        const s = file.stat() catch return null;
+        const buf = self.allocator.alloc(u8, s.size) catch return null;
+        const n = file.readAll(buf) catch {
+            self.allocator.free(buf);
+            return null;
+        };
+        if (n < buf.len) {
+            self.allocator.free(buf);
+            return null;
+        }
+        return buf;
+    }
+
+    fn writeNamesIndex(self: *const BrewApi, key: []const u8, data: []const u8) void {
+        var dir_buf: [512]u8 = undefined;
+        const dir = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
+        std.fs.makeDirAbsolute(dir) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return,
+        };
+
+        var path_buf: [512]u8 = undefined;
+        const p = std.fmt.bufPrint(&path_buf, "{s}/api/names_{s}.txt", .{ self.cache_dir, key }) catch return;
+
+        const f = std.fs.cwd().createFile(p, .{}) catch return;
+        defer f.close();
+        f.writeAll(data) catch {};
     }
 
     /// Invalidate all cached API responses.
