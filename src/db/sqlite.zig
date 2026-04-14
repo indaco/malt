@@ -141,15 +141,26 @@ pub const Database = struct {
     }
 
     /// Execute one or more SQL statements that return no result rows.
-    pub fn exec(self: *Database, sql: [*:0]const u8) SqliteError!void {
-        const rc = c.sqlite3_exec(self.handle, sql, null, null, null);
+    /// Accepts a slice so callers can pass `bufPrint` output without needing
+    /// to hand-manage a null terminator; compile-time literals still coerce
+    /// through unchanged. `sqlite3_exec` itself is C-string-only, so we copy
+    /// into a stack buffer and append the sentinel.
+    pub fn exec(self: *Database, sql: []const u8) SqliteError!void {
+        var buf: [4096]u8 = undefined;
+        if (sql.len >= buf.len) return SqliteError.ExecFailed;
+        @memcpy(buf[0..sql.len], sql);
+        buf[sql.len] = 0;
+        const c_sql: [*:0]const u8 = buf[0..sql.len :0];
+        const rc = c.sqlite3_exec(self.handle, c_sql, null, null, null);
         if (rc != c.SQLITE_OK) return mapError(rc, SqliteError.ExecFailed);
     }
 
-    /// Prepare a single SQL statement for later execution.
-    pub fn prepare(self: *Database, sql: [*:0]const u8) SqliteError!Statement {
+    /// Prepare a single SQL statement for later execution. Takes a slice and
+    /// passes the length directly to sqlite — no null terminator required,
+    /// no copy needed.
+    pub fn prepare(self: *Database, sql: []const u8) SqliteError!Statement {
         var stmt: ?*c.sqlite3_stmt = null;
-        const rc = c.sqlite3_prepare_v2(self.handle, sql, -1, &stmt, null);
+        const rc = c.sqlite3_prepare_v2(self.handle, sql.ptr, @intCast(sql.len), &stmt, null);
         if (rc != c.SQLITE_OK) return mapError(rc, SqliteError.PrepareFailed);
         return Statement{ .stmt = stmt.? };
     }
