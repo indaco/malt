@@ -11,7 +11,7 @@
 > [!NOTE]
 > **Experimental project.** All implementation code in malt was written by AI ([Claude Code](https://claude.ai/code) and [ruflo](https://github.com/ruvnet/ruflo)). The design, architecture, and every merged change were directed and reviewed by a human. It's a hands-on look at how far human + AI pair-programming can go on a non-trivial systems project — and the tool **actually works**.
 
-malt is a macOS package manager written in Zig that reuses Homebrew's formula, bottle, cask, and tap ecosystem — a client for the registry, not a fork. Single binary, ~3 MB, sub-millisecond cold start. Requires macOS 11+ on Apple Silicon or Intel.
+malt is a macOS package manager written in Zig that reuses Homebrew's formula, bottle, cask, and tap ecosystem — a client for the registry, not a fork. Single binary, ~3 MB, ~3 ms cold start. Requires macOS 11+ on Apple Silicon or Intel.
 
 Unlike other alternative clients, malt runs Homebrew `post_install` blocks natively via a built-in Zig interpreter, so packages like `node`, `openssl`, `fontconfig`, and `docbook` are fully configured at install time. On warm installs — the common case after day one — malt is the fastest tool measured on packages with dependencies. See [Benchmarks](#benchmarks).
 
