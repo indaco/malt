@@ -44,13 +44,6 @@ jobs:
       - name: Build universal binary
         run: zig build universal -Doptimize=ReleaseSafe
 
-      - name: Upload macOS binary
-        uses: actions/upload-artifact@v7
-        with:
-          name: malt-macos-arm64
-          path: zig-out/bin/malt
-          retention-days: 7
-
   lint:
     name: Lint
     runs-on: macos-14
