@@ -97,6 +97,7 @@ pub fn build(b: *std.Build) void {
         "tests/install_execute_test.zig",
         "tests/cask_extra_test.zig",
         "tests/dsl_interpreter_extra_test.zig",
+        "tests/list_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");
