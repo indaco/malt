@@ -36,6 +36,7 @@ const restore = @import("cli/restore.zig");
 const purge = @import("cli/purge.zig");
 const services = @import("cli/services.zig");
 const bundle = @import("cli/bundle.zig");
+const uses = @import("cli/uses.zig");
 
 const version_mod = @import("version.zig");
 const version = version_mod.value;
@@ -64,6 +65,7 @@ const Command = enum {
     purge,
     services,
     bundle,
+    uses,
     help,
     version,
 };
@@ -93,6 +95,7 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
     .{ "purge", .purge },
     .{ "services", .services },
     .{ "bundle", .bundle },
+    .{ "uses", .uses },
     .{ "help", .help },
     .{ "--help", .help },
     .{ "-h", .help },
@@ -191,6 +194,7 @@ pub fn main() !void {
             .purge => try purge.execute(allocator, cmd_args),
             .services => try services.execute(allocator, cmd_args),
             .bundle => try bundle.execute(allocator, cmd_args),
+            .uses => try uses.execute(allocator, cmd_args),
             .version_cmd => {
                 // "mt version" — check for "mt version update" subcommand
                 if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
@@ -224,6 +228,7 @@ fn printUsage() void {
         \\  list          List installed packages
         \\  info          Show detailed package information
         \\  search        Search formulas and casks
+        \\  uses          Show installed packages that depend on a formula
         \\  doctor        System health check
         \\  tap/untap     Manage taps
         \\  migrate       Import existing Homebrew installation
