@@ -138,6 +138,36 @@ test "fetchNamesIndex returns a pre-seeded cache without touching the network" {
     try testing.expectEqualStrings("firefox\n", c);
 }
 
+test "exists + fetchNamesIndex + findNameMatches compose end-to-end" {
+    // Full search pipeline against a pre-seeded cache — mirrors what
+    // `mt search <query>` does per kind: exact-hit check, full names
+    // index lookup, substring scan. Guards the composition after the
+    // per-kind path was split into an isolated-HttpClient helper so
+    // the two kinds could run on separate threads.
+    var http = client_mod.HttpClient.init(testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("compose");
+    defer dir.deinit();
+
+    try dir.writeCacheFile("formula_go.json", "{\"name\":\"go\"}");
+    try dir.writeCacheFile("names_formula.txt", "argo\ncargo\ngo\ngolangci-lint\nnode\n");
+
+    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+
+    try testing.expect(try api.exists("go", .formula));
+
+    const idx = try api.fetchNamesIndex(.formula);
+    defer testing.allocator.free(idx);
+
+    const hits = try api_mod.findNameMatches(testing.allocator, idx, "go");
+    defer testing.allocator.free(hits);
+    try testing.expectEqual(@as(usize, 4), hits.len);
+    try testing.expectEqualStrings("argo", hits[0]);
+    try testing.expectEqualStrings("cargo", hits[1]);
+    try testing.expectEqualStrings("go", hits[2]);
+    try testing.expectEqualStrings("golangci-lint", hits[3]);
+}
+
 test "fetchNamesIndex reports missing cache as null via absence of the file" {
     // Sanity check: with no cache file and no seeded content, the cache
     // read path returns null; exercising it via fetchNamesIndex would

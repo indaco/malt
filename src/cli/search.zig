@@ -65,14 +65,44 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer allocator.free(cache_dir);
 
-    var http = client_mod.HttpClient.init(allocator);
-    defer http.deinit();
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
-
-    var formula = if (search_formula) runKind(allocator, &api, .formula, search_query) else KindResults{};
+    // When both kinds are requested we dispatch the cask work to a
+    // worker thread so the two independent JSON index downloads
+    // (formula ~29 MiB, cask ~14 MiB) overlap. On a cold cache this
+    // roughly halves wall time; on a warm cache the thread is created
+    // and joined in under a millisecond so the overhead is noise.
+    //
+    // `std.http.Client` is not safe to share across threads, so each
+    // path owns its own `HttpClient`. The synchronous single-kind
+    // paths keep the original one-client shape to avoid pointless
+    // thread spawns.
+    var formula: KindResults = .{};
+    var cask: KindResults = .{};
     defer formula.deinit(allocator);
-    var cask = if (search_cask) runKind(allocator, &api, .cask, search_query) else KindResults{};
     defer cask.deinit(allocator);
+
+    if (search_formula and search_cask) {
+        var cask_task: KindTask = .{
+            .allocator = allocator,
+            .cache_dir = cache_dir,
+            .kind = .cask,
+            .query = search_query,
+        };
+        const worker = std.Thread.spawn(.{}, KindTask.run, .{&cask_task}) catch null;
+        formula = runKindIsolated(allocator, cache_dir, .formula, search_query);
+        if (worker) |w| {
+            w.join();
+            cask = cask_task.result;
+        } else {
+            // Spawn failed — fall back to running cask inline. Rare
+            // enough (only on thread-creation failure) that the
+            // sequential path is fine.
+            cask = runKindIsolated(allocator, cache_dir, .cask, search_query);
+        }
+    } else if (search_formula) {
+        formula = runKindIsolated(allocator, cache_dir, .formula, search_query);
+    } else if (search_cask) {
+        cask = runKindIsolated(allocator, cache_dir, .cask, search_query);
+    }
 
     const stdout = std.fs.File.stdout();
     if (json_mode) {
@@ -82,15 +112,19 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 }
 
-/// Run the exact + substring search for one kind. Errors from the API
-/// are swallowed into empty results — `mt search` is best-effort and a
-/// transient network failure should not abort the whole command.
-fn runKind(
+/// Run the exact + substring search for one kind with a locally-owned
+/// HTTP client. Errors from the API are swallowed into empty results —
+/// `mt search` is best-effort and a transient network failure should
+/// not abort the whole command.
+fn runKindIsolated(
     allocator: std.mem.Allocator,
-    api: *api_mod.BrewApi,
+    cache_dir: []const u8,
     kind: api_mod.BrewApi.Kind,
     query: []const u8,
 ) KindResults {
+    var http = client_mod.HttpClient.init(allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
     var r: KindResults = .{};
     r.exact = api.exists(query, kind) catch false;
     if (api.fetchNamesIndex(kind)) |idx| {
@@ -99,6 +133,21 @@ fn runKind(
     } else |_| {}
     return r;
 }
+
+/// Thread entry-point wrapper so `std.Thread.spawn` can call it with a
+/// single pointer argument. The result is written back into the struct
+/// the caller allocated on its stack, read after `join()`.
+const KindTask = struct {
+    allocator: std.mem.Allocator,
+    cache_dir: []const u8,
+    kind: api_mod.BrewApi.Kind,
+    query: []const u8,
+    result: KindResults = .{},
+
+    fn run(self: *KindTask) void {
+        self.result = runKindIsolated(self.allocator, self.cache_dir, self.kind, self.query);
+    }
+};
 
 fn emitHuman(
     stdout: std.fs.File,
