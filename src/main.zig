@@ -228,6 +228,7 @@ fn printUsage() void {
         \\  list          List installed packages
         \\  info          Show detailed package information
         \\  search        Search formulas and casks
+        \\  uses          Show installed packages that depend on a formula
         \\  doctor        System health check
         \\  tap/untap     Manage taps
         \\  migrate       Import existing Homebrew installation

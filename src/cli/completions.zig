@@ -84,7 +84,7 @@ pub const bash_script =
     \\    words=("${COMP_WORDS[@]}")
     \\    cword=$COMP_CWORD
     \\
-    \\    local commands="install uninstall remove upgrade update outdated list ls info search doctor tap untap migrate rollback link unlink run version completions backup restore purge services bundle help"
+    \\    local commands="install uninstall remove upgrade update outdated list ls info search uses doctor tap untap migrate rollback link unlink run version completions backup restore purge services bundle help"
     \\    local global_flags="--verbose -v --quiet -q --json --dry-run --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
@@ -144,6 +144,7 @@ pub const bash_script =
     \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --json --quiet -q" ;;
     \\        info)             cmd_flags="--formula --cask --json" ;;
     \\        search)           cmd_flags="--formula --cask --json" ;;
+    \\        uses)             cmd_flags="--recursive -r --json --quiet -q" ;;
     \\        migrate|rollback) cmd_flags="--dry-run" ;;
     \\        link)             cmd_flags="--overwrite --force -f" ;;
     \\        services)         cmd_flags="--tail --stderr --system --json" ;;
@@ -193,6 +194,7 @@ pub const zsh_script =
     \\        'ls:List installed packages (alias for list)'
     \\        'info:Show detailed package information'
     \\        'search:Search formulas and casks'
+    \\        'uses:Show installed packages that depend on a formula'
     \\        'doctor:System health check'
     \\        'tap:Manage taps'
     \\        'untap:Remove a tap'
@@ -419,6 +421,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a ls          -d 'List installed packages (alias)'
     \\    complete -c $__malt_bin -n __malt_needs_command -a info        -d 'Show detailed package information'
     \\    complete -c $__malt_bin -n __malt_needs_command -a search      -d 'Search formulas and casks'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a uses        -d 'Show packages that depend on a formula'
     \\    complete -c $__malt_bin -n __malt_needs_command -a doctor      -d 'System health check'
     \\    complete -c $__malt_bin -n __malt_needs_command -a tap         -d 'Manage taps'
     \\    complete -c $__malt_bin -n __malt_needs_command -a untap       -d 'Remove a tap'
@@ -483,6 +486,11 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l formula -d 'Formulas only'
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l cask    -d 'Casks only'
     \\    complete -c $__malt_bin -n '__malt_using_command search' -l json    -d 'JSON output'
+    \\
+    \\    # uses
+    \\    complete -c $__malt_bin -n '__malt_using_command uses' -l recursive -s r -d 'Include transitive dependents'
+    \\    complete -c $__malt_bin -n '__malt_using_command uses' -l json               -d 'JSON output'
+    \\    complete -c $__malt_bin -n '__malt_using_command uses' -l quiet     -s q    -d 'Suppress status messages'
     \\
     \\    # migrate / rollback
     \\    complete -c $__malt_bin -n '__malt_using_command migrate'    -l dry-run -d 'Preview'
