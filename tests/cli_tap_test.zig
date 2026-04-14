@@ -58,6 +58,82 @@ test "execute with --help short-circuits before touching the database" {
     try tap_cli.execute(testing.allocator, &.{"--help"});
 }
 
+// ---------------------------------------------------------------------------
+// validateTapName
+// ---------------------------------------------------------------------------
+
+const TapNameError = tap_cli.TapNameError;
+const bad = TapNameError.InvalidTapName;
+
+test "validateTapName: accepts canonical user/repo" {
+    try tap_cli.validateTapName("homebrew/core");
+    try tap_cli.validateTapName("homebrew/cask");
+    try tap_cli.validateTapName("hashicorp/tap");
+    try tap_cli.validateTapName("goreleaser/tap");
+    try tap_cli.validateTapName("indaco/tap");
+    try tap_cli.validateTapName("a/b");
+    try tap_cli.validateTapName("user_name/repo-name");
+    try tap_cli.validateTapName("User123/Repo.v2");
+}
+
+test "validateTapName: rejects missing slash" {
+    try testing.expectError(bad, tap_cli.validateTapName("noslash"));
+    try testing.expectError(bad, tap_cli.validateTapName(""));
+}
+
+test "validateTapName: rejects extra slashes (three-part user/tap/formula form)" {
+    // `mt tap` takes only the tap name; three-part refs like
+    // `goreleaser/tap/goreleaser` or `indaco/tap/sley` are for
+    // `mt install`, not `mt tap`, and must be rejected here.
+    try testing.expectError(bad, tap_cli.validateTapName("a/b/c"));
+    try testing.expectError(bad, tap_cli.validateTapName("goreleaser/tap/goreleaser"));
+    try testing.expectError(bad, tap_cli.validateTapName("indaco/tap/sley"));
+}
+
+test "validateTapName: rejects empty components" {
+    try testing.expectError(bad, tap_cli.validateTapName("/repo"));
+    try testing.expectError(bad, tap_cli.validateTapName("user/"));
+    try testing.expectError(bad, tap_cli.validateTapName("/"));
+}
+
+test "validateTapName: rejects path traversal via leading dot" {
+    try testing.expectError(bad, tap_cli.validateTapName("user/.."));
+    try testing.expectError(bad, tap_cli.validateTapName("../repo"));
+    try testing.expectError(bad, tap_cli.validateTapName(".hidden/repo"));
+    try testing.expectError(bad, tap_cli.validateTapName("user/.hidden"));
+}
+
+test "validateTapName: rejects invalid characters" {
+    try testing.expectError(bad, tap_cli.validateTapName("user/repo space"));
+    try testing.expectError(bad, tap_cli.validateTapName("user/repo;rm"));
+    try testing.expectError(bad, tap_cli.validateTapName("user/repo?q=1"));
+    try testing.expectError(bad, tap_cli.validateTapName("user@host/repo"));
+}
+
+test "validateTapName: rejects over-long components" {
+    const long_user = "a" ** 65 ++ "/repo";
+    try testing.expectError(bad, tap_cli.validateTapName(long_user));
+    const long_repo = "user/" ++ "b" ** 65;
+    try testing.expectError(bad, tap_cli.validateTapName(long_repo));
+}
+
+test "execute: malformed tap input returns cleanly without inserting a row" {
+    const prefix = try setupPrefix("reject_malformed");
+    defer testing.allocator.free(prefix);
+    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Each of these should be rejected by the validator and return without
+    // touching the DB. Run them back-to-back; they must not accumulate
+    // partial state or crash.
+    try tap_cli.execute(testing.allocator, &.{"no-slash-here"});
+    try tap_cli.execute(testing.allocator, &.{"a/b/c"});
+    try tap_cli.execute(testing.allocator, &.{"/repo"});
+    try tap_cli.execute(testing.allocator, &.{"user/"});
+    try tap_cli.execute(testing.allocator, &.{"../evil"});
+    try tap_cli.execute(testing.allocator, &.{"user/bad char"});
+}
+
 test "execute with a bare name (no slash) reports an error but does not throw" {
     const prefix = try setupPrefix("bad_name");
     defer testing.allocator.free(prefix);
