@@ -184,7 +184,12 @@ pub fn main() !void {
             .tap => try tap.execute(allocator, cmd_args),
             .untap => try tap.executeUntap(allocator, cmd_args),
             .migrate => try migrate.execute(allocator, cmd_args),
-            .rollback => try rollback.execute(allocator, cmd_args),
+            .rollback => rollback.execute(allocator, cmd_args) catch |e| switch (e) {
+                // User-facing failure already reported by rollback.execute —
+                // exit non-zero without a stack trace.
+                error.Aborted => std.process.exit(1),
+                else => return e,
+            },
             .link => try link_cmd.executeLink(allocator, cmd_args),
             .unlink => try link_cmd.executeUnlink(allocator, cmd_args),
             .run => try run_cmd.execute(allocator, cmd_args),
