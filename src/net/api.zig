@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
+const atomic = @import("../fs/atomic.zig");
 const client_mod = @import("client.zig");
 
 const BASE_URL = "https://formulae.brew.sh/api";
@@ -334,9 +335,10 @@ pub const BrewApi = struct {
         var path_buf: [512]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return;
 
-        const file = fs_compat.cwd().createFile(cache_path, .{}) catch return;
-        defer file.close();
-        file.writeAll(data) catch {};
+        // Atomic write so a crash mid-`writeAll` can't leave a
+        // truncated JSON file that breaks the next install until the
+        // cache is manually wiped.
+        atomic.atomicWriteFile(cache_path, data) catch {};
     }
 
     /// Check for a cached 404 marker. Returns true if a fresh marker

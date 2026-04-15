@@ -26,6 +26,40 @@ pub fn atomicRename(src_path: []const u8, dst_path: []const u8) !void {
     };
 }
 
+/// Write `data` to `dst_path` via a uniquely-named sibling tempfile
+/// and a single `rename(2)`. Readers see either the old contents or
+/// the new ones — never a partial write. A crash before the rename
+/// leaves the tempfile behind; the next call writes its own and
+/// overwrites atomically.
+pub fn atomicWriteFile(dst_path: []const u8, data: []const u8) !void {
+    var rand_bytes: [4]u8 = undefined;
+    std.c.arc4random_buf(&rand_bytes, rand_bytes.len);
+    const hex_chars = "0123456789abcdef";
+    var hex: [8]u8 = undefined;
+    for (rand_bytes, 0..) |b, i| {
+        hex[i * 2] = hex_chars[b >> 4];
+        hex[i * 2 + 1] = hex_chars[b & 0x0f];
+    }
+
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.{s}.tmp", .{ dst_path, &hex }) catch
+        return error.NameTooLong;
+
+    {
+        const f = try fs_compat.createFileAbsolute(tmp_path, .{ .truncate = true });
+        defer f.close();
+        f.writeAll(data) catch |e| {
+            fs_compat.deleteFileAbsolute(tmp_path) catch {};
+            return e;
+        };
+    }
+
+    fs_compat.renameAbsolute(tmp_path, dst_path) catch |e| {
+        fs_compat.deleteFileAbsolute(tmp_path) catch {};
+        return e;
+    };
+}
+
 /// Create a temporary directory under {prefix}/tmp/ with the given label and
 /// a random hex suffix.  The returned path is allocated via `allocator` and
 /// the caller owns the memory.

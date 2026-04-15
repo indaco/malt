@@ -116,6 +116,80 @@ test "cleanupTempDir is a no-op on a non-existent path" {
     atomic.cleanupTempDir("/tmp/malt_atomic_nonexistent_12345");
 }
 
+// atomicWriteFile: readers see either the old file or the full new
+// file, never a partial write. These tests cover the observable
+// contract — fresh path, overwrite, no stale tempfile, missing parent.
+test "atomicWriteFile writes full payload to a fresh path" {
+    const base = "/tmp/malt_atomic_write_fresh";
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    try malt.fs_compat.makeDirAbsolute(base);
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+
+    const dst = base ++ "/cache.json";
+    try atomic.atomicWriteFile(dst, "{\"formulae\":[]}");
+
+    const f = try malt.fs_compat.openFileAbsolute(dst, .{});
+    defer f.close();
+    var buf: [64]u8 = undefined;
+    const n = try f.readAll(&buf);
+    try testing.expectEqualStrings("{\"formulae\":[]}", buf[0..n]);
+}
+
+test "atomicWriteFile replaces an existing file's contents in one step" {
+    const base = "/tmp/malt_atomic_write_replace";
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    try malt.fs_compat.makeDirAbsolute(base);
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+
+    const dst = base ++ "/cache.json";
+    // Seed with old bytes so we can prove the replacement lands whole.
+    {
+        const f = try malt.fs_compat.createFileAbsolute(dst, .{});
+        defer f.close();
+        try f.writeAll("OLD_PAYLOAD_THAT_SHOULD_VANISH");
+    }
+
+    try atomic.atomicWriteFile(dst, "NEW");
+
+    const f = try malt.fs_compat.openFileAbsolute(dst, .{});
+    defer f.close();
+    var buf: [64]u8 = undefined;
+    const n = try f.readAll(&buf);
+    try testing.expectEqualStrings("NEW", buf[0..n]);
+}
+
+test "atomicWriteFile leaves no sibling .tmp files behind on success" {
+    const base = "/tmp/malt_atomic_write_no_tmp";
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    try malt.fs_compat.makeDirAbsolute(base);
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+
+    const dst = base ++ "/cache.json";
+    try atomic.atomicWriteFile(dst, "payload");
+
+    // Only `cache.json` must remain — a stale tempfile would accumulate
+    // across calls and eventually blow up a user's cache dir.
+    var dir = try malt.fs_compat.openDirAbsolute(base, .{ .iterate = true });
+    defer dir.close();
+    var iter = dir.iterate();
+    var count: usize = 0;
+    while (try iter.next()) |entry| {
+        try testing.expectEqualStrings("cache.json", entry.name);
+        count += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), count);
+}
+
+test "atomicWriteFile surfaces FileNotFound when the parent dir is missing" {
+    // Callers (`api.writeCache`) rely on this error to decide
+    // whether their preceding makeDirAbsolute actually succeeded.
+    const err = atomic.atomicWriteFile(
+        "/tmp/malt_atomic_write_nodir_xxxxxx/cache.json",
+        "payload",
+    );
+    try testing.expectError(error.FileNotFound, err);
+}
+
 test "atomicRename moves a directory tree within the same filesystem" {
     const base = "/tmp/malt_atomic_rename_dir";
     malt.fs_compat.deleteTreeAbsolute(base) catch {};

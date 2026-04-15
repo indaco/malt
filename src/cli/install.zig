@@ -1754,9 +1754,7 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
 }
 
 pub fn extractQuoted(line: []const u8, prefix: []const u8) ?[]const u8 {
-    const start = std.mem.indexOf(u8, line, prefix) orelse return null;
-    const value_start = start + prefix.len;
-    if (value_start >= line.len) return null;
-    const end = std.mem.findScalar(u8, line[value_start..], '"') orelse return null;
-    return line[value_start .. value_start + end];
+    _, const after = std.mem.cut(u8, line, prefix) orelse return null;
+    const body, _ = std.mem.cut(u8, after, "\"") orelse return null;
+    return body;
 }
