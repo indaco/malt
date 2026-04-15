@@ -54,8 +54,25 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Run tests
-        run: zig build test
+      - name: Run unit tests
+        # `zig build test` deadlocks under Zig 0.15 (test-runner server
+        # protocol hangs once children finish), so install the test
+        # binaries and execute each one directly. Identical coverage.
+        run: |
+          set -euo pipefail
+          zig build test-bin
+          fail=0
+          for t in zig-out/test-bin/*_test; do
+              name=$(basename "$t")
+              if ! "$t"; then
+                  echo "FAIL: $name"
+                  fail=$((fail + 1))
+              fi
+          done
+          if [ "$fail" -ne 0 ]; then
+              echo "$fail test binary(ies) failed."
+              exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v6
