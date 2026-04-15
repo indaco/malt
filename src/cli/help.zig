@@ -3,19 +3,21 @@
 
 const std = @import("std");
 
-/// Check if args contain -h or --help. If so, print help and return true.
+/// Check if args contain -h or --help. If so, print help to stdout (so the
+/// output is pipeable — `malt install --help | less`) and return true.
 pub fn showIfRequested(args: []const []const u8, command: []const u8) bool {
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            const text = helpFor(command);
-            std.fs.File.stderr().writeAll(text) catch {};
+            std.fs.File.stdout().writeAll(helpFor(command)) catch {};
             return true;
         }
     }
     return false;
 }
 
-fn helpFor(command: []const u8) []const u8 {
+/// Return the help text for a given command, or a generic fallback. Exposed
+/// so tests can assert content without spawning the binary.
+pub fn helpFor(command: []const u8) []const u8 {
     const map = std.StaticStringMap([]const u8).initComptime(.{
         .{ "install", install_help },
         .{ "uninstall", uninstall_help },

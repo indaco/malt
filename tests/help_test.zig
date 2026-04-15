@@ -35,3 +35,33 @@ test "showIfRequested covers every documented command (exercises every branch of
         try testing.expect(help.showIfRequested(&args, cmd));
     }
 }
+
+test "helpFor returns command-specific text for known commands" {
+    try testing.expect(std.mem.indexOf(u8, help.helpFor("install"), "malt install") != null);
+    try testing.expect(std.mem.indexOf(u8, help.helpFor("rollback"), "malt rollback") != null);
+    try testing.expect(std.mem.indexOf(u8, help.helpFor("purge"), "--housekeeping") != null);
+}
+
+test "helpFor falls back gracefully for unknown commands" {
+    try testing.expectEqualStrings("No help available.\n", help.helpFor("not-a-real-command"));
+}
+
+// Integration: verify that `malt <cmd> --help` writes to stdout (not stderr).
+// Relies on the pre-built binary under zig-out/bin/malt; skipped if absent.
+test "--help output lands on stdout, not stderr" {
+    const bin_path = "zig-out/bin/malt";
+    std.fs.cwd().access(bin_path, .{}) catch return error.SkipZigTest;
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{ bin_path, "install", "--help" },
+        .max_output_bytes = 1 << 16,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    try testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, result.term);
+    try testing.expect(result.stdout.len > 0);
+    try testing.expectEqual(@as(usize, 0), result.stderr.len);
+    try testing.expect(std.mem.indexOf(u8, result.stdout, "malt install") != null);
+}
