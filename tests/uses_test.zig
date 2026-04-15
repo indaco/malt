@@ -15,7 +15,7 @@ const schema = malt.schema;
 fn makeDb(tag: []const u8) !sqlite.Database {
     var path_buf: [256]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "/tmp/malt_uses_test_{s}.db", .{tag});
-    std.fs.deleteFileAbsolute(path) catch {};
+    malt.fs_compat.deleteFileAbsolute(path) catch {};
     var db = try sqlite.Database.open(path);
     try schema.initSchema(&db);
     return db;
@@ -133,21 +133,21 @@ test "collectDependents tolerates cycles without spinning" {
 
 test "encodeJson shape: target + dependents array" {
     const deps = [_][]const u8{ "node@20", "wget" };
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try uses.encodeJson(buf.writer(testing.allocator), "openssl@3", @constCast(deps[0..]));
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try uses.encodeJson(&aw.writer, "openssl@3", @constCast(deps[0..]));
 
     try testing.expectEqualStrings(
         "{\"formula\":\"openssl@3\",\"uses\":[\"node@20\",\"wget\"]}\n",
-        buf.items,
+        aw.written(),
     );
 }
 
 test "encodeJson handles an empty dependents list" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try uses.encodeJson(buf.writer(testing.allocator), "lonely", &.{});
-    try testing.expectEqualStrings("{\"formula\":\"lonely\",\"uses\":[]}\n", buf.items);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try uses.encodeJson(&aw.writer, "lonely", &.{});
+    try testing.expectEqualStrings("{\"formula\":\"lonely\",\"uses\":[]}\n", aw.written());
 }
 
 test "encodeJson escapes special characters in target and dependents" {
@@ -156,21 +156,21 @@ test "encodeJson escapes special characters in target and dependents" {
     // formula names won't carry these, but tap-prefixed names and upstream
     // metadata can — so the encoder must escape unconditionally.
     const deps = [_][]const u8{ "weird\"name", "back\\slash", "with\nnewline" };
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try uses.encodeJson(buf.writer(testing.allocator), "tap\"name", @constCast(deps[0..]));
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try uses.encodeJson(&aw.writer, "tap\"name", @constCast(deps[0..]));
 
     // The exact expected bytes verify the escape contract precisely.
     try testing.expectEqualStrings(
         "{\"formula\":\"tap\\\"name\",\"uses\":[\"weird\\\"name\",\"back\\\\slash\",\"with\\nnewline\"]}\n",
-        buf.items,
+        aw.written(),
     );
 
     // And the result must round-trip through a strict JSON parser.
     const parsed = try std.json.parseFromSlice(
         std.json.Value,
         testing.allocator,
-        std.mem.trimRight(u8, buf.items, "\n"),
+        std.mem.trimEnd(u8, aw.written(), "\n"),
         .{},
     );
     defer parsed.deinit();

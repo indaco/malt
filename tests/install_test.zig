@@ -46,7 +46,7 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_install_test_" ++ tag;
-        std.fs.makeDirAbsolute(dir) catch {};
+        malt.fs_compat.makeDirAbsolute(dir) catch {};
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrint(&db_path_buf, "{s}/test.db", .{dir});
         var db = try sqlite.Database.open(db_path);
@@ -57,7 +57,7 @@ const TempDb = struct {
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        std.fs.deleteTreeAbsolute(self.dir) catch {};
+        malt.fs_compat.deleteTreeAbsolute(self.dir) catch {};
     }
 };
 
@@ -83,8 +83,8 @@ test "collectFormulaJobs queues a formula with a post_install hook" {
     const json = postInstallFormulaJson();
 
     const cache_dir = "/tmp/malt_install_test_postinstall_accept_cache";
-    std.fs.makeDirAbsolute(cache_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
+    malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
 
     var http = try malt.client.HttpClientPool.init(alloc, 1);
     defer http.deinit();
@@ -321,8 +321,8 @@ test "collectFormulaJobs queues the main formula when nothing is installed" {
     const json = bottleJsonWithoutDeps("hello");
 
     const cache_dir = "/tmp/malt_install_test_happy_path_cache";
-    std.fs.makeDirAbsolute(cache_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
+    malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
 
     var http = try malt.client.HttpClientPool.init(alloc, 1);
     defer http.deinit();
@@ -401,13 +401,13 @@ test "collectFormulaJobs no-ops when the formula is already installed" {
 fn seedCache(cache_dir: []const u8, name: []const u8, json: []const u8) !void {
     var api_buf: [512]u8 = undefined;
     const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{cache_dir});
-    std.fs.makeDirAbsolute(api_dir) catch |e| switch (e) {
+    malt.fs_compat.makeDirAbsolute(api_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };
     var path_buf: [512]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
-    const f = try std.fs.cwd().createFile(path, .{});
+    const f = try malt.fs_compat.cwd().createFile(path, .{});
     defer f.close();
     try f.writeAll(json);
 }
@@ -442,9 +442,9 @@ test "collectFormulaJobs queues a dep and its parent from a seeded cache" {
     defer tdb.deinit();
 
     const cache_dir = "/tmp/malt_install_test_with_dep_cache";
-    std.fs.deleteTreeAbsolute(cache_dir) catch {};
-    std.fs.makeDirAbsolute(cache_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
+    malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
+    malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
 
     // Seed BOTH the dep and the root formula JSON. deps.resolve re-fetches
     // the root from the API to discover its dep list (even though
@@ -494,9 +494,9 @@ test "collectFormulaJobs deduplicates deps already queued by a prior call" {
     defer tdb.deinit();
 
     const cache_dir = "/tmp/malt_install_test_dedup_cache";
-    std.fs.deleteTreeAbsolute(cache_dir) catch {};
-    std.fs.makeDirAbsolute(cache_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
+    malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
+    malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
 
     const dep_json = bottleJsonWithoutDeps("beta");
     try seedCache(cache_dir, "beta", dep_json);
@@ -569,8 +569,8 @@ test "collectFormulaJobs with post_install leaves the DB untouched" {
     const json = postInstallFormulaJson();
 
     const cache_dir = "/tmp/malt_install_test_postinstall_db_cache";
-    std.fs.makeDirAbsolute(cache_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
+    malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
 
     var http = try malt.client.HttpClientPool.init(alloc, 1);
     defer http.deinit();

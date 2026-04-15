@@ -2,6 +2,7 @@
 //! Covers acquire/release/holderPid and the timeout path.
 
 const std = @import("std");
+const malt = @import("malt");
 const testing = std.testing;
 const lock = @import("malt").lock;
 
@@ -9,14 +10,14 @@ fn uniquePath(suffix: []const u8) ![]const u8 {
     return std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_lock_test_{d}_{s}",
-        .{ std.time.nanoTimestamp(), suffix },
+        .{ malt.fs_compat.nanoTimestamp(), suffix },
     );
 }
 
 test "acquire writes pid, release clears the file, holderPid parses back" {
     const path = try uniquePath("basic");
     defer testing.allocator.free(path);
-    defer std.fs.cwd().deleteFile(path) catch {};
+    defer malt.fs_compat.cwd().deleteFile(path) catch {};
 
     var l = try lock.LockFile.acquire(path, 1000);
 
@@ -37,7 +38,7 @@ test "holderPid returns null when the file does not exist" {
 test "acquire times out when an existing lock is held" {
     const path = try uniquePath("timeout");
     defer testing.allocator.free(path);
-    defer std.fs.cwd().deleteFile(path) catch {};
+    defer malt.fs_compat.cwd().deleteFile(path) catch {};
 
     var held = try lock.LockFile.acquire(path, 500);
     defer held.release();
@@ -50,9 +51,9 @@ test "acquire times out when an existing lock is held" {
 test "holderPid returns null on an empty file (vacated after release)" {
     const path = try uniquePath("empty");
     defer testing.allocator.free(path);
-    defer std.fs.cwd().deleteFile(path) catch {};
+    defer malt.fs_compat.cwd().deleteFile(path) catch {};
 
-    const f = try std.fs.createFileAbsolute(path, .{});
+    const f = try malt.fs_compat.createFileAbsolute(path, .{});
     f.close();
 
     try testing.expect(lock.LockFile.holderPid(path) == null);

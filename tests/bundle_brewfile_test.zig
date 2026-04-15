@@ -87,11 +87,11 @@ test "round trip emit then parse" {
     var m1 = try brewfile.parse(testing.allocator, original);
     defer m1.deinit();
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try brewfile_emit.emit(m1, buf.writer(testing.allocator));
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try brewfile_emit.emit(m1, &aw.writer);
 
-    var m2 = try brewfile.parse(testing.allocator, buf.items);
+    var m2 = try brewfile.parse(testing.allocator, aw.written());
     defer m2.deinit();
 
     try testing.expectEqual(m1.taps.len, m2.taps.len);

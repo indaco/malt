@@ -77,10 +77,10 @@ test "list is empty on a fresh database and hasService returns false" {
 
 test "register writes a plist and a DB row that list reports back" {
     const prefix = "/tmp/malt_sup_register";
-    std.fs.deleteTreeAbsolute(prefix) catch {};
+    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     _ = c.setenv("MALT_PREFIX", prefix, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -109,26 +109,26 @@ test "register writes a plist and a DB row that list reports back" {
     try testing.expect(list[0].auto_start);
 
     // plist file exists on disk
-    var f = try std.fs.openFileAbsolute(list[0].plist_path, .{});
+    var f = try malt.fs_compat.openFileAbsolute(list[0].plist_path, .{});
     f.close();
 }
 
 test "tailLog writes the last N lines into the provided writer" {
     const path = "/tmp/malt_sup_tail.log";
-    std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
+    malt.fs_compat.cwd().deleteFile(path) catch {};
+    defer malt.fs_compat.cwd().deleteFile(path) catch {};
 
-    const f = try std.fs.createFileAbsolute(path, .{});
+    const f = try malt.fs_compat.createFileAbsolute(path, .{});
     try f.writeAll("a\nb\nc\nd\ne\n");
     f.close();
 
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(testing.allocator);
-    try supervisor.tailLog(testing.allocator, path, 2, out.writer(testing.allocator));
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try supervisor.tailLog(testing.allocator, path, 2, &aw.writer);
 
     // Should end with the last 2 lines ("d" and "e").
-    try testing.expect(std.mem.indexOf(u8, out.items, "d") != null);
-    try testing.expect(std.mem.indexOf(u8, out.items, "e") != null);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "d") != null);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "e") != null);
 }
 
 test "start/stop/restart return ServiceNotFound when no DB row exists" {
@@ -171,10 +171,10 @@ test "queryRuntime returns not_loaded for a label launchctl has never heard of" 
 }
 
 test "tailLog reports IoFailed for a missing file" {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
     try testing.expectError(
         error.IoFailed,
-        supervisor.tailLog(testing.allocator, "/tmp/malt_sup_tail_missing_xyz", 1, out.writer(testing.allocator)),
+        supervisor.tailLog(testing.allocator, "/tmp/malt_sup_tail_missing_xyz", 1, &aw.writer),
     );
 }

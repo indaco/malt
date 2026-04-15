@@ -2,6 +2,7 @@
 //! Covers MALT_PREFIX env handling, temp dir creation, and helper path builders.
 
 const std = @import("std");
+const malt = @import("malt");
 const testing = std.testing;
 const atomic = @import("malt").atomic;
 
@@ -71,9 +72,9 @@ test "maltCacheDir honours MALT_CACHE env var" {
 
 test "createTempDir creates a unique directory under the prefix and cleanup removes it" {
     const base = "/tmp/malt_atomic_ctmp";
-    std.fs.deleteTreeAbsolute(base) catch {};
-    std.fs.makeDirAbsolute(base) catch {};
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    malt.fs_compat.makeDirAbsolute(base) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
     setPrefix("/tmp/malt_atomic_ctmp");
     defer unsetPrefix();
 
@@ -82,29 +83,29 @@ test "createTempDir creates a unique directory under the prefix and cleanup remo
 
     // Must exist as an absolute dir under {prefix}/tmp/
     try testing.expect(std.mem.startsWith(u8, dir, "/tmp/malt_atomic_ctmp/tmp/label_"));
-    var open_dir = try std.fs.openDirAbsolute(dir, .{});
+    var open_dir = try malt.fs_compat.openDirAbsolute(dir, .{});
     open_dir.close();
 
     atomic.cleanupTempDir(dir);
-    try testing.expectError(error.FileNotFound, std.fs.openDirAbsolute(dir, .{}));
+    try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(dir, .{}));
 }
 
 test "atomicRename moves a file within the same filesystem" {
     const base = "/tmp/malt_atomic_rename";
-    std.fs.deleteTreeAbsolute(base) catch {};
-    std.fs.makeDirAbsolute(base) catch {};
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    malt.fs_compat.makeDirAbsolute(base) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     const src = "/tmp/malt_atomic_rename/src.txt";
     const dst = "/tmp/malt_atomic_rename/dst.txt";
-    const f = try std.fs.createFileAbsolute(src, .{});
+    const f = try malt.fs_compat.createFileAbsolute(src, .{});
     try f.writeAll("payload");
     f.close();
 
     try atomic.atomicRename(src, dst);
-    try testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(src, .{}));
+    try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(src, .{}));
 
-    const moved = try std.fs.openFileAbsolute(dst, .{});
+    const moved = try malt.fs_compat.openFileAbsolute(dst, .{});
     defer moved.close();
     var buf: [16]u8 = undefined;
     const n = try moved.readAll(&buf);
@@ -117,28 +118,28 @@ test "cleanupTempDir is a no-op on a non-existent path" {
 
 test "atomicRename moves a directory tree within the same filesystem" {
     const base = "/tmp/malt_atomic_rename_dir";
-    std.fs.deleteTreeAbsolute(base) catch {};
-    std.fs.makeDirAbsolute(base) catch {};
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    malt.fs_compat.makeDirAbsolute(base) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     const src = "/tmp/malt_atomic_rename_dir/src";
     const dst = "/tmp/malt_atomic_rename_dir/dst";
-    try std.fs.makeDirAbsolute(src);
+    try malt.fs_compat.makeDirAbsolute(src);
 
     // Put a file inside so an accidental copy+delete fallback would be
     // observable — a plain `rename(2)` on a same-FS directory must not
     // drop child entries.
     const child = "/tmp/malt_atomic_rename_dir/src/inner.txt";
     {
-        const f = try std.fs.createFileAbsolute(child, .{});
+        const f = try malt.fs_compat.createFileAbsolute(child, .{});
         defer f.close();
         try f.writeAll("payload");
     }
 
     try atomic.atomicRename(src, dst);
-    try testing.expectError(error.FileNotFound, std.fs.openDirAbsolute(src, .{}));
+    try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(src, .{}));
 
-    var moved = try std.fs.openDirAbsolute(dst, .{});
+    var moved = try malt.fs_compat.openDirAbsolute(dst, .{});
     defer moved.close();
     const inner = try moved.openFile("inner.txt", .{});
     defer inner.close();

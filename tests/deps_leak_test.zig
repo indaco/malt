@@ -31,7 +31,7 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_deps_leak_test_" ++ tag;
-        std.fs.makeDirAbsolute(dir) catch {};
+        malt.fs_compat.makeDirAbsolute(dir) catch {};
         var buf: [256]u8 = undefined;
         const path = try std.fmt.bufPrint(&buf, "{s}/test.db", .{dir});
         var db = try sqlite.Database.open(path);
@@ -42,7 +42,7 @@ const TempDb = struct {
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        std.fs.deleteTreeAbsolute(self.dir) catch {};
+        malt.fs_compat.deleteTreeAbsolute(self.dir) catch {};
     }
 };
 
@@ -53,25 +53,25 @@ const TempCacheDir = struct {
 
     fn init(comptime tag: []const u8) !TempCacheDir {
         const p = "/tmp/malt_deps_leak_cache_" ++ tag;
-        std.fs.deleteTreeAbsolute(p) catch {};
-        try std.fs.makeDirAbsolute(p);
+        malt.fs_compat.deleteTreeAbsolute(p) catch {};
+        try malt.fs_compat.makeDirAbsolute(p);
         return .{ .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
-        std.fs.deleteTreeAbsolute(self.path) catch {};
+        malt.fs_compat.deleteTreeAbsolute(self.path) catch {};
     }
 
     fn writeFormula(self: *TempCacheDir, name: []const u8, json: []const u8) !void {
         var api_buf: [512]u8 = undefined;
         const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
-        std.fs.makeDirAbsolute(api_dir) catch |e| switch (e) {
+        malt.fs_compat.makeDirAbsolute(api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
         const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ self.path, name });
-        const f = try std.fs.cwd().createFile(full, .{});
+        const f = try malt.fs_compat.cwd().createFile(full, .{});
         defer f.close();
         try f.writeAll(json);
     }

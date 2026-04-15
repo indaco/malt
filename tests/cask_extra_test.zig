@@ -69,9 +69,9 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
 
     // Stage a scratch "app bundle" that uninstall will try to delete.
     const base = "/tmp/malt_cask_uninstall_test";
-    std.fs.deleteTreeAbsolute(base) catch {};
-    try std.fs.cwd().makePath(base);
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    try malt.fs_compat.cwd().makePath(base);
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     const app_path_z = try std.fmt.allocPrintSentinel(
         testing.allocator,
@@ -80,18 +80,18 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
         0,
     );
     defer testing.allocator.free(app_path_z);
-    try std.fs.makeDirAbsolute(app_path_z);
+    try malt.fs_compat.makeDirAbsolute(app_path_z);
 
     try cask.recordInstall(&db, &c, app_path_z);
     try testing.expect(cask.isInstalled(&db, "firefox"));
 
     const prefix: [:0]const u8 = "/tmp/mc-uninstall";
-    std.fs.cwd().makePath(prefix) catch {};
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    malt.fs_compat.cwd().makePath(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     var installer = cask.CaskInstaller.init(testing.allocator, &db, prefix);
     try installer.uninstall("firefox");
 
     // DB row is gone and the staged "app bundle" has been removed.
     try testing.expect(!cask.isInstalled(&db, "firefox"));
-    try testing.expectError(error.FileNotFound, std.fs.openDirAbsolute(app_path_z, .{}));
+    try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(app_path_z, .{}));
 }

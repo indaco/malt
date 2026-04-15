@@ -9,10 +9,10 @@ const testing = std.testing;
 const output = @import("malt").output;
 
 fn encode(s: []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(testing.allocator);
-    try output.jsonStr(buf.writer(testing.allocator), s);
-    return buf.toOwnedSlice(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    errdefer aw.deinit();
+    try output.jsonStr(&aw.writer, s);
+    return aw.toOwnedSlice();
 }
 
 test "jsonStr leaves plain ASCII alone" {

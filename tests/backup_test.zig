@@ -10,41 +10,41 @@ const backup = @import("malt").backup;
 // ── writeEntry / writeHeader ─────────────────────────────────────────────
 
 test "writeEntry writes a bare formula line without a version" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try backup.writeEntry(buf.writer(testing.allocator), .formula, "git", "2.44.0", false);
-    try testing.expectEqualStrings("formula git\n", buf.items);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try backup.writeEntry(&aw.writer, .formula, "git", "2.44.0", false);
+    try testing.expectEqualStrings("formula git\n", aw.written());
 }
 
 test "writeEntry writes a bare cask line without a version" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try backup.writeEntry(buf.writer(testing.allocator), .cask, "firefox", "124.0", false);
-    try testing.expectEqualStrings("cask firefox\n", buf.items);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try backup.writeEntry(&aw.writer, .cask, "firefox", "124.0", false);
+    try testing.expectEqualStrings("cask firefox\n", aw.written());
 }
 
 test "writeEntry includes @version when include_versions is true" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try backup.writeEntry(buf.writer(testing.allocator), .formula, "wget", "1.24.5", true);
-    try testing.expectEqualStrings("formula wget@1.24.5\n", buf.items);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try backup.writeEntry(&aw.writer, .formula, "wget", "1.24.5", true);
+    try testing.expectEqualStrings("formula wget@1.24.5\n", aw.written());
 }
 
 test "writeEntry omits @version even with include_versions when version is empty" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try backup.writeEntry(buf.writer(testing.allocator), .cask, "slack", "", true);
-    try testing.expectEqualStrings("cask slack\n", buf.items);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try backup.writeEntry(&aw.writer, .cask, "slack", "", true);
+    try testing.expectEqualStrings("cask slack\n", aw.written());
 }
 
 test "writeHeader emits comment lines and a trailing blank line" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try backup.writeHeader(buf.writer(testing.allocator));
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try backup.writeHeader(&aw.writer);
 
     // Every non-blank line in the header must start with `#` so that
     // `parseBackup` ignores them when the file is restored.
-    var lines = std.mem.splitScalar(u8, buf.items, '\n');
+    var lines = std.mem.splitScalar(u8, aw.written(), '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
         try testing.expectEqual(@as(u8, '#'), line[0]);
@@ -193,15 +193,15 @@ test "writeEntry + parseBackup round-trip preserves every entry" {
         .{ .kind = .cask, .name = "slack", .version = "4.36.140" },
     };
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    const w = buf.writer(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
     try backup.writeHeader(w);
     for (fixtures) |f| {
         try backup.writeEntry(w, f.kind, f.name, f.version, true);
     }
 
-    const entries = try backup.parseBackup(testing.allocator, buf.items);
+    const entries = try backup.parseBackup(testing.allocator, aw.written());
     defer testing.allocator.free(entries);
 
     try testing.expectEqual(fixtures.len, entries.len);

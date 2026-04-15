@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+
 const malt = @import("malt");
 const dsl = malt.dsl;
 const sandbox = dsl.sandbox;
@@ -164,12 +165,15 @@ test "sandbox: validateResolved rejects outside prefix" {
 
 test "sandbox: symlink escape detected by validateResolved" {
     // Create a temp directory and a symlink pointing outside the sandbox
-    var tmp = std.testing.tmpDir(.{});
+    const tmp = std.testing.tmpDir(.{});
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = try tmp.dir.realpath(".", &buf);
+    const tmp_path = blk: {
+        const n = try std.Io.Dir.realPath(tmp.dir, malt.io_mod.ctx(), &buf);
+        break :blk buf[0..n];
+    };
 
     // Create a "cellar" subdir
-    try tmp.dir.makePath("cellar/pkg/1.0/bin");
+    try std.Io.Dir.createDirPath(tmp.dir, malt.io_mod.ctx(), "cellar/pkg/1.0/bin");
 
     // Create a symlink from cellar/pkg/1.0/bin/escape -> /tmp
     const symlink_dir = try std.fs.path.join(
@@ -184,7 +188,7 @@ test "sandbox: symlink escape detected by validateResolved" {
     );
     defer testing.allocator.free(cellar_dir);
 
-    std.fs.cwd().symLink("/tmp", symlink_dir, .{}) catch {
+    malt.fs_compat.cwd().symLink("/tmp", symlink_dir, .{}) catch {
         // If we can't create symlinks (permissions), skip the test
         return;
     };

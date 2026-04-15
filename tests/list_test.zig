@@ -16,8 +16,8 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_list_test_" ++ tag;
-        std.fs.deleteTreeAbsolute(dir) catch {};
-        try std.fs.makeDirAbsolute(dir);
+        malt.fs_compat.deleteTreeAbsolute(dir) catch {};
+        try malt.fs_compat.makeDirAbsolute(dir);
         var buf: [256]u8 = undefined;
         const path = try std.fmt.bufPrint(&buf, "{s}/test.db", .{dir});
         var db = try sqlite.Database.open(path);
@@ -28,7 +28,7 @@ const TempDb = struct {
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        std.fs.deleteTreeAbsolute(self.dir) catch {};
+        malt.fs_compat.deleteTreeAbsolute(self.dir) catch {};
     }
 };
 
@@ -59,12 +59,11 @@ fn runBuild(
     show_cask: bool,
     show_pinned: bool,
 ) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
     // Use a fixed start_ts so the ",\"time_ms\":N" suffix is predictable.
-    try cli_list.buildListJson(db, w, show_formula, show_cask, show_pinned, std.time.milliTimestamp());
-    return buf.toOwnedSlice(allocator);
+    try cli_list.buildListJson(db, &aw.writer, show_formula, show_cask, show_pinned, malt.fs_compat.milliTimestamp());
+    return aw.toOwnedSlice();
 }
 
 // Strip the non-deterministic ",\"time_ms\":N}\n" suffix so assertions can

@@ -34,7 +34,7 @@ fn minimalJson(alloc: std.mem.Allocator) ![]const u8 {
 fn setupCellar(prefix_dir: []const u8) !void {
     const cellar_path = try std.fs.path.join(testing.allocator, &.{ prefix_dir, "Cellar", "testpkg", "1.0" });
     defer testing.allocator.free(cellar_path);
-    try std.fs.cwd().makePath(cellar_path);
+    try malt.fs_compat.cwd().makePath(cellar_path);
 }
 
 fn run(ruby_src: []const u8) !void {
@@ -45,7 +45,10 @@ fn run(ruby_src: []const u8) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix = try tmp.dir.realpath(".", &path_buf);
+    const prefix = blk: {
+        const n = try std.Io.Dir.realPath(tmp.dir, malt.io_mod.ctx(), &path_buf);
+        break :blk path_buf[0..n];
+    };
     try setupCellar(prefix);
 
     const json = try minimalJson(alloc);

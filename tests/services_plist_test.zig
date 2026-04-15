@@ -6,8 +6,8 @@ const malt = @import("malt");
 const plist = malt.services_plist;
 
 test "render minimal spec matches golden" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
 
     const spec: plist.ServiceSpec = .{
         .label = "com.malt.wget",
@@ -15,7 +15,7 @@ test "render minimal spec matches golden" {
         .stdout_path = "/opt/malt/var/log/wget.out",
         .stderr_path = "/opt/malt/var/log/wget.err",
     };
-    try plist.render(spec, buf.writer(testing.allocator));
+    try plist.render(spec, &aw.writer);
 
     const expected =
         \\<?xml version="1.0" encoding="UTF-8"?>
@@ -44,12 +44,12 @@ test "render minimal spec matches golden" {
         \\</plist>
         \\
     ;
-    try testing.expectEqualStrings(expected, buf.items);
+    try testing.expectEqualStrings(expected, aw.written());
 }
 
 test "render full spec with env and working_dir" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
 
     const spec: plist.ServiceSpec = .{
         .label = "com.malt.postgresql@16",
@@ -64,17 +64,17 @@ test "render full spec with env and working_dir" {
         .run_at_load = true,
         .keep_alive = true,
     };
-    try plist.render(spec, buf.writer(testing.allocator));
+    try plist.render(spec, &aw.writer);
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "<key>WorkingDirectory</key>") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "<key>EnvironmentVariables</key>") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "<key>PGDATA</key>") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "<string>en_US.UTF-8</string>") != null);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "<key>WorkingDirectory</key>") != null);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "<key>EnvironmentVariables</key>") != null);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "<key>PGDATA</key>") != null);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "<string>en_US.UTF-8</string>") != null);
 }
 
 test "XML-escapes special characters" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
 
     const spec: plist.ServiceSpec = .{
         .label = "com.malt.<ampersand&test>",
@@ -82,15 +82,15 @@ test "XML-escapes special characters" {
         .stdout_path = "/tmp/a\"b.log",
         .stderr_path = "/tmp/err.log",
     };
-    try plist.render(spec, buf.writer(testing.allocator));
+    try plist.render(spec, &aw.writer);
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "&lt;ampersand&amp;test&gt;") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "a&quot;b.log") != null);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "&lt;ampersand&amp;test&gt;") != null);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "a&quot;b.log") != null);
 }
 
 test "keep_alive false omits KeepAlive dict" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
 
     const spec: plist.ServiceSpec = .{
         .label = "com.malt.oneshot",
@@ -99,7 +99,7 @@ test "keep_alive false omits KeepAlive dict" {
         .stderr_path = "/tmp/e",
         .keep_alive = false,
     };
-    try plist.render(spec, buf.writer(testing.allocator));
+    try plist.render(spec, &aw.writer);
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "KeepAlive") == null);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "KeepAlive") == null);
 }

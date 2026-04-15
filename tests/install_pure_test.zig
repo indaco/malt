@@ -219,11 +219,11 @@ test "ensureDirs creates every required subdirectory under a fresh prefix" {
     const prefix = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_install_ensure_dirs_{d}",
-        .{std.time.nanoTimestamp()},
+        .{malt.fs_compat.nanoTimestamp()},
     );
     defer testing.allocator.free(prefix);
-    std.fs.deleteTreeAbsolute(prefix) catch {};
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
 
     try install.ensureDirs(prefix);
 
@@ -231,7 +231,7 @@ test "ensureDirs creates every required subdirectory under a fresh prefix" {
     for (subs) |s| {
         const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ prefix, s });
         defer testing.allocator.free(p);
-        var d = try std.fs.openDirAbsolute(p, .{});
+        var d = try malt.fs_compat.openDirAbsolute(p, .{});
         d.close();
     }
 }
