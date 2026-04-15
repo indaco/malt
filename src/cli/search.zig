@@ -11,18 +11,13 @@ const help = @import("help.zig");
 
 /// Results for a single kind (formula or cask) of a search query.
 ///
-/// `index` and `matches` are separately owned because `matches` elements
-/// are slices *into* `index` — freeing `index` invalidates them. Callers
-/// must deinit via `deinit` to release both in the right order.
+/// `matches` elements are slices into `index`, so `index` must outlive
+/// them. Both live in the arena owned by `execute`, freed together at
+/// function exit — no explicit deinit.
 const KindResults = struct {
     exact: bool = false,
     index: ?[]const u8 = null,
     matches: []const []const u8 = &.{},
-
-    fn deinit(self: *KindResults, allocator: std.mem.Allocator) void {
-        if (self.matches.len != 0) allocator.free(self.matches);
-        if (self.index) |b| allocator.free(b);
-    }
 };
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -63,6 +58,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer allocator.free(cache_dir);
 
+    // All search-result buffers live in a function-scoped arena.
+    // `ArenaAllocator` is lock-free in 0.16, so a single shared arena
+    // is safe for the parallel formula/cask fetch below. The arena
+    // deinits at function exit, freeing every `KindResults` field
+    // uniformly — no per-struct deinit needed.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const shared = arena.allocator();
+
     // When both kinds are requested we dispatch the cask work to a
     // worker thread so the two independent JSON index downloads
     // (formula ~29 MiB, cask ~14 MiB) overlap. On a cold cache this
@@ -75,21 +79,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // thread spawns.
     var formula: KindResults = .{};
     var cask: KindResults = .{};
-    defer formula.deinit(allocator);
-    defer cask.deinit(allocator);
 
     if (search_formula and search_cask) {
-        // malt's main allocator is an `ArenaAllocator` which is not
-        // safe to call concurrently — two threads racing on the same
-        // arena can see misaligned returns and corrupted free lists
-        // (observed on release builds as "thread panic: incorrect
-        // alignment" inside `std.http.Client.Connection.Tls.create`).
-        // Wrap it with a mutex-guarded allocator for the parallel
-        // section; results flow back to the caller's allocator via
-        // `dupe`, so the safe wrapper can go out of scope after join.
-        var safe: std.heap.ThreadSafeAllocator = .{ .child_allocator = allocator };
-        const shared = safe.allocator();
-
         var cask_task: KindTask = .{
             .allocator = shared,
             .cache_dir = cache_dir,
@@ -105,12 +96,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             // Spawn failed — fall back to running cask inline. Rare
             // enough (only on thread-creation failure) that the
             // sequential path is fine.
-            cask = runKindIsolated(allocator, cache_dir, .cask, search_query);
+            cask = runKindIsolated(shared, cache_dir, .cask, search_query);
         }
     } else if (search_formula) {
-        formula = runKindIsolated(allocator, cache_dir, .formula, search_query);
+        formula = runKindIsolated(shared, cache_dir, .formula, search_query);
     } else if (search_cask) {
-        cask = runKindIsolated(allocator, cache_dir, .cask, search_query);
+        cask = runKindIsolated(shared, cache_dir, .cask, search_query);
     }
 
     const stdout = std.fs.File.stdout();

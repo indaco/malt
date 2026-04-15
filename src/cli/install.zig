@@ -802,23 +802,20 @@ pub fn collectFormulaJobs(
     // borrows a client from the shared `http_pool` for the duration
     // of its request so TLS contexts are reused across deps.
     //
-    // Thread-safety: the caller's allocator is typically a
-    // non-thread-safe `GeneralPurposeAllocator`, so we wrap it in a
-    // `ThreadSafeAllocator` for the parallel section. Without this,
-    // concurrent workers would race on allocator bookkeeping and
-    // occasionally return corrupted response buffers (observed as
-    // sporadic `InvalidJson` failures on random deps of large
-    // formulae like ffmpeg). After `join()` the parallel phase is
-    // over and the serial post-processing can use the unwrapped
-    // `allocator` again — pointers allocated through the wrapper
-    // remain valid because both go to the same underlying GPA.
+    // Thread-safety: `std.heap.ArenaAllocator` is lock-free in 0.16,
+    // so a single arena shared across workers replaces the old
+    // `ThreadSafeAllocator` wrapper without contention. Worker-local
+    // arenas come later (S7). JSON bodies are duped back into the
+    // caller's `allocator` after join so they outlive the arena and
+    // the subsequent `allocator.free(dep_json)` calls stay valid.
     const dep_jsons = allocator.alloc(?[]const u8, deps.len) catch return InstallError.DownloadFailed;
     defer allocator.free(dep_jsons);
     @memset(dep_jsons, null);
 
     if (deps.len > 0) {
-        var ts_allocator: std.heap.ThreadSafeAllocator = .{ .child_allocator = allocator };
-        const worker_alloc = ts_allocator.allocator();
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const worker_alloc = arena.allocator();
 
         const threads = allocator.alloc(std.Thread, deps.len) catch return InstallError.DownloadFailed;
         defer allocator.free(threads);
@@ -837,6 +834,15 @@ pub fn collectFormulaJobs(
             }
         }
         for (threads[0..spawned]) |t| t.join();
+
+        // Dupe each fetched JSON into the caller's allocator so the
+        // memory outlives `arena.deinit()` — downstream code parses
+        // and eventually `allocator.free`s these bytes.
+        for (dep_jsons) |*dj| {
+            if (dj.*) |bytes| {
+                dj.* = allocator.dupe(u8, bytes) catch null;
+            }
+        }
     }
 
     // Add deps as jobs — serial post-processing (parse + dedup + append)
