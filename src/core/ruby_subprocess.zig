@@ -149,10 +149,10 @@ pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8
 pub fn extractPostInstallFromSource(allocator: std.mem.Allocator, source: []const u8) ?[]const u8 {
     const marker = "def post_install";
     const start_idx = std.mem.indexOf(u8, source, marker) orelse return null;
-    const body_start = std.mem.indexOfScalarPos(u8, source, start_idx, '\n') orelse return null;
+    const body_start = std.mem.findScalarPos(u8, source, start_idx, '\n') orelse return null;
 
     const def_line_start = if (start_idx > 0)
-        if (std.mem.lastIndexOfScalar(u8, source[0..start_idx], '\n')) |nl| nl + 1 else 0
+        if (std.mem.findScalarLast(u8, source[0..start_idx], '\n')) |nl| nl + 1 else 0
     else
         0;
 
@@ -164,7 +164,7 @@ pub fn extractPostInstallFromSource(allocator: std.mem.Allocator, source: []cons
     var pos = body_start + 1;
     while (pos < source.len) {
         const line_start = pos;
-        const line_end = std.mem.indexOfScalarPos(u8, source, pos, '\n') orelse source.len;
+        const line_end = std.mem.findScalarPos(u8, source, pos, '\n') orelse source.len;
 
         var line_indent: usize = 0;
         var scan = line_start;
@@ -205,7 +205,7 @@ pub fn extractPostInstallBody(allocator: std.mem.Allocator, rb_path: []const u8)
     };
 
     // Find the start of the body (after the def line)
-    const body_start = std.mem.indexOfScalarPos(u8, source, start_idx, '\n') orelse {
+    const body_start = std.mem.findScalarPos(u8, source, start_idx, '\n') orelse {
         allocator.free(source);
         return null;
     };
@@ -213,7 +213,7 @@ pub fn extractPostInstallBody(allocator: std.mem.Allocator, rb_path: []const u8)
     // Find matching `end` — simple heuristic: first line starting with
     // exactly "  end" or "end" after the def. We track indentation depth.
     const def_line_start = if (start_idx > 0)
-        if (std.mem.lastIndexOfScalar(u8, source[0..start_idx], '\n')) |nl| nl + 1 else 0
+        if (std.mem.findScalarLast(u8, source[0..start_idx], '\n')) |nl| nl + 1 else 0
     else
         0;
 
@@ -230,7 +230,7 @@ pub fn extractPostInstallBody(allocator: std.mem.Allocator, rb_path: []const u8)
     while (pos < source.len) {
         // Find next line
         const line_start = pos;
-        const line_end = std.mem.indexOfScalarPos(u8, source, pos, '\n') orelse source.len;
+        const line_end = std.mem.findScalarPos(u8, source, pos, '\n') orelse source.len;
 
         // Check if this line is `end` at the same indent level
         var line_indent: usize = 0;

@@ -272,7 +272,7 @@ pub fn glob(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Va
 /// Glob pattern matching with `*`, `?`, and `{a,b,c}` brace expansion.
 fn globMatch(pattern: []const u8, name: []const u8) bool {
     // Check if pattern contains braces — if so, expand and try each alternative
-    if (std.mem.indexOfScalar(u8, pattern, '{')) |brace_start| {
+    if (std.mem.findScalar(u8, pattern, '{')) |brace_start| {
         if (findMatchingBrace(pattern, brace_start)) |brace_end| {
             const prefix = pattern[0..brace_start];
             const suffix = pattern[brace_end + 1 ..];

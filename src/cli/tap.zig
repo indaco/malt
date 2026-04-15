@@ -20,8 +20,8 @@ pub const TapNameError = error{InvalidTapName};
 /// neither side starts with `.` (rules out `..` traversal and hidden
 /// components).
 pub fn validateTapName(name: []const u8) TapNameError!void {
-    const slash = std.mem.indexOfScalar(u8, name, '/') orelse return TapNameError.InvalidTapName;
-    if (std.mem.indexOfScalarPos(u8, name, slash + 1, '/') != null) return TapNameError.InvalidTapName;
+    const slash = std.mem.findScalar(u8, name, '/') orelse return TapNameError.InvalidTapName;
+    if (std.mem.findScalarPos(u8, name, slash + 1, '/') != null) return TapNameError.InvalidTapName;
     try validateComponent(name[0..slash]);
     try validateComponent(name[slash + 1 ..]);
 }

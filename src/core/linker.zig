@@ -73,9 +73,9 @@ pub const Linker = struct {
         const idx = std.mem.indexOf(u8, path, cellar_marker) orelse return null;
         const after = path[idx + cellar_marker.len ..];
         // Find the slash between <name> and <ver>, then the slash after <ver>.
-        const first_slash = std.mem.indexOfScalar(u8, after, '/') orelse return after;
+        const first_slash = std.mem.findScalar(u8, after, '/') orelse return after;
         const rest = after[first_slash + 1 ..];
-        const second_slash = std.mem.indexOfScalar(u8, rest, '/') orelse return after;
+        const second_slash = std.mem.findScalar(u8, rest, '/') orelse return after;
         return path[idx .. idx + cellar_marker.len + first_slash + 1 + second_slash];
     }
 

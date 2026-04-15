@@ -148,7 +148,7 @@ pub fn patchTextFiles(
 
         // Check if binary (null bytes in first 8KB)
         const check_len = @min(content.len, 8192);
-        if (std.mem.indexOfScalar(u8, content[0..check_len], 0) != null) continue;
+        if (std.mem.findScalar(u8, content[0..check_len], 0) != null) continue;
 
         // Apply each replacement in sequence. `current` always points to
         // either `content` or a freshly allocated buffer from replaceAll;
@@ -195,7 +195,7 @@ fn hasPrefix(path: []const u8, prefix: []const u8) bool {
 /// Replace all occurrences of `needle` with `replacement` in `haystack`.
 /// Returns the original slice (same pointer) if there were no matches, or
 /// a caller-owned allocation with the substitution applied. Uses
-/// `std.mem.indexOfPos` which is memchr-based and significantly faster
+/// `std.mem.findPos` which is memchr-based and significantly faster
 /// than a naive byte-by-byte `mem.eql` loop for small needles — the old
 /// implementation showed up as ~60 samples on `mem.eqlBytes` in the
 /// warm-ffmpeg profile.
@@ -209,7 +209,7 @@ fn replaceAll(allocator: std.mem.Allocator, haystack: []const u8, needle: []cons
     // (indexOfPos is O(n) per call; the total work is one linear pass.)
     var match_count: usize = 1;
     var probe = first + needle.len;
-    while (std.mem.indexOfPos(u8, haystack, probe, needle)) |p| {
+    while (std.mem.findPos(u8, haystack, probe, needle)) |p| {
         match_count += 1;
         probe = p + needle.len;
     }
@@ -237,7 +237,7 @@ fn replaceAll(allocator: std.mem.Allocator, haystack: []const u8, needle: []cons
         dst += rep_len;
         src = match + ndl_len;
 
-        match = std.mem.indexOfPos(u8, haystack, src, needle) orelse break;
+        match = std.mem.findPos(u8, haystack, src, needle) orelse break;
     }
 
     // Tail: everything after the last match.

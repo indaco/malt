@@ -211,7 +211,7 @@ pub fn parseLine(line: []const u8) ?Entry {
 
     var name = s;
     var version: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, s, '@')) |idx| {
+    if (std.mem.findScalar(u8, s, '@')) |idx| {
         name = s[0..idx];
         version = s[idx + 1 ..];
     }

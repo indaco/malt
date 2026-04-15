@@ -166,7 +166,7 @@ test "extractPostInstallBody captures the body between def post_install and matc
     try testing.expect(std.mem.indexOf(u8, body.?, "touch \"etc/hello/config\"") != null);
     // Trailing `end` must NOT be inside the body.
     try testing.expect(std.mem.indexOf(u8, body.?, "end\n") == null or
-        std.mem.lastIndexOf(u8, body.?, "end") == null);
+        std.mem.findLast(u8, body.?, "end") == null);
 }
 
 test "detectRuby returns a heap-owned slice that the caller can free" {

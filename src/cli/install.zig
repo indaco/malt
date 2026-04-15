@@ -1318,9 +1318,9 @@ pub fn isTapFormula(name: []const u8) bool {
 
 /// Parse a tap formula name into user, repo, formula components.
 pub fn parseTapName(name: []const u8) ?struct { user: []const u8, repo: []const u8, formula: []const u8 } {
-    const first_slash = std.mem.indexOfScalar(u8, name, '/') orelse return null;
+    const first_slash = std.mem.findScalar(u8, name, '/') orelse return null;
     const rest = name[first_slash + 1 ..];
-    const second_slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+    const second_slash = std.mem.findScalar(u8, rest, '/') orelse return null;
     return .{
         .user = name[0..first_slash],
         .repo = rest[0..second_slash],
@@ -1697,6 +1697,6 @@ pub fn extractQuoted(line: []const u8, prefix: []const u8) ?[]const u8 {
     const start = std.mem.indexOf(u8, line, prefix) orelse return null;
     const value_start = start + prefix.len;
     if (value_start >= line.len) return null;
-    const end = std.mem.indexOfScalar(u8, line[value_start..], '"') orelse return null;
+    const end = std.mem.findScalar(u8, line[value_start..], '"') orelse return null;
     return line[value_start .. value_start + end];
 }

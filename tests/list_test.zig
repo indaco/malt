@@ -71,7 +71,7 @@ fn runBuild(
 // compare the structural body.
 fn trimTimeSuffix(out: []const u8) []const u8 {
     const needle = ",\"time_ms\":";
-    if (std.mem.lastIndexOf(u8, out, needle)) |pos| return out[0..pos];
+    if (std.mem.findLast(u8, out, needle)) |pos| return out[0..pos];
     return out;
 }
 
