@@ -20,13 +20,22 @@ fn sniffMagic(absolute_path: []const u8, out: []u8) !usize {
     return file.readPositionalAll(io, out, 0) catch return error.ExtractionFailed;
 }
 
-/// Extract a tar.gz archive from `archive_path` into `dest_dir`. Uses the
-/// system `tar` command to avoid Zig stdlib flate decompressor panics on
-/// corrupt/truncated gzip streams (Zig issue: unreachable in Writer.rebase
-/// when the inflate state machine encounters malformed data). The archive
-/// is validated to start with the gzip magic (0x1f 0x8b) before spawning
-/// tar, which gives a clear error on truncated downloads or wrong-mime
-/// responses (e.g. HTML error pages saved with a .tar.gz extension).
+/// Extract a tar.gz archive from `archive_path` into `dest_dir` using
+/// the native 0.16 `std.compress.flate` + `std.tar.pipeToFileSystem`
+/// pipeline — no `tar` subprocess. The 0.15 decompressor was known to
+/// panic (unreachable in `Writer.rebase`) on malformed gzip streams;
+/// 0.16's flate surfaces those as plain errors, so we can stream the
+/// archive in-process and skip a fork/exec per bottle.
+///
+/// The archive is validated to start with the gzip magic (0x1f 0x8b)
+/// before handing off to the decompressor so a truncated download or
+/// an HTML error page saved with a .tar.gz extension fails fast with
+/// a clear error rather than a mid-stream decompression fault.
+///
+/// `pipeToFileSystem`'s default `ModeMode.executable_bit_only` copies
+/// the owner-exec bit into group/other on regular files, matching what
+/// `tar xzf` produces on macOS bottles. Symlinks and nested directories
+/// are materialised via the normal tar-entry handlers.
 pub fn extractTarGz(archive_path: []const u8, dest_dir: []const u8) !void {
     var magic: [2]u8 = undefined;
     const n = try sniffMagic(archive_path, &magic);
@@ -34,16 +43,26 @@ pub fn extractTarGz(archive_path: []const u8, dest_dir: []const u8) !void {
         return error.ExtractionFailed;
     }
 
-    const argv = [_][]const u8{ "tar", "xzf", archive_path, "-C", dest_dir };
-    var child = fs_compat.Child.init(&argv, child_allocator);
-    child.spawn() catch return error.ExtractionFailed;
-    const term = child.wait() catch return error.ExtractionFailed;
-    switch (term) {
-        .exited => |code| {
-            if (code != 0) return error.ExtractionFailed;
-        },
-        else => return error.ExtractionFailed,
-    }
+    const io = io_mod.ctx();
+
+    var file = std.Io.Dir.openFileAbsolute(io, archive_path, .{}) catch return error.ExtractionFailed;
+    defer file.close(io);
+
+    // 16 KiB input buffer — enough to amortise per-read syscalls without
+    // holding a page-sized read-ahead on the stack for every extract.
+    var file_buf: [16 * 1024]u8 = undefined;
+    var file_reader = file.reader(io, &file_buf);
+    const input: *std.Io.Reader = &file_reader.interface;
+
+    // flate.max_window_len is 64 KiB — fine on the stack here, same
+    // shape `extractTarZst` uses for the zstd decompressor.
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompress = std.compress.flate.Decompress.init(input, .gzip, &window);
+
+    var dir = std.Io.Dir.openDirAbsolute(io, dest_dir, .{}) catch return error.ExtractionFailed;
+    defer dir.close(io);
+
+    std.tar.pipeToFileSystem(io, dir, &decompress.reader, .{}) catch return error.ExtractionFailed;
 }
 
 /// Extracts a tar.zst archive from the given input reader into output_dir.

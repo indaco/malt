@@ -86,6 +86,76 @@ test "extractTarGz extracts an archive living outside the destination dir" {
     defer f.close();
 }
 
+// S8: native tar.gz extractor (no `tar xzf` subprocess). The bottle
+// extraction path has to preserve three things or installed binaries
+// break at runtime: the owner-executable bit on programs, relative
+// symlinks (used heavily by Homebrew to pin `share/`, `lib/`, etc.),
+// and deeply nested paths (bottles routinely reach 6+ levels under
+// `<name>/<version>/share/...`). A single tarball exercises all three
+// so a regression in any one tripps this test.
+test "extractTarGz preserves exec bits, symlinks, and deep paths" {
+    const base = "/tmp/malt_archive_targz_perms";
+    var dir = try resetDir(base);
+    defer dir.close();
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+
+    // Build the source tree to tar up: an executable, a deep file, and
+    // a relative symlink pointing at the executable.
+    const src_root = base ++ "/src";
+    try malt.fs_compat.makeDirAbsolute(src_root);
+    try dir.makePath("src/bin");
+    try dir.makePath("src/a/b/c/d/e/f");
+    {
+        const f = try dir.createFile("src/bin/hello", .{ .permissions = std.Io.File.Permissions.fromMode(0o755) });
+        try f.writeAll("#!/bin/sh\necho hi\n");
+        f.close();
+    }
+    {
+        const f = try dir.createFile("src/a/b/c/d/e/f/deep.txt", .{});
+        try f.writeAll("deep");
+        f.close();
+    }
+    // Relative symlink sitting next to the executable, pointing at it
+    // by basename — the usual bottle shape.
+    const src_subdir = try dir.openDir("src/bin", .{});
+    defer {
+        var m = src_subdir;
+        m.close();
+    }
+    try src_subdir.symLink("hello", "hello_link", .{});
+
+    // Tar it up; GNU/BSD tar both preserve exec bits and symlinks by
+    // default, so the round-trip through our native extractor is the
+    // thing under test, not tar's archive-building behaviour.
+    const archive_path = base ++ "/payload.tar.gz";
+    try runTar(&.{ "tar", "czf", archive_path, "-C", base, "src" });
+
+    // Nuke the source tree so observed state after extract can only
+    // come from our extractor.
+    try malt.fs_compat.deleteTreeAbsolute(src_root);
+
+    try archive.extractTarGz(archive_path, base);
+
+    // Exec bit preserved (tar.ExtractOptions.ModeMode.executable_bit_only
+    // is the default — owner-x copied to group/other).
+    const st = try dir.statFile("src/bin/hello");
+    const mode = st.permissions.toMode();
+    try testing.expect(mode & 0o111 != 0);
+
+    // Symlink extracted as a link, not a copy — readLink succeeds and
+    // returns the original relative target.
+    var link_buf: [64]u8 = undefined;
+    const target = try dir.readLink("src/bin/hello_link", &link_buf);
+    try testing.expectEqualStrings("hello", target);
+
+    // Deep nested path reached intact.
+    const deep = try dir.openFile("src/a/b/c/d/e/f/deep.txt", .{});
+    defer deep.close();
+    var buf: [8]u8 = undefined;
+    const n = try deep.readAll(&buf);
+    try testing.expectEqualStrings("deep", buf[0..n]);
+}
+
 test "extractTarGz rejects a non-gzip archive" {
     const base = "/tmp/malt_archive_targz_badmagic";
     var dir = try resetDir(base);
