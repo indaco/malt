@@ -2,6 +2,7 @@
 //! Manage taps (tap/untap).
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const tap_mod = @import("../core/tap.zig");
@@ -79,7 +80,7 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
         }
 
         for (taps) |t| {
-            const f = std.fs.File.stdout();
+            const f = fs_compat.stdoutFile();
             f.writeAll(t.name) catch {};
             f.writeAll("\n") catch {};
             allocator.free(t.name);

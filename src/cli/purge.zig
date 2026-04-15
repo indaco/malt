@@ -31,6 +31,7 @@
 //!   * Per-package removal — use `mt uninstall <name>`.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -271,11 +272,11 @@ pub fn formatBytes(bytes: u64, buf: []u8) []const u8 {
 }
 
 fn pathSize(allocator: std.mem.Allocator, path: []const u8) u64 {
-    if (std.fs.cwd().statFile(path)) |st| {
+    if (fs_compat.cwd().statFile(path)) |st| {
         if (st.kind != .directory) return st.size;
     } else |_| {}
 
-    var dir = std.fs.openDirAbsolute(path, .{ .iterate = true }) catch return 0;
+    var dir = fs_compat.openDirAbsolute(path, .{ .iterate = true }) catch return 0;
     defer dir.close();
 
     var walker = dir.walk(allocator) catch return 0;
@@ -284,7 +285,7 @@ fn pathSize(allocator: std.mem.Allocator, path: []const u8) u64 {
     var total: u64 = 0;
     while (walker.next() catch null) |entry| {
         if (entry.kind == .file) {
-            const s = entry.dir.statFile(entry.basename) catch continue;
+            const s = std.Io.Dir.statFile(entry.dir, io_mod.ctx(), entry.basename, .{}) catch continue;
             total += s.size;
         }
     }
@@ -428,7 +429,7 @@ fn runUnusedDeps(allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool
             {
                 var parent_buf: [512]u8 = undefined;
                 const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
-                if (parent_path.len > 0) std.fs.deleteDirAbsolute(parent_path) catch {};
+                if (parent_path.len > 0) fs_compat.deleteDirAbsolute(parent_path) catch {};
             }
             if (sha_ptr) |s| {
                 store.decrementRef(std.mem.sliceTo(s, 0)) catch {};
@@ -458,10 +459,10 @@ fn runCache(allocator: std.mem.Allocator, cache_dir: []const u8, max_age_days: i
 }
 
 fn pruneCacheRecursive(cache_dir: []const u8, max_age_days: i64, dry_run: bool, result: *TierResult) void {
-    var dir = std.fs.openDirAbsolute(cache_dir, .{ .iterate = true }) catch return;
+    var dir = fs_compat.openDirAbsolute(cache_dir, .{ .iterate = true }) catch return;
     defer dir.close();
 
-    const now = std.time.timestamp();
+    const now = fs_compat.timestamp();
     const max_age_secs = max_age_days * 86400;
 
     var iter = dir.iterate();
@@ -473,7 +474,7 @@ fn pruneCacheRecursive(cache_dir: []const u8, max_age_days: i64, dry_run: bool, 
             continue;
         }
         const stat = dir.statFile(entry.name) catch continue;
-        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s));
+        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         if (now - mtime_secs > max_age_secs) {
             if (dry_run) {
                 output.info("  would prune: {s}/{s}", .{ cache_dir, entry.name });
@@ -496,7 +497,7 @@ fn runDownloads(allocator: std.mem.Allocator, cache_dir: []const u8, dry_run: bo
     var path_buf: [512]u8 = undefined;
     const downloads_path = std.fmt.bufPrint(&path_buf, "{s}/downloads", .{cache_dir}) catch return result;
 
-    var dir = std.fs.openDirAbsolute(downloads_path, .{ .iterate = true }) catch {
+    var dir = fs_compat.openDirAbsolute(downloads_path, .{ .iterate = true }) catch {
         output.info("downloads: nothing to remove ({s} not present)", .{downloads_path});
         return result;
     };
@@ -538,7 +539,7 @@ fn runStaleCasks(allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool
     // Cask download cache
     var cask_cache_buf: [512]u8 = undefined;
     const cask_cache_path = std.fmt.bufPrint(&cask_cache_buf, "{s}/cache/Cask", .{prefix}) catch return result;
-    if (std.fs.openDirAbsolute(cask_cache_path, .{ .iterate = true })) |dir_const| {
+    if (fs_compat.openDirAbsolute(cask_cache_path, .{ .iterate = true })) |dir_const| {
         var dir = dir_const;
         defer dir.close();
 
@@ -579,7 +580,7 @@ fn runStaleCasks(allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool
     // Caskroom orphans
     var caskroom_buf: [512]u8 = undefined;
     const caskroom_path = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom", .{prefix}) catch return result;
-    if (std.fs.openDirAbsolute(caskroom_path, .{ .iterate = true })) |dir_const| {
+    if (fs_compat.openDirAbsolute(caskroom_path, .{ .iterate = true })) |dir_const| {
         var caskroom = dir_const;
         defer caskroom.close();
 
@@ -601,7 +602,7 @@ fn runStaleCasks(allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool
             if (dry_run) {
                 output.info("  stale-casks: would remove Caskroom/{s}", .{entry.name});
             } else {
-                std.fs.deleteTreeAbsolute(full) catch continue;
+                fs_compat.deleteTreeAbsolute(full) catch continue;
                 output.info("  stale-casks: removed Caskroom/{s}", .{entry.name});
             }
             result.removed += 1;
@@ -622,7 +623,7 @@ fn runOldVersions(allocator: std.mem.Allocator, prefix: []const u8, dry_run: boo
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{prefix}) catch return result;
 
-    var cellar_dir = std.fs.openDirAbsolute(cellar_path, .{ .iterate = true }) catch {
+    var cellar_dir = fs_compat.openDirAbsolute(cellar_path, .{ .iterate = true }) catch {
         output.info("old-versions: no Cellar directory at {s}", .{cellar_path});
         return result;
     };
@@ -648,7 +649,7 @@ fn runOldVersions(allocator: std.mem.Allocator, prefix: []const u8, dry_run: boo
             if (ver_entry.kind != .directory) continue;
             const stat = formula_dir.statFile(ver_entry.name) catch continue;
             const dup = allocator.dupe(u8, ver_entry.name) catch continue;
-            versions.append(allocator, .{ .name = dup, .mtime = stat.mtime }) catch {
+            versions.append(allocator, .{ .name = dup, .mtime = stat.mtime.nanoseconds }) catch {
                 allocator.free(dup);
                 continue;
             };
@@ -672,7 +673,7 @@ fn runOldVersions(allocator: std.mem.Allocator, prefix: []const u8, dry_run: boo
             if (dry_run) {
                 output.info("  old-versions: would remove {s}/{s}", .{ formula_entry.name, v.name });
             } else {
-                std.fs.deleteTreeAbsolute(full) catch continue;
+                fs_compat.deleteTreeAbsolute(full) catch continue;
                 output.info("  old-versions: removed {s}/{s}", .{ formula_entry.name, v.name });
             }
             result.bytes += sz;
@@ -743,33 +744,30 @@ fn writeBytesToPath(path: []const u8, bytes: []const u8) Error!void {
     if (std.fs.path.dirname(path)) |dir| {
         if (dir.len > 0) {
             if (std.fs.path.isAbsolute(dir)) {
-                std.fs.makeDirAbsolute(dir) catch {};
+                fs_compat.makeDirAbsolute(dir) catch {};
             } else {
-                std.fs.cwd().makePath(dir) catch {};
+                fs_compat.cwd().makePath(dir) catch {};
             }
         }
     }
     const file = if (std.fs.path.isAbsolute(path))
-        std.fs.createFileAbsolute(path, .{ .truncate = true }) catch return Error.OpenFileFailed
+        fs_compat.createFileAbsolute(path, .{ .truncate = true }) catch return Error.OpenFileFailed
     else
-        std.fs.cwd().createFile(path, .{ .truncate = true }) catch return Error.OpenFileFailed;
+        fs_compat.cwd().createFile(path, .{ .truncate = true }) catch return Error.OpenFileFailed;
     defer file.close();
     file.writeAll(bytes) catch return Error.WriteFailed;
 }
 
 fn deleteTarget(path: []const u8) bool {
-    std.fs.deleteTreeAbsolute(path) catch |e| switch (e) {
-        error.FileNotFound => return true,
-        else => {
-            output.warn("could not remove {s}", .{path});
-            return false;
-        },
+    fs_compat.deleteTreeAbsolute(path) catch {
+        output.warn("could not remove {s}", .{path});
+        return false;
     };
     return true;
 }
 
 fn deletePrefixRoot(path: []const u8) bool {
-    std.fs.deleteDirAbsolute(path) catch |e| switch (e) {
+    fs_compat.deleteDirAbsolute(path) catch |e| switch (e) {
         error.FileNotFound => return true,
         error.DirNotEmpty => {
             output.info("prefix {s} not empty — leaving it in place", .{path});
@@ -787,7 +785,7 @@ fn verifyWipe(plan: []const Target) void {
     var leaks: usize = 0;
     for (plan) |t| {
         if (t.category == .prefix_root) continue;
-        std.fs.accessAbsolute(t.path, .{}) catch continue;
+        fs_compat.accessAbsolute(t.path, .{}) catch continue;
         output.warn("verification: {s} still present", .{t.path});
         leaks += 1;
     }

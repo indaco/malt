@@ -1,5 +1,6 @@
 const std = @import("std");
 const io_mod = @import("../ui/io.zig");
+const fs_compat = @import("compat.zig");
 
 /// `c_allocator` is used for `std.process.Child` internals (argv/env
 /// bookkeeping) throughout this module. Callers may be running under an
@@ -34,11 +35,11 @@ pub fn extractTarGz(archive_path: []const u8, dest_dir: []const u8) !void {
     }
 
     const argv = [_][]const u8{ "tar", "xzf", archive_path, "-C", dest_dir };
-    var child = std.process.Child.init(&argv, child_allocator);
+    var child = fs_compat.Child.init(&argv, child_allocator);
     child.spawn() catch return error.ExtractionFailed;
     const term = child.wait() catch return error.ExtractionFailed;
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) return error.ExtractionFailed;
         },
         else => return error.ExtractionFailed,
@@ -69,11 +70,11 @@ pub fn extractZip(archive_path: []const u8, dest_dir: []const u8) !void {
 
     // -q: quiet, -o: overwrite without prompting, -d: destination dir.
     const argv = [_][]const u8{ "unzip", "-q", "-o", archive_path, "-d", dest_dir };
-    var child = std.process.Child.init(&argv, child_allocator);
+    var child = fs_compat.Child.init(&argv, child_allocator);
     child.spawn() catch return error.ExtractionFailed;
     const term = child.wait() catch return error.ExtractionFailed;
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) return error.ExtractionFailed;
         },
         else => return error.ExtractionFailed,
@@ -85,11 +86,11 @@ pub fn extractZip(archive_path: []const u8, dest_dir: []const u8) !void {
 /// with std.tar, so we shell out to the system tar (always available on macOS).
 pub fn extractTarXzFile(archive_path: []const u8, dest_dir: []const u8) !void {
     const argv = [_][]const u8{ "tar", "xf", archive_path, "-C", dest_dir };
-    var child = std.process.Child.init(&argv, child_allocator);
+    var child = fs_compat.Child.init(&argv, child_allocator);
     child.spawn() catch return error.ExtractionFailed;
     const term = child.wait() catch return error.ExtractionFailed;
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) return error.ExtractionFailed;
         },
         else => return error.ExtractionFailed,

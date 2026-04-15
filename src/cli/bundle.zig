@@ -1,6 +1,7 @@
 //! malt — bundle command
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -211,7 +212,7 @@ fn cmdImport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     const name = if (manifest.name.len > 0) manifest.name else path;
     stmt.bindText(1, name) catch return BundleError.DatabaseError;
     stmt.bindText(2, path) catch return BundleError.DatabaseError;
-    stmt.bindInt(3, std.time.timestamp()) catch return BundleError.DatabaseError;
+    stmt.bindInt(3, fs_compat.timestamp()) catch return BundleError.DatabaseError;
     stmt.bindInt(4, @intCast(manifest.version)) catch return BundleError.DatabaseError;
     _ = stmt.step() catch return BundleError.DatabaseError;
     output.success("bundle registered: {s}", .{name});
@@ -235,16 +236,16 @@ fn resolveBundlefile(allocator: std.mem.Allocator, explicit: ?[]const u8) ![]con
         "Maltfile.json",
     };
     for (candidates) |c| {
-        std.fs.cwd().access(c, .{}) catch continue;
+        fs_compat.cwd().access(c, .{}) catch continue;
         return allocator.dupe(u8, c) catch return BundleError.BundlefileNotFound;
     }
 
     // ~/.config/malt
-    if (std.posix.getenv("HOME")) |home| {
+    if (fs_compat.getenv("HOME")) |home| {
         for ([_][]const u8{ "Brewfile", "Maltfile.json" }) |name| {
             const p = std.fmt.allocPrint(allocator, "{s}/.config/malt/{s}", .{ home, name }) catch
                 return BundleError.BundlefileNotFound;
-            std.fs.accessAbsolute(p, .{}) catch {
+            fs_compat.accessAbsolute(p, .{}) catch {
                 allocator.free(p);
                 continue;
             };
@@ -256,9 +257,9 @@ fn resolveBundlefile(allocator: std.mem.Allocator, explicit: ?[]const u8) ![]con
 
 fn readManifest(allocator: std.mem.Allocator, path: []const u8) !manifest_mod.Manifest {
     const file = if (std.fs.path.isAbsolute(path))
-        std.fs.openFileAbsolute(path, .{}) catch return BundleError.BundlefileNotFound
+        fs_compat.openFileAbsolute(path, .{}) catch return BundleError.BundlefileNotFound
     else
-        std.fs.cwd().openFile(path, .{}) catch return BundleError.BundlefileNotFound;
+        fs_compat.cwd().openFile(path, .{}) catch return BundleError.BundlefileNotFound;
     defer file.close();
 
     const stat = file.stat() catch return BundleError.BundlefileNotFound;
@@ -281,12 +282,12 @@ fn writeManifest(
 ) !void {
     _ = allocator;
     const file = if (std.fs.path.isAbsolute(path))
-        std.fs.createFileAbsolute(path, .{ .truncate = true }) catch return BundleError.WriteFailed
+        fs_compat.createFileAbsolute(path, .{ .truncate = true }) catch return BundleError.WriteFailed
     else
-        std.fs.cwd().createFile(path, .{ .truncate = true }) catch return BundleError.WriteFailed;
+        fs_compat.cwd().createFile(path, .{ .truncate = true }) catch return BundleError.WriteFailed;
     defer file.close();
     var write_buf: [4096]u8 = undefined;
-    var fw = file.writer(io_mod.ctx(), &write_buf);
+    var fw = file.writer(&write_buf);
     const w = &fw.interface;
     switch (format) {
         .brewfile => brewfile_emit.emit(manifest, w) catch return BundleError.WriteFailed,
@@ -366,7 +367,7 @@ fn openDb() !sqlite.Database {
     const db_dir = std.fmt.allocPrint(std.heap.page_allocator, "{s}/db", .{prefix}) catch
         return BundleError.DatabaseError;
     defer std.heap.page_allocator.free(db_dir);
-    std.fs.cwd().makePath(db_dir) catch {};
+    fs_compat.cwd().makePath(db_dir) catch {};
     return sqlite.Database.open(path);
 }
 

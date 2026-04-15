@@ -2,6 +2,7 @@
 //! Tree-walking evaluator with ExecContext for formula path bindings.
 
 const std = @import("std");
+const fs_compat = @import("../../fs/compat.zig");
 const ast = @import("ast.zig");
 const values = @import("values.zig");
 const lexer_mod = @import("lexer.zig");
@@ -522,7 +523,7 @@ pub const Interpreter = struct {
         if (rs.message) |msg_node| {
             const msg = try self.eval(msg_node);
             const msg_str = msg.asString(self.allocator) catch "raise";
-            const f = std.fs.File.stderr();
+            const f = fs_compat.stderrFile();
             f.writeAll("  x ") catch {};
             f.writeAll(msg_str) catch {};
             f.writeAll("\n") catch {};

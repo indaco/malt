@@ -1,6 +1,7 @@
 //! malt — services command
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -121,7 +122,7 @@ fn cmdLogs(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     }
     const path = try supervisor.logPath(allocator, name, if (stream == .stdout) .stdout else .stderr);
     defer allocator.free(path);
-    const stdout = std.fs.File.stdout();
+    const stdout = fs_compat.stdoutFile();
     var write_buf: [4096]u8 = undefined;
     var stdout_writer = stdout.writer(&write_buf);
     const w = &stdout_writer.interface;
@@ -137,7 +138,7 @@ fn openDb() !sqlite.Database {
     const db_dir = std.fmt.allocPrint(std.heap.page_allocator, "{s}/db", .{prefix}) catch
         return ServicesError.DatabaseError;
     defer std.heap.page_allocator.free(db_dir);
-    std.fs.cwd().makePath(db_dir) catch {};
+    fs_compat.cwd().makePath(db_dir) catch {};
     return sqlite.Database.open(path);
 }
 
@@ -155,6 +156,6 @@ fn printHelp() !void {
         \\                    Print the last N lines of the service log.
         \\
     ;
-    const f = std.fs.File.stderr();
+    const f = fs_compat.stderrFile();
     try f.writeAll(msg);
 }

@@ -8,6 +8,32 @@ pub fn build(b: *std.Build) void {
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", @embedFile(".version"));
 
+    // --- Translated-C modules ---
+    // Zig 0.16 prefers build-system `addTranslateC` over inline `@cImport`:
+    // each header is translated once per build graph instead of once per
+    // root source file.
+    const c_sqlite = b.addTranslateC(.{
+        .root_source_file = b.path("c/sqlite.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    c_sqlite.addIncludePath(b.path("vendor/"));
+    const c_sqlite_mod = c_sqlite.createModule();
+
+    const c_clonefile = b.addTranslateC(.{
+        .root_source_file = b.path("c/clonefile.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const c_clonefile_mod = c_clonefile.createModule();
+
+    const c_mount = b.addTranslateC(.{
+        .root_source_file = b.path("c/mount.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const c_mount_mod = c_mount.createModule();
+
     // --- Main executable: mt ---
     const exe = b.addExecutable(.{
         .name = "malt",
@@ -19,6 +45,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addOptions("version_string", version_options);
+    exe.root_module.addImport("c_sqlite", c_sqlite_mod);
+    exe.root_module.addImport("c_clonefile", c_clonefile_mod);
+    exe.root_module.addImport("c_mount", c_mount_mod);
 
     // Compile vendored SQLite amalgamation
     exe.root_module.addCSourceFile(.{
@@ -126,6 +155,9 @@ pub fn build(b: *std.Build) void {
     malt_lib.addIncludePath(b.path("vendor/"));
     malt_lib.addIncludePath(b.path("c/"));
     malt_lib.addOptions("version_string", version_options);
+    malt_lib.addImport("c_sqlite", c_sqlite_mod);
+    malt_lib.addImport("c_clonefile", c_clonefile_mod);
+    malt_lib.addImport("c_mount", c_mount_mod);
 
     @setEvalBranchQuota(16000);
     inline for (test_modules) |test_file| {

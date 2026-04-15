@@ -14,10 +14,12 @@ pub const LockFile = struct {
     /// sleeps until `timeout_ms` elapses.  On success the current PID is
     /// written to the file so that other processes can identify the holder.
     pub fn acquire(path: []const u8, timeout_ms: u32) LockError!LockFile {
-        const fd = std.posix.open(path, .{
+        const path_z = std.posix.toPosixPath(path) catch return error.OpenFailed;
+        const fd = std.c.open(&path_z, .{
             .ACCMODE = .RDWR,
             .CREAT = true,
-        }, 0o644) catch return error.OpenFailed;
+        }, @as(std.c.mode_t, 0o644));
+        if (fd < 0) return error.OpenFailed;
 
         const deadline_ns: u128 = @as(u128, @intCast(timeout_ms)) * std.time.ns_per_ms;
         var elapsed_ns: u128 = 0;
@@ -25,46 +27,50 @@ pub const LockFile = struct {
 
         while (true) {
             // Try non-blocking exclusive lock.
-            std.posix.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB) catch |err| {
-                switch (err) {
-                    error.WouldBlock => {
-                        if (elapsed_ns >= deadline_ns) {
-                            std.posix.close(fd);
-                            return error.Timeout;
-                        }
-                        std.Thread.sleep(sleep_ns);
-                        elapsed_ns += sleep_ns;
-                        continue;
-                    },
-                    else => {
-                        std.posix.close(fd);
-                        return error.OpenFailed;
-                    },
-                }
-            };
-            break; // lock acquired
+            const rc = std.c.flock(fd, std.c.LOCK.EX | std.c.LOCK.NB);
+            if (rc == 0) break;
+            const errno = std.posix.errno(rc);
+            switch (errno) {
+                .AGAIN => {
+                    if (elapsed_ns >= deadline_ns) {
+                        _ = std.c.close(fd);
+                        return error.Timeout;
+                    }
+                    const ts: std.c.timespec = .{
+                        .sec = @intCast(sleep_ns / std.time.ns_per_s),
+                        .nsec = @intCast(sleep_ns % std.time.ns_per_s),
+                    };
+                    _ = std.c.nanosleep(&ts, null);
+                    elapsed_ns += sleep_ns;
+                },
+                else => {
+                    _ = std.c.close(fd);
+                    return error.OpenFailed;
+                },
+            }
         }
 
         // Truncate and write PID.
-        std.posix.ftruncate(fd, 0) catch {
-            std.posix.flock(fd, std.posix.LOCK.UN) catch {};
-            std.posix.close(fd);
+        if (std.c.ftruncate(fd, 0) != 0) {
+            _ = std.c.flock(fd, std.c.LOCK.UN);
+            _ = std.c.close(fd);
             return error.WriteFailed;
-        };
+        }
 
         var buf: [32]u8 = undefined;
         const pid = std.c.getpid();
         const pid_str = std.fmt.bufPrint(&buf, "{d}", .{pid}) catch {
-            std.posix.flock(fd, std.posix.LOCK.UN) catch {};
-            std.posix.close(fd);
+            _ = std.c.flock(fd, std.c.LOCK.UN);
+            _ = std.c.close(fd);
             return error.WriteFailed;
         };
 
-        _ = std.posix.write(fd, pid_str) catch {
-            std.posix.flock(fd, std.posix.LOCK.UN) catch {};
-            std.posix.close(fd);
+        const written = std.c.write(fd, pid_str.ptr, pid_str.len);
+        if (written < 0) {
+            _ = std.c.flock(fd, std.c.LOCK.UN);
+            _ = std.c.close(fd);
             return error.WriteFailed;
-        };
+        }
 
         return LockFile{
             .fd = fd,
@@ -80,26 +86,28 @@ pub const LockFile = struct {
     /// left in place — removing it would race against other processes
     /// that may already have it open.
     pub fn release(self: *LockFile) void {
-        std.posix.ftruncate(self.fd, 0) catch {};
+        _ = std.c.ftruncate(self.fd, 0);
         // fsync before unlock so a crash between truncate and close can't
         // leave a stale PID in the lock file — `doctor` would otherwise
         // report a phantom holder.
-        std.posix.fsync(self.fd) catch {};
-        std.posix.flock(self.fd, std.posix.LOCK.UN) catch {};
-        std.posix.close(self.fd);
+        _ = std.c.fsync(self.fd);
+        _ = std.c.flock(self.fd, std.c.LOCK.UN);
+        _ = std.c.close(self.fd);
     }
 
     /// Read the PID from an existing lock file.  Returns null when the file
     /// does not exist or cannot be parsed.
     pub fn holderPid(path: []const u8) ?std.posix.pid_t {
-        const fd = std.posix.open(path, .{ .ACCMODE = .RDONLY }, 0) catch return null;
-        defer std.posix.close(fd);
+        const path_z = std.posix.toPosixPath(path) catch return null;
+        const fd = std.c.open(&path_z, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        if (fd < 0) return null;
+        defer _ = std.c.close(fd);
 
         var buf: [32]u8 = undefined;
         const n = std.posix.read(fd, &buf) catch return null;
         if (n == 0) return null;
 
-        const trimmed = std.mem.trimRight(u8, buf[0..n], &[_]u8{ '\n', '\r', ' ' });
+        const trimmed = std.mem.trimEnd(u8, buf[0..n], &[_]u8{ '\n', '\r', ' ' });
         return std.fmt.parseInt(std.posix.pid_t, trimmed, 10) catch null;
     }
 };

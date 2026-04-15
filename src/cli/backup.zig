@@ -15,6 +15,7 @@
 //! honoured by `malt restore`.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -144,23 +145,23 @@ fn writeToPath(path: []const u8, bytes: []const u8) Error!void {
     if (std.fs.path.dirname(path)) |dir| {
         if (dir.len > 0) {
             if (std.fs.path.isAbsolute(dir)) {
-                std.fs.makeDirAbsolute(dir) catch |e| switch (e) {
+                fs_compat.makeDirAbsolute(dir) catch |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => {},
                 };
             } else {
-                std.fs.cwd().makePath(dir) catch {};
+                fs_compat.cwd().makePath(dir) catch {};
             }
         }
     }
 
     const file = if (std.fs.path.isAbsolute(path))
-        std.fs.createFileAbsolute(path, .{ .truncate = true }) catch {
+        fs_compat.createFileAbsolute(path, .{ .truncate = true }) catch {
             output.err("Failed to create {s}", .{path});
             return Error.OpenFileFailed;
         }
     else
-        std.fs.cwd().createFile(path, .{ .truncate = true }) catch {
+        fs_compat.cwd().createFile(path, .{ .truncate = true }) catch {
             output.err("Failed to create {s}", .{path});
             return Error.OpenFileFailed;
         };
@@ -243,7 +244,7 @@ pub fn parseBackup(allocator: std.mem.Allocator, text: []const u8) ![]Entry {
 /// The timestamp uses UTC so two backups taken at the same wall-clock moment
 /// collide deterministically across time zones.
 pub fn defaultBackupPath(allocator: std.mem.Allocator) ![]u8 {
-    const secs = std.time.timestamp();
+    const secs = fs_compat.timestamp();
     const epoch_seconds: std.time.epoch.EpochSeconds = .{
         .secs = @intCast(@max(secs, 0)),
     };

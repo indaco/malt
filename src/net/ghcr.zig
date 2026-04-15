@@ -2,8 +2,10 @@
 //! Token management and blob fetching for GitHub Container Registry.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 
 const client_mod = @import("client.zig");
+const io_mod = @import("../ui/io.zig");
 
 pub const GhcrError = error{
     TokenFetchFailed,
@@ -19,7 +21,7 @@ pub const GhcrClient = struct {
     cached_token: ?[]const u8,
     cached_repo: ?[]const u8,
     token_expiry: i64,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     pub fn init(allocator: std.mem.Allocator, http: *client_mod.HttpClient) GhcrClient {
         return .{
@@ -28,7 +30,7 @@ pub const GhcrClient = struct {
             .cached_token = null,
             .cached_repo = null,
             .token_expiry = 0,
-            .mutex = .{},
+            .mutex = .init,
         };
     }
 
@@ -47,11 +49,12 @@ pub const GhcrClient = struct {
         http: *client_mod.HttpClient,
         repo: []const u8,
     ) GhcrError![]const u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = io_mod.ctx();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         // Double-checked: if token still valid AND for the same repo, return cached
-        const now = std.time.timestamp();
+        const now = fs_compat.timestamp();
         if (self.cached_token) |t| {
             const same_repo = if (self.cached_repo) |cr| std.mem.eql(u8, cr, repo) else false;
             if (now < self.token_expiry and same_repo) return t;

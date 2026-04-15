@@ -119,7 +119,7 @@ pub fn subBang(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError
 /// chomp — remove trailing newline characters
 pub fn chomp(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const s = try receiverStr(ctx.allocator, receiver);
-    const trimmed = std.mem.trimRight(u8, s, "\n\r");
+    const trimmed = std.mem.trimEnd(u8, s, "\n\r");
     return Value{ .string = trimmed };
 }
 

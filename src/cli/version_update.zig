@@ -2,6 +2,8 @@
 //! Self-update the mt binary from GitHub releases.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
+const io_mod = @import("../ui/io.zig");
 const builtin = @import("builtin");
 const client_mod = @import("../net/client.zig");
 const archive = @import("../fs/archive.zig");
@@ -104,7 +106,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Write to temp file
     const tmp_path = "/tmp/mt-update.tar.gz";
     {
-        const f = std.fs.createFileAbsolute(tmp_path, .{}) catch {
+        const f = fs_compat.createFileAbsolute(tmp_path, .{}) catch {
             output.err("Cannot create temp file", .{});
             return error.Aborted;
         };
@@ -114,16 +116,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return error.Aborted;
         };
     }
-    defer std.fs.deleteFileAbsolute(tmp_path) catch {};
+    defer fs_compat.deleteFileAbsolute(tmp_path) catch {};
 
     // Extract
     const tmp_dir = "/tmp/mt-update";
-    std.fs.deleteTreeAbsolute(tmp_dir) catch {};
-    std.fs.makeDirAbsolute(tmp_dir) catch {
+    fs_compat.deleteTreeAbsolute(tmp_dir) catch {};
+    fs_compat.makeDirAbsolute(tmp_dir) catch {
         output.err("Cannot create temp directory", .{});
         return error.Aborted;
     };
-    defer std.fs.deleteTreeAbsolute(tmp_dir) catch {};
+    defer fs_compat.deleteTreeAbsolute(tmp_dir) catch {};
 
     archive.extractTarGz(tmp_path, tmp_dir) catch {
         output.err("Failed to extract update", .{});
@@ -149,16 +151,17 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     // Find where the current binary lives
-    var self_exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const self_exe = std.fs.selfExePath(&self_exe_buf) catch {
+    var self_exe_buf: [fs_compat.max_path_bytes]u8 = undefined;
+    const n = std.process.executablePath(io_mod.ctx(), &self_exe_buf) catch {
         output.err("Cannot determine current binary path", .{});
         return error.Aborted;
     };
+    const self_exe = self_exe_buf[0..n];
 
     output.info("Replacing {s}...", .{self_exe});
 
     // Replace: copy new over old
-    std.fs.copyFileAbsolute(new_binary, self_exe, .{}) catch {
+    fs_compat.copyFileAbsolute(new_binary, self_exe, .{}) catch {
         output.err("Failed to replace binary. You may need sudo.", .{});
         output.info("Manual update: sudo cp {s} {s}", .{ new_binary, self_exe });
         return;
@@ -166,7 +169,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Make executable
     {
-        const f = std.fs.openFileAbsolute(self_exe, .{ .mode = .read_write }) catch return;
+        const f = fs_compat.openFileAbsolute(self_exe, .{ .mode = .read_write }) catch return;
         defer f.close();
         f.chmod(0o755) catch {};
     }
@@ -233,7 +236,7 @@ pub fn findReleaseBinary(
     tmp_dir: []const u8,
     out_buf: []u8,
 ) ?[]const u8 {
-    var dir = std.fs.openDirAbsolute(tmp_dir, .{ .iterate = true }) catch return null;
+    var dir = fs_compat.openDirAbsolute(tmp_dir, .{ .iterate = true }) catch return null;
     defer dir.close();
 
     var walker = dir.walk(allocator) catch return null;

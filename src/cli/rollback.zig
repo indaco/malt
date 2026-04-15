@@ -2,6 +2,7 @@
 //! Revert a formula to its previous version using existing store entries.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
@@ -61,7 +62,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var store_buf: [512]u8 = undefined;
     const store_dir_path = std.fmt.bufPrint(&store_buf, "{s}/store", .{prefix}) catch return error.Aborted;
 
-    var store_dir = std.fs.openDirAbsolute(store_dir_path, .{ .iterate = true }) catch {
+    var store_dir = fs_compat.openDirAbsolute(store_dir_path, .{ .iterate = true }) catch {
         output.err("Cannot read store directory", .{});
         return error.Aborted;
     };
@@ -80,7 +81,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         var check_buf: [512]u8 = undefined;
         const check_path = std.fmt.bufPrint(&check_buf, "{s}/{s}/{s}", .{ store_dir_path, entry.name, name }) catch continue;
 
-        var keg_dir = std.fs.openDirAbsolute(check_path, .{ .iterate = true }) catch continue;
+        var keg_dir = fs_compat.openDirAbsolute(check_path, .{ .iterate = true }) catch continue;
         defer keg_dir.close();
 
         // The first subdirectory is the version

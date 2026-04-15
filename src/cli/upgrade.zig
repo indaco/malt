@@ -2,6 +2,7 @@
 //! Upgrade installed packages and casks.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -266,7 +267,7 @@ fn upgradeFormula(
         var parent_buf: [512]u8 = undefined;
         const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
         if (parent_path.len > 0) {
-            std.fs.cwd().deleteDir(parent_path) catch {};
+            fs_compat.cwd().deleteDir(parent_path) catch {};
         }
     }
 

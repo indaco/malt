@@ -2,6 +2,7 @@
 //! Cellar materialization: clonefile from store, Mach-O patching, codesigning.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const clonefile = @import("../fs/clonefile.zig");
 const patcher = @import("../macho/patcher.zig");
 const codesign = @import("../macho/codesign.zig");
@@ -89,7 +90,7 @@ pub fn materializeWithCellar(
     var parent_buf: [512]u8 = undefined;
     const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch
         return CellarError.OutOfMemory;
-    std.fs.makeDirAbsolute(parent) catch |e| switch (e) {
+    fs_compat.makeDirAbsolute(parent) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return CellarError.CloneFailed,
     };
@@ -99,11 +100,11 @@ pub fn materializeWithCellar(
     var keg_rev_buf: [512]u8 = undefined;
     const src = blk: {
         // 1. Exact match: {store}/{name}/{version}
-        std.fs.accessAbsolute(keg_src, .{}) catch {
+        fs_compat.accessAbsolute(keg_src, .{}) catch {
             // 2. Scan {store}/{name}/ for a dir starting with "{version}_"
             var name_dir_buf: [512]u8 = undefined;
             const name_dir_path = std.fmt.bufPrint(&name_dir_buf, "{s}/{s}", .{ store_path, name }) catch break :blk store_path;
-            var name_dir = std.fs.openDirAbsolute(name_dir_path, .{ .iterate = true }) catch break :blk store_path;
+            var name_dir = fs_compat.openDirAbsolute(name_dir_path, .{ .iterate = true }) catch break :blk store_path;
             defer name_dir.close();
             var it = name_dir.iterate();
             while (it.next() catch null) |entry| {
@@ -130,8 +131,8 @@ pub fn materializeWithCellar(
     // `deleteDirAbsolute` only succeeds when the directory is empty, so
     // installed sibling versions are left untouched.
     errdefer {
-        std.fs.deleteTreeAbsolute(cellar_path) catch {};
-        std.fs.deleteDirAbsolute(parent) catch {};
+        fs_compat.deleteTreeAbsolute(cellar_path) catch {};
+        fs_compat.deleteDirAbsolute(parent) catch {};
     }
 
     // Clone from store to Cellar
@@ -252,7 +253,7 @@ fn walkMachOAndPatch(
     replacements: []const Replacement,
     modified_out: *std.ArrayList([]const u8),
 ) CellarError!void {
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
+    var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
     defer dir.close();
 
     var walker = dir.walk(allocator) catch return;
@@ -268,7 +269,7 @@ fn walkMachOAndPatch(
         defer if (!keep_path) allocator.free(full_path);
 
         // Check if Mach-O by reading magic.
-        const file = std.fs.openFileAbsolute(full_path, .{}) catch continue;
+        const file = fs_compat.openFileAbsolute(full_path, .{}) catch continue;
         var magic_buf: [4]u8 = undefined;
         const n = file.readAll(&magic_buf) catch {
             file.close();
@@ -317,10 +318,10 @@ pub fn writeInstallReceiptFull(
     var path_buf: [512]u8 = undefined;
     const receipt_path = std.fmt.bufPrint(&path_buf, "{s}/INSTALL_RECEIPT.json", .{cellar_path}) catch return;
 
-    const file = std.fs.createFileAbsolute(receipt_path, .{}) catch return;
+    const file = fs_compat.createFileAbsolute(receipt_path, .{}) catch return;
     defer file.close();
 
-    const timestamp = std.time.timestamp();
+    const timestamp = fs_compat.timestamp();
     const tap_str = tap orelse "homebrew/core";
     const reason = if (is_direct) "true" else "false";
     const dep_reason = if (is_direct) "false" else "true";
@@ -371,5 +372,5 @@ pub fn remove(prefix: []const u8, name: []const u8, version: []const u8) CellarE
     var buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
         return CellarError.OutOfMemory;
-    std.fs.deleteTreeAbsolute(cellar_path) catch return CellarError.RemoveFailed;
+    fs_compat.deleteTreeAbsolute(cellar_path) catch return CellarError.RemoveFailed;
 }

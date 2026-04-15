@@ -2,6 +2,7 @@
 //! CLI entry point and command dispatch for the `mt` binary.
 
 const std = @import("std");
+const fs_compat = @import("fs/compat.zig");
 const io_mod = @import("ui/io.zig");
 
 /// Global interrupt flag — set by SIGINT handler, checked at install step boundaries.
@@ -296,7 +297,7 @@ fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     for (brew_paths) |brew_path| {
-        std.fs.accessAbsolute(brew_path, .{}) catch continue;
+        fs_compat.accessAbsolute(brew_path, .{}) catch continue;
 
         // Build argv: [brew] ++ args
         var argv_buf: [128][]const u8 = undefined;
@@ -306,11 +307,11 @@ fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
             argv_buf[i] = arg;
         }
 
-        var child = std.process.Child.init(argv_buf[0 .. argc + 1], allocator);
+        var child = fs_compat.Child.init(argv_buf[0 .. argc + 1], allocator);
         child.spawn() catch continue;
         const term = child.wait() catch continue;
         switch (term) {
-            .Exited => |code| {
+            .exited => |code| {
                 if (code != 0) return error.BrewFailed;
             },
             else => return error.BrewFailed,

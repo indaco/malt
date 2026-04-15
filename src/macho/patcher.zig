@@ -2,6 +2,7 @@
 //! Path relocation in load commands and text file patching.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const parser = @import("parser.zig");
 
 pub const PatchError = error{
@@ -27,7 +28,7 @@ pub fn patchPaths(
     new_prefix: []const u8,
 ) PatchError!PatchResult {
     // Read the entire file
-    const file = std.fs.cwd().openFile(file_path, .{ .mode = .read_write }) catch
+    const file = fs_compat.cwd().openFile(file_path, .{ .mode = .read_write }) catch
         return PatchError.OpenFailed;
     defer file.close();
 
@@ -93,8 +94,7 @@ pub fn patchPaths(
 
     if (patched > 0) {
         // Write modified data back to file
-        file.seekTo(0) catch return PatchError.IoError;
-        file.writeAll(data) catch return PatchError.IoError;
+        file.writeAllAt(data, 0) catch return PatchError.IoError;
     }
 
     return .{ .patched_count = patched, .skipped_count = skipped };
@@ -121,7 +121,7 @@ pub fn patchTextFiles(
 ) !u32 {
     if (replacements.len == 0) return 0;
 
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return 0;
+    var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch return 0;
     defer dir.close();
 
     var walker = try dir.walk(allocator);
@@ -176,8 +176,7 @@ pub fn patchTextFiles(
         if (modified) {
             defer if (current.ptr != content.ptr) allocator.free(current);
             // Write back
-            file.seekTo(0) catch continue;
-            file.writeAll(current) catch continue;
+            file.writeAllAt(current, 0) catch continue;
             // Truncate if new content is shorter
             file.setEndPos(current.len) catch {};
             count += 1;

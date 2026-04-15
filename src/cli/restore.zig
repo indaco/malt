@@ -4,6 +4,7 @@
 //! the heavy lifting (DB lock, download, dependency resolution).
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const backup_mod = @import("backup.zig");
 const install_mod = @import("install.zig");
 const output = @import("../ui/output.zig");
@@ -141,9 +142,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const file = if (std.fs.path.isAbsolute(path))
-        try std.fs.openFileAbsolute(path, .{})
+        try fs_compat.openFileAbsolute(path, .{})
     else
-        try std.fs.cwd().openFile(path, .{});
+        try fs_compat.cwd().openFile(path, .{});
     defer file.close();
 
     const stat = try file.stat();

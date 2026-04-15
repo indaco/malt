@@ -2,6 +2,8 @@
 //! Terminal progress bar rendering with multi-line support.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
+const io_mod = @import("io.zig");
 
 const color = @import("color.zig");
 const output = @import("output.zig");
@@ -14,11 +16,11 @@ const spinner_chars = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "
 /// bar updates its own line without interfering with others.
 pub const MultiProgress = struct {
     total_lines: u8,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     is_tty: bool,
 
     pub fn init(count: u8) MultiProgress {
-        const stderr = std.fs.File.stderr();
+        const stderr = fs_compat.stderrFile();
         const tty = stderr.supportsAnsiEscapeCodes();
 
         // Hide cursor, disable autowrap, reserve lines by printing empty placeholders.
@@ -37,7 +39,7 @@ pub const MultiProgress = struct {
 
         return .{
             .total_lines = count,
-            .mutex = .{},
+            .mutex = .init,
             .is_tty = tty,
         };
     }
@@ -46,7 +48,7 @@ pub const MultiProgress = struct {
     /// Must be called after all download threads have joined.
     pub fn finish(self: *MultiProgress) void {
         if (self.is_tty and !output.isQuiet()) {
-            const stderr = std.fs.File.stderr();
+            const stderr = fs_compat.stderrFile();
             stderr.writeAll("\x1b[?7h") catch {}; // re-enable autowrap
             stderr.writeAll("\x1b[?25h\r") catch {}; // show cursor + column 0
         }
@@ -72,13 +74,13 @@ pub const ProgressBar = struct {
     const bar_width: u64 = 30;
 
     pub fn init(label: []const u8, total: u64) ProgressBar {
-        const stderr = std.fs.File.stderr();
+        const stderr = fs_compat.stderrFile();
         return .{
             .label = label,
             .total = total,
             .current = 0,
             .last_render_ns = 0,
-            .start_time_ms = std.time.milliTimestamp(),
+            .start_time_ms = fs_compat.milliTimestamp(),
             .spinner_frame = 0,
             .is_tty = stderr.supportsAnsiEscapeCodes(),
             .label_width = 0,
@@ -91,7 +93,7 @@ pub const ProgressBar = struct {
         self.current = current;
         if (output.isQuiet() or !self.is_tty) return;
 
-        const now = std.time.nanoTimestamp();
+        const now = fs_compat.nanoTimestamp();
         if (now - self.last_render_ns < render_interval_ns) return;
         self.last_render_ns = now;
 
@@ -106,7 +108,7 @@ pub const ProgressBar = struct {
         self.render();
         // For standalone bars (no multi), emit a newline
         if (self.multi == null) {
-            std.fs.File.stderr().writeAll("\n") catch {};
+            fs_compat.stderrFile().writeAll("\n") catch {};
         }
     }
 
@@ -136,7 +138,7 @@ pub const ProgressBar = struct {
     }
 
     fn computeRate(self: *const ProgressBar) f64 {
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = fs_compat.milliTimestamp();
         const elapsed_ms = now_ms - self.start_time_ms;
         if (elapsed_ms <= 0) return 0;
         return @as(f64, @floatFromInt(self.current)) / (@as(f64, @floatFromInt(elapsed_ms)) / 1000.0);
@@ -222,14 +224,14 @@ pub const ProgressBar = struct {
     }
 
     fn renderDeterminate(self: *const ProgressBar) void {
-        const f = std.fs.File.stderr();
+        const f = fs_compat.stderrFile();
         const pct: u64 = if (self.total > 0) @min((self.current * 100) / self.total, 100) else 0;
         const filled: u64 = if (self.total > 0) @min((self.current * bar_width) / self.total, bar_width) else 0;
         const empty = bar_width - filled;
 
         // Lock mutex if part of a MultiProgress group
-        if (self.multi) |mp| mp.mutex.lock();
-        defer if (self.multi) |mp| mp.mutex.unlock();
+        if (self.multi) |mp| mp.mutex.lockUncancelable(io_mod.ctx());
+        defer if (self.multi) |mp| mp.mutex.unlock(io_mod.ctx());
 
         var buf: [768]u8 = undefined;
         var pos: usize = 0;
@@ -356,10 +358,10 @@ pub const ProgressBar = struct {
     }
 
     fn renderIndeterminate(self: *const ProgressBar) void {
-        const f = std.fs.File.stderr();
+        const f = fs_compat.stderrFile();
 
-        if (self.multi) |mp| mp.mutex.lock();
-        defer if (self.multi) |mp| mp.mutex.unlock();
+        if (self.multi) |mp| mp.mutex.lockUncancelable(io_mod.ctx());
+        defer if (self.multi) |mp| mp.mutex.unlock(io_mod.ctx());
 
         var buf: [512]u8 = undefined;
         var pos: usize = 0;
@@ -437,7 +439,7 @@ pub const Spinner = struct {
     active: bool,
 
     pub fn init(message: []const u8) Spinner {
-        const stderr = std.fs.File.stderr();
+        const stderr = fs_compat.stderrFile();
         return .{
             .message = message,
             .stop_flag = std.atomic.Value(bool).init(false),
@@ -452,7 +454,7 @@ pub const Spinner = struct {
 
         if (!self.is_tty) {
             // Non-TTY: emit a single dim info line and return. No animation.
-            const f = std.fs.File.stderr();
+            const f = fs_compat.stderrFile();
             const pfx: []const u8 = if (color.isEmojiEnabled()) "  \xe2\x96\xb8 " else "  > ";
             if (color.isColorEnabled()) f.writeAll(color.Style.dim.code()) catch {};
             f.writeAll(pfx) catch {};
@@ -462,7 +464,7 @@ pub const Spinner = struct {
             return;
         }
 
-        const f = std.fs.File.stderr();
+        const f = fs_compat.stderrFile();
         f.writeAll("\x1b[?25l") catch {}; // hide cursor
         self.active = true;
         self.thread = std.Thread.spawn(.{}, spinLoop, .{self}) catch blk: {
@@ -489,7 +491,7 @@ pub const Spinner = struct {
             t.join();
             self.thread = null;
         }
-        const f = std.fs.File.stderr();
+        const f = fs_compat.stderrFile();
         // \r → col 0, ESC[K → clear line, ESC[?25h → show cursor
         f.writeAll("\r\x1b[K\x1b[?25h") catch {};
         self.active = false;
@@ -500,7 +502,7 @@ pub const Spinner = struct {
         while (!self.stop_flag.load(.acquire)) {
             self.drawFrame(frame);
             frame +%= 1;
-            std.Thread.sleep(100 * std.time.ns_per_ms);
+            fs_compat.sleepNanos(100 * std.time.ns_per_ms);
         }
     }
 
@@ -557,7 +559,7 @@ pub const Spinner = struct {
         @memcpy(buf[pos .. pos + erase.len], erase);
         pos += erase.len;
 
-        const f = std.fs.File.stderr();
+        const f = fs_compat.stderrFile();
         f.writeAll(buf[0..pos]) catch {};
     }
 };

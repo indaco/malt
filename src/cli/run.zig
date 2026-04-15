@@ -2,6 +2,7 @@
 //! Run a package binary without installing — download to temp, execute, clean up.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const formula_mod = @import("../core/formula.zig");
@@ -41,7 +42,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     {
         var bin_buf: [512]u8 = undefined;
         const bin_path = std.fmt.bufPrint(&bin_buf, "{s}/bin/{s}", .{ prefix, pkg_name }) catch return;
-        std.fs.accessAbsolute(bin_path, .{}) catch {
+        fs_compat.accessAbsolute(bin_path, .{}) catch {
             // Not installed — proceed with ephemeral run
             return ephemeralRun(allocator, pkg_name, cmd_args, prefix);
         };
@@ -132,20 +133,20 @@ fn ephemeralRun(
         pkg_name,
     }) catch return;
 
-    std.fs.accessAbsolute(bin_path, .{}) catch {
+    fs_compat.accessAbsolute(bin_path, .{}) catch {
         output.err("Binary '{s}' not found in bottle", .{pkg_name});
         return error.Aborted;
     };
 
     // Make executable
     {
-        const f = std.fs.openFileAbsolute(bin_path, .{ .mode = .read_write }) catch return;
+        const f = fs_compat.openFileAbsolute(bin_path, .{ .mode = .read_write }) catch return;
         defer f.close();
         f.chmod(0o755) catch {};
     }
 
     output.info("Running {s} {s} (ephemeral)...", .{ pkg_name, formula.version });
-    const stderr = std.fs.File.stderr();
+    const stderr = fs_compat.stderrFile();
     stderr.writeAll("---\n") catch {};
 
     try execBinary(bin_path, cmd_args);
@@ -160,7 +161,7 @@ fn execBinary(path: []const u8, cmd_args: []const []const u8) !void {
         argv_buf[i] = arg;
     }
 
-    var child = std.process.Child.init(argv_buf[0 .. argc + 1], std.heap.c_allocator);
+    var child = fs_compat.Child.init(argv_buf[0 .. argc + 1], std.heap.c_allocator);
     child.spawn() catch {
         output.err("Failed to execute binary", .{});
         return error.Aborted;

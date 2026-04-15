@@ -52,7 +52,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Run unit tests
         # `zig build test` deadlocks under Zig 0.15 (test-runner server

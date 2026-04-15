@@ -4,6 +4,7 @@
 const std = @import("std");
 const color = @import("color.zig");
 const io_mod = @import("io.zig");
+const fs_compat = @import("../fs/compat.zig");
 
 pub const OutputMode = enum {
     human,
@@ -156,7 +157,7 @@ pub fn dim(comptime fmt: []const u8, args: anytype) void {
 /// Returns false when stdin is not a TTY so that destructive commands
 /// refuse to run unattended without an explicit `--yes` opt-in.
 pub fn confirmTyped(expected: []const u8, prompt: []const u8) bool {
-    if (!std.posix.isatty(std.posix.STDIN_FILENO)) return false;
+    if (!fs_compat.isatty(std.posix.STDIN_FILENO)) return false;
 
     if (color.isColorEnabled()) {
         io_mod.stderrWriteAll(color.Style.bold.code());

@@ -3,6 +3,7 @@
 //! All mutating operations go through sandbox.validatePath first.
 
 const std = @import("std");
+const fs_compat = @import("../../../fs/compat.zig");
 const values = @import("../values.zig");
 const sandbox = @import("../sandbox.zig");
 const pathname = @import("pathname.zig");
@@ -21,14 +22,14 @@ pub fn rm(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
             for (items) |item| {
                 const path = item.asString(ctx.allocator) catch continue;
                 sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch continue;
-                std.fs.cwd().deleteFile(path) catch {};
+                fs_compat.cwd().deleteFile(path) catch {};
             }
         },
         else => {
             const path = try args[0].asString(ctx.allocator);
             sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch
                 return BuiltinError.PathSandboxViolation;
-            std.fs.cwd().deleteFile(path) catch {};
+            fs_compat.cwd().deleteFile(path) catch {};
         },
     }
     return Value{ .nil = {} };
@@ -40,7 +41,7 @@ pub fn rmR(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     const path = try args[0].asString(ctx.allocator);
     sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
-    std.fs.cwd().deleteTree(path) catch {};
+    fs_compat.cwd().deleteTree(path) catch {};
     return Value{ .nil = {} };
 }
 
@@ -55,7 +56,7 @@ pub fn mkdirP(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     const path = try args[0].asString(ctx.allocator);
     sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
-    std.fs.cwd().makePath(path) catch {};
+    fs_compat.cwd().makePath(path) catch {};
     return Value{ .nil = {} };
 }
 
@@ -69,17 +70,17 @@ pub fn cp(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     // If first arg is an array, copy each file into dst directory
     switch (args[0]) {
         .array => |items| {
-            std.fs.cwd().makePath(dst) catch {};
+            fs_compat.cwd().makePath(dst) catch {};
             for (items) |item| {
                 const src = item.asString(ctx.allocator) catch continue;
                 const base = std.fs.path.basename(src);
                 const dest_path = std.fs.path.join(ctx.allocator, &.{ dst, base }) catch continue;
-                std.fs.copyFileAbsolute(src, dest_path, .{}) catch {};
+                fs_compat.copyFileAbsolute(src, dest_path, .{}) catch {};
             }
         },
         else => {
             const src = args[0].asString(ctx.allocator) catch return Value{ .nil = {} };
-            std.fs.copyFileAbsolute(src, dst, .{}) catch {};
+            fs_compat.copyFileAbsolute(src, dst, .{}) catch {};
         },
     }
     return Value{ .nil = {} };
@@ -94,7 +95,7 @@ pub fn cpR(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
         return BuiltinError.PathSandboxViolation;
 
     // Try as single file first
-    std.fs.copyFileAbsolute(src, dst, .{}) catch {
+    fs_compat.copyFileAbsolute(src, dst, .{}) catch {
         // Try as directory: walk and copy
         copyDirRecursive(ctx.allocator, src, dst) catch {};
     };
@@ -108,7 +109,7 @@ pub fn mv(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     const dst = try args[1].asString(ctx.allocator);
     sandbox.validatePath(dst, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
-    std.fs.renameAbsolute(src, dst) catch {};
+    fs_compat.renameAbsolute(src, dst) catch {};
     return Value{ .nil = {} };
 }
 
@@ -140,7 +141,7 @@ pub fn chmod(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
 }
 
 fn chmodPath(path: []const u8, mode: std.posix.mode_t) void {
-    const file = std.fs.openFileAbsolute(path, .{ .mode = .read_only }) catch return;
+    const file = fs_compat.openFileAbsolute(path, .{ .mode = .read_only }) catch return;
     defer file.close();
     file.chmod(mode) catch {};
 }
@@ -153,7 +154,7 @@ pub fn touch(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
         return BuiltinError.PathSandboxViolation;
 
     // Try to open existing file, or create
-    const file = std.fs.createFileAbsolute(path, .{ .truncate = false }) catch {
+    const file = fs_compat.createFileAbsolute(path, .{ .truncate = false }) catch {
         return Value{ .nil = {} };
     };
     file.close();
@@ -170,9 +171,9 @@ pub fn lnS(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
         return BuiltinError.PathSandboxViolation;
 
     if (std.fs.path.dirname(link_path)) |parent| {
-        std.fs.cwd().makePath(parent) catch {};
+        fs_compat.cwd().makePath(parent) catch {};
     }
-    std.fs.symLinkAbsolute(target, link_path, .{}) catch {};
+    fs_compat.symLinkAbsolute(target, link_path, .{}) catch {};
     return Value{ .nil = {} };
 }
 
@@ -187,13 +188,13 @@ pub fn lnSf(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
             const dest_dir = args[1].asString(ctx.allocator) catch return Value{ .nil = {} };
             sandbox.validatePath(dest_dir, ctx.cellar_path, ctx.malt_prefix) catch
                 return BuiltinError.PathSandboxViolation;
-            std.fs.cwd().makePath(dest_dir) catch {};
+            fs_compat.cwd().makePath(dest_dir) catch {};
             for (items) |item| {
                 const target = item.asString(ctx.allocator) catch continue;
                 const base = std.fs.path.basename(target);
                 const link_path = std.fs.path.join(ctx.allocator, &.{ dest_dir, base }) catch continue;
-                std.fs.cwd().deleteFile(link_path) catch {};
-                std.fs.symLinkAbsolute(target, link_path, .{}) catch {};
+                fs_compat.cwd().deleteFile(link_path) catch {};
+                fs_compat.symLinkAbsolute(target, link_path, .{}) catch {};
             }
         },
         else => {
@@ -203,19 +204,19 @@ pub fn lnSf(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
                 return BuiltinError.PathSandboxViolation;
 
             if (std.fs.path.dirname(link_path)) |parent| {
-                std.fs.cwd().makePath(parent) catch {};
+                fs_compat.cwd().makePath(parent) catch {};
             }
-            std.fs.cwd().deleteFile(link_path) catch {};
-            std.fs.symLinkAbsolute(target, link_path, .{}) catch {};
+            fs_compat.cwd().deleteFile(link_path) catch {};
+            fs_compat.symLinkAbsolute(target, link_path, .{}) catch {};
         },
     }
     return Value{ .nil = {} };
 }
 
 fn copyDirRecursive(allocator: std.mem.Allocator, src: []const u8, dst: []const u8) !void {
-    std.fs.cwd().makePath(dst) catch {};
+    fs_compat.cwd().makePath(dst) catch {};
 
-    var dir = std.fs.openDirAbsolute(src, .{ .iterate = true }) catch return;
+    var dir = fs_compat.openDirAbsolute(src, .{ .iterate = true }) catch return;
     defer dir.close();
 
     var iter = dir.iterate();
@@ -226,7 +227,7 @@ fn copyDirRecursive(allocator: std.mem.Allocator, src: []const u8, dst: []const 
         if (entry.kind == .directory) {
             try copyDirRecursive(allocator, src_child, dst_child);
         } else {
-            std.fs.copyFileAbsolute(src_child, dst_child, .{}) catch {};
+            fs_compat.copyFileAbsolute(src_child, dst_child, .{}) catch {};
         }
     }
 }

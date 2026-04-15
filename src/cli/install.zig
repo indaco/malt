@@ -3,6 +3,7 @@
 //! Implements the 9-step atomic install protocol.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
@@ -186,7 +187,7 @@ fn downloadWorker(
             // Wipe the partial tmp and retry
             atomic.cleanupTempDir(tmp_dir);
             if (dl_attempt + 1 < max_attempts) {
-                std.Thread.sleep(retry_delays_ms[dl_attempt] * std.time.ns_per_ms);
+                fs_compat.sleepNanos(retry_delays_ms[dl_attempt] * std.time.ns_per_ms);
             }
         }
     }
@@ -1090,7 +1091,7 @@ fn maybeRegisterService(
     // Ensure the log directory exists.
     var log_dir_buf: [512]u8 = undefined;
     if (std.fmt.bufPrint(&log_dir_buf, "{s}/var/log", .{prefix})) |dir| {
-        std.fs.cwd().makePath(dir) catch {};
+        fs_compat.cwd().makePath(dir) catch {};
     } else |_| {}
 
     const spec: plist_mod.ServiceSpec = .{
@@ -1262,7 +1263,7 @@ pub fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
 /// Ensure all required directories under prefix exist.
 pub fn ensureDirs(prefix: []const u8) !void {
     // Create the prefix directory itself first (e.g. /opt/malt)
-    std.fs.makeDirAbsolute(prefix) catch |e| switch (e) {
+    fs_compat.makeDirAbsolute(prefix) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => {
             output.err("Cannot create prefix directory {s} — you may need: sudo mkdir -p {s} && sudo chown $USER {s}", .{ prefix, prefix, prefix });
@@ -1289,7 +1290,7 @@ pub fn ensureDirs(prefix: []const u8) !void {
     for (subdirs) |subdir| {
         var buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
-        std.fs.makeDirAbsolute(dir_path) catch |e| switch (e) {
+        fs_compat.makeDirAbsolute(dir_path) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => continue,
         };
@@ -1458,11 +1459,11 @@ fn installTapFormula(
     var parent_buf: [512]u8 = undefined;
     const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, parts.formula }) catch
         return InstallError.CellarFailed;
-    std.fs.makeDirAbsolute(parent) catch |e| switch (e) {
+    fs_compat.makeDirAbsolute(parent) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
     };
-    std.fs.makeDirAbsolute(cellar_path) catch |e| switch (e) {
+    fs_compat.makeDirAbsolute(cellar_path) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
     };
@@ -1471,7 +1472,7 @@ fn installTapFormula(
     var bin_buf: [512]u8 = undefined;
     const bin_path = std.fmt.bufPrint(&bin_buf, "{s}/bin", .{cellar_path}) catch
         return InstallError.CellarFailed;
-    std.fs.makeDirAbsolute(bin_path) catch |e| switch (e) {
+    fs_compat.makeDirAbsolute(bin_path) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
     };
@@ -1504,13 +1505,13 @@ fn installTapFormula(
     const tmp_archive = std.fmt.bufPrint(&tmp_buf, "{s}/tmp/tap_download{s}", .{ prefix, ext }) catch
         return InstallError.DownloadFailed;
 
-    const tmp_file = std.fs.createFileAbsolute(tmp_archive, .{}) catch return InstallError.DownloadFailed;
+    const tmp_file = fs_compat.createFileAbsolute(tmp_archive, .{}) catch return InstallError.DownloadFailed;
     tmp_file.writeAll(download_resp.body) catch {
         tmp_file.close();
         return InstallError.DownloadFailed;
     };
     tmp_file.close();
-    defer std.fs.cwd().deleteFile(tmp_archive) catch {};
+    defer fs_compat.cwd().deleteFile(tmp_archive) catch {};
 
     // Extract archive to cellar
     const archive_mod = @import("../fs/archive.zig");
@@ -1532,7 +1533,7 @@ fn installTapFormula(
     // Find and move the binary to bin/
     // GoReleaser may extract directly or into a subdirectory
     {
-        var cellar_dir = std.fs.openDirAbsolute(cellar_path, .{ .iterate = true }) catch return InstallError.CellarFailed;
+        var cellar_dir = fs_compat.openDirAbsolute(cellar_path, .{ .iterate = true }) catch return InstallError.CellarFailed;
         defer cellar_dir.close();
 
         // Walk all files (including subdirectories) looking for the formula binary

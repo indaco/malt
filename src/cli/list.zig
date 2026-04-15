@@ -2,6 +2,7 @@
 //! List installed packages.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -158,7 +159,7 @@ fn writeJsonOutput(
     stdout: *std.Io.Writer,
 ) !void {
     _ = allocator;
-    const start_ts = std.time.milliTimestamp();
+    const start_ts = fs_compat.milliTimestamp();
     try buildListJson(db, stdout, show_formula, show_cask, show_pinned, start_ts);
 }
 
@@ -276,7 +277,7 @@ fn writeCaskRows(
 
 /// Write the ,"time_ms":N suffix for JSON output.
 fn writeTimeSuffix(w: anytype, start_ts: i64) !void {
-    const elapsed = std.time.milliTimestamp() - start_ts;
+    const elapsed = fs_compat.milliTimestamp() - start_ts;
     var time_buf: [32]u8 = undefined;
     const time_str = std.fmt.bufPrint(&time_buf, ",\"time_ms\":{d}", .{elapsed}) catch return;
     try w.writeAll(time_str);

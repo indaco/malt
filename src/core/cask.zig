@@ -2,6 +2,7 @@
 //! Cask JSON parsing and installation (DMG, PKG, ZIP).
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
@@ -144,7 +145,7 @@ pub const CaskInstaller = struct {
         var cache_buf: [512]u8 = undefined;
         const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask", .{self.prefix}) catch
             return CaskError.OutOfMemory;
-        std.fs.makeDirAbsolute(cache_dir) catch |e| switch (e) {
+        fs_compat.makeDirAbsolute(cache_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return CaskError.InstallFailed,
         };
@@ -153,7 +154,7 @@ pub const CaskInstaller = struct {
         const cache_path = self.downloadToCache(cask, cache_dir, self.progress) catch
             return CaskError.DownloadFailed;
         errdefer {
-            std.fs.cwd().deleteFile(cache_path) catch {};
+            fs_compat.cwd().deleteFile(cache_path) catch {};
             self.allocator.free(cache_path);
         }
 
@@ -209,19 +210,19 @@ pub const CaskInstaller = struct {
             if (isAppRunning(app_path)) return CaskError.UninstallFailed;
 
             // Remove the app bundle
-            std.fs.deleteTreeAbsolute(app_path) catch {};
+            fs_compat.deleteTreeAbsolute(app_path) catch {};
         }
 
         // Remove Caskroom entry
         var caskroom_buf: [512]u8 = undefined;
         const caskroom_path = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch "";
-        if (caskroom_path.len > 0) std.fs.deleteTreeAbsolute(caskroom_path) catch {};
+        if (caskroom_path.len > 0) fs_compat.deleteTreeAbsolute(caskroom_path) catch {};
 
         // Remove cache entry
         var cache_buf: [512]u8 = undefined;
         for ([_][]const u8{ ".dmg", ".zip", ".pkg" }) |ext| {
             const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask/{s}{s}", .{ self.prefix, token, ext }) catch continue;
-            std.fs.cwd().deleteFile(cache_file) catch {};
+            fs_compat.cwd().deleteFile(cache_file) catch {};
         }
 
         // Remove DB record
@@ -266,7 +267,7 @@ pub const CaskInstaller = struct {
         if (resp.status != 200) return error.DownloadFailed;
 
         // Write to file
-        const file = try std.fs.createFileAbsolute(dest, .{});
+        const file = try fs_compat.createFileAbsolute(dest, .{});
         defer file.close();
         try file.writeAll(resp.body);
 
@@ -277,7 +278,7 @@ pub const CaskInstaller = struct {
         const expected_hash = expected orelse return; // no_check casks skip verification
         if (std.mem.eql(u8, expected_hash, "no_check")) return;
 
-        const file = try std.fs.openFileAbsolute(file_path, .{});
+        const file = try fs_compat.openFileAbsolute(file_path, .{});
         defer file.close();
 
         const stat = try file.stat();
@@ -304,7 +305,7 @@ pub const CaskInstaller = struct {
         var mount_buf: [512]u8 = undefined;
         const mount_point = std.fmt.bufPrint(&mount_buf, "{s}/tmp/cask_mount_{s}", .{ self.prefix, cask.token }) catch
             return error.InstallFailed;
-        std.fs.makeDirAbsolute(mount_point) catch |e| switch (e) {
+        fs_compat.makeDirAbsolute(mount_point) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return error.InstallFailed,
         };
@@ -316,21 +317,21 @@ pub const CaskInstaller = struct {
             "-mountpoint", mount_point,
             dmg_path,
         };
-        var mount_child = std.process.Child.init(&mount_argv, std.heap.c_allocator);
+        var mount_child = fs_compat.Child.init(&mount_argv, std.heap.c_allocator);
         mount_child.spawn() catch return error.InstallFailed;
         const mount_term = mount_child.wait() catch return error.InstallFailed;
         switch (mount_term) {
-            .Exited => |code| if (code != 0) return error.InstallFailed,
+            .exited => |code| if (code != 0) return error.InstallFailed,
             else => return error.InstallFailed,
         }
 
         // Ensure we unmount on any exit
         defer {
             const detach_argv = [_][]const u8{ "hdiutil", "detach", mount_point, "-quiet" };
-            var detach = std.process.Child.init(&detach_argv, std.heap.c_allocator);
+            var detach = fs_compat.Child.init(&detach_argv, std.heap.c_allocator);
             detach.spawn() catch {};
             _ = detach.wait() catch {};
-            std.fs.deleteDirAbsolute(mount_point) catch {};
+            fs_compat.deleteDirAbsolute(mount_point) catch {};
         }
 
         // Find the .app bundle name (from JSON artifacts or by scanning mount point)
@@ -347,15 +348,15 @@ pub const CaskInstaller = struct {
         errdefer self.allocator.free(dst_app);
 
         // Remove existing app if present (reinstall/upgrade)
-        std.fs.deleteTreeAbsolute(dst_app) catch {};
+        fs_compat.deleteTreeAbsolute(dst_app) catch {};
 
         // Copy .app bundle using ditto (preserves resource forks, xattrs)
         const ditto_argv = [_][]const u8{ "ditto", src_app, dst_app };
-        var ditto_child = std.process.Child.init(&ditto_argv, std.heap.c_allocator);
+        var ditto_child = fs_compat.Child.init(&ditto_argv, std.heap.c_allocator);
         ditto_child.spawn() catch return error.InstallFailed;
         const ditto_term = ditto_child.wait() catch return error.InstallFailed;
         switch (ditto_term) {
-            .Exited => |code| if (code != 0) return error.InstallFailed,
+            .exited => |code| if (code != 0) return error.InstallFailed,
             else => return error.InstallFailed,
         }
 
@@ -367,19 +368,19 @@ pub const CaskInstaller = struct {
         var tmp_buf: [512]u8 = undefined;
         const extract_dir = std.fmt.bufPrint(&tmp_buf, "{s}/tmp/cask_extract_{s}", .{ self.prefix, cask.token }) catch
             return error.InstallFailed;
-        std.fs.makeDirAbsolute(extract_dir) catch |e| switch (e) {
+        fs_compat.makeDirAbsolute(extract_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return error.InstallFailed,
         };
-        defer std.fs.deleteTreeAbsolute(extract_dir) catch {};
+        defer fs_compat.deleteTreeAbsolute(extract_dir) catch {};
 
         // Extract with ditto -xk (handles macOS-specific ZIP features)
         const ditto_argv = [_][]const u8{ "ditto", "-xk", zip_path, extract_dir };
-        var ditto_child = std.process.Child.init(&ditto_argv, std.heap.c_allocator);
+        var ditto_child = fs_compat.Child.init(&ditto_argv, std.heap.c_allocator);
         ditto_child.spawn() catch return error.InstallFailed;
         const ditto_term = ditto_child.wait() catch return error.InstallFailed;
         switch (ditto_term) {
-            .Exited => |code| if (code != 0) return error.InstallFailed,
+            .exited => |code| if (code != 0) return error.InstallFailed,
             else => return error.InstallFailed,
         }
 
@@ -396,15 +397,15 @@ pub const CaskInstaller = struct {
         errdefer self.allocator.free(dst_app);
 
         // Remove existing
-        std.fs.deleteTreeAbsolute(dst_app) catch {};
+        fs_compat.deleteTreeAbsolute(dst_app) catch {};
 
         // Move .app to /Applications
         const mv_argv = [_][]const u8{ "ditto", src_app, dst_app };
-        var mv_child = std.process.Child.init(&mv_argv, std.heap.c_allocator);
+        var mv_child = fs_compat.Child.init(&mv_argv, std.heap.c_allocator);
         mv_child.spawn() catch return error.InstallFailed;
         const mv_term = mv_child.wait() catch return error.InstallFailed;
         switch (mv_term) {
-            .Exited => |code| if (code != 0) return error.InstallFailed,
+            .exited => |code| if (code != 0) return error.InstallFailed,
             else => return error.InstallFailed,
         }
 
@@ -414,11 +415,11 @@ pub const CaskInstaller = struct {
     fn installPkg(self: *CaskInstaller, pkg_path: []const u8) ![]const u8 {
         // PKG installs require sudo — the caller must confirm
         const argv = [_][]const u8{ "sudo", "installer", "-pkg", pkg_path, "-target", "/" };
-        var child = std.process.Child.init(&argv, std.heap.c_allocator);
+        var child = fs_compat.Child.init(&argv, std.heap.c_allocator);
         child.spawn() catch return error.InstallFailed;
         const term = child.wait() catch return error.InstallFailed;
         switch (term) {
-            .Exited => |code| if (code != 0) return error.InstallFailed,
+            .exited => |code| if (code != 0) return error.InstallFailed,
             else => return error.InstallFailed,
         }
         // PKG installs don't have a single app path — record the pkg location
@@ -431,7 +432,7 @@ pub const CaskInstaller = struct {
     }
 
     fn findAppInDir(_: *CaskInstaller, dir_path: []const u8) ?[]const u8 {
-        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return null;
+        var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch return null;
         defer dir.close();
         var iter = dir.iterate();
         while (iter.next() catch null) |entry| {
@@ -448,18 +449,18 @@ pub const CaskInstaller = struct {
         const caskroom_ver = std.fmt.bufPrint(&buf, "{s}/Caskroom/{s}/{s}", .{
             self.prefix, cask.token, cask.version,
         }) catch return;
-        std.fs.cwd().makePath(caskroom_ver) catch {};
+        fs_compat.cwd().makePath(caskroom_ver) catch {};
     }
 };
 
 /// Check if an application is currently running by its path.
 fn isAppRunning(app_path: []const u8) bool {
     const argv = [_][]const u8{ "pgrep", "-f", app_path };
-    var child = std.process.Child.init(&argv, std.heap.c_allocator);
+    var child = fs_compat.Child.init(&argv, std.heap.c_allocator);
     child.spawn() catch return false;
     const term = child.wait() catch return false;
     return switch (term) {
-        .Exited => |code| code == 0, // pgrep exits 0 if match found
+        .exited => |code| code == 0, // pgrep exits 0 if match found
         else => false,
     };
 }
@@ -471,12 +472,12 @@ fn isAppRunning(app_path: []const u8) bool {
 fn applicationsDir(out: []u8) []const u8 {
     // Check if /Applications is writable
     const test_path = "/Applications/.malt_write_test";
-    const file = std.fs.createFileAbsolute(test_path, .{}) catch {
+    const file = fs_compat.createFileAbsolute(test_path, .{}) catch {
         // Fallback to ~/Applications
-        if (std.posix.getenv("HOME")) |home| {
+        if (fs_compat.getenv("HOME")) |home| {
             const home_slice = std.mem.sliceTo(home, 0);
             const home_apps = std.fmt.bufPrint(out, "{s}/Applications", .{home_slice}) catch return "/Applications";
-            std.fs.makeDirAbsolute(home_apps) catch |e| switch (e) {
+            fs_compat.makeDirAbsolute(home_apps) catch |e| switch (e) {
                 error.PathAlreadyExists => {},
                 else => return "/Applications",
             };
@@ -485,7 +486,7 @@ fn applicationsDir(out: []u8) []const u8 {
         return "/Applications";
     };
     file.close();
-    std.fs.cwd().deleteFile(test_path) catch {};
+    fs_compat.cwd().deleteFile(test_path) catch {};
     return "/Applications";
 }
 

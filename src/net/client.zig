@@ -1,4 +1,6 @@
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
+const io_mod = @import("../ui/io.zig");
 
 /// Optional progress reporting for long downloads.
 /// `bytes_so_far`: total bytes received so far (after decompression).
@@ -45,7 +47,7 @@ pub const HttpClient = struct {
     pub fn init(allocator: std.mem.Allocator) HttpClient {
         return .{
             .allocator = allocator,
-            .client = .{ .allocator = allocator },
+            .client = .{ .allocator = allocator, .io = io_mod.ctx() },
         };
     }
 
@@ -74,7 +76,7 @@ pub const HttpClient = struct {
     /// header for GitHub/Homebrew API requests when the env var is set.
     /// The caller owns the returned `Response` and must call `deinit` on it.
     pub fn get(self: *HttpClient, url: []const u8) !Response {
-        if (std.posix.getenv("HOMEBREW_GITHUB_API_TOKEN")) |token| {
+        if (fs_compat.getenv("HOMEBREW_GITHUB_API_TOKEN")) |token| {
             // Apply token to GitHub and Homebrew API requests
             if (std.mem.indexOf(u8, url, "github.com") != null or
                 std.mem.indexOf(u8, url, "formulae.brew.sh") != null or
@@ -176,7 +178,7 @@ pub const HttpClient = struct {
             return n;
         }
 
-        fn sendFile(w: *std.Io.Writer, file_reader: *std.fs.File.Reader, limit: std.io.Limit) std.Io.Writer.FileError!usize {
+        fn sendFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
             const self: *CountingWriter = @fieldParentPtr("writer", w);
             const n = self.inner.writer.vtable.sendFile(&self.inner.writer, file_reader, limit) catch |e| return e;
             self.bytes_written += n;
@@ -222,7 +224,7 @@ pub const HttpClient = struct {
                 if (resp.status == 429 or resp.status == 503 or resp.status == 504) {
                     resp.allocator.free(resp.body);
                     if (attempt < MAX_RETRIES) {
-                        std.Thread.sleep(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms);
+                        std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms)), .awake) catch {};
                         attempt += 1;
                         continue;
                     }
@@ -231,7 +233,7 @@ pub const HttpClient = struct {
             } else |err| {
                 // Retry on connection errors
                 if (attempt < MAX_RETRIES) {
-                    std.Thread.sleep(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms);
+                    std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms)), .awake) catch {};
                     attempt += 1;
                     continue;
                 }
@@ -292,14 +294,14 @@ pub const HttpClient = struct {
         // up to a full second per request — that was the entire warm
         // install floor (see docs/perf/results.md).
         const effective_timeout = if (max_bytes > MAX_METADATA_BYTES) BLOB_TIMEOUT_NS else self.timeout_ns;
-        var request_done: std.Thread.ResetEvent = .{};
+        var request_done: std.Io.Event = .unset;
         const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
             &request_done,
             effective_timeout,
             &req,
         }) catch null;
         defer {
-            request_done.set();
+            request_done.set(io_mod.ctx());
             if (watchdog) |w| w.join();
         }
 
@@ -318,17 +320,17 @@ pub const HttpClient = struct {
         };
         _ = body_reader.streamRemaining(&counting.writer) catch |e| switch (e) {
             error.WriteFailed => {
-                request_done.set();
+                request_done.set(io_mod.ctx());
                 if (counting.limit_exceeded) return error.ResponseTooLarge;
                 return error.ReadFailed;
             },
             error.ReadFailed => {
-                request_done.set();
+                request_done.set(io_mod.ctx());
                 return error.ReadFailed;
             },
         };
 
-        request_done.set();
+        request_done.set(io_mod.ctx());
         if (counting.limit_exceeded) return error.ResponseTooLarge;
 
         const body = try body_writer.toOwnedSlice();
@@ -358,23 +360,24 @@ pub const HttpClient = struct {
     /// Uses `ResetEvent.timedWait` so the main thread can wake us
     /// immediately on successful completion — no polling overhead.
     fn watchdogFn(
-        request_done: *std.Thread.ResetEvent,
+        request_done: *std.Io.Event,
         timeout_ns: u64,
         req: *std.http.Client.Request,
     ) void {
-        request_done.timedWait(timeout_ns) catch |err| switch (err) {
+        const io = io_mod.ctx();
+        const timeout: std.Io.Timeout = .{ .duration = .{
+            .raw = std.Io.Duration.fromNanoseconds(@intCast(timeout_ns)),
+            .clock = .awake,
+        } };
+        request_done.waitTimeout(io, timeout) catch |err| switch (err) {
             error.Timeout => {
                 if (req.connection) |conn| {
                     conn.closing = true;
-                    // Shut down both halves so any blocked read AND
-                    // any in-flight write fail immediately. Errors
-                    // are ignored — we're tearing down the connection
-                    // anyway and a "socket already closed" race is
-                    // harmless here.
-                    const fd = conn.stream_reader.getStream().handle;
-                    std.posix.shutdown(fd, .both) catch {};
+                    const fd = conn.stream_reader.stream.socket.handle;
+                    _ = std.c.shutdown(fd, 2); // SHUT_RDWR
                 }
             },
+            else => {},
         };
     }
 };
@@ -397,8 +400,8 @@ pub const HttpClientPool = struct {
     allocator: std.mem.Allocator,
     clients: []HttpClient,
     busy: []bool,
-    mutex: std.Thread.Mutex,
-    cond: std.Thread.Condition,
+    mutex: std.Io.Mutex,
+    cond: std.Io.Condition,
 
     pub fn init(allocator: std.mem.Allocator, size: usize) !HttpClientPool {
         const clients = try allocator.alloc(HttpClient, size);
@@ -411,8 +414,8 @@ pub const HttpClientPool = struct {
             .allocator = allocator,
             .clients = clients,
             .busy = busy,
-            .mutex = .{},
-            .cond = .{},
+            .mutex = .init,
+            .cond = .init,
         };
     }
 
@@ -425,8 +428,9 @@ pub const HttpClientPool = struct {
     /// Block until an idle client is available, mark it busy, return
     /// a pointer the caller can use exclusively until `release`.
     pub fn acquire(self: *HttpClientPool) *HttpClient {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = io_mod.ctx();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         while (true) {
             for (self.busy, 0..) |b, i| {
                 if (!b) {
@@ -434,7 +438,7 @@ pub const HttpClientPool = struct {
                     return &self.clients[i];
                 }
             }
-            self.cond.wait(&self.mutex);
+            self.cond.waitUncancelable(io, &self.mutex);
         }
     }
 
@@ -442,13 +446,14 @@ pub const HttpClientPool = struct {
     /// must have come from `acquire` on the same pool; calling with
     /// a foreign pointer is a programmer error.
     pub fn release(self: *HttpClientPool, client: *HttpClient) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = io_mod.ctx();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         const base = @intFromPtr(self.clients.ptr);
         const addr = @intFromPtr(client);
         const idx = (addr - base) / @sizeOf(HttpClient);
         std.debug.assert(idx < self.clients.len);
         self.busy[idx] = false;
-        self.cond.signal();
+        self.cond.signal(io);
     }
 };
