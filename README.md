@@ -114,6 +114,8 @@ malt uninstall wget
 
 > [!NOTE]
 > The examples below use `mt` (the shorter alias). All commands work identically with `malt`.
+>
+> **Plural flag forms.** Wherever a command accepts `--formula` or `--cask`, it also accepts `--formulae` or `--casks` — whichever reads more naturally for the number of packages involved.
 
 ### `mt install`
 
