@@ -59,14 +59,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer allocator.free(cache_dir);
 
-    // All search-result buffers live in a function-scoped arena.
-    // `ArenaAllocator` is lock-free in 0.16, so a single shared arena
-    // is safe for the parallel formula/cask fetch below. The arena
-    // deinits at function exit, freeing every `KindResults` field
-    // uniformly — no per-struct deinit needed.
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const shared = arena.allocator();
+    // Each kind owns its own arena on `page_allocator` — worker-local
+    // so the formula and cask threads never share a bump-pointer.
+    // Both arenas deinit at function exit, freeing every `KindResults`
+    // field uniformly — no per-struct deinit needed. The unused arena
+    // on single-kind queries is empty; deinit is cheap.
+    var f_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer f_arena.deinit();
+    var c_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer c_arena.deinit();
 
     // When both kinds are requested we dispatch the cask work to a
     // worker thread so the two independent JSON index downloads
@@ -83,13 +84,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     if (search_formula and search_cask) {
         var cask_task: KindTask = .{
-            .allocator = shared,
+            .allocator = c_arena.allocator(),
             .cache_dir = cache_dir,
             .kind = .cask,
             .query = search_query,
         };
         const worker = std.Thread.spawn(.{}, KindTask.run, .{&cask_task}) catch null;
-        formula = runKindIsolated(shared, cache_dir, .formula, search_query);
+        formula = runKindIsolated(f_arena.allocator(), cache_dir, .formula, search_query);
         if (worker) |w| {
             w.join();
             cask = cask_task.result;
@@ -97,12 +98,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             // Spawn failed — fall back to running cask inline. Rare
             // enough (only on thread-creation failure) that the
             // sequential path is fine.
-            cask = runKindIsolated(shared, cache_dir, .cask, search_query);
+            cask = runKindIsolated(c_arena.allocator(), cache_dir, .cask, search_query);
         }
     } else if (search_formula) {
-        formula = runKindIsolated(shared, cache_dir, .formula, search_query);
+        formula = runKindIsolated(f_arena.allocator(), cache_dir, .formula, search_query);
     } else if (search_cask) {
-        cask = runKindIsolated(shared, cache_dir, .cask, search_query);
+        cask = runKindIsolated(c_arena.allocator(), cache_dir, .cask, search_query);
     }
 
     var stdout_buf: [4096]u8 = undefined;

@@ -743,28 +743,32 @@ pub fn findFailedDep(
     return null;
 }
 
-/// Thread entry-point for parallel dep formula fetching. Borrows a
-/// client from the shared `HttpClientPool` for the duration of the
-/// fetch, builds a throw-away `BrewApi` around it, and stores the
-/// result. On any failure leaves `result.*` as `null`; the caller
-/// treats null as "skip this dep" the same way the old serial loop's
-/// `catch continue` did.
+/// Per-dep worker context for parallel formula fetching. Owns its own
+/// `ArenaAllocator` backed by `page_allocator` so workers never touch
+/// a shared bump-pointer — matches the `downloadWorker` pattern and
+/// removes the last cross-thread allocator on the resolve path.
 ///
-/// Why the pool: creating a fresh `HttpClient` per worker paid a full
-/// TLS context + cert store setup per dep. For cold installs of
-/// packages with many deps (ffmpeg has 11) that overhead compounds.
-fn fetchFormulaWorker(
-    allocator: std.mem.Allocator,
+/// Why the pool on the HTTP side: creating a fresh `HttpClient` per
+/// worker paid a full TLS context + cert store setup per dep. For
+/// cold installs of packages with many deps (ffmpeg has 11) that
+/// overhead compounds; the pool lets workers reuse warm TLS contexts.
+///
+/// `result` is a slice inside `arena`, so the caller must dupe it
+/// into a longer-lived allocator before `arena.deinit()`.
+const FetchFormulaCtx = struct {
+    arena: std.heap.ArenaAllocator,
     pool: *client_mod.HttpClientPool,
     cache_dir: []const u8,
     dep_name: []const u8,
-    result: *?[]const u8,
-) void {
-    const http = pool.acquire();
-    defer pool.release(http);
-    var local_api = api_mod.BrewApi.init(allocator, http, cache_dir);
-    result.* = local_api.fetchFormula(dep_name) catch null;
-}
+    result: ?[]const u8 = null,
+
+    fn run(self: *FetchFormulaCtx) void {
+        const http = self.pool.acquire();
+        defer self.pool.release(http);
+        var local_api = api_mod.BrewApi.init(self.arena.allocator(), http, self.cache_dir);
+        self.result = local_api.fetchFormula(self.dep_name) catch null;
+    }
+};
 
 /// Collect download jobs for a formula and all its dependencies.
 /// Appends to the shared jobs list for parallel download.
@@ -803,20 +807,29 @@ pub fn collectFormulaJobs(
     // borrows a client from the shared `http_pool` for the duration
     // of its request so TLS contexts are reused across deps.
     //
-    // Thread-safety: `std.heap.ArenaAllocator` is lock-free in 0.16,
-    // so a single arena shared across workers replaces the old
-    // `ThreadSafeAllocator` wrapper without contention. Worker-local
-    // arenas come later (S7). JSON bodies are duped back into the
-    // caller's `allocator` after join so they outlive the arena and
-    // the subsequent `allocator.free(dep_json)` calls stay valid.
+    // Allocator strategy (S7): each worker owns a `FetchFormulaCtx`
+    // with its own `ArenaAllocator` on `page_allocator` — no shared
+    // bump-pointer across threads. JSON bodies live in the worker's
+    // arena until after `join`, then get duped into the caller's
+    // `allocator` so they outlive the per-worker deinit.
     const dep_jsons = allocator.alloc(?[]const u8, deps.len) catch return InstallError.DownloadFailed;
     defer allocator.free(dep_jsons);
     @memset(dep_jsons, null);
 
     if (deps.len > 0) {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
-        const worker_alloc = arena.allocator();
+        const ctxs = allocator.alloc(FetchFormulaCtx, deps.len) catch return InstallError.DownloadFailed;
+        defer {
+            for (ctxs) |*c| c.arena.deinit();
+            allocator.free(ctxs);
+        }
+        for (ctxs, 0..) |*c, i| {
+            c.* = .{
+                .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+                .pool = http_pool,
+                .cache_dir = api.cache_dir,
+                .dep_name = deps[i].name,
+            };
+        }
 
         const threads = allocator.alloc(std.Thread, deps.len) catch return InstallError.DownloadFailed;
         defer allocator.free(threads);
@@ -824,24 +837,22 @@ pub fn collectFormulaJobs(
         var spawned: usize = 0;
         for (deps, 0..) |dep, i| {
             if (dep.already_installed) continue;
-            if (std.Thread.spawn(.{}, fetchFormulaWorker, .{
-                worker_alloc, http_pool, api.cache_dir, dep.name, &dep_jsons[i],
-            })) |t| {
+            if (std.Thread.spawn(.{}, FetchFormulaCtx.run, .{&ctxs[i]})) |t| {
                 threads[spawned] = t;
                 spawned += 1;
             } else |_| {
-                // Spawn failure → fall back to inline fetch.
-                fetchFormulaWorker(worker_alloc, http_pool, api.cache_dir, dep.name, &dep_jsons[i]);
+                // Spawn failure → run inline on the caller thread.
+                ctxs[i].run();
             }
         }
         for (threads[0..spawned]) |t| t.join();
 
         // Dupe each fetched JSON into the caller's allocator so the
-        // memory outlives `arena.deinit()` — downstream code parses
-        // and eventually `allocator.free`s these bytes.
-        for (dep_jsons) |*dj| {
-            if (dj.*) |bytes| {
-                dj.* = allocator.dupe(u8, bytes) catch null;
+        // memory outlives per-worker `arena.deinit()` — downstream
+        // parses and eventually `allocator.free`s these bytes.
+        for (ctxs, 0..) |*c, i| {
+            if (c.result) |bytes| {
+                dep_jsons[i] = allocator.dupe(u8, bytes) catch null;
             }
         }
     }
