@@ -117,7 +117,11 @@ pub const HttpClient = struct {
 
         try req.sendBodiless();
 
-        var redirect_buf: [8 * 1024]u8 = undefined;
+        // 32 KiB header buffer — GHCR's `/token` and blob redirects can
+        // exceed 8 KiB once cookies, signed-URL params, and multi-scope
+        // token responses stack up. 0.15 capped at 8 KiB and occasionally
+        // tripped `HeaderBufferTooSmall` on cold installs.
+        var redirect_buf: [32 * 1024]u8 = undefined;
         const response = try req.receiveHead(&redirect_buf);
 
         return @intFromEnum(response.head.status);
@@ -258,7 +262,10 @@ pub const HttpClient = struct {
 
         try req.sendBodiless();
 
-        var redirect_buf: [8 * 1024]u8 = undefined;
+        // 32 KiB header buffer — see comment in `head()`. Blob
+        // redirects from GHCR (Azure CDN signed URLs) routinely push
+        // past the old 8 KiB budget.
+        var redirect_buf: [32 * 1024]u8 = undefined;
         var response = try req.receiveHead(&redirect_buf);
 
         const status: u16 = @intFromEnum(response.head.status);

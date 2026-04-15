@@ -43,6 +43,30 @@ pub const PrefixError = error{PrefixTooLong};
 
 /// Refuse to proceed when MALT_PREFIX exceeds `max_prefix_len`. Exposed so
 /// `mt doctor` can reuse the same rule.
+/// Parsed `<repo>@<digest>` reference from a GHCR blob URL.
+/// Both fields are slices into the input URL — no allocation; valid
+/// for the lifetime of the caller's string.
+pub const GhcrRef = struct {
+    repo: []const u8,
+    digest: []const u8,
+};
+
+/// Split a `https://ghcr.io/v2/<repo>/blobs/<digest>` URL into its
+/// `<repo>` and `<digest>` parts, returning `null` if the URL is not
+/// in that shape. Exposed so the install-phase token prefetch and the
+/// per-worker blob download parse identically — a single pure helper
+/// prevents the two code paths from drifting apart.
+pub fn parseGhcrUrl(url: []const u8) ?GhcrRef {
+    const prefix = "https://ghcr.io/v2/";
+    if (!std.mem.startsWith(u8, url, prefix)) return null;
+    const path = url[prefix.len..];
+    const blobs_pos = std.mem.find(u8, path, "/blobs/") orelse return null;
+    return .{
+        .repo = path[0..blobs_pos],
+        .digest = path[blobs_pos + "/blobs/".len ..],
+    };
+}
+
 pub fn checkPrefixLength(prefix: []const u8) PrefixError!void {
     if (prefix.len > max_prefix_len) return error.PrefixTooLong;
 }
@@ -138,20 +162,13 @@ fn downloadWorker(
         return;
     }
 
-    // Extract repo + digest from bottle URL
-    const ghcr_prefix_str = "https://ghcr.io/v2/";
-    var repo_buf: [256]u8 = undefined;
-    var digest_buf: [128]u8 = undefined;
-    var repo: []const u8 = undefined;
-    var digest: []const u8 = undefined;
-
-    if (std.mem.startsWith(u8, job.bottle_url, ghcr_prefix_str)) {
-        const path = job.bottle_url[ghcr_prefix_str.len..];
-        if (std.mem.indexOf(u8, path, "/blobs/")) |blobs_pos| {
-            repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return;
-            digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return;
-        } else return;
-    } else return;
+    // Extract repo + digest from bottle URL via the shared parser so
+    // the token-prefetch path in `execute` can collect scopes without
+    // duplicating this logic. Slices borrow from `job.bottle_url`,
+    // which outlives the worker.
+    const ref = parseGhcrUrl(job.bottle_url) orelse return;
+    const repo = ref.repo;
+    const digest = ref.digest;
 
     // Create temp dir
     const tmp_dir = atomic.createTempDir(allocator, job.name) catch return;
@@ -434,6 +451,31 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.info("Downloading 1 bottle...", .{});
         } else {
             output.info("Downloading {d} bottles...", .{to_download});
+        }
+
+        // GHCR token prefetch: fold every distinct repo in the batch
+        // into a single multi-scope `/token` round-trip so each
+        // download worker hits the cache instead of racing its own
+        // token fetch. On a 12-dep install this turns 12 sequential
+        // token round-trips into 1. `prefetchTokens` is best-effort;
+        // on any error we leave the cache empty and workers fall back
+        // to per-repo fetches (the old behaviour, one round-trip each).
+        var repo_set: std.StringHashMapUnmanaged(void) = .empty;
+        defer repo_set.deinit(allocator);
+        for (all_jobs.items) |*job| {
+            if (job.succeeded) continue;
+            const ref = parseGhcrUrl(job.bottle_url) orelse continue;
+            repo_set.put(allocator, ref.repo, {}) catch {};
+        }
+        if (repo_set.count() > 0) {
+            var repos: std.ArrayList([]const u8) = .empty;
+            defer repos.deinit(allocator);
+            repos.ensureTotalCapacity(allocator, repo_set.count()) catch {};
+            var it = repo_set.keyIterator();
+            while (it.next()) |k| repos.append(allocator, k.*) catch {};
+            const pre_http = http_pool.acquire();
+            ghcr.prefetchTokens(pre_http, repos.items) catch {};
+            http_pool.release(pre_http);
         }
 
         // Set up multi-progress: assign line indices and create coordinator

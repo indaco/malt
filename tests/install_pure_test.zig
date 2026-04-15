@@ -38,6 +38,31 @@ test "buildGhcrRepo returns OutOfMemory when the buffer is too small" {
     try testing.expectError(error.OutOfMemory, install.buildGhcrRepo(&buf, "wget"));
 }
 
+// S10: parseGhcrUrl — pure splitter used by both the token-prefetch
+// path in `execute` and the per-worker blob download in
+// `downloadWorker`. Pinning the contract here keeps the two call
+// sites from drifting apart.
+test "parseGhcrUrl splits a well-formed bottle URL into repo + digest" {
+    const url = "https://ghcr.io/v2/homebrew/core/wget/blobs/sha256:abcdef";
+    const ref = install.parseGhcrUrl(url) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("homebrew/core/wget", ref.repo);
+    try testing.expectEqualStrings("sha256:abcdef", ref.digest);
+}
+
+test "parseGhcrUrl handles versioned repos that contain a slash" {
+    // openssl@3 maps to homebrew/core/openssl/3 in GHCR's repo layout.
+    const url = "https://ghcr.io/v2/homebrew/core/openssl/3/blobs/sha256:ff00";
+    const ref = install.parseGhcrUrl(url) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("homebrew/core/openssl/3", ref.repo);
+    try testing.expectEqualStrings("sha256:ff00", ref.digest);
+}
+
+test "parseGhcrUrl returns null for non-GHCR and malformed URLs" {
+    try testing.expect(install.parseGhcrUrl("https://example.com/foo") == null);
+    try testing.expect(install.parseGhcrUrl("https://ghcr.io/v2/no-blobs-segment") == null);
+    try testing.expect(install.parseGhcrUrl("") == null);
+}
+
 test "isTapFormula recognises the 'user/repo/formula' shape" {
     try testing.expect(install.isTapFormula("homebrew/core/wget"));
     try testing.expect(install.isTapFormula("user/tap/myformula"));
