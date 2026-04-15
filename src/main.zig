@@ -10,7 +10,7 @@ pub fn isInterrupted() bool {
     return g_interrupted.load(.acquire);
 }
 
-fn sigintHandler(_: c_int) callconv(.c) void {
+fn sigintHandler(_: std.c.SIG) callconv(.c) void {
     g_interrupted.store(true, .release);
 }
 
@@ -106,7 +106,7 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
 pub fn main() !void {
     // In debug builds, use GeneralPurposeAllocator as the backing
     // allocator for leak detection and use-after-free checks.
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     const backing: std.mem.Allocator = if (@import("builtin").mode == .Debug)
         gpa.allocator()
     else

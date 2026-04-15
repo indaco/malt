@@ -127,7 +127,7 @@ pub fn build(b: *std.Build) void {
     malt_lib.addIncludePath(b.path("c/"));
     malt_lib.addOptions("version_string", version_options);
 
-    @setEvalBranchQuota(4000);
+    @setEvalBranchQuota(16000);
     inline for (test_modules) |test_file| {
         // e.g. "tests/formula_test.zig" → "formula_test" (so each test binary
         // has a unique install name, which `test-bin` / kcov need).
