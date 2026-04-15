@@ -52,7 +52,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     std.fs.accessAbsolute(brew_cellar, .{}) catch {
         output.err("No Homebrew installation found at {s}", .{brew_prefix});
-        return;
+        return error.Aborted;
     };
 
     output.info("Found Homebrew installation at {s}", .{brew_prefix});
@@ -60,7 +60,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // ── Step 2: Scan Cellar for installed kegs ──────────────────────
     var dir = std.fs.openDirAbsolute(brew_cellar, .{ .iterate = true }) catch {
         output.err("Cannot read Homebrew Cellar", .{});
-        return;
+        return error.Aborted;
     };
     defer dir.close();
 
@@ -96,20 +96,20 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // ── Step 3: Initialize malt infrastructure ──────────────────────
     const prefix = atomic.maltPrefix();
-    ensureDirs(prefix);
+    ensureDirs(prefix) catch return error.Aborted;
 
     // Open database
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return;
     var db = sqlite.Database.open(db_path) catch {
         output.err("Failed to open database at {s}", .{db_path});
-        return;
+        return error.Aborted;
     };
     defer db.close();
 
     schema.initSchema(&db) catch {
         output.err("Failed to initialize database schema", .{});
-        return;
+        return error.Aborted;
     };
 
     // Acquire lock
@@ -117,7 +117,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
     var lk = lock_mod.LockFile.acquire(lock_path, 30000) catch {
         output.err("Another mt process is running. Wait or run mt doctor.", .{});
-        return;
+        return error.Aborted;
     };
     defer lk.release();
 
@@ -505,12 +505,12 @@ fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
 }
 
 /// Ensure all required directories under prefix exist.
-fn ensureDirs(prefix: []const u8) void {
+fn ensureDirs(prefix: []const u8) !void {
     std.fs.makeDirAbsolute(prefix) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => {
             output.err("Cannot create prefix directory {s}", .{prefix});
-            return;
+            return error.Aborted;
         },
     };
 

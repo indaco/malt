@@ -17,7 +17,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const cache_dir = atomic.maltCacheDir(allocator) catch {
         output.err("Failed to determine cache directory", .{});
-        return;
+        return error.Aborted;
     };
     defer allocator.free(cache_dir);
 

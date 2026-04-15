@@ -55,7 +55,7 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return;
     var db = sqlite.Database.open(db_path) catch {
-        output.err("Failed to open database", .{});
+        // Fresh prefix with no `db/` yet = no taps registered.
         return;
     };
     defer db.close();
@@ -64,12 +64,12 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
     if (args.len == 0) {
         if (action == .remove) {
             output.err("Usage: mt untap user/repo", .{});
-            return;
+            return error.Aborted;
         }
         // List taps
         const taps = tap_mod.list(allocator, &db) catch {
             output.err("Failed to list taps", .{});
-            return;
+            return error.Aborted;
         };
         defer allocator.free(taps);
 
@@ -91,7 +91,7 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
     const name = args[0];
     validateTapName(name) catch {
         output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{name});
-        return;
+        return error.Aborted;
     };
 
     switch (action) {
@@ -100,14 +100,14 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
             const url = std.fmt.bufPrint(&url_buf, "https://github.com/{s}", .{name}) catch return;
             tap_mod.add(&db, name, url) catch {
                 output.err("Failed to add tap {s}", .{name});
-                return;
+                return error.Aborted;
             };
             output.info("Tapped {s}", .{name});
         },
         .remove => {
             tap_mod.remove(&db, name) catch {
                 output.err("Failed to untap {s}", .{name});
-                return;
+                return error.Aborted;
             };
             output.info("Untapped {s}", .{name});
         },

@@ -35,7 +35,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return;
     var db = sqlite.Database.open(db_path) catch {
-        output.err("Failed to open database", .{});
+        // Fresh prefix: nothing installed = nothing to be outdated.
         return;
     };
     defer db.close();
@@ -44,7 +44,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Set up API client
     const cache_dir = atomic.maltCacheDir(allocator) catch {
         output.err("Failed to determine cache directory", .{});
-        return;
+        return error.Aborted;
     };
     defer allocator.free(cache_dir);
 

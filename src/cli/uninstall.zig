@@ -35,7 +35,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const name = pkg_name orelse {
         output.err("Usage: mt uninstall <package>", .{});
-        return;
+        return error.Aborted;
     };
 
     const prefix = atomic.maltPrefix();
@@ -45,7 +45,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
     var lock = lock_mod.LockFile.acquire(lock_path, 5000) catch {
         output.err("Could not acquire lock. Another malt process may be running.", .{});
-        return;
+        return error.Aborted;
     };
     defer lock.release();
 
@@ -54,14 +54,14 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return;
     var db = sqlite.Database.open(db_path) catch {
         output.err("Failed to open database", .{});
-        return;
+        return error.Aborted;
     };
     defer db.close();
     schema.initSchema(&db) catch return;
 
     // Check if it's a cask first (or if --cask was passed)
     if (force_cask or cask_mod.isInstalled(&db, name)) {
-        uninstallCask(allocator, name, &db, prefix, force);
+        try uninstallCask(allocator, name, &db, prefix, force);
         return;
     }
 
@@ -75,7 +75,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const found = find_stmt.step() catch false;
     if (!found) {
         output.err("{s} is not installed", .{name});
-        return;
+        return error.Aborted;
     }
 
     const keg_id = find_stmt.columnInt(0);
@@ -98,7 +98,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             const dependent = dep_stmt.columnText(0);
             const dep_name = if (dependent) |d| std.mem.sliceTo(d, 0) else "unknown";
             output.err("{s} is required by {s}. Use --force to remove anyway.", .{ name, dep_name });
-            return;
+            return error.Aborted;
         }
     }
 
@@ -151,10 +151,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 /// Uninstall a cask by token.
-fn uninstallCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, force: bool) void {
+fn uninstallCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, force: bool) !void {
     const info = cask_mod.lookupInstalled(db, token) orelse {
         output.err("{s} is not installed as a cask", .{token});
-        return;
+        return error.Aborted;
     };
 
     // Check if running (unless --force)
@@ -162,7 +162,7 @@ fn uninstallCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Da
         if (info.appPath()) |app_path| {
             if (cask_mod.CaskInstaller.isAppRunningPub(app_path)) {
                 output.err("{s} appears to be running. Quit the app first, or use --force.", .{token});
-                return;
+                return error.Aborted;
             }
         }
     }
@@ -172,7 +172,7 @@ fn uninstallCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Da
     var installer = cask_mod.CaskInstaller.init(allocator, db, prefix);
     installer.uninstall(token) catch {
         output.err("Failed to uninstall cask {s}", .{token});
-        return;
+        return error.Aborted;
     };
 
     output.success("{s} uninstalled", .{token});

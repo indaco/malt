@@ -20,7 +20,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
         output.err("Usage: mt run <package> [-- <args...>]", .{});
         output.info("Example: mt run jq -- --version", .{});
-        return;
+        return error.Aborted;
     }
 
     const pkg_name = args[0];
@@ -48,7 +48,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         // Already installed — just exec it
         output.info("Running installed {s}...", .{pkg_name});
-        return execBinary(bin_path, cmd_args);
+        return try execBinary(bin_path, cmd_args);
     }
 }
 
@@ -71,20 +71,20 @@ fn ephemeralRun(
     // Fetch formula
     const formula_json = api.fetchFormula(pkg_name) catch {
         output.err("Formula '{s}' not found", .{pkg_name});
-        return;
+        return error.Aborted;
     };
     defer allocator.free(formula_json);
 
     var formula = formula_mod.parseFormula(allocator, formula_json) catch {
         output.err("Failed to parse formula for '{s}'", .{pkg_name});
-        return;
+        return error.Aborted;
     };
     defer formula.deinit();
 
     // Select bottle
     const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
         output.err("No bottle available for {s} on this platform", .{pkg_name});
-        return;
+        return error.Aborted;
     };
 
     // Set up GHCR
@@ -94,7 +94,7 @@ fn ephemeralRun(
     // Create temp dir
     const tmp_dir = atomic.createTempDir(allocator, "run") catch {
         output.err("Failed to create temp directory", .{});
-        return;
+        return error.Aborted;
     };
     defer {
         atomic.cleanupTempDir(tmp_dir);
@@ -120,7 +120,7 @@ fn ephemeralRun(
     output.info("Downloading {s} {s}...", .{ pkg_name, formula.version });
     _ = bottle_mod.download(allocator, &ghcr, &http, repo, digest, bottle.sha256, tmp_dir, null) catch {
         output.err("Failed to download {s}", .{pkg_name});
-        return;
+        return error.Aborted;
     };
 
     // Find the binary in the extracted contents
@@ -134,7 +134,7 @@ fn ephemeralRun(
 
     std.fs.accessAbsolute(bin_path, .{}) catch {
         output.err("Binary '{s}' not found in bottle", .{pkg_name});
-        return;
+        return error.Aborted;
     };
 
     // Make executable
@@ -148,10 +148,10 @@ fn ephemeralRun(
     const stderr = std.fs.File.stderr();
     stderr.writeAll("---\n") catch {};
 
-    execBinary(bin_path, cmd_args);
+    try execBinary(bin_path, cmd_args);
 }
 
-fn execBinary(path: []const u8, cmd_args: []const []const u8) void {
+fn execBinary(path: []const u8, cmd_args: []const []const u8) !void {
     // Build argv: [path] ++ cmd_args
     var argv_buf: [64][]const u8 = undefined;
     argv_buf[0] = path;
@@ -163,7 +163,7 @@ fn execBinary(path: []const u8, cmd_args: []const []const u8) void {
     var child = std.process.Child.init(argv_buf[0 .. argc + 1], std.heap.c_allocator);
     child.spawn() catch {
         output.err("Failed to execute binary", .{});
-        return;
+        return error.Aborted;
     };
     _ = child.wait() catch {};
 }

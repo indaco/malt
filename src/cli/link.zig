@@ -15,7 +15,7 @@ pub fn executeLink(allocator: std.mem.Allocator, args: []const []const u8) !void
     if (args.len == 0) {
         output.err("Usage: mt link <formula>", .{});
         output.info("Create symlinks for an installed keg in the prefix (bin/, lib/, etc.)", .{});
-        return;
+        return error.Aborted;
     }
 
     const name = args[0];
@@ -30,7 +30,7 @@ pub fn executeLink(allocator: std.mem.Allocator, args: []const []const u8) !void
     const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return;
     var db = sqlite.Database.open(db_path) catch {
         output.err("Failed to open database", .{});
-        return;
+        return error.Aborted;
     };
     defer db.close();
     schema.initSchema(&db) catch {};
@@ -38,7 +38,7 @@ pub fn executeLink(allocator: std.mem.Allocator, args: []const []const u8) !void
     // Look up the keg
     var stmt = db.prepare("SELECT id, version, cellar_path FROM kegs WHERE name = ?1 LIMIT 1;") catch {
         output.err("Database query failed", .{});
-        return;
+        return error.Aborted;
     };
     defer stmt.finalize();
     stmt.bindText(1, name) catch return;
@@ -46,13 +46,13 @@ pub fn executeLink(allocator: std.mem.Allocator, args: []const []const u8) !void
     const has_row = stmt.step() catch false;
     if (!has_row) {
         output.err("{s} is not installed", .{name});
-        return;
+        return error.Aborted;
     }
 
     const keg_id = stmt.columnInt(0);
     const cellar_path_raw = stmt.columnText(2) orelse {
         output.err("No cellar path recorded for {s}", .{name});
-        return;
+        return error.Aborted;
     };
     const cellar_path = std.mem.sliceTo(cellar_path_raw, 0);
     var linker = linker_mod.Linker.init(allocator, &db, prefix);
@@ -66,13 +66,13 @@ pub fn executeLink(allocator: std.mem.Allocator, args: []const []const u8) !void
                 output.err("  {s} already linked by {s}", .{ c.link_path, c.existing_keg });
             }
             output.info("Use --overwrite to replace existing links.", .{});
-            return;
+            return error.Aborted;
         }
     }
 
     linker.link(cellar_path, name, keg_id) catch {
         output.err("Failed to create symlinks for {s}", .{name});
-        return;
+        return error.Aborted;
     };
 
     // Also create the version from DB for opt link
@@ -95,7 +95,7 @@ pub fn executeUnlink(allocator: std.mem.Allocator, args: []const []const u8) !vo
         output.err("Usage: mt unlink <formula>", .{});
         output.info("Remove symlinks for an installed keg from the prefix.", .{});
         output.info("The keg remains installed in the Cellar.", .{});
-        return;
+        return error.Aborted;
     }
 
     const name = args[0];
@@ -105,7 +105,7 @@ pub fn executeUnlink(allocator: std.mem.Allocator, args: []const []const u8) !vo
     const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return;
     var db = sqlite.Database.open(db_path) catch {
         output.err("Failed to open database", .{});
-        return;
+        return error.Aborted;
     };
     defer db.close();
     schema.initSchema(&db) catch {};
@@ -113,7 +113,7 @@ pub fn executeUnlink(allocator: std.mem.Allocator, args: []const []const u8) !vo
     // Look up the keg
     var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch {
         output.err("Database query failed", .{});
-        return;
+        return error.Aborted;
     };
     defer stmt.finalize();
     stmt.bindText(1, name) catch return;
@@ -121,7 +121,7 @@ pub fn executeUnlink(allocator: std.mem.Allocator, args: []const []const u8) !vo
     const has_row = stmt.step() catch false;
     if (!has_row) {
         output.err("{s} is not installed", .{name});
-        return;
+        return error.Aborted;
     }
 
     const keg_id = stmt.columnInt(0);
@@ -129,7 +129,7 @@ pub fn executeUnlink(allocator: std.mem.Allocator, args: []const []const u8) !vo
 
     linker.unlink(keg_id) catch {
         output.err("Failed to remove symlinks for {s}", .{name});
-        return;
+        return error.Aborted;
     };
 
     // Also remove opt/ symlink

@@ -171,49 +171,55 @@ pub fn main() !void {
     const cmd_args = filtered.items;
 
     if (command_map.get(cmd_str)) |cmd| {
-        switch (cmd) {
-            .install => try install.execute(allocator, cmd_args),
-            .uninstall => try uninstall.execute(allocator, cmd_args),
-            .upgrade => try upgrade.execute(allocator, cmd_args),
-            .update => try update.execute(allocator, cmd_args),
-            .outdated => try outdated.execute(allocator, cmd_args),
-            .list => try list.execute(allocator, cmd_args),
-            .info => try info.execute(allocator, cmd_args),
-            .search => try search.execute(allocator, cmd_args),
-            .doctor => try doctor.execute(allocator, cmd_args),
-            .tap => try tap.execute(allocator, cmd_args),
-            .untap => try tap.executeUntap(allocator, cmd_args),
-            .migrate => try migrate.execute(allocator, cmd_args),
-            .rollback => rollback.execute(allocator, cmd_args) catch |e| switch (e) {
-                // User-facing failure already reported by rollback.execute —
-                // exit non-zero without a stack trace.
-                error.Aborted => std.process.exit(1),
-                else => return e,
-            },
-            .link => try link_cmd.executeLink(allocator, cmd_args),
-            .unlink => try link_cmd.executeUnlink(allocator, cmd_args),
-            .run => try run_cmd.execute(allocator, cmd_args),
-            .completions => try completions.execute(allocator, cmd_args),
-            .backup => try backup.execute(allocator, cmd_args),
-            .restore => try restore.execute(allocator, cmd_args),
-            .purge => try purge.execute(allocator, cmd_args),
-            .services => try services.execute(allocator, cmd_args),
-            .bundle => try bundle.execute(allocator, cmd_args),
-            .uses => try uses.execute(allocator, cmd_args),
-            .version_cmd => {
-                // "mt version" — check for "mt version update" subcommand
-                if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
-                    try version_update.execute(allocator, cmd_args[1..]);
-                } else {
-                    printVersion();
-                }
-            },
-            .help => printUsage(),
-            .version => printVersion(),
-        }
+        // Any command can signal a user-facing failure by returning
+        // `error.Aborted`; the message has already been emitted via
+        // `output.err`, so we just exit non-zero without a stack trace.
+        // Every other error still propagates and surfaces normally.
+        dispatch(allocator, cmd, cmd_args) catch |e| switch (e) {
+            error.Aborted => std.process.exit(1),
+            else => return e,
+        };
     } else {
         // Unknown command — try transparent brew fallback
         try brewFallback(allocator, args[1..]);
+    }
+}
+
+fn dispatch(allocator: std.mem.Allocator, cmd: Command, cmd_args: []const []const u8) !void {
+    switch (cmd) {
+        .install => try install.execute(allocator, cmd_args),
+        .uninstall => try uninstall.execute(allocator, cmd_args),
+        .upgrade => try upgrade.execute(allocator, cmd_args),
+        .update => try update.execute(allocator, cmd_args),
+        .outdated => try outdated.execute(allocator, cmd_args),
+        .list => try list.execute(allocator, cmd_args),
+        .info => try info.execute(allocator, cmd_args),
+        .search => try search.execute(allocator, cmd_args),
+        .doctor => try doctor.execute(allocator, cmd_args),
+        .tap => try tap.execute(allocator, cmd_args),
+        .untap => try tap.executeUntap(allocator, cmd_args),
+        .migrate => try migrate.execute(allocator, cmd_args),
+        .rollback => try rollback.execute(allocator, cmd_args),
+        .link => try link_cmd.executeLink(allocator, cmd_args),
+        .unlink => try link_cmd.executeUnlink(allocator, cmd_args),
+        .run => try run_cmd.execute(allocator, cmd_args),
+        .completions => try completions.execute(allocator, cmd_args),
+        .backup => try backup.execute(allocator, cmd_args),
+        .restore => try restore.execute(allocator, cmd_args),
+        .purge => try purge.execute(allocator, cmd_args),
+        .services => try services.execute(allocator, cmd_args),
+        .bundle => try bundle.execute(allocator, cmd_args),
+        .uses => try uses.execute(allocator, cmd_args),
+        .version_cmd => {
+            // "mt version" — check for "mt version update" subcommand
+            if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
+                try version_update.execute(allocator, cmd_args[1..]);
+            } else {
+                printVersion();
+            }
+        },
+        .help => printUsage(),
+        .version => printVersion(),
     }
 }
 

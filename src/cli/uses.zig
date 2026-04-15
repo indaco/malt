@@ -27,7 +27,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const name = target orelse {
         output.err("Usage: mt uses <formula>", .{});
-        return;
+        return error.Aborted;
     };
 
     const json_mode = output.isJson();

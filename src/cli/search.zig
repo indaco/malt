@@ -47,7 +47,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const search_query = query orelse {
         output.err("Usage: mt search <query>", .{});
-        return;
+        return error.Aborted;
     };
 
     // If neither specified, search both
@@ -61,7 +61,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const cache_dir = atomic.maltCacheDir(allocator) catch {
         output.err("Failed to determine cache directory", .{});
-        return;
+        return error.Aborted;
     };
     defer allocator.free(cache_dir);
 
