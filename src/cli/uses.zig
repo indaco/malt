@@ -75,20 +75,23 @@ pub fn collectDependents(
     var names: std.StringHashMap(void) = .init(allocator);
     defer names.deinit();
 
+    // Frontier items are owned, heap-duped name strings. The cursor
+    // walk borrows each slot in place — nothing gets shifted or
+    // removed mid-iteration, so pop-from-head is O(1) and the full
+    // BFS is O(V+E) instead of the old `orderedRemove(0)`'s O(V²).
+    // Every frontier entry stays owned by the list until scope exit
+    // (the hash map dupes its own keys independently), so a single
+    // cleanup defer frees everything on both happy and error paths.
     var frontier: std.ArrayList([]const u8) = .empty;
-    defer frontier.deinit(allocator);
-    try frontier.append(allocator, try allocator.dupe(u8, target));
     defer {
-        // Anything that never made it into `names` (e.g. the initial
-        // target itself, or a node rejected as a cycle) still owns
-        // its bytes via this frontier. Free what the hash map didn't
-        // steal so we don't leak on early returns.
         for (frontier.items) |f| allocator.free(f);
+        frontier.deinit(allocator);
     }
+    try frontier.append(allocator, try allocator.dupe(u8, target));
 
-    while (frontier.items.len > 0) {
-        const current = frontier.orderedRemove(0);
-        defer allocator.free(current);
+    var cursor: usize = 0;
+    while (cursor < frontier.items.len) : (cursor += 1) {
+        const current = frontier.items[cursor];
 
         var stmt = db.prepare(
             "SELECT k.name FROM kegs k " ++

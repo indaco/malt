@@ -131,6 +131,69 @@ test "collectDependents tolerates cycles without spinning" {
     try testing.expectEqualStrings("b", hits[1]);
 }
 
+// S9: BFS pop-from-head must be O(1) per step. The old
+// `orderedRemove(0)` implementation was O(n) per pop, making the full
+// walk O(V²); a 1k-node linear chain took that from ~1k operations to
+// ~1M. This test builds a worst-case chain `k999 → k998 → … → k0`
+// (each ki depends on ki-1) so the recursive walk from k0 must visit
+// all 999 dependents in BFS order. Catches two regressions: a return
+// to `orderedRemove(0)` (would still pass but at O(n²) — timing is
+// not asserted because CI jitter would flake it) and any cursor bug
+// that drops or duplicates entries (exact count asserted).
+test "collectDependents recursive walk handles a 1000-node chain" {
+    var db = try makeDb("chain1k");
+    defer db.close();
+
+    const n: usize = 1000;
+
+    // Single transaction keeps the insert cost linear rather than
+    // paying a per-statement fsync on every row.
+    try db.exec("BEGIN;");
+
+    // Pre-insert every keg so addDep can reference them by name.
+    var name_buf: [16]u8 = undefined;
+    var ids: [n]i64 = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const name = try std.fmt.bufPrint(&name_buf, "k{d}", .{i});
+        ids[i] = try insertKeg(&db, name);
+    }
+
+    // Wire up the chain: ki depends on k(i-1). Skip i=0 (the root has
+    // no inbound edge — it's the target of the walk).
+    i = 1;
+    while (i < n) : (i += 1) {
+        const dep_name = try std.fmt.bufPrint(&name_buf, "k{d}", .{i - 1});
+        try addDep(&db, ids[i], dep_name);
+    }
+
+    try db.exec("COMMIT;");
+
+    const hits = try uses.collectDependents(testing.allocator, &db, "k0", true);
+    defer uses.freeDependents(testing.allocator, hits);
+
+    // k0 is the target, so it's not in its own dependents set — every
+    // other node is.
+    try testing.expectEqual(n - 1, hits.len);
+
+    // No duplicates: the result comes out of a StringHashMap-keyed
+    // dedup step, so a cursor bug that visits a node twice would blow
+    // the count check above. Spot-check a few specific names to catch
+    // shift-by-one / off-by-one cursor errors that happen to preserve
+    // the count.
+    var seen_k1 = false;
+    var seen_k500 = false;
+    var seen_k999 = false;
+    for (hits) |h| {
+        if (std.mem.eql(u8, h, "k1")) seen_k1 = true;
+        if (std.mem.eql(u8, h, "k500")) seen_k500 = true;
+        if (std.mem.eql(u8, h, "k999")) seen_k999 = true;
+    }
+    try testing.expect(seen_k1);
+    try testing.expect(seen_k500);
+    try testing.expect(seen_k999);
+}
+
 test "encodeJson shape: target + dependents array" {
     const deps = [_][]const u8{ "node@20", "wget" };
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);

@@ -38,12 +38,16 @@ pub fn resolve(
     var visited = std.StringHashMap(void).init(allocator);
     defer visited.deinit();
 
-    // Queue of owned, heap-duped dep name strings. On scope exit anything
-    // still sitting in the queue gets freed so partial BFS walks don't
-    // leak.
-    var queue: std.ArrayList([]const u8) = .empty;
+    // Queue of owned, heap-duped dep name strings. Slots are set to
+    // `null` once ownership is transferred out (into `result` or freed
+    // on a skip), so scope-exit cleanup frees only what never moved —
+    // no double-frees, no leaks on partial walks. Optional-slot cursor
+    // walk turns pop-from-head from O(n) (`orderedRemove(0)` memmoves
+    // the tail every iteration) into O(1) per step; the full BFS goes
+    // from O(V²) to O(V+E).
+    var queue: std.ArrayList(?[]const u8) = .empty;
     defer {
-        for (queue.items) |s| allocator.free(s);
+        for (queue.items) |maybe| if (maybe) |s| allocator.free(s);
         queue.deinit(allocator);
     }
 
@@ -68,8 +72,10 @@ pub fn resolve(
     // Mark the root so sub-deps never try to recurse into it.
     visited.put(root_name, {}) catch {};
 
-    while (queue.items.len > 0) {
-        const dep_name = queue.orderedRemove(0);
+    var cursor: usize = 0;
+    while (cursor < queue.items.len) : (cursor += 1) {
+        const dep_name = queue.items[cursor] orelse continue;
+        queue.items[cursor] = null; // ownership taken out of the queue
 
         // Dedup: already processed → free the duplicate.
         if (visited.get(dep_name) != null) {
