@@ -12,12 +12,13 @@ const help = @import("help.zig");
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "list")) return;
 
-    // Parse flags
+    // Parse per-command flags. `--json`, `--quiet`/`-q`, `--verbose`/`-v`,
+    // and `--dry-run` are stripped by the global parser in `main.zig`
+    // before we get here — read them via `output.isJson()` etc.
     var show_formula = false;
     var show_cask = false;
     var show_versions = false;
     var show_pinned = false;
-    var json_mode = false;
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--formula") or std.mem.eql(u8, arg, "--formulae")) {
@@ -28,12 +29,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             show_versions = true;
         } else if (std.mem.eql(u8, arg, "--pinned")) {
             show_pinned = true;
-        } else if (std.mem.eql(u8, arg, "--json")) {
-            json_mode = true;
-        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
-            output.setQuiet(true);
         }
     }
+    const json_mode = output.isJson();
 
     // If neither specified, show both
     if (!show_formula and !show_cask) {

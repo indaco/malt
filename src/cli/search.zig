@@ -38,8 +38,6 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             search_formula = true;
         } else if (std.mem.eql(u8, arg, "--cask") or std.mem.eql(u8, arg, "--casks")) {
             search_cask = true;
-        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
-            output.setQuiet(true);
         } else if (arg.len > 0 and arg[0] != '-') {
             if (query == null) query = arg;
         }

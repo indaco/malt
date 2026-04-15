@@ -14,21 +14,18 @@ const help = @import("help.zig");
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "outdated")) return;
 
-    var json_mode = false;
     var cask_only = false;
     var formula_only = false;
 
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--json")) {
-            json_mode = true;
-        } else if (std.mem.eql(u8, arg, "--cask")) {
+        if (std.mem.eql(u8, arg, "--cask")) {
             cask_only = true;
         } else if (std.mem.eql(u8, arg, "--formula") or std.mem.eql(u8, arg, "--formulae")) {
             formula_only = true;
-        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
-            output.setQuiet(true);
         }
     }
+    // `--json` and `--quiet` are stripped by the global parser in main.zig.
+    const json_mode = output.isJson();
 
     // Open DB
     const prefix = atomic.maltPrefix();
