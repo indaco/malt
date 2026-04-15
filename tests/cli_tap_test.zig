@@ -117,28 +117,35 @@ test "validateTapName: rejects over-long components" {
     try testing.expectError(bad, tap_cli.validateTapName(long_repo));
 }
 
-test "execute: malformed tap input returns cleanly without inserting a row" {
+test "execute: malformed tap input is rejected with error.Aborted" {
     const prefix = try setupPrefix("reject_malformed");
     defer testing.allocator.free(prefix);
     defer std.fs.deleteTreeAbsolute(prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    // Each of these should be rejected by the validator and return without
-    // touching the DB. Run them back-to-back; they must not accumulate
-    // partial state or crash.
-    try tap_cli.execute(testing.allocator, &.{"no-slash-here"});
-    try tap_cli.execute(testing.allocator, &.{"a/b/c"});
-    try tap_cli.execute(testing.allocator, &.{"/repo"});
-    try tap_cli.execute(testing.allocator, &.{"user/"});
-    try tap_cli.execute(testing.allocator, &.{"../evil"});
-    try tap_cli.execute(testing.allocator, &.{"user/bad char"});
+    // Each of these should be rejected by the validator and surface as a
+    // non-zero CLI exit — the command-level contract is `error.Aborted`
+    // (see main.zig dispatch). Run them back-to-back to also verify no
+    // partial state accumulates between calls.
+    const bad_inputs = [_][]const u8{
+        "no-slash-here", "a/b/c", "/repo", "user/", "../evil", "user/bad char",
+    };
+    for (bad_inputs) |name| {
+        try testing.expectError(
+            error.Aborted,
+            tap_cli.execute(testing.allocator, &.{name}),
+        );
+    }
 }
 
-test "execute with a bare name (no slash) reports an error but does not throw" {
+test "execute with a bare name (no slash) surfaces error.Aborted" {
     const prefix = try setupPrefix("bad_name");
     defer testing.allocator.free(prefix);
     defer std.fs.deleteTreeAbsolute(prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    try tap_cli.execute(testing.allocator, &.{"no_slash_here"});
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(testing.allocator, &.{"no_slash_here"}),
+    );
 }

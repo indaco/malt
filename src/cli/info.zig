@@ -37,7 +37,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const name = pkg_name orelse {
         output.err("Usage: mt info <package>", .{});
-        return;
+        return error.Aborted;
     };
 
     // Open DB (optional). On a fresh machine the prefix's `db/` dir

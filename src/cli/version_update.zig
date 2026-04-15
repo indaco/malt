@@ -25,19 +25,19 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Fetch latest release info from GitHub API
     var resp = http.get(RELEASES_API) catch {
         output.err("Cannot reach GitHub API", .{});
-        return;
+        return error.Aborted;
     };
     defer resp.deinit();
 
     if (resp.status != 200) {
         output.err("GitHub API returned status {d}", .{resp.status});
-        return;
+        return error.Aborted;
     }
 
     // Parse JSON to find tag_name and assets
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, resp.body, .{}) catch {
         output.err("Failed to parse release info", .{});
-        return;
+        return error.Aborted;
     };
     defer parsed.deinit();
 
@@ -45,12 +45,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         .object => |o| o,
         else => {
             output.err("Release payload was not a JSON object", .{});
-            return;
+            return error.Aborted;
         },
     };
     const tag = strField(obj, "tag_name") orelse {
         output.err("No tag_name in release", .{});
-        return;
+        return error.Aborted;
     };
 
     // Strip leading "v" from tag
@@ -73,32 +73,32 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const assets_val = obj.get("assets") orelse {
         output.err("No assets in release", .{});
-        return;
+        return error.Aborted;
     };
     const assets = switch (assets_val) {
         .array => |a| a,
         else => {
             output.err("Invalid assets", .{});
-            return;
+            return error.Aborted;
         },
     };
 
     const url = pickAssetUrl(assets, arch_str) orelse {
         output.err("No matching binary found for darwin {s}", .{arch_str});
-        return;
+        return error.Aborted;
     };
 
     output.info("Downloading {s}...", .{url});
 
     var dl_resp = http.get(url) catch {
         output.err("Download failed", .{});
-        return;
+        return error.Aborted;
     };
     defer dl_resp.deinit();
 
     if (dl_resp.status != 200) {
         output.err("Download returned status {d}", .{dl_resp.status});
-        return;
+        return error.Aborted;
     }
 
     // Write to temp file
@@ -106,12 +106,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     {
         const f = std.fs.createFileAbsolute(tmp_path, .{}) catch {
             output.err("Cannot create temp file", .{});
-            return;
+            return error.Aborted;
         };
         defer f.close();
         f.writeAll(dl_resp.body) catch {
             output.err("Failed to write temp file", .{});
-            return;
+            return error.Aborted;
         };
     }
     defer std.fs.deleteFileAbsolute(tmp_path) catch {};
@@ -121,13 +121,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     std.fs.deleteTreeAbsolute(tmp_dir) catch {};
     std.fs.makeDirAbsolute(tmp_dir) catch {
         output.err("Cannot create temp directory", .{});
-        return;
+        return error.Aborted;
     };
     defer std.fs.deleteTreeAbsolute(tmp_dir) catch {};
 
     archive.extractTarGz(tmp_path, tmp_dir) catch {
         output.err("Failed to extract update", .{});
-        return;
+        return error.Aborted;
     };
 
     // Locate the replacement binary inside the extracted tree.
@@ -145,14 +145,14 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var new_binary_buf: [std.fs.max_path_bytes]u8 = undefined;
     const new_binary = findReleaseBinary(allocator, tmp_dir, &new_binary_buf) orelse {
         output.err("Binary 'malt' not found in release archive", .{});
-        return;
+        return error.Aborted;
     };
 
     // Find where the current binary lives
     var self_exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const self_exe = std.fs.selfExePath(&self_exe_buf) catch {
         output.err("Cannot determine current binary path", .{});
-        return;
+        return error.Aborted;
     };
 
     output.info("Replacing {s}...", .{self_exe});

@@ -225,7 +225,7 @@ test "ensureDirs creates every required subdirectory under a fresh prefix" {
     std.fs.deleteTreeAbsolute(prefix) catch {};
     defer std.fs.deleteTreeAbsolute(prefix) catch {};
 
-    install.ensureDirs(prefix);
+    try install.ensureDirs(prefix);
 
     const subs = [_][]const u8{ "store", "Cellar", "Caskroom", "opt", "bin", "lib", "include", "share", "sbin", "etc", "tmp", "cache", "db" };
     for (subs) |s| {

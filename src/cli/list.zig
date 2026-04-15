@@ -46,7 +46,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return;
     var db = sqlite.Database.open(db_path) catch {
-        output.err("Failed to open database", .{});
+        // Fresh prefix with no `db/` yet = nothing installed. Treat as
+        // empty output (rc=0), same contract as `ls` on an empty dir.
         return;
     };
     defer db.close();

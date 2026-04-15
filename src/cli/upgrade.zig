@@ -46,15 +46,20 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var lock_path_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
     var lk = lock_mod.LockFile.acquire(lock_path, 5000) catch {
+        // Fresh prefix: no `db/` yet = nothing installed, nothing to
+        // upgrade. Exit 0 silently rather than treating the missing
+        // lock directory as contention with another process.
+        if (dry_run) return;
         output.err("Could not acquire lock. Another malt process may be running.", .{});
-        return;
+        return error.Aborted;
     };
     defer lk.release();
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return;
     var db = sqlite.Database.open(db_path) catch {
-        output.err("Failed to open database", .{});
+        // Same degradation as `list`/`outdated` — missing DB on a fresh
+        // prefix is empty state, not an error.
         return;
     };
     defer db.close();
@@ -71,12 +76,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Upgrade a specific package — try formula first, then cask
         if (!cask_only) {
             if (isFormulaInstalled(&db, name)) {
-                upgradeFormula(allocator, name, &db, &api, &http, prefix, dry_run);
+                upgradeFormula(allocator, name, &db, &api, &http, prefix, dry_run) catch {};
                 return;
             }
         }
         // Not a formula (or --cask): try cask
-        upgradeCask(allocator, name, &db, &api, prefix, dry_run);
+        upgradeCask(allocator, name, &db, &api, prefix, dry_run) catch {};
     } else {
         // Upgrade all
         if (!cask_only) {
@@ -109,7 +114,7 @@ fn upgradeFormula(
     http: *client_mod.HttpClient,
     prefix: [:0]const u8,
     dry_run: bool,
-) void {
+) !void {
     // Step 1: Look up installed version from DB
     var find_stmt = db.prepare(
         "SELECT id, version, store_sha256, cellar_path FROM kegs WHERE name = ?1 LIMIT 1;",
@@ -120,7 +125,7 @@ fn upgradeFormula(
     const found = find_stmt.step() catch false;
     if (!found) {
         output.err("{s} is not installed as a formula", .{name});
-        return;
+        return error.Aborted;
     }
 
     const old_keg_id = find_stmt.columnInt(0);
@@ -134,13 +139,13 @@ fn upgradeFormula(
     // Step 2: Fetch latest formula from API
     const formula_json = api.fetchFormula(name) catch {
         output.err("Could not fetch formula info for {s}", .{name});
-        return;
+        return error.Aborted;
     };
     defer allocator.free(formula_json);
 
     var formula = formula_mod.parseFormula(allocator, formula_json) catch {
         output.err("Failed to parse formula JSON for {s}", .{name});
-        return;
+        return error.Aborted;
     };
     defer formula.deinit();
 
@@ -160,7 +165,7 @@ fn upgradeFormula(
     // Step 3: Resolve bottle for new version
     const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
         output.err("No bottle available for {s} on this platform", .{name});
-        return;
+        return error.Aborted;
     };
 
     // Step 4: Download bottle
@@ -177,19 +182,19 @@ fn upgradeFormula(
 
         if (!std.mem.startsWith(u8, bottle.url, ghcr_prefix_str)) {
             output.err("Unsupported bottle URL for {s}", .{name});
-            return;
+            return error.Aborted;
         }
         const path = bottle.url[ghcr_prefix_str.len..];
         const blobs_pos = std.mem.indexOf(u8, path, "/blobs/") orelse {
             output.err("Malformed bottle URL for {s}", .{name});
-            return;
+            return error.Aborted;
         };
         const repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return;
         const digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return;
 
         const tmp_dir = atomic.createTempDir(allocator, name) catch {
             output.err("Failed to create temp dir for {s}", .{name});
-            return;
+            return error.Aborted;
         };
 
         output.info("  Downloading {s}...", .{name});
@@ -197,14 +202,14 @@ fn upgradeFormula(
             output.err("  Download failed: {s}", .{name});
             atomic.cleanupTempDir(tmp_dir);
             allocator.free(tmp_dir);
-            return;
+            return error.Aborted;
         };
 
         store.commitFrom(bottle.sha256, tmp_dir) catch {
             output.err("Failed to commit bottle to store for {s}", .{name});
             atomic.cleanupTempDir(tmp_dir);
             allocator.free(tmp_dir);
-            return;
+            return error.Aborted;
         };
         allocator.free(tmp_dir);
 
@@ -221,7 +226,7 @@ fn upgradeFormula(
         formula.version,
     ) catch {
         output.err("Failed to materialize {s}", .{name});
-        return;
+        return error.Aborted;
     };
 
     // Step 6: Unlink old symlinks
@@ -394,7 +399,7 @@ fn upgradeAllFormulas(
     }
 
     for (names.items) |name| {
-        upgradeFormula(allocator, name, db, api, http, prefix, dry_run);
+        upgradeFormula(allocator, name, db, api, http, prefix, dry_run) catch {};
     }
 }
 
@@ -402,22 +407,22 @@ fn upgradeAllFormulas(
 // Cask upgrade
 // ---------------------------------------------------------------------------
 
-fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool) void {
+fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool) !void {
     const installed = cask_mod.lookupInstalled(db, token) orelse {
         output.err("{s} is not installed as a cask", .{token});
-        return;
+        return error.Aborted;
     };
 
     // Fetch latest version
     const cask_json = api.fetchCask(token) catch {
         output.err("Could not fetch cask info for {s}", .{token});
-        return;
+        return error.Aborted;
     };
     defer allocator.free(cask_json);
 
     var parsed_cask = cask_mod.parseCask(allocator, cask_json) catch {
         output.err("Failed to parse cask JSON for {s}", .{token});
-        return;
+        return error.Aborted;
     };
     defer parsed_cask.deinit();
 
@@ -438,13 +443,13 @@ fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Data
     var installer = cask_mod.CaskInstaller.init(allocator, db, prefix);
     installer.uninstall(token) catch {
         output.err("Failed to remove old version of {s}", .{token});
-        return;
+        return error.Aborted;
     };
 
     // Install new version
     const app_path = installer.install(&parsed_cask) catch {
         output.err("Failed to install new version of {s}", .{token});
-        return;
+        return error.Aborted;
     };
 
     cask_mod.recordInstall(db, &parsed_cask, app_path) catch {
@@ -464,7 +469,7 @@ fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api
         const token_ptr = stmt.columnText(0) orelse continue;
         const token = std.mem.sliceTo(token_ptr, 0);
 
-        upgradeCask(allocator, token, db, api, prefix, dry_run);
+        upgradeCask(allocator, token, db, api, prefix, dry_run) catch {};
         upgraded += 1;
     }
 

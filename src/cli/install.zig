@@ -194,6 +194,8 @@ fn downloadWorker(
         bar.finish();
         output.err("  Download failed: {s} (after {d} attempts)", .{ job.name, max_attempts });
         allocator.free(tmp_dir);
+        // Thread worker: caller inspects DownloadJob.success rather than
+        // receiving an error — exit the worker, let the coordinator abort.
         return;
     }
     bar.finish();
@@ -275,7 +277,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     // Ensure required directories exist (Step 0)
-    ensureDirs(prefix);
+    ensureDirs(prefix) catch return error.Aborted;
 
     // Open database
     var db_path_buf: [512]u8 = undefined;
@@ -1252,13 +1254,13 @@ pub fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
 }
 
 /// Ensure all required directories under prefix exist.
-pub fn ensureDirs(prefix: []const u8) void {
+pub fn ensureDirs(prefix: []const u8) !void {
     // Create the prefix directory itself first (e.g. /opt/malt)
     std.fs.makeDirAbsolute(prefix) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => {
             output.err("Cannot create prefix directory {s} — you may need: sudo mkdir -p {s} && sudo chown $USER {s}", .{ prefix, prefix, prefix });
-            return;
+            return error.Aborted;
         },
     };
 
