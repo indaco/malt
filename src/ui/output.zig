@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const color = @import("color.zig");
+const io_mod = @import("io.zig");
 
 pub const OutputMode = enum {
     human,
@@ -50,17 +51,16 @@ fn writePrefixedLine(
     emoji_prefix: []const u8,
     plain_prefix: []const u8,
 ) void {
-    const f = std.fs.File.stderr();
     const prefix: []const u8 = if (color.isEmojiEnabled()) emoji_prefix else plain_prefix;
     if (color.isColorEnabled()) {
-        f.writeAll(style.code()) catch {};
-        f.writeAll(prefix) catch {};
-        f.writeAll(color.Style.reset.code()) catch {};
+        io_mod.stderrWriteAll(style.code());
+        io_mod.stderrWriteAll(prefix);
+        io_mod.stderrWriteAll(color.Style.reset.code());
     } else {
-        f.writeAll(prefix) catch {};
+        io_mod.stderrWriteAll(prefix);
     }
-    f.writeAll(msg) catch {};
-    f.writeAll("\n") catch {};
+    io_mod.stderrWriteAll(msg);
+    io_mod.stderrWriteAll("\n");
 }
 
 /// Print info message: "==> {msg}" in cyan
@@ -100,15 +100,14 @@ fn lineStyled(style: ?color.Style, comptime fmt: []const u8, args: anytype) void
     if (quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    const f = std.fs.File.stderr();
     if (style != null and color.isColorEnabled()) {
-        f.writeAll(style.?.code()) catch {};
-        f.writeAll(msg) catch {};
-        f.writeAll(color.Style.reset.code()) catch {};
+        io_mod.stderrWriteAll(style.?.code());
+        io_mod.stderrWriteAll(msg);
+        io_mod.stderrWriteAll(color.Style.reset.code());
     } else {
-        f.writeAll(msg) catch {};
+        io_mod.stderrWriteAll(msg);
     }
-    f.writeAll("\n") catch {};
+    io_mod.stderrWriteAll("\n");
 }
 
 /// Yellow line with no prefix — for multi-line warning blocks (banners,
@@ -138,18 +137,17 @@ pub fn dim(comptime fmt: []const u8, args: anytype) void {
     if (quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    const f = std.fs.File.stderr();
     const prefix: []const u8 = if (color.isEmojiEnabled()) "  ▸ " else "  > ";
     if (color.isColorEnabled()) {
-        f.writeAll(color.Style.dim.code()) catch {};
-        f.writeAll(prefix) catch {};
-        f.writeAll(msg) catch {};
-        f.writeAll(color.Style.reset.code()) catch {};
+        io_mod.stderrWriteAll(color.Style.dim.code());
+        io_mod.stderrWriteAll(prefix);
+        io_mod.stderrWriteAll(msg);
+        io_mod.stderrWriteAll(color.Style.reset.code());
     } else {
-        f.writeAll(prefix) catch {};
-        f.writeAll(msg) catch {};
+        io_mod.stderrWriteAll(prefix);
+        io_mod.stderrWriteAll(msg);
     }
-    f.writeAll("\n") catch {};
+    io_mod.stderrWriteAll("\n");
 }
 
 /// Read a single line from stdin and return true iff the trimmed input
@@ -160,13 +158,12 @@ pub fn dim(comptime fmt: []const u8, args: anytype) void {
 pub fn confirmTyped(expected: []const u8, prompt: []const u8) bool {
     if (!std.posix.isatty(std.posix.STDIN_FILENO)) return false;
 
-    const f = std.fs.File.stderr();
     if (color.isColorEnabled()) {
-        f.writeAll(color.Style.bold.code()) catch {};
-        f.writeAll(prompt) catch {};
-        f.writeAll(color.Style.reset.code()) catch {};
+        io_mod.stderrWriteAll(color.Style.bold.code());
+        io_mod.stderrWriteAll(prompt);
+        io_mod.stderrWriteAll(color.Style.reset.code());
     } else {
-        f.writeAll(prompt) catch {};
+        io_mod.stderrWriteAll(prompt);
     }
 
     var buf: [128]u8 = undefined;
@@ -215,10 +212,9 @@ pub fn jsonStr(w: anytype, s: []const u8) !void {
 
 /// Write JSON to stdout
 pub fn jsonOutput(allocator: std.mem.Allocator, value: anytype) !void {
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(allocator);
-    std.json.stringify(value, .{}, list.writer(allocator)) catch |e| return e;
-    list.append(allocator, '\n') catch |e| return e;
-    const f = std.fs.File.stdout();
-    f.writeAll(list.items) catch {};
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try std.json.Stringify.value(value, .{}, &aw.writer);
+    try aw.writer.writeByte('\n');
+    io_mod.stdoutWriteAll(aw.written());
 }

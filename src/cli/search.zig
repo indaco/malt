@@ -4,6 +4,7 @@
 const std = @import("std");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const io_mod = @import("../ui/io.zig");
 const color = @import("../ui/color.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
@@ -104,7 +105,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         cask = runKindIsolated(shared, cache_dir, .cask, search_query);
     }
 
-    const stdout = std.fs.File.stdout();
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw = std.Io.File.stdout().writer(io_mod.ctx(), &stdout_buf);
+    const stdout: *std.Io.Writer = &stdout_fw.interface;
+    defer stdout.flush() catch {};
     if (json_mode) {
         try emitJson(allocator, stdout, search_formula, search_cask, formula, cask, search_query);
     } else {
@@ -150,7 +154,7 @@ const KindTask = struct {
 };
 
 fn emitHuman(
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     formula: KindResults,
     cask: KindResults,
     query: []const u8,
@@ -171,7 +175,7 @@ fn emitHuman(
 /// relying on substring membership alone to surface exact matches would
 /// under-report on the day of a new release.
 fn writeHuman(
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     kind: []const u8,
     r: KindResults,
     query: []const u8,
@@ -185,31 +189,27 @@ fn writeHuman(
 
 fn emitJson(
     allocator: std.mem.Allocator,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     search_formula: bool,
     search_cask: bool,
     formula: KindResults,
     cask: KindResults,
     query: []const u8,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-
-    try w.writeAll("{");
+    _ = allocator;
+    try stdout.writeAll("{");
     if (search_formula) {
-        try w.writeAll("\"formulae\":[");
-        try writeJson(w, "name", formula, query);
-        try w.writeAll("]");
+        try stdout.writeAll("\"formulae\":[");
+        try writeJson(stdout, "name", formula, query);
+        try stdout.writeAll("]");
     }
     if (search_cask) {
-        if (search_formula) try w.writeAll(",");
-        try w.writeAll("\"casks\":[");
-        try writeJson(w, "token", cask, query);
-        try w.writeAll("]");
+        if (search_formula) try stdout.writeAll(",");
+        try stdout.writeAll("\"casks\":[");
+        try writeJson(stdout, "token", cask, query);
+        try stdout.writeAll("]");
     }
-    try w.writeAll("}\n");
-    stdout.writeAll(buf.items) catch {};
+    try stdout.writeAll("}\n");
 }
 
 fn writeJson(w: anytype, field: []const u8, r: KindResults, query: []const u8) !void {
@@ -235,16 +235,16 @@ fn writeJsonObj(w: anytype, field: []const u8, value: []const u8) !void {
 }
 
 /// Write a single search result with the same ▸ prefix style used by `list`.
-fn writeResult(stdout: std.fs.File, name: []const u8, kind: []const u8) void {
+fn writeResult(stdout: *std.Io.Writer, name: []const u8, kind: []const u8) void {
     const use_color = color.isColorEnabled();
-    if (use_color) stdout.writeAll(color.Style.cyan.code()) catch {};
-    stdout.writeAll("  \xe2\x96\xb8 ") catch {};
-    if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
-    stdout.writeAll(name) catch {};
-    if (use_color) stdout.writeAll(color.Style.dim.code()) catch {};
-    stdout.writeAll(" (") catch {};
-    stdout.writeAll(kind) catch {};
-    stdout.writeAll(")") catch {};
-    if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
-    stdout.writeAll("\n") catch {};
+    if (use_color) stdout.writeAll(color.Style.cyan.code()) catch return;
+    stdout.writeAll("  \xe2\x96\xb8 ") catch return;
+    if (use_color) stdout.writeAll(color.Style.reset.code()) catch return;
+    stdout.writeAll(name) catch return;
+    if (use_color) stdout.writeAll(color.Style.dim.code()) catch return;
+    stdout.writeAll(" (") catch return;
+    stdout.writeAll(kind) catch return;
+    stdout.writeAll(")") catch return;
+    if (use_color) stdout.writeAll(color.Style.reset.code()) catch return;
+    stdout.writeAll("\n") catch return;
 }

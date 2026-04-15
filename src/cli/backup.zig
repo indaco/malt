@@ -19,6 +19,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const io_mod = @import("../ui/io.zig");
 const help = @import("help.zig");
 
 pub const Kind = enum { formula, cask };
@@ -80,9 +81,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     schema.initSchema(&db) catch {};
 
     // ── Serialize into an in-memory buffer ───────────────────────────────
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
 
     try writeHeader(w);
     var count: usize = 0;
@@ -119,20 +120,22 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
+    const bytes = aw.written();
+
     // ── Resolve destination and write ────────────────────────────────────
     if (output_path) |p| {
         if (std.mem.eql(u8, p, "-")) {
-            std.fs.File.stdout().writeAll(buf.items) catch return Error.WriteFailed;
+            io_mod.stdoutWriteAll(bytes);
             return;
         }
-        try writeToPath(p, buf.items);
+        try writeToPath(p, bytes);
         output.success("Backup written to {s} ({d} packages)", .{ p, count });
         return;
     }
 
     const default_path = try defaultBackupPath(allocator);
     defer allocator.free(default_path);
-    try writeToPath(default_path, buf.items);
+    try writeToPath(default_path, bytes);
     output.success("Backup written to {s} ({d} packages)", .{ default_path, count });
 }
 

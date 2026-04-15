@@ -2,6 +2,7 @@
 //! CLI entry point and command dispatch for the `mt` binary.
 
 const std = @import("std");
+const io_mod = @import("ui/io.zig");
 
 /// Global interrupt flag — set by SIGINT handler, checked at install step boundaries.
 var g_interrupted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
@@ -279,11 +280,11 @@ fn printUsage() void {
         \\  MALT_NO_EMOJI     Disable emoji in output
         \\
     ;
-    std.fs.File.stdout().writeAll(usage) catch {};
+    io_mod.stdoutWriteAll(usage);
 }
 
 fn printVersion() void {
-    std.fs.File.stdout().writeAll("malt " ++ version ++ "\n") catch {};
+    io_mod.stdoutWriteAll("malt " ++ version ++ "\n");
 }
 
 fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -318,11 +319,10 @@ fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // brew not found
-    const stderr = std.fs.File.stderr();
     if (args.len > 0) {
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "malt: '{s}' is not a malt command and brew was not found.\n", .{args[0]}) catch return;
-        stderr.writeAll(msg) catch {};
+        io_mod.stderrWriteAll(msg);
     }
-    stderr.writeAll("Install Homebrew: https://brew.sh\n") catch {};
+    io_mod.stderrWriteAll("Install Homebrew: https://brew.sh\n");
 }

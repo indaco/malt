@@ -153,10 +153,10 @@ pub fn register(
         return SupervisorError.IoFailed;
     defer file.close();
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    plist_mod.render(spec, buf.writer(allocator)) catch return SupervisorError.IoFailed;
-    file.writeAll(buf.items) catch return SupervisorError.IoFailed;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    plist_mod.render(spec, &aw.writer) catch return SupervisorError.IoFailed;
+    file.writeAll(aw.written()) catch return SupervisorError.IoFailed;
 
     var stmt = db.prepare(
         \\INSERT OR REPLACE INTO services(name, keg_name, plist_path, auto_start, last_status)

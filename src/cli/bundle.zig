@@ -5,6 +5,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const io_mod = @import("../ui/io.zig");
 const manifest_mod = @import("../core/bundle/manifest.zig");
 const brewfile_mod = @import("../core/bundle/brewfile.zig");
 const brewfile_emit = @import("../core/bundle/brewfile_emit.zig");
@@ -177,9 +178,9 @@ fn cmdExport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
         try populateFromInstalled(&manifest, &db);
     }
 
-    const stdout = std.fs.File.stdout();
+    const stdout = std.Io.File.stdout();
     var write_buf: [4096]u8 = undefined;
-    var stdout_writer = stdout.writer(&write_buf);
+    var stdout_writer = stdout.writer(io_mod.ctx(), &write_buf);
     const w = &stdout_writer.interface;
     switch (format) {
         .brewfile => try brewfile_emit.emit(manifest, w),
@@ -285,7 +286,7 @@ fn writeManifest(
         std.fs.cwd().createFile(path, .{ .truncate = true }) catch return BundleError.WriteFailed;
     defer file.close();
     var write_buf: [4096]u8 = undefined;
-    var fw = file.writer(&write_buf);
+    var fw = file.writer(io_mod.ctx(), &write_buf);
     const w = &fw.interface;
     switch (format) {
         .brewfile => brewfile_emit.emit(manifest, w) catch return BundleError.WriteFailed,
@@ -387,6 +388,5 @@ fn printHelp() !void {
         \\  ./Brewfile, ./Maltfile.json, ~/.config/malt/Brewfile, ~/.config/malt/Maltfile.json
         \\
     ;
-    const f = std.fs.File.stderr();
-    try f.writeAll(msg);
+    io_mod.stderrWriteAll(msg);
 }

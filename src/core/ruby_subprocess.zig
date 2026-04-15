@@ -271,10 +271,10 @@ pub fn generateWrapper(
     prefix: []const u8,
     post_install_body: []const u8,
 ) ![]const u8 {
-    var script: std.ArrayList(u8) = .empty;
-    errdefer script.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
 
-    const writer = script.writer(allocator);
+    const writer = &aw.writer;
 
     try writer.writeAll(
         \\require 'pathname'
@@ -353,7 +353,7 @@ pub fn generateWrapper(
     try writer.writeAll(post_install_body);
     try writer.writeAll("\nend\n");
 
-    return script.toOwnedSlice(allocator);
+    return aw.toOwnedSlice();
 }
 
 /// Run the post_install hook for a formula via the system Ruby interpreter.

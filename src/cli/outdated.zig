@@ -6,6 +6,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const io_mod = @import("../ui/io.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const cask_mod = @import("../core/cask.zig");
@@ -49,7 +50,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer http.deinit();
     var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
 
-    const stdout = std.fs.File.stdout();
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw = std.Io.File.stdout().writer(io_mod.ctx(), &stdout_buf);
+    const stdout: *std.Io.Writer = &stdout_fw.interface;
+    defer stdout.flush() catch {};
 
     // Check outdated formulas (unless --cask)
     if (!cask_only) {
@@ -57,9 +61,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         defer stmt.finalize();
 
         if (json_mode) {
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(allocator);
-            const w = buf.writer(allocator);
+            var aw: std.Io.Writer.Allocating = .init(allocator);
+            defer aw.deinit();
+            const w = &aw.writer;
             try w.writeAll("[");
 
             var first = true;
@@ -86,7 +90,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
 
             try w.writeAll("]\n");
-            stdout.writeAll(buf.items) catch {};
+            stdout.writeAll(aw.written()) catch return;
         } else {
             var found_any = false;
             while (stmt.step() catch false) {
@@ -102,7 +106,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                     found_any = true;
                     var line_buf: [512]u8 = undefined;
                     const line = std.fmt.bufPrint(&line_buf, "{s} ({s}) < {s}\n", .{ name_slice, ver_slice, latest }) catch continue;
-                    stdout.writeAll(line) catch {};
+                    stdout.writeAll(line) catch return;
                 }
             }
 
@@ -125,7 +129,10 @@ fn checkOutdatedCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *
     };
     defer stmt.finalize();
 
-    const stdout = std.fs.File.stdout();
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw = std.Io.File.stdout().writer(io_mod.ctx(), &stdout_buf);
+    const stdout: *std.Io.Writer = &stdout_fw.interface;
+    defer stdout.flush() catch {};
     var found_any = false;
 
     while (stmt.step() catch false) {
@@ -143,21 +150,17 @@ fn checkOutdatedCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *
         if (!std.mem.eql(u8, installed_ver, cask.version)) {
             found_any = true;
             if (json_mode) {
-                var buf: std.ArrayList(u8) = .empty;
-                defer buf.deinit(allocator);
-                const w = buf.writer(allocator);
-                w.writeAll("{\"name\":") catch continue;
-                output.jsonStr(w, token) catch continue;
-                w.writeAll(",\"installed\":") catch continue;
-                output.jsonStr(w, installed_ver) catch continue;
-                w.writeAll(",\"latest\":") catch continue;
-                output.jsonStr(w, cask.version) catch continue;
-                w.writeAll(",\"type\":\"cask\"}\n") catch continue;
-                stdout.writeAll(buf.items) catch {};
+                stdout.writeAll("{\"name\":") catch continue;
+                output.jsonStr(stdout, token) catch continue;
+                stdout.writeAll(",\"installed\":") catch continue;
+                output.jsonStr(stdout, installed_ver) catch continue;
+                stdout.writeAll(",\"latest\":") catch continue;
+                output.jsonStr(stdout, cask.version) catch continue;
+                stdout.writeAll(",\"type\":\"cask\"}\n") catch continue;
             } else {
                 var buf: [512]u8 = undefined;
                 const line = std.fmt.bufPrint(&buf, "{s} ({s}) < {s} [cask]\n", .{ token, installed_ver, cask.version }) catch continue;
-                stdout.writeAll(line) catch {};
+                stdout.writeAll(line) catch return;
             }
         }
     }

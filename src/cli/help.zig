@@ -2,13 +2,14 @@
 //! Returns help text for each subcommand, displayed on -h / --help.
 
 const std = @import("std");
+const io_mod = @import("../ui/io.zig");
 
 /// Check if args contain -h or --help. If so, print help to stdout (so the
 /// output is pipeable — `malt install --help | less`) and return true.
 pub fn showIfRequested(args: []const []const u8, command: []const u8) bool {
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            std.fs.File.stdout().writeAll(helpFor(command)) catch {};
+            io_mod.stdoutWriteAll(helpFor(command));
             return true;
         }
     }

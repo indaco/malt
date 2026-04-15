@@ -35,6 +35,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const io_mod = @import("../ui/io.zig");
 const lock_mod = @import("../db/lock.zig");
 const backup_mod = @import("backup.zig");
 const store_mod = @import("../core/store.zig");
@@ -318,7 +319,7 @@ fn confirmScope(yes: bool, expected: []const u8, scope_label: []const u8) Error!
 }
 
 fn writeStderr(s: []const u8) void {
-    std.fs.File.stderr().writeAll(s) catch {};
+    io_mod.stderrWriteAll(s);
 }
 
 // ── Tier: --store-orphans (was `gc`) ────────────────────────────────────────
@@ -699,9 +700,9 @@ fn writeManifest(allocator: std.mem.Allocator, path: []const u8) Error!void {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return Error.DatabaseError;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
     backup_mod.writeHeader(w) catch return Error.WriteFailed;
 
     if (sqlite.Database.open(db_path)) |*db_val| {
@@ -735,7 +736,7 @@ fn writeManifest(allocator: std.mem.Allocator, path: []const u8) Error!void {
         }
     } else |_| {}
 
-    try writeBytesToPath(path, buf.items);
+    try writeBytesToPath(path, aw.written());
 }
 
 fn writeBytesToPath(path: []const u8, bytes: []const u8) Error!void {
