@@ -103,7 +103,7 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
     .{ "--version", .version },
 });
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     // In debug builds, use GeneralPurposeAllocator as the backing
     // allocator for leak detection and use-after-free checks.
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -131,9 +131,16 @@ pub fn main() !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
+    var args_it = try init.args.iterateAllocator(allocator);
+    defer args_it.deinit();
+    _ = args_it.skip(); // skip argv0
 
-    if (args.len < 2) {
+    var args_list: std.ArrayList([]const u8) = .empty;
+    defer args_list.deinit(allocator);
+    while (args_it.next()) |arg| try args_list.append(allocator, arg);
+    const args = args_list.items;
+
+    if (args.len == 0) {
         printUsage();
         return;
     }
@@ -145,7 +152,7 @@ pub fn main() !void {
     defer filtered.deinit(allocator);
     var cmd_str: []const u8 = "";
     var found_cmd = false;
-    for (args[1..]) |arg| {
+    for (args) |arg| {
         if (!found_cmd and !std.mem.startsWith(u8, arg, "-")) {
             cmd_str = arg;
             found_cmd = true;
@@ -181,7 +188,7 @@ pub fn main() !void {
         };
     } else {
         // Unknown command — try transparent brew fallback
-        try brewFallback(allocator, args[1..]);
+        try brewFallback(allocator, args);
     }
 }
 
