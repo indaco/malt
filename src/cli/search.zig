@@ -226,15 +226,23 @@ fn emitJson(
 fn writeJson(w: anytype, field: []const u8, r: KindResults, query: []const u8) !void {
     var first = true;
     if (r.exact) {
-        try w.print("{{\"{s}\":\"{s}\"}}", .{ field, query });
+        try writeJsonObj(w, field, query);
         first = false;
     }
     for (r.matches) |m| {
         if (r.exact and std.mem.eql(u8, m, query)) continue;
         if (!first) try w.writeAll(",");
-        try w.print("{{\"{s}\":\"{s}\"}}", .{ field, m });
+        try writeJsonObj(w, field, m);
         first = false;
     }
+}
+
+fn writeJsonObj(w: anytype, field: []const u8, value: []const u8) !void {
+    try w.writeAll("{\"");
+    try w.writeAll(field);
+    try w.writeAll("\":");
+    try output.jsonStr(w, value);
+    try w.writeAll("}");
 }
 
 /// Write a single search result with the same ▸ prefix style used by `list`.

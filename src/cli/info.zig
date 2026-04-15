@@ -270,22 +270,38 @@ pub fn encodeApiCaskHuman(
 }
 
 pub fn encodeApiFormulaJson(w: anytype, f: *const formula_mod.Formula) !void {
-    try w.print(
-        "{{\"name\":\"{s}\",\"type\":\"formula\",\"installed\":false,\"version\":\"{s}\",\"desc\":\"{s}\",\"homepage\":\"{s}\",\"tap\":\"{s}\",\"dependencies\":[",
-        .{ f.name, f.version, f.desc, f.homepage, f.tap },
-    );
+    try w.writeAll("{\"name\":");
+    try output.jsonStr(w, f.name);
+    try w.writeAll(",\"type\":\"formula\",\"installed\":false,\"version\":");
+    try output.jsonStr(w, f.version);
+    try w.writeAll(",\"desc\":");
+    try output.jsonStr(w, f.desc);
+    try w.writeAll(",\"homepage\":");
+    try output.jsonStr(w, f.homepage);
+    try w.writeAll(",\"tap\":");
+    try output.jsonStr(w, f.tap);
+    try w.writeAll(",\"dependencies\":[");
     for (f.dependencies, 0..) |dep, i| {
         if (i != 0) try w.writeAll(",");
-        try w.print("\"{s}\"", .{dep});
+        try output.jsonStr(w, dep);
     }
     try w.writeAll("]}\n");
 }
 
 pub fn encodeApiCaskJson(w: anytype, c: *const cask_mod.Cask) !void {
-    try w.print(
-        "{{\"name\":\"{s}\",\"type\":\"cask\",\"installed\":false,\"version\":\"{s}\",\"full_name\":\"{s}\",\"desc\":\"{s}\",\"homepage\":\"{s}\",\"url\":\"{s}\"}}\n",
-        .{ c.token, c.version, c.name, c.desc, c.homepage, c.url },
-    );
+    try w.writeAll("{\"name\":");
+    try output.jsonStr(w, c.token);
+    try w.writeAll(",\"type\":\"cask\",\"installed\":false,\"version\":");
+    try output.jsonStr(w, c.version);
+    try w.writeAll(",\"full_name\":");
+    try output.jsonStr(w, c.name);
+    try w.writeAll(",\"desc\":");
+    try output.jsonStr(w, c.desc);
+    try w.writeAll(",\"homepage\":");
+    try output.jsonStr(w, c.homepage);
+    try w.writeAll(",\"url\":");
+    try output.jsonStr(w, c.url);
+    try w.writeAll("}\n");
 }
 
 /// Emit the "Not installed" line and (unless `quiet`) a runnable
@@ -345,9 +361,9 @@ fn writeJsonNotInstalled(
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
-    try w.writeAll("{\"name\":\"");
-    try w.writeAll(name);
-    try w.writeAll("\",\"type\":\"formula\",\"installed\":false}\n");
+    try w.writeAll("{\"name\":");
+    try output.jsonStr(w, name);
+    try w.writeAll(",\"type\":\"formula\",\"installed\":false}\n");
     stdout.writeAll(buf.items) catch {};
 }
 
@@ -411,9 +427,9 @@ fn writeJsonInfo(
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
-    try w.writeAll("{\"name\":\"");
-    try w.writeAll(name);
-    try w.writeAll("\",\"type\":\"formula\",\"installed\":");
+    try w.writeAll("{\"name\":");
+    try output.jsonStr(w, name);
+    try w.writeAll(",\"type\":\"formula\",\"installed\":");
     try w.writeAll(if (installed) "true" else "false");
 
     if (installed) {
@@ -422,15 +438,14 @@ fn writeJsonInfo(
         const pinned = stmt.columnBool(4);
         const installed_at = stmt.columnText(5);
 
-        try w.writeAll(",\"version\":\"");
-        try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
-        try w.writeAll("\",\"tap\":\"");
-        try w.writeAll(if (tap) |t| std.mem.sliceTo(t, 0) else "");
-        try w.writeAll("\",\"pinned\":");
+        try w.writeAll(",\"version\":");
+        try output.jsonStr(w, if (ver) |v| std.mem.sliceTo(v, 0) else "");
+        try w.writeAll(",\"tap\":");
+        try output.jsonStr(w, if (tap) |t| std.mem.sliceTo(t, 0) else "");
+        try w.writeAll(",\"pinned\":");
         try w.writeAll(if (pinned) "true" else "false");
-        try w.writeAll(",\"installed_at\":\"");
-        try w.writeAll(if (installed_at) |d| std.mem.sliceTo(d, 0) else "");
-        try w.writeAll("\"");
+        try w.writeAll(",\"installed_at\":");
+        try output.jsonStr(w, if (installed_at) |d| std.mem.sliceTo(d, 0) else "");
     }
 
     try w.writeAll("}\n");
@@ -513,20 +528,20 @@ fn writeJsonCaskInfo(
     const auto_updates = stmt.columnBool(6);
     const installed_at = if (stmt.columnText(7)) |d| std.mem.sliceTo(d, 0) else "";
 
-    try w.writeAll("{\"name\":\"");
-    try w.writeAll(token);
-    try w.writeAll("\",\"type\":\"cask\",\"installed\":true,\"version\":\"");
-    try w.writeAll(ver);
-    try w.writeAll("\",\"full_name\":\"");
-    try w.writeAll(cask_name);
-    try w.writeAll("\",\"url\":\"");
-    try w.writeAll(url);
-    try w.writeAll("\",\"app_path\":\"");
-    try w.writeAll(app_path);
-    try w.writeAll("\",\"auto_updates\":");
+    try w.writeAll("{\"name\":");
+    try output.jsonStr(w, token);
+    try w.writeAll(",\"type\":\"cask\",\"installed\":true,\"version\":");
+    try output.jsonStr(w, ver);
+    try w.writeAll(",\"full_name\":");
+    try output.jsonStr(w, cask_name);
+    try w.writeAll(",\"url\":");
+    try output.jsonStr(w, url);
+    try w.writeAll(",\"app_path\":");
+    try output.jsonStr(w, app_path);
+    try w.writeAll(",\"auto_updates\":");
     try w.writeAll(if (auto_updates) "true" else "false");
-    try w.writeAll(",\"installed_at\":\"");
-    try w.writeAll(installed_at);
-    try w.writeAll("\"}\n");
+    try w.writeAll(",\"installed_at\":");
+    try output.jsonStr(w, installed_at);
+    try w.writeAll("}\n");
     stdout.writeAll(buf.items) catch {};
 }

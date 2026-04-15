@@ -166,10 +166,12 @@ pub fn writeJson(
 /// Exposed for tests so the output shape can be asserted without a
 /// live file descriptor.
 pub fn encodeJson(w: anytype, target: []const u8, dependents: [][]const u8) !void {
-    try w.print("{{\"formula\":\"{s}\",\"uses\":[", .{target});
+    try w.writeAll("{\"formula\":");
+    try output.jsonStr(w, target);
+    try w.writeAll(",\"uses\":[");
     for (dependents, 0..) |d, i| {
         if (i != 0) try w.writeAll(",");
-        try w.print("\"{s}\"", .{d});
+        try output.jsonStr(w, d);
     }
     try w.writeAll("]}\n");
 }
