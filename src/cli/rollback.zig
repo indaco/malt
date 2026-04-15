@@ -12,12 +12,15 @@ const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
+/// `error.Aborted` is returned on every user-facing failure. The caller has
+/// already emitted a message via `output.err`; main.zig catches it and exits
+/// non-zero without printing a stack trace.
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "rollback")) return;
 
     if (args.len == 0) {
         output.err("Usage: mt rollback <package>", .{});
-        return;
+        return error.Aborted;
     }
 
     const name = args[0];
@@ -29,24 +32,24 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const prefix = atomic.maltPrefix();
 
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return;
+    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return error.Aborted;
     var db = sqlite.Database.open(db_path) catch {
         output.err("Failed to open database", .{});
-        return;
+        return error.Aborted;
     };
     defer db.close();
-    schema.initSchema(&db) catch return;
+    schema.initSchema(&db) catch return error.Aborted;
 
     // Find current installed version
     var cur_stmt = db.prepare(
         "SELECT id, version, store_sha256 FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
-    ) catch return;
+    ) catch return error.Aborted;
     defer cur_stmt.finalize();
-    cur_stmt.bindText(1, name) catch return;
+    cur_stmt.bindText(1, name) catch return error.Aborted;
 
     if (!(cur_stmt.step() catch false)) {
         output.err("{s} is not installed", .{name});
-        return;
+        return error.Aborted;
     }
 
     const current_id = cur_stmt.columnInt(0);
@@ -56,11 +59,11 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Look for other store entries that contain this formula
     // by scanning the store directory for entries that have {name}/ subdirectory
     var store_buf: [512]u8 = undefined;
-    const store_dir_path = std.fmt.bufPrint(&store_buf, "{s}/store", .{prefix}) catch return;
+    const store_dir_path = std.fmt.bufPrint(&store_buf, "{s}/store", .{prefix}) catch return error.Aborted;
 
     var store_dir = std.fs.openDirAbsolute(store_dir_path, .{ .iterate = true }) catch {
         output.err("Cannot read store directory", .{});
-        return;
+        return error.Aborted;
     };
     defer store_dir.close();
 
@@ -97,7 +100,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (entries.items.len == 0) {
         output.err("No previous version found for {s} in the store", .{name});
         output.info("The store only contains the current version ({s})", .{current_ver});
-        return;
+        return error.Aborted;
     }
 
     // Use the most recent previous version (last entry)
@@ -112,10 +115,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Acquire lock
     var lock_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return;
+    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return error.Aborted;
     var lk = lock_mod.LockFile.acquire(lock_path, 30000) catch {
         output.err("Another mt process is running", .{});
-        return;
+        return error.Aborted;
     };
     defer lk.release();
 
@@ -133,17 +136,17 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Materialize the old version from store
     const keg = cellar.materialize(allocator, prefix, target.sha256, name, target.version) catch {
         output.err("Failed to materialize {s} {s} from store", .{ name, target.version });
-        return;
+        return error.Aborted;
     };
 
     // Update DB: delete old record, insert new one
-    db.beginTransaction() catch return;
+    db.beginTransaction() catch return error.Aborted;
     errdefer db.rollback();
 
     {
-        var del = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return;
+        var del = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return error.Aborted;
         defer del.finalize();
-        del.bindInt(1, current_id) catch return;
+        del.bindInt(1, current_id) catch return error.Aborted;
         _ = del.step() catch {};
     }
 
@@ -151,19 +154,19 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         var ins = db.prepare(
             "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason)" ++
                 " VALUES (?1, ?1, ?2, ?3, ?4, 'direct');",
-        ) catch return;
+        ) catch return error.Aborted;
         defer ins.finalize();
-        ins.bindText(1, name) catch return;
-        ins.bindText(2, target.version) catch return;
-        ins.bindText(3, target.sha256) catch return;
-        ins.bindText(4, keg.path) catch return;
+        ins.bindText(1, name) catch return error.Aborted;
+        ins.bindText(2, target.version) catch return error.Aborted;
+        ins.bindText(3, target.sha256) catch return error.Aborted;
+        ins.bindText(4, keg.path) catch return error.Aborted;
         _ = ins.step() catch {};
     }
 
     // Get new keg_id for linking
-    var id_stmt = db.prepare("SELECT last_insert_rowid();") catch return;
+    var id_stmt = db.prepare("SELECT last_insert_rowid();") catch return error.Aborted;
     defer id_stmt.finalize();
-    const keg_id = if (id_stmt.step() catch false) id_stmt.columnInt(0) else return;
+    const keg_id = if (id_stmt.step() catch false) id_stmt.columnInt(0) else return error.Aborted;
 
     // Link the old version
     linker.link(keg.path, name, keg_id) catch {
@@ -173,7 +176,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         output.warn("Could not create opt link for {s}", .{name});
     };
 
-    db.commit() catch return;
+    db.commit() catch return error.Aborted;
 
     output.info("{s} rolled back to {s}", .{ name, target.version });
 }
