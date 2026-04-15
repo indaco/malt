@@ -748,7 +748,9 @@ malt trades a few ms against correctness and features that the lighter tools ski
 > [!NOTE]
 > **Methodology.**
 >
-> `BENCH_TRUE_COLD=1` wipes each tool's prefix between cold and warm runs, so "cold" really means "no bottle in the store." See [`scripts/bench.sh`](scripts/bench.sh).
+> Each cell is the **median of 3 rounds** (`BENCH_ROUNDS=3`, the default in [`scripts/bench.sh`](scripts/bench.sh)). The median damps single-run jitter — network hiccups, launchd transients, disk cache warm-up — without inflating the table the way a mean over a noisy sample would. Override with `BENCH_ROUNDS=N` if you need a different sample count.
+>
+> `BENCH_TRUE_COLD=1` wipes each tool's prefix before every cold sample, so "cold" really means "no bottle in the store." The download cache lives outside the prefix and isn't wiped between rounds, so round 1 is genuinely cold and rounds 2+ are prefix-empty / cache-warm — the median therefore reflects the steady-state cold-install path rather than a one-off network fetch. See [`scripts/bench.sh`](scripts/bench.sh).
 >
 > **bru caveat (cells marked `‡`).** bru keeps its download cache under `~/.bru/` and `~/Library/Caches/bru/`, outside the wiped prefix, so its cold numbers reflect warm cache + materialise rather than a real network fetch. bru's warm row is apples-to-apples.
 
