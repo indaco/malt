@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.4.1 - 2026-04-15
+
+### 🩹 Fixes
+
+- **cli:** exit non-zero on every user-facing failure ([e7993d6](https://github.com/indaco/malt/commit/e7993d6)) ([#41](https://github.com/indaco/malt/pull/41))
+- **json:** escape strings in --json output ([0a1f0d6](https://github.com/indaco/malt/commit/0a1f0d6)) ([#40](https://github.com/indaco/malt/pull/40))
+- **help:** send --help output to stdout ([3b336ae](https://github.com/indaco/malt/commit/3b336ae)) ([#38](https://github.com/indaco/malt/pull/38))
+- **rollback:** exit non-zero on failure ([568763c](https://github.com/indaco/malt/commit/568763c)) ([#37](https://github.com/indaco/malt/pull/37))
+
+### 💅 Refactors
+
+- **cli:** drop redundant flag re-parsing ([f00d9a1](https://github.com/indaco/malt/commit/f00d9a1)) ([#42](https://github.com/indaco/malt/pull/42))
+
+### 📖 Documentation
+
+- **readme:** note --casks / --formulae plural aliases ([25c0c9e](https://github.com/indaco/malt/commit/25c0c9e)) ([#43](https://github.com/indaco/malt/pull/43))
+
+### 🤖 CI
+
+- bypass zig test-runner deadlock by running test binaries directly ([18733e8](https://github.com/indaco/malt/commit/18733e8)) ([#39](https://github.com/indaco/malt/pull/39))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.4.0 - 2026-04-15
 
 ### Highlights
