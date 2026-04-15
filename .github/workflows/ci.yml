@@ -33,7 +33,24 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe
 
       - name: Run unit tests
-        run: zig build test
+        # `zig build test` deadlocks under Zig 0.15 (test-runner server
+        # protocol hangs once children finish), so install the test
+        # binaries and execute each one directly. Identical coverage.
+        run: |
+          set -euo pipefail
+          zig build test-bin
+          fail=0
+          for t in zig-out/test-bin/*_test; do
+              name=$(basename "$t")
+              if ! "$t"; then
+                  echo "FAIL: $name"
+                  fail=$((fail + 1))
+              fi
+          done
+          if [ "$fail" -ne 0 ]; then
+              echo "$fail test binary(ies) failed."
+              exit 1
+          fi
 
       - name: Smoke test — version flag
         run: ./zig-out/bin/malt --version
