@@ -149,3 +149,31 @@ test "encodeJson handles an empty dependents list" {
     try uses.encodeJson(buf.writer(testing.allocator), "lonely", &.{});
     try testing.expectEqualStrings("{\"formula\":\"lonely\",\"uses\":[]}\n", buf.items);
 }
+
+test "encodeJson escapes special characters in target and dependents" {
+    // A formula name containing a literal quote/backslash/newline would
+    // produce invalid JSON if the encoder concatenated raw bytes. Real
+    // formula names won't carry these, but tap-prefixed names and upstream
+    // metadata can — so the encoder must escape unconditionally.
+    const deps = [_][]const u8{ "weird\"name", "back\\slash", "with\nnewline" };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try uses.encodeJson(buf.writer(testing.allocator), "tap\"name", @constCast(deps[0..]));
+
+    // The exact expected bytes verify the escape contract precisely.
+    try testing.expectEqualStrings(
+        "{\"formula\":\"tap\\\"name\",\"uses\":[\"weird\\\"name\",\"back\\\\slash\",\"with\\nnewline\"]}\n",
+        buf.items,
+    );
+
+    // And the result must round-trip through a strict JSON parser.
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        testing.allocator,
+        std.mem.trimRight(u8, buf.items, "\n"),
+        .{},
+    );
+    defer parsed.deinit();
+    try testing.expectEqualStrings("tap\"name", parsed.value.object.get("formula").?.string);
+    try testing.expectEqual(@as(usize, 3), parsed.value.object.get("uses").?.array.items.len);
+}

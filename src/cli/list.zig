@@ -223,18 +223,18 @@ fn writeFormulaRows(
         const pinned = stmt.columnBool(2);
         if (!first.*) try w.writeAll(",");
         first.* = false;
-        try w.writeAll("{\"name\":\"");
-        try w.writeAll(std.mem.sliceTo(name, 0));
-        try w.writeAll("\",\"version\":\"");
-        try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
+        try w.writeAll("{\"name\":");
+        try output.jsonStr(w, std.mem.sliceTo(name, 0));
+        try w.writeAll(",\"version\":");
+        try output.jsonStr(w, if (ver) |v| std.mem.sliceTo(v, 0) else "");
         switch (shape) {
             .installed => {
-                try w.writeAll("\",\"type\":\"formula\",\"pinned\":");
+                try w.writeAll(",\"type\":\"formula\",\"pinned\":");
                 try w.writeAll(if (pinned) "true" else "false");
                 try w.writeAll("}");
             },
             .legacy => {
-                try w.writeAll("\",\"pinned\":");
+                try w.writeAll(",\"pinned\":");
                 try w.writeAll(if (pinned) "true" else "false");
                 try w.writeAll("}");
             },
@@ -254,22 +254,23 @@ fn writeCaskRows(
     while (stmt.step() catch false) {
         const token = stmt.columnText(0) orelse continue;
         const ver = stmt.columnText(1);
+        const ver_str: []const u8 = if (ver) |v| std.mem.sliceTo(v, 0) else "";
         if (!first.*) try w.writeAll(",");
         first.* = false;
         switch (shape) {
             .installed => {
-                try w.writeAll("{\"name\":\"");
-                try w.writeAll(std.mem.sliceTo(token, 0));
-                try w.writeAll("\",\"version\":\"");
-                try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
-                try w.writeAll("\",\"type\":\"cask\"}");
+                try w.writeAll("{\"name\":");
+                try output.jsonStr(w, std.mem.sliceTo(token, 0));
+                try w.writeAll(",\"version\":");
+                try output.jsonStr(w, ver_str);
+                try w.writeAll(",\"type\":\"cask\"}");
             },
             .legacy => {
-                try w.writeAll("{\"token\":\"");
-                try w.writeAll(std.mem.sliceTo(token, 0));
-                try w.writeAll("\",\"version\":\"");
-                try w.writeAll(if (ver) |v| std.mem.sliceTo(v, 0) else "");
-                try w.writeAll("\"}");
+                try w.writeAll("{\"token\":");
+                try output.jsonStr(w, std.mem.sliceTo(token, 0));
+                try w.writeAll(",\"version\":");
+                try output.jsonStr(w, ver_str);
+                try w.writeAll("}");
             },
         }
     }

@@ -176,6 +176,43 @@ pub fn confirmTyped(expected: []const u8, prompt: []const u8) bool {
     return std.mem.eql(u8, input, expected);
 }
 
+/// Write `s` to `w` as a JSON string literal — surrounding quotes plus RFC 8259
+/// escapes for `"`, `\`, and control characters. Use this wherever handwritten
+/// JSON output embeds an identifier, tap name, version string, file path, or
+/// anything else that might contain special characters.
+///
+/// Kept as `anytype` so it works with both the legacy `std.io.GenericWriter`
+/// and the new `std.Io.Writer` interface; the common path is branch-free.
+pub fn jsonStr(w: anytype, s: []const u8) !void {
+    try w.writeAll("\"");
+    var start: usize = 0;
+    for (s, 0..) |byte, i| {
+        const escape: ?[]const u8 = switch (byte) {
+            '"' => "\\\"",
+            '\\' => "\\\\",
+            '\n' => "\\n",
+            '\r' => "\\r",
+            '\t' => "\\t",
+            0x08 => "\\b",
+            0x0c => "\\f",
+            else => null,
+        };
+        if (escape) |esc| {
+            if (i > start) try w.writeAll(s[start..i]);
+            try w.writeAll(esc);
+            start = i + 1;
+        } else if (byte < 0x20) {
+            if (i > start) try w.writeAll(s[start..i]);
+            var hex_buf: [6]u8 = undefined;
+            const hex = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{byte}) catch unreachable;
+            try w.writeAll(hex);
+            start = i + 1;
+        }
+    }
+    if (start < s.len) try w.writeAll(s[start..]);
+    try w.writeAll("\"");
+}
+
 /// Write JSON to stdout
 pub fn jsonOutput(allocator: std.mem.Allocator, value: anytype) !void {
     var list: std.ArrayList(u8) = .empty;

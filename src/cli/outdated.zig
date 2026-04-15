@@ -78,13 +78,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 if (!std.mem.eql(u8, ver_slice, latest)) {
                     if (!first) try w.writeAll(",");
                     first = false;
-                    try w.writeAll("{\"name\":\"");
-                    try w.writeAll(name_slice);
-                    try w.writeAll("\",\"installed\":\"");
-                    try w.writeAll(ver_slice);
-                    try w.writeAll("\",\"latest\":\"");
-                    try w.writeAll(latest);
-                    try w.writeAll("\",\"type\":\"formula\"}");
+                    try w.writeAll("{\"name\":");
+                    try output.jsonStr(w, name_slice);
+                    try w.writeAll(",\"installed\":");
+                    try output.jsonStr(w, ver_slice);
+                    try w.writeAll(",\"latest\":");
+                    try output.jsonStr(w, latest);
+                    try w.writeAll(",\"type\":\"formula\"}");
                 }
             }
 
@@ -146,12 +146,17 @@ fn checkOutdatedCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *
         if (!std.mem.eql(u8, installed_ver, cask.version)) {
             found_any = true;
             if (json_mode) {
-                var buf: [512]u8 = undefined;
-                const line = std.fmt.bufPrint(&buf, "{{\"name\":\"{s}\",\"installed\":\"{s}\",\"latest\":\"{s}\",\"type\":\"cask\"}}", .{
-                    token, installed_ver, cask.version,
-                }) catch continue;
-                stdout.writeAll(line) catch {};
-                stdout.writeAll("\n") catch {};
+                var buf: std.ArrayList(u8) = .empty;
+                defer buf.deinit(allocator);
+                const w = buf.writer(allocator);
+                w.writeAll("{\"name\":") catch continue;
+                output.jsonStr(w, token) catch continue;
+                w.writeAll(",\"installed\":") catch continue;
+                output.jsonStr(w, installed_ver) catch continue;
+                w.writeAll(",\"latest\":") catch continue;
+                output.jsonStr(w, cask.version) catch continue;
+                w.writeAll(",\"type\":\"cask\"}\n") catch continue;
+                stdout.writeAll(buf.items) catch {};
             } else {
                 var buf: [512]u8 = undefined;
                 const line = std.fmt.bufPrint(&buf, "{s} ({s}) < {s} [cask]\n", .{ token, installed_ver, cask.version }) catch continue;
