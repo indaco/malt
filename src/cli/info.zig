@@ -7,6 +7,7 @@ const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const io_mod = @import("../ui/io.zig");
+const color = @import("../ui/color.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const formula_mod = @import("../core/formula.zig");
@@ -57,10 +58,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     defer stdout.flush() catch {};
 
+    const colorize = !json_mode and color.isColorEnabled();
+
     if (db_opt) |*db| {
         schema.initSchema(db) catch {};
-        if (!force_cask and try emitInstalledFormula(allocator, db, name, prefix, stdout, json_mode)) return;
-        if (!force_formula and try emitInstalledCask(allocator, db, name, stdout, json_mode)) return;
+        if (!force_cask and try emitInstalledFormula(allocator, db, name, prefix, stdout, json_mode, colorize)) return;
+        if (!force_formula and try emitInstalledCask(allocator, db, name, stdout, json_mode, colorize)) return;
     }
 
     // Not locally installed — fall back to Homebrew API metadata so
@@ -68,7 +71,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // homepage, version, dependencies) instead of just "not
     // installed". We only reach this path when the local DB lookup
     // missed or the DB was absent entirely.
-    if (try emitApiMetadata(allocator, name, stdout, json_mode, force_cask, force_formula)) return;
+    if (try emitApiMetadata(allocator, name, stdout, json_mode, colorize, force_cask, force_formula)) return;
 
     try emitNotFound(allocator, name, stdout, json_mode);
 }
@@ -83,6 +86,7 @@ fn emitInstalledFormula(
     prefix: []const u8,
     stdout: *std.Io.Writer,
     json_mode: bool,
+    colorize: bool,
 ) !bool {
     var stmt = db.prepare(
         "SELECT name, version, tap, cellar_path, pinned, installed_at FROM kegs WHERE name = ?1 LIMIT 1;",
@@ -96,7 +100,7 @@ fn emitInstalledFormula(
     if (json_mode) {
         try writeJsonInfo(allocator, db, name, true, &stmt, stdout);
     } else {
-        try writeHumanInfo(name, true, &stmt, prefix, stdout);
+        try writeHumanInfo(name, true, &stmt, prefix, stdout, colorize);
     }
     return true;
 }
@@ -108,12 +112,13 @@ fn emitInstalledCask(
     name: []const u8,
     stdout: *std.Io.Writer,
     json_mode: bool,
+    colorize: bool,
 ) !bool {
     if (cask_mod.lookupInstalled(db, name) == null) return false;
     if (json_mode) {
         try writeJsonCaskInfo(allocator, db, name, stdout);
     } else {
-        try writeHumanCaskInfo(db, name, stdout);
+        try writeHumanCaskInfo(db, name, stdout, colorize);
     }
     return true;
 }
@@ -145,6 +150,7 @@ fn emitApiMetadata(
     name: []const u8,
     stdout: *std.Io.Writer,
     json_mode: bool,
+    colorize: bool,
     force_cask: bool,
     force_formula: bool,
 ) !bool {
@@ -156,10 +162,10 @@ fn emitApiMetadata(
     var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
 
     if (!force_cask) {
-        if (try emitApiFormula(allocator, &api, name, stdout, json_mode)) return true;
+        if (try emitApiFormula(allocator, &api, name, stdout, json_mode, colorize)) return true;
     }
     if (!force_formula) {
-        if (try emitApiCask(allocator, &api, name, stdout, json_mode)) return true;
+        if (try emitApiCask(allocator, &api, name, stdout, json_mode, colorize)) return true;
     }
     return false;
 }
@@ -170,6 +176,7 @@ fn emitApiFormula(
     name: []const u8,
     stdout: *std.Io.Writer,
     json_mode: bool,
+    colorize: bool,
 ) !bool {
     const body = api.fetchFormula(name) catch return false;
     defer allocator.free(body);
@@ -177,7 +184,7 @@ fn emitApiFormula(
     var f = formula_mod.parseFormula(allocator, body) catch return false;
     defer f.deinit();
 
-    if (json_mode) try writeApiFormulaJson(allocator, &f, stdout) else try writeApiFormulaHuman(&f, stdout);
+    if (json_mode) try writeApiFormulaJson(allocator, &f, stdout) else try writeApiFormulaHuman(&f, stdout, colorize);
     return true;
 }
 
@@ -187,6 +194,7 @@ fn emitApiCask(
     name: []const u8,
     stdout: *std.Io.Writer,
     json_mode: bool,
+    colorize: bool,
 ) !bool {
     const body = api.fetchCask(name) catch return false;
     defer allocator.free(body);
@@ -194,18 +202,18 @@ fn emitApiCask(
     var c = cask_mod.parseCask(allocator, body) catch return false;
     defer c.deinit();
 
-    if (json_mode) try writeApiCaskJson(allocator, &c, stdout) else try writeApiCaskHuman(&c, stdout);
+    if (json_mode) try writeApiCaskJson(allocator, &c, stdout) else try writeApiCaskHuman(&c, stdout, colorize);
     return true;
 }
 
-fn writeApiFormulaHuman(f: *const formula_mod.Formula, stdout: *std.Io.Writer) !void {
+fn writeApiFormulaHuman(f: *const formula_mod.Formula, stdout: *std.Io.Writer, colorize: bool) !void {
     var buf: [4096]u8 = undefined;
-    try encodeApiFormulaHuman(stdout, &buf, f, output.isQuiet());
+    try encodeApiFormulaHuman(stdout, &buf, f, output.isQuiet(), colorize);
 }
 
-fn writeApiCaskHuman(c: *const cask_mod.Cask, stdout: *std.Io.Writer) !void {
+fn writeApiCaskHuman(c: *const cask_mod.Cask, stdout: *std.Io.Writer, colorize: bool) !void {
     var buf: [4096]u8 = undefined;
-    try encodeApiCaskHuman(stdout, &buf, c, output.isQuiet());
+    try encodeApiCaskHuman(stdout, &buf, c, output.isQuiet(), colorize);
 }
 
 fn writeApiFormulaJson(
@@ -239,19 +247,22 @@ pub fn encodeApiFormulaHuman(
     scratch: []u8,
     f: *const formula_mod.Formula,
     quiet: bool,
+    colorize: bool,
 ) !void {
-    try writeLine(w, scratch, "{s}: stable {s}\n", .{ f.name, f.version });
-    if (f.desc.len != 0) try writeLine(w, scratch, "{s}\n", .{f.desc});
-    if (f.homepage.len != 0) try writeLine(w, scratch, "{s}\n", .{f.homepage});
-    try encodeInstallHint(w, scratch, f.name, quiet);
-    if (f.tap.len != 0) try writeLine(w, scratch, "From: {s}\n", .{f.tap});
+    // "Dependencies:" is the longest key (13 chars incl. colon), value at col 14.
+    const col: usize = 14;
+    try encodeHeader(w, colorize, f.name, "stable", f.version, "");
+    if (f.desc.len != 0) try output.writeField(w, scratch, colorize, col, "Description", "{s}", .{f.desc});
+    if (f.homepage.len != 0) try output.writeField(w, scratch, colorize, col, "Homepage", "{s}", .{f.homepage});
+    try encodeInstallHint(w, scratch, f.name, quiet, colorize, col);
+    if (f.tap.len != 0) try output.writeField(w, scratch, colorize, col, "From", "{s}", .{f.tap});
     if (f.dependencies.len != 0) {
-        w.writeAll("Dependencies: ") catch {};
+        try output.writeFieldKey(w, colorize, col, "Dependencies");
         for (f.dependencies, 0..) |dep, i| {
-            if (i != 0) w.writeAll(", ") catch {};
-            w.writeAll(dep) catch {};
+            if (i != 0) try w.writeAll(", ");
+            try w.writeAll(dep);
         }
-        w.writeAll("\n") catch {};
+        try w.writeAll("\n");
     }
 }
 
@@ -260,13 +271,45 @@ pub fn encodeApiCaskHuman(
     scratch: []u8,
     c: *const cask_mod.Cask,
     quiet: bool,
+    colorize: bool,
 ) !void {
-    try writeLine(w, scratch, "{s}: {s} (cask)\n", .{ c.token, c.version });
-    if (c.name.len != 0) try writeLine(w, scratch, "Name: {s}\n", .{c.name});
-    if (c.desc.len != 0) try writeLine(w, scratch, "{s}\n", .{c.desc});
-    if (c.homepage.len != 0) try writeLine(w, scratch, "{s}\n", .{c.homepage});
-    try encodeInstallHint(w, scratch, c.token, quiet);
-    if (c.url.len != 0) try writeLine(w, scratch, "URL: {s}\n", .{c.url});
+    // "Description:" is the longest key (12 chars incl. colon), value at col 13.
+    const col: usize = 13;
+    try encodeHeader(w, colorize, c.token, "", c.version, "(cask)");
+    if (c.name.len != 0) try output.writeField(w, scratch, colorize, col, "Name", "{s}", .{c.name});
+    if (c.desc.len != 0) try output.writeField(w, scratch, colorize, col, "Description", "{s}", .{c.desc});
+    if (c.homepage.len != 0) try output.writeField(w, scratch, colorize, col, "Homepage", "{s}", .{c.homepage});
+    try encodeInstallHint(w, scratch, c.token, quiet, colorize, col);
+    if (c.url.len != 0) try output.writeField(w, scratch, colorize, col, "URL", "{s}", .{c.url});
+}
+
+/// Bold `name` + bold `version`, with an optional plain `middle` word
+/// (e.g. "stable" for formulas) and optional plain `suffix` (e.g.
+/// "(cask)"). Emits the header line terminator itself.
+fn encodeHeader(
+    w: anytype,
+    colorize: bool,
+    name: []const u8,
+    middle: []const u8,
+    version: []const u8,
+    suffix: []const u8,
+) !void {
+    if (colorize) try w.writeAll(color.Style.bold.code());
+    try w.writeAll(name);
+    if (colorize) try w.writeAll(color.Style.reset.code());
+    try w.writeAll(": ");
+    if (middle.len != 0) {
+        try w.writeAll(middle);
+        try w.writeAll(" ");
+    }
+    if (colorize) try w.writeAll(color.Style.bold.code());
+    try w.writeAll(version);
+    if (colorize) try w.writeAll(color.Style.reset.code());
+    if (suffix.len != 0) {
+        try w.writeAll(" ");
+        try w.writeAll(suffix);
+    }
+    try w.writeAll("\n");
 }
 
 pub fn encodeApiFormulaJson(w: anytype, f: *const formula_mod.Formula) !void {
@@ -316,19 +359,23 @@ pub fn encodeInstallHint(
     scratch: []u8,
     name: []const u8,
     quiet: bool,
+    colorize: bool,
+    col: usize,
 ) !void {
     if (quiet) {
         try w.writeAll("Not installed\n");
         return;
     }
-    writeLine(
+    try output.writeField(w, scratch, colorize, col, "Status", "Not installed", .{});
+    try output.writeField(
         w,
         scratch,
-        "Not installed. Run: malt install {s}  (or: mt install {s})\n",
+        colorize,
+        col,
+        "Install",
+        "malt install {s}  (or: mt install {s})",
         .{ name, name },
-    ) catch {
-        try w.writeAll("Not installed\n");
-    };
+    );
 }
 
 /// Convenience: format a line into `scratch` and write it to `w`.
@@ -370,10 +417,13 @@ fn writeHumanInfo(
     stmt: *sqlite.Statement,
     prefix: []const u8,
     stdout: *std.Io.Writer,
+    colorize: bool,
 ) !void {
     var buf: [4096]u8 = undefined;
 
     if (installed) {
+        // "Installed:" is the longest key (10 chars incl. colon), value at col 11.
+        const col: usize = 11;
         const ver = stmt.columnText(1);
         const tap = stmt.columnText(2);
         const cellar_path = stmt.columnText(3);
@@ -385,29 +435,14 @@ fn writeHumanInfo(
         const path_slice = if (cellar_path) |p| std.mem.sliceTo(p, 0) else "N/A";
         const date_slice = if (installed_at) |d| std.mem.sliceTo(d, 0) else "N/A";
 
-        {
-            const line = std.fmt.bufPrint(&buf, "{s}: stable {s}\n", .{ name, ver_slice }) catch return;
-            stdout.writeAll(line) catch return;
-        }
-        {
-            const line = std.fmt.bufPrint(&buf, "From: {s}\n", .{tap_slice}) catch return;
-            stdout.writeAll(line) catch return;
-        }
-        {
-            const line = std.fmt.bufPrint(&buf, "Path: {s}/Cellar/{s}/{s}\n", .{ prefix, name, ver_slice }) catch return;
-            stdout.writeAll(line) catch return;
-        }
+        try encodeHeader(stdout, colorize, name, "stable", ver_slice, "");
+        try output.writeField(stdout, &buf, colorize, col, "From", "{s}", .{tap_slice});
+        try output.writeField(stdout, &buf, colorize, col, "Path", "{s}/Cellar/{s}/{s}", .{ prefix, name, ver_slice });
         _ = path_slice;
-        if (pinned) {
-            stdout.writeAll("Pinned: yes\n") catch return;
-        }
-        {
-            const line = std.fmt.bufPrint(&buf, "Installed: {s}\n", .{date_slice}) catch return;
-            stdout.writeAll(line) catch return;
-        }
+        if (pinned) try output.writeField(stdout, &buf, colorize, col, "Pinned", "yes", .{});
+        try output.writeField(stdout, &buf, colorize, col, "Installed", "{s}", .{date_slice});
     } else {
-        const line = std.fmt.bufPrint(&buf, "{s}: not installed\n", .{name}) catch return;
-        stdout.writeAll(line) catch return;
+        try writeLine(stdout, &buf, "{s}: not installed\n", .{name});
     }
 }
 
@@ -450,6 +485,7 @@ fn writeHumanCaskInfo(
     db: *sqlite.Database,
     name: []const u8,
     stdout: *std.Io.Writer,
+    colorize: bool,
 ) !void {
     var stmt = db.prepare(
         "SELECT token, name, version, url, sha256, app_path, auto_updates, installed_at FROM casks WHERE token = ?1 LIMIT 1;",
@@ -461,6 +497,8 @@ fn writeHumanCaskInfo(
     if (!found) return;
 
     var buf: [4096]u8 = undefined;
+    // "Auto-updates:" is the longest key (13 chars incl. colon), value at col 14.
+    const col: usize = 14;
 
     const token = if (stmt.columnText(0)) |t| std.mem.sliceTo(t, 0) else name;
     const cask_name = if (stmt.columnText(1)) |n| std.mem.sliceTo(n, 0) else name;
@@ -470,29 +508,12 @@ fn writeHumanCaskInfo(
     const auto_updates = stmt.columnBool(6);
     const installed_at = if (stmt.columnText(7)) |d| std.mem.sliceTo(d, 0) else "N/A";
 
-    {
-        const line = std.fmt.bufPrint(&buf, "{s}: {s} (cask)\n", .{ token, ver }) catch return;
-        stdout.writeAll(line) catch return;
-    }
-    {
-        const line = std.fmt.bufPrint(&buf, "Name: {s}\n", .{cask_name}) catch return;
-        stdout.writeAll(line) catch return;
-    }
-    {
-        const line = std.fmt.bufPrint(&buf, "URL: {s}\n", .{url}) catch return;
-        stdout.writeAll(line) catch return;
-    }
-    {
-        const line = std.fmt.bufPrint(&buf, "App: {s}\n", .{app_path}) catch return;
-        stdout.writeAll(line) catch return;
-    }
-    if (auto_updates) {
-        stdout.writeAll("Auto-updates: yes\n") catch return;
-    }
-    {
-        const line = std.fmt.bufPrint(&buf, "Installed: {s}\n", .{installed_at}) catch return;
-        stdout.writeAll(line) catch return;
-    }
+    try encodeHeader(stdout, colorize, token, "", ver, "(cask)");
+    try output.writeField(stdout, &buf, colorize, col, "Name", "{s}", .{cask_name});
+    try output.writeField(stdout, &buf, colorize, col, "URL", "{s}", .{url});
+    try output.writeField(stdout, &buf, colorize, col, "App", "{s}", .{app_path});
+    if (auto_updates) try output.writeField(stdout, &buf, colorize, col, "Auto-updates", "yes", .{});
+    try output.writeField(stdout, &buf, colorize, col, "Installed", "{s}", .{installed_at});
 }
 
 fn writeJsonCaskInfo(
