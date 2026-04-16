@@ -55,8 +55,8 @@ jobs:
           version: 0.16.0
 
       - name: Run unit tests
-        # `zig build test` deadlocks under Zig 0.15 (test-runner server
-        # protocol hangs once children finish), so install the test
+        # `zig build test` deadlocks under Zig 0.16 (test-runner IPC
+        # pipe hangs once children finish), so install the test
         # binaries and execute each one directly. Identical coverage.
         run: |
           set -euo pipefail
