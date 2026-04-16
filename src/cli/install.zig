@@ -1114,7 +1114,6 @@ fn linkAndRecord(
         linker.linkOpt(job.name, job.version_str) catch {};
         recordDeps(db, keg_id, &formula);
     } else {
-        output.info("{s} is keg-only; not linking", .{job.name});
         const keg_id = recordKeg(db, &formula, job.store_sha256, keg_path, reason) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
@@ -1124,7 +1123,10 @@ fn linkAndRecord(
         recordDeps(db, keg_id, &formula);
     }
     maybeRegisterService(allocator, db, &formula, prefix);
-    output.success("{s} {s} installed", .{ job.name, job.version_str });
+    // Annotate keg-only packages inline so the single line reads as success,
+    // not as a "not linking" warning paired with a separate ✓.
+    const keg_only_suffix: []const u8 = if (job.keg_only) " (keg-only — dependency only)" else "";
+    output.success("{s} {s} installed{s}", .{ job.name, job.version_str, keg_only_suffix });
 }
 
 /// Register a launchd service when the formula carries a `service:` block.
