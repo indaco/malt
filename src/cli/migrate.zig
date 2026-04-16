@@ -296,7 +296,6 @@ fn migrateKeg(
         linker.linkOpt(formula.name, formula.version) catch {};
         recordDeps(db, keg_id, &formula);
     } else {
-        output.info("    {s} is keg-only; not linking", .{keg_name});
         const keg_id = recordKeg(db, &formula, bottle.sha256, keg.path, "direct") catch {
             cellar_mod.remove(prefix, formula.name, formula.version) catch {};
             formula.deinit();
@@ -378,7 +377,8 @@ fn migrateKeg(
         }
     }
 
-    output.success("  {s} {s} migrated", .{ formula.name, formula.version });
+    const keg_only_suffix: []const u8 = if (formula.keg_only) " (keg-only — dependency only)" else "";
+    output.success("  {s} {s} migrated{s}", .{ formula.name, formula.version, keg_only_suffix });
     return .migrated;
 }
 
