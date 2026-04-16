@@ -75,19 +75,11 @@ pub fn collectDependents(
     var names: std.StringHashMap(void) = .init(allocator);
     defer names.deinit();
 
-    // Frontier items are owned, heap-duped name strings. The cursor
-    // walk borrows each slot in place — nothing gets shifted or
-    // removed mid-iteration, so pop-from-head is O(1) and the full
-    // BFS is O(V+E) instead of the old `orderedRemove(0)`'s O(V²).
-    // Every frontier entry stays owned by the list until scope exit
-    // (the hash map dupes its own keys independently), so a single
-    // cleanup defer frees everything on both happy and error paths.
+    // Frontier borrows: root from caller's `target`, rest from
+    // `names`-owned keys. One dupe per unique name, not two.
     var frontier: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (frontier.items) |f| allocator.free(f);
-        frontier.deinit(allocator);
-    }
-    try frontier.append(allocator, try allocator.dupe(u8, target));
+    defer frontier.deinit(allocator);
+    try frontier.append(allocator, target);
 
     var cursor: usize = 0;
     while (cursor < frontier.items.len) : (cursor += 1) {
@@ -107,9 +99,13 @@ pub fn collectDependents(
             if (names.contains(dep)) continue;
 
             const owned = try allocator.dupe(u8, dep);
-            errdefer allocator.free(owned);
-            try names.put(owned, {});
-            if (recursive) try frontier.append(allocator, try allocator.dupe(u8, dep));
+            {
+                // Scoped so the errdefer only covers the put itself;
+                // past here `owned` is borrowed by `names`.
+                errdefer allocator.free(owned);
+                try names.put(owned, {});
+            }
+            if (recursive) try frontier.append(allocator, owned);
         }
     }
 
