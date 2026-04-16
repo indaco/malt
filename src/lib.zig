@@ -13,6 +13,7 @@ pub const sqlite = @import("db/sqlite.zig");
 pub const atomic = @import("fs/atomic.zig");
 pub const clonefile = @import("fs/clonefile.zig");
 pub const fs_compat = @import("fs/compat.zig");
+pub const color = @import("ui/color.zig");
 pub const io_mod = @import("ui/io.zig");
 pub const codesign = @import("macho/codesign.zig");
 pub const parser = @import("macho/parser.zig");

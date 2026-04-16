@@ -8,6 +8,30 @@ const std = @import("std");
 const testing = std.testing;
 const output = @import("malt").output;
 const io_mod = @import("malt").io_mod;
+const color = @import("malt").color;
+
+/// Set up stderr capture with an explicit color/emoji state. Returns a
+/// guard the caller defers to tear down both the capture and the state
+/// override — keeps each byte-level assertion below a single assertion
+/// in length.
+const Capture = struct {
+    buf: *std.ArrayList(u8),
+    prior_quiet: bool,
+
+    fn init(buf: *std.ArrayList(u8), color_on: bool, emoji_on: bool, quiet: bool) Capture {
+        const prior_quiet = output.isQuiet();
+        color.setForTest(color_on, emoji_on);
+        output.setQuiet(quiet);
+        io_mod.beginStderrCapture(testing.allocator, buf);
+        return .{ .buf = buf, .prior_quiet = prior_quiet };
+    }
+
+    fn deinit(self: Capture) void {
+        io_mod.endStderrCapture();
+        color.setForTest(null, null);
+        output.setQuiet(self.prior_quiet);
+    }
+};
 
 fn encode(s: []const u8) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -62,6 +86,148 @@ test "stdoutWriteAll through the redirected path completes without blocking" {
     var buf: [4096]u8 = undefined;
     @memset(&buf, 'x');
     io_mod.stdoutWriteAll(&buf);
+}
+
+// ---------------------------------------------------------------------------
+// Prefixed-line helpers — byte-level contract.
+//
+// Under the test runner, stderr is funneled to /dev/null (see `io_mod`).
+// The `Capture` guard above swaps in an in-memory buffer so each emit can
+// be asserted at the byte level — including the ANSI wrap shape, which
+// differs between the prefix-only helpers (info/warn/success/err) and the
+// full-line helpers (dim/skip). Keeping these locked down guards against
+// accidental style regressions when the helpers are tweaked.
+// ---------------------------------------------------------------------------
+
+test "info wraps only the emoji prefix in cyan; msg stays unstyled" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, true, true, false);
+    defer cap.deinit();
+
+    output.info("hello {s}", .{"world"});
+    try testing.expectEqualStrings("\x1b[36m  ▸ \x1b[0mhello world\n", buf.items);
+}
+
+test "info falls back to ASCII prefix with color and emoji disabled" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, false, false, false);
+    defer cap.deinit();
+
+    output.info("plain", .{});
+    try testing.expectEqualStrings("  > plain\n", buf.items);
+}
+
+test "info is suppressed by --quiet" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, true, true, true);
+    defer cap.deinit();
+
+    output.info("hidden", .{});
+    try testing.expectEqualStrings("", buf.items);
+}
+
+test "warn wraps the yellow prefix and uses the warning glyph" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, true, true, false);
+    defer cap.deinit();
+
+    output.warn("careful", .{});
+    try testing.expectEqualStrings("\x1b[33m  ⚠ \x1b[0mcareful\n", buf.items);
+}
+
+test "success wraps the green prefix and uses the check glyph" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, true, true, false);
+    defer cap.deinit();
+
+    output.success("done", .{});
+    try testing.expectEqualStrings("\x1b[32m  ✓ \x1b[0mdone\n", buf.items);
+}
+
+test "err wraps the red prefix and uses the cross glyph" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, true, true, false);
+    defer cap.deinit();
+
+    output.err("nope", .{});
+    try testing.expectEqualStrings("\x1b[31m  ✗ \x1b[0mnope\n", buf.items);
+}
+
+// Contract: errors always print, even under `--quiet`. If this ever flips,
+// users will stop seeing failure reasons when they pass `-q` to scripts.
+test "err is NOT suppressed by --quiet" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, false, false, true);
+    defer cap.deinit();
+
+    output.err("boom", .{});
+    try testing.expectEqualStrings("  x boom\n", buf.items);
+}
+
+// `dim` and `skip` are full-line wrappers — the dim ANSI must span the
+// whole line (prefix + msg) rather than just the prefix, so the entire
+// line visually recedes.
+test "dim wraps prefix and msg in a single dim ANSI block" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, true, true, false);
+    defer cap.deinit();
+
+    output.dim("background", .{});
+    try testing.expectEqualStrings("\x1b[2m  ▸ background\x1b[0m\n", buf.items);
+}
+
+test "skip uses the bullet glyph and wraps the whole line in dim" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, true, true, false);
+    defer cap.deinit();
+
+    output.skip("{s} is already at latest version {s}", .{ "ripgrep", "14.1.1" });
+    try testing.expectEqualStrings(
+        "\x1b[2m  · ripgrep is already at latest version 14.1.1\x1b[0m\n",
+        buf.items,
+    );
+}
+
+test "skip falls back to ASCII dot when emoji is disabled" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, false, false, false);
+    defer cap.deinit();
+
+    output.skip("fd is already at latest version 10.2.0", .{});
+    try testing.expectEqualStrings("  . fd is already at latest version 10.2.0\n", buf.items);
+}
+
+test "skip is suppressed by --quiet" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, true, true, true);
+    defer cap.deinit();
+
+    output.skip("hidden", .{});
+    try testing.expectEqualStrings("", buf.items);
+}
+
+// Emoji off + color on is a real combination: NO_COLOR unset but
+// MALT_NO_EMOJI set. Make sure the ANSI wrap still lands around the
+// ASCII prefix (no accidental double-styling or missing reset).
+test "info emits ANSI around the ASCII prefix when only emoji is disabled" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, true, false, false);
+    defer cap.deinit();
+
+    output.info("mixed", .{});
+    try testing.expectEqualStrings("\x1b[36m  > \x1b[0mmixed\n", buf.items);
 }
 
 test "jsonStr output round-trips through std.json parser" {
