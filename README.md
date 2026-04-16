@@ -42,6 +42,7 @@ Unlike other alternative clients, malt runs Homebrew `post_install` blocks nativ
 - **Ephemeral run** — `malt run` launches a formula without installing it permanently
 - **Services** — `malt services` manages long-running launchd processes, `brew services`-compatible
 - **Bundles** — `malt bundle install` reads existing `Brewfile`s with no conversion
+- **Polished output** — readable by default, scriptable via `--json`
 - **Path-sandboxed execution** — the DSL interpreter validates all writes stay within the package prefix
 - **Safe under concurrency** — multiple malt processes won't corrupt state
 

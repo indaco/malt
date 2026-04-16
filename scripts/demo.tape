@@ -60,3 +60,23 @@ Type "malt list --versions"
 Sleep 400ms
 Enter
 Sleep 3s
+
+Type "# Inspect an installed package"
+Sleep 400ms
+Enter
+Sleep 800ms
+
+Type "malt info node"
+Sleep 400ms
+Enter
+Sleep 4s
+
+Type "# …and one that isn't installed yet"
+Sleep 400ms
+Enter
+Sleep 800ms
+
+Type "malt info wget"
+Sleep 400ms
+Enter
+Sleep 4s
