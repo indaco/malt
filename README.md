@@ -696,43 +696,37 @@ zig build universal                      # universal binary (arm64 + x86_64 via 
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
-
 ### Binary Size
 
-| Tool     | Size   |
-| -------- | ------ |
-| **malt** | 3.3 MB |
-| nanobrew | 1.4 MB |
+| Tool | Size |
+| ---- | ---- |
+| **malt** | 3.0 MB |
+| nanobrew | 1.6 MB |
 | zerobrew | 8.6 MB |
-
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
-
 ### Cold Install
 
-| Package              | malt   | nanobrew | zerobrew | Homebrew |
-| -------------------- | ------ | -------- | -------- | -------- |
-| **tree** (0 deps)    | 0.695s | 0.631s   | 2.030s   | 4.444s   |
-| **wget** (6 deps)    | 5.434s | 6.822s   | 6.697s   | 4.319s   |
-| **ffmpeg** (11 deps) | 4.226s | 3.510s   | 6.822s   | 20.516s  |
-
+| Package | malt | nanobrew | zerobrew | Homebrew |
+| ------- | ---- | -------- | -------- | -------- |
+| **tree** (0 deps) | 0.526s | 0.397s | 0.886s | 3.596s |
+| **wget** (6 deps) | 3.044s | 9.339s | 7.197s | 5.140s |
+| **ffmpeg** (11 deps) | 2.159s | 5.327s | 7.591s | 19.338s |
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
-
 ### Warm Install
 
-| Package              | malt   | nanobrew | zerobrew |
-| -------------------- | ------ | -------- | -------- |
-| **tree** (0 deps)    | 0.007s | 0.005s   | 0.340s   |
-| **wget** (6 deps)    | 0.029s | 0.636s   | 0.722s   |
-| **ffmpeg** (11 deps) | 0.085s | 1.079s   | 2.731s   |
-
+| Package | malt | nanobrew | zerobrew |
+| ------- | ---- | -------- | -------- |
+| **tree** (0 deps) | 0.009s | 0.005s | 0.361s |
+| **wget** (6 deps) | 0.066s | 9.431s | 0.858s |
+| **ffmpeg** (11 deps) | 0.222s | 4.062s | 3.190s |
 <!-- BENCH:WARM:END -->
 
 > [!NOTE]
-> Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-14. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
+> Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-16. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
 
 ### Why warm matters more than cold
 
