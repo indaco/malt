@@ -71,13 +71,23 @@ fn insertKeg(
     name: []const u8,
     reason: []const u8,
 ) !i64 {
+    return insertKegWithCellar(db, name, reason, "/tmp");
+}
+
+fn insertKegWithCellar(
+    db: *sqlite.Database,
+    name: []const u8,
+    reason: []const u8,
+    cellar_path: []const u8,
+) !i64 {
     var stmt = try db.prepare(
         \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason)
-        \\VALUES (?1, ?1, '1.0', 'sha', '/tmp', ?2) RETURNING id;
+        \\VALUES (?1, ?1, '1.0', 'sha', ?3, ?2) RETURNING id;
     );
     defer stmt.finalize();
     try stmt.bindText(1, name);
     try stmt.bindText(2, reason);
+    try stmt.bindText(3, cellar_path);
     const has = try stmt.step();
     try testing.expect(has);
     return stmt.columnInt(0);
@@ -295,6 +305,161 @@ test "resolve handles a dep whose sub-fetch fails by falling through" {
 
     try testing.expectEqual(@as(usize, 1), result.len);
     try testing.expectEqualStrings("missing", result[0].name);
+}
+
+// --- ensureOptLink / stale-cellar heal coverage ---------------------------
+
+test "resolve treats a DB keg with a vanished cellar_path as not-installed" {
+    // Reproduces the zig→zstd bug: DB still holds the row after the Cellar
+    // dir was removed (manual cleanup, interrupted uninstall, prefix move).
+    // Without the fs check, BFS would skip the dep and the install would
+    // succeed while leaving dylib consumers pointing at a dead symlink.
+    const alloc = testing.allocator;
+
+    var dir = try TempCacheDir.init("resolve_missing_cellar");
+    defer dir.deinit();
+
+    try dir.writeFormula("alpha", "{\"dependencies\":[\"beta\"]}");
+    try dir.writeFormula("beta", "{\"dependencies\":[]}");
+
+    var http = client_mod.HttpClient.init(alloc);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+
+    var tdb = try TempDb.init("resolve_missing_cellar");
+    defer tdb.deinit();
+    // Point beta's cellar_path at a directory that definitely doesn't exist.
+    _ = try insertKegWithCellar(&tdb.db, "beta", "dependency", "/tmp/malt_missing_xyz_9273");
+
+    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db);
+    defer freeResolved(alloc, result);
+
+    try testing.expectEqual(@as(usize, 1), result.len);
+    try testing.expectEqualStrings("beta", result[0].name);
+    // Filesystem says no — fall back to reinstall, never skip.
+    try testing.expect(!result[0].already_installed);
+}
+
+const TempPrefix = struct {
+    root: []const u8,
+    db: sqlite.Database,
+
+    fn init(comptime tag: []const u8) !TempPrefix {
+        const root = "/tmp/malt_opt_link_" ++ tag;
+        malt.fs_compat.deleteTreeAbsolute(root) catch {};
+        try malt.fs_compat.makeDirAbsolute(root);
+        errdefer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+
+        var db_buf: [256]u8 = undefined;
+        const db_path = try std.fmt.bufPrint(&db_buf, "{s}/malt.db", .{root});
+        var db = try sqlite.Database.open(db_path);
+        errdefer db.close();
+        try schema.initSchema(&db);
+        return .{ .root = root, .db = db };
+    }
+
+    fn deinit(self: *TempPrefix) void {
+        self.db.close();
+        malt.fs_compat.deleteTreeAbsolute(self.root) catch {};
+    }
+
+    fn cellarFor(self: *const TempPrefix, name: []const u8, version: []const u8) ![]const u8 {
+        var cellar_root_buf: [512]u8 = undefined;
+        const cellar_root = try std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{self.root});
+        malt.fs_compat.makeDirAbsolute(cellar_root) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return e,
+        };
+        var name_buf: [512]u8 = undefined;
+        const name_dir = try std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ cellar_root, name });
+        malt.fs_compat.makeDirAbsolute(name_dir) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return e,
+        };
+        var path_buf: [512]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ name_dir, version });
+        malt.fs_compat.makeDirAbsolute(path) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return e,
+        };
+        return try testing.allocator.dupe(u8, path);
+    }
+
+    fn readOptLink(self: *const TempPrefix, name: []const u8, buf: []u8) ![]u8 {
+        var path_buf: [512]u8 = undefined;
+        const opt_path = try std.fmt.bufPrint(&path_buf, "{s}/opt/{s}", .{ self.root, name });
+        return malt.fs_compat.readLinkAbsolute(opt_path, buf);
+    }
+};
+
+test "ensureOptLink recreates a missing opt/<name> symlink" {
+    var p = try TempPrefix.init("missing");
+    defer p.deinit();
+
+    const cellar = try p.cellarFor("zstd", "1.5.7");
+    defer testing.allocator.free(cellar);
+    _ = try insertKegWithCellar(&p.db, "zstd", "dependency", cellar);
+
+    // Precondition: no opt/ symlink yet.
+    var miss_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectError(error.FileNotFound, p.readOptLink("zstd", &miss_buf));
+
+    deps_mod.ensureOptLink(&p.db, p.root, "zstd");
+
+    var got_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const target = try p.readOptLink("zstd", &got_buf);
+    try testing.expectEqualStrings(cellar, target);
+}
+
+test "ensureOptLink is idempotent when the symlink is already correct" {
+    var p = try TempPrefix.init("idempotent");
+    defer p.deinit();
+
+    const cellar = try p.cellarFor("zstd", "1.5.7");
+    defer testing.allocator.free(cellar);
+    _ = try insertKegWithCellar(&p.db, "zstd", "dependency", cellar);
+
+    deps_mod.ensureOptLink(&p.db, p.root, "zstd"); // first call creates
+    deps_mod.ensureOptLink(&p.db, p.root, "zstd"); // second call must be a no-op
+
+    var got_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const target = try p.readOptLink("zstd", &got_buf);
+    try testing.expectEqualStrings(cellar, target);
+}
+
+test "ensureOptLink replaces a stale symlink pointing at an old cellar" {
+    var p = try TempPrefix.init("stale");
+    defer p.deinit();
+
+    // Pre-create a symlink to an OLD cellar path that the DB no longer knows.
+    var opt_parent_buf: [512]u8 = undefined;
+    const opt_parent = try std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{p.root});
+    try malt.fs_compat.makeDirAbsolute(opt_parent);
+    var dir = try malt.fs_compat.openDirAbsolute(opt_parent, .{});
+    defer dir.close();
+    try dir.symLink("/tmp/malt_stale_old_zstd", "zstd", .{});
+
+    // DB points at the CURRENT cellar path.
+    const cellar = try p.cellarFor("zstd", "1.5.7");
+    defer testing.allocator.free(cellar);
+    _ = try insertKegWithCellar(&p.db, "zstd", "dependency", cellar);
+
+    deps_mod.ensureOptLink(&p.db, p.root, "zstd");
+
+    var got_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const target = try p.readOptLink("zstd", &got_buf);
+    try testing.expectEqualStrings(cellar, target);
+}
+
+test "ensureOptLink silently skips names the DB does not know" {
+    var p = try TempPrefix.init("unknown");
+    defer p.deinit();
+
+    // No DB row for 'ghost' → ensureOptLink must be a no-op, not panic.
+    deps_mod.ensureOptLink(&p.db, p.root, "ghost");
+
+    var miss_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectError(error.FileNotFound, p.readOptLink("ghost", &miss_buf));
 }
 
 test "formula with empty dependencies" {

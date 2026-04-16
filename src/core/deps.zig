@@ -4,6 +4,7 @@
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const api_mod = @import("../net/api.zig");
+const fs_compat = @import("../fs/compat.zig");
 
 pub const DepError = error{
     CycleDetected,
@@ -160,10 +161,47 @@ pub fn findOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) ![]const 
 // --- helpers ---
 
 fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
-    var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return false;
+    var stmt = db.prepare("SELECT cellar_path FROM kegs WHERE name = ?1 LIMIT 1;") catch return false;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return false;
-    return stmt.step() catch false;
+    if (!(stmt.step() catch false)) return false;
+
+    // Trust the DB only when the cellar_path is still on disk.
+    const cp_raw = stmt.columnText(0) orelse return false;
+    const cellar_path = std.mem.sliceTo(cp_raw, 0);
+    fs_compat.accessAbsolute(cellar_path, .{}) catch return false;
+    return true;
+}
+
+/// Keep `opt/{name}` pointing at the keg's DB-recorded cellar_path.
+/// No-op when already correct; silent on failure.
+pub fn ensureOptLink(db: *sqlite.Database, prefix: []const u8, name: []const u8) void {
+    var stmt = db.prepare("SELECT cellar_path FROM kegs WHERE name = ?1 LIMIT 1;") catch return;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return;
+    if (!(stmt.step() catch false)) return;
+    const cp_raw = stmt.columnText(0) orelse return;
+    const cellar_path = std.mem.sliceTo(cp_raw, 0);
+
+    var opt_buf: [512]u8 = undefined;
+    const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch return;
+
+    // Fast path: symlink already resolves to the DB's cellar_path.
+    var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (fs_compat.readLinkAbsolute(opt_path, &target_buf)) |target| {
+        if (std.mem.eql(u8, target, cellar_path)) return;
+    } else |_| {}
+
+    var opt_parent_buf: [512]u8 = undefined;
+    const opt_parent = std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{prefix}) catch return;
+    fs_compat.makeDirAbsolute(opt_parent) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => return,
+    };
+    var parent_dir = fs_compat.openDirAbsolute(opt_parent, .{}) catch return;
+    defer parent_dir.close();
+    parent_dir.deleteFile(name) catch {};
+    parent_dir.symLink(cellar_path, name, .{}) catch {};
 }
 
 fn getDeps(allocator: std.mem.Allocator, name: []const u8, api: *api_mod.BrewApi) ![][]const u8 {
