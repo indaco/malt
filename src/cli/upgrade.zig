@@ -152,7 +152,7 @@ fn upgradeFormula(
 
     // Compare versions
     if (std.mem.eql(u8, old_version, formula.version)) {
-        output.info("{s} is already at latest version {s}", .{ name, formula.version });
+        output.skip("{s} is already at latest version {s}", .{ name, formula.version });
         return;
     }
 
@@ -429,7 +429,7 @@ fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Data
 
     const installed_version = installed.version();
     if (std.mem.eql(u8, installed_version, parsed_cask.version)) {
-        output.info("{s} is already at latest version {s}", .{ token, parsed_cask.version });
+        output.skip("{s} is already at latest version {s}", .{ token, parsed_cask.version });
         return;
     }
 

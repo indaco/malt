@@ -151,6 +151,25 @@ pub fn dim(comptime fmt: []const u8, args: anytype) void {
     io_mod.stderrWriteAll("\n");
 }
 
+/// Dim "nothing to do" status line (e.g. already-at-latest). The bullet
+/// glyph makes it recede next to `▸` activity lines in bulk commands.
+pub fn skip(comptime fmt: []const u8, args: anytype) void {
+    if (quiet) return;
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    const prefix: []const u8 = if (color.isEmojiEnabled()) "  · " else "  . ";
+    if (color.isColorEnabled()) {
+        io_mod.stderrWriteAll(color.Style.dim.code());
+        io_mod.stderrWriteAll(prefix);
+        io_mod.stderrWriteAll(msg);
+        io_mod.stderrWriteAll(color.Style.reset.code());
+    } else {
+        io_mod.stderrWriteAll(prefix);
+        io_mod.stderrWriteAll(msg);
+    }
+    io_mod.stderrWriteAll("\n");
+}
+
 /// Read a single line from stdin and return true iff the trimmed input
 /// matches `expected` exactly.  Prints `prompt` to stderr first.
 ///

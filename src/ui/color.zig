@@ -2,6 +2,7 @@
 //! Terminal color output (NO_COLOR aware).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const fs_compat = @import("../fs/compat.zig");
 
 pub const Style = enum {
@@ -49,6 +50,14 @@ pub fn isEmojiEnabled() bool {
     const result = no_emoji == null;
     emoji_enabled = result;
     return result;
+}
+
+/// Test-only override for the color/emoji caches. Pass `null` to let
+/// the next `is*Enabled` call recompute from env.
+pub fn setForTest(c: ?bool, e: ?bool) void {
+    if (!builtin.is_test) return;
+    color_enabled = c;
+    emoji_enabled = e;
 }
 
 /// Write styled text to stderr. If colors disabled, writes text only.

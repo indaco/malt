@@ -46,7 +46,31 @@ pub fn stderrFile() std.Io.File {
     return std.Io.File.stderr();
 }
 
+/// Test-only stderr capture. Tests run sequentially in a binary, so no
+/// lock; elided from release via `builtin.is_test` guards.
+var capture_list: ?*std.ArrayList(u8) = null;
+var capture_allocator: std.mem.Allocator = undefined;
+
+/// Test-only: redirect `stderrWriteAll` into `buf`. Pair with `endStderrCapture`.
+pub fn beginStderrCapture(allocator: std.mem.Allocator, buf: *std.ArrayList(u8)) void {
+    if (!builtin.is_test) return;
+    capture_list = buf;
+    capture_allocator = allocator;
+}
+
+/// Test-only: stop redirecting `stderrWriteAll`.
+pub fn endStderrCapture() void {
+    if (!builtin.is_test) return;
+    capture_list = null;
+}
+
 pub fn stderrWriteAll(bytes: []const u8) void {
+    if (builtin.is_test) {
+        if (capture_list) |list| {
+            list.appendSlice(capture_allocator, bytes) catch {};
+            return;
+        }
+    }
     stderrFile().writeStreamingAll(ctx(), bytes) catch return;
 }
 
