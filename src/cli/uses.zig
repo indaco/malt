@@ -38,7 +38,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer if (db_opt) |*d| d.close();
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw = std.Io.File.stdout().writer(io_mod.ctx(), &stdout_buf);
+    var stdout_fw = io_mod.stdoutFile().writer(io_mod.ctx(), &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     defer stdout.flush() catch {};
 

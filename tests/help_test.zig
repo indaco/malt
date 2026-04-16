@@ -12,8 +12,8 @@ test "showIfRequested returns false when -h/--help absent" {
 }
 
 test "showIfRequested returns true for short -h" {
-    // NOTE: this writes the help text to stderr as a side effect; that's
-    // fine for kcov and is silenced by zig test runners.
+    // Writes help text — redirected to stderr under the test runner by
+    // `io_mod.stdoutFile()`, so it doesn't corrupt the IPC pipe.
     const args = [_][]const u8{"-h"};
     try testing.expect(help.showIfRequested(&args, "install"));
 }

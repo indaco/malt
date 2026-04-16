@@ -7,6 +7,7 @@
 const std = @import("std");
 const testing = std.testing;
 const output = @import("malt").output;
+const io_mod = @import("malt").io_mod;
 
 fn encode(s: []const u8) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -44,6 +45,23 @@ test "jsonStr passes UTF-8 bytes through unchanged" {
     const got = try encode("café 🍺");
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("\"café 🍺\"", got);
+}
+
+// Regression: under the test runner, `io_mod.stdoutFile()` must not
+// resolve to fd 1. The runner owns fd 1 for its IPC; any byte on it
+// wedges the build runner in `read()`. If this assertion breaks,
+// `zig build test` starts deadlocking again.
+test "stdoutFile is not fd 1 under the test runner" {
+    try testing.expect(io_mod.stdoutFile().handle != std.Io.File.stdout().handle);
+}
+
+// Regression (paired with the helper above): exercising a call site that
+// previously deadlocked — `stdoutWriteAll` of a multi-KB payload — must
+// complete without hanging.
+test "stdoutWriteAll through the redirected path completes without blocking" {
+    var buf: [4096]u8 = undefined;
+    @memset(&buf, 'x');
+    io_mod.stdoutWriteAll(&buf);
 }
 
 test "jsonStr output round-trips through std.json parser" {

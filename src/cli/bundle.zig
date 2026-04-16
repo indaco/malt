@@ -179,7 +179,7 @@ fn cmdExport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
         try populateFromInstalled(&manifest, &db);
     }
 
-    const stdout = std.Io.File.stdout();
+    const stdout = io_mod.stdoutFile();
     var write_buf: [4096]u8 = undefined;
     var stdout_writer = stdout.writer(io_mod.ctx(), &write_buf);
     const w = &stdout_writer.interface;
