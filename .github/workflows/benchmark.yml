@@ -85,21 +85,20 @@ jobs:
           | **malt** | ${{ steps.tree.outputs.mt_size }} |
           | nanobrew | ${{ steps.tree.outputs.nb_size }} |
           | zerobrew | ${{ steps.tree.outputs.zb_size }} |
-          | bru | ${{ steps.tree.outputs.bru_size }} |
 
           ### Cold Install
-          | Package | malt | nanobrew | zerobrew | bru | Homebrew |
-          |---------|------|----------|----------|-----|----------|
-          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.bru_cold }} | ${{ steps.tree.outputs.brew_cold }} |
-          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.bru_cold }} | ${{ steps.wget.outputs.brew_cold }} |
-          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.bru_cold }} | ${{ steps.ffmpeg.outputs.brew_cold }} |
+          | Package | malt | nanobrew | zerobrew | Homebrew |
+          |---------|------|----------|----------|----------|
+          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.brew_cold }} |
+          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.brew_cold }} |
+          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.brew_cold }} |
 
           ### Warm Install
-          | Package | malt | nanobrew | zerobrew | bru |
-          |---------|------|----------|----------|-----|
-          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_warm }} | ${{ steps.tree.outputs.nb_warm }} | ${{ steps.tree.outputs.zb_warm }} | ${{ steps.tree.outputs.bru_warm }} |
-          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_warm }} | ${{ steps.wget.outputs.nb_warm }} | ${{ steps.wget.outputs.zb_warm }} | ${{ steps.wget.outputs.bru_warm }} |
-          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_warm }} | ${{ steps.ffmpeg.outputs.nb_warm }} | ${{ steps.ffmpeg.outputs.zb_warm }} | ${{ steps.ffmpeg.outputs.bru_warm }} |
+          | Package | malt | nanobrew | zerobrew |
+          |---------|------|----------|----------|
+          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_warm }} | ${{ steps.tree.outputs.nb_warm }} | ${{ steps.tree.outputs.zb_warm }} |
+          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_warm }} | ${{ steps.wget.outputs.nb_warm }} | ${{ steps.wget.outputs.zb_warm }} |
+          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_warm }} | ${{ steps.ffmpeg.outputs.nb_warm }} | ${{ steps.ffmpeg.outputs.zb_warm }} |
           EOF
 
       - name: Update README
@@ -116,26 +115,19 @@ jobs:
           | **malt** | ${{ steps.tree.outputs.mt_size }} |
           | nanobrew | ${{ steps.tree.outputs.nb_size }} |
           | zerobrew | ${{ steps.tree.outputs.zb_size }} |
-          | bru | ${{ steps.tree.outputs.bru_size }} |
           <!-- BENCH:SIZE:END -->
           TABLE
 
           # Generate cold install table.
-          # The `‡` suffix on bru's cold cells is intentional: bru caches
-          # bottles under ~/.bru/ and ~/Library/Caches/bru/, outside the
-          # wiped /tmp/bru prefix, so its "cold" numbers reflect warm
-          # cache + materialise rather than a real network fetch. The
-          # matching explanation lives in README.md's Methodology
-          # paragraph (outside the markers).
           cat > /tmp/cold_table.md << TABLE
           <!-- BENCH:COLD:START -->
           ### Cold Install
 
-          | Package | malt | nanobrew | zerobrew | bru | Homebrew |
-          | ------- | ---- | -------- | -------- | --- | -------- |
-          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.bru_cold }}‡ | ${{ steps.tree.outputs.brew_cold }} |
-          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.bru_cold }}‡ | ${{ steps.wget.outputs.brew_cold }} |
-          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.bru_cold }}‡ | ${{ steps.ffmpeg.outputs.brew_cold }} |
+          | Package | malt | nanobrew | zerobrew | Homebrew |
+          | ------- | ---- | -------- | -------- | -------- |
+          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.brew_cold }} |
+          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.brew_cold }} |
+          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.brew_cold }} |
           <!-- BENCH:COLD:END -->
           TABLE
 
@@ -144,11 +136,11 @@ jobs:
           <!-- BENCH:WARM:START -->
           ### Warm Install
 
-          | Package | malt | nanobrew | zerobrew | bru |
-          | ------- | ---- | -------- | -------- | --- |
-          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_warm }} | ${{ steps.tree.outputs.nb_warm }} | ${{ steps.tree.outputs.zb_warm }} | ${{ steps.tree.outputs.bru_warm }} |
-          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_warm }} | ${{ steps.wget.outputs.nb_warm }} | ${{ steps.wget.outputs.zb_warm }} | ${{ steps.wget.outputs.bru_warm }} |
-          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_warm }} | ${{ steps.ffmpeg.outputs.nb_warm }} | ${{ steps.ffmpeg.outputs.zb_warm }} | ${{ steps.ffmpeg.outputs.bru_warm }} |
+          | Package | malt | nanobrew | zerobrew |
+          | ------- | ---- | -------- | -------- |
+          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_warm }} | ${{ steps.tree.outputs.nb_warm }} | ${{ steps.tree.outputs.zb_warm }} |
+          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_warm }} | ${{ steps.wget.outputs.nb_warm }} | ${{ steps.wget.outputs.zb_warm }} |
+          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_warm }} | ${{ steps.ffmpeg.outputs.nb_warm }} | ${{ steps.ffmpeg.outputs.zb_warm }} |
           <!-- BENCH:WARM:END -->
           TABLE
 
