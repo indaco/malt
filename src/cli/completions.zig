@@ -2,6 +2,7 @@
 //! Prints shell completion scripts for bash, zsh, or fish to stdout.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const help = @import("help.zig");
 
 pub const Shell = enum { bash, zsh, fish };
@@ -33,7 +34,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const shell = parseShell(args[0]) orelse {
-        const stderr = std.fs.File.stderr();
+        const stderr = fs_compat.stderrFile();
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(
             &buf,
@@ -44,7 +45,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         std.process.exit(2);
     };
 
-    try std.fs.File.stdout().writeAll(scriptFor(shell));
+    try fs_compat.stdoutFile().writeAll(scriptFor(shell));
 }
 
 fn printUsage() void {
@@ -60,7 +61,7 @@ fn printUsage() void {
         \\  fish    source with: malt completions fish | source
         \\
     ;
-    std.fs.File.stderr().writeAll(usage) catch {};
+    fs_compat.stderrFile().writeAll(usage) catch {};
 }
 
 // ---------------------------------------------------------------------------

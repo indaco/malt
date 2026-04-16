@@ -1,4 +1,5 @@
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 
 pub const LinkError = error{ ConflictFound, LinkFailed, UnlinkFailed, OutOfMemory };
@@ -27,13 +28,13 @@ pub const Linker = struct {
             var keg_dir_buf: [512]u8 = undefined;
             const keg_subdir = std.fmt.bufPrint(&keg_dir_buf, "{s}/{s}", .{ keg_path, subdir }) catch continue;
 
-            var dir = std.fs.openDirAbsolute(keg_subdir, .{ .iterate = true }) catch continue;
+            var dir = fs_compat.openDirAbsolute(keg_subdir, .{ .iterate = true }) catch continue;
             defer dir.close();
 
             var prefix_dir_buf: [512]u8 = undefined;
             const prefix_subdir = std.fmt.bufPrint(&prefix_dir_buf, "{s}/{s}", .{ self.prefix, subdir }) catch continue;
 
-            var prefix_dir = std.fs.openDirAbsolute(prefix_subdir, .{}) catch continue;
+            var prefix_dir = fs_compat.openDirAbsolute(prefix_subdir, .{}) catch continue;
             defer prefix_dir.close();
 
             var iter = dir.iterate();
@@ -73,9 +74,9 @@ pub const Linker = struct {
         const idx = std.mem.indexOf(u8, path, cellar_marker) orelse return null;
         const after = path[idx + cellar_marker.len ..];
         // Find the slash between <name> and <ver>, then the slash after <ver>.
-        const first_slash = std.mem.indexOfScalar(u8, after, '/') orelse return after;
+        const first_slash = std.mem.findScalar(u8, after, '/') orelse return after;
         const rest = after[first_slash + 1 ..];
-        const second_slash = std.mem.indexOfScalar(u8, rest, '/') orelse return after;
+        const second_slash = std.mem.findScalar(u8, rest, '/') orelse return after;
         return path[idx .. idx + cellar_marker.len + first_slash + 1 + second_slash];
     }
 
@@ -93,18 +94,18 @@ pub const Linker = struct {
         var keg_dir_buf: [512]u8 = undefined;
         const keg_subdir = std.fmt.bufPrint(&keg_dir_buf, "{s}/{s}", .{ keg_path, subdir }) catch return;
 
-        var dir = std.fs.openDirAbsolute(keg_subdir, .{ .iterate = true }) catch return;
+        var dir = fs_compat.openDirAbsolute(keg_subdir, .{ .iterate = true }) catch return;
         defer dir.close();
 
         // Ensure parent dir exists
         var parent_buf: [512]u8 = undefined;
         const parent = std.fmt.bufPrint(&parent_buf, "{s}/{s}", .{ self.prefix, subdir }) catch return;
-        std.fs.makeDirAbsolute(parent) catch |e| switch (e) {
+        fs_compat.makeDirAbsolute(parent) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
 
-        var parent_dir = std.fs.openDirAbsolute(parent, .{}) catch return;
+        var parent_dir = fs_compat.openDirAbsolute(parent, .{}) catch return;
         defer parent_dir.close();
 
         var iter = dir.iterate();
@@ -147,12 +148,12 @@ pub const Linker = struct {
     pub fn linkOpt(self: *Linker, name: []const u8, version: []const u8) !void {
         var opt_parent_buf: [512]u8 = undefined;
         const opt_parent = std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{self.prefix}) catch return;
-        std.fs.makeDirAbsolute(opt_parent) catch |e| switch (e) {
+        fs_compat.makeDirAbsolute(opt_parent) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
 
-        var opt_dir = std.fs.openDirAbsolute(opt_parent, .{}) catch return;
+        var opt_dir = fs_compat.openDirAbsolute(opt_parent, .{}) catch return;
         defer opt_dir.close();
 
         var cellar_buf: [512]u8 = undefined;
@@ -176,7 +177,7 @@ pub const Linker = struct {
             if (!has_row) break;
             const link_path = stmt.columnText(0) orelse continue;
             const path_slice = std.mem.sliceTo(link_path, 0);
-            std.fs.cwd().deleteFile(path_slice) catch {};
+            fs_compat.cwd().deleteFile(path_slice) catch {};
         }
 
         // Delete from DB

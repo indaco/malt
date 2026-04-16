@@ -2,6 +2,7 @@
 //! Maps Ruby Pathname methods to std.fs calls.
 
 const std = @import("std");
+const fs_compat = @import("../../../fs/compat.zig");
 const values = @import("../values.zig");
 const sandbox = @import("../sandbox.zig");
 const ast = @import("../ast.zig");
@@ -28,7 +29,7 @@ pub const ExecCtx = struct {
 pub fn mkpath(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .nil = {} };
-    std.fs.cwd().makePath(path) catch {};
+    fs_compat.cwd().makePath(path) catch {};
     return Value{ .nil = {} };
 }
 
@@ -36,7 +37,7 @@ pub fn mkpath(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Val
 pub fn existQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .bool = false };
-    std.fs.cwd().access(path, .{}) catch {
+    fs_compat.cwd().access(path, .{}) catch {
         return Value{ .bool = false };
     };
     return Value{ .bool = true };
@@ -46,7 +47,7 @@ pub fn existQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Val
 pub fn directoryQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .bool = false };
-    var dir = std.fs.openDirAbsolute(path, .{}) catch {
+    var dir = fs_compat.openDirAbsolute(path, .{}) catch {
         return Value{ .bool = false };
     };
     dir.close();
@@ -58,7 +59,7 @@ pub fn symlinkQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!V
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .bool = false };
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    _ = std.fs.cwd().readLink(path, &buf) catch {
+    _ = fs_compat.cwd().readLink(path, &buf) catch {
         return Value{ .bool = false };
     };
     return Value{ .bool = true };
@@ -73,7 +74,7 @@ pub fn write(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!V
 
     const content = if (args.len > 0) try args[0].asString(ctx.allocator) else "";
 
-    const file = std.fs.createFileAbsolute(path, .{}) catch {
+    const file = fs_compat.createFileAbsolute(path, .{}) catch {
         return Value{ .nil = {} };
     };
     defer file.close();
@@ -85,7 +86,7 @@ pub fn write(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!V
 pub fn read(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .string = "" };
-    const file = std.fs.openFileAbsolute(path, .{}) catch {
+    const file = fs_compat.openFileAbsolute(path, .{}) catch {
         return Value{ .string = "" };
     };
     defer file.close();
@@ -99,7 +100,7 @@ pub fn read(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value
 pub fn children(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .array = &.{} };
-    var dir = std.fs.openDirAbsolute(path, .{ .iterate = true }) catch {
+    var dir = fs_compat.openDirAbsolute(path, .{ .iterate = true }) catch {
         return Value{ .array = &.{} };
     };
     defer dir.close();
@@ -142,7 +143,7 @@ pub fn toS(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value 
 pub fn realpath(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const resolved = std.fs.cwd().realpath(path, &buf) catch {
+    const resolved = fs_compat.cwd().realpath(path, &buf) catch {
         return Value{ .pathname = path };
     };
     const duped = ctx.allocator.dupe(u8, resolved) catch return BuiltinError.OutOfMemory;
@@ -153,7 +154,7 @@ pub fn realpath(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!V
 pub fn fileQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .bool = false };
-    const stat = std.fs.cwd().statFile(path) catch {
+    const stat = fs_compat.cwd().statFile(path) catch {
         return Value{ .bool = false };
     };
     return Value{ .bool = stat.kind == .file };
@@ -198,7 +199,7 @@ pub fn unlink(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Val
     if (path.len == 0) return Value{ .nil = {} };
     sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
-    std.fs.cwd().deleteFile(path) catch {};
+    fs_compat.cwd().deleteFile(path) catch {};
     return Value{ .nil = {} };
 }
 
@@ -215,11 +216,11 @@ pub fn installSymlink(ctx: ExecCtx, receiver: ?Value, args: []const Value) Built
 
     // Ensure parent exists
     if (std.fs.path.dirname(target)) |parent| {
-        std.fs.cwd().makePath(parent) catch {};
+        fs_compat.cwd().makePath(parent) catch {};
     }
 
-    std.fs.cwd().deleteFile(target) catch {};
-    std.fs.symLinkAbsolute(source, target, .{}) catch {};
+    fs_compat.cwd().deleteFile(target) catch {};
+    fs_compat.symLinkAbsolute(source, target, .{}) catch {};
     return Value{ .nil = {} };
 }
 
@@ -251,7 +252,7 @@ pub fn glob(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Va
     // Guard against empty/relative base_dir
     if (base_dir.len == 0) return Value{ .array = &.{} };
 
-    var dir = std.fs.openDirAbsolute(base_dir, .{ .iterate = true }) catch {
+    var dir = fs_compat.openDirAbsolute(base_dir, .{ .iterate = true }) catch {
         return Value{ .array = &.{} };
     };
     defer dir.close();
@@ -272,7 +273,7 @@ pub fn glob(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Va
 /// Glob pattern matching with `*`, `?`, and `{a,b,c}` brace expansion.
 fn globMatch(pattern: []const u8, name: []const u8) bool {
     // Check if pattern contains braces — if so, expand and try each alternative
-    if (std.mem.indexOfScalar(u8, pattern, '{')) |brace_start| {
+    if (std.mem.findScalar(u8, pattern, '{')) |brace_start| {
         if (findMatchingBrace(pattern, brace_start)) |brace_end| {
             const prefix = pattern[0..brace_start];
             const suffix = pattern[brace_end + 1 ..];

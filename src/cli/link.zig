@@ -2,6 +2,7 @@
 //! Manage symlinks for installed kegs.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const linker_mod = @import("../core/linker.zig");
@@ -135,7 +136,7 @@ pub fn executeUnlink(allocator: std.mem.Allocator, args: []const []const u8) !vo
     // Also remove opt/ symlink
     var opt_buf: [512]u8 = undefined;
     const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch return;
-    std.fs.cwd().deleteFile(opt_path) catch {}; // intentional: may not exist
+    fs_compat.cwd().deleteFile(opt_path) catch {}; // intentional: may not exist
 
     output.success("{s} unlinked (keg remains installed)", .{name});
 }

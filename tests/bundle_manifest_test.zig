@@ -63,11 +63,11 @@ test "round-trip parse emit parse" {
     var m1 = try manifest.parseJson(testing.allocator, json);
     defer m1.deinit();
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try manifest.emitJson(m1, buf.writer(testing.allocator));
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try manifest.emitJson(m1, &aw.writer);
 
-    var m2 = try manifest.parseJson(testing.allocator, buf.items);
+    var m2 = try manifest.parseJson(testing.allocator, aw.written());
     defer m2.deinit();
 
     try testing.expectEqualStrings(m1.name, m2.name);

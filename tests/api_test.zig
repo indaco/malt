@@ -51,26 +51,26 @@ const TempCacheDir = struct {
 
     fn init(comptime tag: []const u8) !TempCacheDir {
         const p = "/tmp/malt_api_test_" ++ tag;
-        std.fs.deleteTreeAbsolute(p) catch {};
-        try std.fs.makeDirAbsolute(p);
+        malt.fs_compat.deleteTreeAbsolute(p) catch {};
+        try malt.fs_compat.makeDirAbsolute(p);
         return .{ .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
-        std.fs.deleteTreeAbsolute(self.path) catch {};
+        malt.fs_compat.deleteTreeAbsolute(self.path) catch {};
     }
 
     fn writeCacheFile(self: *TempCacheDir, rel: []const u8, content: []const u8) !void {
         // Make cache_dir/api first
         var api_buf: [512]u8 = undefined;
         const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
-        std.fs.makeDirAbsolute(api_dir) catch |e| switch (e) {
+        malt.fs_compat.makeDirAbsolute(api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
         const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ self.path, rel });
-        const f = try std.fs.cwd().createFile(full, .{});
+        const f = try malt.fs_compat.cwd().createFile(full, .{});
         defer f.close();
         try f.writeAll(content);
     }
@@ -282,7 +282,7 @@ test "readNotFoundCache returns false for stale marker" {
     var path_buf: [512]u8 = undefined;
     const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_old.404", .{dir.path});
     // Reopen and set mtime back via posix.utimensat-like helper.
-    const file = try std.fs.cwd().openFile(full, .{ .mode = .write_only });
+    const file = try malt.fs_compat.cwd().openFile(full, .{ .mode = .write_only });
     defer file.close();
     // Zig File.updateTimes signature: (atime, mtime) in ns.
     try file.updateTimes(0, 0);

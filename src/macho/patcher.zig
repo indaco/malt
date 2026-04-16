@@ -2,6 +2,7 @@
 //! Path relocation in load commands and text file patching.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const parser = @import("parser.zig");
 
 pub const PatchError = error{
@@ -27,7 +28,7 @@ pub fn patchPaths(
     new_prefix: []const u8,
 ) PatchError!PatchResult {
     // Read the entire file
-    const file = std.fs.cwd().openFile(file_path, .{ .mode = .read_write }) catch
+    const file = fs_compat.cwd().openFile(file_path, .{ .mode = .read_write }) catch
         return PatchError.OpenFailed;
     defer file.close();
 
@@ -93,8 +94,7 @@ pub fn patchPaths(
 
     if (patched > 0) {
         // Write modified data back to file
-        file.seekTo(0) catch return PatchError.IoError;
-        file.writeAll(data) catch return PatchError.IoError;
+        file.writeAllAt(data, 0) catch return PatchError.IoError;
     }
 
     return .{ .patched_count = patched, .skipped_count = skipped };
@@ -121,7 +121,7 @@ pub fn patchTextFiles(
 ) !u32 {
     if (replacements.len == 0) return 0;
 
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return 0;
+    var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch return 0;
     defer dir.close();
 
     var walker = try dir.walk(allocator);
@@ -148,7 +148,7 @@ pub fn patchTextFiles(
 
         // Check if binary (null bytes in first 8KB)
         const check_len = @min(content.len, 8192);
-        if (std.mem.indexOfScalar(u8, content[0..check_len], 0) != null) continue;
+        if (std.mem.findScalar(u8, content[0..check_len], 0) != null) continue;
 
         // Apply each replacement in sequence. `current` always points to
         // either `content` or a freshly allocated buffer from replaceAll;
@@ -176,8 +176,7 @@ pub fn patchTextFiles(
         if (modified) {
             defer if (current.ptr != content.ptr) allocator.free(current);
             // Write back
-            file.seekTo(0) catch continue;
-            file.writeAll(current) catch continue;
+            file.writeAllAt(current, 0) catch continue;
             // Truncate if new content is shorter
             file.setEndPos(current.len) catch {};
             count += 1;
@@ -195,7 +194,7 @@ fn hasPrefix(path: []const u8, prefix: []const u8) bool {
 /// Replace all occurrences of `needle` with `replacement` in `haystack`.
 /// Returns the original slice (same pointer) if there were no matches, or
 /// a caller-owned allocation with the substitution applied. Uses
-/// `std.mem.indexOfPos` which is memchr-based and significantly faster
+/// `std.mem.findPos` which is memchr-based and significantly faster
 /// than a naive byte-by-byte `mem.eql` loop for small needles — the old
 /// implementation showed up as ~60 samples on `mem.eqlBytes` in the
 /// warm-ffmpeg profile.
@@ -209,7 +208,7 @@ fn replaceAll(allocator: std.mem.Allocator, haystack: []const u8, needle: []cons
     // (indexOfPos is O(n) per call; the total work is one linear pass.)
     var match_count: usize = 1;
     var probe = first + needle.len;
-    while (std.mem.indexOfPos(u8, haystack, probe, needle)) |p| {
+    while (std.mem.findPos(u8, haystack, probe, needle)) |p| {
         match_count += 1;
         probe = p + needle.len;
     }
@@ -237,7 +236,7 @@ fn replaceAll(allocator: std.mem.Allocator, haystack: []const u8, needle: []cons
         dst += rep_len;
         src = match + ndl_len;
 
-        match = std.mem.indexOfPos(u8, haystack, src, needle) orelse break;
+        match = std.mem.findPos(u8, haystack, src, needle) orelse break;
     }
 
     // Tail: everything after the last match.

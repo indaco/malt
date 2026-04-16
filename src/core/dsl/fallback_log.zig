@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const io_mod = @import("../../ui/io.zig");
 
 pub const FallbackReason = enum {
     unknown_method,
@@ -41,8 +42,7 @@ pub const FallbackLog = struct {
             // This log is the user's only window into sandbox violations
             // and unsupported constructs; if it's dropping entries under
             // memory pressure the user deserves to know.
-            const f = std.fs.File.stderr();
-            f.writeAll("malt: fallback log dropped an entry due to OOM\n") catch {};
+            io_mod.stderrWriteAll("malt: fallback log dropped an entry due to OOM\n");
         };
     }
 
@@ -67,7 +67,6 @@ pub const FallbackLog = struct {
     /// intentionally skipped — those drive the `--use-system-ruby`
     /// fallback flow and would just be noise here.
     pub fn printFatal(self: *const FallbackLog, tag: []const u8) void {
-        const f = std.fs.File.stderr();
         for (self.entries.items) |entry| {
             const fatal = switch (entry.reason) {
                 .sandbox_violation, .system_command_failed, .parse_error => true,
@@ -83,14 +82,15 @@ pub const FallbackLog = struct {
                 std.fmt.bufPrint(&buf, "  {s}: [{s}] {s}\n", .{
                     tag, @tagName(entry.reason), entry.detail,
                 }) catch continue;
-            f.writeAll(formatted) catch {};
+            io_mod.stderrWriteAll(formatted);
         }
     }
 
     /// Serialize to JSON for telemetry reporting.
     pub fn toJson(self: *const FallbackLog, allocator: std.mem.Allocator) ![]const u8 {
-        var buf: std.ArrayList(u8) = .empty;
-        const writer = buf.writer(allocator);
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        errdefer aw.deinit();
+        const writer = &aw.writer;
 
         try writer.writeAll("[");
         for (self.entries.items, 0..) |entry, i| {
@@ -109,6 +109,6 @@ pub const FallbackLog = struct {
         }
         try writer.writeAll("]");
 
-        return buf.toOwnedSlice(allocator);
+        return aw.toOwnedSlice();
     }
 };

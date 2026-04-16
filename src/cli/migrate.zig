@@ -5,6 +5,7 @@
 //! install protocol. Never modifies the Homebrew installation.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
@@ -50,7 +51,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var cellar_buf: [256]u8 = undefined;
     const brew_cellar = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{brew_prefix}) catch return;
 
-    std.fs.accessAbsolute(brew_cellar, .{}) catch {
+    fs_compat.accessAbsolute(brew_cellar, .{}) catch {
         output.err("No Homebrew installation found at {s}", .{brew_prefix});
         return error.Aborted;
     };
@@ -58,7 +59,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     output.info("Found Homebrew installation at {s}", .{brew_prefix});
 
     // ── Step 2: Scan Cellar for installed kegs ──────────────────────
-    var dir = std.fs.openDirAbsolute(brew_cellar, .{ .iterate = true }) catch {
+    var dir = fs_compat.openDirAbsolute(brew_cellar, .{ .iterate = true }) catch {
         output.err("Cannot read Homebrew Cellar", .{});
         return error.Aborted;
     };
@@ -506,7 +507,7 @@ fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
 
 /// Ensure all required directories under prefix exist.
 fn ensureDirs(prefix: []const u8) !void {
-    std.fs.makeDirAbsolute(prefix) catch |e| switch (e) {
+    fs_compat.makeDirAbsolute(prefix) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => {
             output.err("Cannot create prefix directory {s}", .{prefix});
@@ -532,7 +533,7 @@ fn ensureDirs(prefix: []const u8) !void {
     for (subdirs) |subdir| {
         var buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
-        std.fs.makeDirAbsolute(dir_path) catch |e| switch (e) {
+        fs_compat.makeDirAbsolute(dir_path) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => continue,
         };

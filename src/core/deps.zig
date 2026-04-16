@@ -38,18 +38,16 @@ pub fn resolve(
     var visited = std.StringHashMap(void).init(allocator);
     defer visited.deinit();
 
-    // Queue of owned, heap-duped dep name strings. On scope exit anything
-    // still sitting in the queue gets freed so partial BFS walks don't
-    // leak.
+    // Queue of owned dep names. `head` marks the pop cursor; items
+    // below it have already been handed off (to `result` or freed).
+    // Scope-exit cleanup frees only the un-popped tail.
     var queue: std.ArrayList([]const u8) = .empty;
+    var head: usize = 0;
     defer {
-        for (queue.items) |s| allocator.free(s);
+        for (queue.items[head..]) |s| allocator.free(s);
         queue.deinit(allocator);
     }
 
-    // Seed the queue with the root formula's direct deps. getDeps returns
-    // a slice of duped strings; we transfer each into the queue (or free
-    // it on append failure) and then free the container itself.
     const root_deps = getDeps(allocator, root_name, api) catch {
         return result.toOwnedSlice(allocator) catch blk: {
             result.deinit(allocator);
@@ -65,11 +63,18 @@ pub fn resolve(
         };
     }
 
-    // Mark the root so sub-deps never try to recurse into it.
     visited.put(root_name, {}) catch {};
 
-    while (queue.items.len > 0) {
-        const dep_name = queue.orderedRemove(0);
+    while (head < queue.items.len) {
+        // Peak ~2× max-in-flight: compact live tail to front once half-consumed.
+        if (head > 0 and head * 2 >= queue.items.len) {
+            const live = queue.items[head..];
+            std.mem.copyForwards([]const u8, queue.items[0..live.len], live);
+            queue.items.len = live.len;
+            head = 0;
+        }
+        const dep_name = queue.items[head];
+        head += 1;
 
         // Dedup: already processed → free the duplicate.
         if (visited.get(dep_name) != null) {

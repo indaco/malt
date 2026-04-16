@@ -38,6 +38,31 @@ test "buildGhcrRepo returns OutOfMemory when the buffer is too small" {
     try testing.expectError(error.OutOfMemory, install.buildGhcrRepo(&buf, "wget"));
 }
 
+// S10: parseGhcrUrl — pure splitter used by both the token-prefetch
+// path in `execute` and the per-worker blob download in
+// `downloadWorker`. Pinning the contract here keeps the two call
+// sites from drifting apart.
+test "parseGhcrUrl splits a well-formed bottle URL into repo + digest" {
+    const url = "https://ghcr.io/v2/homebrew/core/wget/blobs/sha256:abcdef";
+    const ref = install.parseGhcrUrl(url) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("homebrew/core/wget", ref.repo);
+    try testing.expectEqualStrings("sha256:abcdef", ref.digest);
+}
+
+test "parseGhcrUrl handles versioned repos that contain a slash" {
+    // openssl@3 maps to homebrew/core/openssl/3 in GHCR's repo layout.
+    const url = "https://ghcr.io/v2/homebrew/core/openssl/3/blobs/sha256:ff00";
+    const ref = install.parseGhcrUrl(url) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("homebrew/core/openssl/3", ref.repo);
+    try testing.expectEqualStrings("sha256:ff00", ref.digest);
+}
+
+test "parseGhcrUrl returns null for non-GHCR and malformed URLs" {
+    try testing.expect(install.parseGhcrUrl("https://example.com/foo") == null);
+    try testing.expect(install.parseGhcrUrl("https://ghcr.io/v2/no-blobs-segment") == null);
+    try testing.expect(install.parseGhcrUrl("") == null);
+}
+
 test "isTapFormula recognises the 'user/repo/formula' shape" {
     try testing.expect(install.isTapFormula("homebrew/core/wget"));
     try testing.expect(install.isTapFormula("user/tap/myformula"));
@@ -219,11 +244,11 @@ test "ensureDirs creates every required subdirectory under a fresh prefix" {
     const prefix = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_install_ensure_dirs_{d}",
-        .{std.time.nanoTimestamp()},
+        .{malt.fs_compat.nanoTimestamp()},
     );
     defer testing.allocator.free(prefix);
-    std.fs.deleteTreeAbsolute(prefix) catch {};
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
 
     try install.ensureDirs(prefix);
 
@@ -231,7 +256,7 @@ test "ensureDirs creates every required subdirectory under a fresh prefix" {
     for (subs) |s| {
         const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ prefix, s });
         defer testing.allocator.free(p);
-        var d = try std.fs.openDirAbsolute(p, .{});
+        var d = try malt.fs_compat.openDirAbsolute(p, .{});
         d.close();
     }
 }

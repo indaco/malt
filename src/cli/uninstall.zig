@@ -2,6 +2,7 @@
 //! Remove installed packages.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -122,13 +123,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     {
         var parent_buf: [512]u8 = undefined;
         const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
-        if (parent_path.len > 0) std.fs.deleteDirAbsolute(parent_path) catch {}; // intentional: only succeeds if empty
+        if (parent_path.len > 0) fs_compat.deleteDirAbsolute(parent_path) catch {}; // intentional: only succeeds if empty
     }
     // Remove opt/ symlink
     {
         var opt_buf: [512]u8 = undefined;
         const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch "";
-        if (opt_path.len > 0) std.fs.cwd().deleteFile(opt_path) catch {}; // intentional: may not exist
+        if (opt_path.len > 0) fs_compat.cwd().deleteFile(opt_path) catch {}; // intentional: may not exist
     }
 
     // Decrement store ref

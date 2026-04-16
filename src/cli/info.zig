@@ -6,6 +6,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const io_mod = @import("../ui/io.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const formula_mod = @import("../core/formula.zig");
@@ -51,7 +52,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var db_opt: ?sqlite.Database = openDb(prefix);
     defer if (db_opt) |*d| d.close();
 
-    const stdout = std.fs.File.stdout();
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw = std.Io.File.stdout().writer(io_mod.ctx(), &stdout_buf);
+    const stdout: *std.Io.Writer = &stdout_fw.interface;
+    defer stdout.flush() catch {};
 
     if (db_opt) |*db| {
         schema.initSchema(db) catch {};
@@ -77,7 +81,7 @@ fn emitInstalledFormula(
     db: *sqlite.Database,
     name: []const u8,
     prefix: []const u8,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     json_mode: bool,
 ) !bool {
     var stmt = db.prepare(
@@ -102,7 +106,7 @@ fn emitInstalledCask(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     name: []const u8,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     json_mode: bool,
 ) !bool {
     if (cask_mod.lookupInstalled(db, name) == null) return false;
@@ -119,7 +123,7 @@ fn emitInstalledCask(
 fn emitNotFound(
     allocator: std.mem.Allocator,
     name: []const u8,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     json_mode: bool,
 ) !void {
     if (json_mode) {
@@ -128,7 +132,7 @@ fn emitNotFound(
     }
     var buf: [4096]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, "{s}: not installed\n", .{name}) catch return;
-    stdout.writeAll(line) catch {};
+    stdout.writeAll(line) catch return;
 }
 
 /// Fetch Homebrew API metadata for a not-locally-installed package and
@@ -139,7 +143,7 @@ fn emitNotFound(
 fn emitApiMetadata(
     allocator: std.mem.Allocator,
     name: []const u8,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     json_mode: bool,
     force_cask: bool,
     force_formula: bool,
@@ -164,7 +168,7 @@ fn emitApiFormula(
     allocator: std.mem.Allocator,
     api: *api_mod.BrewApi,
     name: []const u8,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     json_mode: bool,
 ) !bool {
     const body = api.fetchFormula(name) catch return false;
@@ -181,7 +185,7 @@ fn emitApiCask(
     allocator: std.mem.Allocator,
     api: *api_mod.BrewApi,
     name: []const u8,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     json_mode: bool,
 ) !bool {
     const body = api.fetchCask(name) catch return false;
@@ -194,12 +198,12 @@ fn emitApiCask(
     return true;
 }
 
-fn writeApiFormulaHuman(f: *const formula_mod.Formula, stdout: std.fs.File) !void {
+fn writeApiFormulaHuman(f: *const formula_mod.Formula, stdout: *std.Io.Writer) !void {
     var buf: [4096]u8 = undefined;
     try encodeApiFormulaHuman(stdout, &buf, f, output.isQuiet());
 }
 
-fn writeApiCaskHuman(c: *const cask_mod.Cask, stdout: std.fs.File) !void {
+fn writeApiCaskHuman(c: *const cask_mod.Cask, stdout: *std.Io.Writer) !void {
     var buf: [4096]u8 = undefined;
     try encodeApiCaskHuman(stdout, &buf, c, output.isQuiet());
 }
@@ -207,23 +211,19 @@ fn writeApiCaskHuman(c: *const cask_mod.Cask, stdout: std.fs.File) !void {
 fn writeApiFormulaJson(
     allocator: std.mem.Allocator,
     f: *const formula_mod.Formula,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    try encodeApiFormulaJson(buf.writer(allocator), f);
-    stdout.writeAll(buf.items) catch {};
+    _ = allocator;
+    try encodeApiFormulaJson(stdout, f);
 }
 
 fn writeApiCaskJson(
     allocator: std.mem.Allocator,
     c: *const cask_mod.Cask,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    try encodeApiCaskJson(buf.writer(allocator), c);
-    stdout.writeAll(buf.items) catch {};
+    _ = allocator;
+    try encodeApiCaskJson(stdout, c);
 }
 
 // --- pure encoders (testable) -----------------------------------------------
@@ -356,15 +356,12 @@ pub fn openDb(prefix: []const u8) ?sqlite.Database {
 fn writeJsonNotInstalled(
     allocator: std.mem.Allocator,
     name: []const u8,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    try w.writeAll("{\"name\":");
-    try output.jsonStr(w, name);
-    try w.writeAll(",\"type\":\"formula\",\"installed\":false}\n");
-    stdout.writeAll(buf.items) catch {};
+    _ = allocator;
+    try stdout.writeAll("{\"name\":");
+    try output.jsonStr(stdout, name);
+    try stdout.writeAll(",\"type\":\"formula\",\"installed\":false}\n");
 }
 
 fn writeHumanInfo(
@@ -372,7 +369,7 @@ fn writeHumanInfo(
     installed: bool,
     stmt: *sqlite.Statement,
     prefix: []const u8,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
 ) !void {
     var buf: [4096]u8 = undefined;
 
@@ -390,27 +387,27 @@ fn writeHumanInfo(
 
         {
             const line = std.fmt.bufPrint(&buf, "{s}: stable {s}\n", .{ name, ver_slice }) catch return;
-            stdout.writeAll(line) catch {};
+            stdout.writeAll(line) catch return;
         }
         {
             const line = std.fmt.bufPrint(&buf, "From: {s}\n", .{tap_slice}) catch return;
-            stdout.writeAll(line) catch {};
+            stdout.writeAll(line) catch return;
         }
         {
             const line = std.fmt.bufPrint(&buf, "Path: {s}/Cellar/{s}/{s}\n", .{ prefix, name, ver_slice }) catch return;
-            stdout.writeAll(line) catch {};
+            stdout.writeAll(line) catch return;
         }
         _ = path_slice;
         if (pinned) {
-            stdout.writeAll("Pinned: yes\n") catch {};
+            stdout.writeAll("Pinned: yes\n") catch return;
         }
         {
             const line = std.fmt.bufPrint(&buf, "Installed: {s}\n", .{date_slice}) catch return;
-            stdout.writeAll(line) catch {};
+            stdout.writeAll(line) catch return;
         }
     } else {
         const line = std.fmt.bufPrint(&buf, "{s}: not installed\n", .{name}) catch return;
-        stdout.writeAll(line) catch {};
+        stdout.writeAll(line) catch return;
     }
 }
 
@@ -420,17 +417,15 @@ fn writeJsonInfo(
     name: []const u8,
     installed: bool,
     stmt: *sqlite.Statement,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
 ) !void {
     _ = db;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    _ = allocator;
 
-    try w.writeAll("{\"name\":");
-    try output.jsonStr(w, name);
-    try w.writeAll(",\"type\":\"formula\",\"installed\":");
-    try w.writeAll(if (installed) "true" else "false");
+    try stdout.writeAll("{\"name\":");
+    try output.jsonStr(stdout, name);
+    try stdout.writeAll(",\"type\":\"formula\",\"installed\":");
+    try stdout.writeAll(if (installed) "true" else "false");
 
     if (installed) {
         const ver = stmt.columnText(1);
@@ -438,24 +433,23 @@ fn writeJsonInfo(
         const pinned = stmt.columnBool(4);
         const installed_at = stmt.columnText(5);
 
-        try w.writeAll(",\"version\":");
-        try output.jsonStr(w, if (ver) |v| std.mem.sliceTo(v, 0) else "");
-        try w.writeAll(",\"tap\":");
-        try output.jsonStr(w, if (tap) |t| std.mem.sliceTo(t, 0) else "");
-        try w.writeAll(",\"pinned\":");
-        try w.writeAll(if (pinned) "true" else "false");
-        try w.writeAll(",\"installed_at\":");
-        try output.jsonStr(w, if (installed_at) |d| std.mem.sliceTo(d, 0) else "");
+        try stdout.writeAll(",\"version\":");
+        try output.jsonStr(stdout, if (ver) |v| std.mem.sliceTo(v, 0) else "");
+        try stdout.writeAll(",\"tap\":");
+        try output.jsonStr(stdout, if (tap) |t| std.mem.sliceTo(t, 0) else "");
+        try stdout.writeAll(",\"pinned\":");
+        try stdout.writeAll(if (pinned) "true" else "false");
+        try stdout.writeAll(",\"installed_at\":");
+        try output.jsonStr(stdout, if (installed_at) |d| std.mem.sliceTo(d, 0) else "");
     }
 
-    try w.writeAll("}\n");
-    stdout.writeAll(buf.items) catch {};
+    try stdout.writeAll("}\n");
 }
 
 fn writeHumanCaskInfo(
     db: *sqlite.Database,
     name: []const u8,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
 ) !void {
     var stmt = db.prepare(
         "SELECT token, name, version, url, sha256, app_path, auto_updates, installed_at FROM casks WHERE token = ?1 LIMIT 1;",
@@ -478,26 +472,26 @@ fn writeHumanCaskInfo(
 
     {
         const line = std.fmt.bufPrint(&buf, "{s}: {s} (cask)\n", .{ token, ver }) catch return;
-        stdout.writeAll(line) catch {};
+        stdout.writeAll(line) catch return;
     }
     {
         const line = std.fmt.bufPrint(&buf, "Name: {s}\n", .{cask_name}) catch return;
-        stdout.writeAll(line) catch {};
+        stdout.writeAll(line) catch return;
     }
     {
         const line = std.fmt.bufPrint(&buf, "URL: {s}\n", .{url}) catch return;
-        stdout.writeAll(line) catch {};
+        stdout.writeAll(line) catch return;
     }
     {
         const line = std.fmt.bufPrint(&buf, "App: {s}\n", .{app_path}) catch return;
-        stdout.writeAll(line) catch {};
+        stdout.writeAll(line) catch return;
     }
     if (auto_updates) {
-        stdout.writeAll("Auto-updates: yes\n") catch {};
+        stdout.writeAll("Auto-updates: yes\n") catch return;
     }
     {
         const line = std.fmt.bufPrint(&buf, "Installed: {s}\n", .{installed_at}) catch return;
-        stdout.writeAll(line) catch {};
+        stdout.writeAll(line) catch return;
     }
 }
 
@@ -505,7 +499,7 @@ fn writeJsonCaskInfo(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     name: []const u8,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
 ) !void {
     var stmt = db.prepare(
         "SELECT token, name, version, url, sha256, app_path, auto_updates, installed_at FROM casks WHERE token = ?1 LIMIT 1;",
@@ -516,9 +510,7 @@ fn writeJsonCaskInfo(
     const found = stmt.step() catch false;
     if (!found) return;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    _ = allocator;
 
     const token = if (stmt.columnText(0)) |t| std.mem.sliceTo(t, 0) else name;
     const cask_name = if (stmt.columnText(1)) |n| std.mem.sliceTo(n, 0) else name;
@@ -528,20 +520,19 @@ fn writeJsonCaskInfo(
     const auto_updates = stmt.columnBool(6);
     const installed_at = if (stmt.columnText(7)) |d| std.mem.sliceTo(d, 0) else "";
 
-    try w.writeAll("{\"name\":");
-    try output.jsonStr(w, token);
-    try w.writeAll(",\"type\":\"cask\",\"installed\":true,\"version\":");
-    try output.jsonStr(w, ver);
-    try w.writeAll(",\"full_name\":");
-    try output.jsonStr(w, cask_name);
-    try w.writeAll(",\"url\":");
-    try output.jsonStr(w, url);
-    try w.writeAll(",\"app_path\":");
-    try output.jsonStr(w, app_path);
-    try w.writeAll(",\"auto_updates\":");
-    try w.writeAll(if (auto_updates) "true" else "false");
-    try w.writeAll(",\"installed_at\":");
-    try output.jsonStr(w, installed_at);
-    try w.writeAll("}\n");
-    stdout.writeAll(buf.items) catch {};
+    try stdout.writeAll("{\"name\":");
+    try output.jsonStr(stdout, token);
+    try stdout.writeAll(",\"type\":\"cask\",\"installed\":true,\"version\":");
+    try output.jsonStr(stdout, ver);
+    try stdout.writeAll(",\"full_name\":");
+    try output.jsonStr(stdout, cask_name);
+    try stdout.writeAll(",\"url\":");
+    try output.jsonStr(stdout, url);
+    try stdout.writeAll(",\"app_path\":");
+    try output.jsonStr(stdout, app_path);
+    try stdout.writeAll(",\"auto_updates\":");
+    try stdout.writeAll(if (auto_updates) "true" else "false");
+    try stdout.writeAll(",\"installed_at\":");
+    try output.jsonStr(stdout, installed_at);
+    try stdout.writeAll("}\n");
 }

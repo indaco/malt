@@ -2,6 +2,7 @@
 //! Refresh metadata cache.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
@@ -25,7 +26,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var api_path_buf: [512]u8 = undefined;
     const api_path = std.fmt.bufPrint(&api_path_buf, "{s}/api", .{cache_dir}) catch return;
 
-    std.fs.deleteTreeAbsolute(api_path) catch {
+    fs_compat.deleteTreeAbsolute(api_path) catch {
         // Directory may not exist yet — that's fine
     };
 

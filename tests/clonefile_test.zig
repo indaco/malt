@@ -5,6 +5,7 @@
 //! takes the fast path; on non-APFS volumes we still hit the fallback.
 
 const std = @import("std");
+const malt = @import("malt");
 const testing = std.testing;
 const clonefile = @import("malt").clonefile;
 
@@ -13,26 +14,26 @@ fn tmpRoot(comptime tag: []const u8) []const u8 {
 }
 
 fn setupSourceTree(root: []const u8) !void {
-    std.fs.deleteTreeAbsolute(root) catch {};
-    try std.fs.makeDirAbsolute(root);
+    malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    try malt.fs_compat.makeDirAbsolute(root);
     var src_buf: [512]u8 = undefined;
     const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
-    try std.fs.makeDirAbsolute(src);
+    try malt.fs_compat.makeDirAbsolute(src);
 
     // A regular file.
     var f_buf: [512]u8 = undefined;
     const fpath = try std.fmt.bufPrint(&f_buf, "{s}/hello.txt", .{src});
-    const f = try std.fs.cwd().createFile(fpath, .{});
+    const f = try malt.fs_compat.cwd().createFile(fpath, .{});
     defer f.close();
     try f.writeAll("hi\n");
 
     // A nested file.
     var sub_buf: [512]u8 = undefined;
     const sub = try std.fmt.bufPrint(&sub_buf, "{s}/inner", .{src});
-    try std.fs.makeDirAbsolute(sub);
+    try malt.fs_compat.makeDirAbsolute(sub);
     var sub_f_buf: [512]u8 = undefined;
     const sf_path = try std.fmt.bufPrint(&sub_f_buf, "{s}/world.txt", .{sub});
-    const sf = try std.fs.cwd().createFile(sf_path, .{});
+    const sf = try malt.fs_compat.cwd().createFile(sf_path, .{});
     defer sf.close();
     try sf.writeAll("nested\n");
 }
@@ -53,7 +54,7 @@ test "isApfs returns true for a path that cannot be stat'd (fallback assumption)
 
 test "cloneTree duplicates a small directory tree" {
     const root = tmpRoot("basic");
-    defer std.fs.deleteTreeAbsolute(root) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
@@ -66,7 +67,7 @@ test "cloneTree duplicates a small directory tree" {
     // Verify the cloned top-level file exists with the same contents.
     var verify_buf: [512]u8 = undefined;
     const cloned = try std.fmt.bufPrint(&verify_buf, "{s}/hello.txt", .{dst});
-    const f = try std.fs.cwd().openFile(cloned, .{});
+    const f = try malt.fs_compat.cwd().openFile(cloned, .{});
     defer f.close();
     var contents: [16]u8 = undefined;
     const n = try f.readAll(&contents);
@@ -75,7 +76,7 @@ test "cloneTree duplicates a small directory tree" {
     // And the nested file.
     var nested_buf: [512]u8 = undefined;
     const nested = try std.fmt.bufPrint(&nested_buf, "{s}/inner/world.txt", .{dst});
-    const nf = try std.fs.cwd().openFile(nested, .{});
+    const nf = try malt.fs_compat.cwd().openFile(nested, .{});
     defer nf.close();
     var nb: [16]u8 = undefined;
     const nn = try nf.readAll(&nb);
@@ -84,7 +85,7 @@ test "cloneTree duplicates a small directory tree" {
 
 test "cloneTree fails with AlreadyExists when dst already exists" {
     const root = tmpRoot("exists");
-    defer std.fs.deleteTreeAbsolute(root) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
@@ -95,7 +96,7 @@ test "cloneTree fails with AlreadyExists when dst already exists" {
     // Pre-create dst — clonefile(2) EEXIST → CloneError.AlreadyExists on APFS.
     // On non-APFS filesystems the fallback may overwrite gracefully, so we
     // only assert the error on APFS.
-    try std.fs.makeDirAbsolute(dst);
+    try malt.fs_compat.makeDirAbsolute(dst);
     const result = clonefile.cloneTree(src, dst);
     if (clonefile.isApfs("/tmp")) {
         try testing.expectError(clonefile.CloneError.AlreadyExists, result);
@@ -120,7 +121,7 @@ test "cloneTree errors on a missing source when the fallback path is taken" {
 
 test "copyTreeFallback duplicates files, subdirs, and symlinks" {
     const root = tmpRoot("fallback");
-    defer std.fs.deleteTreeAbsolute(root) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
@@ -131,14 +132,14 @@ test "copyTreeFallback duplicates files, subdirs, and symlinks" {
     // Add a symlink into the source tree so the sym_link branch runs.
     var link_path_buf: [512]u8 = undefined;
     const link_path = try std.fmt.bufPrint(&link_path_buf, "{s}/link.txt", .{src});
-    std.fs.cwd().symLink("hello.txt", link_path, .{}) catch {};
+    malt.fs_compat.cwd().symLink("hello.txt", link_path, .{}) catch {};
 
     try clonefile.copyTreeFallback(src, dst);
 
     // Verify the top-level file is present.
     var check_buf: [512]u8 = undefined;
     const check = try std.fmt.bufPrint(&check_buf, "{s}/hello.txt", .{dst});
-    const f = try std.fs.cwd().openFile(check, .{});
+    const f = try malt.fs_compat.cwd().openFile(check, .{});
     defer f.close();
     var contents: [16]u8 = undefined;
     const n = try f.readAll(&contents);
@@ -147,13 +148,13 @@ test "copyTreeFallback duplicates files, subdirs, and symlinks" {
     // And the nested file.
     var nested_buf: [512]u8 = undefined;
     const nested = try std.fmt.bufPrint(&nested_buf, "{s}/inner/world.txt", .{dst});
-    const nf = try std.fs.cwd().openFile(nested, .{});
+    const nf = try malt.fs_compat.cwd().openFile(nested, .{});
     defer nf.close();
 }
 
 test "copyTreeFallback is idempotent when the destination already exists" {
     const root = tmpRoot("fallback_idem");
-    defer std.fs.deleteTreeAbsolute(root) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
@@ -161,13 +162,13 @@ test "copyTreeFallback is idempotent when the destination already exists" {
     var dst_buf: [512]u8 = undefined;
     const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst_idem", .{root});
 
-    try std.fs.makeDirAbsolute(dst);
+    try malt.fs_compat.makeDirAbsolute(dst);
     try clonefile.copyTreeFallback(src, dst);
 
     // Verify the nested file was still copied.
     var check_buf: [512]u8 = undefined;
     const check = try std.fmt.bufPrint(&check_buf, "{s}/inner/world.txt", .{dst});
-    const f = try std.fs.cwd().openFile(check, .{});
+    const f = try malt.fs_compat.cwd().openFile(check, .{});
     defer f.close();
 }
 

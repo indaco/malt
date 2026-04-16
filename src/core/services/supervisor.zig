@@ -27,6 +27,8 @@
 //!   files.
 
 const std = @import("std");
+const fs_compat = @import("../../fs/compat.zig");
+const io_mod = @import("../../ui/io.zig");
 const builtin = @import("builtin");
 const sqlite = @import("../../db/sqlite.zig");
 const plist_mod = @import("plist.zig");
@@ -136,11 +138,11 @@ pub fn register(
 
     const dir = try serviceDir(allocator, spec.label);
     defer allocator.free(dir);
-    std.fs.makeDirAbsolute(dir) catch |e| switch (e) {
+    fs_compat.makeDirAbsolute(dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         error.FileNotFound => {
             // Create the full parent path.
-            std.fs.cwd().makePath(dir) catch return SupervisorError.IoFailed;
+            fs_compat.cwd().makePath(dir) catch return SupervisorError.IoFailed;
         },
         else => return SupervisorError.IoFailed,
     };
@@ -149,14 +151,14 @@ pub fn register(
         return SupervisorError.OutOfMemory;
     defer allocator.free(plist_path);
 
-    var file = std.fs.createFileAbsolute(plist_path, .{ .truncate = true }) catch
+    var file = fs_compat.createFileAbsolute(plist_path, .{ .truncate = true }) catch
         return SupervisorError.IoFailed;
     defer file.close();
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    plist_mod.render(spec, buf.writer(allocator)) catch return SupervisorError.IoFailed;
-    file.writeAll(buf.items) catch return SupervisorError.IoFailed;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    plist_mod.render(spec, &aw.writer) catch return SupervisorError.IoFailed;
+    file.writeAll(aw.written()) catch return SupervisorError.IoFailed;
 
     var stmt = db.prepare(
         \\INSERT OR REPLACE INTO services(name, keg_name, plist_path, auto_start, last_status)
@@ -173,13 +175,13 @@ pub fn register(
 fn runLaunchctl(allocator: std.mem.Allocator, argv: []const []const u8) SupervisorError!void {
     if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
 
-    var child = std.process.Child.init(argv, allocator);
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
+    var child = fs_compat.Child.init(argv, allocator);
+    child.stdout_behavior = .ignore;
+    child.stderr_behavior = .ignore;
 
     const term = child.spawnAndWait() catch return SupervisorError.LaunchctlFailed;
     switch (term) {
-        .Exited => |code| if (code != 0) return SupervisorError.LaunchctlFailed,
+        .exited => |code| if (code != 0) return SupervisorError.LaunchctlFailed,
         else => return SupervisorError.LaunchctlFailed,
     }
 }
@@ -265,10 +267,15 @@ pub fn queryRuntime(allocator: std.mem.Allocator, label: []const u8) RuntimeStat
     // allocations. Streaming line-by-line via std.Io.Reader would shave
     // a sub-millisecond parse cost but the codebase doesn't otherwise
     // use that API, so the complexity isn't worth it for this cold path.
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    // `io_mod.ctx()` is the static `debug_io` whose internal allocator is
+    // `.failing` — `std.process.run` allocates argv/env and would OOM.
+    // Build a per-call `Threaded` io rooted at the caller's allocator.
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const result = std.process.run(allocator, threaded.io(), .{
         .argv = &.{ "launchctl", "list" },
-        .max_output_bytes = 4 * 1024 * 1024,
+        .stdout_limit = .limited(4 * 1024 * 1024),
+        .stderr_limit = .limited(4 * 1024 * 1024),
     }) catch return .not_loaded;
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
@@ -297,7 +304,7 @@ pub fn hasService(db: *sqlite.Database, name: []const u8) bool {
 }
 
 pub fn tailLog(allocator: std.mem.Allocator, path: []const u8, n: usize, writer: anytype) SupervisorError!void {
-    const f = std.fs.openFileAbsolute(path, .{}) catch return SupervisorError.IoFailed;
+    const f = fs_compat.openFileAbsolute(path, .{}) catch return SupervisorError.IoFailed;
     defer f.close();
     const stat = f.stat() catch return SupervisorError.IoFailed;
 
@@ -306,8 +313,7 @@ pub fn tailLog(allocator: std.mem.Allocator, path: []const u8, n: usize, writer:
     const buf = allocator.alloc(u8, read_size) catch return SupervisorError.OutOfMemory;
     defer allocator.free(buf);
     const seek_from: u64 = if (stat.size > read_size) stat.size - read_size else 0;
-    f.seekTo(seek_from) catch return SupervisorError.IoFailed;
-    const read = f.readAll(buf) catch return SupervisorError.IoFailed;
+    const read = f.readAllAt(buf, seek_from) catch return SupervisorError.IoFailed;
     const slice = buf[0..read];
 
     // Walk backwards, counting newlines.

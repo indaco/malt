@@ -2,17 +2,18 @@
 //! Covers the SHA256 verification helper without hitting the network.
 
 const std = @import("std");
+const malt = @import("malt");
 const testing = std.testing;
 const bottle = @import("malt").bottle;
 
 test "verify returns true when sha256 matches on-disk content" {
     const base = "/tmp/malt_bottle_verify_ok";
-    std.fs.deleteTreeAbsolute(base) catch {};
-    std.fs.makeDirAbsolute(base) catch {};
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    malt.fs_compat.makeDirAbsolute(base) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     const path = "/tmp/malt_bottle_verify_ok/payload.bin";
-    const f = try std.fs.createFileAbsolute(path, .{});
+    const f = try malt.fs_compat.createFileAbsolute(path, .{});
     try f.writeAll("hello");
     f.close();
 
@@ -23,12 +24,12 @@ test "verify returns true when sha256 matches on-disk content" {
 
 test "verify returns false for a mismatching sha256" {
     const base = "/tmp/malt_bottle_verify_mismatch";
-    std.fs.deleteTreeAbsolute(base) catch {};
-    std.fs.makeDirAbsolute(base) catch {};
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    malt.fs_compat.makeDirAbsolute(base) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     const path = "/tmp/malt_bottle_verify_mismatch/payload.bin";
-    const f = try std.fs.createFileAbsolute(path, .{});
+    const f = try malt.fs_compat.createFileAbsolute(path, .{});
     try f.writeAll("hello");
     f.close();
 

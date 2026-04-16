@@ -17,14 +17,14 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const path = try std.fmt.allocPrintSentinel(
         testing.allocator,
         "/tmp/malt_cli_services_{d}_{s}",
-        .{ std.time.nanoTimestamp(), suffix },
+        .{ malt.fs_compat.nanoTimestamp(), suffix },
         0,
     );
-    std.fs.deleteTreeAbsolute(path) catch {};
-    try std.fs.cwd().makePath(path);
+    malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    try malt.fs_compat.cwd().makePath(path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try std.fs.makeDirAbsolute(db_dir);
+    try malt.fs_compat.makeDirAbsolute(db_dir);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -54,7 +54,7 @@ test "execute with -h / --help prints help" {
 test "execute list on an empty prefix reports no services" {
     const prefix = try setupPrefix("list_empty");
     defer testing.allocator.free(prefix);
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
     try services_cli.execute(testing.allocator, &.{"list"});
     try services_cli.execute(testing.allocator, &.{"ls"});
@@ -65,7 +65,7 @@ test "execute list on an empty prefix reports no services" {
 test "execute with an unknown subcommand returns InvalidArgs" {
     const prefix = try setupPrefix("unknown");
     defer testing.allocator.free(prefix);
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
     try testing.expectError(
         error.InvalidArgs,
@@ -76,7 +76,7 @@ test "execute with an unknown subcommand returns InvalidArgs" {
 test "execute status with a non-existent service returns SupervisorError" {
     const prefix = try setupPrefix("status_missing");
     defer testing.allocator.free(prefix);
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
     try testing.expectError(
         error.SupervisorError,
@@ -87,7 +87,7 @@ test "execute status with a non-existent service returns SupervisorError" {
 test "execute start/stop/restart with wrong arity returns InvalidArgs" {
     const prefix = try setupPrefix("lifecycle_argv");
     defer testing.allocator.free(prefix);
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
     for ([_][]const u8{ "start", "stop", "restart" }) |op| {
         try testing.expectError(
@@ -100,7 +100,7 @@ test "execute start/stop/restart with wrong arity returns InvalidArgs" {
 test "execute logs with no args returns InvalidArgs" {
     const prefix = try setupPrefix("logs_noargs");
     defer testing.allocator.free(prefix);
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
     try testing.expectError(
         error.InvalidArgs,

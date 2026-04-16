@@ -2,6 +2,7 @@
 //! Manage taps (tap/untap).
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const tap_mod = @import("../core/tap.zig");
@@ -20,8 +21,8 @@ pub const TapNameError = error{InvalidTapName};
 /// neither side starts with `.` (rules out `..` traversal and hidden
 /// components).
 pub fn validateTapName(name: []const u8) TapNameError!void {
-    const slash = std.mem.indexOfScalar(u8, name, '/') orelse return TapNameError.InvalidTapName;
-    if (std.mem.indexOfScalarPos(u8, name, slash + 1, '/') != null) return TapNameError.InvalidTapName;
+    const slash = std.mem.findScalar(u8, name, '/') orelse return TapNameError.InvalidTapName;
+    if (std.mem.findScalarPos(u8, name, slash + 1, '/') != null) return TapNameError.InvalidTapName;
     try validateComponent(name[0..slash]);
     try validateComponent(name[slash + 1 ..]);
 }
@@ -79,7 +80,7 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
         }
 
         for (taps) |t| {
-            const f = std.fs.File.stdout();
+            const f = fs_compat.stdoutFile();
             f.writeAll(t.name) catch {};
             f.writeAll("\n") catch {};
             allocator.free(t.name);

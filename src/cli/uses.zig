@@ -6,6 +6,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const io_mod = @import("../ui/io.zig");
 const color = @import("../ui/color.zig");
 const cli_info = @import("info.zig");
 const help = @import("help.zig");
@@ -36,7 +37,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var db_opt: ?sqlite.Database = cli_info.openDb(prefix);
     defer if (db_opt) |*d| d.close();
 
-    const stdout = std.fs.File.stdout();
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw = std.Io.File.stdout().writer(io_mod.ctx(), &stdout_buf);
+    const stdout: *std.Io.Writer = &stdout_fw.interface;
+    defer stdout.flush() catch {};
 
     // Without a local DB nothing is installed, so nothing can "use"
     // anything. Emit an empty result in the shape each mode expects
@@ -71,20 +75,23 @@ pub fn collectDependents(
     var names: std.StringHashMap(void) = .init(allocator);
     defer names.deinit();
 
+    // Frontier borrows: root from caller's `target`, rest from
+    // `names`-owned keys. One dupe per unique name, not two.
     var frontier: std.ArrayList([]const u8) = .empty;
     defer frontier.deinit(allocator);
-    try frontier.append(allocator, try allocator.dupe(u8, target));
-    defer {
-        // Anything that never made it into `names` (e.g. the initial
-        // target itself, or a node rejected as a cycle) still owns
-        // its bytes via this frontier. Free what the hash map didn't
-        // steal so we don't leak on early returns.
-        for (frontier.items) |f| allocator.free(f);
-    }
+    try frontier.append(allocator, target);
 
-    while (frontier.items.len > 0) {
-        const current = frontier.orderedRemove(0);
-        defer allocator.free(current);
+    // Peak ~2× max-in-flight: compact live tail to front once half-consumed.
+    var head: usize = 0;
+    while (head < frontier.items.len) {
+        if (head > 0 and head * 2 >= frontier.items.len) {
+            const live = frontier.items[head..];
+            std.mem.copyForwards([]const u8, frontier.items[0..live.len], live);
+            frontier.items.len = live.len;
+            head = 0;
+        }
+        const current = frontier.items[head];
+        head += 1;
 
         var stmt = db.prepare(
             "SELECT k.name FROM kegs k " ++
@@ -100,9 +107,13 @@ pub fn collectDependents(
             if (names.contains(dep)) continue;
 
             const owned = try allocator.dupe(u8, dep);
-            errdefer allocator.free(owned);
-            try names.put(owned, {});
-            if (recursive) try frontier.append(allocator, try allocator.dupe(u8, dep));
+            {
+                // Scoped so the errdefer only covers the put itself;
+                // past here `owned` is borrowed by `names`.
+                errdefer allocator.free(owned);
+                try names.put(owned, {});
+            }
+            if (recursive) try frontier.append(allocator, owned);
         }
     }
 
@@ -129,7 +140,7 @@ pub fn freeDependents(allocator: std.mem.Allocator, deps: [][]const u8) void {
     allocator.free(deps);
 }
 
-pub fn writeHuman(stdout: std.fs.File, target: []const u8, dependents: [][]const u8) !void {
+pub fn writeHuman(stdout: *std.Io.Writer, target: []const u8, dependents: [][]const u8) !void {
     if (dependents.len == 0) {
         var buf: [512]u8 = undefined;
         const line = std.fmt.bufPrint(
@@ -137,29 +148,27 @@ pub fn writeHuman(stdout: std.fs.File, target: []const u8, dependents: [][]const
             "No installed formula uses {s}.\n",
             .{target},
         ) catch return;
-        stdout.writeAll(line) catch {};
+        stdout.writeAll(line) catch return;
         return;
     }
     const use_color = color.isColorEnabled();
     for (dependents) |d| {
-        if (use_color) stdout.writeAll(color.Style.cyan.code()) catch {};
-        stdout.writeAll("  \xe2\x96\xb8 ") catch {};
-        if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
-        stdout.writeAll(d) catch {};
-        stdout.writeAll("\n") catch {};
+        if (use_color) stdout.writeAll(color.Style.cyan.code()) catch return;
+        stdout.writeAll("  \xe2\x96\xb8 ") catch return;
+        if (use_color) stdout.writeAll(color.Style.reset.code()) catch return;
+        stdout.writeAll(d) catch return;
+        stdout.writeAll("\n") catch return;
     }
 }
 
 pub fn writeJson(
     allocator: std.mem.Allocator,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     target: []const u8,
     dependents: [][]const u8,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    try encodeJson(buf.writer(allocator), target, dependents);
-    stdout.writeAll(buf.items) catch {};
+    _ = allocator;
+    try encodeJson(stdout, target, dependents);
 }
 
 /// Pure encoder: emits `{"formula":"<target>","uses":["a","b"]}\n`.

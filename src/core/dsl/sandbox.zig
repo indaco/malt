@@ -2,6 +2,7 @@
 //! Validates that filesystem-mutating operations stay within allowed boundaries.
 
 const std = @import("std");
+const fs_compat = @import("../../fs/compat.zig");
 
 pub const SandboxError = error{PathSandboxViolation};
 
@@ -48,7 +49,7 @@ pub fn validateResolved(
     // Try to resolve symlinks. If the path doesn't exist yet,
     // that's fine — just validate the literal path.
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const resolved = std.fs.cwd().realpath(target_path, &buf) catch {
+    const resolved = fs_compat.cwd().realpath(target_path, &buf) catch {
         return; // Path doesn't exist yet — literal validation passed
     };
 

@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const fs_compat = @import("../fs/compat.zig");
 
 pub const CodesignError = error{
     CodesignFailed,
@@ -44,14 +45,14 @@ pub fn adHocSignAll(allocator: std.mem.Allocator, paths: []const []const u8) Cod
     argv.appendAssumeCapacity("-");
     for (paths) |p| argv.appendAssumeCapacity(p);
 
-    var child = std.process.Child.init(argv.items, allocator);
+    var child = fs_compat.Child.init(argv.items, allocator);
     // Redirect stdout/stderr to /dev/null to suppress codesign messages
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
+    child.stdout_behavior = .ignore;
+    child.stderr_behavior = .ignore;
     child.spawn() catch return CodesignError.SpawnFailed;
     const term = child.wait() catch return CodesignError.CodesignFailed;
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) return CodesignError.CodesignFailed;
         },
         else => return CodesignError.CodesignFailed,

@@ -69,18 +69,15 @@ fn replaceAll(allocator: std.mem.Allocator, haystack: []const u8, needle: []cons
 fn replaceFirst(allocator: std.mem.Allocator, haystack: []const u8, needle: []const u8, replacement: []const u8) BuiltinError![]const u8 {
     if (needle.len == 0) return allocator.dupe(u8, haystack) catch return BuiltinError.OutOfMemory;
 
-    const idx = std.mem.indexOf(u8, haystack, needle) orelse {
+    const before, const after = std.mem.cut(u8, haystack, needle) orelse {
         return allocator.dupe(u8, haystack) catch return BuiltinError.OutOfMemory;
     };
 
-    const new_len = haystack.len - needle.len + replacement.len;
-    const buf = allocator.alloc(u8, new_len) catch return BuiltinError.OutOfMemory;
-
-    @memcpy(buf[0..idx], haystack[0..idx]);
-    @memcpy(buf[idx..][0..replacement.len], replacement);
-    const after = idx + needle.len;
-    @memcpy(buf[idx + replacement.len ..][0 .. haystack.len - after], haystack[after..]);
-
+    const buf = allocator.alloc(u8, before.len + replacement.len + after.len) catch
+        return BuiltinError.OutOfMemory;
+    @memcpy(buf[0..before.len], before);
+    @memcpy(buf[before.len..][0..replacement.len], replacement);
+    @memcpy(buf[before.len + replacement.len ..], after);
     return buf;
 }
 
@@ -119,7 +116,7 @@ pub fn subBang(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError
 /// chomp — remove trailing newline characters
 pub fn chomp(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const s = try receiverStr(ctx.allocator, receiver);
-    const trimmed = std.mem.trimRight(u8, s, "\n\r");
+    const trimmed = std.mem.trimEnd(u8, s, "\n\r");
     return Value{ .string = trimmed };
 }
 

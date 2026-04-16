@@ -2,6 +2,7 @@
 //! Maps ohai/opoo/odie to src/ui/output.zig
 
 const std = @import("std");
+const fs_compat = @import("../../../fs/compat.zig");
 const output = @import("../../../ui/output.zig");
 const values = @import("../values.zig");
 const pathname = @import("pathname.zig");
@@ -16,7 +17,7 @@ pub fn ohai(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     const msg = args[0].asString(ctx.allocator) catch return Value{ .nil = {} };
     var buf: [4096]u8 = undefined;
     const formatted = std.fmt.bufPrint(&buf, "{s}", .{msg}) catch return Value{ .nil = {} };
-    const f = std.fs.File.stderr();
+    const f = fs_compat.stderrFile();
     f.writeAll("  > ") catch {};
     f.writeAll(formatted) catch {};
     f.writeAll("\n") catch {};
@@ -29,7 +30,7 @@ pub fn opoo(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     const msg = args[0].asString(ctx.allocator) catch return Value{ .nil = {} };
     var buf: [4096]u8 = undefined;
     const formatted = std.fmt.bufPrint(&buf, "{s}", .{msg}) catch return Value{ .nil = {} };
-    const f = std.fs.File.stderr();
+    const f = fs_compat.stderrFile();
     f.writeAll("  ! ") catch {};
     f.writeAll(formatted) catch {};
     f.writeAll("\n") catch {};
@@ -42,7 +43,7 @@ pub fn odie(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     const msg = args[0].asString(ctx.allocator) catch return BuiltinError.PostInstallFailed;
     var buf: [4096]u8 = undefined;
     const formatted = std.fmt.bufPrint(&buf, "{s}", .{msg}) catch return BuiltinError.PostInstallFailed;
-    const f = std.fs.File.stderr();
+    const f = fs_compat.stderrFile();
     f.writeAll("  x ") catch {};
     f.writeAll(formatted) catch {};
     f.writeAll("\n") catch {};

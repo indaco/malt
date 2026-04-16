@@ -12,6 +12,7 @@
 //! callers leave it null.
 
 const std = @import("std");
+const fs_compat = @import("../../fs/compat.zig");
 const builtin = @import("builtin");
 const sqlite = @import("../../db/sqlite.zig");
 const schema = @import("../../db/schema.zig");
@@ -66,7 +67,7 @@ pub fn run(
     const bundles_dir = std.fmt.allocPrint(allocator, "{s}/var/malt/bundles", .{prefix}) catch
         return RunnerError.OutOfMemory;
     defer allocator.free(bundles_dir);
-    std.fs.cwd().makePath(bundles_dir) catch {};
+    fs_compat.cwd().makePath(bundles_dir) catch {};
 
     const lock_path = std.fmt.allocPrint(allocator, "{s}/{s}.lock", .{ bundles_dir, bundle_name }) catch
         return RunnerError.OutOfMemory;
@@ -175,12 +176,12 @@ fn runSubprocess(allocator: std.mem.Allocator, bin: []const u8, call: MemberCall
         },
     }
 
-    var child = std.process.Child.init(argv.items, allocator);
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
+    var child = fs_compat.Child.init(argv.items, allocator);
+    child.stdout_behavior = .inherit;
+    child.stderr_behavior = .inherit;
     const term = try child.spawnAndWait();
     switch (term) {
-        .Exited => |code| if (code != 0) return error.MemberFailed,
+        .exited => |code| if (code != 0) return error.MemberFailed,
         else => return error.MemberFailed,
     }
 }
@@ -203,7 +204,7 @@ fn recordBundle(
     );
     defer ins.finalize();
     try ins.bindText(1, name);
-    try ins.bindInt(2, std.time.timestamp());
+    try ins.bindInt(2, fs_compat.timestamp());
     try ins.bindInt(3, @intCast(manifest.version));
     _ = try ins.step();
 

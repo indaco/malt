@@ -2,6 +2,7 @@
 //! system() builtin using std.process.Child
 
 const std = @import("std");
+const fs_compat = @import("../../../fs/compat.zig");
 const values = @import("../values.zig");
 const pathname = @import("pathname.zig");
 
@@ -23,12 +24,12 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
 
     if (argv_slice.len == 0) return Value{ .nil = {} };
 
-    var child = std.process.Child.init(argv_slice, ctx.allocator);
+    var child = fs_compat.Child.init(argv_slice, ctx.allocator);
     child.spawn() catch return BuiltinError.SystemCommandFailed;
     const term = child.wait() catch return BuiltinError.SystemCommandFailed;
 
     return switch (term) {
-        .Exited => |code| if (code == 0) Value{ .bool = true } else Value{ .bool = false },
+        .exited => |code| if (code == 0) Value{ .bool = true } else Value{ .bool = false },
         else => Value{ .bool = false },
     };
 }
@@ -44,7 +45,7 @@ pub fn quietSystem(ctx: ExecCtx, recv: ?Value, args: []const Value) BuiltinError
 pub fn fileExist(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return Value{ .bool = false };
     const path = args[0].asString(ctx.allocator) catch return Value{ .bool = false };
-    std.fs.cwd().access(path, .{}) catch {
+    fs_compat.cwd().access(path, .{}) catch {
         return Value{ .bool = false };
     };
     return Value{ .bool = true };
@@ -61,11 +62,11 @@ pub fn devToolsLocate(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError
     var probe: [std.fs.max_path_bytes]u8 = undefined;
 
     // Search PATH for the command.
-    const path_env = std.posix.getenv("PATH") orelse "/usr/bin:/bin:/usr/sbin:/sbin";
+    const path_env = fs_compat.getenv("PATH") orelse "/usr/bin:/bin:/usr/sbin:/sbin";
     var path_iter = std.mem.tokenizeScalar(u8, path_env, ':');
     while (path_iter.next()) |dir| {
         const full = std.fmt.bufPrint(&probe, "{s}/{s}", .{ dir, cmd_name }) catch continue;
-        std.fs.cwd().access(full, .{}) catch continue;
+        fs_compat.cwd().access(full, .{}) catch continue;
         const owned = ctx.allocator.dupe(u8, full) catch return BuiltinError.OutOfMemory;
         return Value{ .pathname = owned };
     }
@@ -74,7 +75,7 @@ pub fn devToolsLocate(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError
     const fallbacks = [_][]const u8{ "/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/" };
     for (fallbacks) |prefix| {
         const full = std.fmt.bufPrint(&probe, "{s}{s}", .{ prefix, cmd_name }) catch continue;
-        std.fs.cwd().access(full, .{}) catch continue;
+        fs_compat.cwd().access(full, .{}) catch continue;
         const owned = ctx.allocator.dupe(u8, full) catch return BuiltinError.OutOfMemory;
         return Value{ .pathname = owned };
     }
@@ -109,14 +110,14 @@ pub fn osLinux(_: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Value {
 pub fn macosVersion(ctx: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Value {
     // Get macOS version from sw_vers
     const argv = [_][]const u8{ "sw_vers", "-productVersion" };
-    var child = std.process.Child.init(&argv, ctx.allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+    var child = fs_compat.Child.init(&argv, ctx.allocator);
+    child.stdout_behavior = .pipe;
+    child.stderr_behavior = .ignore;
     child.spawn() catch return Value{ .string = "15.0" };
     const stdout = child.stdout orelse return Value{ .string = "15.0" };
-    const ver = stdout.readToEndAlloc(ctx.allocator, 256) catch return Value{ .string = "15.0" };
+    const ver = fs_compat.readFileToEndAlloc(stdout, ctx.allocator, 256) catch return Value{ .string = "15.0" };
     _ = child.wait() catch {};
-    const trimmed = std.mem.trimRight(u8, ver, "\n\r ");
+    const trimmed = std.mem.trimEnd(u8, ver, "\n\r ");
     return Value{ .string = trimmed };
 }
 
@@ -139,7 +140,7 @@ pub fn envGet(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     const key = args[0].asString(ctx.allocator) catch return Value{ .nil = {} };
     // Need null-terminated key for getenv
     const key_z = ctx.allocator.dupeZ(u8, key) catch return BuiltinError.OutOfMemory;
-    if (std.posix.getenv(key_z)) |val| {
+    if (fs_compat.getenv(key_z)) |val| {
         return Value{ .string = val };
     }
     return Value{ .nil = {} };
@@ -167,16 +168,16 @@ pub fn safePopenRead(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!
 
     if (argv_slice.len == 0) return Value{ .string = "" };
 
-    var child = std.process.Child.init(argv_slice, ctx.allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+    var child = fs_compat.Child.init(argv_slice, ctx.allocator);
+    child.stdout_behavior = .pipe;
+    child.stderr_behavior = .ignore;
     child.spawn() catch return Value{ .string = "" };
 
     const stdout = child.stdout orelse return Value{ .string = "" };
-    const content = stdout.readToEndAlloc(ctx.allocator, 1024 * 1024) catch return Value{ .string = "" };
+    const content = fs_compat.readFileToEndAlloc(stdout, ctx.allocator, 1024 * 1024) catch return Value{ .string = "" };
     _ = child.wait() catch {};
 
     // Chomp trailing newline
-    const trimmed = std.mem.trimRight(u8, content, "\n\r");
+    const trimmed = std.mem.trimEnd(u8, content, "\n\r");
     return Value{ .string = trimmed };
 }

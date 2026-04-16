@@ -2,11 +2,13 @@
 //! List installed packages.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const color = @import("../ui/color.zig");
+const io_mod = @import("../ui/io.zig");
 const help = @import("help.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -51,7 +53,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer db.close();
     schema.initSchema(&db) catch return;
 
-    const stdout = std.fs.File.stdout();
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw = std.Io.File.stdout().writer(io_mod.ctx(), &stdout_buf);
+    const stdout: *std.Io.Writer = &stdout_fw.interface;
+    defer stdout.flush() catch {};
 
     if (json_mode) {
         try writeJsonOutput(allocator, &db, show_formula, show_cask, show_pinned, stdout);
@@ -66,7 +71,7 @@ fn writeHumanOutput(
     show_cask: bool,
     show_versions: bool,
     show_pinned: bool,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
 ) !void {
     if (show_formula) {
         const sql = if (show_pinned)
@@ -84,7 +89,7 @@ fn writeHumanOutput(
             const name_slice = std.mem.sliceTo(name, 0);
 
             writeBulletPrefix(stdout);
-            stdout.writeAll(name_slice) catch {};
+            stdout.writeAll(name_slice) catch return;
             if (show_versions) {
                 const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "?";
                 writeStyledSpan(stdout, color.Style.dim, " (", ver_slice, ")");
@@ -92,7 +97,7 @@ fn writeHumanOutput(
             if (pinned) {
                 writeStyledSpan(stdout, color.Style.yellow, " [pinned]", "", "");
             }
-            stdout.writeAll("\n") catch {};
+            stdout.writeAll("\n") catch return;
         }
     }
 
@@ -107,42 +112,42 @@ fn writeHumanOutput(
             const token_slice = std.mem.sliceTo(token, 0);
 
             writeBulletPrefix(stdout);
-            stdout.writeAll(token_slice) catch {};
+            stdout.writeAll(token_slice) catch return;
             if (show_versions) {
                 const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "?";
                 writeStyledSpan(stdout, color.Style.dim, " (", ver_slice, ")");
             }
-            stdout.writeAll("\n") catch {};
+            stdout.writeAll("\n") catch return;
         }
     }
 }
 
 /// Emit the leading cyan bullet + space, honouring `NO_COLOR`.
-fn writeBulletPrefix(stdout: std.fs.File) void {
+fn writeBulletPrefix(stdout: *std.Io.Writer) void {
     if (color.isColorEnabled()) {
-        stdout.writeAll(color.Style.cyan.code()) catch {};
-        stdout.writeAll("  ▸ ") catch {};
-        stdout.writeAll(color.Style.reset.code()) catch {};
+        stdout.writeAll(color.Style.cyan.code()) catch return;
+        stdout.writeAll("  ▸ ") catch return;
+        stdout.writeAll(color.Style.reset.code()) catch return;
     } else {
-        stdout.writeAll("  ▸ ") catch {};
+        stdout.writeAll("  ▸ ") catch return;
     }
 }
 
 /// Emit `open + body + close`, wrapping the whole thing in `style` / reset
 /// when colour is enabled. `open` or `close` may be empty.
 fn writeStyledSpan(
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     style: color.Style,
     open: []const u8,
     body: []const u8,
     close: []const u8,
 ) void {
     const use_color = color.isColorEnabled();
-    if (use_color) stdout.writeAll(style.code()) catch {};
-    stdout.writeAll(open) catch {};
-    stdout.writeAll(body) catch {};
-    stdout.writeAll(close) catch {};
-    if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
+    if (use_color) stdout.writeAll(style.code()) catch return;
+    stdout.writeAll(open) catch return;
+    stdout.writeAll(body) catch return;
+    stdout.writeAll(close) catch return;
+    if (use_color) stdout.writeAll(color.Style.reset.code()) catch return;
 }
 
 fn writeJsonOutput(
@@ -151,16 +156,11 @@ fn writeJsonOutput(
     show_formula: bool,
     show_cask: bool,
     show_pinned: bool,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
 ) !void {
-    const start_ts = std.time.milliTimestamp();
-
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-
-    try buildListJson(db, w, show_formula, show_cask, show_pinned, start_ts);
-    stdout.writeAll(buf.items) catch {};
+    _ = allocator;
+    const start_ts = fs_compat.milliTimestamp();
+    try buildListJson(db, stdout, show_formula, show_cask, show_pinned, start_ts);
 }
 
 /// Build the `{ "installed": [...], "formulae": [...], "casks": [...], "time_ms": N }`
@@ -277,7 +277,7 @@ fn writeCaskRows(
 
 /// Write the ,"time_ms":N suffix for JSON output.
 fn writeTimeSuffix(w: anytype, start_ts: i64) !void {
-    const elapsed = std.time.milliTimestamp() - start_ts;
+    const elapsed = fs_compat.milliTimestamp() - start_ts;
     var time_buf: [32]u8 = undefined;
     const time_str = std.fmt.bufPrint(&time_buf, ",\"time_ms\":{d}", .{elapsed}) catch return;
     try w.writeAll(time_str);

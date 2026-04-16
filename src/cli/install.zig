@@ -3,6 +3,7 @@
 //! Implements the 9-step atomic install protocol.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
@@ -42,6 +43,30 @@ pub const PrefixError = error{PrefixTooLong};
 
 /// Refuse to proceed when MALT_PREFIX exceeds `max_prefix_len`. Exposed so
 /// `mt doctor` can reuse the same rule.
+/// Parsed `<repo>@<digest>` reference from a GHCR blob URL.
+/// Both fields are slices into the input URL — no allocation; valid
+/// for the lifetime of the caller's string.
+pub const GhcrRef = struct {
+    repo: []const u8,
+    digest: []const u8,
+};
+
+/// Split a `https://ghcr.io/v2/<repo>/blobs/<digest>` URL into its
+/// `<repo>` and `<digest>` parts, returning `null` if the URL is not
+/// in that shape. Exposed so the install-phase token prefetch and the
+/// per-worker blob download parse identically — a single pure helper
+/// prevents the two code paths from drifting apart.
+pub fn parseGhcrUrl(url: []const u8) ?GhcrRef {
+    const prefix = "https://ghcr.io/v2/";
+    if (!std.mem.startsWith(u8, url, prefix)) return null;
+    const path = url[prefix.len..];
+    const blobs_pos = std.mem.find(u8, path, "/blobs/") orelse return null;
+    return .{
+        .repo = path[0..blobs_pos],
+        .digest = path[blobs_pos + "/blobs/".len ..],
+    };
+}
+
 pub fn checkPrefixLength(prefix: []const u8) PrefixError!void {
     if (prefix.len > max_prefix_len) return error.PrefixTooLong;
 }
@@ -137,20 +162,13 @@ fn downloadWorker(
         return;
     }
 
-    // Extract repo + digest from bottle URL
-    const ghcr_prefix_str = "https://ghcr.io/v2/";
-    var repo_buf: [256]u8 = undefined;
-    var digest_buf: [128]u8 = undefined;
-    var repo: []const u8 = undefined;
-    var digest: []const u8 = undefined;
-
-    if (std.mem.startsWith(u8, job.bottle_url, ghcr_prefix_str)) {
-        const path = job.bottle_url[ghcr_prefix_str.len..];
-        if (std.mem.indexOf(u8, path, "/blobs/")) |blobs_pos| {
-            repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return;
-            digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return;
-        } else return;
-    } else return;
+    // Extract repo + digest from bottle URL via the shared parser so
+    // the token-prefetch path in `execute` can collect scopes without
+    // duplicating this logic. Slices borrow from `job.bottle_url`,
+    // which outlives the worker.
+    const ref = parseGhcrUrl(job.bottle_url) orelse return;
+    const repo = ref.repo;
+    const digest = ref.digest;
 
     // Create temp dir
     const tmp_dir = atomic.createTempDir(allocator, job.name) catch return;
@@ -186,7 +204,7 @@ fn downloadWorker(
             // Wipe the partial tmp and retry
             atomic.cleanupTempDir(tmp_dir);
             if (dl_attempt + 1 < max_attempts) {
-                std.Thread.sleep(retry_delays_ms[dl_attempt] * std.time.ns_per_ms);
+                fs_compat.sleepNanos(retry_delays_ms[dl_attempt] * std.time.ns_per_ms);
             }
         }
     }
@@ -433,6 +451,31 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.info("Downloading 1 bottle...", .{});
         } else {
             output.info("Downloading {d} bottles...", .{to_download});
+        }
+
+        // GHCR token prefetch: fold every distinct repo in the batch
+        // into a single multi-scope `/token` round-trip so each
+        // download worker hits the cache instead of racing its own
+        // token fetch. On a 12-dep install this turns 12 sequential
+        // token round-trips into 1. `prefetchTokens` is best-effort;
+        // on any error we leave the cache empty and workers fall back
+        // to per-repo fetches (the old behaviour, one round-trip each).
+        var repo_set: std.StringHashMapUnmanaged(void) = .empty;
+        defer repo_set.deinit(allocator);
+        for (all_jobs.items) |*job| {
+            if (job.succeeded) continue;
+            const ref = parseGhcrUrl(job.bottle_url) orelse continue;
+            repo_set.put(allocator, ref.repo, {}) catch {};
+        }
+        if (repo_set.count() > 0) {
+            var repos: std.ArrayList([]const u8) = .empty;
+            defer repos.deinit(allocator);
+            repos.ensureTotalCapacity(allocator, repo_set.count()) catch {};
+            var it = repo_set.keyIterator();
+            while (it.next()) |k| repos.append(allocator, k.*) catch {};
+            const pre_http = http_pool.acquire();
+            ghcr.prefetchTokens(pre_http, repos.items) catch {};
+            http_pool.release(pre_http);
         }
 
         // Set up multi-progress: assign line indices and create coordinator
@@ -742,28 +785,32 @@ pub fn findFailedDep(
     return null;
 }
 
-/// Thread entry-point for parallel dep formula fetching. Borrows a
-/// client from the shared `HttpClientPool` for the duration of the
-/// fetch, builds a throw-away `BrewApi` around it, and stores the
-/// result. On any failure leaves `result.*` as `null`; the caller
-/// treats null as "skip this dep" the same way the old serial loop's
-/// `catch continue` did.
+/// Per-dep worker context for parallel formula fetching. Owns its own
+/// `ArenaAllocator` backed by `page_allocator` so workers never touch
+/// a shared bump-pointer — matches the `downloadWorker` pattern and
+/// removes the last cross-thread allocator on the resolve path.
 ///
-/// Why the pool: creating a fresh `HttpClient` per worker paid a full
-/// TLS context + cert store setup per dep. For cold installs of
-/// packages with many deps (ffmpeg has 11) that overhead compounds.
-fn fetchFormulaWorker(
-    allocator: std.mem.Allocator,
+/// Why the pool on the HTTP side: creating a fresh `HttpClient` per
+/// worker paid a full TLS context + cert store setup per dep. For
+/// cold installs of packages with many deps (ffmpeg has 11) that
+/// overhead compounds; the pool lets workers reuse warm TLS contexts.
+///
+/// `result` is a slice inside `arena`, so the caller must dupe it
+/// into a longer-lived allocator before `arena.deinit()`.
+const FetchFormulaCtx = struct {
+    arena: std.heap.ArenaAllocator,
     pool: *client_mod.HttpClientPool,
     cache_dir: []const u8,
     dep_name: []const u8,
-    result: *?[]const u8,
-) void {
-    const http = pool.acquire();
-    defer pool.release(http);
-    var local_api = api_mod.BrewApi.init(allocator, http, cache_dir);
-    result.* = local_api.fetchFormula(dep_name) catch null;
-}
+    result: ?[]const u8 = null,
+
+    fn run(self: *FetchFormulaCtx) void {
+        const http = self.pool.acquire();
+        defer self.pool.release(http);
+        var local_api = api_mod.BrewApi.init(self.arena.allocator(), http, self.cache_dir);
+        self.result = local_api.fetchFormula(self.dep_name) catch null;
+    }
+};
 
 /// Collect download jobs for a formula and all its dependencies.
 /// Appends to the shared jobs list for parallel download.
@@ -802,23 +849,29 @@ pub fn collectFormulaJobs(
     // borrows a client from the shared `http_pool` for the duration
     // of its request so TLS contexts are reused across deps.
     //
-    // Thread-safety: the caller's allocator is typically a
-    // non-thread-safe `GeneralPurposeAllocator`, so we wrap it in a
-    // `ThreadSafeAllocator` for the parallel section. Without this,
-    // concurrent workers would race on allocator bookkeeping and
-    // occasionally return corrupted response buffers (observed as
-    // sporadic `InvalidJson` failures on random deps of large
-    // formulae like ffmpeg). After `join()` the parallel phase is
-    // over and the serial post-processing can use the unwrapped
-    // `allocator` again — pointers allocated through the wrapper
-    // remain valid because both go to the same underlying GPA.
+    // Allocator strategy (S7): each worker owns a `FetchFormulaCtx`
+    // with its own `ArenaAllocator` on `page_allocator` — no shared
+    // bump-pointer across threads. JSON bodies live in the worker's
+    // arena until after `join`, then get duped into the caller's
+    // `allocator` so they outlive the per-worker deinit.
     const dep_jsons = allocator.alloc(?[]const u8, deps.len) catch return InstallError.DownloadFailed;
     defer allocator.free(dep_jsons);
     @memset(dep_jsons, null);
 
     if (deps.len > 0) {
-        var ts_allocator: std.heap.ThreadSafeAllocator = .{ .child_allocator = allocator };
-        const worker_alloc = ts_allocator.allocator();
+        const ctxs = allocator.alloc(FetchFormulaCtx, deps.len) catch return InstallError.DownloadFailed;
+        defer {
+            for (ctxs) |*c| c.arena.deinit();
+            allocator.free(ctxs);
+        }
+        for (ctxs, 0..) |*c, i| {
+            c.* = .{
+                .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+                .pool = http_pool,
+                .cache_dir = api.cache_dir,
+                .dep_name = deps[i].name,
+            };
+        }
 
         const threads = allocator.alloc(std.Thread, deps.len) catch return InstallError.DownloadFailed;
         defer allocator.free(threads);
@@ -826,17 +879,24 @@ pub fn collectFormulaJobs(
         var spawned: usize = 0;
         for (deps, 0..) |dep, i| {
             if (dep.already_installed) continue;
-            if (std.Thread.spawn(.{}, fetchFormulaWorker, .{
-                worker_alloc, http_pool, api.cache_dir, dep.name, &dep_jsons[i],
-            })) |t| {
+            if (std.Thread.spawn(.{}, FetchFormulaCtx.run, .{&ctxs[i]})) |t| {
                 threads[spawned] = t;
                 spawned += 1;
             } else |_| {
-                // Spawn failure → fall back to inline fetch.
-                fetchFormulaWorker(worker_alloc, http_pool, api.cache_dir, dep.name, &dep_jsons[i]);
+                // Spawn failure → run inline on the caller thread.
+                ctxs[i].run();
             }
         }
         for (threads[0..spawned]) |t| t.join();
+
+        // Dupe each fetched JSON into the caller's allocator so the
+        // memory outlives per-worker `arena.deinit()` — downstream
+        // parses and eventually `allocator.free`s these bytes.
+        for (ctxs, 0..) |*c, i| {
+            if (c.result) |bytes| {
+                dep_jsons[i] = allocator.dupe(u8, bytes) catch null;
+            }
+        }
     }
 
     // Add deps as jobs — serial post-processing (parse + dedup + append)
@@ -1084,7 +1144,7 @@ fn maybeRegisterService(
     // Ensure the log directory exists.
     var log_dir_buf: [512]u8 = undefined;
     if (std.fmt.bufPrint(&log_dir_buf, "{s}/var/log", .{prefix})) |dir| {
-        std.fs.cwd().makePath(dir) catch {};
+        fs_compat.cwd().makePath(dir) catch {};
     } else |_| {}
 
     const spec: plist_mod.ServiceSpec = .{
@@ -1256,7 +1316,7 @@ pub fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
 /// Ensure all required directories under prefix exist.
 pub fn ensureDirs(prefix: []const u8) !void {
     // Create the prefix directory itself first (e.g. /opt/malt)
-    std.fs.makeDirAbsolute(prefix) catch |e| switch (e) {
+    fs_compat.makeDirAbsolute(prefix) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => {
             output.err("Cannot create prefix directory {s} — you may need: sudo mkdir -p {s} && sudo chown $USER {s}", .{ prefix, prefix, prefix });
@@ -1283,7 +1343,7 @@ pub fn ensureDirs(prefix: []const u8) !void {
     for (subdirs) |subdir| {
         var buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
-        std.fs.makeDirAbsolute(dir_path) catch |e| switch (e) {
+        fs_compat.makeDirAbsolute(dir_path) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => continue,
         };
@@ -1318,9 +1378,9 @@ pub fn isTapFormula(name: []const u8) bool {
 
 /// Parse a tap formula name into user, repo, formula components.
 pub fn parseTapName(name: []const u8) ?struct { user: []const u8, repo: []const u8, formula: []const u8 } {
-    const first_slash = std.mem.indexOfScalar(u8, name, '/') orelse return null;
+    const first_slash = std.mem.findScalar(u8, name, '/') orelse return null;
     const rest = name[first_slash + 1 ..];
-    const second_slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+    const second_slash = std.mem.findScalar(u8, rest, '/') orelse return null;
     return .{
         .user = name[0..first_slash],
         .repo = rest[0..second_slash],
@@ -1452,11 +1512,11 @@ fn installTapFormula(
     var parent_buf: [512]u8 = undefined;
     const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, parts.formula }) catch
         return InstallError.CellarFailed;
-    std.fs.makeDirAbsolute(parent) catch |e| switch (e) {
+    fs_compat.makeDirAbsolute(parent) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
     };
-    std.fs.makeDirAbsolute(cellar_path) catch |e| switch (e) {
+    fs_compat.makeDirAbsolute(cellar_path) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
     };
@@ -1465,7 +1525,7 @@ fn installTapFormula(
     var bin_buf: [512]u8 = undefined;
     const bin_path = std.fmt.bufPrint(&bin_buf, "{s}/bin", .{cellar_path}) catch
         return InstallError.CellarFailed;
-    std.fs.makeDirAbsolute(bin_path) catch |e| switch (e) {
+    fs_compat.makeDirAbsolute(bin_path) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
     };
@@ -1498,13 +1558,13 @@ fn installTapFormula(
     const tmp_archive = std.fmt.bufPrint(&tmp_buf, "{s}/tmp/tap_download{s}", .{ prefix, ext }) catch
         return InstallError.DownloadFailed;
 
-    const tmp_file = std.fs.createFileAbsolute(tmp_archive, .{}) catch return InstallError.DownloadFailed;
+    const tmp_file = fs_compat.createFileAbsolute(tmp_archive, .{}) catch return InstallError.DownloadFailed;
     tmp_file.writeAll(download_resp.body) catch {
         tmp_file.close();
         return InstallError.DownloadFailed;
     };
     tmp_file.close();
-    defer std.fs.cwd().deleteFile(tmp_archive) catch {};
+    defer fs_compat.cwd().deleteFile(tmp_archive) catch {};
 
     // Extract archive to cellar
     const archive_mod = @import("../fs/archive.zig");
@@ -1526,7 +1586,7 @@ fn installTapFormula(
     // Find and move the binary to bin/
     // GoReleaser may extract directly or into a subdirectory
     {
-        var cellar_dir = std.fs.openDirAbsolute(cellar_path, .{ .iterate = true }) catch return InstallError.CellarFailed;
+        var cellar_dir = fs_compat.openDirAbsolute(cellar_path, .{ .iterate = true }) catch return InstallError.CellarFailed;
         defer cellar_dir.close();
 
         // Walk all files (including subdirectories) looking for the formula binary
@@ -1694,9 +1754,7 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
 }
 
 pub fn extractQuoted(line: []const u8, prefix: []const u8) ?[]const u8 {
-    const start = std.mem.indexOf(u8, line, prefix) orelse return null;
-    const value_start = start + prefix.len;
-    if (value_start >= line.len) return null;
-    const end = std.mem.indexOfScalar(u8, line[value_start..], '"') orelse return null;
-    return line[value_start .. value_start + end];
+    _, const after = std.mem.cut(u8, line, prefix) orelse return null;
+    const body, _ = std.mem.cut(u8, after, "\"") orelse return null;
+    return body;
 }

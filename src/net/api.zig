@@ -2,6 +2,8 @@
 //! Fetches formula and cask metadata from formulae.brew.sh with caching.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
+const atomic = @import("../fs/atomic.zig");
 const client_mod = @import("client.zig");
 
 const BASE_URL = "https://formulae.brew.sh/api";
@@ -184,9 +186,9 @@ pub const BrewApi = struct {
     fn cachedFresh(self: *BrewApi, key: []const u8, prefix: []const u8) bool {
         var path_buf: [512]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return false;
-        const stat = std.fs.cwd().statFile(cache_path) catch return false;
-        const now = std.time.timestamp();
-        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s));
+        const stat = fs_compat.cwd().statFile(cache_path) catch return false;
+        const now = fs_compat.timestamp();
+        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         return now - mtime_secs <= CACHE_TTL_SECS;
     }
 
@@ -223,12 +225,12 @@ pub const BrewApi = struct {
         var path_buf: [512]u8 = undefined;
         const p = std.fmt.bufPrint(&path_buf, "{s}/api/names_{s}.txt", .{ self.cache_dir, key }) catch return null;
 
-        const stat = std.fs.cwd().statFile(p) catch return null;
-        const now = std.time.timestamp();
-        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s));
+        const stat = fs_compat.cwd().statFile(p) catch return null;
+        const now = fs_compat.timestamp();
+        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         if (now - mtime_secs > INDEX_TTL_SECS) return null;
 
-        const file = std.fs.cwd().openFile(p, .{}) catch return null;
+        const file = fs_compat.cwd().openFile(p, .{}) catch return null;
         defer file.close();
         const s = file.stat() catch return null;
         const buf = self.allocator.alloc(u8, s.size) catch return null;
@@ -246,7 +248,7 @@ pub const BrewApi = struct {
     fn writeNamesIndex(self: *const BrewApi, key: []const u8, data: []const u8) void {
         var dir_buf: [512]u8 = undefined;
         const dir = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
-        std.fs.makeDirAbsolute(dir) catch |e| switch (e) {
+        fs_compat.makeDirAbsolute(dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
@@ -254,7 +256,7 @@ pub const BrewApi = struct {
         var path_buf: [512]u8 = undefined;
         const p = std.fmt.bufPrint(&path_buf, "{s}/api/names_{s}.txt", .{ self.cache_dir, key }) catch return;
 
-        const f = std.fs.cwd().createFile(p, .{}) catch return;
+        const f = fs_compat.cwd().createFile(p, .{}) catch return;
         defer f.close();
         f.writeAll(data) catch {};
     }
@@ -263,7 +265,7 @@ pub const BrewApi = struct {
     pub fn invalidateCache(self: *BrewApi) void {
         var api_path_buf: [512]u8 = undefined;
         const api_path = std.fmt.bufPrint(&api_path_buf, "{s}/api", .{self.cache_dir}) catch return;
-        std.fs.deleteTreeAbsolute(api_path) catch {};
+        fs_compat.deleteTreeAbsolute(api_path) catch {};
     }
 
     // --- internal ---
@@ -301,13 +303,13 @@ pub const BrewApi = struct {
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return null;
 
         // Check freshness
-        const stat = std.fs.cwd().statFile(cache_path) catch return null;
-        const now = std.time.timestamp();
-        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s));
+        const stat = fs_compat.cwd().statFile(cache_path) catch return null;
+        const now = fs_compat.timestamp();
+        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         if (now - mtime_secs > CACHE_TTL_SECS) return null;
 
         // Read file
-        const file = std.fs.cwd().openFile(cache_path, .{}) catch return null;
+        const file = fs_compat.cwd().openFile(cache_path, .{}) catch return null;
         defer file.close();
         const file_stat = file.stat() catch return null;
         const content = self.allocator.alloc(u8, file_stat.size) catch return null;
@@ -325,7 +327,7 @@ pub const BrewApi = struct {
     pub fn writeCache(self: *const BrewApi, key: []const u8, prefix: []const u8, data: []const u8) void {
         var dir_buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
-        std.fs.makeDirAbsolute(dir_path) catch |e| switch (e) {
+        fs_compat.makeDirAbsolute(dir_path) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
@@ -333,9 +335,10 @@ pub const BrewApi = struct {
         var path_buf: [512]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return;
 
-        const file = std.fs.cwd().createFile(cache_path, .{}) catch return;
-        defer file.close();
-        file.writeAll(data) catch {};
+        // Atomic write so a crash mid-`writeAll` can't leave a
+        // truncated JSON file that breaks the next install until the
+        // cache is manually wiped.
+        atomic.atomicWriteFile(cache_path, data) catch {};
     }
 
     /// Check for a cached 404 marker. Returns true if a fresh marker
@@ -347,9 +350,9 @@ pub const BrewApi = struct {
         var path_buf: [512]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return false;
 
-        const stat = std.fs.cwd().statFile(cache_path) catch return false;
-        const now = std.time.timestamp();
-        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s));
+        const stat = fs_compat.cwd().statFile(cache_path) catch return false;
+        const now = fs_compat.timestamp();
+        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         if (now - mtime_secs > CACHE_TTL_SECS) return false;
         return true;
     }
@@ -361,7 +364,7 @@ pub const BrewApi = struct {
     pub fn writeNotFoundCache(self: *const BrewApi, key: []const u8, prefix: []const u8) void {
         var dir_buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
-        std.fs.makeDirAbsolute(dir_path) catch |e| switch (e) {
+        fs_compat.makeDirAbsolute(dir_path) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
@@ -369,7 +372,7 @@ pub const BrewApi = struct {
         var path_buf: [512]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return;
 
-        const file = std.fs.cwd().createFile(cache_path, .{}) catch return;
+        const file = fs_compat.cwd().createFile(cache_path, .{}) catch return;
         file.close();
     }
 
@@ -382,7 +385,7 @@ pub const BrewApi = struct {
         var dir_buf: [512]u8 = undefined;
         const api_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return 0;
 
-        var dir = std.fs.openDirAbsolute(api_path, .{ .iterate = true }) catch return 0;
+        var dir = fs_compat.openDirAbsolute(api_path, .{ .iterate = true }) catch return 0;
         defer dir.close();
 
         // Collect entries with size + mtime
@@ -395,7 +398,7 @@ pub const BrewApi = struct {
         while (iter.next() catch null) |e| {
             if (e.kind != .file) continue;
             const stat = dir.statFile(e.name) catch continue;
-            var entry: Entry = .{ .name_buf = undefined, .name_len = e.name.len, .size = stat.size, .mtime = stat.mtime };
+            var entry: Entry = .{ .name_buf = undefined, .name_len = e.name.len, .size = stat.size, .mtime = stat.mtime.nanoseconds };
             if (e.name.len > entry.name_buf.len) continue;
             @memcpy(entry.name_buf[0..e.name.len], e.name);
             entries.append(self.allocator, entry) catch continue;
@@ -427,7 +430,7 @@ pub const BrewApi = struct {
         var dir_buf: [512]u8 = undefined;
         const api_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return 0;
 
-        var dir = std.fs.openDirAbsolute(api_path, .{ .iterate = true }) catch return 0;
+        var dir = fs_compat.openDirAbsolute(api_path, .{ .iterate = true }) catch return 0;
         defer dir.close();
 
         var total: u64 = 0;

@@ -4,6 +4,7 @@
 //! (every user-facing failure must return `error.Aborted`, not a silent `void`).
 
 const std = @import("std");
+const malt = @import("malt");
 const testing = std.testing;
 const sqlite = @import("malt").sqlite;
 const schema = @import("malt").schema;
@@ -24,12 +25,12 @@ fn unsetPrefix() void {
 /// Create a sandboxed malt prefix with an initialized empty DB. Caller must
 /// `deleteTreeAbsolute` on the returned path.
 fn makeSandbox(path: [:0]const u8) !void {
-    std.fs.deleteTreeAbsolute(path) catch {};
-    try std.fs.makeDirAbsolute(path);
+    malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    try malt.fs_compat.makeDirAbsolute(path);
 
     var db_sub_buf: [512]u8 = undefined;
     const db_sub = try std.fmt.bufPrint(&db_sub_buf, "{s}/db", .{path});
-    try std.fs.makeDirAbsolute(db_sub);
+    try malt.fs_compat.makeDirAbsolute(db_sub);
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{path});
@@ -40,8 +41,8 @@ fn makeSandbox(path: [:0]const u8) !void {
 
 test "schema creates kegs table with expected columns" {
     const prefix = "/tmp/malt_rb_test";
-    std.fs.makeDirAbsolute(prefix) catch {};
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    malt.fs_compat.makeDirAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
 
     var db = try sqlite.Database.open("/tmp/malt_rb_test/rb.db");
     defer db.close();
@@ -68,7 +69,7 @@ test "rollback returns error.Aborted when no package name given" {
 test "rollback returns error.Aborted for package not installed" {
     const prefix: [:0]const u8 = "/tmp/malt_rb_notinstalled";
     try makeSandbox(prefix);
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
 
     setPrefix(prefix);
     defer unsetPrefix();
@@ -81,7 +82,7 @@ test "rollback returns error.Aborted for package not installed" {
 test "rollback returns error.Aborted when no previous version exists in store" {
     const prefix: [:0]const u8 = "/tmp/malt_rb_nostore";
     try makeSandbox(prefix);
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
 
     // Record an installed keg but deliberately omit the store/ directory so
     // the store-scan path fails with "Cannot read store directory".
@@ -101,8 +102,8 @@ test "rollback returns error.Aborted when no previous version exists in store" {
 
 test "schema version table exists" {
     const prefix = "/tmp/malt_sv_test";
-    std.fs.makeDirAbsolute(prefix) catch {};
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    malt.fs_compat.makeDirAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
 
     var db = try sqlite.Database.open("/tmp/malt_sv_test/sv.db");
     defer db.close();

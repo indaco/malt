@@ -2,6 +2,7 @@
 //! Covers showIfRequested flag detection and the helpFor lookup table.
 
 const std = @import("std");
+const malt = @import("malt");
 const testing = std.testing;
 const help = @import("malt").cli_help;
 
@@ -50,17 +51,19 @@ test "helpFor falls back gracefully for unknown commands" {
 // Relies on the pre-built binary under zig-out/bin/malt; skipped if absent.
 test "--help output lands on stdout, not stderr" {
     const bin_path = "zig-out/bin/malt";
-    std.fs.cwd().access(bin_path, .{}) catch return error.SkipZigTest;
+    malt.fs_compat.cwd().access(bin_path, .{}) catch return error.SkipZigTest;
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(testing.allocator, threaded.io(), .{
         .argv = &[_][]const u8{ bin_path, "install", "--help" },
-        .max_output_bytes = 1 << 16,
+        .stdout_limit = .limited(1 << 16),
+        .stderr_limit = .limited(1 << 16),
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
-    try testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, result.term);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
     try testing.expect(result.stdout.len > 0);
     try testing.expectEqual(@as(usize, 0), result.stderr.len);
     try testing.expect(std.mem.indexOf(u8, result.stdout, "malt install") != null);

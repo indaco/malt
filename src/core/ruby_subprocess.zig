@@ -4,6 +4,7 @@
 //! Homebrew DSL.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const builtin = @import("builtin");
 const output = @import("../ui/output.zig");
 const codesign = @import("../macho/codesign.zig");
@@ -35,7 +36,7 @@ pub fn detectRuby(allocator: std.mem.Allocator) ?[]const u8 {
         "/usr/bin/ruby",
     };
     for (candidates) |path| {
-        std.fs.accessAbsolute(path, .{}) catch continue;
+        fs_compat.accessAbsolute(path, .{}) catch continue;
         return allocator.dupe(u8, path) catch return null;
     }
 
@@ -43,22 +44,22 @@ pub fn detectRuby(allocator: std.mem.Allocator) ?[]const u8 {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
 
     // User-local version managers: rbenv, asdf
-    if (std.posix.getenv("HOME")) |home| {
+    if (fs_compat.getenv("HOME")) |home| {
         const shim_suffixes = [_][]const u8{ "/.rbenv/shims/ruby", "/.asdf/shims/ruby" };
         for (shim_suffixes) |suffix| {
             const path = std.fmt.bufPrint(&buf, "{s}{s}", .{ home, suffix }) catch continue;
-            std.fs.accessAbsolute(path, .{}) catch continue;
+            fs_compat.accessAbsolute(path, .{}) catch continue;
             return allocator.dupe(u8, path) catch return null;
         }
     }
 
     // PATH search
-    if (std.posix.getenv("PATH")) |path_env| {
+    if (fs_compat.getenv("PATH")) |path_env| {
         var it = std.mem.splitScalar(u8, path_env, ':');
         while (it.next()) |dir| {
             if (dir.len == 0) continue;
             const candidate = std.fmt.bufPrint(&buf, "{s}/ruby", .{dir}) catch continue;
-            std.fs.accessAbsolute(candidate, .{}) catch continue;
+            fs_compat.accessAbsolute(candidate, .{}) catch continue;
             return allocator.dupe(u8, candidate) catch return null;
         }
     }
@@ -73,7 +74,7 @@ pub fn findHomebrewCoreTap() ?[]const u8 {
         "/usr/local/Homebrew/Library/Taps/homebrew/homebrew-core",
     };
     for (tap_paths) |path| {
-        std.fs.accessAbsolute(path, .{}) catch continue;
+        fs_compat.accessAbsolute(path, .{}) catch continue;
         return path;
     }
     return null;
@@ -89,12 +90,12 @@ pub fn resolveFormulaRbPath(buf: *[1024]u8, tap_path: []const u8, name: []const 
     const new_path = std.fmt.bufPrint(buf, "{s}/Formula/{c}/{s}.rb", .{
         tap_path, name[0], name,
     }) catch return null;
-    std.fs.accessAbsolute(new_path, .{}) catch {
+    fs_compat.accessAbsolute(new_path, .{}) catch {
         // Fall through to old layout
         const old_path = std.fmt.bufPrint(buf, "{s}/Formula/{s}.rb", .{
             tap_path, name,
         }) catch return null;
-        std.fs.accessAbsolute(old_path, .{}) catch return null;
+        fs_compat.accessAbsolute(old_path, .{}) catch return null;
         return old_path;
     };
     return new_path;
@@ -114,17 +115,17 @@ pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8
     }) catch return null;
 
     const argv = [_][]const u8{ "curl", "-fsSL", "--max-time", "10", url };
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
+    var child = fs_compat.Child.init(&argv, allocator);
+    child.stdout_behavior = .pipe;
+    child.stderr_behavior = .ignore;
     child.spawn() catch return null;
 
     const stdout = child.stdout orelse return null;
-    const body = stdout.readToEndAlloc(allocator, 1024 * 1024) catch return null;
+    const body = fs_compat.readFileToEndAlloc(stdout, allocator, 1024 * 1024) catch return null;
     const term = child.wait() catch return null;
 
     switch (term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             allocator.free(body);
             return null;
         },
@@ -149,10 +150,10 @@ pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8
 pub fn extractPostInstallFromSource(allocator: std.mem.Allocator, source: []const u8) ?[]const u8 {
     const marker = "def post_install";
     const start_idx = std.mem.indexOf(u8, source, marker) orelse return null;
-    const body_start = std.mem.indexOfScalarPos(u8, source, start_idx, '\n') orelse return null;
+    const body_start = std.mem.findScalarPos(u8, source, start_idx, '\n') orelse return null;
 
     const def_line_start = if (start_idx > 0)
-        if (std.mem.lastIndexOfScalar(u8, source[0..start_idx], '\n')) |nl| nl + 1 else 0
+        if (std.mem.findScalarLast(u8, source[0..start_idx], '\n')) |nl| nl + 1 else 0
     else
         0;
 
@@ -164,7 +165,7 @@ pub fn extractPostInstallFromSource(allocator: std.mem.Allocator, source: []cons
     var pos = body_start + 1;
     while (pos < source.len) {
         const line_start = pos;
-        const line_end = std.mem.indexOfScalarPos(u8, source, pos, '\n') orelse source.len;
+        const line_end = std.mem.findScalarPos(u8, source, pos, '\n') orelse source.len;
 
         var line_indent: usize = 0;
         var scan = line_start;
@@ -192,7 +193,7 @@ pub fn extractPostInstallFromSource(allocator: std.mem.Allocator, source: []cons
 /// Returns the raw Ruby source between `def post_install` and its matching
 /// `end`, or null if not found.
 pub fn extractPostInstallBody(allocator: std.mem.Allocator, rb_path: []const u8) ?[]const u8 {
-    const file = std.fs.openFileAbsolute(rb_path, .{}) catch return null;
+    const file = fs_compat.openFileAbsolute(rb_path, .{}) catch return null;
     defer file.close();
 
     const source = file.readToEndAlloc(allocator, 1024 * 1024) catch return null;
@@ -205,7 +206,7 @@ pub fn extractPostInstallBody(allocator: std.mem.Allocator, rb_path: []const u8)
     };
 
     // Find the start of the body (after the def line)
-    const body_start = std.mem.indexOfScalarPos(u8, source, start_idx, '\n') orelse {
+    const body_start = std.mem.findScalarPos(u8, source, start_idx, '\n') orelse {
         allocator.free(source);
         return null;
     };
@@ -213,7 +214,7 @@ pub fn extractPostInstallBody(allocator: std.mem.Allocator, rb_path: []const u8)
     // Find matching `end` — simple heuristic: first line starting with
     // exactly "  end" or "end" after the def. We track indentation depth.
     const def_line_start = if (start_idx > 0)
-        if (std.mem.lastIndexOfScalar(u8, source[0..start_idx], '\n')) |nl| nl + 1 else 0
+        if (std.mem.findScalarLast(u8, source[0..start_idx], '\n')) |nl| nl + 1 else 0
     else
         0;
 
@@ -230,7 +231,7 @@ pub fn extractPostInstallBody(allocator: std.mem.Allocator, rb_path: []const u8)
     while (pos < source.len) {
         // Find next line
         const line_start = pos;
-        const line_end = std.mem.indexOfScalarPos(u8, source, pos, '\n') orelse source.len;
+        const line_end = std.mem.findScalarPos(u8, source, pos, '\n') orelse source.len;
 
         // Check if this line is `end` at the same indent level
         var line_indent: usize = 0;
@@ -271,10 +272,10 @@ pub fn generateWrapper(
     prefix: []const u8,
     post_install_body: []const u8,
 ) ![]const u8 {
-    var script: std.ArrayList(u8) = .empty;
-    errdefer script.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
 
-    const writer = script.writer(allocator);
+    const writer = &aw.writer;
 
     try writer.writeAll(
         \\require 'pathname'
@@ -353,7 +354,7 @@ pub fn generateWrapper(
     try writer.writeAll(post_install_body);
     try writer.writeAll("\nend\n");
 
-    return script.toOwnedSlice(allocator);
+    return aw.toOwnedSlice();
 }
 
 /// Run the post_install hook for a formula via the system Ruby interpreter.
@@ -412,7 +413,7 @@ pub fn runPostInstall(
     // and an attacker cannot pre-create the target to redirect execution.
     var tmp_path_buf: [256]u8 = undefined;
     var rand_bytes: [16]u8 = undefined;
-    std.crypto.random.bytes(&rand_bytes);
+    fs_compat.randomBytes(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
     const pid = std.c.getpid();
     const tmp_path = std.fmt.bufPrint(
@@ -421,32 +422,32 @@ pub fn runPostInstall(
         .{ name, pid, hex[0..] },
     ) catch return RubyError.ScriptWriteFailed;
 
-    const tmp_file = std.fs.createFileAbsolute(tmp_path, .{
+    const tmp_file = fs_compat.createFileAbsolute(tmp_path, .{
         .exclusive = true,
-        .mode = 0o600,
+        .permissions = std.Io.File.Permissions.fromMode(0o600),
     }) catch return RubyError.ScriptWriteFailed;
     tmp_file.writeAll(script) catch {
         tmp_file.close();
-        std.fs.deleteFileAbsolute(tmp_path) catch {};
+        fs_compat.deleteFileAbsolute(tmp_path) catch {};
         return RubyError.ScriptWriteFailed;
     };
     tmp_file.close();
 
     // Ensure cleanup
-    defer std.fs.deleteFileAbsolute(tmp_path) catch {};
+    defer fs_compat.deleteFileAbsolute(tmp_path) catch {};
 
     // 7. Spawn Ruby subprocess — inherit stdout/stderr so post_install
     // output flows directly to the user's terminal.
     const argv = [_][]const u8{ ruby_path, tmp_path };
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
+    var child = fs_compat.Child.init(&argv, allocator);
+    child.stdout_behavior = .inherit;
+    child.stderr_behavior = .inherit;
 
     child.spawn() catch return RubyError.PostInstallFailed;
 
     const term = child.wait() catch return RubyError.PostInstallFailed;
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 output.err("post_install script exited with code {d}", .{code});
                 return RubyError.PostInstallFailed;

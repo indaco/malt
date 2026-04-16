@@ -3,6 +3,7 @@
 //! Block form is deferred to a future phase (requires interpreter cooperation).
 
 const std = @import("std");
+const fs_compat = @import("../../../fs/compat.zig");
 const values = @import("../values.zig");
 const sandbox = @import("../sandbox.zig");
 const pathname = @import("pathname.zig");
@@ -26,7 +27,7 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
         return BuiltinError.PathSandboxViolation;
 
     // Read file contents
-    const file = std.fs.openFileAbsolute(path, .{}) catch {
+    const file = fs_compat.openFileAbsolute(path, .{}) catch {
         return Value{ .nil = {} };
     };
     defer file.close();
@@ -45,7 +46,7 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
     // overwrite and log the fallback so the user is aware that the write
     // did *not* use the atomic path.
     writeAtomic(path, new_content) catch |e| {
-        const stderr = std.fs.File.stderr();
+        const stderr = fs_compat.stderrFile();
         var buf: [512]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "malt: inreplace atomic write failed ({s}); falling back to direct overwrite\n", .{@errorName(e)}) catch return Value{ .nil = {} };
         stderr.writeAll(msg) catch {};
@@ -99,7 +100,7 @@ fn replaceAll(allocator: std.mem.Allocator, haystack: []const u8, needle: []cons
 fn writeAtomic(path: []const u8, content: []const u8) !void {
     const dir_path = std.fs.path.dirname(path) orelse "/";
 
-    var dir = try std.fs.openDirAbsolute(dir_path, .{});
+    var dir = try fs_compat.openDirAbsolute(dir_path, .{});
     defer dir.close();
 
     // Create a temp file in the same directory
@@ -125,7 +126,7 @@ fn writeAtomic(path: []const u8, content: []const u8) !void {
 
 /// Fallback: direct overwrite (no atomicity guarantee).
 fn writeDirectly(path: []const u8, content: []const u8) void {
-    const out = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch return;
+    const out = fs_compat.createFileAbsolute(path, .{ .truncate = true }) catch return;
     defer out.close();
     out.writeAll(content) catch {};
 }

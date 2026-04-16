@@ -3,6 +3,7 @@
 //! directory, so the dispatch opens a real SQLite database under the prefix.
 
 const std = @import("std");
+const malt = @import("malt");
 const testing = std.testing;
 const tap_cli = @import("malt").cli_tap;
 
@@ -15,14 +16,14 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const path = try std.fmt.allocPrintSentinel(
         testing.allocator,
         "/tmp/malt_cli_tap_{d}_{s}",
-        .{ std.time.nanoTimestamp(), suffix },
+        .{ malt.fs_compat.nanoTimestamp(), suffix },
         0,
     );
-    std.fs.deleteTreeAbsolute(path) catch {};
-    try std.fs.cwd().makePath(path);
+    malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    try malt.fs_compat.cwd().makePath(path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try std.fs.makeDirAbsolute(db_dir);
+    try malt.fs_compat.makeDirAbsolute(db_dir);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -30,7 +31,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
 test "execute with no args prints an empty list (no taps registered)" {
     const prefix = try setupPrefix("list_empty");
     defer testing.allocator.free(prefix);
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     try tap_cli.execute(testing.allocator, &.{});
@@ -39,7 +40,7 @@ test "execute with no args prints an empty list (no taps registered)" {
 test "execute with user/repo adds a tap idempotently" {
     const prefix = try setupPrefix("add_then_list");
     defer testing.allocator.free(prefix);
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     try tap_cli.execute(testing.allocator, &.{"user/repo"});
@@ -120,7 +121,7 @@ test "validateTapName: rejects over-long components" {
 test "execute: malformed tap input is rejected with error.Aborted" {
     const prefix = try setupPrefix("reject_malformed");
     defer testing.allocator.free(prefix);
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // Each of these should be rejected by the validator and surface as a
@@ -141,7 +142,7 @@ test "execute: malformed tap input is rejected with error.Aborted" {
 test "execute with a bare name (no slash) surfaces error.Aborted" {
     const prefix = try setupPrefix("bad_name");
     defer testing.allocator.free(prefix);
-    defer std.fs.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     try testing.expectError(

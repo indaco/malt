@@ -4,6 +4,7 @@
 const std = @import("std");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const io_mod = @import("../ui/io.zig");
 const color = @import("../ui/color.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
@@ -11,18 +12,13 @@ const help = @import("help.zig");
 
 /// Results for a single kind (formula or cask) of a search query.
 ///
-/// `index` and `matches` are separately owned because `matches` elements
-/// are slices *into* `index` — freeing `index` invalidates them. Callers
-/// must deinit via `deinit` to release both in the right order.
+/// `matches` elements are slices into `index`, so `index` must outlive
+/// them. Both live in the arena owned by `execute`, freed together at
+/// function exit — no explicit deinit.
 const KindResults = struct {
     exact: bool = false,
     index: ?[]const u8 = null,
     matches: []const []const u8 = &.{},
-
-    fn deinit(self: *KindResults, allocator: std.mem.Allocator) void {
-        if (self.matches.len != 0) allocator.free(self.matches);
-        if (self.index) |b| allocator.free(b);
-    }
 };
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -63,6 +59,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer allocator.free(cache_dir);
 
+    // Each kind owns its own arena on `page_allocator` — worker-local
+    // so the formula and cask threads never share a bump-pointer.
+    // Both arenas deinit at function exit, freeing every `KindResults`
+    // field uniformly — no per-struct deinit needed. The unused arena
+    // on single-kind queries is empty; deinit is cheap.
+    var f_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer f_arena.deinit();
+    var c_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer c_arena.deinit();
+
     // When both kinds are requested we dispatch the cask work to a
     // worker thread so the two independent JSON index downloads
     // (formula ~29 MiB, cask ~14 MiB) overlap. On a cold cache this
@@ -75,29 +81,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // thread spawns.
     var formula: KindResults = .{};
     var cask: KindResults = .{};
-    defer formula.deinit(allocator);
-    defer cask.deinit(allocator);
 
     if (search_formula and search_cask) {
-        // malt's main allocator is an `ArenaAllocator` which is not
-        // safe to call concurrently — two threads racing on the same
-        // arena can see misaligned returns and corrupted free lists
-        // (observed on release builds as "thread panic: incorrect
-        // alignment" inside `std.http.Client.Connection.Tls.create`).
-        // Wrap it with a mutex-guarded allocator for the parallel
-        // section; results flow back to the caller's allocator via
-        // `dupe`, so the safe wrapper can go out of scope after join.
-        var safe: std.heap.ThreadSafeAllocator = .{ .child_allocator = allocator };
-        const shared = safe.allocator();
-
         var cask_task: KindTask = .{
-            .allocator = shared,
+            .allocator = c_arena.allocator(),
             .cache_dir = cache_dir,
             .kind = .cask,
             .query = search_query,
         };
         const worker = std.Thread.spawn(.{}, KindTask.run, .{&cask_task}) catch null;
-        formula = runKindIsolated(shared, cache_dir, .formula, search_query);
+        formula = runKindIsolated(f_arena.allocator(), cache_dir, .formula, search_query);
         if (worker) |w| {
             w.join();
             cask = cask_task.result;
@@ -105,15 +98,18 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             // Spawn failed — fall back to running cask inline. Rare
             // enough (only on thread-creation failure) that the
             // sequential path is fine.
-            cask = runKindIsolated(allocator, cache_dir, .cask, search_query);
+            cask = runKindIsolated(c_arena.allocator(), cache_dir, .cask, search_query);
         }
     } else if (search_formula) {
-        formula = runKindIsolated(allocator, cache_dir, .formula, search_query);
+        formula = runKindIsolated(f_arena.allocator(), cache_dir, .formula, search_query);
     } else if (search_cask) {
-        cask = runKindIsolated(allocator, cache_dir, .cask, search_query);
+        cask = runKindIsolated(c_arena.allocator(), cache_dir, .cask, search_query);
     }
 
-    const stdout = std.fs.File.stdout();
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_fw = std.Io.File.stdout().writer(io_mod.ctx(), &stdout_buf);
+    const stdout: *std.Io.Writer = &stdout_fw.interface;
+    defer stdout.flush() catch {};
     if (json_mode) {
         try emitJson(allocator, stdout, search_formula, search_cask, formula, cask, search_query);
     } else {
@@ -159,7 +155,7 @@ const KindTask = struct {
 };
 
 fn emitHuman(
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     formula: KindResults,
     cask: KindResults,
     query: []const u8,
@@ -180,7 +176,7 @@ fn emitHuman(
 /// relying on substring membership alone to surface exact matches would
 /// under-report on the day of a new release.
 fn writeHuman(
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     kind: []const u8,
     r: KindResults,
     query: []const u8,
@@ -194,31 +190,27 @@ fn writeHuman(
 
 fn emitJson(
     allocator: std.mem.Allocator,
-    stdout: std.fs.File,
+    stdout: *std.Io.Writer,
     search_formula: bool,
     search_cask: bool,
     formula: KindResults,
     cask: KindResults,
     query: []const u8,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-
-    try w.writeAll("{");
+    _ = allocator;
+    try stdout.writeAll("{");
     if (search_formula) {
-        try w.writeAll("\"formulae\":[");
-        try writeJson(w, "name", formula, query);
-        try w.writeAll("]");
+        try stdout.writeAll("\"formulae\":[");
+        try writeJson(stdout, "name", formula, query);
+        try stdout.writeAll("]");
     }
     if (search_cask) {
-        if (search_formula) try w.writeAll(",");
-        try w.writeAll("\"casks\":[");
-        try writeJson(w, "token", cask, query);
-        try w.writeAll("]");
+        if (search_formula) try stdout.writeAll(",");
+        try stdout.writeAll("\"casks\":[");
+        try writeJson(stdout, "token", cask, query);
+        try stdout.writeAll("]");
     }
-    try w.writeAll("}\n");
-    stdout.writeAll(buf.items) catch {};
+    try stdout.writeAll("}\n");
 }
 
 fn writeJson(w: anytype, field: []const u8, r: KindResults, query: []const u8) !void {
@@ -244,16 +236,16 @@ fn writeJsonObj(w: anytype, field: []const u8, value: []const u8) !void {
 }
 
 /// Write a single search result with the same ▸ prefix style used by `list`.
-fn writeResult(stdout: std.fs.File, name: []const u8, kind: []const u8) void {
+fn writeResult(stdout: *std.Io.Writer, name: []const u8, kind: []const u8) void {
     const use_color = color.isColorEnabled();
-    if (use_color) stdout.writeAll(color.Style.cyan.code()) catch {};
-    stdout.writeAll("  \xe2\x96\xb8 ") catch {};
-    if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
-    stdout.writeAll(name) catch {};
-    if (use_color) stdout.writeAll(color.Style.dim.code()) catch {};
-    stdout.writeAll(" (") catch {};
-    stdout.writeAll(kind) catch {};
-    stdout.writeAll(")") catch {};
-    if (use_color) stdout.writeAll(color.Style.reset.code()) catch {};
-    stdout.writeAll("\n") catch {};
+    if (use_color) stdout.writeAll(color.Style.cyan.code()) catch return;
+    stdout.writeAll("  \xe2\x96\xb8 ") catch return;
+    if (use_color) stdout.writeAll(color.Style.reset.code()) catch return;
+    stdout.writeAll(name) catch return;
+    if (use_color) stdout.writeAll(color.Style.dim.code()) catch return;
+    stdout.writeAll(" (") catch return;
+    stdout.writeAll(kind) catch return;
+    stdout.writeAll(")") catch return;
+    if (use_color) stdout.writeAll(color.Style.reset.code()) catch return;
+    stdout.writeAll("\n") catch return;
 }

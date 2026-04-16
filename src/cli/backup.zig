@@ -15,10 +15,12 @@
 //! honoured by `malt restore`.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const io_mod = @import("../ui/io.zig");
 const help = @import("help.zig");
 
 pub const Kind = enum { formula, cask };
@@ -80,9 +82,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     schema.initSchema(&db) catch {};
 
     // ── Serialize into an in-memory buffer ───────────────────────────────
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
 
     try writeHeader(w);
     var count: usize = 0;
@@ -119,20 +121,22 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
+    const bytes = aw.written();
+
     // ── Resolve destination and write ────────────────────────────────────
     if (output_path) |p| {
         if (std.mem.eql(u8, p, "-")) {
-            std.fs.File.stdout().writeAll(buf.items) catch return Error.WriteFailed;
+            io_mod.stdoutWriteAll(bytes);
             return;
         }
-        try writeToPath(p, buf.items);
+        try writeToPath(p, bytes);
         output.success("Backup written to {s} ({d} packages)", .{ p, count });
         return;
     }
 
     const default_path = try defaultBackupPath(allocator);
     defer allocator.free(default_path);
-    try writeToPath(default_path, buf.items);
+    try writeToPath(default_path, bytes);
     output.success("Backup written to {s} ({d} packages)", .{ default_path, count });
 }
 
@@ -141,23 +145,23 @@ fn writeToPath(path: []const u8, bytes: []const u8) Error!void {
     if (std.fs.path.dirname(path)) |dir| {
         if (dir.len > 0) {
             if (std.fs.path.isAbsolute(dir)) {
-                std.fs.makeDirAbsolute(dir) catch |e| switch (e) {
+                fs_compat.makeDirAbsolute(dir) catch |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => {},
                 };
             } else {
-                std.fs.cwd().makePath(dir) catch {};
+                fs_compat.cwd().makePath(dir) catch {};
             }
         }
     }
 
     const file = if (std.fs.path.isAbsolute(path))
-        std.fs.createFileAbsolute(path, .{ .truncate = true }) catch {
+        fs_compat.createFileAbsolute(path, .{ .truncate = true }) catch {
             output.err("Failed to create {s}", .{path});
             return Error.OpenFileFailed;
         }
     else
-        std.fs.cwd().createFile(path, .{ .truncate = true }) catch {
+        fs_compat.cwd().createFile(path, .{ .truncate = true }) catch {
             output.err("Failed to create {s}", .{path});
             return Error.OpenFileFailed;
         };
@@ -211,7 +215,7 @@ pub fn parseLine(line: []const u8) ?Entry {
 
     var name = s;
     var version: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, s, '@')) |idx| {
+    if (std.mem.findScalar(u8, s, '@')) |idx| {
         name = s[0..idx];
         version = s[idx + 1 ..];
     }
@@ -240,7 +244,7 @@ pub fn parseBackup(allocator: std.mem.Allocator, text: []const u8) ![]Entry {
 /// The timestamp uses UTC so two backups taken at the same wall-clock moment
 /// collide deterministically across time zones.
 pub fn defaultBackupPath(allocator: std.mem.Allocator) ![]u8 {
-    const secs = std.time.timestamp();
+    const secs = fs_compat.timestamp();
     const epoch_seconds: std.time.epoch.EpochSeconds = .{
         .secs = @intCast(@max(secs, 0)),
     };

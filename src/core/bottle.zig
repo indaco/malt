@@ -2,6 +2,7 @@
 //! Bottle download, SHA256 verification, and extraction pipeline.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 
 const archive = @import("../fs/archive.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -51,12 +52,12 @@ pub fn download(
     // Verify SHA256
     if (!std.mem.eql(u8, &computed_hex, expected_sha256)) {
         // Clean up dest_dir on mismatch
-        std.fs.deleteTreeAbsolute(dest_dir) catch {};
+        fs_compat.deleteTreeAbsolute(dest_dir) catch {};
         return BottleError.Sha256Mismatch;
     }
 
     // Ensure dest_dir exists
-    std.fs.makeDirAbsolute(dest_dir) catch |e| switch (e) {
+    fs_compat.makeDirAbsolute(dest_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return BottleError.IoError,
     };
@@ -66,7 +67,7 @@ pub fn download(
     const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "{s}/bottle.tar.gz", .{dest_dir}) catch
         return BottleError.OutOfMemory;
 
-    const tmp_file = std.fs.createFileAbsolute(tmp_path, .{}) catch return BottleError.IoError;
+    const tmp_file = fs_compat.createFileAbsolute(tmp_path, .{}) catch return BottleError.IoError;
     tmp_file.writeAll(body.items) catch {
         tmp_file.close();
         return BottleError.IoError;
@@ -77,7 +78,7 @@ pub fn download(
     archive.extractTarGz(tmp_path, dest_dir) catch return BottleError.ExtractionFailed;
 
     // Remove the temp archive file
-    std.fs.deleteFileAbsolute(tmp_path) catch {};
+    fs_compat.deleteFileAbsolute(tmp_path) catch {};
 
     return .{
         .sha256 = expected_sha256,
@@ -87,7 +88,7 @@ pub fn download(
 
 /// Verify SHA256 of a file on disk.
 pub fn verify(allocator: std.mem.Allocator, file_path: []const u8, expected_sha256: []const u8) !bool {
-    const file = std.fs.openFileAbsolute(file_path, .{}) catch return false;
+    const file = fs_compat.openFileAbsolute(file_path, .{}) catch return false;
     defer file.close();
 
     const stat = file.stat() catch return false;

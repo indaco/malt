@@ -13,6 +13,7 @@
 #   SKIP_OTHERS=1 scripts/bench.sh         # bench only malt (and brew)
 #   SKIP_BREW=1 scripts/bench.sh           # skip Homebrew comparison
 #   BENCH_TRUE_COLD=1 scripts/bench.sh     # wipe malt prefix before each cold install
+#   BENCH_ROUNDS=5 scripts/bench.sh        # samples per tool/pkg, median wins (default 3)
 #   BENCH_STRESS=20 scripts/bench.sh ffmpeg  # stress mode — see below
 #
 # Env overrides:
@@ -70,6 +71,19 @@ BENCH_FAIL_FAST="${BENCH_FAIL_FAST:-0}"
 # catch low-rate races in the parallel install pipeline — single-sample
 # runs missed the fetchFormulaWorker allocator race for weeks.
 BENCH_STRESS="${BENCH_STRESS:-0}"
+# Samples per tool/package. The reported number is the median, which
+# damps single-run outliers (network jitter, transient launchd hiccups,
+# disk caches warming) without inflating the table the way a mean would.
+# 3 is the smallest count that gives a stable middle value at modest cost
+# (~3× wall time vs. the old single-sample mode).
+BENCH_ROUNDS="${BENCH_ROUNDS:-3}"
+case "$BENCH_ROUNDS" in
+  ''|*[!0-9]*) printf '✗ BENCH_ROUNDS must be a positive integer (got: %s)\n' "$BENCH_ROUNDS" >&2; exit 1 ;;
+esac
+if [ "$BENCH_ROUNDS" -lt 1 ]; then
+  printf '✗ BENCH_ROUNDS must be ≥1 (got: %s)\n' "$BENCH_ROUNDS" >&2
+  exit 1
+fi
 
 # Isolated runtime prefixes — kept separate from /opt/{malt,nanobrew,...} so
 # the benchmark never touches the user's real installations. malt and bru
@@ -292,6 +306,26 @@ time_brew_install() {
   printf '%s' "$t"
 }
 
+# median <v1> <v2> ... <vN>
+#
+# Prints the median of N numeric samples. If any sample is "FAIL", the
+# whole run is treated as failed and "FAIL" is printed — one bad sample
+# would make the median lie about what actually happens. For even N we
+# return the lower of the two middle samples (deterministic, no float).
+median() {
+  local v
+  for v in "$@"; do
+    case "$v" in *FAIL*) printf 'FAIL'; return ;; esac
+  done
+  local n=$# mid
+  if [ $((n % 2)) -eq 1 ]; then
+    mid=$(((n + 1) / 2))
+  else
+    mid=$((n / 2))
+  fi
+  printf '%s\n' "$@" | sort -n | sed -n "${mid}p"
+}
+
 size_of() {
   if [ -f "$1" ]; then
     # Path is an internally-controlled binary; ls -lh matches the workflow.
@@ -387,58 +421,77 @@ run_stress() {
   return 0
 }
 
-run_bench_for() {
-  local pkg="$1" t
-  info "${BOLD}benchmark: $pkg${RESET}"
+# bench_tool <bin> <install> <uninstall> <pkg> <key> [<prep_fn>]
+#
+# Runs $BENCH_ROUNDS sample pairs (cold + warm) for one tool/package and
+# stores the median of each set under cold_<key>_<pkg> / warm_<key>_<pkg>.
+# `prep_fn` (if given) wipes the tool's prefix before the cold sample —
+# only invoked when BENCH_TRUE_COLD=1 so warm-cache runs stay warm.
+#
+# Note: "true cold" wipes the *install prefix* only, not the download
+# cache — so round 1 is genuinely cold but rounds 2+ are prefix-empty
+# / cache-warm. That's intentional and matches the single-sample
+# behaviour of the pre-rounds script: median across rounds favours the
+# steady-state install path. If you need every round to redownload from
+# scratch, wipe the relevant cache dir in `prep_fn` too.
+bench_tool() {
+  local bin="$1" install="$2" uninstall="$3" pkg="$4" key="$5" prep="${6:-}"
+  local cold_samples="" warm_samples="" r
+  for r in $(seq 1 "$BENCH_ROUNDS"); do
+    if [ -n "$prep" ] && [ "$BENCH_TRUE_COLD" = "1" ]; then "$prep"; fi
+    local c w
+    c=$(time_install "$bin" "$install" "$uninstall" "$pkg")
+    w=$(time_install "$bin" "$install" "$uninstall" "$pkg")
+    cold_samples="$cold_samples $c"
+    warm_samples="$warm_samples $w"
+    "$bin" "$uninstall" "$pkg" >/dev/null 2>&1 || true
+  done
+  # shellcheck disable=SC2086
+  set_result "cold_${key}_$pkg" "$(median $cold_samples)"
+  # shellcheck disable=SC2086
+  set_result "warm_${key}_$pkg" "$(median $warm_samples)"
+  emit_output "${key}_cold=$(get_result "cold_${key}_$pkg")s"
+  emit_output "${key}_warm=$(get_result "warm_${key}_$pkg")s"
+}
 
-  # malt
-  if [ "$BENCH_TRUE_COLD" = "1" ]; then prep_cold_malt; fi
-  t=$(time_install "$MALT_BIN" install uninstall "$pkg")
-  set_result "cold_mt_$pkg" "$t"
-  t=$(time_install "$MALT_BIN" install uninstall "$pkg")
-  set_result "warm_mt_$pkg" "$t"
-  "$MALT_BIN" uninstall "$pkg" >/dev/null 2>&1 || true
-  emit_output "mt_cold=$(get_result "cold_mt_$pkg")s"
-  emit_output "mt_warm=$(get_result "warm_mt_$pkg")s"
+# bench_brew <pkg>
+#
+# brew has no separate warm/cold notion in this script (the table only
+# reports a cold column for it), and there's no benign prefix to wipe —
+# we just take $BENCH_ROUNDS install-after-uninstall samples and store
+# the median under cold_brew_<pkg>.
+bench_brew() {
+  local pkg="$1" cold_samples="" r c
+  for r in $(seq 1 "$BENCH_ROUNDS"); do
+    c=$(time_brew_install "$pkg")
+    cold_samples="$cold_samples $c"
+    brew uninstall "$pkg" >/dev/null 2>&1 || true
+  done
+  # shellcheck disable=SC2086
+  set_result "cold_brew_$pkg" "$(median $cold_samples)"
+  emit_output "brew_cold=$(get_result "cold_brew_$pkg")s"
+}
+
+run_bench_for() {
+  local pkg="$1"
+  info "${BOLD}benchmark: $pkg (×$BENCH_ROUNDS rounds, median)${RESET}"
+
+  bench_tool "$MALT_BIN" install uninstall "$pkg" mt prep_cold_malt
 
   if [ "$SKIP_OTHERS" != "1" ]; then
     if [ -x "$NB_BIN" ]; then
-      if [ "$BENCH_TRUE_COLD" = "1" ]; then prep_cold_nb; fi
-      t=$(time_install "$NB_BIN" install remove "$pkg")
-      set_result "cold_nb_$pkg" "$t"
-      t=$(time_install "$NB_BIN" install remove "$pkg")
-      set_result "warm_nb_$pkg" "$t"
-      "$NB_BIN" remove "$pkg" >/dev/null 2>&1 || true
-      emit_output "nb_cold=$(get_result "cold_nb_$pkg")s"
-      emit_output "nb_warm=$(get_result "warm_nb_$pkg")s"
+      bench_tool "$NB_BIN" install remove "$pkg" nb prep_cold_nb
     fi
     if [ -x "$ZB_BIN" ]; then
-      if [ "$BENCH_TRUE_COLD" = "1" ]; then prep_cold_zb; fi
-      t=$(time_install "$ZB_BIN" install uninstall "$pkg")
-      set_result "cold_zb_$pkg" "$t"
-      t=$(time_install "$ZB_BIN" install uninstall "$pkg")
-      set_result "warm_zb_$pkg" "$t"
-      "$ZB_BIN" uninstall "$pkg" >/dev/null 2>&1 || true
-      emit_output "zb_cold=$(get_result "cold_zb_$pkg")s"
-      emit_output "zb_warm=$(get_result "warm_zb_$pkg")s"
+      bench_tool "$ZB_BIN" install uninstall "$pkg" zb prep_cold_zb
     fi
     if [ -x "$BRU_BIN" ]; then
-      if [ "$BENCH_TRUE_COLD" = "1" ]; then prep_cold_bru; fi
-      t=$(time_install "$BRU_BIN" install uninstall "$pkg")
-      set_result "cold_bru_$pkg" "$t"
-      t=$(time_install "$BRU_BIN" install uninstall "$pkg")
-      set_result "warm_bru_$pkg" "$t"
-      "$BRU_BIN" uninstall "$pkg" >/dev/null 2>&1 || true
-      emit_output "bru_cold=$(get_result "cold_bru_$pkg")s"
-      emit_output "bru_warm=$(get_result "warm_bru_$pkg")s"
+      bench_tool "$BRU_BIN" install uninstall "$pkg" bru prep_cold_bru
     fi
   fi
 
   if [ "$SKIP_BREW" != "1" ] && command -v brew >/dev/null 2>&1; then
-    t=$(time_brew_install "$pkg")
-    set_result "cold_brew_$pkg" "$t"
-    brew uninstall "$pkg" >/dev/null 2>&1 || true
-    emit_output "brew_cold=$(get_result "cold_brew_$pkg")s"
+    bench_brew "$pkg"
   fi
 }
 

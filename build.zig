@@ -1,12 +1,62 @@
 const std = @import("std");
 
+const TranslatedCModules = struct {
+    c_sqlite: *std.Build.Module,
+    c_clonefile: *std.Build.Module,
+    c_mount: *std.Build.Module,
+};
+
+// addTranslateC binds the target at creation time, so universal builds
+// (which compile the same sources for two arches) need their own set.
+fn addTranslatedCModules(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) TranslatedCModules {
+    const c_sqlite = b.addTranslateC(.{
+        .root_source_file = b.path("c/sqlite.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    c_sqlite.addIncludePath(b.path("vendor/"));
+
+    const c_clonefile = b.addTranslateC(.{
+        .root_source_file = b.path("c/clonefile.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const c_mount = b.addTranslateC(.{
+        .root_source_file = b.path("c/mount.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    return .{
+        .c_sqlite = c_sqlite.createModule(),
+        .c_clonefile = c_clonefile.createModule(),
+        .c_mount = c_mount.createModule(),
+    };
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const strip = b.option(
+        bool,
+        "strip",
+        "Strip debug info from release binaries (default: true for non-Debug)",
+    ) orelse (optimize != .Debug);
+
     // --- Version from .version file ---
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", @embedFile(".version"));
+
+    // Zig 0.16 prefers build-system `addTranslateC` over inline `@cImport`:
+    // each header is translated once per build graph instead of once per
+    // root source file.
+    const host_c_mods = addTranslatedCModules(b, target, optimize);
 
     // --- Main executable: mt ---
     const exe = b.addExecutable(.{
@@ -16,9 +66,13 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .strip = strip,
         }),
     });
     exe.root_module.addOptions("version_string", version_options);
+    exe.root_module.addImport("c_sqlite", host_c_mods.c_sqlite);
+    exe.root_module.addImport("c_clonefile", host_c_mods.c_clonefile);
+    exe.root_module.addImport("c_mount", host_c_mods.c_mount);
 
     // Compile vendored SQLite amalgamation
     exe.root_module.addCSourceFile(.{
@@ -102,6 +156,7 @@ pub fn build(b: *std.Build) void {
         "tests/info_test.zig",
         "tests/uses_test.zig",
         "tests/output_test.zig",
+        "tests/worker_arena_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");
@@ -126,8 +181,11 @@ pub fn build(b: *std.Build) void {
     malt_lib.addIncludePath(b.path("vendor/"));
     malt_lib.addIncludePath(b.path("c/"));
     malt_lib.addOptions("version_string", version_options);
+    malt_lib.addImport("c_sqlite", host_c_mods.c_sqlite);
+    malt_lib.addImport("c_clonefile", host_c_mods.c_clonefile);
+    malt_lib.addImport("c_mount", host_c_mods.c_mount);
 
-    @setEvalBranchQuota(4000);
+    @setEvalBranchQuota(16000);
     inline for (test_modules) |test_file| {
         // e.g. "tests/formula_test.zig" → "formula_test" (so each test binary
         // has a unique install name, which `test-bin` / kcov need).
@@ -162,13 +220,19 @@ pub fn build(b: *std.Build) void {
     // --- Universal binary step (macOS only) ---
     const universal_step = b.step("universal", "Build universal binary (arm64 + x86_64) via lipo");
 
+    const arm64_target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
+    const x86_target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .macos });
+    const arm64_c_mods = addTranslatedCModules(b, arm64_target, optimize);
+    const x86_c_mods = addTranslatedCModules(b, x86_target, optimize);
+
     const arm64_exe = b.addExecutable(.{
         .name = "malt",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos }),
+            .target = arm64_target,
             .optimize = optimize,
             .link_libc = true,
+            .strip = strip,
         }),
     });
     arm64_exe.root_module.addCSourceFile(.{
@@ -178,14 +242,18 @@ pub fn build(b: *std.Build) void {
     arm64_exe.root_module.addIncludePath(b.path("vendor/"));
     arm64_exe.root_module.addIncludePath(b.path("c/"));
     arm64_exe.root_module.addOptions("version_string", version_options);
+    arm64_exe.root_module.addImport("c_sqlite", arm64_c_mods.c_sqlite);
+    arm64_exe.root_module.addImport("c_clonefile", arm64_c_mods.c_clonefile);
+    arm64_exe.root_module.addImport("c_mount", arm64_c_mods.c_mount);
 
     const x86_exe = b.addExecutable(.{
         .name = "malt",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .macos }),
+            .target = x86_target,
             .optimize = optimize,
             .link_libc = true,
+            .strip = strip,
         }),
     });
     x86_exe.root_module.addCSourceFile(.{
@@ -195,6 +263,9 @@ pub fn build(b: *std.Build) void {
     x86_exe.root_module.addIncludePath(b.path("vendor/"));
     x86_exe.root_module.addIncludePath(b.path("c/"));
     x86_exe.root_module.addOptions("version_string", version_options);
+    x86_exe.root_module.addImport("c_sqlite", x86_c_mods.c_sqlite);
+    x86_exe.root_module.addImport("c_clonefile", x86_c_mods.c_clonefile);
+    x86_exe.root_module.addImport("c_mount", x86_c_mods.c_mount);
 
     const lipo = b.addSystemCommand(&.{"lipo"});
     lipo.addArtifactArg(arm64_exe);

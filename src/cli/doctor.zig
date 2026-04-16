@@ -2,6 +2,7 @@
 //! System health check.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const store_mod = @import("../core/store.zig");
@@ -69,7 +70,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     for (dirs) |dir| {
         var buf: [512]u8 = undefined;
         const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, dir }) catch continue;
-        std.fs.accessAbsolute(p, .{}) catch {
+        fs_compat.accessAbsolute(p, .{}) catch {
             var msg_buf: [256]u8 = undefined;
             const msg = std.fmt.bufPrint(&msg_buf, "Missing directory: {s}", .{p}) catch continue;
             printCheck("Directory structure", .warn_status, msg);
@@ -87,7 +88,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         if (pid) |p| {
             // Check if PID is still running via kill(pid, 0)
             const is_alive = blk_alive: {
-                std.posix.kill(p, 0) catch break :blk_alive false;
+                if (std.c.kill(p, @enumFromInt(0)) != 0) break :blk_alive false;
                 break :blk_alive true;
             };
             if (is_alive) {
@@ -157,7 +158,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         var store_path_buf: [512]u8 = undefined;
         const store_path = std.fmt.bufPrint(&store_path_buf, "{s}/store", .{prefix}) catch break :blk6;
-        var store_dir = std.fs.openDirAbsolute(store_path, .{ .iterate = true }) catch {
+        var store_dir = fs_compat.openDirAbsolute(store_path, .{ .iterate = true }) catch {
             // store/ doesn't exist or can't be read — not an error, just skip
             printCheck("Orphaned store entries", .ok, null);
             break :blk6;
@@ -207,7 +208,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         while (stmt.step() catch false) {
             const cellar_raw = stmt.columnText(2) orelse continue;
             const cellar_path = std.mem.sliceTo(cellar_raw, 0);
-            std.fs.accessAbsolute(cellar_path, .{}) catch {
+            fs_compat.accessAbsolute(cellar_path, .{}) catch {
                 missing_count += 1;
             };
         }
@@ -230,7 +231,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         for (link_dirs) |subdir| {
             var dir_buf: [512]u8 = undefined;
             const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
-            var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch continue;
+            var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch continue;
             defer dir.close();
 
             var dir_iter = dir.iterate();
@@ -263,7 +264,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         var cellar_root_buf: [512]u8 = undefined;
         const cellar_root = std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{prefix}) catch break :blk_mach;
 
-        var cellar_dir = std.fs.openDirAbsolute(cellar_root, .{ .iterate = true }) catch {
+        var cellar_dir = fs_compat.openDirAbsolute(cellar_root, .{ .iterate = true }) catch {
             // No Cellar yet — nothing to scan.
             printCheck("Mach-O placeholders", .ok, null);
             break :blk_mach;
@@ -308,7 +309,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // 9. Disk space — warn if < 1 GB free on the malt prefix volume
     blk9: {
-        const mount_c = @cImport(@cInclude("sys/mount.h"));
+        const mount_c = @import("c_mount");
         const posix_path = std.posix.toPosixPath(prefix) catch break :blk9;
         var stat_buf: mount_c.struct_statfs = undefined;
         const rc = mount_c.statfs(&posix_path, &stat_buf);
@@ -332,7 +333,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // Summary + exit code
-    const f = std.fs.File.stderr();
+    const f = fs_compat.stderrFile();
     f.writeAll("\n") catch {};
     if (errors > 0) {
         output.err("mt doctor found {d} error(s) and {d} warning(s)", .{ errors, warnings });
@@ -449,7 +450,7 @@ fn checkPostInstallStatus(allocator: std.mem.Allocator, prefix: []const u8) void
 /// doctor's placeholder check is best-effort.
 fn hasUnpatchedPlaceholder(
     allocator: std.mem.Allocator,
-    base_dir: *std.fs.Dir,
+    base_dir: *fs_compat.Dir,
     rel_path: []const u8,
 ) !bool {
     var file = base_dir.openFile(rel_path, .{}) catch return false;
@@ -466,7 +467,6 @@ fn hasUnpatchedPlaceholder(
     const data = allocator.alloc(u8, stat.size) catch return false;
     defer allocator.free(data);
 
-    file.seekTo(0) catch return false;
     const read = file.readAll(data) catch return false;
     if (read < data.len) return false;
 
@@ -483,7 +483,7 @@ fn hasUnpatchedPlaceholder(
 const CheckStatus = enum { ok, warn_status, err_status };
 
 fn printCheck(name: []const u8, status: CheckStatus, detail: ?[]const u8) void {
-    const f = std.fs.File.stderr();
+    const f = fs_compat.stderrFile();
     switch (status) {
         .ok => {
             if (color.isColorEnabled()) {

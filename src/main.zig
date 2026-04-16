@@ -2,6 +2,14 @@
 //! CLI entry point and command dispatch for the `mt` binary.
 
 const std = @import("std");
+const fs_compat = @import("fs/compat.zig");
+const io_mod = @import("ui/io.zig");
+
+// Release uses simple_panic so debug.Dwarf stays unreachable (~30 KB smaller).
+pub const panic = if (@import("builtin").mode == .Debug)
+    std.debug.FullPanic(std.debug.defaultPanic)
+else
+    std.debug.simple_panic;
 
 /// Global interrupt flag — set by SIGINT handler, checked at install step boundaries.
 var g_interrupted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
@@ -10,7 +18,7 @@ pub fn isInterrupted() bool {
     return g_interrupted.load(.acquire);
 }
 
-fn sigintHandler(_: c_int) callconv(.c) void {
+fn sigintHandler(_: std.c.SIG) callconv(.c) void {
     g_interrupted.store(true, .release);
 }
 
@@ -103,10 +111,10 @@ const command_map = std.StaticStringMap(Command).initComptime(.{
     .{ "--version", .version },
 });
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     // In debug builds, use GeneralPurposeAllocator as the backing
     // allocator for leak detection and use-after-free checks.
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     const backing: std.mem.Allocator = if (@import("builtin").mode == .Debug)
         gpa.allocator()
     else
@@ -131,9 +139,16 @@ pub fn main() !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
+    var args_it = try init.args.iterateAllocator(allocator);
+    defer args_it.deinit();
+    _ = args_it.skip(); // skip argv0
 
-    if (args.len < 2) {
+    var args_list: std.ArrayList([]const u8) = .empty;
+    defer args_list.deinit(allocator);
+    while (args_it.next()) |arg| try args_list.append(allocator, arg);
+    const args = args_list.items;
+
+    if (args.len == 0) {
         printUsage();
         return;
     }
@@ -145,7 +160,7 @@ pub fn main() !void {
     defer filtered.deinit(allocator);
     var cmd_str: []const u8 = "";
     var found_cmd = false;
-    for (args[1..]) |arg| {
+    for (args) |arg| {
         if (!found_cmd and !std.mem.startsWith(u8, arg, "-")) {
             cmd_str = arg;
             found_cmd = true;
@@ -181,7 +196,7 @@ pub fn main() !void {
         };
     } else {
         // Unknown command — try transparent brew fallback
-        try brewFallback(allocator, args[1..]);
+        try brewFallback(allocator, args);
     }
 }
 
@@ -272,11 +287,11 @@ fn printUsage() void {
         \\  MALT_NO_EMOJI     Disable emoji in output
         \\
     ;
-    std.fs.File.stdout().writeAll(usage) catch {};
+    io_mod.stdoutWriteAll(usage);
 }
 
 fn printVersion() void {
-    std.fs.File.stdout().writeAll("malt " ++ version ++ "\n") catch {};
+    io_mod.stdoutWriteAll("malt " ++ version ++ "\n");
 }
 
 fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -288,7 +303,7 @@ fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     for (brew_paths) |brew_path| {
-        std.fs.accessAbsolute(brew_path, .{}) catch continue;
+        fs_compat.accessAbsolute(brew_path, .{}) catch continue;
 
         // Build argv: [brew] ++ args
         var argv_buf: [128][]const u8 = undefined;
@@ -298,11 +313,11 @@ fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
             argv_buf[i] = arg;
         }
 
-        var child = std.process.Child.init(argv_buf[0 .. argc + 1], allocator);
+        var child = fs_compat.Child.init(argv_buf[0 .. argc + 1], allocator);
         child.spawn() catch continue;
         const term = child.wait() catch continue;
         switch (term) {
-            .Exited => |code| {
+            .exited => |code| {
                 if (code != 0) return error.BrewFailed;
             },
             else => return error.BrewFailed,
@@ -311,11 +326,10 @@ fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // brew not found
-    const stderr = std.fs.File.stderr();
     if (args.len > 0) {
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "malt: '{s}' is not a malt command and brew was not found.\n", .{args[0]}) catch return;
-        stderr.writeAll(msg) catch {};
+        io_mod.stderrWriteAll(msg);
     }
-    stderr.writeAll("Install Homebrew: https://brew.sh\n") catch {};
+    io_mod.stderrWriteAll("Install Homebrew: https://brew.sh\n");
 }

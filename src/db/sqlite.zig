@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @cImport(@cInclude("sqlite3.h"));
+const c = @import("c_sqlite");
 
 pub const SqliteError = error{
     OpenFailed,

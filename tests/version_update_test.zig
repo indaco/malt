@@ -96,13 +96,13 @@ test "pickAssetUrl returns null when nothing matches" {
 /// Reset a scratch directory tree for a single test. The tree under
 /// `path` is fully deleted so fixtures from previous runs (or earlier
 /// failed assertions) cannot influence the current one.
-fn resetTree(path: []const u8) !std.fs.Dir {
-    std.fs.deleteTreeAbsolute(path) catch {};
-    try std.fs.makeDirAbsolute(path);
-    return std.fs.openDirAbsolute(path, .{ .iterate = true });
+fn resetTree(path: []const u8) !malt.fs_compat.Dir {
+    malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    try malt.fs_compat.makeDirAbsolute(path);
+    return malt.fs_compat.openDirAbsolute(path, .{ .iterate = true });
 }
 
-fn touch(dir: std.fs.Dir, rel: []const u8, content: []const u8) !void {
+fn touch(dir: malt.fs_compat.Dir, rel: []const u8, content: []const u8) !void {
     const f = try dir.createFile(rel, .{});
     defer f.close();
     try f.writeAll(content);
@@ -119,7 +119,7 @@ test "findReleaseBinary locates malt nested under GoReleaser's versioned dir" {
     const base = "/tmp/malt_findbin_nested";
     var dir = try resetTree(base);
     defer dir.close();
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     try dir.makePath("malt_0.3.1_darwin_all");
     var sub = try dir.openDir("malt_0.3.1_darwin_all", .{});
@@ -134,7 +134,7 @@ test "findReleaseBinary locates malt nested under GoReleaser's versioned dir" {
 
     try testing.expect(std.mem.endsWith(u8, found, "/malt_0.3.1_darwin_all/malt"));
     // The returned path must actually exist and be the file we wrote.
-    const f = try std.fs.openFileAbsolute(found, .{});
+    const f = try malt.fs_compat.openFileAbsolute(found, .{});
     defer f.close();
     var buf: [64]u8 = undefined;
     const n = try f.readAll(&buf);
@@ -147,7 +147,7 @@ test "findReleaseBinary accepts a flat layout with the binary at the root" {
     const base = "/tmp/malt_findbin_flat";
     var dir = try resetTree(base);
     defer dir.close();
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     try touch(dir, "malt", "binary-bytes");
 
@@ -165,7 +165,7 @@ test "findReleaseBinary accepts the `mt` alias when `malt` is absent" {
     const base = "/tmp/malt_findbin_mt_only";
     var dir = try resetTree(base);
     defer dir.close();
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     try dir.makePath("wrap");
     var sub = try dir.openDir("wrap", .{});
@@ -185,7 +185,7 @@ test "findReleaseBinary returns null when the archive has no matching binary" {
     const base = "/tmp/malt_findbin_missing";
     var dir = try resetTree(base);
     defer dir.close();
-    defer std.fs.deleteTreeAbsolute(base) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     try touch(dir, "LICENSE", "MIT");
     try touch(dir, "README.md", "# malt");

@@ -17,8 +17,8 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_services_test_" ++ tag;
-        std.fs.deleteTreeAbsolute(dir) catch {};
-        try std.fs.makeDirAbsolute(dir);
+        malt.fs_compat.deleteTreeAbsolute(dir) catch {};
+        try malt.fs_compat.makeDirAbsolute(dir);
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrint(&db_path_buf, "{s}/test.db", .{dir});
         var db = try sqlite.Database.open(db_path);
@@ -29,7 +29,7 @@ const TempDb = struct {
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        std.fs.deleteTreeAbsolute(self.dir) catch {};
+        malt.fs_compat.deleteTreeAbsolute(self.dir) catch {};
     }
 };
 
@@ -67,14 +67,14 @@ test "tailLog returns last N lines of a small file" {
 
     const log_path = "/tmp/malt_services_test_tail/sample.log";
     {
-        var f = try std.fs.createFileAbsolute(log_path, .{ .truncate = true });
+        var f = try malt.fs_compat.createFileAbsolute(log_path, .{ .truncate = true });
         defer f.close();
         try f.writeAll("alpha\nbeta\ngamma\ndelta\nepsilon\n");
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    try supervisor.tailLog(testing.allocator, log_path, 2, buf.writer(testing.allocator));
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try supervisor.tailLog(testing.allocator, log_path, 2, &aw.writer);
 
-    try testing.expectEqualStrings("delta\nepsilon\n", buf.items);
+    try testing.expectEqualStrings("delta\nepsilon\n", aw.written());
 }

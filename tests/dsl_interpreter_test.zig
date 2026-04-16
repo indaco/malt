@@ -71,23 +71,26 @@ fn setupCellar(prefix_dir: []const u8) !void {
         &.{ prefix_dir, "Cellar", "testpkg", "1.0" },
     );
     defer testing.allocator.free(cellar_path);
-    try std.fs.cwd().makePath(cellar_path);
+    try malt.fs_compat.cwd().makePath(cellar_path);
 
     // Create etc, share, var
     for ([_][]const u8{ "etc", "share", "var" }) |sub| {
         const p = try std.fs.path.join(testing.allocator, &.{ prefix_dir, sub });
         defer testing.allocator.free(p);
-        try std.fs.cwd().makePath(p);
+        try malt.fs_compat.cwd().makePath(p);
     }
 }
 
 /// Create a temp directory and set up the cellar structure.
 /// Returns the absolute path as an owned slice (caller must free).
 fn makeTempPrefix() ![]const u8 {
-    var tmp = std.testing.tmpDir(.{});
+    const tmp = std.testing.tmpDir(.{});
     // Get the real path of the temp directory
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix_path = try tmp.dir.realpath(".", &buf);
+    var buf: [malt.fs_compat.max_path_bytes]u8 = undefined;
+    const prefix_path = blk: {
+        const n = try std.Io.Dir.realPath(tmp.dir, malt.io_mod.ctx(), &buf);
+        break :blk buf[0..n];
+    };
     const owned = try testing.allocator.dupe(u8, prefix_path);
 
     // Build the cellar structure inside it
@@ -128,7 +131,7 @@ test "interpreter: pathname mkpath creates directory" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "share", "myapp" },
     );
     defer testing.allocator.free(expected);
-    std.fs.cwd().access(expected, .{}) catch {
+    malt.fs_compat.cwd().access(expected, .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -151,7 +154,7 @@ test "interpreter: file write creates file with content" {
     );
     defer testing.allocator.free(expected_path);
 
-    const file = try std.fs.openFileAbsolute(expected_path, .{});
+    const file = try malt.fs_compat.openFileAbsolute(expected_path, .{});
     defer file.close();
     var buf: [64]u8 = undefined;
     const n = try file.readAll(&buf);
@@ -206,7 +209,7 @@ test "interpreter: variable assignment and use" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "share", "data" },
     );
     defer testing.allocator.free(expected);
-    std.fs.cwd().access(expected, .{}) catch {
+    malt.fs_compat.cwd().access(expected, .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -410,12 +413,12 @@ test "interpreter: cp children copies files" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "share", "data" },
     );
     defer testing.allocator.free(share_data);
-    try std.fs.cwd().makePath(share_data);
+    try malt.fs_compat.cwd().makePath(share_data);
 
     const file1 = try std.fs.path.join(testing.allocator, &.{ share_data, "a.txt" });
     defer testing.allocator.free(file1);
     {
-        const f = try std.fs.createFileAbsolute(file1, .{});
+        const f = try malt.fs_compat.createFileAbsolute(file1, .{});
         _ = try f.write("aaa");
         f.close();
     }
@@ -426,7 +429,7 @@ test "interpreter: cp children copies files" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "lib" },
     );
     defer testing.allocator.free(lib_dir);
-    try std.fs.cwd().makePath(lib_dir);
+    try malt.fs_compat.cwd().makePath(lib_dir);
 
     const src =
         \\cp (prefix/"share"/"data").children, prefix/"lib"
@@ -448,12 +451,12 @@ test "interpreter: rm array inline deletes files" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "tmp" },
     );
     defer testing.allocator.free(tmp_dir);
-    try std.fs.cwd().makePath(tmp_dir);
+    try malt.fs_compat.cwd().makePath(tmp_dir);
 
     for ([_][]const u8{ "a.txt", "b.txt" }) |name| {
         const fp = try std.fs.path.join(testing.allocator, &.{ tmp_dir, name });
         defer testing.allocator.free(fp);
-        const f = try std.fs.createFileAbsolute(fp, .{});
+        const f = try malt.fs_compat.createFileAbsolute(fp, .{});
         f.close();
     }
 
@@ -477,14 +480,14 @@ test "interpreter: chmod array no error" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "bin" },
     );
     defer testing.allocator.free(bin_dir);
-    try std.fs.cwd().makePath(bin_dir);
+    try malt.fs_compat.cwd().makePath(bin_dir);
 
     const sbin_dir = try std.fs.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "sbin" },
     );
     defer testing.allocator.free(sbin_dir);
-    try std.fs.cwd().makePath(sbin_dir);
+    try malt.fs_compat.cwd().makePath(sbin_dir);
 
     const src =
         \\chmod 0755, [prefix/"bin", prefix/"sbin"]
@@ -511,7 +514,7 @@ test "interpreter: file? returns true for existing file" {
     );
     defer testing.allocator.free(test_file);
     {
-        const f = try std.fs.createFileAbsolute(test_file, .{});
+        const f = try malt.fs_compat.createFileAbsolute(test_file, .{});
         f.close();
     }
 
@@ -533,12 +536,12 @@ test "interpreter: children on directory no error" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "subdir" },
     );
     defer testing.allocator.free(subdir);
-    try std.fs.cwd().makePath(subdir);
+    try malt.fs_compat.cwd().makePath(subdir);
 
     const fp = try std.fs.path.join(testing.allocator, &.{ subdir, "x.txt" });
     defer testing.allocator.free(fp);
     {
-        const f = try std.fs.createFileAbsolute(fp, .{});
+        const f = try malt.fs_compat.createFileAbsolute(fp, .{});
         f.close();
     }
 
@@ -565,7 +568,7 @@ test "interpreter: atomic_write creates file with content" {
     );
     defer testing.allocator.free(expected_path);
 
-    const file = std.fs.openFileAbsolute(expected_path, .{}) catch {
+    const file = malt.fs_compat.openFileAbsolute(expected_path, .{}) catch {
         return error.TestUnexpectedResult;
     };
     defer file.close();
@@ -592,7 +595,7 @@ test "interpreter: inreplace replaces content in file" {
     );
     defer testing.allocator.free(config_path);
     {
-        const f = try std.fs.createFileAbsolute(config_path, .{});
+        const f = try malt.fs_compat.createFileAbsolute(config_path, .{});
         _ = try f.write("setting=OLD_VALUE\n");
         f.close();
     }
@@ -602,7 +605,7 @@ test "interpreter: inreplace replaces content in file" {
     try testing.expect(err == null);
 
     // Verify replacement
-    const file = try std.fs.openFileAbsolute(config_path, .{});
+    const file = try malt.fs_compat.openFileAbsolute(config_path, .{});
     defer file.close();
     var buf: [128]u8 = undefined;
     const n = try file.readAll(&buf);
@@ -694,7 +697,7 @@ test "interpreter: %w each loop creates dirs" {
             &.{ prefix, "Cellar", "testpkg", "1.0", "dirs", name },
         );
         defer testing.allocator.free(dir_path);
-        std.fs.cwd().access(dir_path, .{}) catch {
+        malt.fs_compat.cwd().access(dir_path, .{}) catch {
             return error.TestUnexpectedResult;
         };
     }
@@ -717,7 +720,7 @@ test "interpreter: unless with negation executes body" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "keep" },
     );
     defer testing.allocator.free(expected);
-    std.fs.cwd().access(expected, .{}) catch {
+    malt.fs_compat.cwd().access(expected, .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -777,7 +780,7 @@ test "interpreter: File.exist? returns true for existing file" {
     );
     defer testing.allocator.free(test_file);
     {
-        const f = try std.fs.createFileAbsolute(test_file, .{});
+        const f = try malt.fs_compat.createFileAbsolute(test_file, .{});
         f.close();
     }
 
@@ -853,12 +856,12 @@ test "coverage: rm_r removes directory tree" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "tmp", "subdir" },
     );
     defer testing.allocator.free(subdir);
-    try std.fs.cwd().makePath(subdir);
+    try malt.fs_compat.cwd().makePath(subdir);
 
     const file_path = try std.fs.path.join(testing.allocator, &.{ subdir, "file.txt" });
     defer testing.allocator.free(file_path);
     {
-        const f = try std.fs.createFileAbsolute(file_path, .{});
+        const f = try malt.fs_compat.createFileAbsolute(file_path, .{});
         _ = try f.write("data");
         f.close();
     }
@@ -873,7 +876,7 @@ test "coverage: rm_r removes directory tree" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "tmp" },
     );
     defer testing.allocator.free(tmp_dir);
-    const gone = std.fs.cwd().access(tmp_dir, .{});
+    const gone = malt.fs_compat.cwd().access(tmp_dir, .{});
     try testing.expect(gone == error.FileNotFound);
 }
 
@@ -891,7 +894,7 @@ test "coverage: cp single file" {
     );
     defer testing.allocator.free(src_file);
     {
-        const f = try std.fs.createFileAbsolute(src_file, .{});
+        const f = try malt.fs_compat.createFileAbsolute(src_file, .{});
         _ = try f.write("hello");
         f.close();
     }
@@ -906,7 +909,7 @@ test "coverage: cp single file" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "dst.txt" },
     );
     defer testing.allocator.free(dst_file);
-    const file = std.fs.openFileAbsolute(dst_file, .{}) catch {
+    const file = malt.fs_compat.openFileAbsolute(dst_file, .{}) catch {
         return error.TestUnexpectedResult;
     };
     defer file.close();
@@ -928,12 +931,12 @@ test "coverage: cp_r copies directory tree" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "srcdir" },
     );
     defer testing.allocator.free(srcdir);
-    try std.fs.cwd().makePath(srcdir);
+    try malt.fs_compat.cwd().makePath(srcdir);
 
     const a_txt = try std.fs.path.join(testing.allocator, &.{ srcdir, "a.txt" });
     defer testing.allocator.free(a_txt);
     {
-        const f = try std.fs.createFileAbsolute(a_txt, .{});
+        const f = try malt.fs_compat.createFileAbsolute(a_txt, .{});
         _ = try f.write("content");
         f.close();
     }
@@ -958,7 +961,7 @@ test "coverage: mv renames file" {
     );
     defer testing.allocator.free(old_file);
     {
-        const f = try std.fs.createFileAbsolute(old_file, .{});
+        const f = try malt.fs_compat.createFileAbsolute(old_file, .{});
         _ = try f.write("data");
         f.close();
     }
@@ -973,12 +976,12 @@ test "coverage: mv renames file" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "new.txt" },
     );
     defer testing.allocator.free(new_file);
-    std.fs.cwd().access(new_file, .{}) catch {
+    malt.fs_compat.cwd().access(new_file, .{}) catch {
         return error.TestUnexpectedResult;
     };
 
     // Verify old.txt is gone
-    const old_gone = std.fs.cwd().access(old_file, .{});
+    const old_gone = malt.fs_compat.cwd().access(old_file, .{});
     try testing.expect(old_gone == error.FileNotFound);
 }
 
@@ -999,7 +1002,7 @@ test "coverage: touch creates file" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "touched.txt" },
     );
     defer testing.allocator.free(file_path);
-    std.fs.cwd().access(file_path, .{}) catch {
+    malt.fs_compat.cwd().access(file_path, .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -1018,7 +1021,7 @@ test "coverage: ln_s creates symlink" {
     );
     defer testing.allocator.free(target_file);
     {
-        const f = try std.fs.createFileAbsolute(target_file, .{});
+        const f = try malt.fs_compat.createFileAbsolute(target_file, .{});
         _ = try f.write("target");
         f.close();
     }
@@ -1033,7 +1036,7 @@ test "coverage: ln_s creates symlink" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "link.txt" },
     );
     defer testing.allocator.free(link_path);
-    std.fs.cwd().access(link_path, .{}) catch {
+    malt.fs_compat.cwd().access(link_path, .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -1052,7 +1055,7 @@ test "coverage: ln_sf single target overwrites" {
     );
     defer testing.allocator.free(target_file);
     {
-        const f = try std.fs.createFileAbsolute(target_file, .{});
+        const f = try malt.fs_compat.createFileAbsolute(target_file, .{});
         _ = try f.write("target");
         f.close();
     }
@@ -1063,7 +1066,7 @@ test "coverage: ln_sf single target overwrites" {
     );
     defer testing.allocator.free(link_path);
     {
-        const f = try std.fs.createFileAbsolute(link_path, .{});
+        const f = try malt.fs_compat.createFileAbsolute(link_path, .{});
         _ = try f.write("old");
         f.close();
     }
@@ -1090,7 +1093,7 @@ test "coverage: mkdir_p nested directories" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "a", "b", "c" },
     );
     defer testing.allocator.free(deep_dir);
-    std.fs.cwd().access(deep_dir, .{}) catch {
+    malt.fs_compat.cwd().access(deep_dir, .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -1138,7 +1141,7 @@ test "coverage: symlink? false for regular file" {
     );
     defer testing.allocator.free(file_path);
     {
-        const f = try std.fs.createFileAbsolute(file_path, .{});
+        const f = try malt.fs_compat.createFileAbsolute(file_path, .{});
         f.close();
     }
 
@@ -1161,7 +1164,7 @@ test "coverage: read returns file content" {
     );
     defer testing.allocator.free(data_file);
     {
-        const f = try std.fs.createFileAbsolute(data_file, .{});
+        const f = try malt.fs_compat.createFileAbsolute(data_file, .{});
         _ = try f.write("test data");
         f.close();
     }
@@ -1208,12 +1211,12 @@ test "coverage: glob finds matching files" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "share" },
     );
     defer testing.allocator.free(share_dir);
-    try std.fs.cwd().makePath(share_dir);
+    try malt.fs_compat.cwd().makePath(share_dir);
 
     for ([_][]const u8{ "a.xml", "b.xml" }) |name| {
         const fp = try std.fs.path.join(testing.allocator, &.{ share_dir, name });
         defer testing.allocator.free(fp);
-        const f = try std.fs.createFileAbsolute(fp, .{});
+        const f = try malt.fs_compat.createFileAbsolute(fp, .{});
         f.close();
     }
 
@@ -1236,7 +1239,7 @@ test "coverage: install_symlink creates link" {
     );
     defer testing.allocator.free(src_file);
     {
-        const f = try std.fs.createFileAbsolute(src_file, .{});
+        const f = try malt.fs_compat.createFileAbsolute(src_file, .{});
         _ = try f.write("content");
         f.close();
     }
@@ -1460,7 +1463,7 @@ test "coverage: each loop with mkpath in body" {
             &.{ prefix, "Cellar", "testpkg", "1.0", "dirs2", name },
         );
         defer testing.allocator.free(dir_path);
-        std.fs.cwd().access(dir_path, .{}) catch {
+        malt.fs_compat.cwd().access(dir_path, .{}) catch {
             return error.TestUnexpectedResult;
         };
     }
