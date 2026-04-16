@@ -13,7 +13,8 @@
 #   SKIP_OTHERS=1 scripts/bench.sh         # bench only malt (and brew)
 #   SKIP_BREW=1 scripts/bench.sh           # skip Homebrew comparison
 #   BENCH_TRUE_COLD=1 scripts/bench.sh     # wipe malt prefix before each cold install
-#   BENCH_ROUNDS=5 scripts/bench.sh        # samples per tool/pkg, median wins (default 3)
+#   BENCH_ROUNDS=7 scripts/bench.sh        # samples per tool/pkg, median wins (default 5)
+#   BENCH_SKIP_UPDATE=1 scripts/bench.sh   # don't git-fetch nanobrew/zerobrew (offline)
 #   BENCH_STRESS=20 scripts/bench.sh ffmpeg  # stress mode — see below
 #
 # Env overrides:
@@ -29,12 +30,27 @@
 #   /opt/{malt,nanobrew,zerobrew,homebrew}, so it never touches existing
 #   installations. nanobrew has no prefix env var, so its source is sed-patched
 #   in place before building (and the patch is reset on each build via
-#   `git checkout -- src` so changing NB_BENCH_PREFIX always works).
+#   `git reset --hard FETCH_HEAD` — or `git checkout -- src` in
+#   BENCH_SKIP_UPDATE mode — so changing NB_BENCH_PREFIX always works).
+# - By default the script `git fetch`es nanobrew/zerobrew before each
+#   build so the comparison isn't malt-today vs peer-from-weeks-ago.
+#   Set BENCH_SKIP_UPDATE=1 to pin whatever is already checked out
+#   (offline/reproducibility).
 # - bru was previously part of the bench but was dropped: upstream pins
 #   Zig 0.15.2 and uses `std.heap.ThreadSafeAllocator`, which was removed in
 #   Zig 0.16 (what malt and nanobrew now build on). Re-add when bru tracks 0.16.
 # - With BENCH_TRUE_COLD=1 each tool's prefix is wiped before its cold
 #   install, forcing a real network download (matches a fresh CI runner).
+# - Every package bench starts with a discarded "warmup" round that runs
+#   every active tool once — primes DNS/TLS/TCP/disk caches so round 1
+#   is not systematically slower than rounds 2+. Measured rounds then
+#   rotate the tool order per round (round r: tools[r % N] goes first),
+#   so no single tool reliably eats the cold-network slot.
+# - In addition to the median reported in the README table, every
+#   (tool, pkg, cold|warm) triple emits `<key>_min` and `<key>_stddev`
+#   to $GITHUB_OUTPUT. These aren't used by the README workflow yet —
+#   they're there so run-to-run noise is visible in the step log and
+#   in the terminal summary.
 # - `BENCH_STRESS=N` runs N back-to-back cold installs of malt *only* for
 #   each package and exits non-zero if any of them fail. Designed to catch
 #   low-rate races in the parallel install pipeline (such as the
@@ -74,9 +90,16 @@ BENCH_STRESS="${BENCH_STRESS:-0}"
 # Samples per tool/package. The reported number is the median, which
 # damps single-run outliers (network jitter, transient launchd hiccups,
 # disk caches warming) without inflating the table the way a mean would.
-# 3 is the smallest count that gives a stable middle value at modest cost
-# (~3× wall time vs. the old single-sample mode).
-BENCH_ROUNDS="${BENCH_ROUNDS:-3}"
+# 5 rounds survive one outright outlier (FAIL/timeout) and still give a
+# stable middle value; 3 was the old default and left the median one bad
+# sample away from a visible shift. Warmup round isn't included here —
+# it's always run and always discarded, regardless of BENCH_ROUNDS.
+BENCH_ROUNDS="${BENCH_ROUNDS:-5}"
+# Whether to `git fetch && reset --hard origin/HEAD` on existing nanobrew
+# and zerobrew clones before building. Default on: prevents comparing
+# malt-today against peer-tool-from-weeks-ago. Set to 1 for offline/reproducible
+# runs that must use whatever is already checked out.
+BENCH_SKIP_UPDATE="${BENCH_SKIP_UPDATE:-0}"
 case "$BENCH_ROUNDS" in
   ''|*[!0-9]*) printf '✗ BENCH_ROUNDS must be a positive integer (got: %s)\n' "$BENCH_ROUNDS" >&2; exit 1 ;;
 esac
@@ -214,10 +237,16 @@ build_nanobrew() {
   info "build nanobrew (prefix $NB_BENCH_PREFIX)"
   if [ ! -d "$NB_DIR/.git" ]; then
     git clone --depth 1 https://github.com/justrach/nanobrew.git "$NB_DIR"
-  else
-    # Discard any prior in-place patch so we re-apply for the current
-    # NB_BENCH_PREFIX (idempotent across runs even if the value changed).
+  elif [ "$BENCH_SKIP_UPDATE" = "1" ]; then
+    # Offline mode: discard any prior in-place sed patch so we re-apply
+    # for the current NB_BENCH_PREFIX (idempotent across runs even if
+    # the value changed), but don't hit the network.
     git -C "$NB_DIR" checkout -- src
+  else
+    info "updating nanobrew source (BENCH_SKIP_UPDATE=1 to skip)"
+    git -C "$NB_DIR" fetch --depth 1 origin HEAD
+    # reset --hard also wipes any prior sed patch — no separate checkout needed.
+    git -C "$NB_DIR" reset --hard FETCH_HEAD
   fi
   # nanobrew has no prefix env var — its paths are compile-time constants in
   # src/platform/paths.zig and several call sites. Replace `/opt/nanobrew`
@@ -237,6 +266,10 @@ build_zerobrew() {
   info "build zerobrew (root $ZB_BENCH_PREFIX)"
   if [ ! -d "$ZB_DIR/.git" ]; then
     git clone --depth 1 https://github.com/lucasgelfond/zerobrew.git "$ZB_DIR"
+  elif [ "$BENCH_SKIP_UPDATE" != "1" ]; then
+    info "updating zerobrew source (BENCH_SKIP_UPDATE=1 to skip)"
+    git -C "$ZB_DIR" fetch --depth 1 origin HEAD
+    git -C "$ZB_DIR" reset --hard FETCH_HEAD
   fi
   (cd "$ZB_DIR" && cargo build --release)
   mkdir -p "$ZB_BENCH_PREFIX"
@@ -306,6 +339,56 @@ median() {
   printf '%s\n' "$@" | sort -n | sed -n "${mid}p"
 }
 
+# min_of <v1> <v2> ... <vN>
+#
+# Prints the smallest numeric sample. FAIL propagates (same reasoning as
+# median: one failed run taints the aggregate).
+min_of() {
+  local v
+  for v in "$@"; do
+    case "$v" in *FAIL*) printf 'FAIL'; return ;; esac
+  done
+  printf '%s\n' "$@" | sort -n | sed -n '1p'
+}
+
+# fmt_disp "<median>" "<stddev>" — "1.234±0.021s" composite string.
+#
+# Used by finalize_results when emitting `<tool>_cold_disp` / `<tool>_warm_disp`
+# to $GITHUB_OUTPUT so the README workflow can drop the combined figure
+# straight into a table cell. Empty median → "—"; FAIL median → "FAIL".
+fmt_disp() {
+  local m="${1:-}" s="${2:-}"
+  if [ -z "$m" ]; then printf "—"; return; fi
+  case "$m" in *FAIL*) printf "FAIL"; return ;; esac
+  if [ -n "$s" ]; then
+    printf "%s±%ss" "$m" "$s"
+  else
+    printf "%ss" "$m"
+  fi
+}
+
+# stddev_of <v1> <v2> ... <vN>
+#
+# Prints sample stddev (n-1 denominator) with 3 decimals. n<2 prints 0.
+# Reported alongside the median so the bench table surfaces how noisy a
+# number is — a 1.20 ± 0.80 cell is not the same story as 1.20 ± 0.02,
+# and a single median hides that.
+stddev_of() {
+  local v
+  for v in "$@"; do
+    case "$v" in *FAIL*) printf 'FAIL'; return ;; esac
+  done
+  printf '%s\n' "$@" | awk '
+    { x[NR] = $1; s += $1 }
+    END {
+      n = NR
+      if (n < 2) { printf("0.000"); exit }
+      m = s / n
+      for (i = 1; i <= n; i++) { d = x[i] - m; sq += d * d }
+      printf("%.3f", sqrt(sq / (n - 1)))
+    }'
+}
+
 size_of() {
   if [ -f "$1" ]; then
     # Path is an internally-controlled binary; ls -lh matches the workflow.
@@ -339,6 +422,38 @@ prep_cold_zb() {
   info "wiping $ZB_BENCH_PREFIX (true cold: zerobrew)"
   rm -rf "$ZB_BENCH_PREFIX"
   "$ZB_BIN" init >/dev/null 2>&1 || true
+}
+
+# prep_cold_brew <pkg>
+#
+# malt/nanobrew/zerobrew all keep their download cache inside their install
+# prefix, so a single `rm -rf $PREFIX` wipes both cleanly. Brew does not —
+# its bottle cache lives at `~/Library/Caches/Homebrew/downloads`, outside
+# any prefix and untouched by the bench. Without this wipe, every brew
+# "cold" sample reuses a bottle cached by a previous round, and local
+# numbers come out 5–25× faster than CI's (which runs on a fresh VM with
+# no cache). The stddev tells the story: brew was reporting ±0.02s on
+# wget cold while malt reported ±1.0s — you can't get that tight unless
+# the network never gets touched.
+#
+# Targeted wipe (bottle file for the package plus each transitive dep)
+# rather than `brew cleanup --prune=all`, so we don't nuke the user's
+# entire Homebrew cache for everything else they've installed.
+prep_cold_brew() {
+  local pkg="$1" deps paths
+  deps=$(brew deps "$pkg" 2>/dev/null || true)
+  # `brew --cache <formula>` prints the bottle path even if absent, so
+  # `rm -f` is safe against missing files.
+  # shellcheck disable=SC2086
+  paths=$(brew --cache "$pkg" $deps 2>/dev/null || true)
+  if [ -n "$paths" ]; then
+    local n_deps
+    # shellcheck disable=SC2086  # intentional: $deps is space-separated list
+    n_deps=$(printf '%s\n' $deps | wc -l | tr -d ' ')
+    info "wiping brew bottle cache for $pkg + $n_deps deps (true cold: brew)"
+    # shellcheck disable=SC2086  # intentional: $paths is space-separated list
+    printf '%s\n' $paths | xargs -I{} rm -f {} 2>/dev/null || true
+  fi
 }
 
 # --- stress mode -------------------------------------------------------------
@@ -396,75 +511,170 @@ run_stress() {
   return 0
 }
 
-# bench_tool <bin> <install> <uninstall> <pkg> <key> [<prep_fn>]
+# --- sample accumulators -----------------------------------------------------
 #
-# Runs $BENCH_ROUNDS sample pairs (cold + warm) for one tool/package and
-# stores the median of each set under cold_<key>_<pkg> / warm_<key>_<pkg>.
-# `prep_fn` (if given) wipes the tool's prefix before the cold sample —
-# only invoked when BENCH_TRUE_COLD=1 so warm-cache runs stay warm.
-#
-# Note: "true cold" wipes the *install prefix* only, not the download
-# cache — so round 1 is genuinely cold but rounds 2+ are prefix-empty
-# / cache-warm. That's intentional and matches the single-sample
-# behaviour of the pre-rounds script: median across rounds favours the
-# steady-state install path. If you need every round to redownload from
-# scratch, wipe the relevant cache dir in `prep_fn` too.
-bench_tool() {
-  local bin="$1" install="$2" uninstall="$3" pkg="$4" key="$5" prep="${6:-}"
-  local cold_samples="" warm_samples="" r
-  for r in $(seq 1 "$BENCH_ROUNDS"); do
-    if [ -n "$prep" ] && [ "$BENCH_TRUE_COLD" = "1" ]; then "$prep"; fi
-    local c w
-    c=$(time_install "$bin" "$install" "$uninstall" "$pkg")
-    w=$(time_install "$bin" "$install" "$uninstall" "$pkg")
-    cold_samples="$cold_samples $c"
-    warm_samples="$warm_samples $w"
-    "$bin" "$uninstall" "$pkg" >/dev/null 2>&1 || true
-  done
-  # shellcheck disable=SC2086
-  set_result "cold_${key}_$pkg" "$(median $cold_samples)"
-  # shellcheck disable=SC2086
-  set_result "warm_${key}_$pkg" "$(median $warm_samples)"
-  emit_output "${key}_cold=$(get_result "cold_${key}_$pkg")s"
-  emit_output "${key}_warm=$(get_result "warm_${key}_$pkg")s"
+# Samples are collected round-by-round and aggregated once the package is
+# done. Each (kind, tool, pkg) triple gets its own space-separated scalar
+# (bash 3.2 has no associative arrays).
+
+append_sample() {
+  # append_sample <cold|warm> <key> <pkg> <value>
+  local kind="$1" key="$2" pkg="$3" val="$4" var
+  var="_samples_${kind}_${key}_$(_keysafe "$pkg")"
+  printf -v "$var" '%s %s' "${!var:-}" "$val"
 }
 
-# bench_brew <pkg>
-#
-# brew has no separate warm/cold notion in this script (the table only
-# reports a cold column for it), and there's no benign prefix to wipe —
-# we just take $BENCH_ROUNDS install-after-uninstall samples and store
-# the median under cold_brew_<pkg>.
-bench_brew() {
-  local pkg="$1" cold_samples="" r c
-  for r in $(seq 1 "$BENCH_ROUNDS"); do
-    c=$(time_brew_install "$pkg")
-    cold_samples="$cold_samples $c"
-    brew uninstall "$pkg" >/dev/null 2>&1 || true
-  done
-  # shellcheck disable=SC2086
-  set_result "cold_brew_$pkg" "$(median $cold_samples)"
-  emit_output "brew_cold=$(get_result "cold_brew_$pkg")s"
+get_samples() {
+  local kind="$1" key="$2" pkg="$3" var
+  var="_samples_${kind}_${key}_$(_keysafe "$pkg")"
+  printf '%s' "${!var:-}"
 }
+
+# --- per-round runners -------------------------------------------------------
+#
+# run_one / run_brew_one perform one cold+warm (or, for brew, just one
+# cold) install pair and optionally append the timings to the sample
+# buffers. record=0 runs the full install/uninstall cycle but discards
+# results — that's the warmup mode.
+#
+# Why warmup + interleave together:
+# - Warmup (one discarded pass per tool) primes DNS, TLS session cache,
+#   TCP congestion window, and disk caches so round 1 isn't systematically
+#   slower than rounds 2+.
+# - Interleave (tool order rotates each round) kills the "first tool
+#   always eats the cold network" bias. The old loop ran N malt rounds,
+#   then N nanobrew, then N zerobrew, then N brew — so brew reliably
+#   benchmarked on the warmest network state.
+#
+# "True cold" is preserved: prep_cold_* wipes the install prefix before
+# every cold sample when BENCH_TRUE_COLD=1, so each cold sample is still
+# a full network download. The goal here is to reduce *cross-sample*
+# noise, not to change what "cold" means.
+#
+# Caveat (unchanged from before): BENCH_TRUE_COLD wipes the install
+# prefix, not the download cache. Round 1 of each tool is genuinely cold
+# (prefix empty + post-warmup network); rounds 2+ are prefix-empty but
+# server/CDN-cache-warm. That's intentional — median across rounds
+# favours the steady-state install path.
+
+run_one() {
+  # run_one <bin> <install> <uninstall> <pkg> <key> <prep_fn> <record>
+  local bin="$1" install="$2" uninstall="$3" pkg="$4" key="$5" prep="$6" record="$7"
+  local c w
+  if [ -n "$prep" ] && [ "$BENCH_TRUE_COLD" = "1" ]; then "$prep"; fi
+  c=$(time_install "$bin" "$install" "$uninstall" "$pkg")
+  w=$(time_install "$bin" "$install" "$uninstall" "$pkg")
+  "$bin" "$uninstall" "$pkg" >/dev/null 2>&1 || true
+  if [ "$record" = "1" ]; then
+    append_sample cold "$key" "$pkg" "$c"
+    append_sample warm "$key" "$pkg" "$w"
+  fi
+}
+
+run_brew_one() {
+  # run_brew_one <pkg> <record>
+  local pkg="$1" record="$2" c
+  if [ "$BENCH_TRUE_COLD" = "1" ]; then prep_cold_brew "$pkg"; fi
+  c=$(time_brew_install "$pkg")
+  brew uninstall "$pkg" >/dev/null 2>&1 || true
+  if [ "$record" = "1" ]; then
+    append_sample cold brew "$pkg" "$c"
+  fi
+}
+
+# run_round <pkg> <round_idx> <record> <tool1> [<tool2> ...]
+#
+# round_idx rotates the tool order: tool at position i is
+# tools[(round_idx + i) mod N]. round_idx=0 runs the declared order
+# (used for warmup), 1..N-1 for the measured rounds — so the first
+# measured round always differs from warmup, and every tool gets its
+# turn at being "first".
+run_round() {
+  local pkg="$1" round="$2" record="$3"
+  shift 3
+  local tools=("$@") n=$# i tool
+  for i in $(seq 0 $((n - 1))); do
+    tool=${tools[$(( (round + i) % n ))]}
+    case "$tool" in
+      mt)   run_one "$MALT_BIN" install uninstall "$pkg" mt prep_cold_malt "$record" ;;
+      nb)   run_one "$NB_BIN"   install remove    "$pkg" nb prep_cold_nb   "$record" ;;
+      zb)   run_one "$ZB_BIN"   install uninstall "$pkg" zb prep_cold_zb   "$record" ;;
+      brew) run_brew_one "$pkg" "$record" ;;
+    esac
+  done
+}
+
+# --- finalize ----------------------------------------------------------------
+#
+# Collapse per-round samples into median (primary reported number), min,
+# and stddev. All three get stored as named results and emitted to
+# $GITHUB_OUTPUT. The README workflow still reads only `<key>_cold` /
+# `<key>_warm`, so adding *_min and *_stddev keys is strictly additive.
+finalize_results() {
+  local pkg="$1"
+  shift
+  local tools=("$@") tool samples
+  for tool in "${tools[@]}"; do
+    samples=$(get_samples cold "$tool" "$pkg")
+    if [ -n "$samples" ]; then
+      # shellcheck disable=SC2086
+      set_result "cold_${tool}_$pkg"        "$(median    $samples)"
+      # shellcheck disable=SC2086
+      set_result "cold_${tool}_${pkg}_min"  "$(min_of    $samples)"
+      # shellcheck disable=SC2086
+      set_result "cold_${tool}_${pkg}_std"  "$(stddev_of $samples)"
+      emit_output "${tool}_cold=$(get_result "cold_${tool}_$pkg")s"
+      emit_output "${tool}_cold_min=$(get_result "cold_${tool}_${pkg}_min")s"
+      emit_output "${tool}_cold_stddev=$(get_result "cold_${tool}_${pkg}_std")s"
+      # Pre-formatted "median±stddev s" string for the README workflow —
+      # saves the workflow template from concatenating two fields.
+      emit_output "${tool}_cold_disp=$(fmt_disp "$(get_result "cold_${tool}_$pkg")" "$(get_result "cold_${tool}_${pkg}_std")")"
+    fi
+    # brew has no warm column in the comparison — only cold gets recorded.
+    if [ "$tool" != "brew" ]; then
+      samples=$(get_samples warm "$tool" "$pkg")
+      if [ -n "$samples" ]; then
+        # shellcheck disable=SC2086
+        set_result "warm_${tool}_$pkg"        "$(median    $samples)"
+        # shellcheck disable=SC2086
+        set_result "warm_${tool}_${pkg}_min"  "$(min_of    $samples)"
+        # shellcheck disable=SC2086
+        set_result "warm_${tool}_${pkg}_std"  "$(stddev_of $samples)"
+        emit_output "${tool}_warm=$(get_result "warm_${tool}_$pkg")s"
+        emit_output "${tool}_warm_min=$(get_result "warm_${tool}_${pkg}_min")s"
+        emit_output "${tool}_warm_stddev=$(get_result "warm_${tool}_${pkg}_std")s"
+        emit_output "${tool}_warm_disp=$(fmt_disp "$(get_result "warm_${tool}_$pkg")" "$(get_result "warm_${tool}_${pkg}_std")")"
+      fi
+    fi
+  done
+}
+
+# --- orchestration -----------------------------------------------------------
 
 run_bench_for() {
-  local pkg="$1"
-  info "${BOLD}benchmark: $pkg (×$BENCH_ROUNDS rounds, median)${RESET}"
-
-  bench_tool "$MALT_BIN" install uninstall "$pkg" mt prep_cold_malt
-
+  local pkg="$1" r
+  # Build the active tool list. Declared order here also controls the
+  # warmup order; measured rounds rotate from it.
+  local tools=(mt)
   if [ "$SKIP_OTHERS" != "1" ]; then
-    if [ -x "$NB_BIN" ]; then
-      bench_tool "$NB_BIN" install remove "$pkg" nb prep_cold_nb
-    fi
-    if [ -x "$ZB_BIN" ]; then
-      bench_tool "$ZB_BIN" install uninstall "$pkg" zb prep_cold_zb
-    fi
+    [ -x "$NB_BIN" ] && tools+=(nb)
+    [ -x "$ZB_BIN" ] && tools+=(zb)
+  fi
+  if [ "$SKIP_BREW" != "1" ] && command -v brew >/dev/null 2>&1; then
+    tools+=(brew)
   fi
 
-  if [ "$SKIP_BREW" != "1" ] && command -v brew >/dev/null 2>&1; then
-    bench_brew "$pkg"
-  fi
+  info "${BOLD}benchmark: $pkg (×$BENCH_ROUNDS rounds + warmup, median ±σ)${RESET}"
+
+  info "warmup (discarded): ${tools[*]}"
+  run_round "$pkg" 0 0 "${tools[@]}"
+
+  for r in $(seq 1 "$BENCH_ROUNDS"); do
+    info "round $r/$BENCH_ROUNDS"
+    run_round "$pkg" "$r" 1 "${tools[@]}"
+  done
+
+  finalize_results "$pkg" "${tools[@]}"
 }
 
 # --- run ---------------------------------------------------------------------
@@ -511,29 +721,55 @@ cell() {
   if [ -n "$v" ]; then printf "%ss" "$v"; else printf "—"; fi
 }
 
+# cell_std "<median>" "<stddev>" — "1.234±0.021s" or "—" if median missing.
+# Used by the terminal summary; for $GITHUB_OUTPUT use fmt_disp (defined
+# alongside the other stat helpers so finalize_results can call it).
+cell_std() {
+  fmt_disp "$@"
+}
+
 printf "\n%sBinary Size%s\n" "$BOLD" "$RESET"
 printf "  %-10s %s\n" "malt" "$(get_result size_mt)"
 printf "  %-10s %s\n" "nanobrew" "$(get_result size_nb)"
 printf "  %-10s %s\n" "zerobrew" "$(get_result size_zb)"
 # brew omitted: `which brew` is the shell wrapper, not a meaningful size.
 
-printf "\n%sCold Install%s\n" "$BOLD" "$RESET"
+printf "\n%sCold Install%s (median ±σ)\n" "$BOLD" "$RESET"
+printf "  %-14s %-16s %-16s %-16s %-16s\n" Package malt nanobrew zerobrew brew
+for pkg in "${PACKAGES[@]}"; do
+  printf "  %-14s %-16s %-16s %-16s %-16s\n" "$pkg" \
+    "$(cell_std "$(get_result "cold_mt_$pkg")"   "$(get_result "cold_mt_${pkg}_std")")" \
+    "$(cell_std "$(get_result "cold_nb_$pkg")"   "$(get_result "cold_nb_${pkg}_std")")" \
+    "$(cell_std "$(get_result "cold_zb_$pkg")"   "$(get_result "cold_zb_${pkg}_std")")" \
+    "$(cell_std "$(get_result "cold_brew_$pkg")" "$(get_result "cold_brew_${pkg}_std")")"
+done
+
+printf "\n%sCold Install%s (min)\n" "$BOLD" "$RESET"
 printf "  %-14s %-10s %-10s %-10s %-10s\n" Package malt nanobrew zerobrew brew
 for pkg in "${PACKAGES[@]}"; do
   printf "  %-14s %-10s %-10s %-10s %-10s\n" "$pkg" \
-    "$(cell "$(get_result "cold_mt_$pkg")")" \
-    "$(cell "$(get_result "cold_nb_$pkg")")" \
-    "$(cell "$(get_result "cold_zb_$pkg")")" \
-    "$(cell "$(get_result "cold_brew_$pkg")")"
+    "$(cell "$(get_result "cold_mt_${pkg}_min")")" \
+    "$(cell "$(get_result "cold_nb_${pkg}_min")")" \
+    "$(cell "$(get_result "cold_zb_${pkg}_min")")" \
+    "$(cell "$(get_result "cold_brew_${pkg}_min")")"
 done
 
-printf "\n%sWarm Install%s\n" "$BOLD" "$RESET"
+printf "\n%sWarm Install%s (median ±σ)\n" "$BOLD" "$RESET"
+printf "  %-14s %-16s %-16s %-16s\n" Package malt nanobrew zerobrew
+for pkg in "${PACKAGES[@]}"; do
+  printf "  %-14s %-16s %-16s %-16s\n" "$pkg" \
+    "$(cell_std "$(get_result "warm_mt_$pkg")" "$(get_result "warm_mt_${pkg}_std")")" \
+    "$(cell_std "$(get_result "warm_nb_$pkg")" "$(get_result "warm_nb_${pkg}_std")")" \
+    "$(cell_std "$(get_result "warm_zb_$pkg")" "$(get_result "warm_zb_${pkg}_std")")"
+done
+
+printf "\n%sWarm Install%s (min)\n" "$BOLD" "$RESET"
 printf "  %-14s %-10s %-10s %-10s\n" Package malt nanobrew zerobrew
 for pkg in "${PACKAGES[@]}"; do
   printf "  %-14s %-10s %-10s %-10s\n" "$pkg" \
-    "$(cell "$(get_result "warm_mt_$pkg")")" \
-    "$(cell "$(get_result "warm_nb_$pkg")")" \
-    "$(cell "$(get_result "warm_zb_$pkg")")"
+    "$(cell "$(get_result "warm_mt_${pkg}_min")")" \
+    "$(cell "$(get_result "warm_nb_${pkg}_min")")" \
+    "$(cell "$(get_result "warm_zb_${pkg}_min")")"
 done
 
 ok "done"
