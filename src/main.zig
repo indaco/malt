@@ -166,6 +166,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
             found_cmd = true;
             continue;
         }
+        // --help, -h, --version behave as commands when no other command has been seen yet.
+        if (!found_cmd and (std.mem.eql(u8, arg, "--help") or
+            std.mem.eql(u8, arg, "-h") or
+            std.mem.eql(u8, arg, "--version")))
+        {
+            cmd_str = arg;
+            found_cmd = true;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
             output.setVerbose(true);
         } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
