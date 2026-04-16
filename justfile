@@ -35,28 +35,7 @@ install:
 # Run unit tests
 [group('test')]
 test:
-    #!/usr/bin/env bash
-    # Build then run each test binary directly. Bypasses Zig 0.15's
-    # `zig build test` runner, which deadlocks on macOS in
-    # `Server.receiveMessage` once the test binaries finish their work
-    # (the parent build never sends "exit", children block on `readv`).
-    # Identical coverage, ~60s versus indefinite hang.
-    set -euo pipefail
-    zig build test-bin
-    fail=0
-    for t in zig-out/test-bin/*_test; do
-        name=$(basename "$t")
-        if ! "$t" >/tmp/malt_test_${name}.log 2>&1; then
-            echo "FAIL: $name"
-            tail -5 /tmp/malt_test_${name}.log | sed 's/^/  /'
-            fail=$((fail + 1))
-        fi
-    done
-    if [ "$fail" -ne 0 ]; then
-        echo "$fail test binary(ies) failed."
-        exit 1
-    fi
-    echo "All test binaries passed."
+    zig build test --summary all
 
 # Run tests under kcov, print line-coverage percentage, and refresh
 # the README badge SVG at .github/badges/coverage.svg.

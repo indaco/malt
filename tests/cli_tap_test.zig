@@ -46,10 +46,10 @@ test "execute with user/repo adds a tap idempotently" {
     try tap_cli.execute(testing.allocator, &.{"user/repo"});
     // A second call is idempotent via INSERT OR IGNORE.
     try tap_cli.execute(testing.allocator, &.{"user/repo"});
-    // NOTE: we deliberately do not exercise the bare-`execute` list path when
-    // rows are present — in the zig-test-runner listen protocol, writing tap
-    // names to stdout deadlocks the parent pipe. The bare list (empty case)
-    // is covered by the sibling test above.
+    // Bare-list path with rows present — `io_mod.stdoutFile()` routes the
+    // tap-name writes to stderr under the test runner, so this no longer
+    // deadlocks the IPC pipe.
+    try tap_cli.execute(testing.allocator, &.{});
 }
 
 test "execute with --help short-circuits before touching the database" {

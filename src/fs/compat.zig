@@ -152,7 +152,7 @@ pub fn stderrFile() File {
 }
 
 pub fn stdoutFile() File {
-    return .{ .inner = std.Io.File.stdout() };
+    return .{ .inner = io_mod.stdoutFile() };
 }
 
 pub fn stdinFile() File {
