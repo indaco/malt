@@ -845,6 +845,13 @@ pub fn collectFormulaJobs(
     // Resolve dependencies
     const deps = deps_mod.resolve(allocator, formula.name, api, db) catch &.{};
 
+    // Keep each already-installed dep's opt/ symlink pointing at its Cellar.
+    const heal_prefix = atomic.maltPrefix();
+    for (deps) |dep| {
+        if (!dep.already_installed) continue;
+        deps_mod.ensureOptLink(db, heal_prefix, dep.name);
+    }
+
     // Fetch every dep's formula JSON **in parallel**. Each worker
     // borrows a client from the shared `http_pool` for the duration
     // of its request so TLS contexts are reused across deps.
