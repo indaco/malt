@@ -156,12 +156,12 @@ fn upgradeFormula(
         return;
     }
 
-    output.info("Upgrading {s} {s} -> {s}...", .{ name, old_version, formula.version });
-
     if (dry_run) {
         output.info("Dry run: would upgrade {s} {s} -> {s}", .{ name, old_version, formula.version });
         return;
     }
+
+    output.info("Upgrading {s} {s} -> {s}...", .{ name, old_version, formula.version });
 
     // Step 3: Resolve bottle for new version
     const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
