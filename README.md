@@ -434,7 +434,7 @@ Group-install and export sets of packages. Drop-in for `brew bundle`: reads exis
 mt bundle install                            # ./Brewfile or ./Maltfile.json
 mt bundle install path/to/Brewfile           # explicit file
 mt bundle install --dry-run                  # print what would happen
-mt bundle create                             # snapshot installed → ./Brewfile
+mt bundle create                             # snapshot installed -> ./Brewfile
 mt bundle create --format json my.json       # JSON output
 mt bundle export                             # print current install to stdout
 mt bundle export --format json my-bundle     # named bundle, JSON
@@ -459,7 +459,7 @@ mt bundle import path/to/Brewfile            # register without installing
 | `--from-installed` | (`create`) populate from currently-installed packages |
 | `--purge`          | (`remove`) also uninstall each member                 |
 
-**Bundlefile lookup order** (when no path is given): `./Brewfile` → `./Maltfile.json` → `~/.config/malt/Brewfile` → `~/.config/malt/Maltfile.json`.
+**Bundlefile lookup order** (when no path is given): `./Brewfile` -> `./Maltfile.json` -> `~/.config/malt/Brewfile` -> `~/.config/malt/Maltfile.json`.
 
 **Brewfile compatibility**: malt parses the standard directive set (`tap`, `brew`, `cask`, `mas`, `vscode`) including hash options (`version:`, `restart_service:`, `link:`) and Ruby symbols (`restart_service: :changed`). Conditionals (`if OS.mac?`) and `do … end` blocks are rejected with a clear error pointing to `Maltfile.json` for power-user cases.
 
@@ -696,36 +696,42 @@ zig build universal                      # universal binary (arm64 + x86_64 via 
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size   |
+| -------- | ------ |
 | **malt** | 3.0 MB |
 | nanobrew | 1.6 MB |
 | zerobrew | 8.6 MB |
+
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install
 
-| Package | malt | nanobrew | zerobrew | Homebrew |
-| ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.526s | 0.397s | 0.886s | 3.596s |
-| **wget** (6 deps) | 3.044s | 9.339s | 7.197s | 5.140s |
-| **ffmpeg** (11 deps) | 2.159s | 5.327s | 7.591s | 19.338s |
+| Package              | malt   | nanobrew | zerobrew | Homebrew |
+| -------------------- | ------ | -------- | -------- | -------- |
+| **tree** (0 deps)    | 0.526s | 0.397s   | 0.886s   | 3.596s   |
+| **wget** (6 deps)    | 3.044s | 9.339s   | 7.197s   | 5.140s   |
+| **ffmpeg** (11 deps) | 2.159s | 5.327s   | 7.591s   | 19.338s  |
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew |
-| ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.009s | 0.005s | 0.361s |
-| **wget** (6 deps) | 0.066s | 9.431s | 0.858s |
-| **ffmpeg** (11 deps) | 0.222s | 4.062s | 3.190s |
+| Package              | malt   | nanobrew | zerobrew |
+| -------------------- | ------ | -------- | -------- |
+| **tree** (0 deps)    | 0.009s | 0.005s   | 0.361s   |
+| **wget** (6 deps)    | 0.066s | 9.431s   | 0.858s   |
+| **ffmpeg** (11 deps) | 0.222s | 4.062s   | 3.190s   |
+
 <!-- BENCH:WARM:END -->
 
-> [!NOTE]
+> [!IMPORTANT]
 > Benchmarks on Apple Silicon (GitHub Actions macos-14), 2026-04-16. Auto-updated weekly via [benchmark workflow](.github/workflows/benchmark.yml).
 
 ### Why warm matters more than cold
@@ -742,19 +748,25 @@ malt trades a few ms against correctness and features that the lighter tools ski
 
 - **SQLite state (~1.5 MB of the 3 MB binary)** — ACID writes, reverse-dep queries (`mt uses openssl@3`), linker conflict detection, atomic rollback. nanobrew uses a flat `state.json`.
 - **Native `post_install` interpreter** — runs Homebrew post-install blocks in Zig, no Ruby subprocess. zerobrew skips post_install entirely; nanobrew regex-scrapes a handful of patterns.
-- **Ad-hoc codesign on arm64 (~15 ms/pkg)** — every Mach-O patched to rewrite `/opt/homebrew` → `MALT_PREFIX` is re-signed so `dyld` will load it.
+- **Ad-hoc codesign on arm64 (~15 ms/pkg)** — every Mach-O patched to rewrite `/opt/homebrew` -> `MALT_PREFIX` is re-signed so `dyld` will load it.
 - **Global install lock + pre-link conflict check (~3 ms)** — `flock` on `db/malt.lock` + a symlink-tree walk refusing to overwrite another keg's files.
 
 > [!NOTE]
 > **Methodology.**
 >
-> Each cell is the **median of 3 rounds** (`BENCH_ROUNDS=3`, the default in [`scripts/bench.sh`](scripts/bench.sh)). The median damps single-run jitter — network hiccups, launchd transients, disk cache warm-up — without inflating the table the way a mean over a noisy sample would. Override with `BENCH_ROUNDS=N` if you need a different sample count.
+> Each cell is the **median of 5 rounds** (`BENCH_ROUNDS=5`, the default in [`scripts/bench.sh`](scripts/bench.sh)). The median damps single-run jitter — network hiccups, launchd transients, disk cache warm-up — without inflating the table the way a mean over a noisy sample would. Override with `BENCH_ROUNDS=N` if you need a different sample count. Every run also emits per-tool `_min` and `_stddev` keys to `$GITHUB_OUTPUT` and prints them in the local terminal summary, so run-to-run noise is visible alongside the published median.
 >
-> `BENCH_TRUE_COLD=1` wipes each tool's prefix before every cold sample, so "cold" really means "no bottle in the store." The download cache lives outside the prefix and isn't wiped between rounds, so round 1 is genuinely cold and rounds 2+ are prefix-empty / cache-warm — the median therefore reflects the steady-state cold-install path rather than a one-off network fetch. See [`scripts/bench.sh`](scripts/bench.sh).
+> **"Cold" definition.** A cold sample here starts from a wiped install prefix for every tool, so the first round exercises the full download -> extract -> link -> db-write path. Some benchmark scripts define "cold" as an uninstall/reinstall instead, which keeps the download cache warm; the two definitions can produce different absolute cold numbers for the same tool on the same hardware. The warm row uses the same definition across tools either way.
 >
-> **"Cold" definition.** A cold sample here starts from a wiped install prefix for every tool, so the first round exercises the full download → extract → link → db-write path. Some benchmark scripts define "cold" as an uninstall/reinstall instead, which keeps the download cache warm; the two definitions can produce different absolute cold numbers for the same tool on the same hardware. The warm row uses the same definition across tools either way.
+> `BENCH_TRUE_COLD=1` wipes each tool's install prefix **and** its bottle download cache before every cold sample, so "cold" really means "no bottle anywhere on disk — full network fetch required." malt, nanobrew, and zerobrew all keep their download cache inside their install prefix, so the single prefix wipe takes both. Homebrew's cache lives outside the prefix (`~/Library/Caches/Homebrew/downloads`) and is therefore wiped explicitly, per target formula and its transitive deps, via `brew --cache`. Without this symmetry, local brew numbers come out 5–25× faster than CI's because brew reuses bottles cached by earlier rounds. See [`scripts/bench.sh`](scripts/bench.sh).
+>
+> **Warmup + rotation.** Each package bench opens with a discarded warmup round — every tool runs one install/uninstall pair whose timings are thrown away — so DNS, TLS session cache, TCP congestion window, and disk caches are populated before timing starts. The measured rounds then rotate tool order (round _r_ starts with `tools[r mod N]`), so no single tool reliably eats the "cold network" slot or benefits from the warmest one. Without these two protocol fixes, whichever tool went first was systematically slower and whichever went last was systematically faster — independent of the install logic being measured.
+>
+> **Peer-tool freshness.** `scripts/bench.sh` `git fetch`es nanobrew and zerobrew before each build so the comparison is always malt-today vs. each peer's latest commit, not a weeks-old snapshot. Set `BENCH_SKIP_UPDATE=1` to pin whatever is already checked out (offline / reproducibility mode).
 >
 > **Build recipes.** Each tool is built using the same release flags its upstream ships with: malt `ReleaseSafe` (matches [`.goreleaser.yaml`](.goreleaser.yaml)), nanobrew `ReleaseFast`, zerobrew `cargo build --release`. Binary sizes may therefore differ from the numbers shown on each tool's own repo — the gap is almost always version drift (different snapshots over time), not a flag difference.
+>
+> **Reproduce locally.** `./scripts/local-bench.sh` runs the four CI phases (tree, wget, ffmpeg, stress-test) in order against the same env (`BENCH_TRUE_COLD=1 BENCH_FAIL_FAST=1`). Add `--clean` to wipe `/tmp` bench state afterwards. For iterative work on a single package, call `scripts/bench.sh <pkg>` directly — `SKIP_BUILD=1` reuses existing binaries, and `SKIP_OTHERS=1` / `SKIP_BREW=1` skip peer comparisons.
 >
 > **bru omitted.** bru previously appeared in this table but was dropped: upstream pins Zig 0.15.2 and relies on `std.heap.ThreadSafeAllocator`, which was removed in Zig 0.16 (what malt and nanobrew now build on). It will be re-added once upstream catches up.
 

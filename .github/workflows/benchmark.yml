@@ -86,12 +86,12 @@ jobs:
           | nanobrew | ${{ steps.tree.outputs.nb_size }} |
           | zerobrew | ${{ steps.tree.outputs.zb_size }} |
 
-          ### Cold Install
+          ### Cold Install (median ±σ)
           | Package | malt | nanobrew | zerobrew | Homebrew |
           |---------|------|----------|----------|----------|
-          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.brew_cold }} |
-          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.brew_cold }} |
-          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.brew_cold }} |
+          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold_disp }} | ${{ steps.tree.outputs.nb_cold_disp }} | ${{ steps.tree.outputs.zb_cold_disp }} | ${{ steps.tree.outputs.brew_cold_disp }} |
+          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold_disp }} | ${{ steps.wget.outputs.nb_cold_disp }} | ${{ steps.wget.outputs.zb_cold_disp }} | ${{ steps.wget.outputs.brew_cold_disp }} |
+          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold_disp }} | ${{ steps.ffmpeg.outputs.nb_cold_disp }} | ${{ steps.ffmpeg.outputs.zb_cold_disp }} | ${{ steps.ffmpeg.outputs.brew_cold_disp }} |
 
           ### Warm Install
           | Package | malt | nanobrew | zerobrew |
@@ -118,16 +118,20 @@ jobs:
           <!-- BENCH:SIZE:END -->
           TABLE
 
-          # Generate cold install table.
+          # Generate cold install table. Cold cells use `_cold_disp`
+          # (pre-formatted "median±stddev s") so run-to-run noise is
+          # visible directly in the README — cold is where network and
+          # launchd jitter actually live. Warm stays as the bare median
+          # because warm-install variance is in the low-milliseconds.
           cat > /tmp/cold_table.md << TABLE
           <!-- BENCH:COLD:START -->
-          ### Cold Install
+          ### Cold Install (median ±σ)
 
           | Package | malt | nanobrew | zerobrew | Homebrew |
           | ------- | ---- | -------- | -------- | -------- |
-          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold }} | ${{ steps.tree.outputs.nb_cold }} | ${{ steps.tree.outputs.zb_cold }} | ${{ steps.tree.outputs.brew_cold }} |
-          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold }} | ${{ steps.wget.outputs.nb_cold }} | ${{ steps.wget.outputs.zb_cold }} | ${{ steps.wget.outputs.brew_cold }} |
-          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold }} | ${{ steps.ffmpeg.outputs.nb_cold }} | ${{ steps.ffmpeg.outputs.zb_cold }} | ${{ steps.ffmpeg.outputs.brew_cold }} |
+          | **tree** (0 deps) | ${{ steps.tree.outputs.mt_cold_disp }} | ${{ steps.tree.outputs.nb_cold_disp }} | ${{ steps.tree.outputs.zb_cold_disp }} | ${{ steps.tree.outputs.brew_cold_disp }} |
+          | **wget** (6 deps) | ${{ steps.wget.outputs.mt_cold_disp }} | ${{ steps.wget.outputs.nb_cold_disp }} | ${{ steps.wget.outputs.zb_cold_disp }} | ${{ steps.wget.outputs.brew_cold_disp }} |
+          | **ffmpeg** (11 deps) | ${{ steps.ffmpeg.outputs.mt_cold_disp }} | ${{ steps.ffmpeg.outputs.nb_cold_disp }} | ${{ steps.ffmpeg.outputs.zb_cold_disp }} | ${{ steps.ffmpeg.outputs.brew_cold_disp }} |
           <!-- BENCH:COLD:END -->
           TABLE
 
