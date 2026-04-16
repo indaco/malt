@@ -81,9 +81,17 @@ pub fn collectDependents(
     defer frontier.deinit(allocator);
     try frontier.append(allocator, target);
 
-    var cursor: usize = 0;
-    while (cursor < frontier.items.len) : (cursor += 1) {
-        const current = frontier.items[cursor];
+    // Peak ~2× max-in-flight: compact live tail to front once half-consumed.
+    var head: usize = 0;
+    while (head < frontier.items.len) {
+        if (head > 0 and head * 2 >= frontier.items.len) {
+            const live = frontier.items[head..];
+            std.mem.copyForwards([]const u8, frontier.items[0..live.len], live);
+            frontier.items.len = live.len;
+            head = 0;
+        }
+        const current = frontier.items[head];
+        head += 1;
 
         var stmt = db.prepare(
             "SELECT k.name FROM kegs k " ++

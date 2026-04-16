@@ -38,22 +38,16 @@ pub fn resolve(
     var visited = std.StringHashMap(void).init(allocator);
     defer visited.deinit();
 
-    // Queue of owned, heap-duped dep name strings. Slots are set to
-    // `null` once ownership is transferred out (into `result` or freed
-    // on a skip), so scope-exit cleanup frees only what never moved —
-    // no double-frees, no leaks on partial walks. Optional-slot cursor
-    // walk turns pop-from-head from O(n) (`orderedRemove(0)` memmoves
-    // the tail every iteration) into O(1) per step; the full BFS goes
-    // from O(V²) to O(V+E).
-    var queue: std.ArrayList(?[]const u8) = .empty;
+    // Queue of owned dep names. `head` marks the pop cursor; items
+    // below it have already been handed off (to `result` or freed).
+    // Scope-exit cleanup frees only the un-popped tail.
+    var queue: std.ArrayList([]const u8) = .empty;
+    var head: usize = 0;
     defer {
-        for (queue.items) |maybe| if (maybe) |s| allocator.free(s);
+        for (queue.items[head..]) |s| allocator.free(s);
         queue.deinit(allocator);
     }
 
-    // Seed the queue with the root formula's direct deps. getDeps returns
-    // a slice of duped strings; we transfer each into the queue (or free
-    // it on append failure) and then free the container itself.
     const root_deps = getDeps(allocator, root_name, api) catch {
         return result.toOwnedSlice(allocator) catch blk: {
             result.deinit(allocator);
@@ -69,13 +63,18 @@ pub fn resolve(
         };
     }
 
-    // Mark the root so sub-deps never try to recurse into it.
     visited.put(root_name, {}) catch {};
 
-    var cursor: usize = 0;
-    while (cursor < queue.items.len) : (cursor += 1) {
-        const dep_name = queue.items[cursor] orelse continue;
-        queue.items[cursor] = null; // ownership taken out of the queue
+    while (head < queue.items.len) {
+        // Peak ~2× max-in-flight: compact live tail to front once half-consumed.
+        if (head > 0 and head * 2 >= queue.items.len) {
+            const live = queue.items[head..];
+            std.mem.copyForwards([]const u8, queue.items[0..live.len], live);
+            queue.items.len = live.len;
+            head = 0;
+        }
+        const dep_name = queue.items[head];
+        head += 1;
 
         // Dedup: already processed → free the duplicate.
         if (visited.get(dep_name) != null) {
