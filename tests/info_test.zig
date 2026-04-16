@@ -50,18 +50,20 @@ test "encodeInstallHint surfaces both malt and mt invocations" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     var scratch: [512]u8 = undefined;
-    try info.encodeInstallHint(&aw.writer, &scratch, "wget", false);
-    try testing.expectEqualStrings(
-        "Not installed. Run: malt install wget  (or: mt install wget)\n",
-        aw.written(),
-    );
+    try info.encodeInstallHint(&aw.writer, &scratch, "wget", false, false, 14);
+    const out = aw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "Status:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Not installed") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Install:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "malt install wget") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "mt install wget") != null);
 }
 
 test "encodeInstallHint collapses to a bare line in quiet mode" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     var scratch: [512]u8 = undefined;
-    try info.encodeInstallHint(&aw.writer, &scratch, "wget", true);
+    try info.encodeInstallHint(&aw.writer, &scratch, "wget", true, false, 14);
     try testing.expectEqualStrings("Not installed\n", aw.written());
 }
 
@@ -113,15 +115,21 @@ test "encodeApiFormulaHuman includes metadata and install hint" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     var scratch: [4096]u8 = undefined;
-    try info.encodeApiFormulaHuman(&aw.writer, &scratch, &f, false);
+    try info.encodeApiFormulaHuman(&aw.writer, &scratch, &f, false, false);
 
     const out = aw.written();
     try testing.expect(std.mem.indexOf(u8, out, "wget: stable 1.24.5\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Description:") != null);
     try testing.expect(std.mem.indexOf(u8, out, "Internet file retriever") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Homepage:") != null);
     try testing.expect(std.mem.indexOf(u8, out, "https://www.gnu.org/software/wget/") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Not installed. Run: malt install wget") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "From: homebrew/core") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Dependencies: libidn2, openssl@3\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Status:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Install:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "malt install wget") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "From:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "homebrew/core") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Dependencies:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "libidn2, openssl@3\n") != null);
 }
 
 test "encodeApiFormulaJson produces the documented shape" {
@@ -149,14 +157,19 @@ test "encodeApiCaskHuman includes metadata and install hint" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     var scratch: [4096]u8 = undefined;
-    try info.encodeApiCaskHuman(&aw.writer, &scratch, &c, false);
+    try info.encodeApiCaskHuman(&aw.writer, &scratch, &c, false, false);
 
     const out = aw.written();
     try testing.expect(std.mem.indexOf(u8, out, "firefox: 149.0.2 (cask)\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Name: Mozilla Firefox\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Name:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Mozilla Firefox") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Description:") != null);
     try testing.expect(std.mem.indexOf(u8, out, "Web browser") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Not installed. Run: malt install firefox") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "URL: https://example.com/firefox.dmg") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Status:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Install:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "malt install firefox") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "URL:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "https://example.com/firefox.dmg") != null);
 }
 
 test "encodeApiCaskJson produces the documented shape" {

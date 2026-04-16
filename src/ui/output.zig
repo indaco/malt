@@ -174,6 +174,41 @@ pub fn confirmTyped(expected: []const u8, prompt: []const u8) bool {
     return std.mem.eql(u8, input, expected);
 }
 
+/// Write a dim `key:` prefix followed by padding so the value starts at
+/// column `col`. Callers that need to emit a list (or any non-`bufPrint`
+/// value) use this helper and then write the value themselves.
+pub fn writeFieldKey(w: anytype, colorize: bool, col: usize, key: []const u8) !void {
+    if (colorize) try w.writeAll(color.Style.dim.code());
+    try w.writeAll(key);
+    try w.writeAll(":");
+    if (colorize) try w.writeAll(color.Style.reset.code());
+    const consumed = key.len + 1;
+    const pad: usize = if (col > consumed) col - consumed else 1;
+    var i: usize = 0;
+    while (i < pad) : (i += 1) try w.writeAll(" ");
+}
+
+/// Write a `key: value` row where the value starts at column `col`.
+/// When `colorize` is true the key and its colon are wrapped in dim
+/// ANSI codes so the value stands out against aligned-key prefixes.
+pub fn writeField(
+    w: anytype,
+    scratch: []u8,
+    colorize: bool,
+    col: usize,
+    key: []const u8,
+    comptime value_fmt: []const u8,
+    args: anytype,
+) !void {
+    try writeFieldKey(w, colorize, col, key);
+    const value = std.fmt.bufPrint(scratch, value_fmt, args) catch {
+        try w.writeAll("\n");
+        return;
+    };
+    try w.writeAll(value);
+    try w.writeAll("\n");
+}
+
 /// Write `s` to `w` as a JSON string literal — surrounding quotes plus RFC 8259
 /// escapes for `"`, `\`, and control characters. Use this wherever handwritten
 /// JSON output embeds an identifier, tap name, version string, file path, or
