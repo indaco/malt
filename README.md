@@ -3,7 +3,7 @@
 **A Homebrew client in Zig. Warm installs in milliseconds. `post_install` scripts that actually run.**
 
 ![macOS only](https://img.shields.io/badge/platform-macOS-blue)
-![Zig 0.15.x](https://img.shields.io/badge/zig-0.15.x-orange)
+![Zig 0.16.x](https://img.shields.io/badge/zig-0.16.x-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Coverage](.github/badges/coverage.svg)
 [![Built with Devbox](https://www.jetify.com/img/devbox/shield_galaxy.svg)](https://www.jetify.com/devbox/docs/contributor-quickstart/)
@@ -74,7 +74,7 @@ cd malt
 ./scripts/install.sh
 ```
 
-Requires [Zig 0.15.x](https://ziglang.org/download/).
+Requires [Zig 0.16.x](https://ziglang.org/download/).
 
 > [!NOTE]
 > `zig build` produces both `malt` and `mt` in `zig-out/bin/`. Both are identical — use whichever you prefer. All install methods (script, Homebrew, source) install both.
@@ -681,7 +681,7 @@ Install Homebrew: https://brew.sh
 ## Building
 
 ```bash
-# Requires Zig 0.15.x
+# Requires Zig 0.16.x
 zig build                                # debug build
 zig build -Doptimize=ReleaseSafe         # release build (~3 MB)
 zig build test                           # run tests
@@ -695,34 +695,40 @@ zig build universal                      # universal binary (arm64 + x86_64 via 
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size   |
+| -------- | ------ |
 | **malt** | 3.3 MB |
 | nanobrew | 1.4 MB |
 | zerobrew | 8.6 MB |
-| bru | 1.8 MB |
+| bru      | 1.8 MB |
+
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install
 
-| Package | malt | nanobrew | zerobrew | bru | Homebrew |
-| ------- | ---- | -------- | -------- | --- | -------- |
-| **tree** (0 deps) | 0.695s | 0.631s | 2.030s | 0.806s‡ | 4.444s |
-| **wget** (6 deps) | 5.434s | 6.822s | 6.697s | 0.769s‡ | 4.319s |
-| **ffmpeg** (11 deps) | 4.226s | 3.510s | 6.822s | 3.748s‡ | 20.516s |
+| Package              | malt   | nanobrew | zerobrew | bru     | Homebrew |
+| -------------------- | ------ | -------- | -------- | ------- | -------- |
+| **tree** (0 deps)    | 0.695s | 0.631s   | 2.030s   | 0.806s‡ | 4.444s   |
+| **wget** (6 deps)    | 5.434s | 6.822s   | 6.697s   | 0.769s‡ | 4.319s   |
+| **ffmpeg** (11 deps) | 4.226s | 3.510s   | 6.822s   | 3.748s‡ | 20.516s  |
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew | bru |
-| ------- | ---- | -------- | -------- | --- |
-| **tree** (0 deps) | 0.007s | 0.005s | 0.340s | 0.047s |
-| **wget** (6 deps) | 0.029s | 0.636s | 0.722s | 0.100s |
-| **ffmpeg** (11 deps) | 0.085s | 1.079s | 2.731s | 1.220s |
+| Package              | malt   | nanobrew | zerobrew | bru    |
+| -------------------- | ------ | -------- | -------- | ------ |
+| **tree** (0 deps)    | 0.007s | 0.005s   | 0.340s   | 0.047s |
+| **wget** (6 deps)    | 0.029s | 0.636s   | 0.722s   | 0.100s |
+| **ffmpeg** (11 deps) | 0.085s | 1.079s   | 2.731s   | 1.220s |
+
 <!-- BENCH:WARM:END -->
 
 > [!NOTE]
