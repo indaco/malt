@@ -703,7 +703,6 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 | **malt** | 3.3 MB |
 | nanobrew | 1.4 MB |
 | zerobrew | 8.6 MB |
-| bru      | 1.8 MB |
 
 <!-- BENCH:SIZE:END -->
 
@@ -711,11 +710,11 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 ### Cold Install
 
-| Package              | malt   | nanobrew | zerobrew | bru     | Homebrew |
-| -------------------- | ------ | -------- | -------- | ------- | -------- |
-| **tree** (0 deps)    | 0.695s | 0.631s   | 2.030s   | 0.806s‡ | 4.444s   |
-| **wget** (6 deps)    | 5.434s | 6.822s   | 6.697s   | 0.769s‡ | 4.319s   |
-| **ffmpeg** (11 deps) | 4.226s | 3.510s   | 6.822s   | 3.748s‡ | 20.516s  |
+| Package              | malt   | nanobrew | zerobrew | Homebrew |
+| -------------------- | ------ | -------- | -------- | -------- |
+| **tree** (0 deps)    | 0.695s | 0.631s   | 2.030s   | 4.444s   |
+| **wget** (6 deps)    | 5.434s | 6.822s   | 6.697s   | 4.319s   |
+| **ffmpeg** (11 deps) | 4.226s | 3.510s   | 6.822s   | 20.516s  |
 
 <!-- BENCH:COLD:END -->
 
@@ -723,11 +722,11 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 ### Warm Install
 
-| Package              | malt   | nanobrew | zerobrew | bru    |
-| -------------------- | ------ | -------- | -------- | ------ |
-| **tree** (0 deps)    | 0.007s | 0.005s   | 0.340s   | 0.047s |
-| **wget** (6 deps)    | 0.029s | 0.636s   | 0.722s   | 0.100s |
-| **ffmpeg** (11 deps) | 0.085s | 1.079s   | 2.731s   | 1.220s |
+| Package              | malt   | nanobrew | zerobrew |
+| -------------------- | ------ | -------- | -------- |
+| **tree** (0 deps)    | 0.007s | 0.005s   | 0.340s   |
+| **wget** (6 deps)    | 0.029s | 0.636s   | 0.722s   |
+| **ffmpeg** (11 deps) | 0.085s | 1.079s   | 2.731s   |
 
 <!-- BENCH:WARM:END -->
 
@@ -746,8 +745,8 @@ Put plainly: the number that matters after your first day using malt is the warm
 
 malt trades a few ms against correctness and features that the lighter tools skip:
 
-- **SQLite state (~1.5 MB of the 3 MB binary)** — ACID writes, reverse-dep queries (`mt uses openssl@3`), linker conflict detection, atomic rollback. nanobrew and bru use a flat `state.json`.
-- **Native `post_install` interpreter** — runs Homebrew post-install blocks in Zig, no Ruby subprocess. bru and zerobrew skip post_install entirely; nanobrew regex-scrapes a handful of patterns.
+- **SQLite state (~1.5 MB of the 3 MB binary)** — ACID writes, reverse-dep queries (`mt uses openssl@3`), linker conflict detection, atomic rollback. nanobrew uses a flat `state.json`.
+- **Native `post_install` interpreter** — runs Homebrew post-install blocks in Zig, no Ruby subprocess. zerobrew skips post_install entirely; nanobrew regex-scrapes a handful of patterns.
 - **Ad-hoc codesign on arm64 (~15 ms/pkg)** — every Mach-O patched to rewrite `/opt/homebrew` → `MALT_PREFIX` is re-signed so `dyld` will load it.
 - **Global install lock + pre-link conflict check (~3 ms)** — `flock` on `db/malt.lock` + a symlink-tree walk refusing to overwrite another keg's files.
 
@@ -758,7 +757,11 @@ malt trades a few ms against correctness and features that the lighter tools ski
 >
 > `BENCH_TRUE_COLD=1` wipes each tool's prefix before every cold sample, so "cold" really means "no bottle in the store." The download cache lives outside the prefix and isn't wiped between rounds, so round 1 is genuinely cold and rounds 2+ are prefix-empty / cache-warm — the median therefore reflects the steady-state cold-install path rather than a one-off network fetch. See [`scripts/bench.sh`](scripts/bench.sh).
 >
-> **bru caveat (cells marked `‡`).** bru keeps its download cache under `~/.bru/` and `~/Library/Caches/bru/`, outside the wiped prefix, so its cold numbers reflect warm cache + materialise rather than a real network fetch. bru's warm row is apples-to-apples.
+> **"Cold" definition.** A cold sample here starts from a wiped install prefix for every tool, so the first round exercises the full download → extract → link → db-write path. Some benchmark scripts define "cold" as an uninstall/reinstall instead, which keeps the download cache warm; the two definitions can produce different absolute cold numbers for the same tool on the same hardware. The warm row uses the same definition across tools either way.
+>
+> **Build recipes.** Each tool is built using the same release flags its upstream ships with: malt `ReleaseSafe` (matches [`.goreleaser.yaml`](.goreleaser.yaml)), nanobrew `ReleaseFast`, zerobrew `cargo build --release`. Binary sizes may therefore differ from the numbers shown on each tool's own repo — the gap is almost always version drift (different snapshots over time), not a flag difference.
+>
+> **bru omitted.** bru previously appeared in this table but was dropped: upstream pins Zig 0.15.2 and relies on `std.heap.ThreadSafeAllocator`, which was removed in Zig 0.16 (what malt and nanobrew now build on). It will be re-added once upstream catches up.
 
 ---
 

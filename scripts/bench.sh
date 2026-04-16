@@ -22,15 +22,17 @@
 #   MALT_BENCH_PREFIX  Runtime MALT_PREFIX for malt    (default /tmp/mt-b, must be ≤13 bytes)
 #   NB_BENCH_PREFIX    Runtime root for nanobrew       (default /tmp/nb,  patched into source)
 #   ZB_BENCH_PREFIX    Runtime ZEROBREW_ROOT           (default /tmp/zb)
-#   BRU_BENCH_PREFIX   Runtime HOMEBREW_PREFIX for bru (default /tmp/bru, must be ≤13 bytes)
-#   NB_DIR/ZB_DIR/BRU_DIR  Other tools' source dirs    (default $BENCH_WORK_DIR/<name>)
+#   NB_DIR/ZB_DIR     Other tools' source dirs         (default $BENCH_WORK_DIR/<name>)
 #
 # Notes:
 # - The script runs every tool against an isolated /tmp prefix rather than
-#   /opt/{malt,nanobrew,zerobrew,bru,homebrew}, so it never touches existing
+#   /opt/{malt,nanobrew,zerobrew,homebrew}, so it never touches existing
 #   installations. nanobrew has no prefix env var, so its source is sed-patched
 #   in place before building (and the patch is reset on each build via
 #   `git checkout -- src` so changing NB_BENCH_PREFIX always works).
+# - bru was previously part of the bench but was dropped: upstream pins
+#   Zig 0.15.2 and uses `std.heap.ThreadSafeAllocator`, which was removed in
+#   Zig 0.16 (what malt and nanobrew now build on). Re-add when bru tracks 0.16.
 # - With BENCH_TRUE_COLD=1 each tool's prefix is wiped before its cold
 #   install, forcing a real network download (matches a fresh CI runner).
 # - `BENCH_STRESS=N` runs N back-to-back cold installs of malt *only* for
@@ -52,10 +54,8 @@ BENCH_BUILD_PREFIX="${BENCH_BUILD_PREFIX:-$WORK_DIR/build}"
 MALT_BIN="${MALT_BIN:-$BENCH_BUILD_PREFIX/bin/malt}"
 NB_DIR="${NB_DIR:-$WORK_DIR/nanobrew}"
 ZB_DIR="${ZB_DIR:-$WORK_DIR/zerobrew}"
-BRU_DIR="${BRU_DIR:-$WORK_DIR/bru}"
 NB_BIN="$NB_DIR/zig-out/bin/nb"
 ZB_BIN="$ZB_DIR/target/release/zb"
-BRU_BIN="$BRU_DIR/zig-out/bin/bru"
 
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SKIP_BREW="${SKIP_BREW:-0}"
@@ -86,29 +86,24 @@ if [ "$BENCH_ROUNDS" -lt 1 ]; then
 fi
 
 # Isolated runtime prefixes — kept separate from /opt/{malt,nanobrew,...} so
-# the benchmark never touches the user's real installations. malt and bru
-# patch Mach-O LC_LOAD_DYLIB paths in place and so cap the prefix at 13 bytes
+# the benchmark never touches the user's real installations. malt patches
+# Mach-O LC_LOAD_DYLIB paths in place and so caps its prefix at 13 bytes
 # (the length of the original `/opt/homebrew` slot). nanobrew uses a longer
 # placeholder system and zerobrew similarly is not constrained the same way.
 MALT_BENCH_PREFIX="${MALT_BENCH_PREFIX:-/tmp/mt-b}"
 NB_BENCH_PREFIX="${NB_BENCH_PREFIX:-/tmp/nb}"
 ZB_BENCH_PREFIX="${ZB_BENCH_PREFIX:-/tmp/zb}"
-BRU_BENCH_PREFIX="${BRU_BENCH_PREFIX:-/tmp/bru}"
 
-# Length cap (13) for the two tools that patch Mach-O paths in place.
-_check_len() {
-  if [ "${#2}" -gt 13 ]; then
-    printf '✗ %s must be ≤13 bytes (got %d): %s\n' "$1" "${#2}" "$2" >&2
-    exit 1
-  fi
-}
-_check_len MALT_BENCH_PREFIX "$MALT_BENCH_PREFIX"
-_check_len BRU_BENCH_PREFIX "$BRU_BENCH_PREFIX"
-unset -f _check_len
+# Length cap (13) for malt, which patches Mach-O paths in place.
+if [ "${#MALT_BENCH_PREFIX}" -gt 13 ]; then
+  printf '✗ MALT_BENCH_PREFIX must be ≤13 bytes (got %d): %s\n' \
+    "${#MALT_BENCH_PREFIX}" "$MALT_BENCH_PREFIX" >&2
+  exit 1
+fi
 
 # Refuse to wipe anything outside /tmp — protects /opt/{malt,nanobrew,...}.
 if [ "$BENCH_TRUE_COLD" = "1" ]; then
-  for _p in "$MALT_BENCH_PREFIX" "$NB_BENCH_PREFIX" "$ZB_BENCH_PREFIX" "$BRU_BENCH_PREFIX"; do
+  for _p in "$MALT_BENCH_PREFIX" "$NB_BENCH_PREFIX" "$ZB_BENCH_PREFIX"; do
     case "$_p" in
       /tmp/*) ;;
       *)
@@ -126,9 +121,6 @@ fi
 export MALT_PREFIX="$MALT_BENCH_PREFIX"
 export ZEROBREW_ROOT="$ZB_BENCH_PREFIX"
 export ZEROBREW_PREFIX="$ZB_BENCH_PREFIX"
-# Real `brew` overwrites HOMEBREW_PREFIX from its own `$0` path on every run
-# (see /opt/homebrew/bin/brew line ~75), so exporting it here only affects bru.
-export HOMEBREW_PREFIX="$BRU_BENCH_PREFIX"
 
 if [ $# -gt 0 ]; then
   PACKAGES=("$@")
@@ -198,7 +190,7 @@ get_result() {
 # --- build steps -------------------------------------------------------------
 
 build_malt() {
-  info "prefixes: malt=$MALT_BENCH_PREFIX nb=$NB_BENCH_PREFIX zb=$ZB_BENCH_PREFIX bru=$BRU_BENCH_PREFIX (BENCH_TRUE_COLD=$BENCH_TRUE_COLD)"
+  info "prefixes: malt=$MALT_BENCH_PREFIX nb=$NB_BENCH_PREFIX zb=$ZB_BENCH_PREFIX (BENCH_TRUE_COLD=$BENCH_TRUE_COLD)"
   if [ "$SKIP_BUILD" = "1" ] && [ -x "$MALT_BIN" ]; then
     info "skip build malt (SKIP_BUILD=1, binary present)"
     return
@@ -249,18 +241,6 @@ build_zerobrew() {
   (cd "$ZB_DIR" && cargo build --release)
   mkdir -p "$ZB_BENCH_PREFIX"
   "$ZB_BIN" init >/dev/null 2>&1 || true
-}
-
-build_bru() {
-  if [ "$SKIP_BUILD" = "1" ] && [ -x "$BRU_BIN" ]; then return; fi
-  need git
-  need zig
-  info "build bru (prefix $BRU_BENCH_PREFIX)"
-  if [ ! -d "$BRU_DIR/.git" ]; then
-    git clone --depth 1 https://github.com/zieka/bru.git "$BRU_DIR"
-  fi
-  (cd "$BRU_DIR" && zig build -Doptimize=ReleaseFast)
-  mkdir -p "$BRU_BENCH_PREFIX"
 }
 
 # --- timing ------------------------------------------------------------------
@@ -359,11 +339,6 @@ prep_cold_zb() {
   info "wiping $ZB_BENCH_PREFIX (true cold: zerobrew)"
   rm -rf "$ZB_BENCH_PREFIX"
   "$ZB_BIN" init >/dev/null 2>&1 || true
-}
-prep_cold_bru() {
-  info "wiping $BRU_BENCH_PREFIX (true cold: bru)"
-  rm -rf "$BRU_BENCH_PREFIX"
-  mkdir -p "$BRU_BENCH_PREFIX"
 }
 
 # --- stress mode -------------------------------------------------------------
@@ -485,9 +460,6 @@ run_bench_for() {
     if [ -x "$ZB_BIN" ]; then
       bench_tool "$ZB_BIN" install uninstall "$pkg" zb prep_cold_zb
     fi
-    if [ -x "$BRU_BIN" ]; then
-      bench_tool "$BRU_BIN" install uninstall "$pkg" bru prep_cold_bru
-    fi
   fi
 
   if [ "$SKIP_BREW" != "1" ] && command -v brew >/dev/null 2>&1; then
@@ -513,13 +485,11 @@ if [ "$SKIP_OTHERS" != "1" ]; then
   else
     warn "cargo missing — skipping zerobrew"
   fi
-  build_bru || warn "bru build failed — skipping"
 fi
 
 set_result "size_mt" "$(size_of "$MALT_BIN")"
 set_result "size_nb" "$(size_of "$NB_BIN")"
 set_result "size_zb" "$(size_of "$ZB_BIN")"
-set_result "size_bru" "$(size_of "$BRU_BIN")"
 if command -v brew >/dev/null 2>&1; then
   set_result "size_brew" "$(size_of "$(command -v brew)")"
 else
@@ -528,7 +498,6 @@ fi
 emit_output "mt_size=$(get_result size_mt)"
 emit_output "nb_size=$(get_result size_nb)"
 emit_output "zb_size=$(get_result size_zb)"
-emit_output "bru_size=$(get_result size_bru)"
 # brew_size omitted: `which brew` is the shell wrapper, not a meaningful size.
 
 for pkg in "${PACKAGES[@]}"; do
@@ -546,28 +515,25 @@ printf "\n%sBinary Size%s\n" "$BOLD" "$RESET"
 printf "  %-10s %s\n" "malt" "$(get_result size_mt)"
 printf "  %-10s %s\n" "nanobrew" "$(get_result size_nb)"
 printf "  %-10s %s\n" "zerobrew" "$(get_result size_zb)"
-printf "  %-10s %s\n" "bru" "$(get_result size_bru)"
 # brew omitted: `which brew` is the shell wrapper, not a meaningful size.
 
 printf "\n%sCold Install%s\n" "$BOLD" "$RESET"
-printf "  %-14s %-10s %-10s %-10s %-10s %-10s\n" Package malt nanobrew zerobrew bru brew
+printf "  %-14s %-10s %-10s %-10s %-10s\n" Package malt nanobrew zerobrew brew
 for pkg in "${PACKAGES[@]}"; do
-  printf "  %-14s %-10s %-10s %-10s %-10s %-10s\n" "$pkg" \
+  printf "  %-14s %-10s %-10s %-10s %-10s\n" "$pkg" \
     "$(cell "$(get_result "cold_mt_$pkg")")" \
     "$(cell "$(get_result "cold_nb_$pkg")")" \
     "$(cell "$(get_result "cold_zb_$pkg")")" \
-    "$(cell "$(get_result "cold_bru_$pkg")")" \
     "$(cell "$(get_result "cold_brew_$pkg")")"
 done
 
 printf "\n%sWarm Install%s\n" "$BOLD" "$RESET"
-printf "  %-14s %-10s %-10s %-10s %-10s\n" Package malt nanobrew zerobrew bru
+printf "  %-14s %-10s %-10s %-10s\n" Package malt nanobrew zerobrew
 for pkg in "${PACKAGES[@]}"; do
-  printf "  %-14s %-10s %-10s %-10s %-10s\n" "$pkg" \
+  printf "  %-14s %-10s %-10s %-10s\n" "$pkg" \
     "$(cell "$(get_result "warm_mt_$pkg")")" \
     "$(cell "$(get_result "warm_nb_$pkg")")" \
-    "$(cell "$(get_result "warm_zb_$pkg")")" \
-    "$(cell "$(get_result "warm_bru_$pkg")")"
+    "$(cell "$(get_result "warm_zb_$pkg")")"
 done
 
 ok "done"
