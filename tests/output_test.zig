@@ -47,17 +47,17 @@ test "jsonStr passes UTF-8 bytes through unchanged" {
     try testing.expectEqualStrings("\"café 🍺\"", got);
 }
 
-// Regression: under the test runner, `io_mod.stdoutFile()` must resolve to
-// stderr. The runner owns fd 1 for its IPC; any byte on it wedges the
-// build runner in `read()`. If this assertion breaks, `zig build test`
-// starts deadlocking again.
-test "stdoutFile redirects to stderr under the test runner" {
-    try testing.expectEqual(std.Io.File.stderr().handle, io_mod.stdoutFile().handle);
+// Regression: under the test runner, `io_mod.stdoutFile()` must not
+// resolve to fd 1. The runner owns fd 1 for its IPC; any byte on it
+// wedges the build runner in `read()`. If this assertion breaks,
+// `zig build test` starts deadlocking again.
+test "stdoutFile is not fd 1 under the test runner" {
+    try testing.expect(io_mod.stdoutFile().handle != std.Io.File.stdout().handle);
 }
 
 // Regression (paired with the helper above): exercising a call site that
 // previously deadlocked — `stdoutWriteAll` of a multi-KB payload — must
-// complete without hanging and must not land on fd 1.
+// complete without hanging.
 test "stdoutWriteAll through the redirected path completes without blocking" {
     var buf: [4096]u8 = undefined;
     @memset(&buf, 'x');

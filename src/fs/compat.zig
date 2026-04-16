@@ -148,7 +148,7 @@ pub fn cwd() Dir {
 /// shim wrapper so `.writeAll` / `.supportsAnsiEscapeCodes` etc. work
 /// without threading `io` through callers.
 pub fn stderrFile() File {
-    return .{ .inner = std.Io.File.stderr() };
+    return .{ .inner = io_mod.stderrFile() };
 }
 
 pub fn stdoutFile() File {
