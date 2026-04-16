@@ -4,6 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const strip = b.option(
+        bool,
+        "strip",
+        "Strip debug info from release binaries (default: true for non-Debug)",
+    ) orelse (optimize != .Debug);
+
     // --- Version from .version file ---
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", @embedFile(".version"));
@@ -42,6 +48,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .strip = strip,
         }),
     });
     exe.root_module.addOptions("version_string", version_options);
@@ -202,6 +209,7 @@ pub fn build(b: *std.Build) void {
             .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos }),
             .optimize = optimize,
             .link_libc = true,
+            .strip = strip,
         }),
     });
     arm64_exe.root_module.addCSourceFile(.{
@@ -219,6 +227,7 @@ pub fn build(b: *std.Build) void {
             .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .macos }),
             .optimize = optimize,
             .link_libc = true,
+            .strip = strip,
         }),
     });
     x86_exe.root_module.addCSourceFile(.{

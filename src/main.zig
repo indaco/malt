@@ -5,6 +5,12 @@ const std = @import("std");
 const fs_compat = @import("fs/compat.zig");
 const io_mod = @import("ui/io.zig");
 
+// Release uses simple_panic so debug.Dwarf stays unreachable (~30 KB smaller).
+pub const panic = if (@import("builtin").mode == .Debug)
+    std.debug.FullPanic(std.debug.defaultPanic)
+else
+    std.debug.simple_panic;
+
 /// Global interrupt flag — set by SIGINT handler, checked at install step boundaries.
 var g_interrupted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
