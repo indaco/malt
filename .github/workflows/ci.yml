@@ -7,6 +7,7 @@ on:
       - "**/*.zig"
       - "**/*.zon"
       - "scripts/**/*.sh"
+      - "src/core/pins_manifest.txt"
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
@@ -14,6 +15,7 @@ on:
       - "**/*.zig"
       - "**/*.zon"
       - "scripts/**/*.sh"
+      - "src/core/pins_manifest.txt"
       - ".github/workflows/ci.yml"
 
 jobs:
@@ -82,3 +84,32 @@ jobs:
         run: |
           shellcheck scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
           shfmt -i 2 -d scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
+
+  # Drift guard: re-run gen-pins.sh against the committed pin on every PR
+  # and fail on any diff. Catches "bumped pins.zig, forgot to regenerate
+  # the manifest" (or vice-versa) before the binary embeds a stale
+  # allowlist. Kept unconditional because the check is ~12 curl requests
+  # to raw.githubusercontent.com — cheaper than the subtle false-pass a
+  # path-filtered version produced under shallow checkouts.
+  pins-drift:
+    name: Pins drift
+    runs-on: macos-14
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Regenerate against committed pin
+        run: |
+          PINNED=$(grep -E 'HOMEBREW_CORE_COMMIT_SHA.*=.*"' src/core/pins.zig \
+            | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "committed pin: $PINNED"
+          ./scripts/gen-pins.sh "$PINNED"
+
+      - name: Fail on drift
+        run: |
+          if ! git diff --quiet -- src/core/pins.zig src/core/pins_manifest.txt; then
+            echo "::error::pins manifest is out of sync with the committed pin."
+            echo "Run scripts/gen-pins.sh \$PINNED_COMMIT and commit the diff."
+            git --no-pager diff -- src/core/pins.zig src/core/pins_manifest.txt
+            exit 1
+          fi

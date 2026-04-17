@@ -26,17 +26,70 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Default seed set — formulas commonly hit by the --use-system-ruby
-# fallback path. Callers can override via FORMULAS env var.
-DEFAULT_FORMULAS=(
+# Pick the first working sha256 hasher. macOS ships /usr/bin/shasum, but
+# nanobrew/homebrew setups can shadow the Perl runtime and leave it
+# broken; fall back to sha256sum (coreutils) or openssl.
+if command -v sha256sum >/dev/null 2>&1 && sha256sum </dev/null >/dev/null 2>&1; then
+  sha256_stdin() { sha256sum | awk '{print $1}'; }
+elif /usr/bin/shasum -a 256 </dev/null >/dev/null 2>&1; then
+  sha256_stdin() { /usr/bin/shasum -a 256 | awk '{print $1}'; }
+elif command -v openssl >/dev/null 2>&1; then
+  sha256_stdin() { openssl dgst -sha256 -r | awk '{print $1}'; }
+else
+  echo "error: no working sha256 hasher (need sha256sum, shasum, or openssl)" >&2
+  exit 1
+fi
+
+# Fallback seed — TLS + popular language toolchains. Only used when the
+# Homebrew API enumeration below can't be reached (offline dev runs).
+FALLBACK_FORMULAS=(
+  ca-certificates
   fontconfig
+  git
+  go
   node
   openssl@3
+  perl
+  python@3.11
   python@3.12
+  python@3.13
   ruby
 )
-# shellcheck disable=SC2206
-read -r -a FORMULAS_ARR <<<"${FORMULAS:-${DEFAULT_FORMULAS[*]}}"
+
+# Resolve the formula list. Explicit FORMULAS env var wins (useful for
+# tests and one-off regeneration). Otherwise pull every formula whose
+# post_install_defined flag is true from formulae.brew.sh — an exhaustive
+# allowlist is what the fail-closed gate actually needs. Fall back to the
+# static seed only when the API is unreachable.
+if [ -n "${FORMULAS:-}" ]; then
+  # shellcheck disable=SC2206
+  read -r -a FORMULAS_ARR <<<"$FORMULAS"
+  printf '▸ using FORMULAS override (%d entries)\n' "${#FORMULAS_ARR[@]}" >&2
+else
+  printf '▸ enumerating post_install formulas from formulae.brew.sh\n' >&2
+  api_json=$(curl -fsSL --max-time 30 "https://formulae.brew.sh/api/formula.json" || true)
+  if [ -n "$api_json" ]; then
+    # Python 3 ships on every supported runner and all dev macOS/Linux
+    # boxes; avoids a jq dependency on CI. Read line-by-line instead of
+    # `mapfile` because macOS still ships bash 3.2.
+    FORMULAS_ARR=()
+    while IFS= read -r line; do
+      [ -n "$line" ] && FORMULAS_ARR+=("$line")
+    done < <(
+      printf '%s' "$api_json" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for f in data:
+    if f.get("post_install_defined") and f.get("name"):
+        print(f["name"])
+' | LC_ALL=C sort -u
+    )
+    printf '▸ %d formulas have post_install_defined\n' "${#FORMULAS_ARR[@]}" >&2
+  else
+    printf '  ⚠ API fetch failed — falling back to static seed\n' >&2
+    FORMULAS_ARR=("${FALLBACK_FORMULAS[@]}")
+  fi
+fi
 
 if [ $# -ge 1 ]; then
   COMMIT="$1"
@@ -97,19 +150,34 @@ cat >"$TMP" <<'HEADER'
 HEADER
 printf '\n' >>"$TMP"
 
+RB_TMP=$(mktemp)
+trap 'rm -f "$TMP" "$RB_TMP"' EXIT
+
 for name in "${FORMULAS_ARR[@]}"; do
   [ -n "$name" ] || continue
   first=${name:0:1}
   url="https://raw.githubusercontent.com/Homebrew/homebrew-core/${COMMIT}/Formula/${first}/${name}.rb"
-  body=$(curl -fsSL --max-time 15 "$url" || true)
-  if [ -z "$body" ]; then
-    printf '  ⚠ %s: fetch failed (skipping)\n' "$name" >&2
+  # Download to a file — command substitution strips trailing newlines,
+  # which makes the computed SHA256 disagree with the runtime fetch (the
+  # runtime hashes the raw bytes, trailing newline included).
+  #
+  # Drop -f and inspect %{http_code} ourselves so 404s (formulas in the
+  # API's HEAD snapshot that were renamed/moved before the pinned commit)
+  # produce one clean warning per entry instead of a raw "curl: (56)"
+  # dump in CI logs.
+  http_code=$(curl -sSL --max-time 15 -o "$RB_TMP" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
+  case "$http_code" in
+  200) ;;
+  404)
+    printf '  ⚠ %-24s not at pinned commit (skipping)\n' "$name" >&2
     continue
-  fi
-  # Use /usr/bin paths directly — some dev environments shadow shasum
-  # with a broken homebrew/nanobrew perl-backed wrapper ahead of the
-  # system one (the same bug that bit scripts/test/install_sh_test.sh).
-  sha=$(printf '%s' "$body" | /usr/bin/shasum -a 256 | awk '{print $1}')
+    ;;
+  *)
+    printf '  ⚠ %-24s HTTP %s (skipping)\n' "$name" "$http_code" >&2
+    continue
+    ;;
+  esac
+  sha=$(sha256_stdin <"$RB_TMP")
   printf '%s %s\n' "$name" "$sha" >>"$TMP"
   printf '  ✓ %-24s %s\n' "$name" "$sha" >&2
 done

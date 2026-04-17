@@ -82,11 +82,26 @@ test "expectedSha256 — missing entry returns null" {
     try std.testing.expectEqual(@as(?[]const u8, null), expectedSha256(""));
 }
 
-test "expectedSha256 — comment/blank tolerant parser" {
-    // This test exercises the parser shape. The manifest ships empty by
-    // default (header-only), so we confirm lookup-on-empty returns null
-    // without crashing on the comment lines.
-    try std.testing.expectEqual(@as(?[]const u8, null), expectedSha256("fontconfig"));
+test "lookupIn — finds entry past comments, blanks, and unrelated names" {
+    // Fixture locally — keeps the test independent of whatever the
+    // embedded manifest happens to pin today.
+    const manifest =
+        "# header comment\n" ++
+        "\n" ++
+        "other-pkg 0000000000000000000000000000000000000000000000000000000000000000\n" ++
+        "ca-certificates eb62343b59997c87b2f2c46f1d9717bf851da905cf54b4fdfc1351d677987cc8\n";
+    const got = lookupIn(manifest, "ca-certificates") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "eb62343b59997c87b2f2c46f1d9717bf851da905cf54b4fdfc1351d677987cc8",
+        got,
+    );
+    // Still returns null for a name that isn't there, even when others are.
+    try std.testing.expectEqual(@as(?[]const u8, null), lookupIn(manifest, "fontconfig"));
+}
+
+test "lookupIn — rejects entry with non-hex hash" {
+    const manifest = "bad-pkg ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ\n";
+    try std.testing.expectEqual(@as(?[]const u8, null), lookupIn(manifest, "bad-pkg"));
 }
 
 test "sha256Hex — known vector" {
