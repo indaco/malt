@@ -240,6 +240,68 @@ fi
   failures+=("sha-mismatch-artifact")
 }
 
+# ── test 5: source-fallback refuses unverified clone ────────────────
+# When the API is unreachable AND `git ls-remote` surfaces no tags,
+# install.sh must refuse to build from the default branch. We fake
+# both: API URL points at a dead port; a shim `git ls-remote` returns
+# empty so no release tag can be resolved offline either.
+printf '▸ source fallback refuses unverified clone\n'
+
+FAKE_BIN="$TMP/fake-bin-5"
+mkdir -p "$FAKE_BIN"
+cat >"$FAKE_BIN/git" <<'EOF'
+#!/bin/bash
+if [ "$1" = "ls-remote" ]; then exit 0; fi
+exec /usr/bin/git "$@"
+EOF
+# install.sh aborts early if zig isn't on PATH. The refuse-unverified
+# check happens after that probe but before any real zig invocation —
+# a stub that satisfies `command -v` is enough.
+cat >"$FAKE_BIN/zig" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$FAKE_BIN/git" "$FAKE_BIN/zig"
+
+prefix5="$TMP/prefix_5"
+install_dir5="$TMP/bin_5"
+mkdir -p "$prefix5" "$install_dir5"
+rc5=0
+env -i \
+  HOME="$HOME" \
+  PATH="$FAKE_BIN:/usr/bin:/bin:/usr/sbin:/sbin" \
+  USER="$USER" \
+  PREFIX="$prefix5" \
+  INSTALL_DIR="$install_dir5" \
+  MALT_ALLOW_UNVERIFIED=1 \
+  MALT_TEST_RELEASES_URL="http://127.0.0.1:1" \
+  MALT_TEST_API_URL="http://127.0.0.1:1/unreachable" \
+  NO_COLOR=1 \
+  bash "$INSTALLER" >"$TMP/out.log" 2>&1 || rc5=$?
+
+if [ "$rc5" != "0" ]; then
+  printf '  ✓ unverified source clone rejected (rc=%s)\n' "$rc5"
+  pass=$((pass + 1))
+else
+  printf '  ✗ unverified source clone did NOT fail\n' >&2
+  fail=$((fail + 1))
+  failures+=("source-fallback-allowed")
+  sed 's/^/      /' "$TMP/out.log" >&2 || true
+fi
+[ ! -e "$install_dir5/malt" ] || {
+  printf '  ✗ source fallback: artifact landed anyway\n' >&2
+  fail=$((fail + 1))
+  failures+=("source-fallback-artifact")
+}
+if grep -q "MALT_ALLOW_UNVERIFIED_SOURCE" "$TMP/out.log"; then
+  printf '  ✓ refuse message references the opt-out env\n'
+  pass=$((pass + 1))
+else
+  printf '  ✗ refuse message missing the opt-out env hint\n' >&2
+  fail=$((fail + 1))
+  failures+=("source-fallback-message")
+fi
+
 printf '\n── summary ──\n'
 printf 'pass: %d\n' "$pass"
 printf 'fail: %d\n' "$fail"

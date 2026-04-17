@@ -120,8 +120,25 @@ if [ -z "$LATEST" ]; then
     TMPDIR=$(mktemp -d)
     trap 'rm -rf "$TMPDIR"' EXIT
 
-    info "Cloning repository..."
-    git clone --depth 1 "https://github.com/${REPO}.git" "$TMPDIR/malt"
+    # Resolve the latest release tag without the GitHub API. Rewriting
+    # git refs is a higher bar than rewriting main at a single moment.
+    CLONE_REF=""
+    if command -v git >/dev/null 2>&1; then
+      CLONE_REF=$(git ls-remote --tags --refs "https://github.com/${REPO}.git" 'refs/tags/v*' 2>/dev/null |
+        awk -F/ '{print $NF}' | sort -V | tail -1)
+    fi
+
+    if [ -n "$CLONE_REF" ]; then
+      info "Cloning repository at ${CLONE_REF}..."
+      git clone --depth 1 --branch "$CLONE_REF" "https://github.com/${REPO}.git" "$TMPDIR/malt"
+    elif [ "${MALT_ALLOW_UNVERIFIED_SOURCE:-0}" = "1" ]; then
+      warn "MALT_ALLOW_UNVERIFIED_SOURCE=1 — cloning default branch without a pinned tag"
+      git clone --depth 1 "https://github.com/${REPO}.git" "$TMPDIR/malt"
+    else
+      error "Could not resolve a release tag to clone.
+  Refusing to build from the default branch (untrusted).
+  To bypass (not recommended): MALT_ALLOW_UNVERIFIED_SOURCE=1 curl … | bash"
+    fi
 
     info "Building (this may take a minute)..."
     cd "$TMPDIR/malt"
