@@ -37,8 +37,12 @@ jobs:
     name: goreleaser
     runs-on: macos-14
     needs: create-release-notes
+    # id-token: write is the minimum for cosign keyless - it lets the
+    # job mint a GitHub OIDC token that Sigstore exchanges for a
+    # short-lived signing certificate. Nothing else is widened.
     permissions:
       contents: write
+      id-token: write
     environment:
       name: Release
 
@@ -62,6 +66,9 @@ jobs:
         with:
           go-version: stable
           cache: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
