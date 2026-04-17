@@ -160,10 +160,23 @@ for name in "${FORMULAS_ARR[@]}"; do
   # Download to a file — command substitution strips trailing newlines,
   # which makes the computed SHA256 disagree with the runtime fetch (the
   # runtime hashes the raw bytes, trailing newline included).
-  if ! curl -fsSL --max-time 15 -o "$RB_TMP" "$url"; then
-    printf '  ⚠ %s: fetch failed (skipping)\n' "$name" >&2
+  #
+  # Drop -f and inspect %{http_code} ourselves so 404s (formulas in the
+  # API's HEAD snapshot that were renamed/moved before the pinned commit)
+  # produce one clean warning per entry instead of a raw "curl: (56)"
+  # dump in CI logs.
+  http_code=$(curl -sSL --max-time 15 -o "$RB_TMP" -w '%{http_code}' "$url" 2>/dev/null || echo "000")
+  case "$http_code" in
+  200) ;;
+  404)
+    printf '  ⚠ %-24s not at pinned commit (skipping)\n' "$name" >&2
     continue
-  fi
+    ;;
+  *)
+    printf '  ⚠ %-24s HTTP %s (skipping)\n' "$name" "$http_code" >&2
+    continue
+    ;;
+  esac
   sha=$(sha256_stdin <"$RB_TMP")
   printf '%s %s\n' "$name" "$sha" >>"$TMP"
   printf '  ✓ %-24s %s\n' "$name" "$sha" >&2
