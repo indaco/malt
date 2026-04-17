@@ -14,6 +14,7 @@ const color = @import("../ui/color.zig");
 const help = @import("help.zig");
 const install_mod = @import("install.zig");
 const parser = @import("../macho/parser.zig");
+const perms_mod = @import("../core/perms.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "doctor")) return;
@@ -144,6 +145,49 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     } else {
         printCheck("APFS volume", .warn_status, "Not on APFS — clonefile unavailable");
         warnings += 1;
+    }
+
+    // 4b. Prefix permissions — surfaces world/group-writable paths or
+    //     unexpected ownership. Only meaningful on shared systems, but
+    //     cheap to check and a clear signal when someone's chmod'd the
+    //     tree.
+    blk_perms: {
+        const findings = perms_mod.walkPrefix(
+            allocator,
+            prefix,
+            perms_mod.currentUid(),
+            32, // cap so pathological trees don't balloon doctor's memory
+        ) catch {
+            printCheck("Prefix permissions", .warn_status, "Walk failed");
+            warnings += 1;
+            break :blk_perms;
+        };
+        defer perms_mod.freeFindings(allocator, findings);
+
+        if (findings.len == 0) {
+            printCheck("Prefix permissions", .ok, null);
+        } else {
+            var pm_buf: [256]u8 = undefined;
+            const pm_msg = std.fmt.bufPrint(
+                &pm_buf,
+                "{d} path(s) with weak permissions under {s} — run `ls -l` or `chmod`",
+                .{ findings.len, prefix },
+            ) catch "Weak-permission paths under prefix";
+            printCheck("Prefix permissions", .warn_status, pm_msg);
+            warnings += 1;
+            // First couple as a hint so the user knows where to look.
+            for (findings[0..@min(findings.len, 3)]) |f| {
+                var line_buf: [1024]u8 = undefined;
+                const reason = if (f.report.other_writable)
+                    "other-writable"
+                else if (f.report.group_writable)
+                    "group-writable"
+                else
+                    "wrong owner";
+                const line = std.fmt.bufPrint(&line_buf, "        {s} ({s})", .{ f.path, reason }) catch continue;
+                std.debug.print("{s}\n", .{line});
+            }
+        }
     }
 
     // 5. API reachable
