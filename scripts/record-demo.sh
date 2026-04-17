@@ -20,13 +20,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if ! command -v vhs >/dev/null 2>&1; then
-    echo "error: vhs not found. Install with: brew install vhs" >&2
-    exit 1
+  echo "error: vhs not found. Install with: brew install vhs" >&2
+  exit 1
 fi
 
 if [[ ! -x zig-out/bin/malt ]]; then
-    echo "==> Building release malt binary..."
-    zig build -Doptimize=ReleaseSafe
+  echo "==> Building release malt binary..."
+  zig build -Doptimize=ReleaseSafe
 fi
 
 # Throwaway prefix. 7 bytes, safely under malt's 13-byte Mach-O patch budget
@@ -45,11 +45,11 @@ rm -rf "$PREFIX"
 mkdir -p "$PREFIX"
 
 cleanup() {
-    if [[ "${KEEP_PREFIX:-0}" == "1" ]]; then
-        echo "==> Leaving $PREFIX in place (KEEP_PREFIX=1)"
-    else
-        rm -rf "$PREFIX"
-    fi
+  if [[ "${KEEP_PREFIX:-0}" == "1" ]]; then
+    echo "==> Leaving $PREFIX in place (KEEP_PREFIX=1)"
+  else
+    rm -rf "$PREFIX"
+  fi
 }
 trap cleanup EXIT
 

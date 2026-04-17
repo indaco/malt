@@ -18,7 +18,10 @@ fi
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BIN="$ROOT/zig-out/bin/malt"
-[[ -x "$BIN" ]] || { echo "build malt first: zig build" >&2; exit 2; }
+[[ -x "$BIN" ]] || {
+  echo "build malt first: zig build" >&2
+  exit 2
+}
 
 PREFIX=$(mktemp -d -t malt_smoke_XXXXXX)
 export MALT_PREFIX="$PREFIX"
@@ -38,7 +41,7 @@ SQL
 
 mkdir -p "$PREFIX/var/malt/services/smoke-echo"
 PLIST="$PREFIX/var/malt/services/smoke-echo/service.plist"
-cat > "$PLIST" <<EOF
+cat >"$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

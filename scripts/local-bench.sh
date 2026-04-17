@@ -39,16 +39,16 @@ set -euo pipefail
 CLEAN=0
 for arg in "$@"; do
   case "$arg" in
-    --clean) CLEAN=1 ;;
-    -h|--help)
-      sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
-      exit 0
-      ;;
-    *)
-      printf 'unknown argument: %s\n' "$arg" >&2
-      printf 'try: %s --help\n' "$0" >&2
-      exit 2
-      ;;
+  --clean) CLEAN=1 ;;
+  -h | --help)
+    sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  *)
+    printf 'unknown argument: %s\n' "$arg" >&2
+    printf 'try: %s --help\n' "$0" >&2
+    exit 2
+    ;;
   esac
 done
 
@@ -76,14 +76,14 @@ if [ "$CLEAN" = "1" ]; then
   wipe_tmp() {
     local p="$1"
     case "$p" in
-      /tmp/*)
-        if [ -e "$p" ]; then
-          rm -rf "$p" && printf '  ✓ rm -rf %s\n' "$p" >&2
-        fi
-        ;;
-      *)
-        printf '  ⚠ refusing to wipe path outside /tmp: %s\n' "$p" >&2
-        ;;
+    /tmp/*)
+      if [ -e "$p" ]; then
+        rm -rf "$p" && printf '  ✓ rm -rf %s\n' "$p" >&2
+      fi
+      ;;
+    *)
+      printf '  ⚠ refusing to wipe path outside /tmp: %s\n' "$p" >&2
+      ;;
     esac
   }
 

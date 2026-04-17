@@ -101,7 +101,10 @@ BENCH_ROUNDS="${BENCH_ROUNDS:-5}"
 # runs that must use whatever is already checked out.
 BENCH_SKIP_UPDATE="${BENCH_SKIP_UPDATE:-0}"
 case "$BENCH_ROUNDS" in
-  ''|*[!0-9]*) printf '✗ BENCH_ROUNDS must be a positive integer (got: %s)\n' "$BENCH_ROUNDS" >&2; exit 1 ;;
+'' | *[!0-9]*)
+  printf '✗ BENCH_ROUNDS must be a positive integer (got: %s)\n' "$BENCH_ROUNDS" >&2
+  exit 1
+  ;;
 esac
 if [ "$BENCH_ROUNDS" -lt 1 ]; then
   printf '✗ BENCH_ROUNDS must be ≥1 (got: %s)\n' "$BENCH_ROUNDS" >&2
@@ -128,12 +131,12 @@ fi
 if [ "$BENCH_TRUE_COLD" = "1" ]; then
   for _p in "$MALT_BENCH_PREFIX" "$NB_BENCH_PREFIX" "$ZB_BENCH_PREFIX"; do
     case "$_p" in
-      /tmp/*) ;;
-      *)
-        printf '✗ BENCH_TRUE_COLD refuses to wipe a prefix outside /tmp: %s\n' \
-          "$_p" >&2
-        exit 1
-        ;;
+    /tmp/*) ;;
+    *)
+      printf '✗ BENCH_TRUE_COLD refuses to wipe a prefix outside /tmp: %s\n' \
+        "$_p" >&2
+      exit 1
+      ;;
     esac
   done
   unset _p
@@ -328,7 +331,11 @@ time_brew_install() {
 median() {
   local v
   for v in "$@"; do
-    case "$v" in *FAIL*) printf 'FAIL'; return ;; esac
+    case "$v" in *FAIL*)
+      printf 'FAIL'
+      return
+      ;;
+    esac
   done
   local n=$# mid
   if [ $((n % 2)) -eq 1 ]; then
@@ -346,7 +353,11 @@ median() {
 min_of() {
   local v
   for v in "$@"; do
-    case "$v" in *FAIL*) printf 'FAIL'; return ;; esac
+    case "$v" in *FAIL*)
+      printf 'FAIL'
+      return
+      ;;
+    esac
   done
   printf '%s\n' "$@" | sort -n | sed -n '1p'
 }
@@ -358,8 +369,15 @@ min_of() {
 # straight into a table cell. Empty median → "—"; FAIL median → "FAIL".
 fmt_disp() {
   local m="${1:-}" s="${2:-}"
-  if [ -z "$m" ]; then printf "—"; return; fi
-  case "$m" in *FAIL*) printf "FAIL"; return ;; esac
+  if [ -z "$m" ]; then
+    printf "—"
+    return
+  fi
+  case "$m" in *FAIL*)
+    printf "FAIL"
+    return
+    ;;
+  esac
   if [ -n "$s" ]; then
     printf "%s±%ss" "$m" "$s"
   else
@@ -376,7 +394,11 @@ fmt_disp() {
 stddev_of() {
   local v
   for v in "$@"; do
-    case "$v" in *FAIL*) printf 'FAIL'; return ;; esac
+    case "$v" in *FAIL*)
+      printf 'FAIL'
+      return
+      ;;
+    esac
   done
   printf '%s\n' "$@" | awk '
     { x[NR] = $1; s += $1 }
@@ -466,6 +488,9 @@ prep_cold_brew() {
 # Output is a compact progress bar of `.` (pass) and `F` (fail) characters,
 # then a pass/fail summary per package. Exits non-zero on any failure so it
 # slots cleanly into CI.
+# shellcheck disable=SC2317  # lines after `err` in the failure branch
+# look unreachable to shellcheck because it can't see that `err` is a
+# plain logger that returns, not a non-returning function.
 run_stress_pkg() {
   local pkg="$1" count="$2"
   local passes=0 failures=0 i
@@ -494,6 +519,8 @@ run_stress_pkg() {
   return 0
 }
 
+# shellcheck disable=SC2317  # same reason as run_stress_pkg above —
+# `err` is a logger that returns, not a non-returning exit.
 run_stress() {
   local count="$1" rc=0
   shift
@@ -594,12 +621,12 @@ run_round() {
   shift 3
   local tools=("$@") n=$# i tool
   for i in $(seq 0 $((n - 1))); do
-    tool=${tools[$(( (round + i) % n ))]}
+    tool=${tools[$(((round + i) % n))]}
     case "$tool" in
-      mt)   run_one "$MALT_BIN" install uninstall "$pkg" mt prep_cold_malt "$record" ;;
-      nb)   run_one "$NB_BIN"   install remove    "$pkg" nb prep_cold_nb   "$record" ;;
-      zb)   run_one "$ZB_BIN"   install uninstall "$pkg" zb prep_cold_zb   "$record" ;;
-      brew) run_brew_one "$pkg" "$record" ;;
+    mt) run_one "$MALT_BIN" install uninstall "$pkg" mt prep_cold_malt "$record" ;;
+    nb) run_one "$NB_BIN" install remove "$pkg" nb prep_cold_nb "$record" ;;
+    zb) run_one "$ZB_BIN" install uninstall "$pkg" zb prep_cold_zb "$record" ;;
+    brew) run_brew_one "$pkg" "$record" ;;
     esac
   done
 }
@@ -618,11 +645,11 @@ finalize_results() {
     samples=$(get_samples cold "$tool" "$pkg")
     if [ -n "$samples" ]; then
       # shellcheck disable=SC2086
-      set_result "cold_${tool}_$pkg"        "$(median    $samples)"
+      set_result "cold_${tool}_$pkg" "$(median $samples)"
       # shellcheck disable=SC2086
-      set_result "cold_${tool}_${pkg}_min"  "$(min_of    $samples)"
+      set_result "cold_${tool}_${pkg}_min" "$(min_of $samples)"
       # shellcheck disable=SC2086
-      set_result "cold_${tool}_${pkg}_std"  "$(stddev_of $samples)"
+      set_result "cold_${tool}_${pkg}_std" "$(stddev_of $samples)"
       emit_output "${tool}_cold=$(get_result "cold_${tool}_$pkg")s"
       emit_output "${tool}_cold_min=$(get_result "cold_${tool}_${pkg}_min")s"
       emit_output "${tool}_cold_stddev=$(get_result "cold_${tool}_${pkg}_std")s"
@@ -635,11 +662,11 @@ finalize_results() {
       samples=$(get_samples warm "$tool" "$pkg")
       if [ -n "$samples" ]; then
         # shellcheck disable=SC2086
-        set_result "warm_${tool}_$pkg"        "$(median    $samples)"
+        set_result "warm_${tool}_$pkg" "$(median $samples)"
         # shellcheck disable=SC2086
-        set_result "warm_${tool}_${pkg}_min"  "$(min_of    $samples)"
+        set_result "warm_${tool}_${pkg}_min" "$(min_of $samples)"
         # shellcheck disable=SC2086
-        set_result "warm_${tool}_${pkg}_std"  "$(stddev_of $samples)"
+        set_result "warm_${tool}_${pkg}_std" "$(stddev_of $samples)"
         emit_output "${tool}_warm=$(get_result "warm_${tool}_$pkg")s"
         emit_output "${tool}_warm_min=$(get_result "warm_${tool}_${pkg}_min")s"
         emit_output "${tool}_warm_stddev=$(get_result "warm_${tool}_${pkg}_std")s"
@@ -738,9 +765,9 @@ printf "\n%sCold Install%s (median ±σ)\n" "$BOLD" "$RESET"
 printf "  %-14s %-16s %-16s %-16s %-16s\n" Package malt nanobrew zerobrew brew
 for pkg in "${PACKAGES[@]}"; do
   printf "  %-14s %-16s %-16s %-16s %-16s\n" "$pkg" \
-    "$(cell_std "$(get_result "cold_mt_$pkg")"   "$(get_result "cold_mt_${pkg}_std")")" \
-    "$(cell_std "$(get_result "cold_nb_$pkg")"   "$(get_result "cold_nb_${pkg}_std")")" \
-    "$(cell_std "$(get_result "cold_zb_$pkg")"   "$(get_result "cold_zb_${pkg}_std")")" \
+    "$(cell_std "$(get_result "cold_mt_$pkg")" "$(get_result "cold_mt_${pkg}_std")")" \
+    "$(cell_std "$(get_result "cold_nb_$pkg")" "$(get_result "cold_nb_${pkg}_std")")" \
+    "$(cell_std "$(get_result "cold_zb_$pkg")" "$(get_result "cold_zb_${pkg}_std")")" \
     "$(cell_std "$(get_result "cold_brew_$pkg")" "$(get_result "cold_brew_${pkg}_std")")"
 done
 
