@@ -24,6 +24,12 @@ pub const Response = struct {
     }
 };
 
+/// True if the URI scheme is exactly "https" (ascii case-insensitive).
+/// Exposed for the downgrade-guard tests; inlined at the only call site.
+pub fn schemeIsHttps(scheme: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(scheme, "https");
+}
+
 pub const HttpClient = struct {
     allocator: std.mem.Allocator,
     client: std.http.Client,
@@ -254,6 +260,7 @@ pub const HttpClient = struct {
         progress: ?ProgressCallback,
     ) !Response {
         const uri = try std.Uri.parse(url);
+        const https_origin = schemeIsHttps(uri.scheme);
 
         var req = try self.client.request(.GET, uri, .{
             .extra_headers = extra_headers,
@@ -267,6 +274,15 @@ pub const HttpClient = struct {
         // past the old 8 KiB budget.
         var redirect_buf: [32 * 1024]u8 = undefined;
         var response = try req.receiveHead(&redirect_buf);
+
+        // Refuse an https → http downgrade across a 3xx chain. The
+        // stdlib already strips privileged headers on scheme change,
+        // but letting the body itself come back over plaintext with
+        // no CA validation is still a metadata-substitution vector
+        // for every endpoint whose integrity check depends on what
+        // the response says.
+        if (https_origin and !schemeIsHttps(req.uri.scheme))
+            return error.TlsDowngradeRefused;
 
         const status: u16 = @intFromEnum(response.head.status);
 
