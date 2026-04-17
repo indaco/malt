@@ -6,12 +6,14 @@ on:
     paths:
       - "**/*.zig"
       - "**/*.zon"
+      - "scripts/**/*.sh"
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
     paths:
       - "**/*.zig"
       - "**/*.zon"
+      - "scripts/**/*.sh"
       - ".github/workflows/ci.yml"
 
 jobs:
@@ -57,3 +59,6 @@ jobs:
 
       - name: Check formatting
         run: zig fmt --check src/ tests/
+
+      - name: install.sh fail-closed regression tests
+        run: ./scripts/test/install_sh_test.sh

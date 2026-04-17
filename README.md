@@ -57,7 +57,24 @@ Unlike other alternative clients, malt runs Homebrew `post_install` blocks nativ
 curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
 ```
 
-Downloads the latest release, verifies the SHA256 checksum, installs the binary to `/usr/local/bin/`, and creates `/opt/malt` with proper ownership. Falls back to building from source if no release is available.
+Downloads the latest release, verifies the SHA256 checksum **and a cosign keyless signature**, installs the binary to `/usr/local/bin/`, and creates `/opt/malt` with proper ownership. Falls back to building from source if no release is available.
+
+> [!NOTE]
+> The installer requires [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/) on your `PATH` to cryptographically verify that the release was produced by malt's GitHub Actions workflow. To bypass (not recommended), set `MALT_ALLOW_UNVERIFIED=1`.
+
+#### Verifying `install.sh` itself
+
+The pipe-to-bash pattern can't verify the script that's fetching it. To verify `install.sh` out of band, check it against the tagged copy in this repository:
+
+```bash
+# Pin to a release tag (recommended):
+curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.5.1/scripts/install.sh" -o install.sh
+shasum -a 256 install.sh
+# Compare against the SHA printed in the release notes for v0.5.1, then:
+bash install.sh
+```
+
+Once `install.sh` runs, it re-verifies every subsequent download with cosign, so the trust anchor shifts from "whatever HTTPS returned" to "the Sigstore-pinned workflow identity".
 
 ### Via Homebrew
 

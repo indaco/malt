@@ -12,6 +12,14 @@ BINARY="malt"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 PREFIX="${PREFIX:-/opt/malt}"
 
+# URL overrides — TESTING ONLY. In production both point at github.com.
+# The regression tests under scripts/test/install_sh_test.sh drive the
+# installer against a local fixture HTTP server, so each integrity-check
+# code path (missing checksums, name not listed, SHA mismatch, happy
+# path) can be exercised without hitting the real release surface.
+RELEASES_BASE_URL="${MALT_TEST_RELEASES_URL:-https://github.com/${REPO}/releases/download}"
+API_LATEST_URL="${MALT_TEST_API_URL:-https://api.github.com/repos/${REPO}/releases/latest}"
+
 # Use sudo only when we actually need it. Root obviously skips it; a
 # non-root run skips it too when INSTALL_DIR and PREFIX are already
 # writable (the common case when testing against /tmp).
@@ -57,9 +65,9 @@ ARCH="$(uname -m)"
 [ "$OS" = "Darwin" ] || error "malt is macOS only. Detected: $OS"
 
 case "$ARCH" in
-  arm64 | aarch64) ARCH_LABEL="arm64" ;;
-  x86_64) ARCH_LABEL="x86_64" ;;
-  *) error "Unsupported architecture: $ARCH" ;;
+arm64 | aarch64) ARCH_LABEL="arm64" ;;
+x86_64) ARCH_LABEL="x86_64" ;;
+*) error "Unsupported architecture: $ARCH" ;;
 esac
 
 info "Detected macOS $ARCH_LABEL"
@@ -82,7 +90,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "${REPO_ROOT}/build.zig" ] && [ -f "${REPO_ROOT}/
 else
   # ── Find latest release ──────────────────────────────────────────
   info "Fetching latest release..."
-  if API_RESPONSE=$(curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null); then
+  if API_RESPONSE=$(curl -fsSL --connect-timeout 5 --max-time 10 "$API_LATEST_URL" 2>/dev/null); then
     LATEST=$(printf '%s' "$API_RESPONSE" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
   else
     API_FAILED=1
@@ -147,7 +155,7 @@ else
   # for the "Detected macOS …" banner; the tarball name no longer
   # depends on the host arch.
   ARCHIVE_NAME="malt_${VERSION}_darwin_all.tar.gz"
-  DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${ARCHIVE_NAME}"
+  DOWNLOAD_URL="${RELEASES_BASE_URL}/${LATEST}/${ARCHIVE_NAME}"
 
   TMPDIR=$(mktemp -d)
   trap 'rm -rf "$TMPDIR"' EXIT
@@ -158,10 +166,47 @@ else
 
   # ── Verify checksum (required) ──────────────────────────────────
   # README promises SHA256 verification, so refuse to install without it.
-  CHECKSUM_URL="https://github.com/${REPO}/releases/download/${LATEST}/checksums.txt"
+  CHECKSUM_URL="${RELEASES_BASE_URL}/${LATEST}/checksums.txt"
   info "Verifying SHA256 checksum..."
   curl -fsSL "$CHECKSUM_URL" -o "$TMPDIR/checksums.txt" ||
     error "Could not fetch checksums.txt from ${CHECKSUM_URL}. Refusing to install without verification."
+
+  # ── Verify cosign signature (required unless explicitly opted out) ──
+  # The checksums file is signed keyless at release time by the
+  # goreleaser workflow, producing a single .sigstore.json bundle that
+  # carries both the signature and the Sigstore certificate. Verifying
+  # here ties the SHA list to the exact workflow identity that produced
+  # it; a token capable of uploading a replacement checksums.txt cannot
+  # forge this signature without also being able to run that workflow.
+  BUNDLE_URL="${CHECKSUM_URL}.sigstore.json"
+  CERT_IDENTITY_REGEX="^https://github.com/${REPO}/\\.github/workflows/release\\.yml@"
+  OIDC_ISSUER="https://token.actions.githubusercontent.com"
+
+  if command -v cosign >/dev/null 2>&1; then
+    info "Verifying cosign signature..."
+    # Missing .sigstore.json is a signed-release regression, not a soft
+    # fallback — fail the same way a missing checksum file would.
+    curl -fsSL "$BUNDLE_URL" -o "$TMPDIR/checksums.txt.sigstore.json" ||
+      error "Could not fetch ${BUNDLE_URL}. Refusing to install without signature verification."
+
+    cosign verify-blob \
+      --bundle "$TMPDIR/checksums.txt.sigstore.json" \
+      --certificate-identity-regexp "$CERT_IDENTITY_REGEX" \
+      --certificate-oidc-issuer "$OIDC_ISSUER" \
+      "$TMPDIR/checksums.txt" >/dev/null 2>&1 ||
+      error "cosign signature verification failed for checksums.txt."
+    ok "cosign signature verified"
+  elif [ "${MALT_ALLOW_UNVERIFIED:-0}" = "1" ]; then
+    # Loud on purpose: users who hit this have stepped around a
+    # trust anchor, not a cosmetic check.
+    warn "cosign not installed; MALT_ALLOW_UNVERIFIED=1 — skipping signature verification"
+    warn "install cosign to cryptographically verify the release: https://docs.sigstore.dev/cosign/system_config/installation/"
+  else
+    error "cosign is required to verify the release signature.
+  Install: https://docs.sigstore.dev/cosign/system_config/installation/ (e.g. \`brew install cosign\`)
+  To bypass (not recommended): MALT_ALLOW_UNVERIFIED=1 curl … | bash"
+  fi
+
   EXPECTED=$(grep "$ARCHIVE_NAME" "$TMPDIR/checksums.txt" | awk '{print $1}')
   [ -n "$EXPECTED" ] || error "Checksum for ${ARCHIVE_NAME} not listed in checksums.txt."
   ACTUAL=$(shasum -a 256 "$TMPDIR/$ARCHIVE_NAME" | awk '{print $1}')
