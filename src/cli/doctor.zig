@@ -31,6 +31,20 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var warnings: u32 = 0;
     var errors: u32 = 0;
 
+    // 0. MALT_PREFIX visibility. atomic.maltPrefix() already aborts on a
+    //    malformed env, so by this point the value is validated — doctor
+    //    just surfaces it for operator context.
+    {
+        const is_default = std.mem.eql(u8, prefix, "/opt/malt");
+        var pbuf: [600]u8 = undefined;
+        const detail = std.fmt.bufPrint(
+            &pbuf,
+            "{s} {s}",
+            .{ prefix, if (is_default) "(default)" else "(from MALT_PREFIX)" },
+        ) catch prefix;
+        printCheck("MALT_PREFIX", .ok, detail);
+    }
+
     // 1. SQLite integrity
     blk: {
         var db_path_buf: [512]u8 = undefined;

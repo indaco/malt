@@ -37,6 +37,126 @@ test "maltPrefix honours MALT_PREFIX env var" {
     try testing.expectEqualStrings("/tmp/malt_atomic_prefix_env", got);
 }
 
+// ────────────────────────────────────────────────────────────────────
+// validatePrefix — pure-function tests, exhaustive over the error set.
+// maltPrefixChecked() is exercised via these + the env-based tests
+// above, which establish the happy path through the same validator.
+// ────────────────────────────────────────────────────────────────────
+
+test "validatePrefix: default path is accepted" {
+    try atomic.validatePrefix("/opt/malt");
+}
+
+test "validatePrefix: tmp sandbox prefix is accepted" {
+    try atomic.validatePrefix("/tmp/malt_test_prefix");
+}
+
+test "validatePrefix: root '/' is accepted" {
+    // Root alone is technically absolute and has no bad components; we
+    // don't get to veto unusual-but-syntactically-valid prefixes.
+    try atomic.validatePrefix("/");
+}
+
+test "validatePrefix: trailing slash is tolerated" {
+    try atomic.validatePrefix("/opt/malt/");
+}
+
+test "validatePrefix: empty string rejected" {
+    try testing.expectError(error.Empty, atomic.validatePrefix(""));
+}
+
+test "validatePrefix: relative path rejected" {
+    try testing.expectError(error.NotAbsolute, atomic.validatePrefix("opt/malt"));
+    try testing.expectError(error.NotAbsolute, atomic.validatePrefix("./malt"));
+    try testing.expectError(error.NotAbsolute, atomic.validatePrefix("malt"));
+}
+
+test "validatePrefix: .. component rejected" {
+    try testing.expectError(error.DotDotComponent, atomic.validatePrefix("/opt/../etc"));
+    try testing.expectError(error.DotDotComponent, atomic.validatePrefix("/.."));
+    try testing.expectError(error.DotDotComponent, atomic.validatePrefix("/opt/malt/.."));
+}
+
+test "validatePrefix: NUL byte rejected" {
+    try testing.expectError(error.EmbeddedNul, atomic.validatePrefix("/opt/\x00malt"));
+    try testing.expectError(error.EmbeddedNul, atomic.validatePrefix("/opt/malt\x00"));
+}
+
+test "validatePrefix: length > MAX_PREFIX_LEN rejected" {
+    var buf: [atomic.MAX_PREFIX_LEN + 1]u8 = undefined;
+    @memset(&buf, 'a');
+    buf[0] = '/';
+    try testing.expectError(error.TooLong, atomic.validatePrefix(&buf));
+}
+
+test "validatePrefix: length == MAX_PREFIX_LEN accepted" {
+    var buf: [atomic.MAX_PREFIX_LEN]u8 = undefined;
+    @memset(&buf, 'a');
+    buf[0] = '/';
+    try atomic.validatePrefix(&buf);
+}
+
+test "validatePrefix: '//' inside rejected" {
+    try testing.expectError(error.EmptyComponent, atomic.validatePrefix("/opt//malt"));
+    try testing.expectError(error.EmptyComponent, atomic.validatePrefix("//opt/malt"));
+}
+
+test "validatePrefix: single dot component is permitted (not our job to canonicalise)" {
+    // A lone `.` is a valid filesystem path component; we only reject
+    // the traversal primitive `..`. Keeping this permissive avoids
+    // surprising users on paths like /opt/./malt.
+    try atomic.validatePrefix("/opt/./malt");
+}
+
+test "validatePrefix: dotdot-like-but-not-exact component accepted" {
+    // Make sure we don't over-match on .. — names like `foo..bar` are
+    // not path traversal.
+    try atomic.validatePrefix("/opt/foo..bar");
+    try atomic.validatePrefix("/opt/..malt");
+    try atomic.validatePrefix("/opt/malt..");
+}
+
+test "maltPrefixChecked: empty MALT_PREFIX returns Empty error" {
+    setPrefix("");
+    defer unsetPrefix();
+    try testing.expectError(error.Empty, atomic.maltPrefixChecked());
+}
+
+test "maltPrefixChecked: traversal MALT_PREFIX returns DotDotComponent" {
+    setPrefix("/tmp/malt/../etc");
+    defer unsetPrefix();
+    try testing.expectError(error.DotDotComponent, atomic.maltPrefixChecked());
+}
+
+test "maltPrefixChecked: relative MALT_PREFIX returns NotAbsolute" {
+    setPrefix("relative/path");
+    defer unsetPrefix();
+    try testing.expectError(error.NotAbsolute, atomic.maltPrefixChecked());
+}
+
+test "maltPrefixChecked: unset returns default" {
+    unsetPrefix();
+    const got = try atomic.maltPrefixChecked();
+    try testing.expectEqualStrings("/opt/malt", got);
+}
+
+test "describePrefixError: every error has a descriptive string" {
+    // Compile-time-ish coverage: every arm of the switch must return
+    // something non-empty so error output is useful.
+    const cases = [_]atomic.PrefixError{
+        error.Empty,
+        error.NotAbsolute,
+        error.DotDotComponent,
+        error.EmbeddedNul,
+        error.TooLong,
+        error.EmptyComponent,
+    };
+    for (cases) |e| {
+        const desc = atomic.describePrefixError(e);
+        try testing.expect(desc.len > 0);
+    }
+}
+
 test "maltTmpDir composes {prefix}/tmp" {
     setPrefix("/tmp/malt_atomic_tmp_env");
     defer unsetPrefix();
