@@ -26,13 +26,33 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Default seed set — formulas commonly hit by the --use-system-ruby
-# fallback path. Callers can override via FORMULAS env var.
+# Pick the first working sha256 hasher. macOS ships /usr/bin/shasum, but
+# nanobrew/homebrew setups can shadow the Perl runtime and leave it
+# broken; fall back to sha256sum (coreutils) or openssl.
+if command -v sha256sum >/dev/null 2>&1 && sha256sum </dev/null >/dev/null 2>&1; then
+  sha256_stdin() { sha256sum | awk '{print $1}'; }
+elif /usr/bin/shasum -a 256 </dev/null >/dev/null 2>&1; then
+  sha256_stdin() { /usr/bin/shasum -a 256 | awk '{print $1}'; }
+elif command -v openssl >/dev/null 2>&1; then
+  sha256_stdin() { openssl dgst -sha256 -r | awk '{print $1}'; }
+else
+  echo "error: no working sha256 hasher (need sha256sum, shasum, or openssl)" >&2
+  exit 1
+fi
+
+# Default seed set — formulas whose post_install runs during common
+# installs (TLS + language toolchains). Callers can override via FORMULAS.
 DEFAULT_FORMULAS=(
+  ca-certificates
   fontconfig
+  git
+  go
   node
   openssl@3
+  perl
+  python@3.11
   python@3.12
+  python@3.13
   ruby
 )
 # shellcheck disable=SC2206
@@ -106,10 +126,7 @@ for name in "${FORMULAS_ARR[@]}"; do
     printf '  ⚠ %s: fetch failed (skipping)\n' "$name" >&2
     continue
   fi
-  # Use /usr/bin paths directly — some dev environments shadow shasum
-  # with a broken homebrew/nanobrew perl-backed wrapper ahead of the
-  # system one (the same bug that bit scripts/test/install_sh_test.sh).
-  sha=$(printf '%s' "$body" | /usr/bin/shasum -a 256 | awk '{print $1}')
+  sha=$(printf '%s' "$body" | sha256_stdin)
   printf '%s %s\n' "$name" "$sha" >>"$TMP"
   printf '  ✓ %-24s %s\n' "$name" "$sha" >&2
 done
