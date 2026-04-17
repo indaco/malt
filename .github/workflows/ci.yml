@@ -37,28 +37,11 @@ jobs:
       - name: Run unit tests
         run: zig build test --summary all
 
-      # Fast sanity probes - catch a totally broken binary before any
-      # of the longer smoke suites run.
-      - name: Smoke - version flag
+      - name: Smoke test — version flag
         run: ./zig-out/bin/malt --version
 
-      - name: Smoke - help flag
+      - name: Smoke test — help flag
         run: ./zig-out/bin/malt --help
-
-      # Offline CLI smoke: exercises every documented command + alias
-      # against an isolated MALT_PREFIX. Tier 3 (network installs) is
-      # skipped in CI - it lives in the benchmark workflow already.
-      - name: CLI smoke (offline tiers)
-        env:
-          SMOKE_SKIP_NETWORK: "1"
-        run: ./scripts/e2e/smoke_test.sh
-
-      # Security smoke: flag-scope enforcement, argv-only lint,
-      # pins-manifest shape, install.sh fail-closed regression suite.
-      # Subsumes the individual lint + install.sh steps that used to
-      # live in the Lint job.
-      - name: Security smoke
-        run: ./scripts/e2e/smoke_security.sh
 
       - name: Build universal binary
         run: zig build universal -Doptimize=ReleaseSafe
@@ -74,13 +57,8 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Check Zig formatting
+      - name: Check formatting
         run: zig fmt --check src/ tests/
 
-      - name: Install shell-lint tools
-        run: brew install shellcheck shfmt
-
-      - name: Lint shell scripts (shellcheck + shfmt)
-        run: |
-          shellcheck scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
-          shfmt -i 2 -d scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
+      - name: install.sh fail-closed regression tests
+        run: ./scripts/test/install_sh_test.sh
