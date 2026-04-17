@@ -77,6 +77,7 @@ test "list is empty on a fresh database and hasService returns false" {
 
 test "register writes a plist and a DB row that list reports back" {
     const prefix = "/tmp/malt_sup_register";
+    const cellar = "/tmp/malt_sup_register/Cellar/testkeg/1.0";
     malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     _ = c.setenv("MALT_PREFIX", prefix, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
@@ -86,9 +87,11 @@ test "register writes a plist and a DB row that list reports back" {
     defer db.close();
     try schema.initSchema(&db);
 
+    // program_args[0] must live under cellar (new path-allowlist rule);
+    // log paths must live under malt_prefix.
     const spec = plist_mod.ServiceSpec{
         .label = "com.malt.test.svc",
-        .program_args = &.{ "/bin/echo", "hi" },
+        .program_args = &.{ "/tmp/malt_sup_register/Cellar/testkeg/1.0/bin/echo", "hi" },
         .working_dir = null,
         .env = &.{},
         .run_at_load = false,
@@ -96,7 +99,7 @@ test "register writes a plist and a DB row that list reports back" {
         .stdout_path = "/tmp/malt_sup_register/out.log",
         .stderr_path = "/tmp/malt_sup_register/err.log",
     };
-    try supervisor.register(testing.allocator, &db, spec, "testkeg", true);
+    try supervisor.register(testing.allocator, &db, spec, "testkeg", true, cellar, prefix);
 
     try testing.expect(supervisor.hasService(&db, "com.malt.test.svc"));
 

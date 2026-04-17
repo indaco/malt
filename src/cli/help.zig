@@ -60,7 +60,9 @@ const install_help =
     \\  --formula          Force formula installation
     \\  --dry-run          Show what would be installed
     \\  --force            Overwrite existing installations
-    \\  --use-system-ruby  Execute post_install scripts via system Ruby (experimental)
+    \\  --use-system-ruby[=<name>,...]  Run post_install via the system Ruby interpreter
+    \\                     (experimental, sandboxed). A bare flag requires a single
+    \\                     package; use =<name>,... to scope when installing multiple.
     \\  --quiet, -q        Suppress non-error output
     \\  --json             Output result as JSON
     \\
@@ -175,7 +177,10 @@ const migrate_help =
     \\
     \\Flags:
     \\  --dry-run          Show what would be migrated
-    \\  --use-system-ruby  Execute post_install scripts via system Ruby (experimental)
+    \\  --use-system-ruby=<name>,...  Run post_install via the system Ruby interpreter
+    \\                     (experimental, sandboxed) for the named kegs only. A bare
+    \\                     `--use-system-ruby` is not allowed here — it would widen
+    \\                     the trust boundary to every keg discovered in the Cellar.
     \\
 ;
 

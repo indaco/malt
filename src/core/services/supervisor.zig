@@ -42,6 +42,10 @@ pub const SupervisorError = error{
     IoFailed,
     DatabaseError,
     OutOfMemory,
+    /// Service definition violated the validation rules in
+    /// `plist_mod.validate` — interpreter bait, path escape, or
+    /// oversize/NUL-bearing argv. See the render path for specifics.
+    InvalidService,
 };
 
 pub fn describeError(err: SupervisorError) []const u8 {
@@ -52,6 +56,7 @@ pub fn describeError(err: SupervisorError) []const u8 {
         SupervisorError.IoFailed => "filesystem error while managing service",
         SupervisorError.DatabaseError => "database error while managing service",
         SupervisorError.OutOfMemory => "out of memory",
+        SupervisorError.InvalidService => "service definition rejected by malt validator",
     };
 }
 
@@ -127,14 +132,23 @@ pub fn freeServiceInfos(allocator: std.mem.Allocator, services: []ServiceInfo) v
 
 /// Register a new service row. The plist file is written to disk; the
 /// launchctl bootstrap happens on `start`.
+///
+/// `cellar_path` / `malt_prefix` are the allowlist roots used to reject
+/// interpreter bait, path escapes, and pathologically large argvs
+/// before the plist lands on disk or launchctl sees it. See
+/// `plist_mod.validate`.
 pub fn register(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     spec: plist_mod.ServiceSpec,
     keg_name: []const u8,
     auto_start: bool,
+    cellar_path: []const u8,
+    malt_prefix: []const u8,
 ) SupervisorError!void {
     if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
+
+    plist_mod.validate(spec, cellar_path, malt_prefix) catch return SupervisorError.InvalidService;
 
     const dir = try serviceDir(allocator, spec.label);
     defer allocator.free(dir);

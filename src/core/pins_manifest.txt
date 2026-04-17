@@ -1,0 +1,12 @@
+# malt — pinned formula source manifest
+#
+# One record per line:  <formula-name> <sha256-of-.rb-at-pinned-commit>
+#
+# Entries here authorize fetchPostInstallFromGitHub() to execute the
+# matching Ruby source after verifying its SHA256. Formulas with no
+# entry are refused — the code path is fail-closed.
+#
+# Regenerate with: scripts/gen-pins.sh
+# Pinned commit lives in src/core/pins.zig (HOMEBREW_CORE_COMMIT_SHA).
+#
+# Lines starting with '#' and blank lines are ignored.

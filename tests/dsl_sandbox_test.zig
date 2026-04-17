@@ -242,3 +242,44 @@ test "sandbox: lookalike cellar prefix rejected when prefixes disjoint" {
     );
     try testing.expectError(SandboxError.PathSandboxViolation, result);
 }
+
+// ────────────────────────────────────────────────────────────────────
+// pathHasPrefix direct tests. This helper is now public and re-used by
+// the plist validator (src/core/services/plist.zig) for the argv path
+// allowlist, so its boundary behaviour is load-bearing for two
+// independent security checks. Regression here = silent bypass in
+// either place.
+// ────────────────────────────────────────────────────────────────────
+
+test "pathHasPrefix: identical paths accepted" {
+    try testing.expect(sandbox.pathHasPrefix("/opt/malt", "/opt/malt"));
+}
+
+test "pathHasPrefix: component-boundary extension accepted" {
+    try testing.expect(sandbox.pathHasPrefix("/opt/malt/bin/foo", "/opt/malt"));
+}
+
+test "pathHasPrefix: substring-without-boundary rejected" {
+    // The whole point of this helper: `/opt/malthack` must NOT match
+    // prefix `/opt/malt`. Plain `startsWith` would say yes.
+    try testing.expect(!sandbox.pathHasPrefix("/opt/malthack", "/opt/malt"));
+    try testing.expect(!sandbox.pathHasPrefix("/opt/malthack/x", "/opt/malt"));
+}
+
+test "pathHasPrefix: trailing-slash prefix still accepts bare path" {
+    // e.g. prefix computed with a stray trailing '/'
+    try testing.expect(sandbox.pathHasPrefix("/opt/malt/bin/foo", "/opt/malt/"));
+}
+
+test "pathHasPrefix: empty prefix rejected" {
+    // An empty prefix would accept every absolute path — explicitly refuse.
+    try testing.expect(!sandbox.pathHasPrefix("/opt/malt", ""));
+}
+
+test "pathHasPrefix: shorter path than prefix rejected" {
+    try testing.expect(!sandbox.pathHasPrefix("/opt", "/opt/malt"));
+}
+
+test "pathHasPrefix: disjoint paths rejected" {
+    try testing.expect(!sandbox.pathHasPrefix("/usr/local/bin", "/opt/malt"));
+}

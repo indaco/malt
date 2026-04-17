@@ -95,7 +95,19 @@ pub const InstallError = error{
     /// Raised before any dep resolution or job queueing so nothing is
     /// downloaded, materialised, or linked for the affected package.
     PostInstallUnsupported,
+    /// `--use-system-ruby` used with multiple formulas and no explicit
+    /// scope list. The flag widens the trust boundary (runs full Ruby
+    /// with only OS-level sandboxing), so malt requires the user to
+    /// name which formulas it should apply to when ambiguity exists.
+    AmbiguousSystemRubyScope,
 };
+
+/// Whether --use-system-ruby opts the named formula into the Ruby
+/// post_install path. Caller carries the parsed scope from the flag.
+fn useSystemRubyForFormula(scope: []const []const u8, formula_name: []const u8) bool {
+    for (scope) |n| if (std.mem.eql(u8, n, formula_name)) return true;
+    return false;
+}
 
 /// A bottle download job for parallel processing.
 ///
@@ -246,7 +258,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // allowing programmatic callers to pass `--dry-run` directly in `args`.
     var dry_run = output.isDryRun();
     var force = false;
-    var use_system_ruby = false;
+    // `--use-system-ruby` scope: the audit flagged a session-wide flag
+    // as an auto-fallback trust widener. We keep the flag ergonomic
+    // when a single formula is installed (bare flag implies that
+    // formula) but require an explicit `--use-system-ruby=name[,name]`
+    // list when multiple formulas are queued, so a DSL parse failure
+    // on one never enables Ruby for the rest.
+    var use_system_ruby_bare = false;
+    var use_system_ruby_scope: std.ArrayList([]const u8) = .empty;
+    defer use_system_ruby_scope.deinit(allocator);
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--cask")) {
@@ -258,7 +278,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--force")) {
             force = true;
         } else if (std.mem.eql(u8, arg, "--use-system-ruby")) {
-            use_system_ruby = true;
+            use_system_ruby_bare = true;
+        } else if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
+            const list = arg["--use-system-ruby=".len..];
+            var it = std.mem.splitScalar(u8, list, ',');
+            while (it.next()) |name| {
+                if (name.len > 0) try use_system_ruby_scope.append(allocator, name);
+            }
         } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
             output.setQuiet(true);
         } else if (std.mem.eql(u8, arg, "--json")) {
@@ -272,6 +298,22 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         output.err("No package names specified", .{});
         return InstallError.NoPackages;
     }
+
+    // Disambiguate bare `--use-system-ruby`: accept it as shorthand
+    // when exactly one formula was listed; otherwise the user must
+    // name which formulas should get the wider path.
+    if (use_system_ruby_bare) {
+        if (packages.items.len == 1) {
+            try use_system_ruby_scope.append(allocator, packages.items[0]);
+        } else {
+            output.err(
+                "--use-system-ruby needs a scope when multiple packages are installed; use --use-system-ruby={s}[,<name>...]",
+                .{packages.items[0]},
+            );
+            return InstallError.AmbiguousSystemRubyScope;
+        }
+    }
+    const use_system_ruby_list: []const []const u8 = use_system_ruby_scope.items;
 
     // Initialize infrastructure
     const prefix = atomic.maltPrefix();
@@ -685,13 +727,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                             flog.printFatal(job.name);
                             break :post_install;
                         }
-                        if (use_system_ruby) {
+                        if (useSystemRubyForFormula(use_system_ruby_list, job.name)) {
                             output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{job.name});
                             ruby_sub.runPostInstall(allocator, job.name, job.version_str, prefix) catch |e| {
                                 output.warn("post_install subprocess failed for {s}: {s}", .{ job.name, @errorName(e) });
                             };
                         } else {
-                            output.warn("{s}: post_install partially skipped (use --use-system-ruby to attempt via Ruby)", .{job.name});
+                            output.warn("{s}: post_install partially skipped (use --use-system-ruby={s} to attempt via Ruby)", .{ job.name, job.name });
                         }
                         break :post_install;
                     };
@@ -719,12 +761,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                         flog.printFatal(job.name);
                         break :post_install;
                     }
-                    if (use_system_ruby) {
+                    if (useSystemRubyForFormula(use_system_ruby_list, job.name)) {
                         ruby_sub.runPostInstall(allocator, job.name, job.version_str, prefix) catch |e| {
                             output.warn("post_install subprocess failed for {s}: {s}", .{ job.name, @errorName(e) });
                         };
                     } else {
-                        output.warn("{s}: post_install partially skipped (use --use-system-ruby to attempt via Ruby)", .{job.name});
+                        output.warn("{s}: post_install partially skipped (use --use-system-ruby={s} to attempt via Ruby)", .{ job.name, job.name });
                     }
                     break :post_install;
                 };
@@ -733,13 +775,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
 
             // No source available — fall back to subprocess or skip
-            if (use_system_ruby) {
+            if (useSystemRubyForFormula(use_system_ruby_list, job.name)) {
                 output.warn("Running post_install for {s} via system Ruby...", .{job.name});
                 ruby_sub.runPostInstall(allocator, job.name, job.version_str, prefix) catch |e| {
                     output.warn("post_install failed for {s}: {s}", .{ job.name, @errorName(e) });
                 };
             } else {
-                output.warn("{s}: post_install skipped (use --use-system-ruby or brew install {s})", .{ job.name, job.name });
+                output.warn("{s}: post_install skipped (use --use-system-ruby={s} or brew install {s})", .{ job.name, job.name, job.name });
             }
         }
     }
@@ -1131,6 +1173,9 @@ fn linkAndRecord(
 
 /// Register a launchd service when the formula carries a `service:` block.
 /// Best-effort: failures only emit a warning so they don't fail the install.
+/// Path validation (interpreter bait, path escape, argv caps) is run
+/// inside `supervisor.register` against the formula's cellar + the
+/// install prefix.
 fn maybeRegisterService(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
@@ -1156,6 +1201,13 @@ fn maybeRegisterService(
         fs_compat.cwd().makePath(dir) catch {};
     } else |_| {}
 
+    var cellar_buf: [512]u8 = undefined;
+    const cellar_path = std.fmt.bufPrint(
+        &cellar_buf,
+        "{s}/Cellar/{s}/{s}",
+        .{ prefix, formula.name, formula.version },
+    ) catch return;
+
     const spec: plist_mod.ServiceSpec = .{
         .label = label,
         .program_args = def.run,
@@ -1166,7 +1218,7 @@ fn maybeRegisterService(
         .keep_alive = def.keep_alive,
     };
 
-    supervisor_mod.register(allocator, db, spec, formula.name, false) catch |err| {
+    supervisor_mod.register(allocator, db, spec, formula.name, false, cellar_path, prefix) catch |err| {
         output.warn("could not register service for {s}: {s}", .{ formula.name, @errorName(err) });
     };
 }
