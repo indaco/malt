@@ -43,3 +43,87 @@ test "sha256Hex — short known vector" {
         &out,
     );
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Manifest parser edge cases. These run against an in-memory fixture
+// via `lookupIn` so they can't be masked by a well-formed shipping
+// manifest — each one isolates one property of the parser.
+// ────────────────────────────────────────────────────────────────────
+
+const good_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+test "lookupIn — space-separated entry found" {
+    const m = "fontconfig " ++ good_hash ++ "\n";
+    const h = pins.lookupIn(m, "fontconfig") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(good_hash, h);
+}
+
+test "lookupIn — tab-separated entry found" {
+    const m = "fontconfig\t" ++ good_hash ++ "\n";
+    const h = pins.lookupIn(m, "fontconfig") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(good_hash, h);
+}
+
+test "lookupIn — blank lines and comments are ignored" {
+    const m =
+        "\n" ++
+        "# comment\n" ++
+        "  # indented comment\n" ++
+        "\n" ++
+        "node " ++ good_hash ++ "\n";
+    const h = pins.lookupIn(m, "node") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(good_hash, h);
+}
+
+test "lookupIn — uppercase hex rejected" {
+    const bad = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const m = "node " ++ bad ++ "\n";
+    try testing.expectEqual(@as(?[]const u8, null), pins.lookupIn(m, "node"));
+}
+
+test "lookupIn — non-hex chars rejected" {
+    const bad = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+    const m = "node " ++ bad ++ "\n";
+    try testing.expectEqual(@as(?[]const u8, null), pins.lookupIn(m, "node"));
+}
+
+test "lookupIn — short hash rejected" {
+    const m = "node deadbeef\n";
+    try testing.expectEqual(@as(?[]const u8, null), pins.lookupIn(m, "node"));
+}
+
+test "lookupIn — name-without-hash line skipped" {
+    const m = "badline\ngood " ++ good_hash ++ "\n";
+    try testing.expectEqual(@as(?[]const u8, null), pins.lookupIn(m, "badline"));
+    const h = pins.lookupIn(m, "good") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(good_hash, h);
+}
+
+test "lookupIn — substring-of-name does NOT match" {
+    // pathological case: don't let `nodejs` accidentally satisfy a query
+    // for `node`.
+    const m = "nodejs " ++ good_hash ++ "\n";
+    try testing.expectEqual(@as(?[]const u8, null), pins.lookupIn(m, "node"));
+}
+
+test "lookupIn — first match wins when name appears twice" {
+    const h1 = "1111111111111111111111111111111111111111111111111111111111111111";
+    const h2 = "2222222222222222222222222222222222222222222222222222222222222222";
+    const m = "node " ++ h1 ++ "\nnode " ++ h2 ++ "\n";
+    const got = pins.lookupIn(m, "node") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(h1, got);
+}
+
+test "lookupIn — CRLF line endings tolerated" {
+    const m = "node " ++ good_hash ++ "\r\n";
+    const h = pins.lookupIn(m, "node") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(good_hash, h);
+}
+
+test "lookupIn — trailing text after hash ignored (length gate)" {
+    // lookupIn slices exactly SHA256_HEX_LEN chars; anything after is
+    // out of bounds of the returned hash but mustn't crash the parser.
+    const m = "node " ++ good_hash ++ "  # with comment\n";
+    const h = pins.lookupIn(m, "node") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(good_hash, h);
+}

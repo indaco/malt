@@ -27,13 +27,20 @@ pub const SHA256_HEX_LEN: usize = 64;
 /// Look up the expected SHA256 (as lowercase hex) for a formula at the
 /// pinned commit. Returns null when no entry exists — the caller must
 /// treat "no entry" as a refusal, not a pass-through.
-///
-/// Linear scan: the manifest is in the thousands of bytes and this
-/// function is hit at most once per formula install, behind a network
-/// round-trip, so a StringHashMap would cost more than it saves.
 pub fn expectedSha256(name: []const u8) ?[]const u8 {
+    return lookupIn(MANIFEST_TEXT, name);
+}
+
+/// Parser shared by `expectedSha256` and the unit tests. Split out so
+/// manifest-parsing edge cases (malformed hex, wrong separator, weird
+/// whitespace) can be covered without rebuilding the embedded manifest.
+///
+/// Linear scan: manifests are in the thousands of bytes and this runs
+/// at most once per formula install, behind a network round-trip, so a
+/// StringHashMap would cost more than it saves.
+pub fn lookupIn(manifest: []const u8, name: []const u8) ?[]const u8 {
     if (name.len == 0) return null;
-    var it = std.mem.splitScalar(u8, MANIFEST_TEXT, '\n');
+    var it = std.mem.splitScalar(u8, manifest, '\n');
     while (it.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
