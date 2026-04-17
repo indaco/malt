@@ -30,6 +30,14 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+          # Release runs rarely; a fresh compile takes a few extra
+          # minutes but is worth it. A cancelled or crashed release
+          # job (e.g. the one we killed while debugging the smoke
+          # race) leaves a half-written .zig-cache entry, which the
+          # next release picks up and tries to exec — producing an
+          # InvalidExe failure on a "cached 102ms" binary. Releases
+          # are a trust boundary; always rebuild from scratch.
+          use-cache: false
 
       - name: Run unit tests
         run: zig build test --summary all
