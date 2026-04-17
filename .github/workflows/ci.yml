@@ -43,6 +43,21 @@ jobs:
       - name: Smoke test — help flag
         run: ./zig-out/bin/malt --help
 
+      # Offline CLI smoke: exercises every documented command + alias
+      # against an isolated MALT_PREFIX. Tier 3 (network installs) is
+      # skipped in CI — it lives in the benchmark workflow already.
+      - name: CLI smoke (offline tiers)
+        env:
+          SMOKE_SKIP_NETWORK: "1"
+        run: ./scripts/e2e/smoke_test.sh
+
+      # Security smoke: flag-scope enforcement, argv-only lint,
+      # pins-manifest shape, install.sh fail-closed regression suite.
+      # Subsumes the individual install.sh step that used to live in
+      # the Lint job.
+      - name: Security smoke
+        run: ./scripts/e2e/smoke_security.sh
+
       - name: Build universal binary
         run: zig build universal -Doptimize=ReleaseSafe
 
@@ -57,8 +72,13 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Check formatting
+      - name: Check Zig formatting
         run: zig fmt --check src/ tests/
 
-      - name: install.sh fail-closed regression tests
-        run: ./scripts/test/install_sh_test.sh
+      - name: Install shell-lint tools
+        run: brew install shellcheck shfmt
+
+      - name: Lint shell scripts (shellcheck + shfmt)
+        run: |
+          shellcheck scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
+          shfmt -i 2 -d scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
