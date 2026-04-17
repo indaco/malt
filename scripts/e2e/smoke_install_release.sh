@@ -76,6 +76,15 @@ if [ -n "$COSIGN_PATH" ]; then
   SAFE_PATH="$(dirname "$COSIGN_PATH"):$SAFE_PATH"
 fi
 
+# GitHub's /releases/latest is CDN-cached and lags a freshly-published
+# release by up to a minute. install.sh has its own retry loop, but a
+# short pre-wait here shortens the feedback loop when the smoke runs
+# seconds after the release is flipped to published.
+if [ "${MALT_SMOKE_SKIP_PROPAGATION_WAIT:-0}" != "1" ]; then
+  step "Waiting 15s for release to propagate to the API"
+  sleep 15
+fi
+
 step "Running install.sh from README against the live release"
 if [ "${MALT_SKIP_COSIGN:-0}" = "1" ]; then
   env -i HOME="$HOME" USER="$USER" PATH="$SAFE_PATH" \

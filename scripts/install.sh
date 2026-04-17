@@ -90,7 +90,21 @@ if [ -n "$REPO_ROOT" ] && [ -f "${REPO_ROOT}/build.zig" ] && [ -f "${REPO_ROOT}/
 else
   # ── Find latest release ──────────────────────────────────────────
   info "Fetching latest release..."
-  if API_RESPONSE=$(curl -fsSL --connect-timeout 5 --max-time 10 "$API_LATEST_URL" 2>/dev/null); then
+  # Retry any curl failure — GitHub's /releases/latest endpoint can
+  # return 404 (CDN cache not yet warm on a freshly published release),
+  # 5xx, rate-limit responses, or just time out. Curl's built-in --retry
+  # only covers 408/429/5xx and needs 7.71+ for --retry-all-errors, so
+  # we do it in bash for portability across macOS and older Linux.
+  API_RESPONSE=""
+  for attempt in 1 2 3; do
+    if API_RESPONSE=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+      "$API_LATEST_URL" 2>/dev/null); then
+      break
+    fi
+    API_RESPONSE=""
+    [ "$attempt" -lt 3 ] && sleep $((attempt * 3))
+  done
+  if [ -n "$API_RESPONSE" ]; then
     LATEST=$(printf '%s' "$API_RESPONSE" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
   else
     API_FAILED=1
@@ -98,13 +112,18 @@ else
 fi
 
 if [ -z "$LATEST" ]; then
+  # When invoked as `curl ... | bash` with no local repo, the source
+  # fallback needs both zig and a fresh git clone — which is rarely
+  # what a one-liner user wants. If the API failed here, point at the
+  # Releases page so the user isn't chasing a red-herring "Zig is
+  # required" error for what is really a transient network issue.
+  if [ "$API_FAILED" -eq 1 ] && { [ -z "$REPO_ROOT" ] || [ ! -f "${REPO_ROOT}/build.zig" ]; }; then
+    error "Could not reach GitHub API after retries. Try again in a minute, or download manually: https://github.com/${REPO}/releases"
+  fi
+
   # Build from source (local checkout or freshly cloned).
   if [ -z "$REPO_ROOT" ] || [ ! -f "${REPO_ROOT}/build.zig" ]; then
-    if [ "$API_FAILED" -eq 1 ]; then
-      warn "Could not reach GitHub API. Falling back to build from source."
-    else
-      warn "No releases found on GitHub. Falling back to build from source."
-    fi
+    warn "No releases found on GitHub. Falling back to build from source."
   fi
 
   if ! command -v zig >/dev/null 2>&1; then
