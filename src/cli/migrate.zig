@@ -24,6 +24,11 @@ const ruby_sub = @import("../core/ruby_subprocess.zig");
 const dsl = @import("../core/dsl/root.zig");
 const help = @import("help.zig");
 
+fn inScope(scope: []const []const u8, name: []const u8) bool {
+    for (scope) |n| if (std.mem.eql(u8, n, name)) return true;
+    return false;
+}
+
 /// Result of migrating a single keg.
 const KegResult = enum {
     migrated,
@@ -39,11 +44,30 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "migrate")) return;
 
     var dry_run = output.isDryRun();
-    var use_system_ruby = false;
+    // Ruby is opt-in per keg only. A bare --use-system-ruby across a
+    // whole `migrate` would widen the trust boundary to every
+    // Homebrew-Cellar entry at once; refuse it and require names.
+    var use_system_ruby_bare = false;
+    var use_system_ruby_scope: std.ArrayList([]const u8) = .empty;
+    defer use_system_ruby_scope.deinit(allocator);
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--dry-run")) dry_run = true;
-        if (std.mem.eql(u8, arg, "--use-system-ruby")) use_system_ruby = true;
+        if (std.mem.eql(u8, arg, "--use-system-ruby")) use_system_ruby_bare = true;
+        if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
+            const list = arg["--use-system-ruby=".len..];
+            var it = std.mem.splitScalar(u8, list, ',');
+            while (it.next()) |name| {
+                if (name.len > 0) try use_system_ruby_scope.append(allocator, name);
+            }
+        }
         if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) output.setQuiet(true);
+    }
+    if (use_system_ruby_bare) {
+        output.err(
+            "bare --use-system-ruby is not allowed with `migrate`; scope it: --use-system-ruby=<name>[,<name>...]",
+            .{},
+        );
+        return error.Aborted;
     }
 
     // ── Step 1: Detect Homebrew prefix ──────────────────────────────
@@ -158,7 +182,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             &linker,
             &db,
             prefix,
-            use_system_ruby,
+            use_system_ruby_scope.items,
         );
 
         switch (result) {
@@ -214,7 +238,7 @@ fn migrateKeg(
     linker: *linker_mod.Linker,
     db: *sqlite.Database,
     prefix: []const u8,
-    use_system_ruby: bool,
+    use_system_ruby_scope: []const []const u8,
 ) KegResult {
     // 1. Check if already installed in malt
     if (isInstalled(db, keg_name)) {
@@ -326,12 +350,12 @@ fn migrateKeg(
                         flog.printFatal(formula.name);
                         break :post_install;
                     }
-                    if (use_system_ruby) {
+                    if (inScope(use_system_ruby_scope, formula.name)) {
                         ruby_sub.runPostInstall(allocator, formula.name, formula.version, prefix) catch |e| {
                             output.warn("  post_install subprocess failed for {s}: {s}", .{ formula.name, @errorName(e) });
                         };
                     } else {
-                        output.warn("  {s}: post_install partially skipped (use --use-system-ruby to attempt via Ruby)", .{formula.name});
+                        output.warn("  {s}: post_install partially skipped (use --use-system-ruby={s} to attempt via Ruby)", .{ formula.name, formula.name });
                     }
                     break :post_install;
                 };
@@ -353,12 +377,12 @@ fn migrateKeg(
                     flog2.printFatal(formula.name);
                     break :post_install;
                 }
-                if (use_system_ruby) {
+                if (inScope(use_system_ruby_scope, formula.name)) {
                     ruby_sub.runPostInstall(allocator, formula.name, formula.version, prefix) catch |e| {
                         output.warn("  post_install subprocess failed for {s}: {s}", .{ formula.name, @errorName(e) });
                     };
                 } else {
-                    output.warn("  {s}: post_install partially skipped (use --use-system-ruby to attempt via Ruby)", .{formula.name});
+                    output.warn("  {s}: post_install partially skipped (use --use-system-ruby={s} to attempt via Ruby)", .{ formula.name, formula.name });
                 }
                 break :post_install;
             };
@@ -367,13 +391,13 @@ fn migrateKeg(
         }
 
         // No source available — fall back to subprocess or skip
-        if (use_system_ruby) {
+        if (inScope(use_system_ruby_scope, formula.name)) {
             output.warn("  Running post_install for {s} via system Ruby...", .{formula.name});
             ruby_sub.runPostInstall(allocator, formula.name, formula.version, prefix) catch |e| {
                 output.warn("  post_install failed for {s}: {s}", .{ formula.name, @errorName(e) });
             };
         } else {
-            output.warn("  {s}: post_install skipped (use --use-system-ruby or brew install {s})", .{ formula.name, formula.name });
+            output.warn("  {s}: post_install skipped (use --use-system-ruby={s} or brew install {s})", .{ formula.name, formula.name, formula.name });
         }
     }
 

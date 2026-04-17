@@ -8,6 +8,10 @@ const fs_compat = @import("../fs/compat.zig");
 const builtin = @import("builtin");
 const output = @import("../ui/output.zig");
 const codesign = @import("../macho/codesign.zig");
+const pins = @import("pins.zig");
+const http_client = @import("../net/client.zig");
+const api_mod = @import("../net/api.zig");
+const sandbox = @import("sandbox/macos.zig");
 
 pub const RubyError = error{
     RubyNotFound,
@@ -18,6 +22,11 @@ pub const RubyError = error{
     PostInstallFailed,
     OutOfMemory,
 };
+
+/// Upper bound on a fetched formula .rb blob. The Homebrew-wide 99th
+/// percentile is ~40 KiB; 1 MiB is orders of magnitude of headroom
+/// without giving a hostile response room to grow.
+const MAX_FORMULA_RB_BYTES: usize = 1024 * 1024;
 
 /// Detect a usable Ruby interpreter. Returns a caller-owned absolute path
 /// or null. Caller must free the returned slice with `allocator.free`.
@@ -101,49 +110,62 @@ pub fn resolveFormulaRbPath(buf: *[1024]u8, tap_path: []const u8, name: []const 
     return new_path;
 }
 
-/// Fetch a formula's .rb source from GitHub and extract the post_install body.
-/// This is the fallback when the homebrew-core tap is not cloned locally.
-/// Uses curl for simplicity and TLS handling.
-/// Returns the post_install body or null if the fetch fails or no post_install exists.
+/// Fetch a formula's .rb source from the pinned homebrew-core commit,
+/// verify its SHA256 against the embedded manifest, and extract the
+/// post_install body.
+///
+/// This path is the fallback when the homebrew-core tap is not cloned
+/// locally. It refuses anything whose hash isn't pre-authorized in
+/// `pins_manifest.txt` — a floating-HEAD fetch would give an attacker
+/// who controls the raw.githubusercontent.com response (MITM with a
+/// valid cert, compromised CDN edge, branch rewrite) a direct path to
+/// code execution via `--use-system-ruby`.
+///
+/// Returns the post_install body or null on any fetch / verify / parse
+/// failure. All failures are silent-to-caller; the caller decides
+/// whether to warn.
 pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
-    if (name.len == 0) return null;
+    // Reject anything that wouldn't pass the API name allowlist
+    // ([a-z0-9@._+-]) — the URL path substitutes the name directly.
+    api_mod.validateName(name) catch return null;
 
-    // Build the GitHub raw URL: Formula/FIRST_LETTER/NAME.rb
-    var url_buf: [256]u8 = undefined;
-    const url = std.fmt.bufPrint(&url_buf, "https://raw.githubusercontent.com/Homebrew/homebrew-core/HEAD/Formula/{c}/{s}.rb", .{
-        name[0], name,
-    }) catch return null;
+    const expected_hash = pins.expectedSha256(name) orelse {
+        // Fail-closed: no manifest entry, no fetch. Logged so users
+        // hitting this path know *why* rather than guessing that the
+        // network is down.
+        output.warn(
+            "post_install fetch refused for {s}: no entry in pins_manifest.txt (run scripts/gen-pins.sh)",
+            .{name},
+        );
+        return null;
+    };
 
-    const argv = [_][]const u8{ "curl", "-fsSL", "--max-time", "10", url };
-    var child = fs_compat.Child.init(&argv, allocator);
-    child.stdout_behavior = .pipe;
-    child.stderr_behavior = .ignore;
-    child.spawn() catch return null;
+    var url_buf: [512]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &url_buf,
+        "https://raw.githubusercontent.com/Homebrew/homebrew-core/{s}/Formula/{c}/{s}.rb",
+        .{ pins.HOMEBREW_CORE_COMMIT_SHA, name[0], name },
+    ) catch return null;
 
-    const stdout = child.stdout orelse return null;
-    const body = fs_compat.readFileToEndAlloc(stdout, allocator, 1024 * 1024) catch return null;
-    const term = child.wait() catch return null;
+    var http = http_client.HttpClient.init(allocator);
+    defer http.deinit();
 
-    switch (term) {
-        .exited => |code| if (code != 0) {
-            allocator.free(body);
-            return null;
-        },
-        else => {
-            allocator.free(body);
-            return null;
-        },
-    }
+    var resp = http.get(url) catch return null;
+    defer resp.deinit();
+    if (resp.status != 200) return null;
+    if (resp.body.len == 0 or resp.body.len > MAX_FORMULA_RB_BYTES) return null;
 
-    if (body.len == 0) {
-        allocator.free(body);
+    var actual_hex: [pins.SHA256_HEX_LEN]u8 = undefined;
+    pins.sha256Hex(resp.body, &actual_hex);
+    if (!std.mem.eql(u8, actual_hex[0..], expected_hash)) {
+        output.err(
+            "post_install fetch refused for {s}: SHA256 mismatch at pinned commit (expected {s}, got {s})",
+            .{ name, expected_hash, actual_hex[0..] },
+        );
         return null;
     }
 
-    // Extract post_install from the fetched source
-    const result = extractPostInstallFromSource(allocator, body);
-    allocator.free(body);
-    return result;
+    return extractPostInstallFromSource(allocator, resp.body);
 }
 
 /// Extract post_install body from Ruby source text (in-memory version).
@@ -436,23 +458,41 @@ pub fn runPostInstall(
     // Ensure cleanup
     defer fs_compat.deleteFileAbsolute(tmp_path) catch {};
 
-    // 7. Spawn Ruby subprocess — inherit stdout/stderr so post_install
-    // output flows directly to the user's terminal.
-    const argv = [_][]const u8{ ruby_path, tmp_path };
-    var child = fs_compat.Child.init(&argv, allocator);
-    child.stdout_behavior = .inherit;
-    child.stderr_behavior = .inherit;
+    // 7. Spawn Ruby under sandbox-exec with a per-formula profile,
+    //    scrubbed env, and resource limits. stdout/stderr inherit the
+    //    parent's so post_install output still reaches the user.
+    //    The parent's env is intentionally NOT forwarded — only HOME,
+    //    a minimal PATH, MALT_PREFIX, and a formula-scoped TMPDIR pass.
 
-    child.spawn() catch return RubyError.PostInstallFailed;
+    var cellar_buf: [512]u8 = undefined;
+    const cellar_path = std.fmt.bufPrint(
+        &cellar_buf,
+        "{s}/Cellar/{s}/{s}",
+        .{ prefix, name, version },
+    ) catch return RubyError.PostInstallFailed;
 
-    const term = child.wait() catch return RubyError.PostInstallFailed;
-    switch (term) {
-        .exited => |code| {
-            if (code != 0) {
-                output.err("post_install script exited with code {d}", .{code});
-                return RubyError.PostInstallFailed;
-            }
-        },
-        else => return RubyError.PostInstallFailed,
+    const home = fs_compat.getenv("HOME") orelse "/tmp";
+    const env: sandbox.ScrubbedEnv = .{
+        .home = home,
+        .path = sandbox.SANDBOX_PATH,
+        .malt_prefix = prefix,
+        .tmpdir = "/tmp",
+    };
+
+    const exit_code = sandbox.runRubySandboxed(
+        allocator,
+        ruby_path,
+        tmp_path,
+        cellar_path,
+        prefix,
+        env,
+        .{},
+    ) catch |e| {
+        output.err("post_install sandbox spawn failed: {s}", .{@errorName(e)});
+        return RubyError.PostInstallFailed;
+    };
+    if (exit_code != 0) {
+        output.err("post_install script exited with code {d}", .{exit_code});
+        return RubyError.PostInstallFailed;
     }
 }
