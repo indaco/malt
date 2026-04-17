@@ -1,6 +1,13 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.1/.schema/devbox.schema.json",
-  "packages": ["zig@latest", "git@latest", "curl@latest", "just@latest"],
+  "packages": [
+    "zig@latest",
+    "git@latest",
+    "curl@latest",
+    "just@latest",
+    "shellcheck@latest",
+    "shfmt@latest"
+  ],
   "shell": {
     "scripts": {
       "dev": ["just build"],

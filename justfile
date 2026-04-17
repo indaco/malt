@@ -59,6 +59,19 @@ fmt-check:
 fmt:
     zig fmt src/ tests/
 
+# Requires shellcheck + shfmt on PATH (`brew install shellcheck shfmt`).
+# Project convention: 2-space indent across every shell script.
+# Lint shell scripts with shellcheck + shfmt.
+[group('lint')]
+shell-lint:
+    shellcheck scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
+    shfmt -i 2 -d scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
+
+# Apply shfmt formatting in place. Run after a failing `shell-lint`.
+[group('lint')]
+shell-fmt:
+    shfmt -i 2 -w scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
+
 # Lint: format check + build + test
 [group('lint')]
 lint: fmt-check build test
@@ -86,9 +99,9 @@ pre-commit:
     git add "${files[@]}"
     echo "Auto-formatted ${#files[@]} staged .zig file(s)."
 
-# Pre-push hook: everything that CI checks
+# Pre-push hook: everything that CI checks, plus shell-lint.
 [group('hooks')]
-pre-push: fmt-check test
+pre-push: fmt-check test shell-lint
     @echo "All pre-push checks passed."
 
 # Install git hooks (pre-commit + pre-push)
