@@ -11,8 +11,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if ! command -v kcov >/dev/null 2>&1; then
-    echo "error: kcov not found. Install with: brew install kcov" >&2
-    exit 1
+  echo "error: kcov not found. Install with: brew install kcov" >&2
+  exit 1
 fi
 
 rm -rf coverage
@@ -25,11 +25,11 @@ src_dir="$(pwd)/src"
 
 # Run kcov once per test binary into a shared outdir
 for bin in zig-out/test-bin/*; do
-    # Skip .dSYM debug bundles and any non-regular files
-    [ -f "$bin" ] || continue
-    [ -x "$bin" ] || continue
-    echo "→ kcov: $(basename "$bin")"
-    kcov --include-path="$src_dir" coverage "$bin" >/dev/null
+  # Skip .dSYM debug bundles and any non-regular files
+  [ -f "$bin" ] || continue
+  [ -x "$bin" ] || continue
+  echo "→ kcov: $(basename "$bin")"
+  kcov --include-path="$src_dir" coverage "$bin" >/dev/null
 done
 
 # kcov 43 on macOS doesn't reliably auto-merge, so do it explicitly.
@@ -38,31 +38,37 @@ shopt -s nullglob
 per_bin_dirs=(coverage/*_test.*)
 shopt -u nullglob
 if [ ${#per_bin_dirs[@]} -eq 0 ]; then
-    echo "error: kcov produced no per-binary reports" >&2
-    exit 1
+  echo "error: kcov produced no per-binary reports" >&2
+  exit 1
 fi
 kcov --merge coverage/merged "${per_bin_dirs[@]}" >/dev/null
 
 report="coverage/merged/kcov-merged/coverage.json"
 if [ ! -f "$report" ]; then
-    echo "error: merged report not found at $report" >&2
-    exit 1
+  echo "error: merged report not found at $report" >&2
+  exit 1
 fi
 
 if command -v jq >/dev/null 2>&1; then
-    percent=$(jq -r '.percent_covered' "$report")
+  percent=$(jq -r '.percent_covered' "$report")
 else
-    percent=$(grep -oE '"percent_covered"[^,}]*' "$report" | grep -oE '[0-9]+(\.[0-9]+)?' | head -1)
+  percent=$(grep -oE '"percent_covered"[^,}]*' "$report" | grep -oE '[0-9]+(\.[0-9]+)?' | head -1)
 fi
 
 # Pick a shields.io color based on the integer part of the percentage.
 pct_int=${percent%.*}
-if   [ "$pct_int" -ge 90 ]; then color="brightgreen"
-elif [ "$pct_int" -ge 80 ]; then color="green"
-elif [ "$pct_int" -ge 70 ]; then color="yellowgreen"
-elif [ "$pct_int" -ge 60 ]; then color="yellow"
-elif [ "$pct_int" -ge 50 ]; then color="orange"
-else                             color="red"
+if [ "$pct_int" -ge 90 ]; then
+  color="brightgreen"
+elif [ "$pct_int" -ge 80 ]; then
+  color="green"
+elif [ "$pct_int" -ge 70 ]; then
+  color="yellowgreen"
+elif [ "$pct_int" -ge 60 ]; then
+  color="yellow"
+elif [ "$pct_int" -ge 50 ]; then
+  color="orange"
+else
+  color="red"
 fi
 
 # Fetch the static badge SVG from shields.io and commit it under .github/badges/.
@@ -70,9 +76,9 @@ fi
 mkdir -p .github/badges
 badge_url="https://img.shields.io/badge/coverage-${percent}%25-${color}"
 if curl -sSLf "$badge_url" -o .github/badges/coverage.svg; then
-    badge_msg=".github/badges/coverage.svg (refreshed — remember to commit it)"
+  badge_msg=".github/badges/coverage.svg (refreshed — remember to commit it)"
 else
-    badge_msg="warning: could not fetch badge from shields.io (offline?) — badge not refreshed"
+  badge_msg="warning: could not fetch badge from shields.io (offline?) — badge not refreshed"
 fi
 
 echo ""

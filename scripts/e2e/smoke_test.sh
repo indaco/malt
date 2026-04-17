@@ -25,9 +25,9 @@ MT_BIN="${MT_BIN:-./zig-out/bin/malt}"
 SKIP_NETWORK="${SMOKE_SKIP_NETWORK:-0}"
 
 if [[ ! -x "$MT_BIN" ]]; then
-    echo "smoke: $MT_BIN not found or not executable" >&2
-    echo "smoke: run 'zig build' first (or set MT_BIN)" >&2
-    exit 2
+  echo "smoke: $MT_BIN not found or not executable" >&2
+  echo "smoke: run 'zig build' first (or set MT_BIN)" >&2
+  exit 2
 fi
 MT_BIN="$(cd "$(dirname "$MT_BIN")" && pwd)/$(basename "$MT_BIN")"
 
@@ -51,52 +51,52 @@ FAILURES=()
 # run <tag> <expected-exit> -- <cmd...>
 #   Runs the command; passes if exit matches expected.
 run() {
-    local tag="$1" expected="$2"
-    shift 2
-    [[ "$1" == "--" ]] && shift
-    local log
-    log="$LOGDIR/$(printf '%s' "$tag" | tr -c 'A-Za-z0-9' _).log"
-    "$@" >"$log" 2>&1
-    local rc=$?
-    if [[ "$rc" == "$expected" ]]; then
-        printf '  PASS  [%s] %s\n' "$tag" "$*"
-        PASS=$((PASS + 1))
-    else
-        printf '  FAIL  [%s] expected exit=%s got=%s :: %s\n' "$tag" "$expected" "$rc" "$*"
-        printf '        log: %s\n' "$log"
-        sed -n '1,6p' "$log" | sed 's/^/        | /'
-        FAIL=$((FAIL + 1))
-        FAILURES+=("$tag")
-    fi
+  local tag="$1" expected="$2"
+  shift 2
+  [[ "$1" == "--" ]] && shift
+  local log
+  log="$LOGDIR/$(printf '%s' "$tag" | tr -c 'A-Za-z0-9' _).log"
+  "$@" >"$log" 2>&1
+  local rc=$?
+  if [[ "$rc" == "$expected" ]]; then
+    printf '  PASS  [%s] %s\n' "$tag" "$*"
+    PASS=$((PASS + 1))
+  else
+    printf '  FAIL  [%s] expected exit=%s got=%s :: %s\n' "$tag" "$expected" "$rc" "$*"
+    printf '        log: %s\n' "$log"
+    sed -n '1,6p' "$log" | sed 's/^/        | /'
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$tag")
+  fi
 }
 
 # run_ok <tag> -- <cmd...>   (expects exit 0)
 run_ok() {
-    local t="$1"
-    shift
-    run "$t" 0 "$@"
+  local t="$1"
+  shift
+  run "$t" 0 "$@"
 }
 
 # run_grep <tag> <regex> -- <cmd...>
 #   Runs, expects exit 0 AND stdout/stderr match regex.
 run_grep() {
-    local tag="$1" pat="$2"
-    shift 2
-    [[ "$1" == "--" ]] && shift
-    local log
-    log="$LOGDIR/$(printf '%s' "$tag" | tr -c 'A-Za-z0-9' _).log"
-    "$@" >"$log" 2>&1
-    local rc=$?
-    if [[ "$rc" == 0 ]] && grep -qE "$pat" "$log"; then
-        printf '  PASS  [%s] %s\n' "$tag" "$*"
-        PASS=$((PASS + 1))
-    else
-        printf '  FAIL  [%s] rc=%s, pattern /%s/ missing :: %s\n' "$tag" "$rc" "$pat" "$*"
-        printf '        log: %s\n' "$log"
-        sed -n '1,6p' "$log" | sed 's/^/        | /'
-        FAIL=$((FAIL + 1))
-        FAILURES+=("$tag")
-    fi
+  local tag="$1" pat="$2"
+  shift 2
+  [[ "$1" == "--" ]] && shift
+  local log
+  log="$LOGDIR/$(printf '%s' "$tag" | tr -c 'A-Za-z0-9' _).log"
+  "$@" >"$log" 2>&1
+  local rc=$?
+  if [[ "$rc" == 0 ]] && grep -qE "$pat" "$log"; then
+    printf '  PASS  [%s] %s\n' "$tag" "$*"
+    PASS=$((PASS + 1))
+  else
+    printf '  FAIL  [%s] rc=%s, pattern /%s/ missing :: %s\n' "$tag" "$rc" "$pat" "$*"
+    printf '        log: %s\n' "$log"
+    sed -n '1,6p' "$log" | sed 's/^/        | /'
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$tag")
+  fi
 }
 
 section() { printf '\n── %s ───────────────────────────────────────\n' "$1"; }
@@ -117,19 +117,19 @@ run_ok t1.completions.fish -- "$MT_BIN" completions fish
 "$MT_BIN" completions tcsh >/dev/null 2>&1
 rc=$?
 if [[ "$rc" != 0 ]]; then
-    printf '  PASS  [t1.completions.bad] exit=%s (non-zero)\n' "$rc"
-    PASS=$((PASS + 1))
+  printf '  PASS  [t1.completions.bad] exit=%s (non-zero)\n' "$rc"
+  PASS=$((PASS + 1))
 else
-    printf '  FAIL  [t1.completions.bad] expected non-zero, got %s\n' "$rc"
-    FAIL=$((FAIL + 1))
-    FAILURES+=("t1.completions.bad")
+  printf '  FAIL  [t1.completions.bad] expected non-zero, got %s\n' "$rc"
+  FAIL=$((FAIL + 1))
+  FAILURES+=("t1.completions.bad")
 fi
 
 # Per-command --help on everything documented.
 for cmd in install uninstall upgrade update outdated list info search uses \
-    doctor purge tap untap migrate backup restore services bundle \
-    rollback run link unlink version completions; do
-    run_ok "t1.help.$cmd" -- "$MT_BIN" "$cmd" --help
+  doctor purge tap untap migrate backup restore services bundle \
+  rollback run link unlink version completions; do
+  run_ok "t1.help.$cmd" -- "$MT_BIN" "$cmd" --help
 done
 
 # Alias dispatch (`mt` and `malt` both installed in zig-out/bin).
@@ -162,12 +162,12 @@ run_ok t2.tap.list -- "$MT_BIN" tap
 "$MT_BIN" doctor >"$LOGDIR/t2.doctor.log" 2>&1
 rc=$?
 if [[ "$rc" == 0 || "$rc" == 1 || "$rc" == 2 ]]; then
-    printf '  PASS  [t2.doctor] exit=%s (0/1/2 documented)\n' "$rc"
-    PASS=$((PASS + 1))
+  printf '  PASS  [t2.doctor] exit=%s (0/1/2 documented)\n' "$rc"
+  PASS=$((PASS + 1))
 else
-    printf '  FAIL  [t2.doctor] unexpected exit=%s\n' "$rc"
-    FAIL=$((FAIL + 1))
-    FAILURES+=("t2.doctor")
+  printf '  FAIL  [t2.doctor] unexpected exit=%s\n' "$rc"
+  FAIL=$((FAIL + 1))
+  FAILURES+=("t2.doctor")
 fi
 
 # Dry-run upgrade on empty prefix should succeed with nothing to do.
@@ -176,46 +176,46 @@ run_ok t2.upgrade.dry -- "$MT_BIN" upgrade --dry-run
 # ── Tier 3: network installs (small, fast package: tree — 0 deps) ──────────
 
 if [[ "$SKIP_NETWORK" == "1" ]]; then
-    section "Tier 3 — SKIPPED (SMOKE_SKIP_NETWORK=1)"
+  section "Tier 3 — SKIPPED (SMOKE_SKIP_NETWORK=1)"
 else
-    section "Tier 3 — network installs (sandboxed)"
+  section "Tier 3 — network installs (sandboxed)"
 
-    run_ok t3.install.dry -- "$MT_BIN" install --dry-run tree
-    run_ok t3.install.tree -- "$MT_BIN" install tree
-    run_grep t3.list.has-tree "tree" -- "$MT_BIN" list
-    run_grep t3.info.tree "tree" -- "$MT_BIN" info tree
-    run_ok t3.uses.tree -- "$MT_BIN" uses tree
-    run_ok t3.uses.recursive -- "$MT_BIN" uses --recursive tree
+  run_ok t3.install.dry -- "$MT_BIN" install --dry-run tree
+  run_ok t3.install.tree -- "$MT_BIN" install tree
+  run_grep t3.list.has-tree "tree" -- "$MT_BIN" list
+  run_grep t3.info.tree "tree" -- "$MT_BIN" info tree
+  run_ok t3.uses.tree -- "$MT_BIN" uses tree
+  run_ok t3.uses.recursive -- "$MT_BIN" uses --recursive tree
 
-    # link is already done by install; unlink + re-link exercises the code path.
-    run_ok t3.unlink -- "$MT_BIN" unlink tree
-    run_ok t3.link -- "$MT_BIN" link tree
-    run_ok t3.link.overwrite -- "$MT_BIN" link tree --overwrite
+  # link is already done by install; unlink + re-link exercises the code path.
+  run_ok t3.unlink -- "$MT_BIN" unlink tree
+  run_ok t3.link -- "$MT_BIN" link tree
+  run_ok t3.link.overwrite -- "$MT_BIN" link tree --overwrite
 
-    # backup / restore round-trip.
-    run_ok t3.backup -- "$MT_BIN" backup --output "$LOGDIR/backup.txt"
-    run_ok t3.backup.versions -- "$MT_BIN" backup --versions --output "$LOGDIR/backup-v.txt"
-    run_ok t3.restore.dry -- "$MT_BIN" restore "$LOGDIR/backup.txt" --dry-run
+  # backup / restore round-trip.
+  run_ok t3.backup -- "$MT_BIN" backup --output "$LOGDIR/backup.txt"
+  run_ok t3.backup.versions -- "$MT_BIN" backup --versions --output "$LOGDIR/backup-v.txt"
+  run_ok t3.restore.dry -- "$MT_BIN" restore "$LOGDIR/backup.txt" --dry-run
 
-    # bundle round-trip.
-    run_ok t3.bundle.export -- "$MT_BIN" bundle export
-    run_ok t3.bundle.create -- "$MT_BIN" bundle create --format json "$LOGDIR/Maltfile.json"
-    run_ok t3.bundle.list -- "$MT_BIN" bundle list
-    run_ok t3.bundle.install.dry -- "$MT_BIN" bundle install --dry-run "$LOGDIR/Maltfile.json"
+  # bundle round-trip.
+  run_ok t3.bundle.export -- "$MT_BIN" bundle export
+  run_ok t3.bundle.create -- "$MT_BIN" bundle create --format json "$LOGDIR/Maltfile.json"
+  run_ok t3.bundle.list -- "$MT_BIN" bundle list
+  run_ok t3.bundle.install.dry -- "$MT_BIN" bundle install --dry-run "$LOGDIR/Maltfile.json"
 
-    # run: already-installed path (no re-download).
-    run_ok t3.run.tree -- "$MT_BIN" run tree -- --version
+  # run: already-installed path (no re-download).
+  run_ok t3.run.tree -- "$MT_BIN" run tree -- --version
 
-    # purge dry-runs only — never destructive here.
-    run_ok t3.purge.store.dry -- "$MT_BIN" purge --store-orphans --dry-run
-    run_ok t3.purge.house.dry -- "$MT_BIN" purge --housekeeping --dry-run
-    run_ok t3.purge.cache.dry -- "$MT_BIN" purge --cache=7 --dry-run
+  # purge dry-runs only — never destructive here.
+  run_ok t3.purge.store.dry -- "$MT_BIN" purge --store-orphans --dry-run
+  run_ok t3.purge.house.dry -- "$MT_BIN" purge --housekeeping --dry-run
+  run_ok t3.purge.cache.dry -- "$MT_BIN" purge --cache=7 --dry-run
 
-    # uninstall — removes from sandbox.
-    run_ok t3.uninstall -- "$MT_BIN" uninstall tree
+  # uninstall — removes from sandbox.
+  run_ok t3.uninstall -- "$MT_BIN" uninstall tree
 
-    # After uninstall, rollback on an uninstalled package should fail cleanly.
-    run t3.rollback.none 1 -- "$MT_BIN" rollback tree
+  # After uninstall, rollback on an uninstalled package should fail cleanly.
+  run t3.rollback.none 1 -- "$MT_BIN" rollback tree
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
@@ -224,10 +224,10 @@ section "Summary"
 TOTAL=$((PASS + FAIL))
 printf 'Ran %d tests — %d passed, %d failed.\n' "$TOTAL" "$PASS" "$FAIL"
 if ((FAIL > 0)); then
-    printf 'Failures:\n'
-    for t in "${FAILURES[@]}"; do printf '  - %s\n' "$t"; done
-    printf 'Logs in: %s (preserved on failure)\n' "$LOGDIR"
-    trap - EXIT # keep logs for post-mortem
-    exit 1
+  printf 'Failures:\n'
+  for t in "${FAILURES[@]}"; do printf '  - %s\n' "$t"; done
+  printf 'Logs in: %s (preserved on failure)\n' "$LOGDIR"
+  trap - EXIT # keep logs for post-mortem
+  exit 1
 fi
 exit 0

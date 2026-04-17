@@ -34,6 +34,10 @@ VERBOSE="${VERBOSE:-0}"
 PHASE1_FORMULAE=(glib fontconfig dbus)
 PHASE3_FORMULAE=(shared-mime-info node)
 PHASE4_FORMULAE=(openssl@3)
+# Tracked-but-not-wired: formulas whose post_install is known to crash
+# the interpreter. Kept as a data reference for future triage; the test
+# loop does not invoke it today.
+# shellcheck disable=SC2034
 KNOWN_CRASH=(daemontools)
 
 # Default: run all phases
@@ -50,16 +54,17 @@ else
   BOLD="" GREEN="" YELLOW="" RED="" CYAN="" RESET=""
 fi
 
-pass()  { printf "  %sPASS%s  %s\n" "$GREEN" "$RESET" "$*"; }
-skip()  { printf "  %sSKIP%s  %s\n" "$YELLOW" "$RESET" "$*"; }
-fail()  { printf "  %sFAIL%s  %s\n" "$RED" "$RESET" "$*"; }
-info()  { printf "  %s>%s %s\n" "$CYAN" "$RESET" "$*"; }
+pass() { printf "  %sPASS%s  %s\n" "$GREEN" "$RESET" "$*"; }
+skip() { printf "  %sSKIP%s  %s\n" "$YELLOW" "$RESET" "$*"; }
+fail() { printf "  %sFAIL%s  %s\n" "$RED" "$RESET" "$*"; }
+info() { printf "  %s>%s %s\n" "$CYAN" "$RESET" "$*"; }
 
 # --- build -------------------------------------------------------------------
 if [ "$SKIP_BUILD" != "1" ]; then
   info "Building malt (ReleaseSafe) -> $BUILD_PREFIX"
   (cd "$REPO_ROOT" && zig build -Doptimize=ReleaseSafe --prefix "$BUILD_PREFIX" 2>&1) || {
-    fail "Build failed"; exit 1
+    fail "Build failed"
+    exit 1
   }
 fi
 
@@ -104,6 +109,9 @@ for pkg in "${ALL_FORMULAE[@]}"; do
   OUTPUT=$(MALT_PREFIX="$TEST_PREFIX" "$MALT_BIN" install "$pkg" 2>&1) || true
 
   if [ "$VERBOSE" = "1" ]; then
+    # sed is the right tool here — prefixing every line with indentation
+    # isn't expressible via bash parameter expansion.
+    # shellcheck disable=SC2001
     echo "$OUTPUT" | sed "s/^/    /"
   fi
 
@@ -155,9 +163,9 @@ for r in "${RESULTS[@]}"; do
   status="${r%%:*}"
   name="${r#*:}"
   case "$status" in
-    PASS) printf "  %s[PASS]%s %s\n" "$GREEN" "$RESET" "$name" ;;
-    SKIP) printf "  %s[SKIP]%s %s\n" "$YELLOW" "$RESET" "$name" ;;
-    FAIL) printf "  %s[FAIL]%s %s\n" "$RED" "$RESET" "$name" ;;
+  PASS) printf "  %s[PASS]%s %s\n" "$GREEN" "$RESET" "$name" ;;
+  SKIP) printf "  %s[SKIP]%s %s\n" "$YELLOW" "$RESET" "$name" ;;
+  FAIL) printf "  %s[FAIL]%s %s\n" "$RED" "$RESET" "$name" ;;
   esac
 done
 
