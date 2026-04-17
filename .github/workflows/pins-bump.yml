@@ -1,0 +1,62 @@
+name: Pins auto-bump
+
+# Refresh the homebrew-core pin + regenerated manifest as an auto-PR.
+# A human still has to review and merge; the drift guard in ci.yml
+# validates the generated diff before merge. Auto-apply is intentionally
+# off — pin bumps are a security boundary, not a dependency update.
+
+on:
+  schedule:
+    # Monthly, first of the month, 06:00 UTC. post_install blocks move
+    # rarely enough that weekly would be noise.
+    - cron: "0 6 1 * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  bump:
+    name: Bump homebrew-core pin
+    runs-on: macos-14
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Regenerate pin + manifest at HEAD
+        run: ./scripts/gen-pins.sh
+
+      - name: Compute short SHA for PR metadata
+        id: pin
+        run: |
+          SHA=$(grep -E 'HOMEBREW_CORE_COMMIT_SHA.*=.*"' src/core/pins.zig \
+            | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "sha=$SHA" >>"$GITHUB_OUTPUT"
+          echo "short=${SHA:0:12}" >>"$GITHUB_OUTPUT"
+
+      - name: Open or update auto-PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: chore/pins-auto-bump
+          base: main
+          commit-message: |
+            chore(pins): bump homebrew-core pin to ${{ steps.pin.outputs.short }}
+          title: "chore(pins): bump homebrew-core pin to ${{ steps.pin.outputs.short }}"
+          body: |
+            Automated refresh of the homebrew-core snapshot malt pins for
+            `post_install` Ruby source verification.
+
+            - New pinned commit: `${{ steps.pin.outputs.sha }}`
+            - `src/core/pins_manifest.txt` regenerated against the new pin.
+
+            The `pins-drift` CI job validates this PR; merge once green.
+            If the diff looks wrong, close this PR and a fresh one will
+            open on the next schedule.
+          add-paths: |
+            src/core/pins.zig
+            src/core/pins_manifest.txt
+          delete-branch: true
