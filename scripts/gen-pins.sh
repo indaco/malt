@@ -40,9 +40,9 @@ else
   exit 1
 fi
 
-# Default seed set — formulas whose post_install runs during common
-# installs (TLS + language toolchains). Callers can override via FORMULAS.
-DEFAULT_FORMULAS=(
+# Fallback seed — TLS + popular language toolchains. Only used when the
+# Homebrew API enumeration below can't be reached (offline dev runs).
+FALLBACK_FORMULAS=(
   ca-certificates
   fontconfig
   git
@@ -55,8 +55,41 @@ DEFAULT_FORMULAS=(
   python@3.13
   ruby
 )
-# shellcheck disable=SC2206
-read -r -a FORMULAS_ARR <<<"${FORMULAS:-${DEFAULT_FORMULAS[*]}}"
+
+# Resolve the formula list. Explicit FORMULAS env var wins (useful for
+# tests and one-off regeneration). Otherwise pull every formula whose
+# post_install_defined flag is true from formulae.brew.sh — an exhaustive
+# allowlist is what the fail-closed gate actually needs. Fall back to the
+# static seed only when the API is unreachable.
+if [ -n "${FORMULAS:-}" ]; then
+  # shellcheck disable=SC2206
+  read -r -a FORMULAS_ARR <<<"$FORMULAS"
+  printf '▸ using FORMULAS override (%d entries)\n' "${#FORMULAS_ARR[@]}" >&2
+else
+  printf '▸ enumerating post_install formulas from formulae.brew.sh\n' >&2
+  api_json=$(curl -fsSL --max-time 30 "https://formulae.brew.sh/api/formula.json" || true)
+  if [ -n "$api_json" ]; then
+    # Python 3 ships on every supported runner and all dev macOS/Linux
+    # boxes; avoids a jq dependency on CI. Read line-by-line instead of
+    # `mapfile` because macOS still ships bash 3.2.
+    FORMULAS_ARR=()
+    while IFS= read -r line; do
+      [ -n "$line" ] && FORMULAS_ARR+=("$line")
+    done < <(
+      printf '%s' "$api_json" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for f in data:
+    if f.get("post_install_defined") and f.get("name"):
+        print(f["name"])
+' | LC_ALL=C sort -u
+    )
+    printf '▸ %d formulas have post_install_defined\n' "${#FORMULAS_ARR[@]}" >&2
+  else
+    printf '  ⚠ API fetch failed — falling back to static seed\n' >&2
+    FORMULAS_ARR=("${FALLBACK_FORMULAS[@]}")
+  fi
+fi
 
 if [ $# -ge 1 ]; then
   COMMIT="$1"
@@ -117,16 +150,21 @@ cat >"$TMP" <<'HEADER'
 HEADER
 printf '\n' >>"$TMP"
 
+RB_TMP=$(mktemp)
+trap 'rm -f "$TMP" "$RB_TMP"' EXIT
+
 for name in "${FORMULAS_ARR[@]}"; do
   [ -n "$name" ] || continue
   first=${name:0:1}
   url="https://raw.githubusercontent.com/Homebrew/homebrew-core/${COMMIT}/Formula/${first}/${name}.rb"
-  body=$(curl -fsSL --max-time 15 "$url" || true)
-  if [ -z "$body" ]; then
+  # Download to a file — command substitution strips trailing newlines,
+  # which makes the computed SHA256 disagree with the runtime fetch (the
+  # runtime hashes the raw bytes, trailing newline included).
+  if ! curl -fsSL --max-time 15 -o "$RB_TMP" "$url"; then
     printf '  ⚠ %s: fetch failed (skipping)\n' "$name" >&2
     continue
   fi
-  sha=$(printf '%s' "$body" | sha256_stdin)
+  sha=$(sha256_stdin <"$RB_TMP")
   printf '%s %s\n' "$name" "$sha" >>"$TMP"
   printf '  ✓ %-24s %s\n' "$name" "$sha" >&2
 done
