@@ -37,19 +37,20 @@ test "execute with no args prints an empty list (no taps registered)" {
     try tap_cli.execute(testing.allocator, &.{});
 }
 
-test "execute with user/repo adds a tap idempotently" {
-    const prefix = try setupPrefix("add_then_list");
+test "execute with unresolvable user/repo aborts (no network pin = no add)" {
+    const prefix = try setupPrefix("unresolvable");
     defer testing.allocator.free(prefix);
     defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    try tap_cli.execute(testing.allocator, &.{"user/repo"});
-    // A second call is idempotent via INSERT OR IGNORE.
-    try tap_cli.execute(testing.allocator, &.{"user/repo"});
-    // Bare-list path with rows present — `io_mod.stdoutFile()` routes the
-    // tap-name writes to stderr under the test runner, so this no longer
-    // deadlocks the IPC pipe.
-    try tap_cli.execute(testing.allocator, &.{});
+    // `user/repo` isn't a real GitHub repo; HEAD resolution fails and
+    // we refuse to register an unpinned tap. Idempotency + list-with-
+    // rows paths are covered by tests/tap_test.zig directly against
+    // `tap_mod`, which doesn't need network.
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(testing.allocator, &.{"user/repo"}),
+    );
 }
 
 test "execute with --help short-circuits before touching the database" {

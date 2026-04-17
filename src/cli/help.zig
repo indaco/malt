@@ -162,10 +162,17 @@ const doctor_help =
 
 const tap_help =
     \\Usage: malt tap [<user>/<repo>]
+    \\       malt tap --refresh <user>/<repo>
     \\       malt untap <user>/<repo>
     \\
-    \\Manage taps. Without arguments, lists registered taps.
-    \\Taps are auto-resolved during install, so explicit tap is optional.
+    \\Manage taps. Without arguments, lists registered taps + their
+    \\pinned commit. `tap <slug>` resolves the repo's HEAD commit at
+    \\that moment and stores it; subsequent installs from the tap fetch
+    \\against the pin, not whatever HEAD happens to point to later.
+    \\`--refresh` explicitly advances the pin to the current HEAD.
+    \\
+    \\Taps are auto-resolved during install, so explicit `tap` is
+    \\usually unnecessary — the auto-tap also pins the SHA on first use.
     \\
 ;
 
