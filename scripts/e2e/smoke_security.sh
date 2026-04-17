@@ -166,6 +166,11 @@ else
   done <"$MANIFEST"
   if [[ -n "$bad_line" ]]; then
     manual_fail s2.manifest.shape "malformed entry: $bad_line"
+  elif [[ "$entries" -lt 1 ]]; then
+    # An empty manifest is parser-valid but silently disables every
+    # post_install fetch — the state that shipped before the seed was
+    # populated. Guard against regressing back to it.
+    manual_fail s2.manifest.entries "pins_manifest.txt has no entries (run scripts/gen-pins.sh)"
   else
     manual_pass s2.manifest.shape "$entries entries, all well-formed (64-char lowercase hex SHA256)"
   fi
