@@ -74,7 +74,7 @@ fn containsDotDot(path: []const u8) bool {
 /// path-component boundary. Guards against substring matches such as
 /// `prefix="/opt/malt"` vs `path="/opt/malthack"` where a plain
 /// `std.mem.startsWith` would incorrectly return true.
-fn pathHasPrefix(path: []const u8, prefix: []const u8) bool {
+pub fn pathHasPrefix(path: []const u8, prefix: []const u8) bool {
     if (prefix.len == 0) return false;
     if (!std.mem.startsWith(u8, path, prefix)) return false;
     if (path.len == prefix.len) return true;

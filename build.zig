@@ -148,6 +148,7 @@ pub fn build(b: *std.Build) void {
         "tests/ruby_subprocess_test.zig",
         "tests/pins_test.zig",
         "tests/sandbox_macos_test.zig",
+        "tests/services_validate_test.zig",
         "tests/cli_tap_test.zig",
         "tests/cli_services_test.zig",
         "tests/install_execute_test.zig",
