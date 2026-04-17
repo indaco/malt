@@ -20,6 +20,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const fs_compat = @import("../../fs/compat.zig");
+const term_sanitize = @import("../../ui/term_sanitize.zig");
 
 pub const SandboxError = error{
     SandboxUnsupported,
@@ -220,6 +221,12 @@ fn freeArgv(allocator: std.mem.Allocator, argv: [:null]?[*:0]u8) void {
 /// Returns the child's exit code on normal exit, or a SandboxError
 /// if the child was killed by a signal / the sandbox couldn't be
 /// applied / the fork-exec itself failed.
+///
+/// The child's stdout/stderr are filtered through a terminal escape-
+/// sequence sanitizer (`term_sanitize`) before being forwarded to the
+/// parent's fds, so a hostile formula cannot emit OSC/DCS/cursor
+/// commands that rewrite scrollback or exfiltrate via terminal
+/// extensions. Set `MALT_ALLOW_RAW_POST_INSTALL=1` to bypass.
 pub fn runRubySandboxed(
     allocator: std.mem.Allocator,
     ruby_path: []const u8,
@@ -243,23 +250,121 @@ pub fn runRubySandboxed(
     const envp = try buildEnvp(allocator, env);
     defer freeEnvp(allocator, envp);
 
+    if (rawPassthroughEnabled()) {
+        return spawnInherit(argv_z, envp, limits);
+    }
+    return spawnFiltered(argv_z, envp, limits);
+}
+
+fn rawPassthroughEnabled() bool {
+    const v = fs_compat.getenv("MALT_ALLOW_RAW_POST_INSTALL") orelse return false;
+    return std.mem.eql(u8, std.mem.sliceTo(v, 0), "1");
+}
+
+fn spawnInherit(
+    argv_z: [:null]?[*:0]u8,
+    envp: [:null]?[*:0]u8,
+    limits: Limits,
+) SandboxError!u8 {
     const pid = std.c.fork();
     if (pid < 0) return SandboxError.ForkFailed;
     if (pid == 0) {
-        // child: apply rlimits, then exec. Any failure here must call
-        // _exit, not return — we are post-fork and must not run parent
-        // cleanup code.
         applyRlimits(limits) catch std.c._exit(127);
         _ = std.c.execve(argv_z[0].?, argv_z.ptr, envp.ptr);
         std.c._exit(127);
     }
-    // parent
     var status: c_int = 0;
     const w = std.c.waitpid(pid, &status, 0);
     if (w < 0) return SandboxError.WaitFailed;
     if (wifsignaled(status)) return SandboxError.ChildSignaled;
     if (!wifexited(status)) return SandboxError.ChildCrashed;
     return @intCast(wexitstatus(status));
+}
+
+fn spawnFiltered(
+    argv_z: [:null]?[*:0]u8,
+    envp: [:null]?[*:0]u8,
+    limits: Limits,
+) SandboxError!u8 {
+    var out_pipe: [2]c_int = undefined;
+    var err_pipe: [2]c_int = undefined;
+    if (std.c.pipe(&out_pipe) != 0) return SandboxError.ForkFailed;
+    errdefer {
+        _ = std.c.close(out_pipe[0]);
+        _ = std.c.close(out_pipe[1]);
+    }
+    if (std.c.pipe(&err_pipe) != 0) return SandboxError.ForkFailed;
+    errdefer {
+        _ = std.c.close(err_pipe[0]);
+        _ = std.c.close(err_pipe[1]);
+    }
+
+    const pid = std.c.fork();
+    if (pid < 0) return SandboxError.ForkFailed;
+    if (pid == 0) {
+        // Child: wire pipes to fd 1/2, drop the read ends, exec.
+        _ = std.c.close(out_pipe[0]);
+        _ = std.c.close(err_pipe[0]);
+        _ = std.c.dup2(out_pipe[1], 1);
+        _ = std.c.dup2(err_pipe[1], 2);
+        _ = std.c.close(out_pipe[1]);
+        _ = std.c.close(err_pipe[1]);
+        applyRlimits(limits) catch std.c._exit(127);
+        _ = std.c.execve(argv_z[0].?, argv_z.ptr, envp.ptr);
+        std.c._exit(127);
+    }
+
+    // Parent: drop write ends, spawn reader threads that sanitize
+    // into the parent's real stdout/stderr.
+    _ = std.c.close(out_pipe[1]);
+    _ = std.c.close(err_pipe[1]);
+
+    const out_thread = std.Thread.spawn(.{}, filterLoop, .{ out_pipe[0], @as(c_int, 1) }) catch
+        return SandboxError.ForkFailed;
+    const err_thread = std.Thread.spawn(.{}, filterLoop, .{ err_pipe[0], @as(c_int, 2) }) catch
+        return SandboxError.ForkFailed;
+
+    var status: c_int = 0;
+    const w = std.c.waitpid(pid, &status, 0);
+
+    // Reader threads exit when their pipe returns EOF (child's fd
+    // closed), so we can safely join after waitpid.
+    out_thread.join();
+    err_thread.join();
+
+    if (w < 0) return SandboxError.WaitFailed;
+    if (wifsignaled(status)) return SandboxError.ChildSignaled;
+    if (!wifexited(status)) return SandboxError.ChildCrashed;
+    return @intCast(wexitstatus(status));
+}
+
+const FdSinkCtx = struct { fd: c_int };
+
+fn fdSinkWrite(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+    const self: *FdSinkCtx = @ptrCast(@alignCast(ctx));
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = std.c.write(self.fd, bytes.ptr + off, bytes.len - off);
+        if (n < 0) return error.WriteFailed;
+        off += @intCast(n);
+    }
+}
+
+/// Reader thread: pull from the pipe, run through the sanitizer,
+/// push the surviving bytes to the parent's real fd. Exits on EOF
+/// or write error.
+fn filterLoop(pipe_fd: c_int, out_fd: c_int) void {
+    defer _ = std.c.close(pipe_fd);
+    var sanitizer = term_sanitize.Sanitizer.init();
+    var ctx = FdSinkCtx{ .fd = out_fd };
+    const sink = term_sanitize.Sink{ .ctx = &ctx, .write_fn = fdSinkWrite };
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = std.c.read(pipe_fd, &buf, buf.len);
+        if (n <= 0) break;
+        sanitizer.feed(buf[0..@intCast(n)], sink) catch break;
+    }
+    sanitizer.flush(sink) catch {};
 }
 
 // macOS <sys/wait.h> status macros, open-coded.

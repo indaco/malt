@@ -21,6 +21,7 @@ pub const patcher = @import("macho/patcher.zig");
 pub const api = @import("net/api.zig");
 pub const client = @import("net/client.zig");
 pub const output = @import("ui/output.zig");
+pub const term_sanitize = @import("ui/term_sanitize.zig");
 pub const progress = @import("ui/progress.zig");
 pub const version = @import("version.zig");
 pub const completions = @import("cli/completions.zig");
