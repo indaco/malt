@@ -6,12 +6,14 @@ on:
     paths:
       - "**/*.zig"
       - "**/*.zon"
+      - "scripts/**/*.sh"
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
     paths:
       - "**/*.zig"
       - "**/*.zon"
+      - "scripts/**/*.sh"
       - ".github/workflows/ci.yml"
 
 jobs:
@@ -35,11 +37,28 @@ jobs:
       - name: Run unit tests
         run: zig build test --summary all
 
-      - name: Smoke test — version flag
+      # Fast sanity probes - catch a totally broken binary before any
+      # of the longer smoke suites run.
+      - name: Smoke - version flag
         run: ./zig-out/bin/malt --version
 
-      - name: Smoke test — help flag
+      - name: Smoke - help flag
         run: ./zig-out/bin/malt --help
+
+      # Offline CLI smoke: exercises every documented command + alias
+      # against an isolated MALT_PREFIX. Tier 3 (network installs) is
+      # skipped in CI - it lives in the benchmark workflow already.
+      - name: CLI smoke (offline tiers)
+        env:
+          SMOKE_SKIP_NETWORK: "1"
+        run: ./scripts/e2e/smoke_test.sh
+
+      # Security smoke: flag-scope enforcement, argv-only lint,
+      # pins-manifest shape, install.sh fail-closed regression suite.
+      # Subsumes the individual lint + install.sh steps that used to
+      # live in the Lint job.
+      - name: Security smoke
+        run: ./scripts/e2e/smoke_security.sh
 
       - name: Build universal binary
         run: zig build universal -Doptimize=ReleaseSafe
@@ -55,5 +74,13 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Check formatting
+      - name: Check Zig formatting
         run: zig fmt --check src/ tests/
+
+      - name: Install shell-lint tools
+        run: brew install shellcheck shfmt
+
+      - name: Lint shell scripts (shellcheck + shfmt)
+        run: |
+          shellcheck scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
+          shfmt -i 2 -d scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
