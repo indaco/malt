@@ -1555,13 +1555,18 @@ fn installTapFormula(
         return;
     }
 
-    // Download the binary archive
-    output.info("Downloading {s}...", .{parts.formula});
-    var download_resp = http.get(final_url) catch {
+    // Stream with a progress bar, matching formula/cask downloads.
+    var bar = progress_mod.ProgressBar.init(parts.formula, 0);
+    var download_resp = http.getWithHeaders(final_url, &.{}, .{
+        .context = @ptrCast(&bar),
+        .func = &progressBridge,
+    }) catch {
+        bar.finish();
         output.err("Failed to download {s}", .{parts.formula});
         return InstallError.DownloadFailed;
     };
     defer download_resp.deinit();
+    bar.finish();
 
     if (download_resp.status != 200) {
         output.err("Download failed with status {d}", .{download_resp.status});
