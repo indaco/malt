@@ -112,18 +112,13 @@ else
 fi
 
 if [ -z "$LATEST" ]; then
-  # When invoked as `curl ... | bash` with no local repo, the source
-  # fallback needs both zig and a fresh git clone — which is rarely
-  # what a one-liner user wants. If the API failed here, point at the
-  # Releases page so the user isn't chasing a red-herring "Zig is
-  # required" error for what is really a transient network issue.
-  if [ "$API_FAILED" -eq 1 ] && { [ -z "$REPO_ROOT" ] || [ ! -f "${REPO_ROOT}/build.zig" ]; }; then
-    error "Could not reach GitHub API after retries. Try again in a minute, or download manually: https://github.com/${REPO}/releases"
-  fi
-
   # Build from source (local checkout or freshly cloned).
   if [ -z "$REPO_ROOT" ] || [ ! -f "${REPO_ROOT}/build.zig" ]; then
-    warn "No releases found on GitHub. Falling back to build from source."
+    if [ "$API_FAILED" -eq 1 ]; then
+      warn "Could not reach GitHub API. Falling back to build from source."
+    else
+      warn "No releases found on GitHub. Falling back to build from source."
+    fi
   fi
 
   if ! command -v zig >/dev/null 2>&1; then
