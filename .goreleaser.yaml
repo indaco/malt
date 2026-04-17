@@ -21,8 +21,7 @@ universal_binaries:
     # Drop the `mt` alias next to the universal binary so it ends up
     # inside the release tarball. Matches what `zig build` produces,
     # what install.sh creates via symlink, and what the homebrew_casks
-    # stanza below already declares — the release tarball was the
-    # only distribution path that shipped `malt` without `mt`.
+    # stanza below already declares.
     hooks:
       post:
         - cmd: cp "{{ .Path }}" "{{ dir .Path }}/mt"
@@ -35,7 +34,7 @@ archives:
       - LICENSE
       # Pick up the `mt` copy produced by the universal-binaries
       # post-hook above. `dst: "."` lands it next to `malt` at the
-      # archive root instead of inside an `mt/` subdir.
+      # archive root.
       - src: "dist/*_darwin_all*/mt"
         dst: "."
     wrap_in_directory: true
@@ -43,6 +42,23 @@ archives:
 checksum:
   name_template: checksums.txt
   algorithm: sha256
+
+# Keyless cosign signing of the checksums file. With id-token: write on
+# the release job, cosign mints a short-lived certificate from Sigstore
+# bound to the GitHub Actions OIDC identity of this workflow, signs
+# checksums.txt with it, and publishes a single .sigstore.json bundle
+# (signature + certificate inline).
+# install.sh re-verifies the identity against the workflow URL,
+# so a leaked token cannot forge a release from an arbitrary workflow.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: ${artifact}.sigstore.json
+    args:
+      - sign-blob
+      - --bundle=${signature}
+      - ${artifact}
+      - --yes
 
 changelog:
   disable: true
