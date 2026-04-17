@@ -2,10 +2,77 @@ const std = @import("std");
 const fs_compat = @import("compat.zig");
 const clonefile = @import("clonefile.zig");
 
-/// Return the malt install prefix, honouring the MALT_PREFIX environment
-/// variable and falling back to "/opt/malt".
+/// 512 bytes: ~4× real Homebrew prefix length, still small enough that
+/// anything past it is either a bug or overflow bait.
+pub const MAX_PREFIX_LEN: usize = 512;
+
+pub const PrefixError = error{
+    Empty,
+    NotAbsolute,
+    DotDotComponent,
+    EmbeddedNul,
+    TooLong,
+    EmptyComponent,
+};
+
+/// Validate a candidate install prefix. Called at the env boundary so
+/// downstream code can assume absolute, NUL-free, traversal-free.
+pub fn validatePrefix(prefix: []const u8) PrefixError!void {
+    if (prefix.len == 0) return PrefixError.Empty;
+    if (prefix.len > MAX_PREFIX_LEN) return PrefixError.TooLong;
+    if (prefix[0] != '/') return PrefixError.NotAbsolute;
+    if (std.mem.indexOfScalar(u8, prefix, 0) != null) return PrefixError.EmbeddedNul;
+
+    // Strip one trailing slash; `/opt/malt/` is fine, `//` inside is not.
+    const trimmed = if (prefix.len > 1 and prefix[prefix.len - 1] == '/')
+        prefix[0 .. prefix.len - 1]
+    else
+        prefix;
+    if (trimmed.len == 1) return; // just "/" — no components to scan
+
+    var it = std.mem.splitScalar(u8, trimmed, '/');
+    _ = it.next(); // leading "/" yields an empty first slice
+    while (it.next()) |comp| {
+        if (comp.len == 0) return PrefixError.EmptyComponent;
+        if (std.mem.eql(u8, comp, "..")) return PrefixError.DotDotComponent;
+    }
+}
+
+pub fn describePrefixError(e: PrefixError) []const u8 {
+    return switch (e) {
+        PrefixError.Empty => "empty",
+        PrefixError.NotAbsolute => "not an absolute path",
+        PrefixError.DotDotComponent => "contains '..' component",
+        PrefixError.EmbeddedNul => "contains NUL byte",
+        PrefixError.TooLong => "exceeds 512 bytes",
+        PrefixError.EmptyComponent => "contains empty path component ('//')",
+    };
+}
+
+/// Validated form of `maltPrefix`, returns an error on bad env so tests
+/// can inspect the failure without the process exiting.
+pub fn maltPrefixChecked() PrefixError![:0]const u8 {
+    const raw = fs_compat.getenv("MALT_PREFIX") orelse return "/opt/malt";
+    try validatePrefix(raw);
+    return raw;
+}
+
+/// Install prefix with a fail-closed env check. A malformed MALT_PREFIX
+/// is a startup misconfig or traversal attempt — abort loudly rather
+/// than falling back silently.
 pub fn maltPrefix() [:0]const u8 {
-    return fs_compat.getenv("MALT_PREFIX") orelse "/opt/malt";
+    return maltPrefixChecked() catch |e| {
+        const raw = fs_compat.getenv("MALT_PREFIX") orelse "<unset>";
+        // Bypass the UI layer — atomic.zig sits below it in the dep graph.
+        var buf: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "malt: refusing to use MALT_PREFIX='{s}': {s}\n",
+            .{ raw, describePrefixError(e) },
+        ) catch "malt: MALT_PREFIX rejected; refusing to proceed\n";
+        _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+        std.process.exit(78); // EX_CONFIG
+    };
 }
 
 /// Rename `src_path` to `dst_path`. Tries a single `rename(2)` first — the
