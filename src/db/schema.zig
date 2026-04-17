@@ -79,7 +79,8 @@ pub fn initSchema(db: *sqlite.Database) sqlite.SqliteError!void {
         \\);
     );
 
-    // 7. taps
+    // 7. taps. `commit_sha` is added by the v2→v3 migration below so
+    //    fresh and upgraded DBs converge on the same final shape.
     try db.exec(
         \\CREATE TABLE IF NOT EXISTS taps (
         \\    id         INTEGER PRIMARY KEY,
@@ -101,6 +102,7 @@ pub fn initSchema(db: *sqlite.Database) sqlite.SqliteError!void {
 pub fn migrate(db: *sqlite.Database) sqlite.SqliteError!void {
     const ver = try currentVersion(db);
     if (ver < 2) try migrateV1toV2(db);
+    if (ver < 3) try migrateV2toV3(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -138,6 +140,36 @@ fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
     );
 
     try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (2);");
+
+    try db.commit();
+}
+
+/// v3 — pin third-party taps to a specific commit SHA so a hostile
+/// HEAD can't silently swap a formula's URL/SHA256 out from under us.
+fn migrateV2toV3(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    // ALTER guarded by PRAGMA so the migration is truly idempotent on
+    // any DB that already carries the column (e.g. rerun against a
+    // test fixture mid-development).
+    var have_column = false;
+    {
+        var stmt = try db.prepare("PRAGMA table_info(taps);");
+        defer stmt.finalize();
+        while (try stmt.step()) {
+            const name = stmt.columnText(1) orelse continue;
+            if (std.mem.eql(u8, std.mem.sliceTo(name, 0), "commit_sha")) {
+                have_column = true;
+                break;
+            }
+        }
+    }
+    if (!have_column) {
+        try db.exec("ALTER TABLE taps ADD COLUMN commit_sha TEXT;");
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (3);");
 
     try db.commit();
 }

@@ -40,7 +40,7 @@ fn tableExists(db: *sqlite.Database, name: [:0]const u8) !bool {
     return stmt.columnInt(0) == 1;
 }
 
-test "initSchema runs v1 then migrates to v2" {
+test "initSchema runs v1 then migrates to v3" {
     var tdb = try TempDb.init("init");
     defer tdb.deinit();
 
@@ -52,7 +52,7 @@ test "initSchema runs v1 then migrates to v2" {
     try testing.expect(try tableExists(&tdb.db, "bundle_members"));
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 2), ver);
+    try testing.expectEqual(@as(i64, 3), ver);
 }
 
 test "migrate is idempotent on re-run" {
@@ -64,7 +64,30 @@ test "migrate is idempotent on re-run" {
     try schema.migrate(&tdb.db);
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 2), ver);
+    try testing.expectEqual(@as(i64, 3), ver);
+}
+
+test "v3 migration adds commit_sha column to taps" {
+    var tdb = try TempDb.init("v3_column");
+    defer tdb.deinit();
+
+    try schema.initSchema(&tdb.db);
+
+    // INSERT should accept a value in commit_sha without blowing up.
+    try tdb.db.exec(
+        \\INSERT INTO taps(name, url, commit_sha)
+        \\VALUES ('user/repo', 'https://github.com/user/repo',
+        \\        '0123456789abcdef0123456789abcdef01234567');
+    );
+
+    var stmt = try tdb.db.prepare("SELECT commit_sha FROM taps WHERE name='user/repo';");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    const raw = stmt.columnText(0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(
+        "0123456789abcdef0123456789abcdef01234567",
+        std.mem.sliceTo(raw, 0),
+    );
 }
 
 test "services table accepts inserts and enforces PK" {

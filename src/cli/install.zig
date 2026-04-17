@@ -1467,14 +1467,33 @@ fn installTapFormula(
 
     output.info("Resolving tap {s}/{s}/{s}...", .{ parts.user, parts.repo, parts.formula });
 
+    // Determine the commit SHA to fetch against. Prefer the pin
+    // already in the DB (set at tap-add or last --refresh); if no pin
+    // exists yet, resolve HEAD once and record it below. Refuses to
+    // build a URL from a floating HEAD at install time.
+    var tap_slug_buf: [128]u8 = undefined;
+    const tap_slug = std.fmt.bufPrint(&tap_slug_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
+        return InstallError.FormulaNotFound;
+    const commit_sha = blk: {
+        if ((tap_mod.getCommitSha(allocator, db, tap_slug) catch null)) |cached| {
+            break :blk cached;
+        }
+        break :blk tap_mod.resolveHeadCommit(allocator, parts.user, parts.repo) catch {
+            output.err("Could not resolve {s}'s HEAD commit — refusing to install from a floating HEAD.", .{tap_slug});
+            return InstallError.FormulaNotFound;
+        };
+    };
+    defer allocator.free(commit_sha);
+
     var http = client_mod.HttpClient.init(allocator);
     defer http.deinit();
 
     // Try Formula/ first, then Casks/
     var url_buf: [512]u8 = undefined;
-    const rb_url = std.fmt.bufPrint(&url_buf, "https://raw.githubusercontent.com/{s}/homebrew-{s}/HEAD/Formula/{s}.rb", .{
+    const rb_url = std.fmt.bufPrint(&url_buf, "https://raw.githubusercontent.com/{s}/homebrew-{s}/{s}/Formula/{s}.rb", .{
         parts.user,
         parts.repo,
+        commit_sha,
         parts.formula,
     }) catch return InstallError.FormulaNotFound;
 
@@ -1486,9 +1505,10 @@ fn installTapFormula(
     if (resp.status != 200) {
         resp.deinit();
         // Try Casks/ directory
-        const cask_url = std.fmt.bufPrint(&url_buf, "https://raw.githubusercontent.com/{s}/homebrew-{s}/HEAD/Casks/{s}.rb", .{
+        const cask_url = std.fmt.bufPrint(&url_buf, "https://raw.githubusercontent.com/{s}/homebrew-{s}/{s}/Casks/{s}.rb", .{
             parts.user,
             parts.repo,
+            commit_sha,
             parts.formula,
         }) catch return InstallError.FormulaNotFound;
 
@@ -1699,12 +1719,12 @@ fn installTapFormula(
 
         keg_id = getLastInsertId(db) catch return InstallError.RecordFailed;
 
-        // Register the tap so `mt tap` lists it and `mt untap` can remove
-        // it. Homebrew auto-taps on install; we mirror that. INSERT OR
-        // IGNORE inside tap_mod.add keeps this idempotent.
+        // Register the tap so `mt tap` lists it and `mt untap` can
+        // remove it. Carry the resolved commit SHA so `COALESCE` in
+        // tap_mod.add pins this tap on first install.
         var tap_url_buf: [256]u8 = undefined;
         const tap_url = std.fmt.bufPrint(&tap_url_buf, "https://github.com/{s}", .{tap_name}) catch return InstallError.RecordFailed;
-        tap_mod.add(db, tap_name, tap_url) catch {};
+        tap_mod.add(db, tap_name, tap_url, commit_sha) catch {};
     }
 
     linker.link(cellar_path, parts.formula, keg_id) catch {
