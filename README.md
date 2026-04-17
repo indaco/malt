@@ -7,6 +7,7 @@
 ![Coverage](.github/badges/coverage.svg)
 ![Zig 0.16.x](https://img.shields.io/badge/zig-0.16.x-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
+[![Signed by cosign](https://img.shields.io/badge/signed-cosign-brightgreen?logo=sigstore&logoColor=white)](#security)
 [![Built with Devbox](https://www.jetify.com/img/devbox/shield_galaxy.svg)](https://www.jetify.com/devbox/docs/contributor-quickstart/)
 
 > [!NOTE]
@@ -149,18 +150,21 @@ mt install <user>/<tap>/<formula>        # inline tap (no separate tap step)
 mt install <package> [<package> ...]     # multiple packages
 ```
 
-| Flag                | Description                                       |
-| ------------------- | ------------------------------------------------- |
-| `--cask`            | Force cask installation                           |
-| `--formula`         | Force formula installation                        |
-| `--dry-run`         | Show what would be installed without installing   |
-| `--force`           | Overwrite existing installations                  |
-| `--use-system-ruby` | Execute `post_install` via system Ruby (fallback) |
-| `--quiet`, `-q`     | Suppress all output except errors                 |
-| `--json`            | Output result as JSON                             |
+| Flag                           | Description                                                 |
+| ------------------------------ | ----------------------------------------------------------- |
+| `--cask`                       | Force cask installation                                     |
+| `--formula`                    | Force formula installation                                  |
+| `--dry-run`                    | Show what would be installed without installing             |
+| `--force`                      | Overwrite existing installations                            |
+| `--use-system-ruby[=<name>,…]` | Run `post_install` via system Ruby (sandboxed, per-formula) |
+| `--quiet`, `-q`                | Suppress all output except errors                           |
+| `--json`                       | Output result as JSON                                       |
 
 > [!NOTE]
 > **Post-install scripts run natively.** malt includes a built-in interpreter that executes Homebrew `post_install` blocks in Zig — no Ruby required. Packages like `node`, `openssl`, `fontconfig`, and `docbook` are fully configured at install time. For the small number of scripts the interpreter doesn't cover, add `--use-system-ruby` to delegate to any available Ruby, or use `brew install` as a fallback. See [Post-Install DSL Interpreter](#post-install-dsl-interpreter) for details.
+
+> [!IMPORTANT]
+> `--use-system-ruby` is **per-formula**. The bare flag works only when installing a single package (`mt install jq --use-system-ruby`). Multi-package installs must scope it: `mt install jq wget --use-system-ruby=jq` enables Ruby for `jq` only. `mt migrate` rejects the bare form entirely. This keeps one package's `post_install` failing from silently widening the trust boundary to the rest of the batch. The Ruby subprocess itself runs sandboxed — see [Security](#security).
 
 ### `mt uninstall`
 
@@ -670,17 +674,33 @@ Every install follows a strict 9-step protocol. Failure at any step triggers cle
 - **Store immutability** — store entries are never modified after commit. Patching happens on the Cellar clone. Only `mt purge --store-orphans` deletes store entries.
 - **DSL path sandboxing** — the post_install interpreter validates every mutating filesystem operation (write, rm, chmod, symlink) against the formula's Cellar prefix and the malt prefix. Paths containing `..` or resolving outside the sandbox via symlinks are rejected immediately.
 
+> [!TIP]
+> See [Security](#security) for the supply-chain and sandboxing properties — release signing, pinned third-party sources, and the `sandbox-exec` profile around the opt-in Ruby `post_install` path.
+
+---
+
+## Security
+
+- **Signed releases.** Every release is cosign-signed keyless via GitHub OIDC; `install.sh` verifies the signature before trusting the SHA256 checksum. A leaked GitHub token isn't enough to ship a malicious malt binary.
+- **Pinned third-party source.** `homebrew-core` and third-party taps are pinned to a specific commit SHA. Formula Ruby source is SHA256-verified against an embedded manifest at that commit. A rewritten upstream branch cannot substitute a formula's bottle URL mid-install. Advance a tap pin explicitly with `mt tap --refresh user/repo`.
+- **Sandboxed `post_install`.** The opt-in `--use-system-ruby` path runs inside a `sandbox-exec` profile scoped to the formula's cellar, with a scrubbed environment, `RLIMIT_CPU`/`AS`/`FSIZE` caps, and terminal escape sequences filtered from child output. A hostile formula's blast radius shrinks to its own install prefix.
+- **Boundary validation.** `MALT_PREFIX`, launchd service declarations, install-script checksums, and HTTP redirects all fail-closed on malformed or suspicious input — no silent HTTPS→HTTP downgrades, no `/bin/sh` in service argv, no `..` in prefix paths.
+- **Posture visibility.** `mt doctor` flags world- or group-writable paths and unexpected ownership under `/opt/malt`, so multi-user machines can see their attack surface at a glance.
+
 ---
 
 ## Environment Variables
 
-| Variable                    | Description                             | Default          |
-| --------------------------- | --------------------------------------- | ---------------- |
-| `MALT_PREFIX`               | Override install prefix                 | `/opt/malt`      |
-| `MALT_CACHE`                | Override cache directory                | `{prefix}/cache` |
-| `NO_COLOR`                  | Disable colored output                  | unset            |
-| `MALT_NO_EMOJI`             | Disable emoji in output                 | unset            |
-| `HOMEBREW_GITHUB_API_TOKEN` | GitHub token for higher API rate limits | unset            |
+| Variable                       | Description                                                                       | Default          |
+| ------------------------------ | --------------------------------------------------------------------------------- | ---------------- |
+| `MALT_PREFIX`                  | Override install prefix                                                           | `/opt/malt`      |
+| `MALT_CACHE`                   | Override cache directory                                                          | `{prefix}/cache` |
+| `NO_COLOR`                     | Disable colored output                                                            | unset            |
+| `MALT_NO_EMOJI`                | Disable emoji in output                                                           | unset            |
+| `HOMEBREW_GITHUB_API_TOKEN`    | GitHub token for higher API rate limits                                           | unset            |
+| `MALT_ALLOW_UNVERIFIED`        | Skip cosign signature check in `install.sh` (use only when cosign is unavailable) | unset            |
+| `MALT_ALLOW_UNVERIFIED_SOURCE` | Allow `install.sh` to clone `main` when no release tag resolves                   | unset            |
+| `MALT_ALLOW_RAW_POST_INSTALL`  | Disable terminal escape filter on ruby `post_install` output                      | unset            |
 
 ---
 
