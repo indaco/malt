@@ -92,6 +92,19 @@ test "add preserves existing commit pin when new add passes null" {
     try testing.expectEqualStrings(valid_sha, taps[0].commit_sha.?);
 }
 
+test "add replaces existing pin when new add passes a different non-null SHA" {
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try tap.add(&db, "user/repo", "https://x", valid_sha);
+    try tap.add(&db, "user/repo", "https://x", other_sha);
+
+    const taps = try tap.list(testing.allocator, &db);
+    defer freeTaps(taps);
+    try testing.expectEqualStrings(other_sha, taps[0].commit_sha.?);
+}
+
 test "updateCommit replaces an existing pin" {
     var db = try openDb();
     defer db.close();
@@ -113,6 +126,18 @@ test "updateCommit rejects malformed SHA" {
     try tap.add(&db, "user/repo", "https://x", valid_sha);
     try testing.expectError(error.InvalidSha, tap.updateCommit(&db, "user/repo", "notasha"));
     try testing.expectError(error.InvalidSha, tap.updateCommit(&db, "user/repo", "XXXX567890abcdef0123456789abcdef01234567"));
+}
+
+test "updateCommit on an unknown tap is a no-op (no rows affected, no error)" {
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try tap.updateCommit(&db, "nobody/never-added", valid_sha);
+
+    const taps = try tap.list(testing.allocator, &db);
+    defer freeTaps(taps);
+    try testing.expectEqual(@as(usize, 0), taps.len);
 }
 
 test "getCommitSha returns the stored pin" {
@@ -187,4 +212,80 @@ test "resolveFormula joins user/repo/formula with slashes" {
     const s = try tap.resolveFormula(testing.allocator, "u", "r", "f");
     defer testing.allocator.free(s);
     try testing.expectEqualStrings("u/r/f", s);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// parseCommitShaFromJson — security-sensitive: picking up the wrong
+// "sha" field would pin malt to an attacker-influenced commit instead
+// of the real HEAD. Exhaustive coverage of shapes a real GitHub
+// `commits/HEAD` response can take.
+// ────────────────────────────────────────────────────────────────────
+
+test "parseCommitShaFromJson: canonical GitHub response" {
+    const body =
+        \\{"sha":"0123456789abcdef0123456789abcdef01234567","node_id":"X","commit":{"author":{"name":"x"}}}
+    ;
+    const got = tap.parseCommitShaFromJson(body) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(valid_sha, got);
+}
+
+test "parseCommitShaFromJson: tolerates whitespace around ':' and value" {
+    const body =
+        \\{  "sha"  :  "0123456789abcdef0123456789abcdef01234567" , "other": 1 }
+    ;
+    const got = tap.parseCommitShaFromJson(body) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(valid_sha, got);
+}
+
+test "parseCommitShaFromJson: returns first top-level sha even when nested sha exists" {
+    // Real responses have `commit.tree.sha` as a separate field —
+    // the parser's first-match behaviour is the whole point: the
+    // top-level commit SHA appears first.
+    const body =
+        \\{"sha":"0123456789abcdef0123456789abcdef01234567","commit":{"tree":{"sha":"ffffffffffffffffffffffffffffffffffffffff"}}}
+    ;
+    const got = tap.parseCommitShaFromJson(body) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(valid_sha, got);
+}
+
+test "parseCommitShaFromJson: missing sha field yields null" {
+    const body =
+        \\{"node_id":"X","commit":{"author":{"name":"x"}}}
+    ;
+    try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(body));
+}
+
+test "parseCommitShaFromJson: non-string value yields null" {
+    // Defense: if upstream ever returned a number or null for sha we'd
+    // rather refuse than misparse.
+    const body =
+        \\{"sha": 42}
+    ;
+    try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(body));
+}
+
+test "parseCommitShaFromJson: truncated value yields null" {
+    const body =
+        \\{"sha":"deadbeef
+    ;
+    try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(body));
+}
+
+test "parseCommitShaFromJson: malformed SHA value yields null" {
+    // Right structural shape, wrong content — validator rejects.
+    const body =
+        \\{"sha":"not-a-valid-sha"}
+    ;
+    try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(body));
+}
+
+test "parseCommitShaFromJson: empty body yields null" {
+    try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(""));
+}
+
+test "parseCommitShaFromJson: uppercase hex in value is rejected" {
+    const body =
+        \\{"sha":"0123456789ABCDEF0123456789ABCDEF01234567"}
+    ;
+    try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(body));
 }

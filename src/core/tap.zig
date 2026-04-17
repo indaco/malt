@@ -119,6 +119,27 @@ pub fn validateCommitSha(sha: []const u8) TapError!void {
     };
 }
 
+/// Pull the first top-level `"sha"` field out of a GitHub commits/HEAD
+/// response. Exposed for unit tests; production code reaches it via
+/// `resolveHeadCommit`.
+///
+/// Takes only the first match because GitHub's response always has
+/// the commit SHA before the nested tree/parent objects. The result
+/// is validated as a 40-char lowercase hex string — malformed or
+/// unexpected shapes return null rather than misleading SHAs.
+pub fn parseCommitShaFromJson(body: []const u8) ?[]const u8 {
+    const marker = "\"sha\"";
+    const idx = std.mem.indexOf(u8, body, marker) orelse return null;
+    var cur = idx + marker.len;
+    while (cur < body.len and (body[cur] == ' ' or body[cur] == ':' or body[cur] == '\t')) : (cur += 1) {}
+    if (cur >= body.len or body[cur] != '"') return null;
+    cur += 1;
+    const end = std.mem.indexOfScalarPos(u8, body, cur, '"') orelse return null;
+    const sha = body[cur..end];
+    validateCommitSha(sha) catch return null;
+    return sha;
+}
+
 /// Ask GitHub for the current HEAD commit of a tap's repo. Returns
 /// the 40-char lowercase hex SHA or an error on network / malformed
 /// response. Caller owns the returned slice.
@@ -141,17 +162,6 @@ pub fn resolveHeadCommit(
     defer resp.deinit();
     if (resp.status != 200) return TapError.ResolveFailed;
 
-    // Pull the top-level "sha" field without a full JSON parse — the
-    // first occurrence in a commits/HEAD response is always the commit
-    // SHA, before any nested tree/parent objects.
-    const marker = "\"sha\"";
-    const idx = std.mem.indexOf(u8, resp.body, marker) orelse return TapError.ResolveFailed;
-    var cur = idx + marker.len;
-    while (cur < resp.body.len and (resp.body[cur] == ' ' or resp.body[cur] == ':' or resp.body[cur] == '\t')) : (cur += 1) {}
-    if (cur >= resp.body.len or resp.body[cur] != '"') return TapError.ResolveFailed;
-    cur += 1;
-    const end = std.mem.indexOfScalarPos(u8, resp.body, cur, '"') orelse return TapError.ResolveFailed;
-    const sha = resp.body[cur..end];
-    try validateCommitSha(sha);
+    const sha = parseCommitShaFromJson(resp.body) orelse return TapError.ResolveFailed;
     return allocator.dupe(u8, sha) catch TapError.OutOfMemory;
 }
