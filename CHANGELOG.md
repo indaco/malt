@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.6.0 - 2026-04-17
+
+### Highlights
+
+This release is a security pass. Every path from curl … | bash through malt install has been tightened against a concrete threat.
+
+- **Release signing closes the install-path trust gap.** Every GitHub release is now signed keyless via cosign/Sigstore, and install.sh verifies the signature against the signing workflow's identity before it trusts the checksum. The build-from-source fallback clones at a tagged release instead of whatever main happens to point at. Together these close the last "just trust whatever HTTPS returned" step on the install path - a compromised GitHub token is no longer enough to ship a malicious malt binary.
+- **post_install runs in a real sandbox.** The --use-system-ruby path - previously a full Ruby interpreter running with your UID and no containment - now runs inside a sandbox-exec profile confined to the formula's own cellar, with a scrubbed environment, resource limits, and terminal escape sequences filtered before they hit your scrollback. A hostile formula's blast radius shrinks from "your home directory" to "its own install prefix." The flag is also per-formula now, so one package's post_install failing can't silently widen the trust boundary for the rest of an install batch.
+- **Third-party formula sources are pinned.** Ruby formulas from homebrew-core are SHA256-verified against an embedded manifest at a specific pinned commit. Third-party taps (malt tap user/repo) pin their HEAD commit at tap time; advancing the pin is an explicit `malt tap --refresh`. A force-pushed tap or a rewritten branch cannot swap a formula's bottle URL out from under malt.
+- **Boundary validation, everywhere.** `MALT_PREFIX`, launchd service definitions, the install script's checksum paths, and the HTTP client's redirect chain all fail-closed on malformed or suspicious input. Malformed prefixes exit with a clear error; hostile service blocks can't launch /bin/sh at login; HTTPS requests can't be silently downgraded to plaintext mid-chain.
+- **Posture visibility in malt doctor.** Weak permissions on `/opt/malt` - world-writable files, group-writable directories, paths owned by an unexpected user - now show up as warnings with a count and a short list. Multi-user machines can see their attack surface at a glance.
+- **Lock-in for what was already clean.** The argv-only spawn convention (no `sh -c` anywhere in the codebase) and the install script's fail-closed checksum behavior are now covered by regression tests and CI gates, so neither can quietly drift.
+
+---
+
+### 🚀 Enhancements
+
+- **security:** pin third-party taps to a commit SHA ([a02a2aa](https://github.com/indaco/malt/commit/a02a2aa)) ([#64](https://github.com/indaco/malt/pull/64))
+- **security:** audit /opt/malt permissions in malt doctor ([0386e02](https://github.com/indaco/malt/commit/0386e02)) ([#63](https://github.com/indaco/malt/pull/63))
+- **security:** filter terminal escapes from ruby post_install output ([c162bdf](https://github.com/indaco/malt/commit/c162bdf)) ([#62](https://github.com/indaco/malt/pull/62))
+- **security:** refuse https → http redirect downgrades ([e4a6250](https://github.com/indaco/malt/commit/e4a6250)) ([#61](https://github.com/indaco/malt/pull/61))
+- **security:** pin install.sh source fallback to a release tag ([cc5f697](https://github.com/indaco/malt/commit/cc5f697)) ([#60](https://github.com/indaco/malt/pull/60))
+- **security:** validate MALT_PREFIX at the env boundary ([ba6c786](https://github.com/indaco/malt/commit/ba6c786)) ([#59](https://github.com/indaco/malt/pull/59))
+- **security:** harden post-install pipeline and service declarations ([b9be902](https://github.com/indaco/malt/commit/b9be902)) ([#58](https://github.com/indaco/malt/pull/58))
+
+### 🩹 Fixes
+
+- **doctor:** match the rest of malt's UI palette ([de612d4](https://github.com/indaco/malt/commit/de612d4)) ([#66](https://github.com/indaco/malt/pull/66))
+
+### 📖 Documentation
+
+- **readme:** document the new security surface ([83ed26a](https://github.com/indaco/malt/commit/83ed26a)) ([#65](https://github.com/indaco/malt/pull/65))
+
+### 🏡 Chores
+
+- normalize scripts and lint on pre push hook ([675f94b](https://github.com/indaco/malt/commit/675f94b)) ([#56](https://github.com/indaco/malt/pull/56))
+
+### 🤖 CI
+
+- **release:** run goreleaser before publishing release notes ([cb3bde5](https://github.com/indaco/malt/commit/cb3bde5)) ([#67](https://github.com/indaco/malt/pull/67))
+- **release:** sign artifacts with cosign keyless ([387aedc](https://github.com/indaco/malt/commit/387aedc)) ([#57](https://github.com/indaco/malt/pull/57))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.5.1 - 2026-04-16
 
 ### 🩹 Fixes
