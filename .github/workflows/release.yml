@@ -41,7 +41,7 @@ jobs:
           cache: false
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.1
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
