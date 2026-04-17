@@ -32,6 +32,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var warnings: u32 = 0;
     var errors: u32 = 0;
 
+    output.info("Running health checks...", .{});
+
     // 0. MALT_PREFIX visibility. atomic.maltPrefix() already aborts on a
     //    malformed env, so by this point the value is validated — doctor
     //    just surfaces it for operator context.
@@ -390,17 +392,17 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    // Summary + exit code
-    const f = fs_compat.stderrFile();
-    f.writeAll("\n") catch {};
+    // Summary + exit code. Blank line first so the summary separates
+    // visually from the check rows above it.
+    output.plain("", .{});
     if (errors > 0) {
-        output.err("mt doctor found {d} error(s) and {d} warning(s)", .{ errors, warnings });
+        output.err("{d} error(s), {d} warning(s)", .{ errors, warnings });
         std.process.exit(2);
     } else if (warnings > 0) {
-        output.warn("mt doctor found {d} warning(s)", .{warnings});
+        output.warn("{d} warning(s)", .{warnings});
         std.process.exit(1);
     } else {
-        output.info("Your malt installation is healthy", .{});
+        output.success("Your malt installation is healthy", .{});
     }
 }
 
@@ -538,43 +540,90 @@ fn hasUnpatchedPlaceholder(
     return false;
 }
 
-const CheckStatus = enum { ok, warn_status, err_status };
+pub const CheckStatus = enum { ok, warn_status, err_status };
+
+pub const CheckStyle = struct {
+    /// Emit ANSI colour codes. False for plain terminals and tests.
+    color: bool,
+    /// Use the ✓/⚠/✗ glyphs. False falls back to ASCII */!/x.
+    emoji: bool,
+};
+
+fn glyphFor(status: CheckStatus, emoji: bool) []const u8 {
+    return if (emoji) switch (status) {
+        .ok => "✓",
+        .warn_status => "⚠",
+        .err_status => "✗",
+    } else switch (status) {
+        .ok => "*",
+        .warn_status => "!",
+        .err_status => "x",
+    };
+}
+
+fn styleFor(status: CheckStatus) color.Style {
+    return switch (status) {
+        .ok => .green,
+        .warn_status => .yellow,
+        .err_status => .red,
+    };
+}
+
+/// Render one check row. Pure (no stderr / global state), so tests
+/// can drive it against a buffer writer and assert on the bytes.
+///
+/// Row shape: `  <glyph> <name>[ — <detail>]\n`. With `color=true`,
+/// the glyph is painted in the status colour and the detail is dim.
+pub fn renderCheckRow(
+    writer: anytype,
+    status: CheckStatus,
+    name: []const u8,
+    detail: ?[]const u8,
+    style_opts: CheckStyle,
+) !void {
+    const glyph = glyphFor(status, style_opts.emoji);
+    try writer.writeAll("  ");
+    if (style_opts.color) {
+        try writer.writeAll(styleFor(status).code());
+        try writer.writeAll(glyph);
+        try writer.writeAll(color.Style.reset.code());
+    } else {
+        try writer.writeAll(glyph);
+    }
+    try writer.writeAll(" ");
+    try writer.writeAll(name);
+
+    if (detail) |d| {
+        if (style_opts.color) {
+            try writer.writeAll(" ");
+            try writer.writeAll(color.Style.dim.code());
+            try writer.writeAll("— ");
+            try writer.writeAll(d);
+            try writer.writeAll(color.Style.reset.code());
+        } else {
+            try writer.writeAll(" — ");
+            try writer.writeAll(d);
+        }
+    }
+    try writer.writeAll("\n");
+}
 
 fn printCheck(name: []const u8, status: CheckStatus, detail: ?[]const u8) void {
+    if (output.isQuiet()) return;
     const f = fs_compat.stderrFile();
-    switch (status) {
-        .ok => {
-            if (color.isColorEnabled()) {
-                f.writeAll(color.Style.green.code()) catch {};
-                f.writeAll("[OK]    ") catch {};
-                f.writeAll(color.Style.reset.code()) catch {};
-            } else {
-                f.writeAll("[OK]    ") catch {};
-            }
-        },
-        .warn_status => {
-            if (color.isColorEnabled()) {
-                f.writeAll(color.Style.yellow.code()) catch {};
-                f.writeAll("[WARN]  ") catch {};
-                f.writeAll(color.Style.reset.code()) catch {};
-            } else {
-                f.writeAll("[WARN]  ") catch {};
-            }
-        },
-        .err_status => {
-            if (color.isColorEnabled()) {
-                f.writeAll(color.Style.red.code()) catch {};
-                f.writeAll("[ERROR] ") catch {};
-                f.writeAll(color.Style.reset.code()) catch {};
-            } else {
-                f.writeAll("[ERROR] ") catch {};
-            }
-        },
-    }
-    f.writeAll(name) catch {};
-    if (detail) |d| {
-        f.writeAll(" — ") catch {};
-        f.writeAll(d) catch {};
-    }
-    f.writeAll("\n") catch {};
+    var w = FileWriter{ .file = f };
+    renderCheckRow(&w, status, name, detail, .{
+        .color = color.isColorEnabled(),
+        .emoji = color.isEmojiEnabled(),
+    }) catch {};
 }
+
+/// Thin writer shim so renderCheckRow can call `writer.writeAll`
+/// against `fs_compat.File`. We only need `writeAll`; nothing else.
+const FileWriter = struct {
+    file: fs_compat.File,
+
+    pub fn writeAll(self: *FileWriter, bytes: []const u8) !void {
+        return self.file.writeAll(bytes);
+    }
+};
