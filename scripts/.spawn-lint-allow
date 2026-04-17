@@ -1,0 +1,15 @@
+# scripts/.spawn-lint-allow — exceptions for lint-spawn-invariants.sh
+#
+# Each non-comment line is a grep -E regex. A line that matches any rule
+# is dropped before the violation check. Add entries sparingly — every
+# exception is a potential regression vector.
+
+# The service-file validator lists forbidden interpreter paths on
+# purpose: these are the `program_args[0]` values we *reject* from
+# formula-declared services. They never reach a spawn.
+src/core/services/plist\.zig:.*"/(bin|usr/bin)/(sh|bash|zsh|ksh|env|tcsh|python|perl)"
+
+# Comment lines in plist.zig that name the same interpreters in
+# docstrings/error messages.
+src/core/services/plist\.zig:.*///.*/bin/sh
+src/core/services/plist\.zig:.*//.*/bin/sh
