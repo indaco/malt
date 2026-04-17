@@ -78,3 +78,28 @@ jobs:
             --prerelease=false \
             --latest \
             --notes-file "${{ github.workspace }}/.changes/${TAG_NAME}.md"
+
+  # End-to-end smoke: installs from the published release artifacts and
+  # verifies cosign + checksum + a trivial formula install. Runs here
+  # (not in a separate `release: published` workflow) so the job order
+  # is strictly sequential — goreleaser uploads, notes publish, smoke
+  # runs. A non-draft release would otherwise race two workflows on
+  # the same event and 404 on the asset before goreleaser uploads it.
+  install-smoke:
+    name: Install smoke (live release)
+    runs-on: macos-14
+    needs: create-release-notes
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.1
+
+      - name: Run release-install smoke
+        run: ./scripts/e2e/smoke_install_release.sh
