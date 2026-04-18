@@ -92,3 +92,11 @@ test "all scripts complete the three shells for the completions subcommand" {
         try expectContains(script, "fish");
     }
 }
+
+test "all install completions expose --local" {
+    // Regression guard: once a flag is shipped it must survive CLI edits
+    // to every shell script, not just bash.
+    try expectContains(completions.bash_script, "--local");
+    try expectContains(completions.zsh_script, "--local");
+    try expectContains(completions.fish_script, "-l local");
+}

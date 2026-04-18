@@ -43,6 +43,14 @@ test "helpFor returns command-specific text for known commands" {
     try testing.expect(std.mem.indexOf(u8, help.helpFor("purge"), "--housekeeping") != null);
 }
 
+test "install help documents --local and its code-exec warning" {
+    // Discoverability guard: the flag only meaningfully exists if the
+    // help output tells the user about it.
+    const text = help.helpFor("install");
+    try testing.expect(std.mem.indexOf(u8, text, "--local") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "trust") != null);
+}
+
 test "helpFor falls back gracefully for unknown commands" {
     try testing.expectEqualStrings("No help available.\n", help.helpFor("not-a-real-command"));
 }
