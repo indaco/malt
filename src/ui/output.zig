@@ -41,20 +41,18 @@ pub fn isJson() bool {
     return mode == .json;
 }
 
-/// Shared implementation for info/warn/success/err. Takes an already-formatted
-/// message slice so this function is concrete (non-generic) — a single copy
-/// ends up in the binary regardless of how many call sites exist. Passing a
-/// generic `anytype` body through here instead would monomorphize per caller
-/// and roughly double the emitted code.
+/// Shared implementation for info/warn/success/err. One concrete
+/// function so the binary carries a single copy regardless of how
+/// many call sites route through it.
 fn writePrefixedLine(
     msg: []const u8,
-    style: color.Style,
+    role: color.SemanticStyle,
     emoji_prefix: []const u8,
     plain_prefix: []const u8,
 ) void {
     const prefix: []const u8 = if (color.isEmojiEnabled()) emoji_prefix else plain_prefix;
     if (color.isColorEnabled()) {
-        io_mod.stderrWriteAll(style.code());
+        io_mod.stderrWriteAll(role.code());
         io_mod.stderrWriteAll(prefix);
         io_mod.stderrWriteAll(color.Style.reset.code());
     } else {
@@ -64,73 +62,71 @@ fn writePrefixedLine(
     io_mod.stderrWriteAll("\n");
 }
 
-/// Print info message: "==> {msg}" in cyan
 pub fn info(comptime fmt: []const u8, args: anytype) void {
     if (quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writePrefixedLine(msg, color.Style.cyan, "  ▸ ", "  > ");
+    writePrefixedLine(msg, .info, "  ▸ ", "  > ");
 }
 
-/// Print warning: "Warning: {msg}" in yellow
 pub fn warn(comptime fmt: []const u8, args: anytype) void {
     if (quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writePrefixedLine(msg, color.Style.yellow, "  ⚠ ", "  ! ");
+    writePrefixedLine(msg, .warn, "  ⚠ ", "  ! ");
 }
 
-/// Print success: "ok {msg}" in green to stderr
 pub fn success(comptime fmt: []const u8, args: anytype) void {
     if (quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writePrefixedLine(msg, color.Style.green, "  ✓ ", "  * ");
+    writePrefixedLine(msg, .success, "  ✓ ", "  * ");
 }
 
-/// Print error: "Error: {msg}" in red to stderr
 pub fn err(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writePrefixedLine(msg, color.Style.red, "  ✗ ", "  x ");
+    writePrefixedLine(msg, .err, "  ✗ ", "  x ");
 }
 
-/// Internal: write a single styled line to stderr with no icon prefix.
-/// `style` is `null` for plain text. Respects `--quiet`.
-fn lineStyled(style: ?color.Style, comptime fmt: []const u8, args: anytype) void {
+/// Write a single styled line (no icon prefix). Pass null `style_code`
+/// for plain text. Respects `--quiet`.
+fn lineStyled(style_code: ?[]const u8, comptime fmt: []const u8, args: anytype) void {
     if (quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    if (style != null and color.isColorEnabled()) {
-        io_mod.stderrWriteAll(style.?.code());
-        io_mod.stderrWriteAll(msg);
-        io_mod.stderrWriteAll(color.Style.reset.code());
+    if (style_code) |code| {
+        if (color.isColorEnabled()) {
+            io_mod.stderrWriteAll(code);
+            io_mod.stderrWriteAll(msg);
+            io_mod.stderrWriteAll(color.Style.reset.code());
+        } else {
+            io_mod.stderrWriteAll(msg);
+        }
     } else {
         io_mod.stderrWriteAll(msg);
     }
     io_mod.stderrWriteAll("\n");
 }
 
-/// Yellow line with no prefix — for multi-line warning blocks (banners,
-/// tables) where a repeated `⚠` icon is more noise than signal.
+/// Warn-coloured line with no icon — for multi-line warning blocks.
 pub fn warnPlain(comptime fmt: []const u8, args: anytype) void {
-    lineStyled(.yellow, fmt, args);
+    lineStyled(color.SemanticStyle.warn.code(), fmt, args);
 }
 
-/// Plain (un-styled, un-prefixed) line — for body text in multi-line
-/// output where color would compete with a warning block above it.
+/// Plain un-styled line.
 pub fn plain(comptime fmt: []const u8, args: anytype) void {
     lineStyled(null, fmt, args);
 }
 
-/// Dim/faint line with no prefix — for low-priority context lines.
+/// Faded detail line — legible on both palettes.
 pub fn dimPlain(comptime fmt: []const u8, args: anytype) void {
-    lineStyled(.dim, fmt, args);
+    lineStyled(color.SemanticStyle.detail.code(), fmt, args);
 }
 
-/// Bold line with no prefix — for headline values (totals, summaries).
+/// Bold headline line (totals, summaries).
 pub fn boldPlain(comptime fmt: []const u8, args: anytype) void {
-    lineStyled(.bold, fmt, args);
+    lineStyled(color.Style.bold.code(), fmt, args);
 }
 
 /// Print a dim/faint info message for low-priority status lines.
@@ -140,7 +136,7 @@ pub fn dim(comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const prefix: []const u8 = if (color.isEmojiEnabled()) "  ▸ " else "  > ";
     if (color.isColorEnabled()) {
-        io_mod.stderrWriteAll(color.Style.dim.code());
+        io_mod.stderrWriteAll(color.SemanticStyle.detail.code());
         io_mod.stderrWriteAll(prefix);
         io_mod.stderrWriteAll(msg);
         io_mod.stderrWriteAll(color.Style.reset.code());
@@ -159,7 +155,7 @@ pub fn skip(comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const prefix: []const u8 = if (color.isEmojiEnabled()) "  · " else "  . ";
     if (color.isColorEnabled()) {
-        io_mod.stderrWriteAll(color.Style.dim.code());
+        io_mod.stderrWriteAll(color.SemanticStyle.detail.code());
         io_mod.stderrWriteAll(prefix);
         io_mod.stderrWriteAll(msg);
         io_mod.stderrWriteAll(color.Style.reset.code());
@@ -197,7 +193,7 @@ pub fn confirmTyped(expected: []const u8, prompt: []const u8) bool {
 /// column `col`. Callers that need to emit a list (or any non-`bufPrint`
 /// value) use this helper and then write the value themselves.
 pub fn writeFieldKey(w: anytype, colorize: bool, col: usize, key: []const u8) !void {
-    if (colorize) try w.writeAll(color.Style.dim.code());
+    if (colorize) try w.writeAll(color.SemanticStyle.detail.code());
     try w.writeAll(key);
     try w.writeAll(":");
     if (colorize) try w.writeAll(color.Style.reset.code());
