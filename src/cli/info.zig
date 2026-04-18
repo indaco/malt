@@ -437,8 +437,10 @@ fn writeHumanInfo(
 
         try encodeHeader(stdout, colorize, name, "stable", ver_slice, "");
         try output.writeField(stdout, &buf, colorize, col, "From", "{s}", .{tap_slice});
-        try output.writeField(stdout, &buf, colorize, col, "Path", "{s}/Cellar/{s}/{s}", .{ prefix, name, ver_slice });
-        _ = path_slice;
+        // Use the recorded cellar_path directly — it carries the
+        // correct `_<revision>` suffix for revisioned formulas.
+        _ = prefix;
+        try output.writeField(stdout, &buf, colorize, col, "Path", "{s}", .{path_slice});
         if (pinned) try output.writeField(stdout, &buf, colorize, col, "Pinned", "yes", .{});
         try output.writeField(stdout, &buf, colorize, col, "Installed", "{s}", .{date_slice});
     } else {

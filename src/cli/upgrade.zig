@@ -118,7 +118,7 @@ fn upgradeFormula(
 ) !void {
     // Step 1: Look up installed version from DB
     var find_stmt = db.prepare(
-        "SELECT id, version, store_sha256, cellar_path FROM kegs WHERE name = ?1 LIMIT 1;",
+        "SELECT id, version, revision, store_sha256, cellar_path FROM kegs WHERE name = ?1 LIMIT 1;",
     ) catch return;
     defer find_stmt.finalize();
     find_stmt.bindText(1, name) catch return;
@@ -131,11 +131,17 @@ fn upgradeFormula(
 
     const old_keg_id = find_stmt.columnInt(0);
     const old_ver_ptr = find_stmt.columnText(1);
-    const old_sha_ptr = find_stmt.columnText(2);
-    const old_cellar_ptr = find_stmt.columnText(3);
+    const old_revision = find_stmt.columnInt(2);
+    const old_sha_ptr = find_stmt.columnText(3);
+    const old_cellar_ptr = find_stmt.columnText(4);
     const old_version = if (old_ver_ptr) |v| std.mem.sliceTo(v, 0) else "unknown";
     const old_sha256 = if (old_sha_ptr) |s| std.mem.sliceTo(s, 0) else "";
     const old_cellar_path = if (old_cellar_ptr) |c| std.mem.sliceTo(c, 0) else "";
+
+    // Reconstruct the revision-aware path label for the old keg so
+    // cellar_mod.remove / linker calls target the actual on-disk dir.
+    var old_pkgver_buf: [128]u8 = undefined;
+    const old_pkg_version = formula_mod.pkgVersion(&old_pkgver_buf, old_version, old_revision) catch old_version;
 
     // Step 2: Fetch latest formula from API
     const formula_json = api.fetchFormula(name) catch {
@@ -151,17 +157,17 @@ fn upgradeFormula(
     defer formula.deinit();
 
     // Compare versions
-    if (std.mem.eql(u8, old_version, formula.version)) {
-        output.skip("{s} is already at latest version {s}", .{ name, formula.version });
+    if (std.mem.eql(u8, old_pkg_version, formula.pkg_version)) {
+        output.skip("{s} is already at latest version {s}", .{ name, formula.pkg_version });
         return;
     }
 
     if (dry_run) {
-        output.info("Dry run: would upgrade {s} {s} -> {s}", .{ name, old_version, formula.version });
+        output.info("Dry run: would upgrade {s} {s} -> {s}", .{ name, old_version, formula.pkg_version });
         return;
     }
 
-    output.info("Upgrading {s} {s} -> {s}...", .{ name, old_version, formula.version });
+    output.info("Upgrading {s} {s} -> {s}...", .{ name, old_version, formula.pkg_version });
 
     // Step 3: Resolve bottle for new version
     const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
@@ -224,7 +230,7 @@ fn upgradeFormula(
         prefix,
         bottle.sha256,
         formula.name,
-        formula.version,
+        formula.pkg_version,
     ) catch {
         output.err("Failed to materialize {s}", .{name});
         return error.Aborted;
@@ -241,7 +247,7 @@ fn upgradeFormula(
         output.err("Failed to record new version of {s} in database", .{name});
         // Rollback: re-link old version
         restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
-        cellar_mod.remove(prefix, formula.name, formula.version) catch {};
+        cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
         return;
     };
 
@@ -251,16 +257,16 @@ fn upgradeFormula(
         linker.unlink(new_keg_id) catch {};
         deleteKeg(db, new_keg_id);
         restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
-        cellar_mod.remove(prefix, formula.name, formula.version) catch {};
+        cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
         return;
     };
 
-    linker.linkOpt(formula.name, formula.version) catch {};
+    linker.linkOpt(formula.name, formula.pkg_version) catch {};
 
     // Step 8: Remove old DB record + Cellar entry (success path only)
     deleteKeg(db, old_keg_id);
-    cellar_mod.remove(prefix, name, old_version) catch {
-        output.warn("Could not remove old cellar entry for {s} {s}", .{ name, old_version });
+    cellar_mod.remove(prefix, name, old_pkg_version) catch {
+        output.warn("Could not remove old cellar entry for {s} {s}", .{ name, old_pkg_version });
     };
     // Also remove parent if empty
     {
@@ -276,7 +282,7 @@ fn upgradeFormula(
         store.decrementRef(old_sha256) catch {};
     }
 
-    output.success("{s} upgraded to {s}", .{ name, formula.version });
+    output.success("{s} upgraded to {s}", .{ name, formula.pkg_version });
 }
 
 /// Re-link old version during rollback.

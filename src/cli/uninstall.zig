@@ -12,6 +12,7 @@ const linker = @import("../core/linker.zig");
 const cellar = @import("../core/cellar.zig");
 const store = @import("../core/store.zig");
 const cask_mod = @import("../core/cask.zig");
+const formula_mod = @import("../core/formula.zig");
 const supervisor_mod = @import("../core/services/supervisor.zig");
 const help = @import("help.zig");
 
@@ -68,7 +69,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Find the keg
     var find_stmt = db.prepare(
-        "SELECT id, version, store_sha256 FROM kegs WHERE name = ?1 LIMIT 1;",
+        "SELECT id, version, revision, store_sha256 FROM kegs WHERE name = ?1 LIMIT 1;",
     ) catch return;
     defer find_stmt.finalize();
     find_stmt.bindText(1, name) catch return;
@@ -81,9 +82,14 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const keg_id = find_stmt.columnInt(0);
     const ver_ptr = find_stmt.columnText(1);
-    const sha_ptr = find_stmt.columnText(2);
+    const revision = find_stmt.columnInt(2);
+    const sha_ptr = find_stmt.columnText(3);
     const version = if (ver_ptr) |v| std.mem.sliceTo(v, 0) else "unknown";
     const sha256 = if (sha_ptr) |s| std.mem.sliceTo(s, 0) else "";
+
+    // Revision-aware dir name for the on-disk cellar entry.
+    var pkgver_buf: [128]u8 = undefined;
+    const pkg_version = formula_mod.pkgVersion(&pkgver_buf, version, revision) catch version;
 
     // Check for dependents (unless --force)
     if (!force) {
@@ -115,8 +121,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         output.warn("Could not remove all symlinks for {s}", .{name});
     };
 
-    // Remove Cellar directory
-    cellar.remove(prefix, name, version) catch {
+    // Remove Cellar directory (dir name carries the _<revision> suffix
+    // when the keg was installed with revision > 0).
+    cellar.remove(prefix, name, pkg_version) catch {
         output.warn("Could not remove cellar entry for {s} {s}", .{ name, version });
     };
     // Also remove parent if empty (e.g. Cellar/jq/ after removing Cellar/jq/1.8.1/)
