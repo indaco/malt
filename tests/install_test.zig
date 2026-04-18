@@ -603,3 +603,84 @@ test "collectFormulaJobs with post_install leaves the DB untouched" {
     try testing.expect(has_row);
     try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
 }
+
+test "collectFormulaJobs carries the _<revision> suffix in version_str" {
+    // Direct coverage for issue #77: a revisioned formula must reach
+    // the DownloadJob with its pkg_version (e.g. "10.47_1"), not the
+    // plain `versions.stable` (e.g. "10.47"). materializeAndLink reads
+    // `job.version_str` to form the Cellar dir name, so any drift
+    // there re-introduces the dyld breakage.
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tdb = try TempDb.init("rev_jobs");
+    defer tdb.deinit();
+
+    const json =
+        \\{"name":"rev","full_name":"rev","tap":"homebrew/core","desc":"","homepage":"",
+        \\ "versions":{"stable":"10.47"},"revision":1,"dependencies":[],"oldnames":[],
+        \\ "keg_only":false,"post_install_defined":false,
+        \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/rev/blobs","files":{
+        \\   "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"a"},
+        \\   "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"a"},
+        \\   "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"a"},
+        \\   "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"a"},
+        \\   "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"b"},
+        \\   "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"b"},
+        \\   "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"b"},
+        \\   "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"b"}
+        \\ }}}}
+    ;
+
+    const cache_dir = "/tmp/malt_install_test_rev_jobs_cache";
+    malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
+
+    var http = try malt.client.HttpClientPool.init(alloc, 1);
+    defer http.deinit();
+    var real_http = malt.client.HttpClient.init(alloc);
+    defer real_http.deinit();
+    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+
+    var store_inst: malt.store.Store = undefined;
+    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    defer jobs.deinit(alloc);
+
+    try install.collectFormulaJobs(alloc, "rev", json, &api, &http, &tdb.db, &store_inst, false, &jobs);
+
+    try testing.expectEqual(@as(usize, 1), jobs.items.len);
+    try testing.expectEqualStrings("10.47_1", jobs.items[0].version_str);
+}
+
+test "collectFormulaJobs leaves plain-version formulas unchanged" {
+    // Regression guard: revision == 0 must NOT sprout an `_0` suffix.
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tdb = try TempDb.init("norev_jobs");
+    defer tdb.deinit();
+
+    const json = postInstallFormulaJson(); // revision: 0 fixture.
+
+    const cache_dir = "/tmp/malt_install_test_norev_jobs_cache";
+    malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
+
+    var http = try malt.client.HttpClientPool.init(alloc, 1);
+    defer http.deinit();
+    var real_http = malt.client.HttpClient.init(alloc);
+    defer real_http.deinit();
+    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+
+    var store_inst: malt.store.Store = undefined;
+    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    defer jobs.deinit(alloc);
+
+    try install.collectFormulaJobs(alloc, "needs-ruby", json, &api, &http, &tdb.db, &store_inst, false, &jobs);
+
+    try testing.expectEqual(@as(usize, 1), jobs.items.len);
+    try testing.expectEqualStrings("1.0", jobs.items[0].version_str);
+    try testing.expect(std.mem.indexOf(u8, jobs.items[0].version_str, "_") == null);
+}
