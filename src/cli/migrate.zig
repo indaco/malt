@@ -290,7 +290,7 @@ fn migrateKeg(
         prefix,
         bottle.sha256,
         formula.name,
-        formula.version,
+        formula.pkg_version,
     ) catch {
         output.err("    {s}: failed to materialize", .{keg_name});
         formula.deinit();
@@ -302,7 +302,7 @@ fn migrateKeg(
     if (!formula.keg_only) {
         const keg_id = recordKeg(db, &formula, bottle.sha256, keg.path, "direct") catch {
             output.err("    {s}: failed to record in database", .{keg_name});
-            cellar_mod.remove(prefix, formula.name, formula.version) catch {};
+            cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
             formula.deinit();
             allocator.free(formula_json);
             return .failed_install;
@@ -312,21 +312,21 @@ fn migrateKeg(
             output.warn("    {s}: some links could not be created", .{keg_name});
             linker.unlink(keg_id) catch {};
             deleteKeg(db, keg_id);
-            cellar_mod.remove(prefix, formula.name, formula.version) catch {};
+            cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
             formula.deinit();
             allocator.free(formula_json);
             return .failed_install;
         };
-        linker.linkOpt(formula.name, formula.version) catch {};
+        linker.linkOpt(formula.name, formula.pkg_version) catch {};
         recordDeps(db, keg_id, &formula);
     } else {
         const keg_id = recordKeg(db, &formula, bottle.sha256, keg.path, "direct") catch {
-            cellar_mod.remove(prefix, formula.name, formula.version) catch {};
+            cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
             formula.deinit();
             allocator.free(formula_json);
             return .failed_install;
         };
-        linker.linkOpt(formula.name, formula.version) catch {};
+        linker.linkOpt(formula.name, formula.pkg_version) catch {};
         recordDeps(db, keg_id, &formula);
     }
 
@@ -351,7 +351,7 @@ fn migrateKeg(
                         break :post_install;
                     }
                     if (inScope(use_system_ruby_scope, formula.name)) {
-                        ruby_sub.runPostInstall(allocator, formula.name, formula.version, prefix) catch |e| {
+                        ruby_sub.runPostInstall(allocator, formula.name, formula.pkg_version, prefix) catch |e| {
                             output.warn("  post_install subprocess failed for {s}: {s}", .{ formula.name, @errorName(e) });
                         };
                     } else {
@@ -378,7 +378,7 @@ fn migrateKeg(
                     break :post_install;
                 }
                 if (inScope(use_system_ruby_scope, formula.name)) {
-                    ruby_sub.runPostInstall(allocator, formula.name, formula.version, prefix) catch |e| {
+                    ruby_sub.runPostInstall(allocator, formula.name, formula.pkg_version, prefix) catch |e| {
                         output.warn("  post_install subprocess failed for {s}: {s}", .{ formula.name, @errorName(e) });
                     };
                 } else {
@@ -393,7 +393,7 @@ fn migrateKeg(
         // No source available — fall back to subprocess or skip
         if (inScope(use_system_ruby_scope, formula.name)) {
             output.warn("  Running post_install for {s} via system Ruby...", .{formula.name});
-            ruby_sub.runPostInstall(allocator, formula.name, formula.version, prefix) catch |e| {
+            ruby_sub.runPostInstall(allocator, formula.name, formula.pkg_version, prefix) catch |e| {
                 output.warn("  post_install failed for {s}: {s}", .{ formula.name, @errorName(e) });
             };
         } else {

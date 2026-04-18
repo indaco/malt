@@ -30,12 +30,29 @@ pub const ServiceDef = struct {
     run_at_load: bool = true,
 };
 
+/// Format Homebrew's canonical on-disk version label into `buf`.
+/// `revision > 0` appends `_<revision>` (matching Homebrew's
+/// `PkgVersion`); otherwise the plain `version` is returned
+/// unchanged. Revisions ≤ 0 are treated as zero — defensive against
+/// upstream JSON glitches. Used everywhere a filesystem path under
+/// `Cellar/<name>/` is assembled; getting this wrong produces
+/// `dyld: Library not loaded` errors because bottles hard-code the
+/// full path in LC_LOAD_DYLIB entries.
+pub fn pkgVersion(buf: []u8, version: []const u8, revision: i64) ![]const u8 {
+    if (revision <= 0) return std.fmt.bufPrint(buf, "{s}", .{version});
+    return std.fmt.bufPrint(buf, "{s}_{d}", .{ version, revision });
+}
+
 pub const Formula = struct {
     name: []const u8,
     full_name: []const u8,
     tap: []const u8,
     desc: []const u8,
     version: []const u8,
+    /// Canonical on-disk version name: equals `version` when
+    /// `revision == 0`, else `<version>_<revision>`. Use this for
+    /// every Cellar/opt/receipt path — never raw `version`.
+    pkg_version: []const u8,
     revision: i64,
     license: ?[]const u8,
     homepage: []const u8,
@@ -232,12 +249,21 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         }
     }
 
+    // Pre-compute the revision-aware path label once. Single-allocator
+    // dupe into the caller's arena so every downstream consumer can
+    // borrow a stable slice instead of re-formatting per call site.
+    const pkg_version_str = blk: {
+        if (revision <= 0) break :blk version_str;
+        break :blk try std.fmt.allocPrint(allocator, "{s}_{d}", .{ version_str, revision });
+    };
+
     return Formula{
         .name = name,
         .full_name = full_name,
         .tap = tap,
         .desc = desc,
         .version = version_str,
+        .pkg_version = pkg_version_str,
         .revision = revision,
         .license = license,
         .homepage = homepage,

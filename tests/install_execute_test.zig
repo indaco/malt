@@ -176,3 +176,47 @@ test "execute refuses to run when MALT_PREFIX exceeds the Mach-O budget" {
         install.execute(testing.allocator, &.{"wget"}),
     );
 }
+
+// ─── Revisioned formula handling (issue #77) ─────────────────────────
+//
+// Revisioned formulas (Homebrew `revision: 1` onwards) must land in
+// `Cellar/<name>/<version>_<revision>`, because bottles are built
+// against that path and bake it into LC_LOAD_DYLIB entries. A plain
+// `Cellar/<name>/<version>` install produces "dyld: Library not
+// loaded" at runtime (see issue #77 with pcre2 10.47_1).
+
+test "execute --dry-run routes a revisioned formula through the install pipeline" {
+    // The dry-run path flows: ensureDirs → DB open → lock → cache hit
+    // → collectFormulaJobs → print plan → return. A revisioned formula
+    // exercises every call site that reads `formula.pkg_version` in
+    // place of the plain `version`.
+    const prefix_z: [:0]const u8 = "/tmp/mr";
+    malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    try malt.fs_compat.cwd().makePath(prefix_z);
+    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // revision=1 → the keg dir under Cellar must be "10.47_1", not "10.47".
+    const json =
+        \\{"name":"rev1","full_name":"rev1","tap":"homebrew/core","desc":"","homepage":"",
+        \\ "versions":{"stable":"10.47"},"revision":1,"dependencies":[],"oldnames":[],
+        \\ "keg_only":false,"post_install_defined":false,
+        \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/rev1/blobs",
+        \\   "files":{
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"}
+        \\   }}}}
+    ;
+    try seedFormulaCache(prefix_z, "rev1", json);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "rev1" });
+}

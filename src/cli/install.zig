@@ -980,7 +980,9 @@ pub fn collectFormulaJobs(
 
         jobs.append(allocator, .{
             .name = dep_formula.name,
-            .version_str = dep_formula.version,
+            // pkg_version folds in the `_N` revision suffix so cellar
+            // paths match the bottle's baked-in LC_LOAD_DYLIB entries.
+            .version_str = dep_formula.pkg_version,
             .sha256 = dep_bottle.sha256,
             .bottle_url = dep_bottle.url,
             .is_dep = true,
@@ -1005,7 +1007,9 @@ pub fn collectFormulaJobs(
 
     jobs.append(allocator, .{
         .name = formula.name,
-        .version_str = formula.version,
+        // Same reason as the dep branch above: the cellar dir name
+        // must carry the `_N` suffix when revision > 0.
+        .version_str = formula.pkg_version,
         .sha256 = bottle.sha256,
         .bottle_url = bottle.url,
         .is_dep = false,
@@ -1205,7 +1209,7 @@ fn maybeRegisterService(
     const cellar_path = std.fmt.bufPrint(
         &cellar_buf,
         "{s}/Cellar/{s}/{s}",
-        .{ prefix, formula.name, formula.version },
+        .{ prefix, formula.name, formula.pkg_version },
     ) catch return;
 
     const spec: plist_mod.ServiceSpec = .{

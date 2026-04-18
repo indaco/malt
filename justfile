@@ -64,13 +64,13 @@ fmt:
 # Lint shell scripts with shellcheck + shfmt.
 [group('lint')]
 shell-lint:
-    shellcheck scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
-    shfmt -i 2 -d scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
+    shellcheck scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh
+    shfmt -i 2 -d scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh
 
 # Apply shfmt formatting in place. Run after a failing `shell-lint`.
 [group('lint')]
 shell-fmt:
-    shfmt -i 2 -w scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
+    shfmt -i 2 -w scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh
 
 # Lint: format check + build + test
 [group('lint')]
