@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.6.2 - 2026-04-18
+
+### 🩹 Fixes
+
+- **install:** restore source-fallback after API failure ([0526027](https://github.com/indaco/malt/commit/0526027)) ([#75](https://github.com/indaco/malt/pull/75))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.6.1 - 2026-04-18
 
 ### Highlights
