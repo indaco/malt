@@ -54,10 +54,13 @@ const install_help =
     \\  malt install --cask <app>              explicit cask
     \\  malt install --formula <name>          explicit formula
     \\  malt install <user>/<tap>/<formula>    inline tap
+    \\  malt install --local <path.rb>         install from a local Ruby formula
     \\
     \\Flags:
     \\  --cask             Force cask installation
     \\  --formula          Force formula installation
+    \\  --local            Install from a local .rb file path (code-exec surface:
+    \\                     only pass files you trust)
     \\  --dry-run          Show what would be installed
     \\  --force            Overwrite existing installations
     \\  --use-system-ruby[=<name>,...]  Run post_install via the system Ruby interpreter

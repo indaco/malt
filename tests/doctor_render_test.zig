@@ -143,3 +143,90 @@ test "null detail omits the em-dash entirely" {
     try testing.expect(std.mem.indexOf(u8, s, "—") == null);
     try testing.expect(std.mem.indexOf(u8, s, "-") == null);
 }
+
+// ── countMissingLocalSources ────────────────────────────────────────
+//
+// The local-source check walks `kegs WHERE tap='local'` and reports
+// how many rows point at a path that no longer exists. Exercised with
+// an in-memory SQLite so the test is hermetic.
+
+const malt = @import("malt");
+const sqlite = malt.sqlite;
+const schema = malt.schema;
+
+fn seedKeg(db: *sqlite.Database, name: []const u8, tap: []const u8, full_name: []const u8) !void {
+    var stmt = try db.prepare(
+        "INSERT INTO kegs (name, full_name, version, tap, store_sha256, cellar_path, install_reason)" ++
+            " VALUES (?1, ?2, '1.0', ?3, '0' , '/opt/malt/Cellar/x/1.0', 'direct');",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    try stmt.bindText(2, full_name);
+    try stmt.bindText(3, tap);
+    _ = try stmt.step();
+}
+
+test "countMissingLocalSources ignores non-local kegs" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try seedKeg(&db, "foo", "homebrew/core", "foo");
+    try seedKeg(&db, "bar", "user/tap", "bar");
+
+    const got = doctor.countMissingLocalSources(testing.allocator, &db);
+    try testing.expectEqual(@as(u32, 0), got.total);
+    try testing.expectEqual(@as(u32, 0), got.stale);
+}
+
+test "countMissingLocalSources flags kegs whose .rb no longer exists" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try seedKeg(&db, "ghost", "local", "/tmp/mt_doctor_vanished_formula_xyz.rb");
+
+    const got = doctor.countMissingLocalSources(testing.allocator, &db);
+    try testing.expectEqual(@as(u32, 1), got.total);
+    try testing.expectEqual(@as(u32, 1), got.stale);
+}
+
+test "countMissingLocalSources does not flag kegs whose .rb still exists" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // Use the running test binary as the "file exists" witness — it
+    // is guaranteed to be readable from the test process.
+    const self_path = "/tmp/mt_doctor_present_formula.rb";
+    const f = try malt.fs_compat.createFileAbsolute(self_path, .{});
+    defer malt.fs_compat.cwd().deleteFile(self_path) catch {};
+    try f.writeAll("class X end\n");
+    f.close();
+
+    try seedKeg(&db, "present", "local", self_path);
+
+    const got = doctor.countMissingLocalSources(testing.allocator, &db);
+    try testing.expectEqual(@as(u32, 1), got.total);
+    try testing.expectEqual(@as(u32, 0), got.stale);
+}
+
+test "countMissingLocalSources mixes stale and present rows correctly" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const present_path = "/tmp/mt_doctor_mixed_present.rb";
+    const f = try malt.fs_compat.createFileAbsolute(present_path, .{});
+    defer malt.fs_compat.cwd().deleteFile(present_path) catch {};
+    try f.writeAll("x");
+    f.close();
+
+    try seedKeg(&db, "p1", "local", present_path);
+    try seedKeg(&db, "g1", "local", "/tmp/mt_doctor_mixed_missing_1.rb");
+    try seedKeg(&db, "g2", "local", "/tmp/mt_doctor_mixed_missing_2.rb");
+
+    const got = doctor.countMissingLocalSources(testing.allocator, &db);
+    try testing.expectEqual(@as(u32, 3), got.total);
+    try testing.expectEqual(@as(u32, 2), got.stale);
+}

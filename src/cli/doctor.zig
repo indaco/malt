@@ -392,6 +392,34 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
+    // 10. Local-install source tracking — every keg with `tap='local'`
+    //     remembers the absolute realpath of the `.rb` it was installed
+    //     from. If that file has since been moved or deleted, the keg
+    //     still works but `mt info <name>` will keep quoting a stale
+    //     path. Advisory only.
+    blk_local: {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch break :blk_local;
+        var db = sqlite.Database.open(db_path) catch break :blk_local;
+        defer db.close();
+
+        const missing = countMissingLocalSources(allocator, &db);
+        if (missing.total == 0) {
+            printCheck("Local formula sources", .ok, null);
+        } else if (missing.stale == 0) {
+            printCheck("Local formula sources", .ok, null);
+        } else {
+            var msg_buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &msg_buf,
+                "{d}/{d} local keg(s) reference a .rb that no longer exists on disk. Run `mt info <name>` to see which.",
+                .{ missing.stale, missing.total },
+            ) catch "Some local kegs reference a .rb that no longer exists.";
+            printCheck("Local formula sources", .warn_status, msg);
+            warnings += 1;
+        }
+    }
+
     // Summary + exit code. Blank line first so the summary separates
     // visually from the check rows above it.
     output.plain("", .{});
@@ -559,6 +587,40 @@ fn glyphFor(status: CheckStatus, emoji: bool) []const u8 {
         .warn_status => "!",
         .err_status => "x",
     };
+}
+
+/// Summary of how many locally-installed kegs still point at their
+/// original `.rb` source. `total` counts rows with `tap='local'`;
+/// `stale` counts the subset whose `full_name` no longer exists on
+/// disk. Keeping this pure (pass in the DB, no `output.*` calls) means
+/// the check is exercisable from a hermetic unit test.
+pub const LocalSourceCensus = struct {
+    total: u32,
+    stale: u32,
+};
+
+/// Walk `kegs WHERE tap='local'` and classify each row's recorded
+/// source path as present or missing. Uses `accessAbsolute` (not a
+/// full `openFile`) because we just need to know if the path resolves
+/// — we are not reading the file. Silent on DB errors: a broken DB is
+/// reported by the separate SQLite-integrity check above.
+pub fn countMissingLocalSources(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+) LocalSourceCensus {
+    _ = allocator;
+    var census: LocalSourceCensus = .{ .total = 0, .stale = 0 };
+    var stmt = db.prepare("SELECT full_name FROM kegs WHERE tap = 'local';") catch return census;
+    defer stmt.finalize();
+    while (stmt.step() catch false) {
+        const path_ptr = stmt.columnText(0) orelse continue;
+        const path = std.mem.sliceTo(path_ptr, 0);
+        census.total += 1;
+        fs_compat.accessAbsolute(path, .{}) catch {
+            census.stale += 1;
+        };
+    }
+    return census;
 }
 
 fn styleFor(status: CheckStatus) color.Style {

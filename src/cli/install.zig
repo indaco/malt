@@ -100,6 +100,15 @@ pub const InstallError = error{
     /// with only OS-level sandboxing), so malt requires the user to
     /// name which formulas it should apply to when ambiguity exists.
     AmbiguousSystemRubyScope,
+    /// `--local <path>` named a file that does not exist, is not a
+    /// regular file, or cannot be opened. Raised before parse so the
+    /// user sees the real filesystem error instead of a parser message.
+    LocalFormulaNotReadable,
+    /// The `.rb`'s archive URL is not `https://`. Refusing to fetch
+    /// means a malicious or accidentally-committed `file://`,
+    /// `ftp://`, or plaintext `http://` URL cannot be turned into an
+    /// exploit just by `malt install --local`-ing the file.
+    InsecureArchiveUrl,
 };
 
 /// Whether --use-system-ruby opts the named formula into the Ruby
@@ -267,6 +276,11 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var use_system_ruby_bare = false;
     var use_system_ruby_scope: std.ArrayList([]const u8) = .empty;
     defer use_system_ruby_scope.deinit(allocator);
+    // `--local` forces every positional argument to be interpreted as a
+    // path to a `.rb` file. The flag is the explicit opt-in that
+    // captures the "I trust this file" decision in argv, rather than
+    // leaving it to shape-based autodetection.
+    var local_only = false;
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--cask")) {
@@ -277,6 +291,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             dry_run = true;
         } else if (std.mem.eql(u8, arg, "--force")) {
             force = true;
+        } else if (std.mem.eql(u8, arg, "--local")) {
+            local_only = true;
         } else if (std.mem.eql(u8, arg, "--use-system-ruby")) {
             use_system_ruby_bare = true;
         } else if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
@@ -291,6 +307,34 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.setMode(.json);
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             packages.append(allocator, arg) catch return error.OutOfMemory;
+        }
+    }
+
+    if (local_only and packages.items.len == 0) {
+        // User-facing argv error — emit the one-liner and exit clean.
+        // Returning `error.Aborted` (per the main.zig contract) avoids
+        // the "error: LocalFormulaMissingPath" stack trace that raw
+        // InstallError variants trigger.
+        output.err("--local requires a path to a .rb file", .{});
+        return error.Aborted;
+    }
+
+    // `--local` conflicts with other mode flags. Rather than silently
+    // letting path-shape detection win, refuse ambiguous argv up front
+    // so "install --local --cask ./foo.rb" cannot quietly drop the
+    // cask pathway or vice versa.
+    if (local_only) {
+        if (force_cask) {
+            output.err("--local cannot be combined with --cask (a .rb file is never a cask)", .{});
+            return error.Aborted;
+        }
+        if (force_formula) {
+            output.err("--local already selects formula mode; drop --formula", .{});
+            return error.Aborted;
+        }
+        if (use_system_ruby_bare or use_system_ruby_scope.items.len > 0) {
+            output.err("--local does not run post_install; --use-system-ruby has no effect and is refused", .{});
+            return error.Aborted;
         }
     }
 
@@ -411,6 +455,26 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         if (main_mod.isInterrupted()) {
             output.warn("Interrupted during resolution.", .{});
             return;
+        }
+
+        // Local .rb path (explicit via --local, or shape-detected — a
+        // leading `.`/`/`/`~` or embedded slash plus a `.rb` suffix).
+        // Path wins over tap-form when `.rb` is present so a typo like
+        // `user/repo/foo.rb` gets a clean local-file error instead of
+        // a confusing GitHub 404.
+        if (local_only or isLocalFormulaPath(pkg_name)) {
+            installLocalFormula(allocator, pkg_name, &db, &linker, prefix, dry_run, force) catch |e| {
+                // The inner function has already emitted a specific
+                // error line (missing file, insecure URL, parse
+                // failure, …). Only append the generic summary for
+                // errors whose internal message didn't cover the
+                // "what" — keeps single-package failures from printing
+                // two red lines for one problem.
+                if (!localErrorIsAnnounced(e)) {
+                    output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+                }
+            };
+            continue;
         }
 
         // Handle tap formulas separately (they don't use GHCR)
@@ -1441,6 +1505,25 @@ pub fn isTapFormula(name: []const u8) bool {
     return slash_count == 2;
 }
 
+/// Shape-based detection for a local `.rb` path argument (e.g.
+/// `./wget.rb`, `/tmp/wget.rb`, `~/f/wget.rb`, `a/b/c/d.rb`). Pure:
+/// no filesystem access, no allocation.
+///
+/// Tie-break with tap-form: the `.rb` suffix always wins. A bare tap
+/// slug `user/repo/formula` has no suffix; `user/repo/formula.rb` is
+/// treated as a path so the user does not get a confusing 404 from the
+/// tap resolver.
+pub fn isLocalFormulaPath(arg: []const u8) bool {
+    if (!std.mem.endsWith(u8, arg, ".rb")) return false;
+    if (arg.len == 0) return false;
+    if (arg[0] == '/' or arg[0] == '~' or arg[0] == '.') return true;
+    // Any embedded separator also flags it as a path (e.g. "a/b/c.rb").
+    for (arg) |ch| if (ch == '/' or ch == '\\') return true;
+    // Bare `wget.rb` with no separator is NOT auto-detected; require
+    // `--local` to avoid shadowing a same-named formula on the API.
+    return false;
+}
+
 /// Parse a tap formula name into user, repo, formula components.
 pub fn parseTapName(name: []const u8) ?struct { user: []const u8, repo: []const u8, formula: []const u8 } {
     const first_slash = std.mem.findScalar(u8, name, '/') orelse return null;
@@ -1452,6 +1535,41 @@ pub fn parseTapName(name: []const u8) ?struct { user: []const u8, repo: []const 
         .formula = rest[second_slash + 1 ..],
     };
 }
+
+/// Maximum size of a `.rb` formula file that `malt install --local`
+/// will read. Real Homebrew formulas top out well below this (the
+/// current heaviest, `llvm.rb`, is ~60 KB). The cap bounds the single
+/// TOCTOU-safe read so a hostile symlink cannot force malt to slurp an
+/// unbounded file before parsing.
+pub const max_local_formula_bytes: usize = 1 * 1024 * 1024;
+
+/// Post-parse payload shared by the tap and local-file install paths.
+/// Slices point into caller-owned memory (parsed `.rb`, interpolated
+/// URL buffer) and must outlive `materializeRubyFormula`.
+const ResolvedRubyFormula = struct {
+    /// Short formula name — becomes the Cellar dir, bin basename, and
+    /// `kegs.name` column.
+    name: []const u8,
+    /// Full origin identifier stored in `kegs.full_name`. Tap slugs
+    /// carry the `user/repo/formula` form; local installs carry the
+    /// realpath so `mt list` shows where the `.rb` came from.
+    full_name: []const u8,
+    /// Label for the `kegs.tap` column and, optionally, `tap_mod.add`.
+    tap_label: []const u8,
+    version: []const u8,
+    /// Archive URL post `#{version}` interpolation.
+    url: []const u8,
+    sha256: []const u8,
+    /// When set, the tap is registered in the DB (mirrors the original
+    /// tap install behaviour). Local installs leave this null so they
+    /// never pollute the tap list.
+    tap_registration: ?TapRegistration = null,
+};
+
+const TapRegistration = struct {
+    url: []const u8,
+    commit_sha: []const u8,
+};
 
 /// Install a tap formula by fetching the Ruby formula from GitHub and
 /// extracting URL + SHA256 for the current platform.
@@ -1535,38 +1653,278 @@ fn installTapFormula(
     };
 
     // Interpolate #{version} in URL if present
-    const version_needle = "#" ++ "{version}";
     var final_url_buf: [512]u8 = undefined;
-    const final_url = blk: {
-        if (std.mem.indexOf(u8, rb.url, version_needle)) |pos| {
-            const before = rb.url[0..pos];
-            const after = rb.url[pos + version_needle.len ..];
-            break :blk std.fmt.bufPrint(&final_url_buf, "{s}{s}{s}", .{ before, rb.version, after }) catch rb.url;
-        }
-        break :blk rb.url;
+    const final_url = interpolateVersion(&final_url_buf, rb.url, rb.version);
+
+    var tap_buf: [128]u8 = undefined;
+    const tap_name = std.fmt.bufPrint(&tap_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
+        return InstallError.FormulaNotFound;
+    var tap_url_buf: [256]u8 = undefined;
+    const tap_url = std.fmt.bufPrint(&tap_url_buf, "https://github.com/{s}", .{tap_name}) catch
+        return InstallError.FormulaNotFound;
+
+    const resolved = ResolvedRubyFormula{
+        .name = parts.formula,
+        .full_name = pkg_name,
+        .tap_label = tap_name,
+        .version = rb.version,
+        .url = final_url,
+        .sha256 = rb.sha256,
+        .tap_registration = .{ .url = tap_url, .commit_sha = commit_sha },
+    };
+    try materializeRubyFormula(allocator, resolved, &http, db, linker, prefix, dry_run, force);
+}
+
+/// Install a formula from a local `.rb` file on disk. Gated by the
+/// explicit `--local` flag (or autodetection with warning). Reads the
+/// file once with a size cap so a hostile symlink cannot force an
+/// unbounded read, parses via the same `parseRubyFormula` the tap path
+/// uses, and then hands off to the shared materialize helper.
+///
+/// `pkg_arg` is the argument as typed (possibly relative, possibly with
+/// `~/`); the canonical realpath used for messages and DB storage is
+/// derived inside the function.
+fn installLocalFormula(
+    allocator: std.mem.Allocator,
+    pkg_arg: []const u8,
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    prefix: []const u8,
+    dry_run: bool,
+    force: bool,
+) !void {
+    // Expand a leading `~/` to `$HOME` so the common "drop it in
+    // your dotfiles" path works without requiring shell expansion.
+    var home_buf: [fs_compat.max_path_bytes]u8 = undefined;
+    const expanded = expandTildePath(&home_buf, pkg_arg) orelse {
+        output.err("Cannot resolve home directory for '{s}'", .{pkg_arg});
+        return InstallError.LocalFormulaNotReadable;
     };
 
-    output.info("Found {s} {s}", .{ parts.formula, rb.version });
+    // Canonicalise once via open+F_GETPATH. This both checks the file
+    // exists AND gives us a symlink-free absolute path for audit
+    // messages and the kegs row — defeating the "relative path in a
+    // shared Brewfile" footgun.
+    var real_buf: [fs_compat.max_path_bytes]u8 = undefined;
+    const realpath = fs_compat.cwd().realpath(expanded, &real_buf) catch {
+        output.err("Cannot open local formula: {s}", .{pkg_arg});
+        return InstallError.LocalFormulaNotReadable;
+    };
+
+    // Security warning on every install — the `.rb` is a code-execution
+    // vector (parse is pure, but post_install + the archive URL trust
+    // this file). Printing the realpath surfaces hidden /tmp or
+    // world-writable locations to an attentive reader.
+    output.warn("Installing from local file '{s}'. Only install .rb files you trust.", .{realpath});
+
+    // Reject non-regular files outright (directory, socket, device)
+    // before allocating a read buffer.
+    const f = fs_compat.openFileAbsolute(realpath, .{ .mode = .read_only }) catch {
+        output.err("Cannot open local formula: {s}", .{realpath});
+        return InstallError.LocalFormulaNotReadable;
+    };
+    defer f.close();
+    const st = f.stat() catch {
+        output.err("Cannot stat local formula: {s}", .{realpath});
+        return InstallError.LocalFormulaNotReadable;
+    };
+    if (st.kind != .file) {
+        output.err("Local formula is not a regular file: {s}", .{realpath});
+        return InstallError.LocalFormulaNotReadable;
+    }
+    if (st.size > max_local_formula_bytes) {
+        output.err("Local formula exceeds {d}-byte read cap: {s}", .{ max_local_formula_bytes, realpath });
+        return InstallError.LocalFormulaNotReadable;
+    }
+
+    // Advisory: warn if the file is world-writable or owned by a
+    // different user. `--local` is already the trust gate so we don't
+    // block — but we make the risk visible on the same line style as
+    // the primary security warning.
+    if (fstatRisk(f)) |risk| switch (risk) {
+        .world_writable => output.warn("Local formula is world-writable — any local user could rewrite it between reads.", .{}),
+        .other_owner => output.warn("Local formula is not owned by you — another account wrote this file.", .{}),
+    };
+
+    const body = f.readToEndAlloc(allocator, max_local_formula_bytes) catch {
+        output.err("Cannot read local formula: {s}", .{realpath});
+        return InstallError.LocalFormulaNotReadable;
+    };
+    defer allocator.free(body);
+
+    // Parse the Ruby formula to extract name, version, URL, SHA256 for current arch
+    const rb = parseRubyFormula(body) orelse {
+        output.err("Cannot parse local formula (missing version/url/sha256): {s}", .{realpath});
+        return InstallError.FormulaNotFound;
+    };
+
+    // Formula name comes from the basename minus `.rb` — mirrors
+    // Homebrew's convention where `wget.rb` installs `wget`. This is
+    // the canonical surface for the cellar path, bin name, and DB row.
+    const base = std.fs.path.basename(realpath);
+    if (!std.mem.endsWith(u8, base, ".rb") or base.len <= 3) {
+        output.err("Local formula must end in .rb: {s}", .{realpath});
+        return InstallError.LocalFormulaNotReadable;
+    }
+    const name = base[0 .. base.len - 3];
+
+    var final_url_buf: [512]u8 = undefined;
+    const final_url = interpolateVersion(&final_url_buf, rb.url, rb.version);
+
+    const resolved = ResolvedRubyFormula{
+        .name = name,
+        .full_name = realpath,
+        .tap_label = "local",
+        .version = rb.version,
+        .url = final_url,
+        .sha256 = rb.sha256,
+        // No tap_registration — never pollute `mt tap` with a local path.
+    };
+
+    var http = client_mod.HttpClient.init(allocator);
+    defer http.deinit();
+    try materializeRubyFormula(allocator, resolved, &http, db, linker, prefix, dry_run, force);
+}
+
+/// True only when `url` is a well-formed `https://` URL with a host
+/// component. The local-install path uses this to reject scheme
+/// smuggling (file://, ftp://, data:) and downgrade attempts (http://)
+/// before we ever hand the URL to the HTTP client. Strict lower-case
+/// match keeps the allowlist tamper-resistant; real tap formulas never
+/// use mixed-case schemes.
+pub fn isAllowedArchiveUrl(url: []const u8) bool {
+    const prefix = "https://";
+    if (!std.mem.startsWith(u8, url, prefix)) return false;
+    const host_and_path = url[prefix.len..];
+    // Reject `https://` with nothing after, or a leading slash that
+    // would collapse the authority component.
+    if (host_and_path.len == 0) return false;
+    if (host_and_path[0] == '/') return false;
+    return true;
+}
+
+/// True when the given error has already surfaced a specific,
+/// user-facing `output.err` line from inside the install helpers, so
+/// the dispatch-loop shouldn't add a generic "Failed to install X: E"
+/// summary on top. Kept next to the helpers it mirrors so adding a new
+/// announced error type can't forget this call site.
+pub fn localErrorIsAnnounced(e: anyerror) bool {
+    return switch (e) {
+        InstallError.LocalFormulaNotReadable,
+        InstallError.InsecureArchiveUrl,
+        InstallError.FormulaNotFound,
+        InstallError.DownloadFailed,
+        InstallError.CellarFailed,
+        => true,
+        else => false,
+    };
+}
+
+/// Ordered set of advisory risk labels that may fire on a `.rb` file
+/// the user asked to install. `world_writable` dominates `other_owner`
+/// because any local account can win the TOCTOU race while only the
+/// owner can edit a 0o644 file. Pure enum — no allocation, trivially
+/// table-testable (see `describeLocalPermissionRisk`).
+pub const LocalPermissionRisk = enum { world_writable, other_owner };
+
+/// Classify a local formula's filesystem metadata into at most one
+/// advisory risk label. Returns null when the file is plausibly safe
+/// (owned by the effective user and not world-writable). The caller
+/// uses the result to emit a single extra `⚠` line — never to block
+/// the install, since `--local` is itself the explicit trust decision.
+pub fn describeLocalPermissionRisk(mode: u32, file_uid: u32, effective_uid: u32) ?LocalPermissionRisk {
+    if (mode & 0o002 != 0) return .world_writable;
+    if (file_uid != effective_uid) return .other_owner;
+    return null;
+}
+
+/// Thin wrapper that pulls raw POSIX `st_mode`/`st_uid` from the
+/// already-opened handle and routes them through the pure predicate.
+/// `Stat` in `std.Io` doesn't surface uid or mode bits directly, so a
+/// libc `fstat(2)` is the path of least resistance on macOS.
+fn fstatRisk(f: fs_compat.File) ?LocalPermissionRisk {
+    var raw: std.c.Stat = undefined;
+    if (std.c.fstat(f.inner.handle, &raw) != 0) return null;
+    const effective = std.c.geteuid();
+    return describeLocalPermissionRisk(@intCast(raw.mode), @intCast(raw.uid), @intCast(effective));
+}
+
+/// Constant-time equality for byte slices. Used on the SHA256
+/// comparison so a network-positioned attacker cannot mount a byte-by-
+/// byte timing oracle against the expected hash. Returns false
+/// immediately on length mismatch (the length itself is not a secret).
+pub fn constantTimeEql(comptime T: type, a: []const T, b: []const T) bool {
+    if (a.len != b.len) return false;
+    var diff: T = 0;
+    for (a, b) |x, y| diff |= x ^ y;
+    return diff == 0;
+}
+
+/// Interpolate `#{version}` inside a URL. Falls back to the raw URL if
+/// the buffer is too small (bufPrint error) — the caller's SHA check
+/// will then fail fast if the server serves a different asset.
+pub fn interpolateVersion(buf: []u8, url: []const u8, version: []const u8) []const u8 {
+    const version_needle = "#" ++ "{version}";
+    if (std.mem.indexOf(u8, url, version_needle)) |pos| {
+        const before = url[0..pos];
+        const after = url[pos + version_needle.len ..];
+        return std.fmt.bufPrint(buf, "{s}{s}{s}", .{ before, version, after }) catch url;
+    }
+    return url;
+}
+
+/// Expand a leading `~/` to `$HOME/...`. Returns the input unchanged
+/// when no tilde prefix is present. Returns null when `$HOME` is
+/// needed but unset.
+pub fn expandTildePath(buf: []u8, arg: []const u8) ?[]const u8 {
+    if (arg.len < 2 or arg[0] != '~' or arg[1] != '/') return arg;
+    const home = fs_compat.getenv("HOME") orelse return null;
+    return std.fmt.bufPrint(buf, "{s}{s}", .{ home, arg[1..] }) catch null;
+}
+
+/// Shared "from parsed `.rb` to linked keg" path, used by the tap and
+/// local installers. Does the network fetch for the archive, SHA256
+/// verification, cellar materialisation, and DB + linker commit.
+fn materializeRubyFormula(
+    allocator: std.mem.Allocator,
+    resolved: ResolvedRubyFormula,
+    http: *client_mod.HttpClient,
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    prefix: []const u8,
+    dry_run: bool,
+    force: bool,
+) !void {
+    output.info("Found {s} {s}", .{ resolved.name, resolved.version });
 
     if (dry_run) {
-        output.info("Dry run: would install {s} {s} from {s}", .{ parts.formula, rb.version, final_url });
+        output.info("Dry run: would install {s} {s} from {s}", .{ resolved.name, resolved.version, resolved.url });
         return;
     }
 
-    // Check if already installed
-    if (!force and isInstalled(db, parts.formula)) {
-        output.info("{s} is already installed", .{parts.formula});
+    // Skip silently when the keg is already present (unless --force).
+    if (!force and isInstalled(db, resolved.name)) {
+        output.info("{s} is already installed", .{resolved.name});
         return;
+    }
+
+    // Refuse any scheme other than `https://`. A `.rb` that smuggled
+    // `http://` (downgrade), `file:///etc/passwd`, `ftp://`, or a data
+    // URI would otherwise be trusted by the HTTP client. Enforced for
+    // every caller of this helper — tap and local share the check.
+    if (!isAllowedArchiveUrl(resolved.url)) {
+        output.err("Refusing to fetch non-HTTPS archive URL for {s}: {s}", .{ resolved.name, resolved.url });
+        return InstallError.InsecureArchiveUrl;
     }
 
     // Stream with a progress bar, matching formula/cask downloads.
-    var bar = progress_mod.ProgressBar.init(parts.formula, 0);
-    var download_resp = http.getWithHeaders(final_url, &.{}, .{
+    var bar = progress_mod.ProgressBar.init(resolved.name, 0);
+    var download_resp = http.getWithHeaders(resolved.url, &.{}, .{
         .context = @ptrCast(&bar),
         .func = &progressBridge,
     }) catch {
         bar.finish();
-        output.err("Failed to download {s}", .{parts.formula});
+        output.err("Failed to download {s}", .{resolved.name});
         return InstallError.DownloadFailed;
     };
     defer download_resp.deinit();
@@ -1577,7 +1935,7 @@ fn installTapFormula(
         return InstallError.DownloadFailed;
     }
 
-    // Verify SHA256
+    // Verify SHA256 before anything touches the filesystem.
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(download_resp.body, &hash, .{});
     var hex_buf: [64]u8 = undefined;
@@ -1588,19 +1946,21 @@ fn installTapFormula(
     }
     const computed: []const u8 = &hex_buf;
 
-    if (!std.mem.eql(u8, computed, rb.sha256)) {
-        output.err("SHA256 mismatch for {s}", .{parts.formula});
+    // Constant-time compare on the SHA256: a stock `mem.eql` leaks
+    // per-byte progress via timing, giving an adaptive attacker a
+    // byte-by-byte oracle against the expected hash.
+    if (!constantTimeEql(u8, computed, resolved.sha256)) {
+        output.err("SHA256 mismatch for {s}", .{resolved.name});
         return InstallError.DownloadFailed;
     }
 
-    // Extract to Cellar directly (tap binaries are simple archives)
+    // Extract to Cellar directly (tap-style binaries are simple archives).
     var cellar_buf: [512]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, parts.formula, rb.version }) catch
+    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, resolved.name, resolved.version }) catch
         return InstallError.CellarFailed;
 
-    // Create cellar directory
     var parent_buf: [512]u8 = undefined;
-    const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, parts.formula }) catch
+    const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, resolved.name }) catch
         return InstallError.CellarFailed;
     fs_compat.makeDirAbsolute(parent) catch |e| switch (e) {
         error.PathAlreadyExists => {},
@@ -1611,7 +1971,6 @@ fn installTapFormula(
         else => return InstallError.CellarFailed,
     };
 
-    // Create bin subdirectory and extract
     var bin_buf: [512]u8 = undefined;
     const bin_path = std.fmt.bufPrint(&bin_buf, "{s}/bin", .{cellar_path}) catch
         return InstallError.CellarFailed;
@@ -1620,23 +1979,18 @@ fn installTapFormula(
         else => return InstallError.CellarFailed,
     };
 
-    // Pick the archive extension from the final URL. Supported formats:
-    //   .tar.gz / .tgz  — most Homebrew tap bottles
-    //   .tar.xz         — a handful of smaller taps
-    //   .zip            — HashiCorp-style releases (terraform, consul, …)
-    // Anything else is rejected with a clear message rather than silently
-    // renamed and fed to tar, which only produced a generic "Failed to
-    // extract" before.
+    // Pick archive kind from the URL suffix; reject unknown formats
+    // rather than feeding them to tar and printing a generic "failed".
     const TapArchive = enum { tar_gz, tar_xz, zip };
     const kind: ?TapArchive = blk: {
-        if (std.mem.endsWith(u8, final_url, ".tar.gz") or std.mem.endsWith(u8, final_url, ".tgz")) break :blk .tar_gz;
-        if (std.mem.endsWith(u8, final_url, ".tar.xz")) break :blk .tar_xz;
-        if (std.mem.endsWith(u8, final_url, ".zip")) break :blk .zip;
+        if (std.mem.endsWith(u8, resolved.url, ".tar.gz") or std.mem.endsWith(u8, resolved.url, ".tgz")) break :blk .tar_gz;
+        if (std.mem.endsWith(u8, resolved.url, ".tar.xz")) break :blk .tar_xz;
+        if (std.mem.endsWith(u8, resolved.url, ".zip")) break :blk .zip;
         break :blk null;
     };
     const archive_kind = kind orelse {
-        output.err("Unsupported archive format for {s}: {s}", .{ parts.formula, final_url });
-        output.err("Supported formats: .tar.gz, .tar.xz, .zip. Please open an issue if this is a widely-used tap.", .{});
+        output.err("Unsupported archive format for {s}: {s}", .{ resolved.name, resolved.url });
+        output.err("Supported formats: .tar.gz, .tar.xz, .zip.", .{});
         return InstallError.DownloadFailed;
     };
     const ext: []const u8 = switch (archive_kind) {
@@ -1656,43 +2010,37 @@ fn installTapFormula(
     tmp_file.close();
     defer fs_compat.cwd().deleteFile(tmp_archive) catch {};
 
-    // Extract archive to cellar
     const archive_mod = @import("../fs/archive.zig");
     switch (archive_kind) {
         .tar_gz => archive_mod.extractTarGz(tmp_archive, cellar_path) catch {
-            output.err("Failed to extract archive for {s}", .{parts.formula});
+            output.err("Failed to extract archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
         .tar_xz => archive_mod.extractTarXzFile(tmp_archive, cellar_path) catch {
-            output.err("Failed to extract .tar.xz archive for {s}", .{parts.formula});
+            output.err("Failed to extract .tar.xz archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
         .zip => archive_mod.extractZip(tmp_archive, cellar_path) catch {
-            output.err("Failed to extract .zip archive for {s}", .{parts.formula});
+            output.err("Failed to extract .zip archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
     }
 
-    // Find and move the binary to bin/
-    // GoReleaser may extract directly or into a subdirectory
+    // Promote the binary to bin/ (GoReleaser may extract directly or
+    // into a subdirectory — walk to handle both).
     {
         var cellar_dir = fs_compat.openDirAbsolute(cellar_path, .{ .iterate = true }) catch return InstallError.CellarFailed;
         defer cellar_dir.close();
 
-        // Walk all files (including subdirectories) looking for the formula binary
         var walker = cellar_dir.walk(allocator) catch return InstallError.CellarFailed;
         defer walker.deinit();
 
         while (walker.next() catch null) |entry| {
             if (entry.kind != .file) continue;
-
-            // Match binary by formula name (the basename, not the full path)
             const basename = std.fs.path.basename(entry.path);
-            if (std.mem.eql(u8, basename, parts.formula)) {
-                // Copy to bin/
+            if (std.mem.eql(u8, basename, resolved.name)) {
                 const dest_name = std.fmt.bufPrint(&tmp_buf, "bin/{s}", .{basename}) catch continue;
                 cellar_dir.copyFile(entry.path, cellar_dir, dest_name, .{}) catch continue;
-                // Make executable
                 const bin_file = cellar_dir.openFile(dest_name, .{ .mode = .read_write }) catch continue;
                 defer bin_file.close();
                 bin_file.chmod(0o755) catch {};
@@ -1701,10 +2049,11 @@ fn installTapFormula(
         }
     }
 
-    // Link
-    output.info("Linking {s}...", .{parts.formula});
+    output.info("Linking {s}...", .{resolved.name});
 
-    // Record in DB first to get keg_id
+    // Single DB transaction: keg row → optional tap registration →
+    // linker work → commit. `errdefer rollback` unwinds cleanly if any
+    // step fails before commit.
     db.beginTransaction() catch return InstallError.RecordFailed;
     errdefer db.rollback();
 
@@ -1715,37 +2064,33 @@ fn installTapFormula(
                 " VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'direct');",
         ) catch return InstallError.RecordFailed;
         defer stmt.finalize();
-        stmt.bindText(1, parts.formula) catch return InstallError.RecordFailed;
-        stmt.bindText(2, pkg_name) catch return InstallError.RecordFailed;
-        stmt.bindText(3, rb.version) catch return InstallError.RecordFailed;
-
-        var tap_buf: [128]u8 = undefined;
-        const tap_name = std.fmt.bufPrint(&tap_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch return InstallError.RecordFailed;
-        stmt.bindText(4, tap_name) catch return InstallError.RecordFailed;
-        stmt.bindText(5, rb.sha256) catch return InstallError.RecordFailed;
+        stmt.bindText(1, resolved.name) catch return InstallError.RecordFailed;
+        stmt.bindText(2, resolved.full_name) catch return InstallError.RecordFailed;
+        stmt.bindText(3, resolved.version) catch return InstallError.RecordFailed;
+        stmt.bindText(4, resolved.tap_label) catch return InstallError.RecordFailed;
+        stmt.bindText(5, resolved.sha256) catch return InstallError.RecordFailed;
         stmt.bindText(6, cellar_path) catch return InstallError.RecordFailed;
         _ = stmt.step() catch return InstallError.RecordFailed;
 
         keg_id = getLastInsertId(db) catch return InstallError.RecordFailed;
 
-        // Register the tap so `mt tap` lists it and `mt untap` can
-        // remove it. Carry the resolved commit SHA so `COALESCE` in
-        // tap_mod.add pins this tap on first install.
-        var tap_url_buf: [256]u8 = undefined;
-        const tap_url = std.fmt.bufPrint(&tap_url_buf, "https://github.com/{s}", .{tap_name}) catch return InstallError.RecordFailed;
-        tap_mod.add(db, tap_name, tap_url, commit_sha) catch {};
+        if (resolved.tap_registration) |t| {
+            // `COALESCE` in tap_mod.add pins the commit on first install
+            // and leaves later pins untouched.
+            tap_mod.add(db, resolved.tap_label, t.url, t.commit_sha) catch {};
+        }
     }
 
-    linker.link(cellar_path, parts.formula, keg_id) catch {
-        output.warn("Some links for {s} could not be created", .{parts.formula});
+    linker.link(cellar_path, resolved.name, keg_id) catch {
+        output.warn("Some links for {s} could not be created", .{resolved.name});
     };
-    linker.linkOpt(parts.formula, rb.version) catch {
-        output.warn("Could not create opt link for {s}", .{parts.formula});
+    linker.linkOpt(resolved.name, resolved.version) catch {
+        output.warn("Could not create opt link for {s}", .{resolved.name});
     };
 
     db.commit() catch return InstallError.RecordFailed;
 
-    output.success("{s} {s} installed", .{ parts.formula, rb.version });
+    output.success("{s} {s} installed", .{ resolved.name, resolved.version });
 }
 
 /// Minimal Ruby formula parser for GoReleaser-style formulas.

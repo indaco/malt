@@ -135,7 +135,7 @@ pub const bash_script =
     \\
     \\    local cmd_flags=""
     \\    case "$cmd" in
-    \\        install)          cmd_flags="--cask --formula --dry-run --force --quiet -q --json" ;;
+    \\        install)          cmd_flags="--cask --formula --local --dry-run --force --quiet -q --json" ;;
     \\        backup)           cmd_flags="--output -o --versions --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
@@ -234,6 +234,7 @@ pub const zsh_script =
     \\                    _arguments \
     \\                        '--cask[Force cask installation]' \
     \\                        '--formula[Force formula installation]' \
+    \\                        '--local[Install from a local .rb path]:formula:_files -g "*.rb"' \
     \\                        '--dry-run[Show what would be installed]' \
     \\                        '--force[Overwrite existing installations]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
@@ -443,6 +444,7 @@ pub const fish_script =
     \\    # install
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l cask    -d 'Force cask'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l formula -d 'Force formula'
+    \\    complete -c $__malt_bin -n '__malt_using_command install' -l local   -d 'Install from a local .rb path'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l force   -d 'Overwrite existing'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l json    -d 'JSON output'
