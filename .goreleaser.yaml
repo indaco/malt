@@ -83,6 +83,9 @@ homebrew_casks:
           end
 
 release:
+  # Assets upload to a draft; the release workflow's notes step flips
+  # draft=false after writing the changelog. All other release
+  # semantics (title, prerelease, latest, notes) are owned by
+  # .github/workflows/release.yml — goreleaser is artefacts only.
   draft: true
-  prerelease: auto
-  name_template: "{{ .ProjectName }} v{{ .Version }}"
+  name_template: "v{{ .Version }}"
