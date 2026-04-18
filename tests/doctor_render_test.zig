@@ -9,6 +9,13 @@
 const std = @import("std");
 const testing = std.testing;
 const doctor = @import("malt").doctor;
+const color = @import("malt").color;
+
+// Pin the palette so escape-string assertions stay deterministic
+// across terminals. Tests below run against dark+basic.
+comptime {
+    // no-op, just documents the shared assumption.
+}
 
 const Buf = struct {
     list: std.ArrayList(u8) = .empty,
@@ -28,6 +35,10 @@ fn render(
     detail: ?[]const u8,
     opts: doctor.CheckStyle,
 ) ![]const u8 {
+    color.setBackgroundForTest(color.Background.dark);
+    color.setTruecolorForTest(false);
+    defer color.setBackgroundForTest(null);
+    defer color.setTruecolorForTest(null);
     var buf: Buf = .{};
     try doctor.renderCheckRow(&buf, status, name, detail, opts);
     return buf.list.toOwnedSlice(testing.allocator);
