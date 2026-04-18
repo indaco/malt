@@ -76,33 +76,19 @@ if [ -n "$COSIGN_PATH" ]; then
   SAFE_PATH="$(dirname "$COSIGN_PATH"):$SAFE_PATH"
 fi
 
-# GitHub's /releases/latest endpoint flips to the new tag
-# asynchronously — measured at up to ~60s after a release is published
-# (the old release stops being "latest" before the new one takes the
-# flag, and the endpoint serves 404 through the transition). The
-# smoke runs seconds after publish, so a blind sleep isn't enough.
-# Actively poll the API until it reflects our tag, up to 2 minutes.
-# install.sh itself has a retry loop for real users; this poll just
-# makes the CI feedback loop deterministic.
+# GitHub publishes a release in two observable steps:
+#   1. /releases/tags/<tag> goes 200 (the release object exists).
+#   2. /releases/latest.tag_name flips to <tag> (CDN catches up).
+# install.sh hits /releases/latest, so step 2 is the user-facing gate —
+# but separating the two lets the smoke say *which* of the two lagged.
+# Unit coverage for these helpers lives in scripts/test/release_wait_test.sh.
 if [ "${MALT_SMOKE_SKIP_PROPAGATION_WAIT:-0}" != "1" ]; then
   EXPECTED_TAG="v$(cat "$(dirname "$0")/../../.version")"
-  step "Waiting up to 2m for ${EXPECTED_TAG} to appear on /releases/latest"
-  API_URL="https://api.github.com/repos/indaco/malt/releases/latest"
-  deadline=$(($(date +%s) + 120))
-  ready=0
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    body=$(curl -fsSL --max-time 10 "$API_URL" 2>/dev/null || true)
-    if printf '%s' "$body" | grep -q "\"tag_name\": *\"${EXPECTED_TAG}\""; then
-      ready=1
-      break
-    fi
-    sleep 5
-  done
-  if [ "$ready" = "1" ]; then
-    pass "API reflects ${EXPECTED_TAG}"
-  else
-    fail "API still not showing ${EXPECTED_TAG} after 2m — propagation unusually slow"
-  fi
+  # shellcheck source=/dev/null
+  source "$(dirname "$0")/../lib/release_wait.sh"
+  step "Waiting up to $((WAIT_BUDGET_SECONDS / 60))m for ${EXPECTED_TAG} to propagate"
+  wait_for_release "${EXPECTED_TAG}"
+  pass "API /releases/latest reflects ${EXPECTED_TAG}"
 fi
 
 step "Running install.sh from README against the live release"
