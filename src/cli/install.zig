@@ -1351,9 +1351,11 @@ fn installCask(
         .func = &progressBridge,
     };
 
-    const app_path = installer.install(&cask) catch {
+    const app_path = installer.install(&cask) catch |e| {
         bar.finish();
-        output.err("Failed to install cask {s}", .{cask.token});
+        // Surface the specific cause (Sha256Mismatch, DownloadFailed, …) —
+        // users can't act on a bare "failed to install".
+        output.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
         return InstallError.CaskNotFound;
     };
     bar.finish();
