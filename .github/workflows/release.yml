@@ -1,8 +1,13 @@
 name: Release
 
 on:
-  release:
-    types: [created]
+  # Pushing a semver tag is the single source of truth for "cut a
+  # release". Goreleaser creates the GitHub release itself, then the
+  # notes job edits it with the changelog. Keeps the happy path to:
+  #   sley bump auto && sley changelog merge && sley tag create --push
+  push:
+    tags:
+      - "v*"
 
 permissions: {}
 
@@ -77,15 +82,25 @@ jobs:
 
       - name: Update release with notes
         env:
-          TAG_NAME: ${{ github.event.release.tag_name }}
+          # `ref_name` is the tag (e.g. v0.7.0) on push:tags events.
+          TAG_NAME: ${{ github.ref_name }}
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
+          # Fail loud and early if the changelog fragment is missing —
+          # `gh release edit --notes-file` otherwise errors cryptically
+          # after already touching the release.
+          notes_file="${{ github.workspace }}/.changes/${TAG_NAME}.md"
+          if [ ! -f "$notes_file" ]; then
+            echo "::error::missing changelog fragment at $notes_file" \
+                 "— run 'sley changelog merge' before 'sley tag create --push'"
+            exit 1
+          fi
           gh release edit "$TAG_NAME" \
             --title "$TAG_NAME" \
             --draft=false \
             --prerelease=false \
             --latest \
-            --notes-file "${{ github.workspace }}/.changes/${TAG_NAME}.md"
+            --notes-file "$notes_file"
 
   # End-to-end smoke: installs from the published release artifacts and
   # verifies cosign + checksum + a trivial formula install. Runs here
