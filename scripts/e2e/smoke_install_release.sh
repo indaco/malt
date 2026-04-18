@@ -76,13 +76,33 @@ if [ -n "$COSIGN_PATH" ]; then
   SAFE_PATH="$(dirname "$COSIGN_PATH"):$SAFE_PATH"
 fi
 
-# GitHub's /releases/latest is CDN-cached and lags a freshly-published
-# release by up to a minute. install.sh has its own retry loop, but a
-# short pre-wait here shortens the feedback loop when the smoke runs
-# seconds after the release is flipped to published.
+# GitHub's /releases/latest endpoint flips to the new tag
+# asynchronously — measured at up to ~60s after a release is published
+# (the old release stops being "latest" before the new one takes the
+# flag, and the endpoint serves 404 through the transition). The
+# smoke runs seconds after publish, so a blind sleep isn't enough.
+# Actively poll the API until it reflects our tag, up to 2 minutes.
+# install.sh itself has a retry loop for real users; this poll just
+# makes the CI feedback loop deterministic.
 if [ "${MALT_SMOKE_SKIP_PROPAGATION_WAIT:-0}" != "1" ]; then
-  step "Waiting 15s for release to propagate to the API"
-  sleep 15
+  EXPECTED_TAG="v$(cat "$(dirname "$0")/../../.version")"
+  step "Waiting up to 2m for ${EXPECTED_TAG} to appear on /releases/latest"
+  API_URL="https://api.github.com/repos/indaco/malt/releases/latest"
+  deadline=$(($(date +%s) + 120))
+  ready=0
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    body=$(curl -fsSL --max-time 10 "$API_URL" 2>/dev/null || true)
+    if printf '%s' "$body" | grep -q "\"tag_name\": *\"${EXPECTED_TAG}\""; then
+      ready=1
+      break
+    fi
+    sleep 5
+  done
+  if [ "$ready" = "1" ]; then
+    pass "API reflects ${EXPECTED_TAG}"
+  else
+    fail "API still not showing ${EXPECTED_TAG} after 2m — propagation unusually slow"
+  fi
 fi
 
 step "Running install.sh from README against the live release"
