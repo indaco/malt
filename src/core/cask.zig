@@ -275,29 +275,7 @@ pub const CaskInstaller = struct {
     }
 
     fn verifySha256(_: *CaskInstaller, file_path: []const u8, expected: ?[]const u8) !void {
-        const expected_hash = expected orelse return; // no_check casks skip verification
-        if (std.mem.eql(u8, expected_hash, "no_check")) return;
-
-        const file = try fs_compat.openFileAbsolute(file_path, .{});
-        defer file.close();
-
-        const stat = try file.stat();
-        // For large files, read in chunks
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        var read_buf: [65536]u8 = undefined;
-        var remaining: u64 = stat.size;
-        while (remaining > 0) {
-            const to_read = @min(remaining, read_buf.len);
-            const n = file.readAll(read_buf[0..to_read]) catch return error.Sha256Mismatch;
-            if (n == 0) break;
-            hasher.update(read_buf[0..n]);
-            remaining -= n;
-        }
-        var hash: [32]u8 = undefined;
-        hasher.final(&hash);
-
-        const hex_buf = std.fmt.bytesToHex(hash, .lower);
-        if (!std.mem.eql(u8, &hex_buf, expected_hash)) return error.Sha256Mismatch;
+        return verifyFileSha256(file_path, expected);
     }
 
     fn installDmg(self: *CaskInstaller, dmg_path: []const u8, app_dir: []const u8, cask: *const Cask) ![]const u8 {
@@ -452,6 +430,45 @@ pub const CaskInstaller = struct {
         fs_compat.cwd().makePath(caskroom_ver) catch {};
     }
 };
+
+/// SHA256 buffer size — one positional read per 64 KiB.
+const sha256_read_chunk: usize = 64 * 1024;
+
+/// Compute the SHA256 of `file_path` as lowercase hex. Streams via
+/// `fs_compat.streamFile` so the file-reading loop lives in exactly
+/// one place — no more hand-rolled offset bookkeeping.
+pub fn hashFileSha256(file_path: []const u8) ![64]u8 {
+    const file = try fs_compat.openFileAbsolute(file_path, .{});
+    defer file.close();
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var read_buf: [sha256_read_chunk]u8 = undefined;
+    try fs_compat.streamFile(file, &read_buf, .{
+        .context = @ptrCast(&hasher),
+        .func = &sha256Update,
+    });
+    var hash: [32]u8 = undefined;
+    hasher.final(&hash);
+    return std.fmt.bytesToHex(hash, .lower);
+}
+
+/// Bridge `streamFile`'s erased-context callback to `Sha256.update`.
+fn sha256Update(ctx: *anyopaque, chunk: []const u8) anyerror!void {
+    const hasher: *std.crypto.hash.sha2.Sha256 = @ptrCast(@alignCast(ctx));
+    hasher.update(chunk);
+}
+
+/// Verify `file_path` hashes to `expected` (lowercase hex). A null
+/// `expected` or the literal `"no_check"` skips verification —
+/// mirrors Homebrew's `sha256 :no_check` escape hatch for casks that
+/// cannot be pinned (auto-updating installers).
+pub fn verifyFileSha256(file_path: []const u8, expected: ?[]const u8) !void {
+    const expected_hash = expected orelse return;
+    if (std.mem.eql(u8, expected_hash, "no_check")) return;
+
+    const got = try hashFileSha256(file_path);
+    if (!std.mem.eql(u8, &got, expected_hash)) return error.Sha256Mismatch;
+}
 
 /// Check if an application is currently running by its path.
 fn isAppRunning(app_path: []const u8) bool {

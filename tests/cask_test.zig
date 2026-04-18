@@ -171,3 +171,260 @@ test "isOutdated detects version mismatch" {
     try std.testing.expect(installer.isOutdated("firefox", "124.0"));
     try std.testing.expect(!installer.isOutdated("firefox", "123.0"));
 }
+
+// ─── hashFileSha256 / verifyFileSha256 ───────────────────────────────
+//
+// A multi-chunk read bug meant any file larger than the 64 KiB read
+// buffer got the first chunk re-hashed in place of later chunks,
+// producing a wrong digest. Caught on a live cask install where the
+// upstream zip was bit-perfect but malt rejected it. These tests
+// exercise the chunk loop at every boundary and prove the hash
+// output against independently-computed digests.
+
+const testing = std.testing;
+const malt_fs = malt.fs_compat;
+
+/// 64 KiB — the internal SHA256 read buffer size. Every boundary
+/// case below is expressed relative to this so the tests stay
+/// meaningful if the constant ever changes.
+const CHUNK: usize = 64 * 1024;
+
+fn tempFilePath(tag: []const u8, buf: []u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "/tmp/malt_cask_verify_{s}_{d}", .{ tag, malt_fs.nanoTimestamp() });
+}
+
+fn writeFile(path: []const u8, bytes: []const u8) !void {
+    const f = try malt_fs.createFileAbsolute(path, .{});
+    defer f.close();
+    try f.writeAll(bytes);
+}
+
+/// Independent SHA256 of `bytes` as lowercase hex, computed in one
+/// pass via `std.crypto` — used to cross-check the chunked impl.
+fn referenceHex(bytes: []const u8) [64]u8 {
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+    return std.fmt.bytesToHex(hash, .lower);
+}
+
+/// Fill `buf` with a predictable, non-repeating byte pattern so every
+/// chunk contributes distinct bytes. The old bug only shows up when
+/// later chunks differ from the first.
+fn fillPattern(buf: []u8) void {
+    for (buf, 0..) |*b, i| b.* = @intCast((i *% 131 +% 7) & 0xFF);
+}
+
+fn hashTempFile(alloc: std.mem.Allocator, tag: []const u8, size: usize) !void {
+    const payload = try alloc.alloc(u8, size);
+    defer alloc.free(payload);
+    fillPattern(payload);
+
+    var path_buf: [128]u8 = undefined;
+    const p = try tempFilePath(tag, &path_buf);
+    try writeFile(p, payload);
+    defer malt_fs.cwd().deleteFile(p) catch {};
+
+    const got = try cask.hashFileSha256(p);
+    const want = referenceHex(payload);
+    try testing.expectEqualSlices(u8, &want, &got);
+}
+
+// ── hashFileSha256: exercises the chunk-boundary matrix ──────────────
+
+test "hashFileSha256 matches reference for an empty file" {
+    var path_buf: [128]u8 = undefined;
+    const p = try tempFilePath("empty", &path_buf);
+    try writeFile(p, "");
+    defer malt_fs.cwd().deleteFile(p) catch {};
+
+    const got = try cask.hashFileSha256(p);
+    // SHA256 of empty input.
+    try testing.expectEqualSlices(
+        u8,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        &got,
+    );
+}
+
+test "hashFileSha256 matches reference for sub-chunk inputs" {
+    try hashTempFile(testing.allocator, "sub_1", 1);
+    try hashTempFile(testing.allocator, "sub_63", 63);
+    try hashTempFile(testing.allocator, "sub_1024", 1024);
+}
+
+test "hashFileSha256 matches reference at CHUNK-1" {
+    try hashTempFile(testing.allocator, "below", CHUNK - 1);
+}
+
+test "hashFileSha256 matches reference at exactly CHUNK" {
+    // Precise boundary: the loop does one full read then a short-read
+    // EOF check. If the loop ever double-read the first chunk this
+    // would be the smallest failing size.
+    try hashTempFile(testing.allocator, "eq", CHUNK);
+}
+
+test "hashFileSha256 matches reference at CHUNK+1 (straddles the boundary)" {
+    try hashTempFile(testing.allocator, "above", CHUNK + 1);
+}
+
+test "hashFileSha256 matches reference across two full chunks" {
+    try hashTempFile(testing.allocator, "two", 2 * CHUNK);
+}
+
+test "hashFileSha256 matches reference across 2½ chunks (the repro size)" {
+    // 160 KiB — mirrors the failing-in-the-wild case: later chunks
+    // carry bytes the old loop never actually hashed.
+    try hashTempFile(testing.allocator, "repro", CHUNK * 2 + CHUNK / 2);
+}
+
+test "hashFileSha256 matches reference on a 1 MiB payload" {
+    try hashTempFile(testing.allocator, "mib", 1024 * 1024);
+}
+
+test "hashFileSha256 of 'abc' matches the NIST test vector" {
+    var path_buf: [128]u8 = undefined;
+    const p = try tempFilePath("nist_abc", &path_buf);
+    try writeFile(p, "abc");
+    defer malt_fs.cwd().deleteFile(p) catch {};
+
+    const got = try cask.hashFileSha256(p);
+    try testing.expectEqualSlices(
+        u8,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        &got,
+    );
+}
+
+test "hashFileSha256 propagates FileNotFound for a missing path" {
+    try testing.expectError(
+        error.FileNotFound,
+        cask.hashFileSha256("/tmp/malt_cask_verify_absent_xyzzy.bin"),
+    );
+}
+
+// ── verifyFileSha256: the pickier public API ─────────────────────────
+
+test "verifyFileSha256 accepts the correct digest on a tiny file" {
+    var path_buf: [128]u8 = undefined;
+    const p = try tempFilePath("tiny_ok", &path_buf);
+    try writeFile(p, "hello");
+    defer malt_fs.cwd().deleteFile(p) catch {};
+
+    // `printf 'hello' | shasum -a 256`
+    try cask.verifyFileSha256(p, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+}
+
+test "verifyFileSha256 rejects a digest with a single flipped bit" {
+    // The strictest form of "is our compare byte-exact?" — the only
+    // difference from the correct digest is the trailing character.
+    var path_buf: [128]u8 = undefined;
+    const p = try tempFilePath("flip", &path_buf);
+    try writeFile(p, "hello");
+    defer malt_fs.cwd().deleteFile(p) catch {};
+
+    try testing.expectError(
+        error.Sha256Mismatch,
+        cask.verifyFileSha256(p, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9825"),
+    );
+}
+
+test "verifyFileSha256 rejects an uppercase digest (strict lower-hex)" {
+    // Homebrew always emits lowercase. Reject mixed-case so a sloppy
+    // copy-paste can never silently succeed with an attacker-tuned hex.
+    var path_buf: [128]u8 = undefined;
+    const p = try tempFilePath("upper", &path_buf);
+    try writeFile(p, "hello");
+    defer malt_fs.cwd().deleteFile(p) catch {};
+
+    try testing.expectError(
+        error.Sha256Mismatch,
+        cask.verifyFileSha256(p, "2CF24DBA5FB0A30E26E83B2AC5B9E29E1B161E5C1FA7425E73043362938B9824"),
+    );
+}
+
+test "verifyFileSha256 rejects a truncated or over-length digest" {
+    var path_buf: [128]u8 = undefined;
+    const p = try tempFilePath("length", &path_buf);
+    try writeFile(p, "hello");
+    defer malt_fs.cwd().deleteFile(p) catch {};
+
+    try testing.expectError(error.Sha256Mismatch, cask.verifyFileSha256(p, "2cf2"));
+    try testing.expectError(
+        error.Sha256Mismatch,
+        cask.verifyFileSha256(p, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b98240"),
+    );
+}
+
+test "verifyFileSha256 skips verification on null or :no_check" {
+    // `sha256 :no_check` is Homebrew's opt-out for self-updating
+    // installers. Honouring the skip prevents spurious failures on
+    // perfectly valid casks.
+    var path_buf: [128]u8 = undefined;
+    const p = try tempFilePath("skip", &path_buf);
+    try writeFile(p, "anything");
+    defer malt_fs.cwd().deleteFile(p) catch {};
+
+    try cask.verifyFileSha256(p, null);
+    try cask.verifyFileSha256(p, "no_check");
+}
+
+test "verifyFileSha256 accepts a correct digest on a >1 MiB file" {
+    // Regression guard for the chunked-read bug: the public API must
+    // produce the same digest as `openssl dgst -sha256` on arbitrarily
+    // large files. Without the fix, every chunk after the first is
+    // re-read from offset 0 and the digest comes out wrong.
+    const alloc = testing.allocator;
+    const size: usize = 1024 * 1024 + 7; // non-power-of-two on purpose
+    const payload = try alloc.alloc(u8, size);
+    defer alloc.free(payload);
+    fillPattern(payload);
+
+    var path_buf: [128]u8 = undefined;
+    const p = try tempFilePath("big_ok", &path_buf);
+    try writeFile(p, payload);
+    defer malt_fs.cwd().deleteFile(p) catch {};
+
+    const expected = referenceHex(payload);
+    try cask.verifyFileSha256(p, &expected);
+}
+
+test "verifyFileSha256 propagates FileNotFound rather than Sha256Mismatch" {
+    // Distinguish I/O failure from hash failure — users hitting a
+    // permission error deserve to know, not "your download is
+    // corrupt" when nothing was ever read.
+    try testing.expectError(
+        error.FileNotFound,
+        cask.verifyFileSha256("/tmp/malt_cask_verify_missing_xyzzy.bin", "0" ** 64),
+    );
+}
+
+test "verifyFileSha256 accepts only the exact-byte payload (collision check)" {
+    // Two files that differ by a single byte must produce different
+    // hashes — the chunk-boundary bug could otherwise let two files
+    // share a hash when the diverging byte lived in a "skipped" chunk.
+    const alloc = testing.allocator;
+    const a = try alloc.alloc(u8, CHUNK + 128);
+    defer alloc.free(a);
+    fillPattern(a);
+
+    const b = try alloc.alloc(u8, CHUNK + 128);
+    defer alloc.free(b);
+    fillPattern(b);
+    b[CHUNK + 64] +%= 1; // flip one byte past the first chunk boundary
+
+    var ap_buf: [128]u8 = undefined;
+    const ap = try tempFilePath("coll_a", &ap_buf);
+    try writeFile(ap, a);
+    defer malt_fs.cwd().deleteFile(ap) catch {};
+
+    var bp_buf: [128]u8 = undefined;
+    const bp = try tempFilePath("coll_b", &bp_buf);
+    try writeFile(bp, b);
+    defer malt_fs.cwd().deleteFile(bp) catch {};
+
+    const hex_a = referenceHex(a);
+    try cask.verifyFileSha256(ap, &hex_a);
+    // `a`'s hash must NOT validate `b` — this is exactly the property
+    // the old bug could have broken.
+    try testing.expectError(error.Sha256Mismatch, cask.verifyFileSha256(bp, &hex_a));
+}
