@@ -84,6 +84,31 @@ pub fn milliTimestamp() i64 {
     return @as(i64, ts.sec) * std.time.ms_per_s + @divTrunc(ts.nsec, std.time.ns_per_ms);
 }
 
+/// Context + function pair for `streamFile`. The func receives every
+/// chunk exactly once, in order — any non-void error aborts the walk
+/// and propagates out to the caller.
+pub const StreamCallback = struct {
+    context: *anyopaque,
+    func: *const fn (context: *anyopaque, chunk: []const u8) anyerror!void,
+};
+
+/// Walk `file` from start to EOF in `buf`-sized chunks, invoking `cb`
+/// on each chunk. Advancing-offset positional reads — the obvious way
+/// to stream a file without tripping on `readAll`'s offset-0
+/// behaviour. Fails fast on a zero-length buffer (would loop).
+pub fn streamFile(file: File, buf: []u8, cb: StreamCallback) !void {
+    if (buf.len == 0) return error.InvalidArgument;
+    var offset: u64 = 0;
+    while (true) {
+        const n = try file.readAllAt(buf, offset);
+        if (n == 0) break;
+        try cb.func(cb.context, buf[0..n]);
+        offset += n;
+        // Short read ⇒ EOF; skip one extra syscall on exact-multiple sizes.
+        if (n < buf.len) break;
+    }
+}
+
 pub fn isatty(fd: std.posix.fd_t) bool {
     return std.c.isatty(fd) != 0;
 }
@@ -247,10 +272,18 @@ pub const File = struct {
         });
     }
 
+    /// Positional read from offset 0. Safe for single-shot reads of a
+    /// whole file into a stat-sized buffer. **Never call this inside a
+    /// loop** — every iteration re-reads the first bytes. For
+    /// streaming use `readAllAt` with an advancing offset or (better)
+    /// the `streamFile` helper which handles the offset bookkeeping.
     pub fn readAll(self: File, buffer: []u8) !usize {
         return self.inner.readPositionalAll(io_mod.ctx(), buffer, 0);
     }
 
+    /// Positional read from `offset`. The streaming primitive — the
+    /// caller advances `offset` by the returned byte count. Prefer
+    /// `streamFile` when the loop body would otherwise be boilerplate.
     pub fn readAllAt(self: File, buffer: []u8, offset: u64) !usize {
         return self.inner.readPositionalAll(io_mod.ctx(), buffer, offset);
     }
