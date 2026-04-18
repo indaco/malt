@@ -118,6 +118,9 @@ malt install --cask firefox
 # Install from a tap (inline — no separate tap step)
 malt install user/tap/formula
 
+# Install from a local .rb file (explicit opt-in)
+malt install --local ./wget.rb
+
 # Install multiple packages (downloads in parallel)
 malt install jq wget ripgrep
 
@@ -147,18 +150,51 @@ mt install <package>@<version>           # versioned formula (e.g. openssl@3)
 mt install --cask <app>                  # explicit cask
 mt install --formula <name>              # explicit formula
 mt install <user>/<tap>/<formula>        # inline tap (no separate tap step)
+mt install --local <path.rb>             # install from a local Ruby formula
 mt install <package> [<package> ...]     # multiple packages
 ```
 
-| Flag                           | Description                                                 |
-| ------------------------------ | ----------------------------------------------------------- |
-| `--cask`                       | Force cask installation                                     |
-| `--formula`                    | Force formula installation                                  |
-| `--dry-run`                    | Show what would be installed without installing             |
-| `--force`                      | Overwrite existing installations                            |
-| `--use-system-ruby[=<name>,…]` | Run `post_install` via system Ruby (sandboxed, per-formula) |
-| `--quiet`, `-q`                | Suppress all output except errors                           |
-| `--json`                       | Output result as JSON                                       |
+| Flag                           | Description                                                          |
+| ------------------------------ | -------------------------------------------------------------------- |
+| `--cask`                       | Force cask installation                                              |
+| `--formula`                    | Force formula installation                                           |
+| `--local`                      | Install from a local `.rb` path (code-exec surface — trust required) |
+| `--dry-run`                    | Show what would be installed without installing                      |
+| `--force`                      | Overwrite existing installations                                     |
+| `--use-system-ruby[=<name>,…]` | Run `post_install` via system Ruby (sandboxed, per-formula)          |
+| `--quiet`, `-q`                | Suppress all output except errors                                    |
+| `--json`                       | Output result as JSON                                                |
+
+> [!IMPORTANT]
+> **`--local` trust boundary.** Installing from a `.rb` path trusts that file to name the archive URL and SHA256 of what ends up on your system. Use it for your own formulas, for experimenting with upstream changes before they land in a tap, or for private in-house packages — never for a `.rb` you did not read.
+>
+> malt prints the canonical realpath on every install so an attentive reader notices surprises like `/tmp/...`. A leading `./`, `/`, `~/`, or any embedded slash combined with a `.rb` suffix is auto-detected as a local path; the same warning fires either way. Bare filenames (e.g. `wget.rb` without `./`) are _not_ auto-detected — pass `--local` to disambiguate.
+>
+> **Security guardrails.** The archive URL inside the `.rb` must be `https://` — plaintext HTTP, `file://`, `ftp://`, and `data:` are rejected before any download. The SHA256 check uses a constant-time compare. An extra `⚠` line fires if the `.rb` is world-writable or owned by a different user. Combining `--local` with `--cask`, `--formula`, or `--use-system-ruby` is refused up front.
+>
+> **Not supported for local installs.** `depends_on` and `post_install` blocks inside the `.rb` are **not** evaluated — only the bottle-style `version` + `url` + `sha256` triple (optionally inside `on_macos` / `on_arm` / `on_intel`). If you need dependencies or `post_install` behaviour, publish the formula to a tap and install via `mt install user/tap/formula`.
+>
+> **Archive formats.** The `url` must end in `.tar.gz` / `.tgz`, `.tar.xz`, or `.zip`. Anything else is rejected with a clear error before download.
+>
+> **Minimal compatible `.rb`.** This is the full shape malt reads — everything else is ignored:
+>
+> ```ruby
+> class Hello < Formula
+>   version "1.2.3"
+>   on_macos do
+>     on_arm do
+>       url "https://example.com/hello-#{version}-arm64.tar.gz"
+>       sha256 "aaaa…"   # 64 hex chars
+>     end
+>     on_intel do
+>       url "https://example.com/hello-#{version}-x86_64.tar.gz"
+>       sha256 "bbbb…"
+>     end
+>   end
+> end
+> ```
+>
+> The formula name comes from the `.rb` basename (so `hello.rb` installs `hello`). A flat `url` / `sha256` at the top level works for single-arch archives. See `scripts/fixtures/local_formulae/hello.rb` for a runnable example.
 
 > [!NOTE]
 > **Post-install scripts run natively.** malt includes a built-in interpreter that executes Homebrew `post_install` blocks in Zig — no Ruby required. Packages like `node`, `openssl`, `fontconfig`, and `docbook` are fully configured at install time. For the small number of scripts the interpreter doesn't cover, add `--use-system-ruby` to delegate to any available Ruby, or use `brew install` as a fallback. See [Post-Install DSL Interpreter](#post-install-dsl-interpreter) for details.
