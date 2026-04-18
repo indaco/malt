@@ -91,18 +91,26 @@ else
   # ── Find latest release ──────────────────────────────────────────
   info "Fetching latest release..."
   # Retry any curl failure — GitHub's /releases/latest endpoint can
-  # return 404 (CDN cache not yet warm on a freshly published release),
-  # 5xx, rate-limit responses, or just time out. Curl's built-in --retry
-  # only covers 408/429/5xx and needs 7.71+ for --retry-all-errors, so
-  # we do it in bash for portability across macOS and older Linux.
+  # return 404 while the "latest" flag is in transition right after a
+  # release is published, plus the usual 5xx/rate-limit/timeout.
+  # Measured: transition can take 30-60s after publish, so the retry
+  # budget has to be at least ~45s to cover it. Exponential backoff
+  # across 5 attempts (3, 6, 12, 24) gives ~45s plus the fast-fail
+  # per-attempt time — still bounded, and benefits every one-liner
+  # user hitting a freshly-cut release, not just the CI smoke. Plain
+  # --retry (no --retry-all-errors) needs 7.71+, so we do it in bash
+  # for portability across macOS and older Linux.
   API_RESPONSE=""
-  for attempt in 1 2 3; do
+  backoffs="3 6 12 24"
+  attempt=0
+  for delay in $backoffs end; do
+    attempt=$((attempt + 1))
     if API_RESPONSE=$(curl -fsSL --connect-timeout 10 --max-time 30 \
       "$API_LATEST_URL" 2>/dev/null); then
       break
     fi
     API_RESPONSE=""
-    [ "$attempt" -lt 3 ] && sleep $((attempt * 3))
+    [ "$delay" != "end" ] && sleep "$delay"
   done
   if [ -n "$API_RESPONSE" ]; then
     LATEST=$(printf '%s' "$API_RESPONSE" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
