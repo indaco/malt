@@ -155,6 +155,9 @@ run_ok t2.info.json -- "$MT_BIN" info jq --json
 run_ok t2.outdated -- "$MT_BIN" outdated
 run_ok t2.outdated.json -- "$MT_BIN" outdated --json
 run_ok t2.update -- "$MT_BIN" update
+# --check must not touch the binary; guards the self-update path as it
+# grows cosign verification.
+run_ok t2.version.update.check -- "$MT_BIN" version update --check
 run_ok t2.tap.list -- "$MT_BIN" tap
 
 # doctor: README documents exit 0/1/2 as valid semantics — accept all three on a
