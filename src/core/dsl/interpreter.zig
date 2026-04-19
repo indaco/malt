@@ -463,6 +463,21 @@ pub const Interpreter = struct {
                 }
             }
 
+            // Enumerable methods on hash receivers — same shape as arrays
+            // but the block is yielded (key, value) pairs. Covers llvm@21's
+            // `{ darwin: ..., macosx: ... }.map do |system, version| ... end`.
+            if (receiver_val == .hash and mc.blk != null) {
+                if (std.mem.eql(u8, mc.method, "map")) {
+                    return self.evalHashMap(receiver_val.hash, mc.block_params, mc.blk.?);
+                } else if (std.mem.eql(u8, mc.method, "each")) {
+                    return self.evalHashEach(receiver_val.hash, mc.block_params, mc.blk.?);
+                } else if (std.mem.eql(u8, mc.method, "select")) {
+                    return self.evalHashSelect(receiver_val.hash, mc.block_params, mc.blk.?);
+                } else if (std.mem.eql(u8, mc.method, "reject")) {
+                    return self.evalHashReject(receiver_val.hash, mc.block_params, mc.blk.?);
+                }
+            }
+
             // `&:sym` block-pass on the common Enumerable methods. The symbol
             // names a receiver builtin invoked per element — same effect as
             // `{ |x| x.sym }` without the block allocation.
@@ -487,6 +502,23 @@ pub const Interpreter = struct {
                 } else if (std.mem.eql(u8, mc.method, "any?")) {
                     for (receiver_val.array) |it| if (it.isTruthy()) return Value{ .bool = true };
                     return Value{ .bool = false };
+                }
+            }
+
+            // `hash.any?` / `hash.all?` without a block. Ruby's default is
+            // non-empty / empty check for `any?` and "every value truthy"
+            // for `all?` (treating pairs as `[k, v]` truthy-by-default, so
+            // `all?` reduces to "no entries are nil/false values").
+            if (receiver_val == .hash and mc.blk == null and mc.block_pass == null) {
+                if (std.mem.eql(u8, mc.method, "any?")) {
+                    return Value{ .bool = receiver_val.hash.len > 0 };
+                } else if (std.mem.eql(u8, mc.method, "all?")) {
+                    for (receiver_val.hash) |pair| if (!pair.value.isTruthy()) return Value{ .bool = false };
+                    return Value{ .bool = true };
+                } else if (std.mem.eql(u8, mc.method, "empty?")) {
+                    return Value{ .bool = receiver_val.hash.len == 0 };
+                } else if (std.mem.eql(u8, mc.method, "length") or std.mem.eql(u8, mc.method, "size")) {
+                    return Value{ .int = @as(i64, @intCast(receiver_val.hash.len)) };
                 }
             }
 
@@ -621,23 +653,28 @@ pub const Interpreter = struct {
 
     fn evalEachLoop(self: *Interpreter, el: *const ast.EachLoop) DslError!Value {
         const iterable = try self.eval(el.iterable);
-        const items = switch (iterable) {
-            .array => |a| a,
+        switch (iterable) {
+            .array => |items| for (items) |item| {
+                self.ctx.pushScope();
+                defer self.ctx.popScope();
+                if (el.params.len > 0) self.ctx.setLocal(el.params[0], item);
+                _ = self.evalBlockSlice(el.body) catch |e| switch (e) {
+                    DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
+                    else => continue,
+                };
+            },
+            .hash => |pairs| for (pairs) |pair| {
+                // Hash iteration yields (key, value) — matches Ruby's
+                // `hash.each do |k, v|` and the llvm@21 post_install shape.
+                self.ctx.pushScope();
+                defer self.ctx.popScope();
+                self.bindHashPair(el.params, pair);
+                _ = self.evalBlockSlice(el.body) catch |e| switch (e) {
+                    DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
+                    else => continue,
+                };
+            },
             else => return Value{ .nil = {} },
-        };
-
-        for (items) |item| {
-            self.ctx.pushScope();
-            defer self.ctx.popScope();
-
-            if (el.params.len > 0) {
-                self.ctx.setLocal(el.params[0], item);
-            }
-
-            _ = self.evalBlockSlice(el.body) catch |e| switch (e) {
-                DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
-                else => continue,
-            };
         }
         return Value{ .nil = {} };
     }
@@ -722,6 +759,75 @@ pub const Interpreter = struct {
             };
         }
         return Value{ .nil = {} };
+    }
+
+    /// Bind a hash pair into the current scope for block evaluation. Two
+    /// positional params → classic `|k, v|`; one param → the pair is
+    /// bound to it (same shape as Ruby's `|kv|` destructuring). Zero
+    /// params is legal but useless — nothing to reference.
+    fn bindHashPair(self: *Interpreter, params: []const []const u8, pair: Value.HashPair) void {
+        if (params.len == 0) return;
+        if (params.len == 1) {
+            const arr = self.allocator.alloc(Value, 2) catch return;
+            arr[0] = pair.key;
+            arr[1] = pair.value;
+            self.ctx.setLocal(params[0], Value{ .array = arr });
+            return;
+        }
+        self.ctx.setLocal(params[0], pair.key);
+        self.ctx.setLocal(params[1], pair.value);
+    }
+
+    fn evalHashEach(self: *Interpreter, pairs: []const Value.HashPair, params: []const []const u8, blk: *const Node) DslError!Value {
+        for (pairs) |pair| {
+            self.ctx.pushScope();
+            defer self.ctx.popScope();
+            self.bindHashPair(params, pair);
+            _ = self.eval(blk) catch |e| switch (e) {
+                DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
+                else => continue,
+            };
+        }
+        return Value{ .nil = {} };
+    }
+
+    fn evalHashMap(self: *Interpreter, pairs: []const Value.HashPair, params: []const []const u8, blk: *const Node) DslError!Value {
+        var out: std.ArrayList(Value) = .empty;
+        for (pairs) |pair| {
+            self.ctx.pushScope();
+            defer self.ctx.popScope();
+            self.bindHashPair(params, pair);
+            const v = try self.eval(blk);
+            out.append(self.allocator, v) catch return DslError.OutOfMemory;
+        }
+        const slice = out.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+        return Value{ .array = slice };
+    }
+
+    fn evalHashSelect(self: *Interpreter, pairs: []const Value.HashPair, params: []const []const u8, blk: *const Node) DslError!Value {
+        var out: std.ArrayList(Value.HashPair) = .empty;
+        for (pairs) |pair| {
+            self.ctx.pushScope();
+            defer self.ctx.popScope();
+            self.bindHashPair(params, pair);
+            const v = try self.eval(blk);
+            if (v.isTruthy()) out.append(self.allocator, pair) catch return DslError.OutOfMemory;
+        }
+        const slice = out.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+        return Value{ .hash = slice };
+    }
+
+    fn evalHashReject(self: *Interpreter, pairs: []const Value.HashPair, params: []const []const u8, blk: *const Node) DslError!Value {
+        var out: std.ArrayList(Value.HashPair) = .empty;
+        for (pairs) |pair| {
+            self.ctx.pushScope();
+            defer self.ctx.popScope();
+            self.bindHashPair(params, pair);
+            const v = try self.eval(blk);
+            if (!v.isTruthy()) out.append(self.allocator, pair) catch return DslError.OutOfMemory;
+        }
+        const slice = out.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+        return Value{ .hash = slice };
     }
 
     /// Dispatch an Enumerable method whose block is `&:sym` shorthand. The
