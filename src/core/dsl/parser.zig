@@ -114,6 +114,14 @@ pub const Parser = struct {
     }
 
     fn parseExpression(self: *Parser) DslError!*const Node {
+        // `if` / `unless` on the RHS of an assignment is Ruby's
+        // expression-form. The statement-level parse already handles the
+        // standalone form; accepting them here lets
+        // `sysroot = if cond then "a" else "b" end` round-trip through
+        // parseExpression without special-casing at the call site.
+        if (self.current.kind == .kw_if) return self.parseIf();
+        if (self.current.kind == .kw_unless) return self.parseUnless();
+
         // Check for assignment: identifier followed by =
         if (self.current.kind == .identifier) {
             const name = self.current.lexeme;
@@ -190,7 +198,72 @@ pub const Parser = struct {
                 .kind = .{ .logical_not = operand },
             });
         }
-        return self.parseMethodChain();
+        return self.parseEquality();
+    }
+
+    /// `x == y` / `x != y`. Ruby precedence: higher than `&&`, lower than
+    /// the relational operators. Lowered to a method_call so the
+    /// interpreter's receiver-dispatch path handles both sides.
+    fn parseEquality(self: *Parser) DslError!*const Node {
+        var node = try self.parseRelational();
+        while (true) {
+            const op: ?[]const u8 = switch (self.current.kind) {
+                .double_eq => "==",
+                .not_eq => "!=",
+                else => null,
+            };
+            if (op == null) break;
+            const loc = self.currentLoc();
+            self.advanceToken();
+            const right = try self.parseRelational();
+            node = try self.buildBinaryCall(node, op.?, right, loc);
+        }
+        return node;
+    }
+
+    /// `x < y` / `>` / `<=` / `>=`. Tighter than equality so
+    /// `a < b == c` is `(a < b) == c`.
+    fn parseRelational(self: *Parser) DslError!*const Node {
+        var node = try self.parseMethodChain();
+        while (true) {
+            const op: ?[]const u8 = switch (self.current.kind) {
+                .less_than => "<",
+                .greater_than => ">",
+                .less_eq => "<=",
+                .greater_eq => ">=",
+                else => null,
+            };
+            if (op == null) break;
+            const loc = self.currentLoc();
+            self.advanceToken();
+            const right = try self.parseMethodChain();
+            node = try self.buildBinaryCall(node, op.?, right, loc);
+        }
+        return node;
+    }
+
+    /// Lower a binary operator into a method_call node so the interpreter
+    /// dispatches it through the same path as `<<` / `+` — keeps the AST
+    /// compact and avoids a bespoke AST variant per operator.
+    fn buildBinaryCall(
+        self: *Parser,
+        left: *const Node,
+        op: []const u8,
+        right: *const Node,
+        loc: SourceLoc,
+    ) DslError!*const Node {
+        const args = self.allocator.alloc(*const Node, 1) catch return DslError.OutOfMemory;
+        args[0] = right;
+        return self.allocNode(.{
+            .loc = loc,
+            .kind = .{ .method_call = .{
+                .receiver = left,
+                .method = op,
+                .args = args,
+                .blk = null,
+                .block_params = &.{},
+            } },
+        });
     }
 
     /// Top of the chain precedence stack — shovel `<<` is Ruby's lowest
