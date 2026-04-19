@@ -82,11 +82,10 @@ Once `install.sh` runs, it re-verifies every subsequent download with cosign, so
 Malt is published as a cask under [`indaco/homebrew-tap`](https://github.com/indaco/homebrew-tap):
 
 ```bash
-brew tap indaco/tap
-brew install --cask malt
+brew install --cask indaco/tap/malt
 ```
 
-Upgrade with `brew upgrade --cask malt`. `mt version update` detects Homebrew installs and defers to brew automatically — updating underneath brew would break its install receipt.
+The qualified `<tap>/<cask>` shorthand taps implicitly, so no separate `brew tap` step is needed. Upgrade with `brew upgrade --cask malt`. `mt version update` detects Homebrew installs and defers to brew automatically — updating underneath brew would break its install receipt.
 
 ### From source
 
