@@ -1,0 +1,68 @@
+//! malt - atomic binary replacement for self-update.
+//!
+//! `atomicReplace(target, new)` swaps in a fresh binary using two
+//! POSIX rename(2) calls. Both operands live in the same directory
+//! as `target` at the rename step, so the rename is always within
+//! one filesystem and therefore atomic. Preserves `<target>.old` for
+//! manual rollback on success; restores it to `<target>` on failure.
+
+const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
+
+pub const SwapError = error{
+    /// Could not stage the new binary next to the target (disk full,
+    /// permission, parent-dir unwritable). No file has moved yet.
+    StagingFailed,
+    /// The target→.old rename failed. Target is untouched.
+    SwapFailed,
+    /// The swap happened but the state is inconsistent (e.g. rollback
+    /// also failed). `<target>.old` may be the live binary; the real
+    /// target path may not exist. Caller surfaces the situation loudly.
+    RollbackFailed,
+};
+
+/// Replace `target_path` with the contents of `new_path`. On success,
+/// the previous binary is kept at `<target_path>.old` for manual
+/// rollback. On failure during the swap, the previous binary is
+/// restored and no partial state is left behind.
+///
+/// `new_path` is copied - not moved - so callers can keep scratch
+/// extraction in `$TMPDIR` without caring whether it shares a volume
+/// with the target.
+pub fn atomicReplace(target_path: []const u8, new_path: []const u8) SwapError!void {
+    const target_dir = std.fs.path.dirname(target_path) orelse return error.SwapFailed;
+
+    var old_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const old_path = std.fmt.bufPrint(&old_path_buf, "{s}.old", .{target_path}) catch
+        return error.StagingFailed;
+
+    var staged_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const staged_path = std.fmt.bufPrint(&staged_path_buf, "{s}/.malt-update-{d}", .{ target_dir, std.c.getpid() }) catch
+        return error.StagingFailed;
+
+    // Stage the new binary next to the target. Cleans any stale file
+    // from a killed earlier run first so copy never EEXISTs.
+    fs_compat.deleteFileAbsolute(staged_path) catch {};
+    fs_compat.copyFileAbsolute(new_path, staged_path, .{}) catch return error.StagingFailed;
+    errdefer fs_compat.deleteFileAbsolute(staged_path) catch {};
+
+    // Set mode on the staged file so we never leave a non-executable
+    // malt in place if the rename succeeds but chmod races.
+    {
+        const f = fs_compat.openFileAbsolute(staged_path, .{ .mode = .read_write }) catch
+            return error.StagingFailed;
+        defer f.close();
+        f.chmod(0o755) catch return error.StagingFailed;
+    }
+
+    // Clear any .old left by a crashed prior run before we overwrite it.
+    fs_compat.deleteFileAbsolute(old_path) catch {};
+
+    // Atomic rename #1: target -> target.old.
+    fs_compat.renameAbsolute(target_path, old_path) catch return error.SwapFailed;
+    errdefer fs_compat.renameAbsolute(old_path, target_path) catch {};
+
+    // Atomic rename #2: staged -> target. If this fails the errdefers
+    // above restore .old to target and delete the stage.
+    fs_compat.renameAbsolute(staged_path, target_path) catch return error.RollbackFailed;
+}
