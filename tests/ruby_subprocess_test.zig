@@ -170,6 +170,85 @@ test "extractPostInstallBody captures the body between def post_install and matc
         std.mem.findLast(u8, body.?, "end") == null);
 }
 
+// ---------------------------------------------------------------------------
+// Sibling-def extraction — real formulas (llvm@21, ca-certificates) define
+// helpers at class indent and call them from post_install. The extractor
+// must surface those helpers so the DSL can register them.
+// ---------------------------------------------------------------------------
+
+test "extractPostInstallFromSource prepends sibling defs so helpers resolve" {
+    const src =
+        \\class Foo < Formula
+        \\  def helper
+        \\    ohai "helped"
+        \\  end
+        \\
+        \\  def post_install
+        \\    helper
+        \\  end
+        \\end
+        \\
+    ;
+    const body = ruby.extractPostInstallFromSource(testing.allocator, src);
+    try testing.expect(body != null);
+    defer testing.allocator.free(body.?);
+
+    // Sibling def appears before post_install body content.
+    const idx_sibling = std.mem.indexOf(u8, body.?, "def helper") orelse return error.TestUnexpectedResult;
+    const idx_call = std.mem.indexOf(u8, body.?, "  helper\n") orelse return error.TestUnexpectedResult;
+    try testing.expect(idx_sibling < idx_call);
+    // `def post_install` itself is NOT repeated in the body — only its body.
+    try testing.expect(std.mem.indexOf(u8, body.?, "def post_install") == null);
+}
+
+test "extractPostInstallFromSource collects multiple sibling defs in file order" {
+    // Same shape as ca-certificates.rb — two mac/linux helpers plus the
+    // dispatcher post_install. All three must register before the body runs.
+    const src =
+        \\class Certs < Formula
+        \\  def macos_post_install
+        \\    ohai "mac"
+        \\  end
+        \\
+        \\  def linux_post_install
+        \\    ohai "linux"
+        \\  end
+        \\
+        \\  def post_install
+        \\    if OS.mac?
+        \\      macos_post_install
+        \\    else
+        \\      linux_post_install
+        \\    end
+        \\  end
+        \\end
+    ;
+    const body = ruby.extractPostInstallFromSource(testing.allocator, src);
+    try testing.expect(body != null);
+    defer testing.allocator.free(body.?);
+    try testing.expect(std.mem.indexOf(u8, body.?, "def macos_post_install") != null);
+    try testing.expect(std.mem.indexOf(u8, body.?, "def linux_post_install") != null);
+    try testing.expect(std.mem.indexOf(u8, body.?, "if OS.mac?") != null);
+}
+
+test "extractPostInstallFromSource skips nested defs inside post_install body" {
+    // A `def` nested inside the post_install body stays in the body; it is
+    // NOT promoted to a sibling (the indent match ensures this). No double
+    // occurrences.
+    const src =
+        \\class X < Formula
+        \\  def post_install
+        \\    ohai "hi"
+        \\  end
+        \\end
+    ;
+    const body = ruby.extractPostInstallFromSource(testing.allocator, src);
+    try testing.expect(body != null);
+    defer testing.allocator.free(body.?);
+    try testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, body.?, "def post_install"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, body.?, "ohai \"hi\""));
+}
+
 test "detectRuby returns a heap-owned slice that the caller can free" {
     // On any machine that has Ruby available, the contract requires the
     // returned slice to be allocator-owned so the call site can pair it

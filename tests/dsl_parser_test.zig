@@ -696,3 +696,137 @@ test "parser: multi-line system call with continuation" {
     try testing.expectEqualStrings("system", mc.method);
     try testing.expectEqual(@as(usize, 3), mc.args.len);
 }
+
+// ---------------------------------------------------------------------------
+// Method definitions (`def ... end`) and `return` statements
+//
+// These unlock running private helpers that formulas define inside
+// post_install (e.g. llvm@21's `write_config_files(...)`). Without
+// them the interpreter logs every helper call as unknown_method and
+// leaves the work to `--use-system-ruby`.
+// ---------------------------------------------------------------------------
+
+test "parser: empty def with no params" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src =
+        \\def greet
+        \\end
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const md = nodes[0].kind.method_def;
+    try testing.expectEqualStrings("greet", md.name);
+    try testing.expectEqual(@as(usize, 0), md.params.len);
+    try testing.expectEqual(@as(usize, 0), md.body.len);
+}
+
+test "parser: def with positional params" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // Avoid `x + y` — the DSL has no arithmetic; keep the body shape
+    // minimal and focus on param binding.
+    const src =
+        \\def write_cfg(name, body)
+        \\  (share/name).write body
+        \\end
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const md = nodes[0].kind.method_def;
+    try testing.expectEqualStrings("write_cfg", md.name);
+    try testing.expectEqual(@as(usize, 2), md.params.len);
+    try testing.expectEqualStrings("name", md.params[0]);
+    try testing.expectEqualStrings("body", md.params[1]);
+    try testing.expect(md.body.len >= 1);
+}
+
+test "parser: def with paren-less param list" {
+    // Ruby permits `def name a, b` — older formulas still use it.
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src =
+        \\def greet name
+        \\  ohai name
+        \\end
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const md = nodes[0].kind.method_def;
+    try testing.expectEqualStrings("greet", md.name);
+    try testing.expectEqual(@as(usize, 1), md.params.len);
+    try testing.expectEqualStrings("name", md.params[0]);
+}
+
+test "parser: return with value" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "return 42");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const ret = nodes[0].kind.return_statement;
+    try testing.expect(ret.value != null);
+    try testing.expectEqual(@as(i64, 42), ret.value.?.kind.int_literal);
+}
+
+test "parser: bare return (no value) at statement boundary" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src =
+        \\return
+        \\ohai "after"
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 2), nodes.len);
+
+    const ret = nodes[0].kind.return_statement;
+    try testing.expect(ret.value == null);
+}
+
+test "parser: return inside postfix if" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // Exact shape used in llvm@21/openssl@3 post_install guards.
+    const nodes = try parseSource(&arena, "return if false");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const postfix = nodes[0].kind.postfix_if;
+    switch (postfix.body.kind) {
+        .return_statement => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parser: def body with return short-circuit" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src =
+        \\def early(x)
+        \\  return 0 if x
+        \\  1
+        \\end
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const md = nodes[0].kind.method_def;
+    try testing.expectEqualStrings("early", md.name);
+    try testing.expectEqual(@as(usize, 2), md.body.len);
+    switch (md.body[0].kind) {
+        .postfix_if => |pf| switch (pf.body.kind) {
+            .return_statement => {},
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}

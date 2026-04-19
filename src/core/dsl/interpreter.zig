@@ -28,10 +28,19 @@ pub const DslError = error{
     PostInstallFailed,
     SystemCommandFailed,
     OutOfMemory,
+    /// Control-flow signal raised by `return`. Callers that bound the
+    /// unwind (a def call frame, the post_install top-level) catch it;
+    /// block iterators propagate it so `return` inside `.each` exits the
+    /// enclosing method instead of the iteration.
+    ReturnSignal,
 };
 
 pub const Scope = struct {
     locals: std.StringHashMap(Value),
+    /// Marks a def-call frame. Binding lookup stops here so a called
+    /// method cannot see the caller's locals — matches Ruby's lexical
+    /// scoping for `def`.
+    is_method_frame: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Scope {
         return .{ .locals = std.StringHashMap(Value).init(allocator) };
@@ -76,6 +85,15 @@ pub const ExecContext = struct {
     // Formula name for fallback log entries
     formula_name: []const u8,
 
+    // User-defined methods from `def ... end` statements in the post_install
+    // body. Keyed by method name; entries borrow the AST allocated on the
+    // parser arena so no extra ownership is needed here.
+    methods: std.StringHashMap(ast.MethodDef),
+
+    // Value threaded through a `return` statement. The call-frame (or
+    // top-level executor) reads + resets this when it catches ReturnSignal.
+    return_value: Value,
+
     pub fn init(
         allocator: std.mem.Allocator,
         formula: *const Formula,
@@ -107,6 +125,8 @@ pub const ExecContext = struct {
             .sandbox_root = malt_prefix,
             .fallback_log_writer = flog,
             .formula_name = formula.name,
+            .methods = std.StringHashMap(ast.MethodDef).init(allocator),
+            .return_value = Value{ .nil = {} },
         };
 
         // Push initial scope
@@ -114,14 +134,22 @@ pub const ExecContext = struct {
         return ctx;
     }
 
+    pub fn deinit(self: *ExecContext) void {
+        self.methods.deinit();
+    }
+
     pub fn resolveBinding(self: *ExecContext, name: []const u8) ?Value {
-        // Check local scopes (innermost first)
+        // Check local scopes (innermost first). Stop at the first
+        // is_method_frame scope so a def doesn't leak through caller
+        // locals (Ruby lexical-scope behaviour for `def`).
         var i = self.scopes.items.len;
         while (i > 0) {
             i -= 1;
-            if (self.scopes.items[i].locals.get(name)) |val| {
+            const scope = &self.scopes.items[i];
+            if (scope.locals.get(name)) |val| {
                 return val;
             }
+            if (scope.is_method_frame) break;
         }
 
         // Check formula path bindings
@@ -169,6 +197,13 @@ pub const ExecContext = struct {
         self.scopes.append(self.allocator, Scope.init(self.allocator)) catch {};
     }
 
+    pub fn pushMethodScope(self: *ExecContext) void {
+        self.scopes.append(self.allocator, .{
+            .locals = std.StringHashMap(Value).init(self.allocator),
+            .is_method_frame = true,
+        }) catch {};
+    }
+
     pub fn popScope(self: *ExecContext) void {
         if (self.scopes.items.len > 0) {
             var scope = self.scopes.pop() orelse return;
@@ -207,6 +242,13 @@ pub const Interpreter = struct {
                     });
                     return e;
                 },
+                // Top-level `return` exits the post_install body cleanly.
+                // Formulas use `return if <guard>` to short-circuit; the
+                // value is discarded because there's no caller.
+                DslError.ReturnSignal => {
+                    self.ctx.return_value = Value{ .nil = {} };
+                    return;
+                },
                 DslError.UnknownMethod => continue, // Non-fatal
                 DslError.UnsupportedNode => continue, // Non-fatal
                 else => continue,
@@ -241,7 +283,60 @@ pub const Interpreter = struct {
             .logical_or => |lo| self.evalLogicalOr(&lo),
             .logical_not => |operand| self.evalLogicalNot(operand),
             .interpolation => Value{ .nil = {} },
+            .method_def => |md| self.evalMethodDef(&md),
+            .return_statement => |rs| self.evalReturn(&rs),
         };
+    }
+
+    /// Register a user method into the ExecContext's method table. The body
+    /// and params borrow the parser arena's allocation.
+    fn evalMethodDef(self: *Interpreter, md: *const ast.MethodDef) DslError!Value {
+        self.ctx.methods.put(md.name, md.*) catch return DslError.OutOfMemory;
+        return Value{ .nil = {} };
+    }
+
+    /// Evaluate the optional return value, stash it on the context, and
+    /// raise ReturnSignal so the nearest call frame (or top-level) unwinds.
+    fn evalReturn(self: *Interpreter, rs: *const ast.ReturnStatement) DslError!Value {
+        self.ctx.return_value = if (rs.value) |v| try self.eval(v) else Value{ .nil = {} };
+        return DslError.ReturnSignal;
+    }
+
+    /// Invoke a user-defined method. Pushes a method-frame scope, binds
+    /// positional params, runs the body, and catches a ReturnSignal so
+    /// `return` unwinds the call but not the outer block. Missing args
+    /// are bound to nil, extras are dropped — same policy as lenient
+    /// Ruby method dispatch for the formulas we care about.
+    fn invokeUserMethod(
+        self: *Interpreter,
+        md: ast.MethodDef,
+        args: []const Value,
+    ) DslError!Value {
+        self.ctx.pushMethodScope();
+        defer self.ctx.popScope();
+
+        for (md.params, 0..) |pname, i| {
+            const v = if (i < args.len) args[i] else Value{ .nil = {} };
+            self.ctx.setLocal(pname, v);
+        }
+
+        // Ruby implicit-return: the last expression's value is the method's
+        // return value unless an explicit `return` unwinds earlier. Non-fatal
+        // diagnostics (unknown_method, unsupported_node) keep going so a
+        // helper doesn't abort on a single unrecognised construct.
+        var last: Value = Value{ .nil = {} };
+        for (md.body) |stmt| {
+            last = self.eval(stmt) catch |e| switch (e) {
+                DslError.ReturnSignal => {
+                    const v = self.ctx.return_value;
+                    self.ctx.return_value = Value{ .nil = {} };
+                    return v;
+                },
+                DslError.UnknownMethod, DslError.UnsupportedNode => continue,
+                else => return e,
+            };
+        }
+        return last;
     }
 
     fn evalStringLiteral(self: *Interpreter, sl: *const ast.StringLiteral) DslError!Value {
@@ -273,6 +368,13 @@ pub const Interpreter = struct {
 
     fn evalIdentifier(self: *Interpreter, name: []const u8, loc: SourceLoc) DslError!Value {
         if (self.ctx.resolveBinding(name)) |val| return val;
+
+        // Bare name resolves to a zero-arg user method call — Ruby treats
+        // `foo` and `foo()` identically, and chain expressions like
+        // `clang_config_file_dir.mkpath` parse as identifier + tail.
+        if (self.ctx.methods.get(name)) |md| {
+            return self.invokeUserMethod(md, &.{});
+        }
 
         // Unknown identifier — log as non-fatal
         self.ctx.fallback_log_writer.log(.{
@@ -382,6 +484,12 @@ pub const Interpreter = struct {
                 return func(builtin_ctx, null, args_slice) catch |e| {
                     return mapBuiltinError(e);
                 };
+            }
+
+            // User-defined method (from a `def ... end` earlier in this
+            // post_install body). Invocation handles its own scope + return.
+            if (self.ctx.methods.get(mc.method)) |md| {
+                return self.invokeUserMethod(md, args_slice);
             }
 
             // Check if it's a binding used as a method
@@ -500,7 +608,7 @@ pub const Interpreter = struct {
             }
 
             _ = self.evalBlockSlice(el.body) catch |e| switch (e) {
-                DslError.PostInstallFailed, DslError.PathSandboxViolation => return e,
+                DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
                 else => continue,
             };
         }
@@ -509,8 +617,10 @@ pub const Interpreter = struct {
 
     fn evalBeginRescue(self: *Interpreter, br: *const ast.BeginRescue) DslError!Value {
         _ = self.evalBlockSlice(br.body) catch |e| switch (e) {
-            // Only sandbox violations are truly unrecoverable
-            DslError.PathSandboxViolation => return e,
+            // Sandbox violations are unrecoverable; `return` must unwind
+            // past the rescue because Ruby's `rescue` does not catch
+            // control-flow signals.
+            DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
             else => {
                 // Execute rescue body — catches PostInstallFailed (raise), SystemCommandFailed, etc.
                 return self.evalBlockSlice(br.rescue_body) catch Value{ .nil = {} };
@@ -580,7 +690,7 @@ pub const Interpreter = struct {
             defer self.ctx.popScope();
             if (params.len > 0) self.ctx.setLocal(params[0], item);
             _ = self.eval(blk) catch |e| switch (e) {
-                DslError.PostInstallFailed, DslError.PathSandboxViolation => return e,
+                DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
                 else => continue,
             };
         }
@@ -655,6 +765,7 @@ pub fn executePostInstall(
     };
 
     var ctx = ExecContext.init(a, formula, malt_prefix, flog);
+    defer ctx.deinit();
     var interp = Interpreter.init(&ctx);
     try interp.execute(nodes);
 }

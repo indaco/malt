@@ -36,6 +36,8 @@ pub const Node = struct {
         logical_and: LogicalBinary,
         logical_or: LogicalBinary,
         logical_not: *const Node,
+        method_def: MethodDef,
+        return_statement: ReturnStatement,
     };
 };
 
@@ -118,4 +120,19 @@ pub const HashEntry = struct {
 
 pub const RaiseStatement = struct {
     message: ?*const Node,
+};
+
+/// User-defined method (`def name(params) body end`). Registered at eval
+/// time into the ExecContext's method table so later bare-method calls
+/// route to it instead of logging unknown_method.
+pub const MethodDef = struct {
+    name: []const u8,
+    params: []const []const u8,
+    body: []const *const Node,
+};
+
+/// `return [expr]` — unwinds the enclosing def (or the post_install body)
+/// via a dedicated interpreter signal; the optional value is the result.
+pub const ReturnStatement = struct {
+    value: ?*const Node,
 };

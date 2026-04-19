@@ -29,6 +29,7 @@ pub const TokenKind = enum {
     kw_false,
     kw_def,
     kw_raise,
+    kw_return,
 
     // Operators
     dot,
@@ -494,6 +495,7 @@ pub const Lexer = struct {
             .{ "false", .kw_false },
             .{ "def", .kw_def },
             .{ "raise", .kw_raise },
+            .{ "return", .kw_return },
         });
         return keywords.get(lexeme) orelse .identifier;
     }
