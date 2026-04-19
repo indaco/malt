@@ -4,6 +4,7 @@
 const std = @import("std");
 const fs_compat = @import("fs/compat.zig");
 const io_mod = @import("ui/io.zig");
+const color_mod = @import("ui/color.zig");
 
 // Release uses simple_panic so debug.Dwarf stays unreachable (~30 KB smaller).
 pub const panic = if (@import("builtin").mode == .Debug)
@@ -134,6 +135,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .flags = 0,
     };
     std.posix.sigaction(std.posix.SIG.INT, &act, null);
+
+    // Run terminal-background detection once, up front, before any
+    // output.* call can trigger a lazy OSC 11 probe mid-stream (the
+    // query write could otherwise land inside a progress-bar frame).
+    _ = color_mod.background();
+    _ = color_mod.truecolorSupported();
 
     var arena = std.heap.ArenaAllocator.init(backing);
     defer arena.deinit();

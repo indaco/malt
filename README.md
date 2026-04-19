@@ -733,6 +733,7 @@ Every install follows a strict 9-step protocol. Failure at any step triggers cle
 | `MALT_CACHE`                   | Override cache directory                                                          | `{prefix}/cache` |
 | `NO_COLOR`                     | Disable colored output                                                            | unset            |
 | `MALT_NO_EMOJI`                | Disable emoji in output                                                           | unset            |
+| `MALT_THEME`                   | Force the output palette: `light`, `dark`, or `auto` (detects via OSC 11)         | `auto`           |
 | `HOMEBREW_GITHUB_API_TOKEN`    | GitHub token for higher API rate limits                                           | unset            |
 | `MALT_ALLOW_UNVERIFIED`        | Skip cosign signature check in `install.sh` (use only when cosign is unavailable) | unset            |
 | `MALT_ALLOW_UNVERIFIED_SOURCE` | Allow `install.sh` to clone `main` when no release tag resolves                   | unset            |

@@ -178,7 +178,7 @@ pub const ProgressBar = struct {
         const g = self.glyph();
 
         if (use_color) {
-            const c = if (done) color.Style.green.code() else color.Style.cyan.code();
+            const c = if (done) color.SemanticStyle.success.code() else color.SemanticStyle.info.code();
             @memcpy(buf[pos .. pos + c.len], c);
             pos += c.len;
         }
@@ -249,8 +249,8 @@ pub const ProgressBar = struct {
 
         // Bar
         if (color.isColorEnabled()) {
-            const cyan_code = color.Style.cyan.code();
-            const dim_code = color.Style.dim.code();
+            const cyan_code = color.SemanticStyle.info.code();
+            const dim_code = color.SemanticStyle.detail.code();
             const reset_code = color.Style.reset.code();
 
             @memcpy(buf[pos .. pos + cyan_code.len], cyan_code);
@@ -297,7 +297,7 @@ pub const ProgressBar = struct {
 
         // Details in dim color: (64/64 KB | 42 KB/s | ETA 2s)
         const use_color = color.isColorEnabled();
-        const dim_code = if (use_color) color.Style.dim.code() else "";
+        const dim_code = if (use_color) color.SemanticStyle.detail.code() else "";
         const reset_code2 = if (use_color) color.Style.reset.code() else "";
 
         @memcpy(buf[pos .. pos + dim_code.len], dim_code);
@@ -376,7 +376,7 @@ pub const ProgressBar = struct {
         pos = self.writeLabel(&buf, pos);
 
         const use_color = color.isColorEnabled();
-        const dim_code = if (use_color) color.Style.dim.code() else "";
+        const dim_code = if (use_color) color.SemanticStyle.detail.code() else "";
         const reset_code = if (use_color) color.Style.reset.code() else "";
 
         @memcpy(buf[pos .. pos + dim_code.len], dim_code);
@@ -456,7 +456,7 @@ pub const Spinner = struct {
             // Non-TTY: emit a single dim info line and return. No animation.
             const f = fs_compat.stderrFile();
             const pfx: []const u8 = if (color.isEmojiEnabled()) "  \xe2\x96\xb8 " else "  > ";
-            if (color.isColorEnabled()) f.writeAll(color.Style.dim.code()) catch {};
+            if (color.isColorEnabled()) f.writeAll(color.SemanticStyle.detail.code()) catch {};
             f.writeAll(pfx) catch {};
             f.writeAll(self.message) catch {};
             if (color.isColorEnabled()) f.writeAll(color.Style.reset.code()) catch {};
@@ -472,7 +472,7 @@ pub const Spinner = struct {
             self.active = false;
             f.writeAll("\x1b[?25h") catch {};
             const pfx: []const u8 = if (color.isEmojiEnabled()) "  \xe2\x96\xb8 " else "  > ";
-            if (color.isColorEnabled()) f.writeAll(color.Style.dim.code()) catch {};
+            if (color.isColorEnabled()) f.writeAll(color.SemanticStyle.detail.code()) catch {};
             f.writeAll(pfx) catch {};
             f.writeAll(self.message) catch {};
             if (color.isColorEnabled()) f.writeAll(color.Style.reset.code()) catch {};
@@ -522,9 +522,9 @@ pub const Spinner = struct {
 
         const use_color = color.isColorEnabled();
 
-        // Cyan spinner glyph
+        // Info-coloured spinner glyph.
         if (use_color) {
-            const c = color.Style.cyan.code();
+            const c = color.SemanticStyle.info.code();
             @memcpy(buf[pos .. pos + c.len], c);
             pos += c.len;
         }
@@ -541,7 +541,7 @@ pub const Spinner = struct {
 
         // Dim message text
         if (use_color) {
-            const d = color.Style.dim.code();
+            const d = color.SemanticStyle.detail.code();
             @memcpy(buf[pos .. pos + d.len], d);
             pos += d.len;
         }

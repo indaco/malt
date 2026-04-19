@@ -623,19 +623,16 @@ pub fn countMissingLocalSources(
     return census;
 }
 
-fn styleFor(status: CheckStatus) color.Style {
+fn statusCode(status: CheckStatus) []const u8 {
     return switch (status) {
-        .ok => .green,
-        .warn_status => .yellow,
-        .err_status => .red,
+        .ok => color.SemanticStyle.success.code(),
+        .warn_status => color.SemanticStyle.warn.code(),
+        .err_status => color.SemanticStyle.err.code(),
     };
 }
 
 /// Render one check row. Pure (no stderr / global state), so tests
 /// can drive it against a buffer writer and assert on the bytes.
-///
-/// Row shape: `  <glyph> <name>[ — <detail>]\n`. With `color=true`,
-/// the glyph is painted in the status colour and the detail is dim.
 pub fn renderCheckRow(
     writer: anytype,
     status: CheckStatus,
@@ -646,7 +643,7 @@ pub fn renderCheckRow(
     const glyph = glyphFor(status, style_opts.emoji);
     try writer.writeAll("  ");
     if (style_opts.color) {
-        try writer.writeAll(styleFor(status).code());
+        try writer.writeAll(statusCode(status));
         try writer.writeAll(glyph);
         try writer.writeAll(color.Style.reset.code());
     } else {
@@ -658,7 +655,7 @@ pub fn renderCheckRow(
     if (detail) |d| {
         if (style_opts.color) {
             try writer.writeAll(" ");
-            try writer.writeAll(color.Style.dim.code());
+            try writer.writeAll(color.SemanticStyle.detail.code());
             try writer.writeAll("— ");
             try writer.writeAll(d);
             try writer.writeAll(color.Style.reset.code());

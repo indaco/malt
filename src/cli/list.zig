@@ -92,10 +92,10 @@ fn writeHumanOutput(
             stdout.writeAll(name_slice) catch return;
             if (show_versions) {
                 const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "?";
-                writeStyledSpan(stdout, color.Style.dim, " (", ver_slice, ")");
+                writeStyledSpan(stdout, color.SemanticStyle.detail.code(), " (", ver_slice, ")");
             }
             if (pinned) {
-                writeStyledSpan(stdout, color.Style.yellow, " [pinned]", "", "");
+                writeStyledSpan(stdout, color.SemanticStyle.warn.code(), " [pinned]", "", "");
             }
             stdout.writeAll("\n") catch return;
         }
@@ -115,7 +115,7 @@ fn writeHumanOutput(
             stdout.writeAll(token_slice) catch return;
             if (show_versions) {
                 const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "?";
-                writeStyledSpan(stdout, color.Style.dim, " (", ver_slice, ")");
+                writeStyledSpan(stdout, color.SemanticStyle.detail.code(), " (", ver_slice, ")");
             }
             stdout.writeAll("\n") catch return;
         }
@@ -125,7 +125,7 @@ fn writeHumanOutput(
 /// Emit the leading cyan bullet + space, honouring `NO_COLOR`.
 fn writeBulletPrefix(stdout: *std.Io.Writer) void {
     if (color.isColorEnabled()) {
-        stdout.writeAll(color.Style.cyan.code()) catch return;
+        stdout.writeAll(color.SemanticStyle.info.code()) catch return;
         stdout.writeAll("  ▸ ") catch return;
         stdout.writeAll(color.Style.reset.code()) catch return;
     } else {
@@ -137,13 +137,13 @@ fn writeBulletPrefix(stdout: *std.Io.Writer) void {
 /// when colour is enabled. `open` or `close` may be empty.
 fn writeStyledSpan(
     stdout: *std.Io.Writer,
-    style: color.Style,
+    style_code: []const u8,
     open: []const u8,
     body: []const u8,
     close: []const u8,
 ) void {
     const use_color = color.isColorEnabled();
-    if (use_color) stdout.writeAll(style.code()) catch return;
+    if (use_color) stdout.writeAll(style_code) catch return;
     stdout.writeAll(open) catch return;
     stdout.writeAll(body) catch return;
     stdout.writeAll(close) catch return;

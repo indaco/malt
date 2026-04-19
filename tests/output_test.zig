@@ -21,6 +21,10 @@ const Capture = struct {
     fn init(buf: *std.ArrayList(u8), color_on: bool, emoji_on: bool, quiet: bool) Capture {
         const prior_quiet = output.isQuiet();
         color.setForTest(color_on, emoji_on);
+        // Pin the palette so escape-string assertions below stay
+        // deterministic regardless of the host terminal.
+        color.setBackgroundForTest(color.Background.dark);
+        color.setTruecolorForTest(false);
         output.setQuiet(quiet);
         io_mod.beginStderrCapture(testing.allocator, buf);
         return .{ .buf = buf, .prior_quiet = prior_quiet };
@@ -29,6 +33,8 @@ const Capture = struct {
     fn deinit(self: Capture) void {
         io_mod.endStderrCapture();
         color.setForTest(null, null);
+        color.setBackgroundForTest(null);
+        color.setTruecolorForTest(null);
         output.setQuiet(self.prior_quiet);
     }
 };
