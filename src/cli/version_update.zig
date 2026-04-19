@@ -92,10 +92,11 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    const assets = switch (obj.get("assets") orelse {
+    const assets_val = obj.get("assets") orelse {
         output.err("No assets in release", .{});
         return error.Aborted;
-    }) {
+    };
+    const assets = switch (assets_val) {
         .array => |a| a,
         else => {
             output.err("Invalid assets", .{});
@@ -274,7 +275,7 @@ fn runVerification(
     };
 
     output.info("Verifying SHA256 checksum...", .{});
-    const checksums_bytes = readFileBytes(allocator, checksums_path, 1 << 20) catch {
+    const checksums_bytes = fs_compat.readFileAbsoluteAlloc(allocator, checksums_path, 1 << 20) catch {
         output.err("Cannot read {s}", .{CHECKSUMS_NAME});
         return error.Aborted;
     };
@@ -283,7 +284,7 @@ fn runVerification(
         output.err("Checksum for {s} not listed in {s}", .{ archive_name, CHECKSUMS_NAME });
         return error.Aborted;
     };
-    const tarball_bytes = readFileBytes(allocator, tarball_path, 1 << 28) catch {
+    const tarball_bytes = fs_compat.readFileAbsoluteAlloc(allocator, tarball_path, 1 << 28) catch {
         output.err("Cannot read {s}", .{tarball_path});
         return error.Aborted;
     };
@@ -298,12 +299,6 @@ fn runVerification(
             return error.Aborted;
         },
     };
-}
-
-fn readFileBytes(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
-    const f = try fs_compat.openFileAbsolute(path, .{});
-    defer f.close();
-    return f.readToEndAlloc(allocator, max_bytes);
 }
 
 fn unverifiedAllowed() bool {
