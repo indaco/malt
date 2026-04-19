@@ -8,6 +8,7 @@ const builtin = @import("builtin");
 const client_mod = @import("../net/client.zig");
 const archive = @import("../fs/archive.zig");
 const output = @import("../ui/output.zig");
+const release = @import("../update/release.zig");
 
 const CURRENT_VERSION = @import("../version.zig").value;
 const RELEASES_API = "https://api.github.com/repos/indaco/malt/releases/latest";
@@ -50,9 +51,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return error.Aborted;
         },
     };
-    const tag = strField(obj, "tag_name") orelse {
+    const tag_val = obj.get("tag_name") orelse {
         output.err("No tag_name in release", .{});
         return error.Aborted;
+    };
+    const tag = switch (tag_val) {
+        .string => |s| s,
+        else => {
+            output.err("tag_name was not a string", .{});
+            return error.Aborted;
+        },
     };
 
     // Strip leading "v" from tag
@@ -85,7 +93,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         },
     };
 
-    const url = pickAssetUrl(assets, arch_str) orelse {
+    const url = release.pickAssetUrl(assets, arch_str) orelse {
         output.err("No matching binary found for darwin {s}", .{arch_str});
         return error.Aborted;
     };
@@ -145,7 +153,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // buffer, making the eventual copy a no-op `copy(self_exe,
     // self_exe)` that silently failed to replace the binary.
     var new_binary_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const new_binary = findReleaseBinary(allocator, tmp_dir, &new_binary_buf) orelse {
+    const new_binary = release.findReleaseBinary(allocator, tmp_dir, &new_binary_buf) orelse {
         output.err("Binary 'malt' not found in release archive", .{});
         return error.Aborted;
     };
@@ -175,87 +183,4 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     output.info("Updated to {s}", .{latest});
-}
-
-/// Pick the right release asset download URL for the running machine.
-///
-/// The published tarballs follow GoReleaser's default naming scheme,
-/// which the old matcher got wrong on two axes: case (we're given
-/// `Darwin`, GoReleaser emits `darwin`) and architecture (the release
-/// is a single universal binary suffixed `_all`, not `_arm64`/`_x86_64`).
-///
-/// Accept both the traditional per-arch suffix and the universal
-/// `all` build, lowercasing the comparison so future releases that
-/// tweak the template don't silently break self-update again. Exposed
-/// so tests can pin the matching rules without spinning up an HTTP
-/// fixture.
-pub fn pickAssetUrl(assets: std.json.Array, arch_str: []const u8) ?[]const u8 {
-    for (assets.items) |asset| {
-        const obj = switch (asset) {
-            .object => |o| o,
-            else => continue,
-        };
-        const name = strField(obj, "name") orelse continue;
-        if (!matchesAssetName(name, arch_str)) continue;
-        return strField(obj, "browser_download_url");
-    }
-    return null;
-}
-
-/// True when `name` is a darwin tarball that covers the running arch
-/// (either a per-arch binary or a universal one). ASCII lowercasing
-/// matches GoReleaser's own normalization; package managers don't
-/// publish mixed-case release artifact names in practice.
-pub fn matchesAssetName(name: []const u8, arch_str: []const u8) bool {
-    if (!std.mem.endsWith(u8, name, ".tar.gz")) return false;
-
-    var lower_buf: [256]u8 = undefined;
-    if (name.len > lower_buf.len) return false;
-    const lower = std.ascii.lowerString(lower_buf[0..name.len], name);
-
-    if (std.mem.indexOf(u8, lower, "darwin") == null) return false;
-    if (std.mem.indexOf(u8, lower, arch_str) != null) return true;
-    // Universal binary covers every darwin arch.
-    if (std.mem.indexOf(u8, lower, "_all") != null) return true;
-    if (std.mem.indexOf(u8, lower, "universal") != null) return true;
-    return false;
-}
-
-/// Walk the extracted release tree and return the absolute path to
-/// the first file named `malt` or `mt`. `out_buf` is filled with the
-/// full path and a slice into it is returned; the caller keeps
-/// ownership of the buffer.
-///
-/// `allocator` is borrowed for `Dir.walk`'s internal path-tracking
-/// arena only — nothing produced by this function outlives the call.
-/// Returns null if the binary isn't present, which means the release
-/// packaging changed shape; callers should surface a clear error
-/// rather than silently no-op.
-pub fn findReleaseBinary(
-    allocator: std.mem.Allocator,
-    tmp_dir: []const u8,
-    out_buf: []u8,
-) ?[]const u8 {
-    var dir = fs_compat.openDirAbsolute(tmp_dir, .{ .iterate = true }) catch return null;
-    defer dir.close();
-
-    var walker = dir.walk(allocator) catch return null;
-    defer walker.deinit();
-
-    while (walker.next() catch null) |entry| {
-        if (entry.kind != .file) continue;
-        const base = std.fs.path.basename(entry.path);
-        if (!std.mem.eql(u8, base, "malt") and !std.mem.eql(u8, base, "mt")) continue;
-        const full = std.fmt.bufPrint(out_buf, "{s}/{s}", .{ tmp_dir, entry.path }) catch return null;
-        return full;
-    }
-    return null;
-}
-
-fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    const v = obj.get(key) orelse return null;
-    return switch (v) {
-        .string => |s| s,
-        else => null,
-    };
 }
