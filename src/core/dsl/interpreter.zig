@@ -65,6 +65,7 @@ pub const ExecContext = struct {
     share: []const u8,
     pkgshare: []const u8,
     etc: []const u8,
+    pkgetc: []const u8,
     var_dir: []const u8,
     opt_prefix: []const u8,
 
@@ -116,6 +117,11 @@ pub const ExecContext = struct {
             .share = joinPath(allocator, cellar_path, "share"),
             .pkgshare = std.fmt.allocPrint(allocator, "{s}/share/{s}", .{ cellar_path, formula.name }) catch cellar_path,
             .etc = joinPath(allocator, malt_prefix, "etc"),
+            // Formula instance method `pkgetc` → `<prefix>/etc/<name>`.
+            // Homebrew exposes it as bare identifier inside post_install
+            // (gnutls, openssl@3…); registering it here resolves the
+            // most common `pkgetc` unknown_method across the corpus.
+            .pkgetc = std.fmt.allocPrint(allocator, "{s}/etc/{s}", .{ malt_prefix, formula.name }) catch malt_prefix,
             .var_dir = joinPath(allocator, malt_prefix, "var"),
             .opt_prefix = std.fmt.allocPrint(allocator, "{s}/opt/{s}", .{ malt_prefix, formula.name }) catch malt_prefix,
             .malt_prefix = malt_prefix,
@@ -163,6 +169,7 @@ pub const ExecContext = struct {
             .{ "share", {} },
             .{ "pkgshare", {} },
             .{ "etc", {} },
+            .{ "pkgetc", {} },
             .{ "var", {} },
             .{ "opt_prefix", {} },
             .{ "HOMEBREW_PREFIX", {} },
@@ -185,6 +192,7 @@ pub const ExecContext = struct {
         if (std.mem.eql(u8, name, "include")) return Value{ .pathname = self.include_dir };
         if (std.mem.eql(u8, name, "share")) return Value{ .pathname = self.share };
         if (std.mem.eql(u8, name, "pkgshare")) return Value{ .pathname = self.pkgshare };
+        if (std.mem.eql(u8, name, "pkgetc")) return Value{ .pathname = self.pkgetc };
         if (std.mem.eql(u8, name, "etc")) return Value{ .pathname = self.etc };
         if (std.mem.eql(u8, name, "var")) return Value{ .pathname = self.var_dir };
         if (std.mem.eql(u8, name, "opt_prefix")) return Value{ .pathname = self.opt_prefix };

@@ -2396,6 +2396,22 @@ test "interpreter: Set.new(array) passes the array through so << and .each work"
     // `share/` (empty filename) and the test passes if no fatal fires.
 }
 
+test "interpreter: bare `pkgetc` resolves to <prefix>/etc/<formula_name>" {
+    // Homebrew exposes `pkgetc` as an instance method. Formulas call it
+    // bare from post_install (gnutls, openssl@3 in chained form). Path
+    // binding resolves it without going through receiver dispatch.
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\odie "pkgetc empty" if pkgetc.blank?
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
 test "interpreter: empty Set.new() returns an array that iterates zero times" {
     var arena = testArena();
     defer arena.deinit();
