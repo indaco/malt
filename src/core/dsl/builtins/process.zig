@@ -121,6 +121,29 @@ pub fn macosVersion(ctx: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Valu
     return Value{ .string = trimmed };
 }
 
+/// MacOS::CLT.PKG_PATH — Homebrew's canonical Command Line Tools prefix.
+/// Hard-coded because Apple's installer places CLT here on every macOS
+/// version our DSL could plausibly run on; resolving it lets formulas
+/// like `"#{MacOS::CLT::PKG_PATH}/SDKs/MacOSX.sdk"` interpolate into
+/// real paths instead of silent empty strings.
+pub fn cltPkgPath(_: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Value {
+    return Value{ .string = "/Library/Developer/CommandLineTools" };
+}
+
+/// `Set.new(arr)` — stubbed as a thin array pass-through. Real Ruby Set
+/// is ordered-unique; for the formulas we care about (llvm@21's
+/// `arches = Set.new([:arm64, :x86_64, :aarch64]); arches << arch`)
+/// the only operations are `<<` append and `.each` iteration, both of
+/// which already work on arrays. Calling with no args returns an
+/// empty array so the subsequent shovel keeps going.
+pub fn setNew(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
+    if (args.len == 0) return Value{ .array = &.{} };
+    if (args[0] == .array) return args[0];
+    const singleton = ctx.allocator.alloc(Value, 1) catch return BuiltinError.OutOfMemory;
+    singleton[0] = args[0];
+    return Value{ .array = singleton };
+}
+
 /// Hardware::CPU.arch — return "arm64" or "x86_64"
 pub fn cpuArch(_: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Value {
     const is_arm = @import("builtin").cpu.arch == .aarch64;

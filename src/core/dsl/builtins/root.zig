@@ -67,6 +67,17 @@ pub const bare_builtins = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "Hardware::CPU.intel?", process.osLinux }, // intel? = false on Apple Silicon
     .{ "OS.kernel_version", process.macosVersion },
 
+    // Module constants. The parser lowers `A::B::C` and `A::B.C` to the
+    // same chained method_call shape, so one key covers both syntaxes.
+    // `PATH` is a common alternate spelling of `PKG_PATH` across formulas.
+    .{ "MacOS::CLT.PKG_PATH", process.cltPkgPath },
+    .{ "MacOS::CLT.PATH", process.cltPkgPath },
+
+    // Set.new(arr) — stubbed as an array pass-through. `.each` and `<<`
+    // already work on arrays, so the subset of Set usage we see in
+    // post_install bodies (dedup helpers for arch lists) stays native.
+    .{ "Set.new", process.setNew },
+
     // Pathname.new
     .{ "Pathname.new", process.pathnameNew },
 
