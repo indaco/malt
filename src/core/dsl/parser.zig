@@ -193,9 +193,36 @@ pub const Parser = struct {
         return self.parseMethodChain();
     }
 
+    /// Top of the chain precedence stack — shovel `<<` is Ruby's lowest
+    /// chain operator, so it consumes fully-formed tight chains on both
+    /// sides. Split out so `arr << share/"x"` parses as `arr << (share/"x")`.
     fn parseMethodChain(self: *Parser) DslError!*const Node {
-        var node = try self.parsePrimary();
+        var node = try self.parseTightChain();
+        while (self.current.kind == .less_less) {
+            const loc = self.currentLoc();
+            self.advanceToken(); // consume <<
+            const right = try self.parseTightChain();
+            const args = self.allocator.alloc(*const Node, 1) catch return DslError.OutOfMemory;
+            args[0] = right;
+            node = self.allocNode(.{
+                .loc = loc,
+                .kind = .{ .method_call = .{
+                    .receiver = node,
+                    .method = "<<",
+                    .args = args,
+                    .blk = null,
+                    .block_params = &.{},
+                } },
+            }) catch return DslError.OutOfMemory;
+        }
+        return node;
+    }
 
+    /// Dot / path-join / module-separator bind tighter than shovel.
+    /// Used both as the entry point from `parseMethodChain` and for each
+    /// shovel operand, so `a << b.m / c` → `a << ((b.m) / c)`.
+    fn parseTightChain(self: *Parser) DslError!*const Node {
+        var node = try self.parsePrimary();
         while (true) {
             if (self.current.kind == .dot) {
                 self.advanceToken(); // consume .
@@ -216,7 +243,6 @@ pub const Parser = struct {
                 break;
             }
         }
-
         return node;
     }
 

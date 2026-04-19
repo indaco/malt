@@ -121,6 +121,10 @@ pub const receiver_builtins = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "length", string.length },
     .{ "size", string.length },
     .{ "+", string.concat },
+    // `s << x` — Ruby shovel; mutates in Ruby but we return a fresh
+    // string (arena-allocated) since Values are immutable here. Callers
+    // that care about in-place semantics reassign (`s = s << x`).
+    .{ "<<", string.concat },
 
     // Version-style accessors on strings — keep the dispatch keys tight
     // to match Homebrew's shape (OS.kernel_version.major, etc.).
