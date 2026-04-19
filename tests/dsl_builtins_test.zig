@@ -10,6 +10,7 @@ const dsl = @import("malt").dsl;
 const pathname = dsl.builtins.pathname;
 const fileutils = dsl.builtins.fileutils;
 const process = dsl.builtins.process;
+const string = dsl.builtins.string;
 const Value = dsl.Value;
 const ExecCtx = pathname.ExecCtx;
 
@@ -638,4 +639,67 @@ test "safePopenRead captures stdout and chomps trailing newline" {
     defer arena.deinit();
     const v = try process.safePopenRead(arenaCtx(&arena, "/tmp/malt"), null, &.{ .{ .string = "/bin/echo" }, .{ .string = "hello" } });
     try testing.expectEqualStrings("hello", v.string);
+}
+
+// ---------------------------------------------------------------------------
+// Version-style accessors on strings — `.major`, `.minor`, `.patch`, `.to_i`
+//
+// Homebrew formulas routinely chain `OS.kernel_version.major` /
+// `Version.new(x).major`. Without these, llvm@21-style post_install bodies
+// hit `unknown_method` on each accessor and bail out early.
+// ---------------------------------------------------------------------------
+
+test "string.major returns the leading numeric segment as an integer" {
+    const v = try string.major(mkCtx("/tmp"), .{ .string = "25.4.0" }, &.{});
+    try testing.expectEqual(@as(i64, 25), v.int);
+}
+
+test "string.major handles single-segment versions" {
+    const v = try string.major(mkCtx("/tmp"), .{ .string = "15" }, &.{});
+    try testing.expectEqual(@as(i64, 15), v.int);
+}
+
+test "string.major strips a leading 'v' prefix" {
+    // Common in tag-style version strings (e.g. `v3.11.7`).
+    const v = try string.major(mkCtx("/tmp"), .{ .string = "v3.11.7" }, &.{});
+    try testing.expectEqual(@as(i64, 3), v.int);
+}
+
+test "string.major returns 0 on non-numeric / empty input" {
+    // Conservative: degrade to 0 so downstream `.major == N` comparisons
+    // don't crash on stray output. Matches Ruby `"".to_i == 0`.
+    try testing.expectEqual(@as(i64, 0), (try string.major(mkCtx("/tmp"), .{ .string = "" }, &.{})).int);
+    try testing.expectEqual(@as(i64, 0), (try string.major(mkCtx("/tmp"), .{ .string = "dev" }, &.{})).int);
+}
+
+test "string.minor returns the second numeric segment" {
+    try testing.expectEqual(@as(i64, 4), (try string.minor(mkCtx("/tmp"), .{ .string = "25.4.0" }, &.{})).int);
+    try testing.expectEqual(@as(i64, 11), (try string.minor(mkCtx("/tmp"), .{ .string = "3.11.7" }, &.{})).int);
+    // Single-segment version has no minor — fall back to 0.
+    try testing.expectEqual(@as(i64, 0), (try string.minor(mkCtx("/tmp"), .{ .string = "15" }, &.{})).int);
+}
+
+test "string.patch returns the third numeric segment" {
+    try testing.expectEqual(@as(i64, 0), (try string.patch(mkCtx("/tmp"), .{ .string = "25.4.0" }, &.{})).int);
+    try testing.expectEqual(@as(i64, 7), (try string.patch(mkCtx("/tmp"), .{ .string = "3.11.7" }, &.{})).int);
+    try testing.expectEqual(@as(i64, 0), (try string.patch(mkCtx("/tmp"), .{ .string = "25.4" }, &.{})).int);
+}
+
+test "string.to_i parses the leading integer and stops at non-digits" {
+    // Ruby-style: `"42abc".to_i == 42`, `"no_digits".to_i == 0`.
+    try testing.expectEqual(@as(i64, 42), (try string.toI(mkCtx("/tmp"), .{ .string = "42" }, &.{})).int);
+    try testing.expectEqual(@as(i64, 42), (try string.toI(mkCtx("/tmp"), .{ .string = "42abc" }, &.{})).int);
+    try testing.expectEqual(@as(i64, 0), (try string.toI(mkCtx("/tmp"), .{ .string = "abc" }, &.{})).int);
+    try testing.expectEqual(@as(i64, -5), (try string.toI(mkCtx("/tmp"), .{ .string = "-5" }, &.{})).int);
+}
+
+test "string.major routes through receiver_builtins dispatch" {
+    // Regression: the interpreter looks up `.major` in receiver_builtins;
+    // if this wiring ever drifts, `OS.kernel_version.major` silently
+    // degrades back to unknown_method. Pin both the key and the function.
+    const dispatch = @import("malt").dsl.builtins.receiver_builtins;
+    try testing.expect(dispatch.get("major") != null);
+    try testing.expect(dispatch.get("minor") != null);
+    try testing.expect(dispatch.get("patch") != null);
+    try testing.expect(dispatch.get("to_i") != null);
 }

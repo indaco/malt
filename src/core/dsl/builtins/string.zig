@@ -226,3 +226,84 @@ pub fn concat(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!
 fn isWhitespace(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r';
 }
+
+// ---------------------------------------------------------------------------
+// Version-style accessors — Homebrew routinely chains `x.major` on string
+// results from `OS.kernel_version` / `MacOS.version` / `Version.new(x)`.
+// Faithful to Ruby's Version contract: strip an optional leading `v`, split
+// on `.`, yield the Nth numeric segment as an Int, missing/non-numeric
+// segments degrade to `0` (same policy as `"".to_i`).
+// ---------------------------------------------------------------------------
+
+/// `.major` — first numeric segment of a version string.
+pub fn major(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
+    return Value{ .int = versionSegment(try receiverStr(ctx.allocator, receiver), 0) };
+}
+
+/// `.minor` — second numeric segment; 0 if absent.
+pub fn minor(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
+    return Value{ .int = versionSegment(try receiverStr(ctx.allocator, receiver), 1) };
+}
+
+/// `.patch` — third numeric segment; 0 if absent.
+pub fn patch(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
+    return Value{ .int = versionSegment(try receiverStr(ctx.allocator, receiver), 2) };
+}
+
+/// `.to_i` — Ruby's leading-integer parse: reads an optional sign then as
+/// many digits as possible; junk at the tail is ignored. Empty / no-digit
+/// input yields 0. Unlike Ruby (which promotes to Bignum), we saturate at
+/// i64 bounds so a huge literal doesn't wrap into a bogus comparison.
+pub fn toI(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
+    const s = std.mem.trim(u8, try receiverStr(ctx.allocator, receiver), " \t\r\n");
+    if (s.len == 0) return Value{ .int = 0 };
+
+    var i: usize = 0;
+    var negative = false;
+    if (s[0] == '-' or s[0] == '+') {
+        negative = s[0] == '-';
+        i = 1;
+    }
+    var n: i64 = 0;
+    var saw_digit = false;
+    while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) {
+        const digit: i64 = @as(i64, s[i] - '0');
+        n = std.math.mul(i64, n, 10) catch std.math.maxInt(i64);
+        n = std.math.add(i64, n, digit) catch std.math.maxInt(i64);
+        saw_digit = true;
+    }
+    if (!saw_digit) return Value{ .int = 0 };
+    return Value{ .int = if (negative) -n else n };
+}
+
+/// Return the `index`-th numeric segment of a dotted version string, or 0
+/// when the segment is missing or non-numeric.
+fn versionSegment(raw: []const u8, index: usize) i64 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    const stripped = if (trimmed.len > 0 and (trimmed[0] == 'v' or trimmed[0] == 'V'))
+        trimmed[1..]
+    else
+        trimmed;
+
+    var it = std.mem.splitScalar(u8, stripped, '.');
+    var seen: usize = 0;
+    while (it.next()) |segment| : (seen += 1) {
+        if (seen == index) return parseLeadingInt(segment);
+    }
+    return 0;
+}
+
+/// Read as many leading digits as possible and return them as i64. Used by
+/// `versionSegment`; saturates at i64 max on overflow so "999...9".major
+/// can still participate in comparisons without wrapping.
+fn parseLeadingInt(s: []const u8) i64 {
+    var n: i64 = 0;
+    var saw_digit = false;
+    for (s) |b| {
+        if (!std.ascii.isDigit(b)) break;
+        n = std.math.mul(i64, n, 10) catch std.math.maxInt(i64);
+        n = std.math.add(i64, n, @as(i64, b - '0')) catch std.math.maxInt(i64);
+        saw_digit = true;
+    }
+    return if (saw_digit) n else 0;
+}
