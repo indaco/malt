@@ -450,6 +450,14 @@ pub const Interpreter = struct {
             // Receiver-based call
             const receiver_val = try self.eval(receiver_node);
 
+            // Binary comparison operators: lowered by the parser to a
+            // method_call with method = "<", ">", "<=", ">=", "==", "!=".
+            // Handle upfront so subsequent `receiver_val == .array` checks
+            // don't see a single-arg comparison as an Enumerable method.
+            if (mc.blk == null and mc.block_pass == null and args_slice.len == 1 and isComparisonOp(mc.method)) {
+                return Value{ .bool = compare(receiver_val, mc.method, args_slice[0]) };
+            }
+
             // Handle .select { |x| ... } and .map { |x| ... } on arrays
             if (receiver_val == .array and mc.blk != null) {
                 if (std.mem.eql(u8, mc.method, "select")) {
@@ -980,6 +988,54 @@ pub const Interpreter = struct {
         };
     }
 };
+
+/// True when `method` is one of the six comparison operators the parser
+/// lowers from binary `a OP b` into `method_call(receiver=a, method=OP)`.
+fn isComparisonOp(method: []const u8) bool {
+    const ops = [_][]const u8{ "<", ">", "<=", ">=", "==", "!=" };
+    for (ops) |op| if (std.mem.eql(u8, method, op)) return true;
+    return false;
+}
+
+/// Evaluate `left OP right`, degrading to `false` for cross-type or
+/// nil-operand cases so a logical guard (`unless x < 1`) doesn't crash.
+/// Matches Ruby's int/int and string/string total orders for equal types.
+fn compare(left: Value, op: []const u8, right: Value) bool {
+    // Equality / inequality work across every value pair.
+    if (std.mem.eql(u8, op, "==")) return left.eql(right);
+    if (std.mem.eql(u8, op, "!=")) return !left.eql(right);
+
+    // Relational operators need a total order — only defined for same-type
+    // int/int or string/string pairs. Mixed-kind / nil operands degrade
+    // to false so callers observe a well-defined boolean.
+    const ord: i8 = blk: {
+        if (left == .int and right == .int) {
+            break :blk if (left.int < right.int) @as(i8, -1) else if (left.int > right.int) @as(i8, 1) else 0;
+        }
+        const left_str: ?[]const u8 = switch (left) {
+            .string, .pathname => |s| s,
+            else => null,
+        };
+        const right_str: ?[]const u8 = switch (right) {
+            .string, .pathname => |s| s,
+            else => null,
+        };
+        if (left_str != null and right_str != null) {
+            const o = std.mem.order(u8, left_str.?, right_str.?);
+            break :blk switch (o) {
+                .lt => @as(i8, -1),
+                .gt => @as(i8, 1),
+                .eq => @as(i8, 0),
+            };
+        }
+        return false;
+    };
+    if (std.mem.eql(u8, op, "<")) return ord < 0;
+    if (std.mem.eql(u8, op, ">")) return ord > 0;
+    if (std.mem.eql(u8, op, "<=")) return ord <= 0;
+    if (std.mem.eql(u8, op, ">=")) return ord >= 0;
+    return false;
+}
 
 /// Execute a formula's post_install block.
 pub fn executePostInstall(

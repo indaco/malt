@@ -208,6 +208,20 @@ pub fn emptyQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Val
     return Value{ .bool = s.len == 0 };
 }
 
+/// blank? — Rails/ActiveSupport predicate used across Homebrew guards.
+/// True for `nil` and empty / whitespace-only strings; false otherwise.
+pub fn blankQ(_: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
+    const recv = receiver orelse return Value{ .bool = true };
+    return Value{ .bool = switch (recv) {
+        .nil => true,
+        .string, .pathname => |s| blk: {
+            for (s) |c| if (c != ' ' and c != '\t' and c != '\n' and c != '\r') break :blk false;
+            break :blk true;
+        },
+        else => false,
+    } };
+}
+
 /// length / size — return string length
 pub fn length(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const s = try receiverStr(ctx.allocator, receiver);

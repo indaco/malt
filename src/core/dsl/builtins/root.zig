@@ -118,6 +118,7 @@ pub const receiver_builtins = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "start_with?", string.startWithQ },
     .{ "end_with?", string.endWithQ },
     .{ "empty?", string.emptyQ },
+    .{ "blank?", string.blankQ },
     .{ "length", string.length },
     .{ "size", string.length },
     .{ "+", string.concat },
