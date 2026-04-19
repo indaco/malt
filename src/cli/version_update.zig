@@ -14,6 +14,7 @@ const builtin = @import("builtin");
 const client_mod = @import("../net/client.zig");
 const archive = @import("../fs/archive.zig");
 const output = @import("../ui/output.zig");
+const origin = @import("../update/origin.zig");
 const release = @import("../update/release.zig");
 const verify = @import("../update/verify.zig");
 const swap = @import("../update/swap.zig");
@@ -45,6 +46,15 @@ fn parseArgs(args: []const []const u8) Opts {
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const opts = parseArgs(args);
+
+    // Brew-managed installs must be upgraded via `brew`, otherwise the
+    // Cellar/Caskroom metadata drifts from the file on disk. Route these
+    // users at the tool that owns their install.
+    if (detectOrigin() == .homebrew) {
+        output.info("This malt was installed via Homebrew.", .{});
+        output.info("Update with: brew upgrade --cask malt", .{});
+        return;
+    }
 
     output.info("Current version: {s}", .{CURRENT_VERSION});
     output.info("Checking for updates...", .{});
@@ -305,6 +315,16 @@ fn runVerification(
             return error.Aborted;
         },
     };
+}
+
+/// Resolve the running binary via `executablePath` + `realpath` and
+/// classify the install. Failure to resolve degrades to `.direct`, so
+/// a transient FS error never locks the updater out.
+fn detectOrigin() origin.Origin {
+    var exe_buf: [fs_compat.max_path_bytes]u8 = undefined;
+    const n = std.process.executablePath(io_mod.ctx(), &exe_buf) catch return .direct;
+    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    return origin.classifyResolved(&resolved_buf, exe_buf[0..n]);
 }
 
 fn unverifiedAllowed() bool {

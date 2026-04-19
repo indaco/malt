@@ -5,6 +5,7 @@
 //! fighting the Cellar/Caskroom.
 
 const std = @import("std");
+const fs_compat = @import("../fs/compat.zig");
 
 pub const Origin = enum { direct, homebrew };
 
@@ -21,4 +22,13 @@ pub fn classify(resolved_path: []const u8) Origin {
     if (std.mem.indexOf(u8, resolved_path, "/Cellar/") != null) return .homebrew;
     if (std.mem.indexOf(u8, resolved_path, "/Caskroom/") != null) return .homebrew;
     return .direct;
+}
+
+/// Classify a possibly-symlinked path: resolve via `realpath(2)`, then
+/// `classify()` the real path. Returns `.direct` if the path cannot be
+/// resolved - a missing/unreadable binary should fall through to the
+/// normal updater rather than refusing based on a resolution error.
+pub fn classifyResolved(out_buf: []u8, path: []const u8) Origin {
+    const resolved = fs_compat.cwd().realpath(path, out_buf) catch return .direct;
+    return classify(resolved);
 }
