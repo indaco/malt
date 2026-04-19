@@ -8,6 +8,21 @@
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
 
+/// Exact-name asset lookup. For `checksums.txt` and
+/// `checksums.txt.sigstore.json`, which must match by name, not pattern.
+pub fn pickAssetUrlByName(assets: std.json.Array, name: []const u8) ?[]const u8 {
+    for (assets.items) |asset| {
+        const obj = switch (asset) {
+            .object => |o| o,
+            else => continue,
+        };
+        const asset_name = strField(obj, "name") orelse continue;
+        if (!std.mem.eql(u8, asset_name, name)) continue;
+        return strField(obj, "browser_download_url");
+    }
+    return null;
+}
+
 /// First asset whose name matches `arch_str` wins. Returns its
 /// `browser_download_url`, or `null` when nothing matches.
 pub fn pickAssetUrl(assets: std.json.Array, arch_str: []const u8) ?[]const u8 {
