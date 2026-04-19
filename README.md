@@ -577,7 +577,7 @@ mt version update --cleanup          # remove stale .old + orphaned staging file
 
 `update` queries the GitHub releases API, verifies the release with cosign and SHA256 against the same trust anchor as `install.sh`, and atomically replaces the running binary. The previous binary is preserved at `<target>.old` for manual rollback; accumulated `.old` files (and any orphaned `.malt-update-<pid>` staging files from killed updates) can be removed with `mt version update --cleanup`, which runs locally and makes no network calls.
 
-**Homebrew installs.** If malt was installed via `brew install --cask malt`, the updater detects this and prints a hint pointing you at `brew upgrade --cask malt` — overwriting a brew-managed file from underneath would corrupt its install receipt and break the next `brew upgrade`.
+**Homebrew installs.** If malt was installed via `brew install --cask indaco/tap/malt`, the updater detects this and prints a hint pointing you at `brew upgrade --cask malt` — overwriting a brew-managed file from underneath would corrupt its install receipt and break the next `brew upgrade`.
 
 **Verification.** Every update downloads `checksums.txt` and its Sigstore bundle, runs `cosign verify-blob` pinned to the release workflow's OIDC identity, then confirms the tarball's SHA256 against the verified checksums file. [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/) must be on your `PATH`; without it, `mt version update` refuses rather than silently skip the check. To bypass (strongly discouraged):
 
