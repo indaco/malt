@@ -16,6 +16,7 @@ const archive = @import("../fs/archive.zig");
 const output = @import("../ui/output.zig");
 const release = @import("../update/release.zig");
 const verify = @import("../update/verify.zig");
+const swap = @import("../update/swap.zig");
 
 const CURRENT_VERSION = @import("../version.zig").value;
 const RELEASES_API = "https://api.github.com/repos/indaco/malt/releases/latest";
@@ -175,19 +176,24 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     output.info("Replacing {s}...", .{self_exe});
-    fs_compat.copyFileAbsolute(new_binary, self_exe, .{}) catch {
-        output.err("Failed to replace binary. You may need sudo.", .{});
-        output.info("Manual update: sudo cp {s} {s}", .{ new_binary, self_exe });
-        return;
+    swap.atomicReplace(self_exe, new_binary) catch |e| switch (e) {
+        error.StagingFailed, error.SwapFailed => {
+            output.err("Failed to replace {s}. You may need sudo.", .{self_exe});
+            output.info("Manual update: sudo cp {s} {s}", .{ new_binary, self_exe });
+            return;
+        },
+        error.RollbackFailed => {
+            // Two renames went one-and-a-half: target is gone, .old is still
+            // the previous binary. The next invocation the user makes
+            // cannot find `malt` on PATH, so surface the recovery path loudly.
+            output.err("Update aborted mid-swap; rollback also failed.", .{});
+            output.info("Restore the previous binary with:", .{});
+            output.info("  sudo mv {s}.old {s}", .{ self_exe, self_exe });
+            return error.Aborted;
+        },
     };
 
-    {
-        const f = fs_compat.openFileAbsolute(self_exe, .{ .mode = .read_write }) catch return;
-        defer f.close();
-        f.chmod(0o755) catch {};
-    }
-
-    output.info("Updated to {s}", .{latest});
+    output.info("Updated to {s} (previous kept at {s}.old)", .{ latest, self_exe });
 }
 
 /// Build `$TMPDIR/malt-update-<pid>/`. Falls back to `/tmp` when
