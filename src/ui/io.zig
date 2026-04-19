@@ -46,10 +46,12 @@ pub fn stderrFile() std.Io.File {
     return std.Io.File.stderr();
 }
 
-/// Test-only stderr capture. Tests run sequentially in a binary, so no
-/// lock; elided from release via `builtin.is_test` guards.
+/// Test-only stderr / stdout capture. Tests run sequentially in a binary,
+/// so no lock; elided from release via `builtin.is_test` guards.
 var capture_list: ?*std.ArrayList(u8) = null;
 var capture_allocator: std.mem.Allocator = undefined;
+var stdout_capture_list: ?*std.ArrayList(u8) = null;
+var stdout_capture_allocator: std.mem.Allocator = undefined;
 
 /// Test-only: redirect `stderrWriteAll` into `buf`. Pair with `endStderrCapture`.
 pub fn beginStderrCapture(allocator: std.mem.Allocator, buf: *std.ArrayList(u8)) void {
@@ -64,6 +66,19 @@ pub fn endStderrCapture() void {
     capture_list = null;
 }
 
+/// Test-only: redirect `stdoutWriteAll` into `buf`. Pair with `endStdoutCapture`.
+/// Needed for asserting JSON-mode payloads that land on stdout.
+pub fn beginStdoutCapture(allocator: std.mem.Allocator, buf: *std.ArrayList(u8)) void {
+    if (!builtin.is_test) return;
+    stdout_capture_list = buf;
+    stdout_capture_allocator = allocator;
+}
+
+pub fn endStdoutCapture() void {
+    if (!builtin.is_test) return;
+    stdout_capture_list = null;
+}
+
 pub fn stderrWriteAll(bytes: []const u8) void {
     if (builtin.is_test) {
         if (capture_list) |list| {
@@ -75,5 +90,11 @@ pub fn stderrWriteAll(bytes: []const u8) void {
 }
 
 pub fn stdoutWriteAll(bytes: []const u8) void {
+    if (builtin.is_test) {
+        if (stdout_capture_list) |list| {
+            list.appendSlice(stdout_capture_allocator, bytes) catch {};
+            return;
+        }
+    }
     stdoutFile().writeStreamingAll(ctx(), bytes) catch return;
 }
