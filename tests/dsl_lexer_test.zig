@@ -428,3 +428,42 @@ test "lexer: method with bang suffix" {
     try expectToken(&lex, .identifier, "gsub!");
     try expectKind(&lex, .eof);
 }
+
+// `::` is Ruby's module/constant separator. Real formulas use it heavily
+// (`Hardware::CPU.arch`, `MacOS::CLT::PKG_PATH`), so ensure the lexer emits
+// a single `double_colon` token and not two `colon` tokens — regression
+// traced to llvm@21's post_install.
+test "lexer: :: is a single double_colon token" {
+    var lex = Lexer.init("A::B");
+    try expectToken(&lex, .identifier, "A");
+    try expectKind(&lex, .double_colon);
+    try expectToken(&lex, .identifier, "B");
+    try expectKind(&lex, .eof);
+}
+
+test "lexer: nested module path A::B::C" {
+    var lex = Lexer.init("Hardware::CPU::arch");
+    try expectToken(&lex, .identifier, "Hardware");
+    try expectKind(&lex, .double_colon);
+    try expectToken(&lex, .identifier, "CPU");
+    try expectKind(&lex, .double_colon);
+    try expectToken(&lex, .identifier, "arch");
+    try expectKind(&lex, .eof);
+}
+
+test "lexer: symbol-vs-module-separator still lexes :sym correctly" {
+    // The fix for `::` must NOT break the `:sym` symbol path.
+    var lex = Lexer.init(":exist?");
+    try expectToken(&lex, .symbol, ":exist?");
+    try expectKind(&lex, .eof);
+}
+
+test "lexer: bare colon (hash rocket lhs) remains a single colon" {
+    var lex = Lexer.init("{ foo: 1 }");
+    try expectKind(&lex, .lbrace);
+    try expectToken(&lex, .identifier, "foo");
+    try expectKind(&lex, .colon);
+    try expectToken(&lex, .integer, "1");
+    try expectKind(&lex, .rbrace);
+    try expectKind(&lex, .eof);
+}

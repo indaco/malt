@@ -475,3 +475,194 @@ test "routePostInstallOutcome: scope with unrelated names is ignored" {
     try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") == null);
     try testing.expect(std.mem.indexOf(u8, out, "partially skipped (use --use-system-ruby=foo") != null);
 }
+
+// ---------------------------------------------------------------------------
+// routePostInstallOutcome under --verbose / --debug — the diagnostic dump
+// is what lets users (and bug reports) see WHICH helpers the DSL skipped.
+// ---------------------------------------------------------------------------
+
+test "routePostInstallOutcome: --verbose dumps unknown_method entries after the hint" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "foo", .reason = .unknown_method, .detail = "quiet_system", .loc = .{ .line = 4, .col = 6 } });
+    flog.log(.{ .formula = "foo", .reason = .unsupported_node, .detail = "default_args", .loc = null });
+
+    const prior = output_mod.isVerbose();
+    output_mod.setVerbose(true);
+    defer output_mod.setVerbose(prior);
+
+    const out = try runRoute(&flog, "foo", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") != null);
+    // Both reasons surface, with/without source location.
+    try testing.expect(std.mem.indexOf(u8, out, "foo:4:6: [unknown_method] quiet_system") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "foo: [unsupported_node] default_args") != null);
+}
+
+test "routePostInstallOutcome: --debug surfaces fatal entries alongside the hint" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    // Non-fatal unknown + a parse_error diagnostic — debug prints both.
+    flog.log(.{ .formula = "foo", .reason = .unknown_method, .detail = "helper", .loc = null });
+    flog.log(.{ .formula = "foo", .reason = .parse_error, .detail = "unexpected token", .loc = .{ .line = 1, .col = 1 } });
+
+    const prior_v = output_mod.isVerbose();
+    const prior_d = output_mod.isDebug();
+    output_mod.setDebug(true);
+    defer {
+        output_mod.setVerbose(prior_v);
+        // No setter to un-debug a flag — reset via setDebug(false).
+        output_mod.setDebug(prior_d);
+    }
+
+    const out = try runRoute(&flog, "foo", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "[unknown_method] helper") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "[parse_error] unexpected token") != null);
+}
+
+test "routePostInstallOutcome: fatal + --debug also prints non-fatal context" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "z", .reason = .sandbox_violation, .detail = "/etc/passwd", .loc = null });
+    flog.log(.{ .formula = "z", .reason = .unknown_method, .detail = "tangential_helper", .loc = null });
+
+    const prior_d = output_mod.isDebug();
+    output_mod.setDebug(true);
+    defer output_mod.setDebug(prior_d);
+
+    const out = try runRoute(&flog, "z", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "DSL failed for z (fatal)") != null);
+    // Sandbox violation surfaces via printFatal; tangential helper via printUnknown.
+    try testing.expect(std.mem.indexOf(u8, out, "[sandbox_violation] /etc/passwd") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "[unknown_method] tangential_helper") != null);
+}
+
+// ---------------------------------------------------------------------------
+// routePostInstallOutcome under --json — one structured line per package
+// so scripted pipelines can tell completed / partial / fatal apart.
+// ---------------------------------------------------------------------------
+
+fn runRouteCaptureStdout(
+    flog: *const dsl.FallbackLog,
+    name: []const u8,
+    scope: []const []const u8,
+) ![]u8 {
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    errdefer stdout_buf.deinit(testing.allocator);
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+
+    color_mod.setForTest(false, false);
+    defer color_mod.setForTest(null, null);
+
+    const prior_mode_is_json = output_mod.isJson();
+    output_mod.setMode(.json);
+    defer output_mod.setMode(if (prior_mode_is_json) .json else .human);
+
+    io_mod.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer io_mod.endStdoutCapture();
+    io_mod.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer io_mod.endStderrCapture();
+
+    install.routePostInstallOutcome(testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
+    return stdout_buf.toOwnedSlice(testing.allocator);
+}
+
+test "routePostInstallOutcome: --json emits one status line with escaped name" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "llvm@21", .reason = .unknown_method, .detail = "write_config_files", .loc = .{ .line = 8, .col = 3 } });
+
+    const out = try runRouteCaptureStdout(&flog, "llvm@21", &.{});
+    defer testing.allocator.free(out);
+
+    // Shape: `{"event":"post_install","name":"llvm@21","status":"partially_skipped","entries":[...]}\n`
+    try testing.expect(std.mem.endsWith(u8, out, "\n"));
+    try testing.expect(std.mem.indexOf(u8, out, "\"event\":\"post_install\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"name\":\"llvm@21\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"status\":\"partially_skipped\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"reason\":\"unknown_method\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"detail\":\"write_config_files\"") != null);
+
+    // Round-trip through std.json to confirm the line is parser-clean.
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("llvm@21", parsed.value.object.get("name").?.string);
+    try testing.expectEqualStrings("partially_skipped", parsed.value.object.get("status").?.string);
+}
+
+test "routePostInstallOutcome: --json status=completed for clean flog" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    const out = try runRouteCaptureStdout(&flog, "wget", &.{});
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "\"status\":\"completed\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"entries\":[]") != null);
+}
+
+test "routePostInstallOutcome: --json status=fatal on sandbox violation" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "bad", .reason = .sandbox_violation, .detail = "/etc/passwd", .loc = null });
+    const out = try runRouteCaptureStdout(&flog, "bad", &.{});
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "\"status\":\"fatal\"") != null);
+}
+
+// ---------------------------------------------------------------------------
+// Invariants — pinned as tests so future refactors can't drift them silently:
+//   - per-formula FallbackLog isolation
+//   - deferred cleanup fires on labelled break
+//   - multiple non-fatal entries emit a single partial-skip warning
+//   - unknown scope names can't pass as `--use-system-ruby` matches
+// ---------------------------------------------------------------------------
+
+test "invariant: two FallbackLogs stay isolated (per-formula scope)" {
+    var a = dsl.FallbackLog.init(testing.allocator);
+    defer a.deinit();
+    var b = dsl.FallbackLog.init(testing.allocator);
+    defer b.deinit();
+
+    a.log(.{ .formula = "a", .reason = .unknown_method, .detail = "a_helper", .loc = null });
+    try testing.expect(a.hasErrors());
+    try testing.expect(!b.hasErrors());
+    try testing.expectEqual(@as(usize, 1), a.entries.items.len);
+    try testing.expectEqual(@as(usize, 0), b.entries.items.len);
+}
+
+test "invariant: router emits exactly one partially-skipped warn regardless of entry count" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    // 10 entries shouldn't yield 10 warnings — the hint is per-package.
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        flog.log(.{ .formula = "f", .reason = .unknown_method, .detail = "x", .loc = null });
+    }
+    const out = try runRoute(&flog, "f", &.{});
+    defer testing.allocator.free(out);
+
+    // One "partially skipped" line with the package name — count occurrences.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "partially skipped"));
+}
+
+test "invariant: defer fires on labelled break (FallbackLog no-leak)" {
+    // Smokes the control-flow that the install loop uses every iteration.
+    var leaked = false;
+    outer: {
+        var list: std.ArrayList(u8) = .empty;
+        defer list.deinit(testing.allocator);
+        list.append(testing.allocator, 'x') catch {
+            leaked = true;
+            break :outer;
+        };
+        // Labelled break — the Zig runtime MUST still run the defer above.
+        break :outer;
+    }
+    try testing.expect(!leaked);
+}
