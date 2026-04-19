@@ -184,6 +184,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
         if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
             output.setVerbose(true);
+        } else if (std.mem.eql(u8, arg, "--debug")) {
+            output.setDebug(true);
         } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
             output.setQuiet(true);
         } else if (std.mem.eql(u8, arg, "--json")) {
@@ -290,6 +292,8 @@ fn printUsage() void {
         \\
         \\Global flags:
         \\  --verbose, -v   Verbose output
+        \\  --debug         Surface every DSL diagnostic (implies verbose);
+        \\                  pair with issue reports for full context
         \\  --quiet, -q     Suppress non-error output
         \\  --json          JSON output (read commands)
         \\  --dry-run       Preview without executing

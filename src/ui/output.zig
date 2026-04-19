@@ -13,6 +13,7 @@ pub const OutputMode = enum {
 
 var quiet: bool = false;
 var verbose: bool = false;
+var debug: bool = false;
 var dry_run: bool = false;
 var mode: OutputMode = .human;
 
@@ -21,6 +22,13 @@ pub fn setQuiet(q: bool) void {
 }
 pub fn setVerbose(v: bool) void {
     verbose = v;
+}
+/// Enable debug mode — prints every logged diagnostic the CLI collects,
+/// so users filing issues can attach a single transcript that captures
+/// what the DSL/interpreter saw. Implies verbose.
+pub fn setDebug(d: bool) void {
+    debug = d;
+    if (d) verbose = true;
 }
 pub fn setDryRun(d: bool) void {
     dry_run = d;
@@ -33,6 +41,9 @@ pub fn isQuiet() bool {
 }
 pub fn isVerbose() bool {
     return verbose;
+}
+pub fn isDebug() bool {
+    return debug;
 }
 pub fn isDryRun() bool {
     return dry_run;

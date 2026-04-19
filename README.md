@@ -592,14 +592,15 @@ Completes subcommands (for both `malt` and `mt`), per-command flags, global flag
 
 ### Global Flags
 
-| Flag              | Description                                   |
-| ----------------- | --------------------------------------------- |
-| `--verbose`, `-v` | Verbose output (all commands)                 |
-| `--quiet`, `-q`   | Suppress non-error output (all commands)      |
-| `--json`          | JSON output (read commands)                   |
-| `--dry-run`       | Preview without executing (mutating commands) |
-| `--help`, `-h`    | Show help                                     |
-| `--version`       | Show version                                  |
+| Flag              | Description                                                                      |
+| ----------------- | -------------------------------------------------------------------------------- |
+| `--verbose`, `-v` | Verbose output (all commands)                                                    |
+| `--debug`         | Surface every DSL diagnostic (implies verbose); pair with issue reports          |
+| `--quiet`, `-q`   | Suppress non-error output (all commands)                                         |
+| `--json`          | JSON output (read commands; also emits per-package `post_install` status lines)  |
+| `--dry-run`       | Preview without executing (mutating commands)                                    |
+| `--help`, `-h`    | Show help                                                                        |
+| `--version`       | Show version                                                                     |
 
 ---
 

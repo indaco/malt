@@ -181,8 +181,11 @@ pub const Lexer = struct {
             }
         }
 
-        // Symbol literal :name
-        if (c == ':' and self.remaining() > 1) {
+        // `:` starts a symbol (`:name`) or the `:` side of a hash rocket;
+        // `::` is the module separator, handled by `lexOperator`. Check
+        // for `::` first so it isn't split into two colons (regression
+        // observed in `Hardware::CPU.arch` and similar Homebrew idioms).
+        if (c == ':' and self.remaining() > 1 and self.source[self.pos + 1] != ':') {
             const next_c = self.source[self.pos + 1];
             if (std.ascii.isAlphabetic(next_c) or next_c == '_') {
                 return self.lexSymbol();
