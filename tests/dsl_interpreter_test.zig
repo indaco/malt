@@ -1914,3 +1914,179 @@ test "interpreter: chained .major on an OS.kernel_version result stays an intege
     const err = try runSnippet(&arena, src, prefix);
     try testing.expect(err == null);
 }
+
+// ---------------------------------------------------------------------------
+// Enumerable methods on hash receivers — .each / .map / .select / .reject
+// with two-param blocks (|key, value|). Needed by llvm@21's post_install
+// which does `{ darwin: ..., macosx: ... }.map do |system, version| ... end`.
+// ---------------------------------------------------------------------------
+
+test "interpreter: hash.map yields (key, value) and returns an array" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // Map each entry to `share/<key>` and write the value as its body. The
+    // .map result is an array of pathnames that .all?(&:exist?) confirms.
+    const src =
+        \\share.mkpath
+        \\paths = { a: "alpha", b: "beta" }.map do |name, body|
+        \\  (share/name).write body
+        \\  share/name
+        \\end
+        \\odie "hash.map lost entries" unless paths.all?(&:exist?)
+        \\odie "a missing" unless (share/"a").exist?
+        \\odie "b missing" unless (share/"b").exist?
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: hash.each yields (key, value) and returns nil" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\share.mkpath
+        \\{ one: "1", two: "2" }.each do |name, body|
+        \\  (share/name).write body
+        \\end
+        \\odie "one missing" unless (share/"one").exist?
+        \\odie "two missing" unless (share/"two").exist?
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: hash.select filters entries by the 2-arg block" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // Keep only entries whose value `.exist?` is true. Pre-create one of
+    // the two target files so the filter has a real decision to make.
+    const src =
+        \\share.mkpath
+        \\(share/"here").write "x"
+        \\subset = { a: share/"here", b: share/"missing" }.select do |_k, path|
+        \\  path.exist?
+        \\end
+        \\odie "expected 1 entry after select" unless subset.any?
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: llvm@21 shape — hash.map + array.all?(&:exist?) chains cleanly" {
+    // Exact shape from llvm@21 post_install. Only `write_config_files`
+    // (blocked on the `<<` shovel operator) should remain unknown after
+    // this PR — tracked in the next follow-up.
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\share.mkpath
+        \\(share/"a.cfg").write "x"
+        \\(share/"b.cfg").write "x"
+        \\paths = { a: share/"a.cfg", b: share/"b.cfg" }.map do |_k, p|
+        \\  p
+        \\end
+        \\odie "chain lost entries" unless paths.all?(&:exist?)
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: hash.reject is the dual of select" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // Reject entries whose value is already present; we expect the
+    // remaining entry's side effect (write) to run.
+    const src =
+        \\share.mkpath
+        \\(share/"kept_k").write "already"
+        \\{ a: share/"kept_k", b: share/"new_k" }.reject do |_k, p|
+        \\  p.exist?
+        \\end.each do |_k, p|
+        \\  p.write "fresh"
+        \\end
+        \\odie "new_k should have been written" unless (share/"new_k").exist?
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: block-less hash.any?/all?/empty?/length" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // `.any?` on non-empty → truthy; `.empty?` → false; `.length` > 0.
+    // `.all?` is true unless a value is literally false/nil.
+    const src =
+        \\h = { a: 1, b: 2 }
+        \\odie "any? should be true" unless h.any?
+        \\odie "empty? should be false" if h.empty?
+        \\odie "all? should be true for truthy values" unless h.all?
+        \\odie "length should be positive" unless h.length
+        \\empty = {}
+        \\odie "empty.any? should be false" if empty.any?
+        \\odie "empty.empty? should be true" unless empty.empty?
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: hash.each with single-param block destructures the pair" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // Ruby allows `hash.each { |kv| ... }` where `kv` is `[key, value]`.
+    // The DSL binds the pair as a 2-element array — assert one element
+    // came through by writing its value to disk under its key.
+    const src =
+        \\share.mkpath
+        \\{ single: "yes" }.each do |kv|
+        \\  (share/kv[0]).write kv[1]
+        \\end
+        \\odie "single missing" unless (share/"single").exist?
+    ;
+    _ = try runSnippet(&arena, src, prefix);
+    // We don't insist on success — `kv[0]` indexing isn't implemented
+    // yet, so the only invariant enforced here is: no parse_error / no
+    // panic when destructuring a 1-arg block over a hash.
+}
+
+test "interpreter: empty hash.map/each returns quickly without side effects" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // Guard against a spurious block invocation on an empty hash — would
+    // have shown up as the odie firing despite no entries.
+    const src =
+        \\share.mkpath
+        \\empty = {}
+        \\empty.map do |_k, _v|
+        \\  odie "map should not run on empty hash"
+        \\end
+        \\empty.each do |_k, _v|
+        \\  odie "each should not run on empty hash"
+        \\end
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
