@@ -351,3 +351,127 @@ test "findFailedDep returns null when no dep is in the failed set" {
     ;
     try testing.expect(install.findFailedDep(&failed, json) == null);
 }
+
+// ---------------------------------------------------------------------------
+// routePostInstallOutcome — branch coverage driven by a synthetic fallback
+// log. The router is where "completed" gets its real meaning (zero logged
+// entries) and where silent unknown_method entries now surface the
+// `--use-system-ruby` hint instead of passing under the radar.
+// ---------------------------------------------------------------------------
+
+const dsl = @import("malt").dsl;
+const io_mod = @import("malt").io_mod;
+const color_mod = @import("malt").color;
+const output_mod = @import("malt").output;
+
+/// Capture stderr output from a single router call and return the raw
+/// bytes. Caller owns the buffer. Deterministic state (no color / no
+/// emoji / not quiet) so the assertions pin plain ASCII prefixes.
+fn runRoute(
+    flog: *const dsl.FallbackLog,
+    name: []const u8,
+    scope: []const []const u8,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(testing.allocator);
+
+    color_mod.setForTest(false, false);
+    defer color_mod.setForTest(null, null);
+    const prior_quiet = output_mod.isQuiet();
+    output_mod.setQuiet(false);
+    defer output_mod.setQuiet(prior_quiet);
+
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    install.routePostInstallOutcome(testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
+
+    return buf.toOwnedSlice(testing.allocator);
+}
+
+test "routePostInstallOutcome: clean flog prints a 'completed' info line" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+
+    const out = try runRoute(&flog, "wget", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "post_install completed for wget") != null);
+    // Never suggest the Ruby fallback on clean runs.
+    try testing.expect(std.mem.indexOf(u8, out, "--use-system-ruby") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "fatal") == null);
+}
+
+test "routePostInstallOutcome: non-fatal entry surfaces the --use-system-ruby hint" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{
+        .formula = "wget",
+        .reason = .unknown_method,
+        .detail = "some_helper",
+        .loc = .{ .line = 2, .col = 3 },
+    });
+
+    const out = try runRoute(&flog, "wget", &.{});
+    defer testing.allocator.free(out);
+
+    // Downgrade: "completed" must NOT appear — silent skip ≠ success.
+    try testing.expect(std.mem.indexOf(u8, out, "post_install completed") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "--use-system-ruby=wget") != null);
+}
+
+test "routePostInstallOutcome: --use-system-ruby=NAME in scope triggers the Ruby fallback banner" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{
+        .formula = "openssl@3",
+        .reason = .unsupported_node,
+        .detail = "keyword_args",
+        .loc = null,
+    });
+
+    const scope = [_][]const u8{"openssl@3"};
+    const out = try runRoute(&flog, "openssl@3", scope[0..]);
+    defer testing.allocator.free(out);
+
+    // The fallback banner leads the warning so users know the Ruby
+    // subprocess is about to run — not the "partially skipped" hint.
+    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "post_install completed") == null);
+}
+
+test "routePostInstallOutcome: fatal entry wins over hasErrors heuristic" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{
+        .formula = "evil",
+        .reason = .sandbox_violation,
+        .detail = "/etc/passwd",
+        .loc = .{ .line = 1, .col = 1 },
+    });
+    // A fatal entry must short-circuit even if --use-system-ruby is in
+    // scope — sandbox violations are never delegated to Ruby.
+    const scope = [_][]const u8{"evil"};
+    const out = try runRoute(&flog, "evil", scope[0..]);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "post_install DSL failed for evil (fatal)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "post_install completed") == null);
+}
+
+test "routePostInstallOutcome: scope with unrelated names is ignored" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "foo", .reason = .unknown_method, .detail = "x", .loc = null });
+
+    // `--use-system-ruby=other` shouldn't catch "foo".
+    const scope = [_][]const u8{"other"};
+    const out = try runRoute(&flog, "foo", scope[0..]);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "partially skipped (use --use-system-ruby=foo") != null);
+}
