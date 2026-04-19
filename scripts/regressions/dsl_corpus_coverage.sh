@@ -63,14 +63,22 @@ slug() {
 # Default target list — picked to exercise the full range of shapes the
 # DSL must tolerate. Override with TARGETS="a b c" to customise.
 #
-#   * ca-certificates: dispatcher + sibling defs + keychain shell-outs
-#   * gnupg:           trivial post_install (var/run.mkpath + killall)
-#   * openssl@3:       sibling def (openssldir) + install_symlink chain
-#   * libidn2:         minimal post_install — quick baseline
-#   * tree:            NO post_install — confirms DSL path is inert
-#   * jq:              NO post_install — same
-#   * ripgrep:         NO post_install — bottle with lots of completions
-TARGETS="${TARGETS:-ca-certificates gnupg openssl@3 libidn2 tree jq ripgrep}"
+#   post_install-defined formulas (exercise the DSL):
+#     * ca-certificates: dispatcher + sibling defs + keychain shell-outs
+#     * gnupg:           trivial post_install (var/run.mkpath + killall)
+#     * openssl@3:       sibling def (openssldir) + install_symlink chain
+#     * libidn2:         minimal post_install — quick baseline
+#     * llvm@21:         the whole arc — block-pass, def, Set, module
+#                        constants, comparison operators, hash.map
+#                        (pulled transitively by `zig`; kept direct too
+#                        so a future regression in the sibling path
+#                        fails on this target specifically, not only
+#                        after 500 MB of llvm deps)
+#
+#   no-post_install formulas (DSL must NOT fire):
+#     * tree, jq, ripgrep: small, common; any unknown here signals the
+#                          DSL path is being exercised where it shouldn't
+TARGETS="${TARGETS:-ca-certificates gnupg openssl@3 libidn2 llvm@21 tree jq ripgrep}"
 
 # Per-target expected maximum `[unknown_method]+[unsupported_node]` count.
 # Baselines leave a small cushion above the observed count so a single
@@ -81,6 +89,7 @@ BASELINE_ca_certificates="${BASELINE_ca_certificates:-5}"
 BASELINE_gnupg="${BASELINE_gnupg:-4}"
 BASELINE_openssl_AT_3="${BASELINE_openssl_AT_3:-5}"
 BASELINE_libidn2="${BASELINE_libidn2:-2}"
+BASELINE_llvm_AT_21="${BASELINE_llvm_AT_21:-2}"
 BASELINE_tree="${BASELINE_tree:-0}"
 BASELINE_jq="${BASELINE_jq:-0}"
 BASELINE_ripgrep="${BASELINE_ripgrep:-0}"

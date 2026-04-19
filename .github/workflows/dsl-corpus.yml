@@ -1,0 +1,68 @@
+name: DSL corpus coverage
+
+# Battle-tests the DSL post_install pipeline against real homebrew-core
+# formulas. Does real installs + bottle downloads, so it's costly — only
+# runs on a schedule and on manual dispatch, never on every PR.
+#
+#   * `schedule`:          weekly sanity sweep — catches Homebrew-side
+#                          formula rewrites that shrink or grow the
+#                          DSL diagnostic fingerprint.
+#   * `workflow_dispatch`: on-demand runner, useful when a reviewer asks
+#                          "does this PR regress the corpus?" and the
+#                          offline CI isn't enough.
+#   * `push` to main that touches the DSL source tree: runs automatically
+#                          so a merge that regresses baselines is caught
+#                          before it ships.
+
+on:
+  schedule:
+    # Monday 06:00 UTC — before most Homebrew bottle updates for the week.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "Space-separated TARGETS override (default: script's built-in list)"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "src/core/dsl/**"
+      - "scripts/regressions/dsl_corpus_coverage.sh"
+      - ".github/workflows/dsl-corpus.yml"
+
+jobs:
+  corpus:
+    name: DSL corpus coverage (macOS)
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build ReleaseSafe
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Run corpus coverage
+        env:
+          TARGETS: ${{ github.event.inputs.targets }}
+        run: |
+          if [[ -n "$TARGETS" ]]; then
+            echo "Using override TARGETS=$TARGETS"
+            TARGETS="$TARGETS" ./scripts/regressions/dsl_corpus_coverage.sh
+          else
+            ./scripts/regressions/dsl_corpus_coverage.sh
+          fi
+
+      - name: Upload install logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: corpus-logs
+          path: /tmp/mt_cs/logs
+          retention-days: 14
+          if-no-files-found: ignore
