@@ -42,6 +42,7 @@ pub const cli_help = @import("cli/help.zig");
 pub const cli_info = @import("cli/info.zig");
 pub const cli_uses = @import("cli/uses.zig");
 pub const cli_version_update = @import("cli/version_update.zig");
+pub const update_cleanup = @import("update/cleanup.zig");
 pub const update_origin = @import("update/origin.zig");
 pub const update_release = @import("update/release.zig");
 pub const update_verify = @import("update/verify.zig");

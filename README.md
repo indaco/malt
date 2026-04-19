@@ -572,9 +572,10 @@ mt version                           # show current version
 mt version update                    # install latest (interactive confirm)
 mt version update --check            # check only, no download
 mt version update --yes              # non-interactive (CI / scripts)
+mt version update --cleanup          # remove stale .old + orphaned staging files
 ```
 
-`update` queries the GitHub releases API, verifies the release with cosign and SHA256 against the same trust anchor as `install.sh`, and atomically replaces the running binary. The previous binary is preserved at `<target>.old` for manual rollback.
+`update` queries the GitHub releases API, verifies the release with cosign and SHA256 against the same trust anchor as `install.sh`, and atomically replaces the running binary. The previous binary is preserved at `<target>.old` for manual rollback; accumulated `.old` files (and any orphaned `.malt-update-<pid>` staging files from killed updates) can be removed with `mt version update --cleanup`, which runs locally and makes no network calls.
 
 **Homebrew installs.** If malt was installed via `brew install --cask malt`, the updater detects this and prints a hint pointing you at `brew upgrade --cask malt` — overwriting a brew-managed file from underneath would corrupt its install receipt and break the next `brew upgrade`.
 
@@ -584,6 +585,7 @@ mt version update --yes              # non-interactive (CI / scripts)
 MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 ```
 
+> [!NOTE]
 > `install.sh` accepts `MALT_ALLOW_UNVERIFIED=1` alone as the bypass; `mt version update` requires both the env var and `--no-verify`. Update is the command that runs repeatedly — the extra guard is deliberate.
 
 ### `mt completions`

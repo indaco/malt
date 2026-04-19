@@ -131,6 +131,114 @@ test "verifyCosignBlob accepts a cosign that exits 0" {
     try verify.verifyCosignBlob(testing.allocator, args);
 }
 
+// --- verifyAll (end-to-end, local fixtures) ------------------------------
+//
+// Exercises the composed trust chain without HTTP: caller stages three
+// files on disk, verifyAll runs cosign + SHA256 and either succeeds or
+// refuses. Covers every failure mode the updater must catch.
+
+const HELLO_WORLD_HEX_LINE = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9  malt_0.7.0_darwin_all.tar.gz\n";
+const ARCHIVE_NAME = "malt_0.7.0_darwin_all.tar.gz";
+
+const Fixture = struct {
+    dir: []const u8,
+    tarball: []const u8,
+    checksums: []const u8,
+    sigstore: []const u8,
+    cosign_bin: []const u8,
+
+    fn setup(allocator: std.mem.Allocator, tag: []const u8, tarball_bytes: []const u8, checksums_bytes: []const u8, cosign_exit: u8) !Fixture {
+        const dir = try std.fmt.allocPrint(allocator, "/tmp/malt_verifyall_{s}", .{tag});
+        fs_compat.deleteTreeAbsolute(dir) catch {};
+        try fs_compat.makeDirAbsolute(dir);
+
+        const tarball = try std.fmt.allocPrint(allocator, "{s}/malt.tgz", .{dir});
+        const checksums = try std.fmt.allocPrint(allocator, "{s}/checksums.txt", .{dir});
+        const sigstore = try std.fmt.allocPrint(allocator, "{s}/checksums.txt.sigstore.json", .{dir});
+        const cosign_bin = try std.fmt.allocPrint(allocator, "{s}/fake_cosign", .{dir});
+
+        try writeFile(tarball, tarball_bytes);
+        try writeFile(checksums, checksums_bytes);
+        try writeFile(sigstore, "{}"); // content doesn't matter; fake cosign ignores it
+        try writeFakeCosign(cosign_bin, cosign_exit);
+
+        return .{
+            .dir = dir,
+            .tarball = tarball,
+            .checksums = checksums,
+            .sigstore = sigstore,
+            .cosign_bin = cosign_bin,
+        };
+    }
+
+    fn deinit(self: *const Fixture, allocator: std.mem.Allocator) void {
+        fs_compat.deleteTreeAbsolute(self.dir) catch {};
+        allocator.free(self.dir);
+        allocator.free(self.tarball);
+        allocator.free(self.checksums);
+        allocator.free(self.sigstore);
+        allocator.free(self.cosign_bin);
+    }
+
+    fn inputs(self: *const Fixture) verify.VerifyInputs {
+        return .{
+            .cosign_bin = self.cosign_bin,
+            .tarball_path = self.tarball,
+            .checksums_path = self.checksums,
+            .sigstore_path = self.sigstore,
+            .archive_name = ARCHIVE_NAME,
+            .cert_identity_regex = "^https://example\\.com/",
+            .oidc_issuer = "https://example.com",
+        };
+    }
+};
+
+fn writeFile(path: []const u8, content: []const u8) !void {
+    const f = try fs_compat.createFileAbsolute(path, .{});
+    defer f.close();
+    try f.writeAll(content);
+}
+
+test "verifyAll accepts a valid tarball + matching checksum + good cosign" {
+    var fx = try Fixture.setup(testing.allocator, "happy", "hello world", HELLO_WORLD_HEX_LINE, 0);
+    defer fx.deinit(testing.allocator);
+    try verify.verifyAll(testing.allocator, fx.inputs());
+}
+
+test "verifyAll rejects a tampered tarball (SHA256 mismatch)" {
+    var fx = try Fixture.setup(testing.allocator, "sha_mismatch", "hello WORLD", HELLO_WORLD_HEX_LINE, 0);
+    defer fx.deinit(testing.allocator);
+    try testing.expectError(error.ChecksumMismatch, verify.verifyAll(testing.allocator, fx.inputs()));
+}
+
+test "verifyAll rejects when checksums.txt omits the archive" {
+    const unrelated = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  other.tar.gz\n";
+    var fx = try Fixture.setup(testing.allocator, "missing_entry", "hello world", unrelated, 0);
+    defer fx.deinit(testing.allocator);
+    try testing.expectError(error.ChecksumMissing, verify.verifyAll(testing.allocator, fx.inputs()));
+}
+
+test "verifyAll rejects when cosign exits non-zero (signature tampered)" {
+    var fx = try Fixture.setup(testing.allocator, "cosign_fail", "hello world", HELLO_WORLD_HEX_LINE, 1);
+    defer fx.deinit(testing.allocator);
+    try testing.expectError(error.CosignVerifyFailed, verify.verifyAll(testing.allocator, fx.inputs()));
+}
+
+test "verifyAll reports CosignNotFound when the binary is missing" {
+    var fx = try Fixture.setup(testing.allocator, "no_cosign", "hello world", HELLO_WORLD_HEX_LINE, 0);
+    defer fx.deinit(testing.allocator);
+    var inputs = fx.inputs();
+    inputs.cosign_bin = "/tmp/malt_verifyall_absent_cosign_xyz";
+    try testing.expectError(error.CosignNotFound, verify.verifyAll(testing.allocator, inputs));
+}
+
+test "verifyAll reports ReadFailed when the tarball cannot be read" {
+    var fx = try Fixture.setup(testing.allocator, "missing_tarball", "hello world", HELLO_WORLD_HEX_LINE, 0);
+    defer fx.deinit(testing.allocator);
+    try fs_compat.deleteFileAbsolute(fx.tarball);
+    try testing.expectError(error.ReadFailed, verify.verifyAll(testing.allocator, fx.inputs()));
+}
+
 test "verifyCosignBlob errors when cosign exits non-zero" {
     const path = "/tmp/malt_fake_cosign_fail";
     try writeFakeCosign(path, 1);

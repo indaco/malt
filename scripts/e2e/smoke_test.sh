@@ -134,6 +134,8 @@ done
 
 # Alias dispatch (`mt` and `malt` both installed in zig-out/bin).
 run_ok t1.alias.mt -- "$(dirname "$MT_BIN")/mt" version
+# --cleanup is a local-only operation; no network, safe in tier 1.
+run_ok t1.version.update.cleanup -- "$MT_BIN" version update --cleanup
 
 # `purge` with no scope must error per README.
 run t1.purge.no-scope 1 -- "$MT_BIN" purge
