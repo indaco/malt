@@ -87,7 +87,9 @@ pub fn findReleaseBinary(
     return null;
 }
 
-fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+/// Return `obj[key]` when it is a JSON string, else `null`. Pub'd so
+/// the updater's `tag_name` extraction can reuse it.
+pub fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const v = obj.get(key) orelse return null;
     return switch (v) {
         .string => |s| s,

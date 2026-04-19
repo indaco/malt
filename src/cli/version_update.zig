@@ -14,6 +14,7 @@ const builtin = @import("builtin");
 const client_mod = @import("../net/client.zig");
 const archive = @import("../fs/archive.zig");
 const output = @import("../ui/output.zig");
+const cleanup = @import("../update/cleanup.zig");
 const origin = @import("../update/origin.zig");
 const release = @import("../update/release.zig");
 const verify = @import("../update/verify.zig");
@@ -28,24 +29,28 @@ const SIGSTORE_NAME = "checksums.txt.sigstore.json";
 const CERT_IDENTITY_REGEX = "^https://github.com/indaco/malt/\\.github/workflows/release\\.yml@";
 const OIDC_ISSUER = "https://token.actions.githubusercontent.com";
 
-const Opts = struct {
+pub const Opts = struct {
     check: bool = false,
     yes: bool = false,
     no_verify: bool = false,
+    cleanup: bool = false,
 };
 
-fn parseArgs(args: []const []const u8) Opts {
+pub fn parseArgs(args: []const []const u8) Opts {
     var opts = Opts{};
     for (args) |a| {
         if (std.mem.eql(u8, a, "--check")) opts.check = true;
         if (std.mem.eql(u8, a, "--yes") or std.mem.eql(u8, a, "-y")) opts.yes = true;
         if (std.mem.eql(u8, a, "--no-verify")) opts.no_verify = true;
+        if (std.mem.eql(u8, a, "--cleanup")) opts.cleanup = true;
     }
     return opts;
 }
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const opts = parseArgs(args);
+
+    if (opts.cleanup) return runCleanup();
 
     // Brew-managed installs must be upgraded via `brew`, otherwise the
     // Cellar/Caskroom metadata drifts from the file on disk. Route these
@@ -86,7 +91,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         },
     };
 
-    const tag = strField(obj, "tag_name") orelse {
+    const tag = release.strField(obj, "tag_name") orelse {
         output.err("No tag_name in release", .{});
         return error.Aborted;
     };
@@ -146,7 +151,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const checksums_path = try writeDownload(allocator, &http, checksums_url, scratch, CHECKSUMS_NAME);
 
     // --- verification phase ---
-    try runVerification(allocator, &http, assets, scratch, tarball_path, checksums_path, archive_name, opts);
+    try runVerification(.{
+        .allocator = allocator,
+        .http = &http,
+        .assets = assets,
+        .scratch = scratch,
+        .tarball_path = tarball_path,
+        .checksums_path = checksums_path,
+        .archive_name = archive_name,
+        .opts = opts,
+    });
 
     // --- extract + find binary ---
     const extract_dir_buf = try std.fmt.allocPrint(allocator, "{s}/extract", .{scratch});
@@ -246,10 +260,7 @@ fn writeDownload(
     return path;
 }
 
-/// Run cosign + SHA256 verification, or print a loud bypass warning
-/// when the user has opted out of both with `--no-verify` and
-/// `MALT_ALLOW_UNVERIFIED=1`. Fails the update on any verify error.
-fn runVerification(
+const RunVerification = struct {
     allocator: std.mem.Allocator,
     http: *client_mod.HttpClient,
     assets: std.json.Array,
@@ -258,23 +269,30 @@ fn runVerification(
     checksums_path: []const u8,
     archive_name: []const u8,
     opts: Opts,
-) !void {
-    if (opts.no_verify and unverifiedAllowed()) {
+};
+
+/// Run cosign + SHA256 verification, or print a loud bypass warning
+/// when the user has opted out of both with `--no-verify` and
+/// `MALT_ALLOW_UNVERIFIED=1`. Fails the update on any verify error.
+fn runVerification(rv: RunVerification) !void {
+    if (rv.opts.no_verify and unverifiedAllowed()) {
         output.warn("MALT_ALLOW_UNVERIFIED=1 and --no-verify - skipping signature and checksum verification", .{});
         output.warn("This update will not be cryptographically verified. Install cosign to enable verification.", .{});
         return;
     }
 
-    const sigstore_url = release.pickAssetUrlByName(assets, SIGSTORE_NAME) orelse {
+    const sigstore_url = release.pickAssetUrlByName(rv.assets, SIGSTORE_NAME) orelse {
         output.err("Release is missing {s}", .{SIGSTORE_NAME});
         return error.Aborted;
     };
-    const sigstore_path = try writeDownload(allocator, http, sigstore_url, scratch, SIGSTORE_NAME);
+    const sigstore_path = try writeDownload(rv.allocator, rv.http, sigstore_url, rv.scratch, SIGSTORE_NAME);
 
-    output.info("Verifying cosign signature...", .{});
-    verify.verifyCosignBlob(allocator, .{
-        .blob_path = checksums_path,
-        .bundle_path = sigstore_path,
+    output.info("Verifying cosign signature + SHA256 checksum...", .{});
+    verify.verifyAll(rv.allocator, .{
+        .tarball_path = rv.tarball_path,
+        .checksums_path = rv.checksums_path,
+        .sigstore_path = sigstore_path,
+        .archive_name = rv.archive_name,
         .cert_identity_regex = CERT_IDENTITY_REGEX,
         .oidc_issuer = OIDC_ISSUER,
     }) catch |e| switch (e) {
@@ -288,33 +306,43 @@ fn runVerification(
             output.err("cosign signature verification failed for {s}", .{CHECKSUMS_NAME});
             return error.Aborted;
         },
-    };
-
-    output.info("Verifying SHA256 checksum...", .{});
-    const checksums_bytes = fs_compat.readFileAbsoluteAlloc(allocator, checksums_path, 1 << 20) catch {
-        output.err("Cannot read {s}", .{CHECKSUMS_NAME});
-        return error.Aborted;
-    };
-    defer allocator.free(checksums_bytes);
-    const expected = verify.lookupSha256(checksums_bytes, archive_name) orelse {
-        output.err("Checksum for {s} not listed in {s}", .{ archive_name, CHECKSUMS_NAME });
-        return error.Aborted;
-    };
-    const tarball_bytes = fs_compat.readFileAbsoluteAlloc(allocator, tarball_path, 1 << 28) catch {
-        output.err("Cannot read {s}", .{tarball_path});
-        return error.Aborted;
-    };
-    defer allocator.free(tarball_bytes);
-    verify.verifySha256(tarball_bytes, expected) catch |e| switch (e) {
+        error.ChecksumMissing => {
+            output.err("Checksum for {s} not listed in {s}", .{ rv.archive_name, CHECKSUMS_NAME });
+            return error.Aborted;
+        },
         error.ChecksumMismatch => {
-            output.err("SHA256 mismatch for {s}", .{archive_name});
+            output.err("SHA256 mismatch for {s}", .{rv.archive_name});
             return error.Aborted;
         },
         error.InvalidHex => {
-            output.err("Malformed checksum for {s}", .{archive_name});
+            output.err("Malformed checksum for {s}", .{rv.archive_name});
             return error.Aborted;
         },
+        error.ReadFailed => {
+            output.err("Cannot read verification files in {s}", .{rv.scratch});
+            return error.Aborted;
+        },
+        error.OutOfMemory => return error.OutOfMemory,
     };
+}
+
+/// Remove `<self_exe>.old` and any orphaned `.malt-update-*` staging
+/// files next to the running binary. Idempotent - a clean tree exits 0.
+fn runCleanup() !void {
+    var exe_buf: [fs_compat.max_path_bytes]u8 = undefined;
+    const n = std.process.executablePath(io_mod.ctx(), &exe_buf) catch {
+        output.err("Cannot determine current binary path", .{});
+        return error.Aborted;
+    };
+    const cleaned = cleanup.cleanUpdateArtefacts(exe_buf[0..n]) catch {
+        output.err("Cleanup failed", .{});
+        return error.Aborted;
+    };
+    if (cleaned.total() == 0) {
+        output.info("Nothing to clean up.", .{});
+    } else {
+        output.info("Removed {d} .old binary, {d} staging file(s).", .{ cleaned.old, cleaned.staging });
+    }
 }
 
 /// Resolve the running binary via `executablePath` + `realpath` and
@@ -330,12 +358,4 @@ fn detectOrigin() origin.Origin {
 fn unverifiedAllowed() bool {
     const v = fs_compat.getenv("MALT_ALLOW_UNVERIFIED") orelse return false;
     return std.mem.eql(u8, v, "1");
-}
-
-fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    const v = obj.get(key) orelse return null;
-    return switch (v) {
-        .string => |s| s,
-        else => null,
-    };
 }

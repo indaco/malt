@@ -38,6 +38,17 @@ test "matchesAssetName rejects the wrong arch on a per-arch build" {
     try testing.expect(!release.matchesAssetName("malt_0.3.1_darwin_arm64.tar.gz", "x86_64"));
 }
 
+test "matchesAssetName rejects names longer than the internal lowercase buffer" {
+    // The matcher uses a 256-byte stack buffer for the lowercase copy.
+    // Names exceeding it must return false (not silently truncate and
+    // match). Documents the boundary so a future GoReleaser template
+    // change that produces longer names surfaces a clear fix.
+    var buf: [300]u8 = undefined;
+    @memset(&buf, 'a');
+    std.mem.copyForwards(u8, buf[buf.len - 22 ..], "_darwin_all.tar.gz.zip");
+    try testing.expect(!release.matchesAssetName(buf[0..buf.len], "arm64"));
+}
+
 test "matchesAssetName rejects the non-tarball sibling assets" {
     // Release set also contains checksums + signature files; only the
     // tarball is ever a valid pick.

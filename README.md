@@ -584,6 +584,7 @@ mt version update --yes              # non-interactive (CI / scripts)
 MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 ```
 
+> [!NOTE]
 > `install.sh` accepts `MALT_ALLOW_UNVERIFIED=1` alone as the bypass; `mt version update` requires both the env var and `--no-verify`. Update is the command that runs repeatedly — the extra guard is deliberate.
 
 ### `mt completions`
