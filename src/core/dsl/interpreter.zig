@@ -502,6 +502,15 @@ pub const Interpreter = struct {
                 } else if (std.mem.eql(u8, mc.method, "any?")) {
                     for (receiver_val.array) |it| if (it.isTruthy()) return Value{ .bool = true };
                     return Value{ .bool = false };
+                } else if (std.mem.eql(u8, mc.method, "<<") and args_slice.len == 1) {
+                    // `arr << x` — return a fresh array with x appended.
+                    // Ruby mutates in place; Values here are immutable so
+                    // callers wanting mutation semantics reassign
+                    // (`arr = arr << x`). Both shapes parse cleanly.
+                    const out = self.allocator.alloc(Value, receiver_val.array.len + 1) catch return DslError.OutOfMemory;
+                    @memcpy(out[0..receiver_val.array.len], receiver_val.array);
+                    out[receiver_val.array.len] = args_slice[0];
+                    return Value{ .array = out };
                 }
             }
 

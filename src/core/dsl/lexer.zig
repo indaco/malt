@@ -56,6 +56,7 @@ pub const TokenKind = enum {
     tilde,
     colon,
     less_than,
+    less_less,
     greater_than,
     double_eq,
     not_eq,
@@ -550,7 +551,16 @@ pub const Lexer = struct {
                 }
                 break :blk .{ .kind = .equals, .len = 1 };
             },
-            '<' => .{ .kind = .less_than, .len = 1 },
+            '<' => blk: {
+                // `<<` is the shovel operator (Array/String/Set append).
+                // `<<~` is heredoc-start — handled earlier in `next()` so
+                // by the time we reach `lexOperator`, any `<<` we see is
+                // definitely the shovel, not a heredoc.
+                if (self.remaining() > 1 and self.source[self.pos + 1] == '<') {
+                    break :blk .{ .kind = .less_less, .len = 2 };
+                }
+                break :blk .{ .kind = .less_than, .len = 1 };
+            },
             '>' => .{ .kind = .greater_than, .len = 1 },
             '/' => blk: {
                 // Context-sensitive: after value token it's division/path-join,

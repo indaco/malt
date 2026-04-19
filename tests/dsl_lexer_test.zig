@@ -467,3 +467,31 @@ test "lexer: bare colon (hash rocket lhs) remains a single colon" {
     try expectKind(&lex, .rbrace);
     try expectKind(&lex, .eof);
 }
+
+// `<<` is Ruby's shovel operator (Array#<<, String#<<, Set#<<). Real
+// formulas use it freely — `arches << arch`, `s << "\n"`. Lexer must
+// emit a single `less_less` token, NOT two `less_than` tokens, and
+// must not collide with the `<<~EOS` heredoc start.
+test "lexer: << emits one less_less token" {
+    var lex = Lexer.init("a << b");
+    try expectToken(&lex, .identifier, "a");
+    try expectKind(&lex, .less_less);
+    try expectToken(&lex, .identifier, "b");
+    try expectKind(&lex, .eof);
+}
+
+test "lexer: <<~EOS heredoc start is unaffected by the shovel fix" {
+    // Keep the heredoc path priority — `<<~` still lexes as heredoc_start.
+    var lex = Lexer.init("s = <<~EOS\nhi\nEOS\n");
+    try expectToken(&lex, .identifier, "s");
+    try expectKind(&lex, .equals);
+    try expectKind(&lex, .heredoc_start);
+}
+
+test "lexer: a single < is still a less_than" {
+    var lex = Lexer.init("a < b");
+    try expectToken(&lex, .identifier, "a");
+    try expectKind(&lex, .less_than);
+    try expectToken(&lex, .identifier, "b");
+    try expectKind(&lex, .eof);
+}
