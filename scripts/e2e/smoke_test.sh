@@ -216,6 +216,18 @@ else
 
   # After uninstall, rollback on an uninstalled package should fail cleanly.
   run t3.rollback.none 1 -- "$MT_BIN" rollback tree
+
+  # Issue #85 regression: zig pulls llvm@21 whose post_install uses Ruby's
+  # `&:sym` block-pass shorthand. If the DSL parser or fatal-classification
+  # ever regresses, the install prints "post_install DSL failed for llvm@21"
+  # — the grep below will catch it. Gated on SMOKE_INSTALL_HEAVY because the
+  # llvm@21 bottle is ~350 MB and most CI runs shouldn't download it.
+  if [[ "${SMOKE_INSTALL_HEAVY:-0}" == "1" ]]; then
+    run_ok t3.install.zig -- "$MT_BIN" install zig
+    run 't3.install.zig.no_post_install_fatal' 1 -- \
+      grep -q "post_install DSL failed for llvm@21" "$LOGDIR/t3_install_zig.log"
+    run_ok t3.uninstall.zig -- "$MT_BIN" uninstall zig
+  fi
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
