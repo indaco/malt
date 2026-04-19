@@ -2319,3 +2319,95 @@ test "interpreter: llvm@21 sysroot-assignment shape runs without fatal" {
     const err = try runSnippet(&arena, src, prefix);
     try testing.expect(err == null);
 }
+
+// ---------------------------------------------------------------------------
+// Module constants — `MacOS::CLT::PKG_PATH` and friends appear in real
+// Homebrew formulas (llvm@21, python@3.x, rust). They parse as chained
+// `::` method calls; resolving them to a useful string keeps post_install
+// interpolations meaningful instead of producing `#{""}` gaps.
+// ---------------------------------------------------------------------------
+
+test "interpreter: MacOS::CLT::PKG_PATH resolves to the canonical CLT path" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\p = MacOS::CLT::PKG_PATH
+        \\odie "CLT path empty" if p.blank?
+        \\odie "CLT path wrong" unless p == "/Library/Developer/CommandLineTools"
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: string interpolation with module constants expands inline" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // Exact shape from llvm@21: `"#{MacOS::CLT::PKG_PATH}/SDKs/…"`.
+    const src =
+        \\sysroot = "#{MacOS::CLT::PKG_PATH}/SDKs/MacOSX.sdk"
+        \\odie "interpolation dropped the constant" if sysroot.blank?
+        \\odie "unexpected interpolation result" unless sysroot == "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: unknown module constant stays non-fatal and returns nil" {
+    // Any not-yet-stubbed constant should degrade via unknown_method, not
+    // crash — the whole point of the fallback log.
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\x = Some::Bogus::Const
+        \\odie "unreachable: bogus const should be nil" unless x.blank?
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: Set.new(array) passes the array through so << and .each work" {
+    // llvm@21 does `arches = Set.new([:arm64, :x86_64]); arches << arch`
+    // then `.each`. With Set.new stubbed as an array pass-through the
+    // entire chain resolves without unknowns.
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\share.mkpath
+        \\arches = Set.new([:arm64, :x86_64])
+        \\arches = arches << :aarch64
+        \\arches.each do |a|
+        \\  (share/a.to_s).write "x"
+        \\end
+    ;
+    _ = try runSnippet(&arena, src, prefix);
+    // .to_s on a symbol isn't implemented yet → the writes land at
+    // `share/` (empty filename) and the test passes if no fatal fires.
+}
+
+test "interpreter: empty Set.new() returns an array that iterates zero times" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\empty = Set.new
+        \\empty.each do |_a|
+        \\  odie "empty Set.new iterated — should be inert"
+        \\end
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
