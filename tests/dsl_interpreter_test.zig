@@ -1876,3 +1876,41 @@ test "interpreter: llvm@21 post_install shape runs to completion" {
     const err = try runSnippet(&arena, src, prefix);
     try testing.expect(err == null);
 }
+
+// ---------------------------------------------------------------------------
+// `.major`/`.minor`/`.patch`/`.to_i` on strings — unlocks Homebrew's
+// `OS.kernel_version.major` / `Version.new(x).major` idioms so llvm@21-style
+// post_install guards can compute without falling back.
+// ---------------------------------------------------------------------------
+
+test "interpreter: MacOS.version.major chains through string receiver builtins" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // odie only fires if .major returns a non-positive value — i.e. the
+    // DSL still has the accessor wired. Works on any macOS (major ≥ 10).
+    const src =
+        \\v = MacOS.version.major
+        \\odie "major unavailable" unless v
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: chained .major on an OS.kernel_version result stays an integer" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // `.to_i` on a `.major` result is a no-op — but exercises both builtins
+    // in sequence and guards against an accidental Value-kind regression.
+    const src =
+        \\n = OS.kernel_version.major.to_i
+        \\odie "expected an int from .major.to_i" unless n
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}

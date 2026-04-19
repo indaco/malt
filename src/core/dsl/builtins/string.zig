@@ -252,7 +252,8 @@ pub fn patch(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Valu
 
 /// `.to_i` — Ruby's leading-integer parse: reads an optional sign then as
 /// many digits as possible; junk at the tail is ignored. Empty / no-digit
-/// input yields 0.
+/// input yields 0. Unlike Ruby (which promotes to Bignum), we saturate at
+/// i64 bounds so a huge literal doesn't wrap into a bogus comparison.
 pub fn toI(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const s = std.mem.trim(u8, try receiverStr(ctx.allocator, receiver), " \t\r\n");
     if (s.len == 0) return Value{ .int = 0 };
@@ -266,7 +267,9 @@ pub fn toI(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value 
     var n: i64 = 0;
     var saw_digit = false;
     while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) {
-        n = n *% 10 +% @as(i64, s[i] - '0');
+        const digit: i64 = @as(i64, s[i] - '0');
+        n = std.math.mul(i64, n, 10) catch std.math.maxInt(i64);
+        n = std.math.add(i64, n, digit) catch std.math.maxInt(i64);
         saw_digit = true;
     }
     if (!saw_digit) return Value{ .int = 0 };
@@ -291,13 +294,15 @@ fn versionSegment(raw: []const u8, index: usize) i64 {
 }
 
 /// Read as many leading digits as possible and return them as i64. Used by
-/// both `versionSegment` and `.to_i`. Non-digit-led input yields 0.
+/// `versionSegment`; saturates at i64 max on overflow so "999...9".major
+/// can still participate in comparisons without wrapping.
 fn parseLeadingInt(s: []const u8) i64 {
     var n: i64 = 0;
     var saw_digit = false;
     for (s) |b| {
         if (!std.ascii.isDigit(b)) break;
-        n = n *% 10 +% @as(i64, b - '0');
+        n = std.math.mul(i64, n, 10) catch std.math.maxInt(i64);
+        n = std.math.add(i64, n, @as(i64, b - '0')) catch std.math.maxInt(i64);
         saw_digit = true;
     }
     return if (saw_digit) n else 0;
