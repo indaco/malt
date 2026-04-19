@@ -118,6 +118,41 @@ fn useSystemRubyForFormula(scope: []const []const u8, formula_name: []const u8) 
     return false;
 }
 
+/// Route the post_install outcome using the fallback log as the single
+/// source of truth. "completed" now means exactly that — zero logged
+/// entries; any unknown_method / unsupported_node downgrades to the same
+/// `--use-system-ruby` suggestion we show on execute-time failures, so
+/// users never see "completed" when statements were silently skipped.
+///
+/// Pub so the install-pure tests can drive it with a synthetic flog and
+/// pin the exact output for every branch.
+pub fn routePostInstallOutcome(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    version_str: []const u8,
+    prefix: []const u8,
+    flog: *const dsl.FallbackLog,
+    use_system_ruby_list: []const []const u8,
+) void {
+    if (flog.hasFatal()) {
+        output.warn("post_install DSL failed for {s} (fatal)", .{name});
+        flog.printFatal(name);
+        return;
+    }
+    if (!flog.hasErrors()) {
+        output.info("post_install completed for {s}", .{name});
+        return;
+    }
+    if (useSystemRubyForFormula(use_system_ruby_list, name)) {
+        output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{name});
+        ruby_sub.runPostInstall(allocator, name, version_str, prefix) catch |e| {
+            output.warn("post_install subprocess failed for {s}: {s}", .{ name, @errorName(e) });
+        };
+        return;
+    }
+    output.warn("{s}: post_install partially skipped (use --use-system-ruby={s} to attempt via Ruby)", .{ name, name });
+}
+
 /// A bottle download job for parallel processing.
 ///
 /// Public so integration tests can construct an empty jobs list and assert
@@ -785,23 +820,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                     var flog = dsl.FallbackLog.init(allocator);
                     defer flog.deinit();
 
-                    dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {
-                        if (flog.hasFatal()) {
-                            output.warn("post_install DSL failed for {s} (fatal)", .{job.name});
-                            flog.printFatal(job.name);
-                            break :post_install;
-                        }
-                        if (useSystemRubyForFormula(use_system_ruby_list, job.name)) {
-                            output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{job.name});
-                            ruby_sub.runPostInstall(allocator, job.name, job.version_str, prefix) catch |e| {
-                                output.warn("post_install subprocess failed for {s}: {s}", .{ job.name, @errorName(e) });
-                            };
-                        } else {
-                            output.warn("{s}: post_install partially skipped (use --use-system-ruby={s} to attempt via Ruby)", .{ job.name, job.name });
-                        }
-                        break :post_install;
-                    };
-                    output.info("post_install completed for {s}", .{job.name});
+                    // Error from execute is already reflected in `flog`;
+                    // the outcome router uses the log as the source of
+                    // truth so silent-skips downgrade the same as hard
+                    // failures instead of reading as "completed".
+                    dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {};
+                    routePostInstallOutcome(allocator, job.name, job.version_str, prefix, &flog, use_system_ruby_list);
                     break :post_install;
                 }
             }
@@ -819,22 +843,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 var flog = dsl.FallbackLog.init(allocator);
                 defer flog.deinit();
 
-                dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {
-                    if (flog.hasFatal()) {
-                        output.warn("post_install DSL failed for {s} (fatal)", .{job.name});
-                        flog.printFatal(job.name);
-                        break :post_install;
-                    }
-                    if (useSystemRubyForFormula(use_system_ruby_list, job.name)) {
-                        ruby_sub.runPostInstall(allocator, job.name, job.version_str, prefix) catch |e| {
-                            output.warn("post_install subprocess failed for {s}: {s}", .{ job.name, @errorName(e) });
-                        };
-                    } else {
-                        output.warn("{s}: post_install partially skipped (use --use-system-ruby={s} to attempt via Ruby)", .{ job.name, job.name });
-                    }
-                    break :post_install;
-                };
-                output.info("post_install completed for {s}", .{job.name});
+                dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {};
+                routePostInstallOutcome(allocator, job.name, job.version_str, prefix, &flog, use_system_ruby_list);
                 break :post_install;
             }
 
