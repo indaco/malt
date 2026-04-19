@@ -121,4 +121,11 @@ pub const receiver_builtins = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "length", string.length },
     .{ "size", string.length },
     .{ "+", string.concat },
+
+    // Version-style accessors on strings — keep the dispatch keys tight
+    // to match Homebrew's shape (OS.kernel_version.major, etc.).
+    .{ "major", string.major },
+    .{ "minor", string.minor },
+    .{ "patch", string.patch },
+    .{ "to_i", string.toI },
 });
