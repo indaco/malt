@@ -79,10 +79,14 @@ Once `install.sh` runs, it re-verifies every subsequent download with cosign, so
 
 ### Via Homebrew
 
+Malt is published as a cask under [`indaco/homebrew-tap`](https://github.com/indaco/homebrew-tap):
+
 ```bash
 brew tap indaco/tap
-brew install malt
+brew install --cask malt
 ```
+
+Upgrade with `brew upgrade --cask malt`. `mt version update` detects Homebrew installs and defers to brew automatically — updating underneath brew would break its install receipt.
 
 ### From source
 
@@ -565,12 +569,23 @@ mt unlink <formula>                      # remove symlinks (keg stays installed)
 Show the current version or self-update the binary.
 
 ```bash
-mt version                    # show current version
-mt version update             # download and install latest
-mt version update --check     # check without installing
+mt version                           # show current version
+mt version update                    # install latest (interactive confirm)
+mt version update --check            # check only, no download
+mt version update --yes              # non-interactive (CI / scripts)
 ```
 
-`update` queries the GitHub releases API, downloads the correct binary for the current platform, and replaces the running binary in-place.
+`update` queries the GitHub releases API, verifies the release with cosign and SHA256 against the same trust anchor as `install.sh`, and atomically replaces the running binary. The previous binary is preserved at `<target>.old` for manual rollback.
+
+**Homebrew installs.** If malt was installed via `brew install --cask malt`, the updater detects this and prints a hint pointing you at `brew upgrade --cask malt` — overwriting a brew-managed file from underneath would corrupt its install receipt and break the next `brew upgrade`.
+
+**Verification.** Every update downloads `checksums.txt` and its Sigstore bundle, runs `cosign verify-blob` pinned to the release workflow's OIDC identity, then confirms the tarball's SHA256 against the verified checksums file. [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/) must be on your `PATH`; without it, `mt version update` refuses rather than silently skip the check. To bypass (strongly discouraged):
+
+```bash
+MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
+```
+
+> `install.sh` accepts `MALT_ALLOW_UNVERIFIED=1` alone as the bypass; `mt version update` requires both the env var and `--no-verify`. Update is the command that runs repeatedly — the extra guard is deliberate.
 
 ### `mt completions`
 
