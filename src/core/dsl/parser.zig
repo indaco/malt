@@ -76,29 +76,41 @@ pub const Parser = struct {
         if (self.current.kind == .kw_begin) return self.parseBeginRescue();
         // raise
         if (self.current.kind == .kw_raise) return self.parseRaise();
+        // user-defined method
+        if (self.current.kind == .kw_def) return self.parseDef();
+        // return [expr] — eligible for postfix if/unless below.
+        if (self.current.kind == .kw_return) {
+            const ret = try self.parseReturn();
+            return self.maybeWrapPostfix(ret);
+        }
 
         // Assignment or expression statement
         const expr = try self.parseExpression();
+        return self.maybeWrapPostfix(expr);
+    }
 
-        // Check for postfix if/unless
+    /// Wrap `body` in a postfix_if/postfix_unless if the current token is
+    /// `if`/`unless`, otherwise return it unchanged. Used for both regular
+    /// expression statements and `return` — Ruby lets either form appear
+    /// with a trailing guard.
+    fn maybeWrapPostfix(self: *Parser, body: *const Node) DslError!*const Node {
         if (self.current.kind == .kw_if) {
             self.advanceToken();
             const cond = try self.parseExpression();
             return self.allocNode(.{
-                .loc = expr.loc,
-                .kind = .{ .postfix_if = .{ .body = expr, .condition = cond } },
+                .loc = body.loc,
+                .kind = .{ .postfix_if = .{ .body = body, .condition = cond } },
             });
         }
         if (self.current.kind == .kw_unless) {
             self.advanceToken();
             const cond = try self.parseExpression();
             return self.allocNode(.{
-                .loc = expr.loc,
-                .kind = .{ .postfix_unless = .{ .body = expr, .condition = cond } },
+                .loc = body.loc,
+                .kind = .{ .postfix_unless = .{ .body = body, .condition = cond } },
             });
         }
-
-        return expr;
+        return body;
     }
 
     fn parseExpression(self: *Parser) DslError!*const Node {
@@ -999,6 +1011,80 @@ pub const Parser = struct {
         return self.allocNode(.{
             .loc = loc,
             .kind = .{ .raise_statement = .{ .message = message } },
+        });
+    }
+
+    /// Parse `def name[(params) | params] body end`. Paren-less forms are
+    /// accepted because older homebrew-core formulas still use them.
+    fn parseDef(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        self.advanceToken(); // consume 'def'
+
+        if (self.current.kind != .identifier) {
+            return self.emitError("expected method name after 'def'");
+        }
+        const name = self.current.lexeme;
+        self.advanceToken();
+
+        var params: std.ArrayList([]const u8) = .empty;
+        if (self.current.kind == .lparen) {
+            self.advanceToken();
+            try self.parseDefParams(&params);
+            if (self.current.kind == .rparen) self.advanceToken();
+        } else if (self.current.kind == .identifier) {
+            try self.parseDefParams(&params);
+        }
+
+        self.skipNewlines();
+        const body = try self.parseBlock();
+        if (self.current.kind == .kw_end) self.advanceToken();
+
+        const params_slice = params.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+        return self.allocNode(.{
+            .loc = loc,
+            .kind = .{ .method_def = .{
+                .name = name,
+                .params = params_slice,
+                .body = body,
+            } },
+        });
+    }
+
+    /// Collect a comma-separated identifier list for `def` params. Shared
+    /// between paren and bare forms; the caller consumes the paren (or
+    /// newline) that terminates the list. Unknown tokens (default args,
+    /// `*rest`, `&blk`) stop the loop — formulas using those degrade to
+    /// `--use-system-ruby` via the sibling parse-check.
+    fn parseDefParams(
+        self: *Parser,
+        params: *std.ArrayList([]const u8),
+    ) DslError!void {
+        while (self.current.kind == .identifier) {
+            params.append(self.allocator, self.current.lexeme) catch return DslError.OutOfMemory;
+            self.advanceToken();
+            if (self.current.kind == .comma) {
+                self.advanceToken();
+                self.skipNewlines();
+                continue;
+            }
+            break;
+        }
+    }
+
+    fn parseReturn(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        self.advanceToken(); // consume 'return'
+
+        // Bare `return` must not greedily swallow the next statement.
+        const has_value = switch (self.current.kind) {
+            .newline, .eof, .kw_end, .kw_else, .kw_elsif, .kw_rescue, .rbrace, .kw_if, .kw_unless => false,
+            else => true,
+        };
+        const value: ?*const Node = if (has_value) try self.parseExpression() else null;
+
+        return self.allocNode(.{
+            .loc = loc,
+            .kind = .{ .return_statement = .{ .value = value } },
         });
     }
 

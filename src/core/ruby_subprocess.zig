@@ -12,6 +12,8 @@ const pins = @import("pins.zig");
 const http_client = @import("../net/client.zig");
 const api_mod = @import("../net/api.zig");
 const sandbox = @import("sandbox/macos.zig");
+const dsl_lexer = @import("dsl/lexer.zig");
+const dsl_parser = @import("dsl/parser.zig");
 
 pub const RubyError = error{
     RubyNotFound,
@@ -168,121 +170,177 @@ pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8
     return extractPostInstallFromSource(allocator, resp.body);
 }
 
-/// Extract post_install body from Ruby source text (in-memory version).
+/// Extract post_install body + any sibling `def` blocks at the same indent,
+/// concatenated so the DSL sees helpers registered before the body runs.
+/// Without this, formulas like ca-certificates/llvm@21 whose post_install
+/// calls into private helpers would fall back to `--use-system-ruby`.
 pub fn extractPostInstallFromSource(allocator: std.mem.Allocator, source: []const u8) ?[]const u8 {
-    const marker = "def post_install";
-    const start_idx = std.mem.indexOf(u8, source, marker) orelse return null;
-    const body_start = std.mem.findScalarPos(u8, source, start_idx, '\n') orelse return null;
+    const post_install_span = findDefBlock(source, "post_install") orelse return null;
 
-    const def_line_start = if (start_idx > 0)
-        if (std.mem.findScalarLast(u8, source[0..start_idx], '\n')) |nl| nl + 1 else 0
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    // Siblings first — they're registered as user methods by the interpreter
+    // before the post_install body runs. Each sibling is parse-checked in
+    // isolation so a complex helper (e.g. ca-certificates's keychain scan)
+    // doesn't trip the whole post_install extraction; we simply skip the
+    // sibling and let it fall through to `--use-system-ruby` later.
+    var pos: usize = 0;
+    while (findAnyDefBlockAtIndent(source, pos, post_install_span.indent)) |span| {
+        const is_self = std.mem.eql(u8, span.name, "post_install");
+        if (!is_self and canParseBlock(allocator, source[span.block_start..span.block_end])) {
+            out.appendSlice(allocator, source[span.block_start..span.block_end]) catch return null;
+            out.append(allocator, '\n') catch return null;
+        }
+        pos = span.block_end;
+    }
+
+    // Then the post_install body itself (no `def`/`end` wrapper).
+    out.appendSlice(allocator, source[post_install_span.body_start..post_install_span.body_end]) catch return null;
+
+    return out.toOwnedSlice(allocator) catch return null;
+}
+
+/// Run the DSL parser over an isolated sibling-def block and report whether
+/// it produced zero diagnostics. Used to gate sibling inclusion so a formula
+/// whose `def install` or `def macos_post_install` contains Ruby we don't
+/// speak yet (keyword args, `Tempfile`, `.scan` regex blocks, …) doesn't
+/// wreck the whole post_install extraction.
+fn canParseBlock(allocator: std.mem.Allocator, src: []const u8) bool {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var lex = dsl_lexer.Lexer.init(src);
+    var p = dsl_parser.Parser.init(arena.allocator(), &lex);
+    _ = p.parseBlock() catch return false;
+    return p.diagnostics.items.len == 0;
+}
+
+/// Span describing a single `def NAME ... end` block at a known indent.
+const DefSpan = struct {
+    name: []const u8,
+    indent: usize,
+    block_start: usize, // column 0 of the `def` line
+    block_end: usize, // index AFTER the matching `end` line's newline
+    body_start: usize, // index just after the `def` line's newline
+    body_end: usize, // `line_start` of the matching `end`
+};
+
+/// Find the named def (`def <name>`) at class-body indent and return its span.
+fn findDefBlock(source: []const u8, name: []const u8) ?DefSpan {
+    var buf: [64]u8 = undefined;
+    const marker = std.fmt.bufPrint(&buf, "def {s}", .{name}) catch return null;
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, source, pos, marker)) |idx| {
+        const span = defSpanAt(source, idx) orelse {
+            pos = idx + marker.len;
+            continue;
+        };
+        if (std.mem.eql(u8, span.name, name)) return span;
+        pos = span.block_end;
+    }
+    return null;
+}
+
+/// Return the next `def ... end` block at `indent` starting at or after
+/// `pos`. Returns null when no more defs at that indent exist.
+fn findAnyDefBlockAtIndent(source: []const u8, start: usize, indent: usize) ?DefSpan {
+    var pos = start;
+    while (std.mem.indexOfPos(u8, source, pos, "def ")) |idx| {
+        const span = defSpanAt(source, idx) orelse {
+            pos = idx + 4;
+            continue;
+        };
+        if (span.indent == indent) return span;
+        pos = span.block_end;
+    }
+    return null;
+}
+
+/// If `idx` points at the `d` of a `def` that starts a line, build its
+/// DefSpan. Returns null if the context isn't a real top-of-line def.
+fn defSpanAt(source: []const u8, idx: usize) ?DefSpan {
+    // Must be at line start (optionally preceded by spaces).
+    const line_start = if (idx == 0)
+        0
+    else if (std.mem.findScalarLast(u8, source[0..idx], '\n')) |nl|
+        nl + 1
     else
         0;
 
-    var def_indent: usize = 0;
-    for (source[def_line_start..start_idx]) |c| {
-        if (c == ' ') def_indent += 1 else break;
-    }
+    // Verify the gap between line_start and idx is only spaces.
+    for (source[line_start..idx]) |c| if (c != ' ') return null;
+    const indent = idx - line_start;
 
-    var pos = body_start + 1;
+    // Skip `def ` + optional leading whitespace to the name.
+    var name_start = idx + 4; // after "def "
+    while (name_start < source.len and source[name_start] == ' ') name_start += 1;
+
+    // Ruby method names: letters, digits, `_`, optional trailing `?`/`!`/`=`.
+    var ne = name_start;
+    while (ne < source.len) : (ne += 1) {
+        const c = source[ne];
+        if (std.ascii.isAlphanumeric(c) or c == '_') continue;
+        break;
+    }
+    if (ne < source.len and (source[ne] == '?' or source[ne] == '!' or source[ne] == '=')) {
+        ne += 1;
+    }
+    if (ne == name_start) return null;
+
+    const body_start = std.mem.findScalarPos(u8, source, idx, '\n') orelse return null;
+    const matching_end = findMatchingEnd(source, body_start + 1, indent) orelse return null;
+
+    return .{
+        .name = source[name_start..ne],
+        .indent = indent,
+        .block_start = line_start,
+        .block_end = matching_end.block_end,
+        .body_start = body_start + 1,
+        .body_end = matching_end.end_line_start,
+    };
+}
+
+/// Locate the matching `end` line at exactly `indent` columns. Returns both
+/// the index AFTER the end line's newline and the index of the end line's
+/// first character so callers can slice both the block and its body.
+fn findMatchingEnd(source: []const u8, start: usize, indent: usize) ?struct {
+    end_line_start: usize,
+    block_end: usize,
+} {
+    var pos = start;
     while (pos < source.len) {
         const line_start = pos;
         const line_end = std.mem.findScalarPos(u8, source, pos, '\n') orelse source.len;
 
         var line_indent: usize = 0;
         var scan = line_start;
-        while (scan < line_end and source[scan] == ' ') {
-            line_indent += 1;
-            scan += 1;
-        }
+        while (scan < line_end and source[scan] == ' ') : (scan += 1) line_indent += 1;
 
-        if (line_indent == def_indent and
+        if (line_indent == indent and
             line_end - scan >= 3 and
             std.mem.eql(u8, source[scan..@min(scan + 3, line_end)], "end") and
             (scan + 3 >= line_end or source[scan + 3] == ' ' or source[scan + 3] == '\n'))
         {
-            const body = source[body_start + 1 .. line_start];
-            return allocator.dupe(u8, body) catch return null;
+            const block_end = if (line_end < source.len) line_end + 1 else source.len;
+            return .{ .end_line_start = line_start, .block_end = block_end };
         }
 
         pos = if (line_end < source.len) line_end + 1 else source.len;
     }
-
     return null;
 }
 
-/// Extract the post_install method body from a formula .rb source file.
-/// Returns the raw Ruby source between `def post_install` and its matching
-/// `end`, or null if not found.
+/// Extract the post_install method body + sibling helpers from a formula
+/// .rb source file. Thin file-IO wrapper around `extractPostInstallFromSource`
+/// so the parsing contract lives in one place.
 pub fn extractPostInstallBody(allocator: std.mem.Allocator, rb_path: []const u8) ?[]const u8 {
     const file = fs_compat.openFileAbsolute(rb_path, .{}) catch return null;
     defer file.close();
 
     const source = file.readToEndAlloc(allocator, 1024 * 1024) catch return null;
+    defer allocator.free(source);
 
-    // Find `def post_install`
-    const marker = "def post_install";
-    const start_idx = std.mem.indexOf(u8, source, marker) orelse {
-        allocator.free(source);
-        return null;
-    };
-
-    // Find the start of the body (after the def line)
-    const body_start = std.mem.findScalarPos(u8, source, start_idx, '\n') orelse {
-        allocator.free(source);
-        return null;
-    };
-
-    // Find matching `end` — simple heuristic: first line starting with
-    // exactly "  end" or "end" after the def. We track indentation depth.
-    const def_line_start = if (start_idx > 0)
-        if (std.mem.findScalarLast(u8, source[0..start_idx], '\n')) |nl| nl + 1 else 0
-    else
-        0;
-
-    // Measure indent of `def post_install`
-    var def_indent: usize = 0;
-    for (source[def_line_start..start_idx]) |c| {
-        if (c == ' ') {
-            def_indent += 1;
-        } else break;
-    }
-
-    // Scan for matching end at the same indent level
-    var pos = body_start + 1;
-    while (pos < source.len) {
-        // Find next line
-        const line_start = pos;
-        const line_end = std.mem.findScalarPos(u8, source, pos, '\n') orelse source.len;
-
-        // Check if this line is `end` at the same indent level
-        var line_indent: usize = 0;
-        var scan = line_start;
-        while (scan < line_end and source[scan] == ' ') {
-            line_indent += 1;
-            scan += 1;
-        }
-
-        if (line_indent == def_indent and
-            line_end - scan >= 3 and
-            std.mem.eql(u8, source[scan..@min(scan + 3, line_end)], "end") and
-            (scan + 3 >= line_end or source[scan + 3] == ' ' or source[scan + 3] == '\n'))
-        {
-            // Found the matching end — body is source[body_start+1 .. line_start]
-            const body = source[body_start + 1 .. line_start];
-            const result = allocator.dupe(u8, body) catch {
-                allocator.free(source);
-                return null;
-            };
-            allocator.free(source);
-            return result;
-        }
-
-        pos = if (line_end < source.len) line_end + 1 else source.len;
-    }
-
-    allocator.free(source);
-    return null;
+    return extractPostInstallFromSource(allocator, source);
 }
 
 /// Generate the Ruby wrapper script that provides a FormulaStub sandbox
