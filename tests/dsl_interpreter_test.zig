@@ -1522,7 +1522,9 @@ test "parse_error: malformed source populates fallback log with location" {
     // The diagnostics from Parser.diagnostics should now be on the log
     // tagged as parse_error and carrying their source location, so the
     // CLI can print "<formula>:<line>:<col>: <message>" for the user.
-    try testing.expect(flog.hasFatal());
+    // parse_error is no longer fatal — it's logged with loc for the CLI
+    // but must not suppress the --use-system-ruby salvage path.
+    try testing.expect(!flog.hasFatal());
 
     var saw_parse_error = false;
     for (flog.entries.items) |entry| {
@@ -1781,4 +1783,96 @@ test "interpreter: return from inside .each exits the enclosing def" {
     // no-op and the return-if-count==2 never fires. Accept whatever
     // err comes back — the important invariant is that the snippet
     // doesn't explode when `return` crosses a block boundary.
+}
+
+// ---------------------------------------------------------------------------
+// Block-pass (&:symbol) — the llvm@21 regression.
+//
+// `config_files.all?(&:exist?)` must both parse and evaluate so that the
+// native DSL path keeps pace with real homebrew-core formulas.
+// ---------------------------------------------------------------------------
+
+test "interpreter: array.all?(&:exist?) is true when every path exists" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // Both dirs exist → `all?` is true → `odie unless ...` is skipped.
+    const src =
+        \\a = share/"a"
+        \\b = share/"b"
+        \\a.mkpath
+        \\b.mkpath
+        \\odie "at least one path missing" unless [a, b].all?(&:exist?)
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: array.all?(&:exist?) is false when any path is missing" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // `b` was never created → `all?` is false → `odie` fires → PostInstallFailed.
+    const src =
+        \\a = share/"a"
+        \\b = share/"b_absent"
+        \\a.mkpath
+        \\odie "expected failure" unless [a, b].all?(&:exist?)
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expectEqual(@as(?dsl.DslError, dsl.DslError.PostInstallFailed), err);
+}
+
+test "interpreter: array.any?(&:exist?) reflects membership" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // Only `a` exists → `any?` is true → `odie` is skipped.
+    const src =
+        \\a = share/"a"
+        \\b = share/"b_absent"
+        \\a.mkpath
+        \\odie "expected no failure" unless [a, b].any?(&:exist?)
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: array.map(&:exist?) threads the sym-to-proc block" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    // Map yields [true, false]; all? over that is false, so odie fires.
+    const src =
+        \\a = share/"a"
+        \\b = share/"missing"
+        \\a.mkpath
+        \\odie "mapped false present" unless [a, b].map(&:exist?).all?
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expectEqual(@as(?dsl.DslError, dsl.DslError.PostInstallFailed), err);
+}
+
+test "interpreter: llvm@21 post_install shape runs to completion" {
+    // End-to-end reproduction of the #85 failure. With block-pass +
+    // parse_error non-fatal, the snippet must no longer explode on line 9.
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\config_files = [share/"a.cfg", share/"b.cfg"]
+        \\return if config_files.all?(&:exist?)
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
 }

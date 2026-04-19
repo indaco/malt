@@ -830,3 +830,71 @@ test "parser: def body with return short-circuit" {
         else => return error.TestUnexpectedResult,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Block-pass argument (&:symbol) — Ruby's symbol-to-proc shorthand.
+//
+// Regression: llvm@21's `post_install` uses `config_files.all?(&:exist?)`;
+// the parser must accept `&<primary>` inside any arg list and expose it on
+// `MethodCall.block_pass` instead of tripping "unexpected token".
+// ---------------------------------------------------------------------------
+
+test "parser: block-pass with symbol on receiver method call" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "xs.all?(&:exist?)");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("all?", mc.method);
+    try testing.expectEqual(@as(usize, 0), mc.args.len);
+    try testing.expect(mc.block_pass != null);
+    try testing.expectEqualStrings("exist?", mc.block_pass.?.kind.symbol_literal);
+}
+
+test "parser: block-pass mixed with regular positional arg" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "xs.inject(0, &:plus)");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("inject", mc.method);
+    try testing.expectEqual(@as(usize, 1), mc.args.len);
+    try testing.expectEqual(@as(i64, 0), mc.args[0].kind.int_literal);
+    try testing.expect(mc.block_pass != null);
+    try testing.expectEqualStrings("plus", mc.block_pass.?.kind.symbol_literal);
+}
+
+test "parser: block-pass on bare paren call" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "foo(&:bar)");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("foo", mc.method);
+    try testing.expect(mc.block_pass != null);
+    try testing.expectEqualStrings("bar", mc.block_pass.?.kind.symbol_literal);
+}
+
+test "parser: llvm@21 post_install snippet parses with block-pass" {
+    // Distilled from llvm@21.rb — reproduces the original `unexpected token`.
+    var arena = testArena();
+    defer arena.deinit();
+
+    const src =
+        \\config_files = [bin/"a", bin/"b"]
+        \\return if config_files.all?(&:exist?)
+    ;
+    const nodes = try parseSource(&arena, src);
+    try testing.expectEqual(@as(usize, 2), nodes.len);
+
+    const postfix = nodes[1].kind.postfix_if;
+    const cond_mc = postfix.condition.kind.method_call;
+    try testing.expectEqualStrings("all?", cond_mc.method);
+    try testing.expect(cond_mc.block_pass != null);
+}

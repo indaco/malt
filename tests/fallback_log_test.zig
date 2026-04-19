@@ -23,7 +23,7 @@ test "hasErrors is true once any entry is logged" {
     try testing.expect(!log.hasFatal()); // unknown_method is non-fatal
 }
 
-test "hasFatal picks up sandbox_violation, system_command_failed and parse_error" {
+test "hasFatal picks up sandbox_violation and system_command_failed" {
     var log_a = FallbackLog.init(testing.allocator);
     defer log_a.deinit();
     log_a.log(.{ .formula = "f", .reason = .sandbox_violation, .detail = "d", .loc = null });
@@ -38,11 +38,18 @@ test "hasFatal picks up sandbox_violation, system_command_failed and parse_error
     defer log_c.deinit();
     log_c.log(.{ .formula = "f", .reason = .unsupported_node, .detail = "d", .loc = null });
     try testing.expect(!log_c.hasFatal());
+}
 
-    var log_d = FallbackLog.init(testing.allocator);
-    defer log_d.deinit();
-    log_d.log(.{ .formula = "f", .reason = .parse_error, .detail = "expected end", .loc = .{ .line = 4, .col = 1 } });
-    try testing.expect(log_d.hasFatal());
+// parse_error used to be fatal, which also killed the --use-system-ruby
+// fallback path. Now it's logged with loc for the CLI but treated as
+// recoverable so formulas using constructs the native DSL doesn't know
+// yet can still be salvaged by the Ruby subprocess.
+test "hasFatal does NOT trip on parse_error (fallback path stays open)" {
+    var log = FallbackLog.init(testing.allocator);
+    defer log.deinit();
+    log.log(.{ .formula = "f", .reason = .parse_error, .detail = "unexpected token", .loc = .{ .line = 4, .col = 1 } });
+    try testing.expect(log.hasErrors());
+    try testing.expect(!log.hasFatal());
 }
 
 test "printFatal does not crash on empty / fatal / non-fatal mixes" {
