@@ -822,15 +822,42 @@ pub const Parser = struct {
                 });
             },
             .lbrace => {
-                // Hash literal
+                // Hash literal. Ruby's shorthand `{ name: value }` lowers
+                // to a symbol key — recognise the `identifier:` case so
+                // it doesn't get resolved as an unknown method/identifier
+                // at interpret time.
                 self.advanceToken();
                 var entries: std.ArrayList(ast.HashEntry) = .empty;
                 while (self.current.kind != .rbrace and self.current.kind != .eof) {
                     self.skipNewlines();
                     if (self.current.kind == .rbrace) break;
 
-                    const key = try self.parseExpression();
+                    const key_loc = self.currentLoc();
+                    var key: *const Node = undefined;
+                    // Peek: if we see `identifier : ...` (single colon, not `::`),
+                    // treat the identifier as a symbol literal.
+                    if (self.current.kind == .identifier) {
+                        const lex_before = self.lexer.*;
+                        const ident_lexeme = self.current.lexeme;
+                        self.advanceToken();
+                        if (self.current.kind == .colon) {
+                            self.advanceToken();
+                            key = try self.allocNode(.{
+                                .loc = key_loc,
+                                .kind = .{ .symbol_literal = ident_lexeme },
+                            });
+                            const value = try self.parseExpression();
+                            entries.append(self.allocator, .{ .key = key, .value = value }) catch return DslError.OutOfMemory;
+                            self.skipNewlines();
+                            if (self.current.kind == .comma) self.advanceToken();
+                            continue;
+                        }
+                        // Not shorthand — rewind and parse as a full expression.
+                        self.lexer.* = lex_before;
+                        self.current = self.lexer.next();
+                    }
 
+                    key = try self.parseExpression();
                     if (self.current.kind == .fat_arrow) {
                         self.advanceToken();
                     } else if (self.current.kind == .colon) {

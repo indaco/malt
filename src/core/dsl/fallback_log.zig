@@ -84,6 +84,31 @@ pub const FallbackLog = struct {
         }
     }
 
+    /// Print unknown_method / unsupported_node entries to stderr — the
+    /// log-only reasons that `printFatal` intentionally skips. Called by
+    /// the install CLI under `--verbose` so users can see which helpers
+    /// the DSL silently downgraded instead of only the "partially skipped"
+    /// hint.
+    pub fn printUnknown(self: *const FallbackLog, tag: []const u8) void {
+        for (self.entries.items) |entry| {
+            const unknown = switch (entry.reason) {
+                .unknown_method, .unsupported_node => true,
+                else => false,
+            };
+            if (!unknown) continue;
+            var buf: [1024]u8 = undefined;
+            const formatted = if (entry.loc) |loc|
+                std.fmt.bufPrint(&buf, "  {s}:{d}:{d}: [{s}] {s}\n", .{
+                    tag, loc.line, loc.col, @tagName(entry.reason), entry.detail,
+                }) catch continue
+            else
+                std.fmt.bufPrint(&buf, "  {s}: [{s}] {s}\n", .{
+                    tag, @tagName(entry.reason), entry.detail,
+                }) catch continue;
+            io_mod.stderrWriteAll(formatted);
+        }
+    }
+
     /// Serialize to JSON for telemetry reporting.
     pub fn toJson(self: *const FallbackLog, allocator: std.mem.Allocator) ![]const u8 {
         var aw: std.Io.Writer.Allocating = .init(allocator);
