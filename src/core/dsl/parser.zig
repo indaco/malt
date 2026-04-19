@@ -236,15 +236,21 @@ pub const Parser = struct {
             return self.parseEachWithReceiver(receiver, loc);
         }
 
-        // Parse arguments
+        // Parse arguments — paren list may end with `&<primary>` (block-pass).
         var args: std.ArrayList(*const Node) = .empty;
+        var block_pass: ?*const Node = null;
         if (self.current.kind == .lparen) {
             self.advanceToken();
             while (self.current.kind != .rparen and self.current.kind != .eof) {
                 self.skipNewlines();
                 if (self.current.kind == .rparen) break;
-                const arg = try self.parseExpression();
-                args.append(self.allocator, arg) catch return DslError.OutOfMemory;
+                switch (try self.parseOneArg()) {
+                    .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
+                    .block_pass => |bp| {
+                        block_pass = bp;
+                        break;
+                    },
+                }
                 self.skipNewlines();
                 if (self.current.kind == .comma) {
                     self.advanceToken();
@@ -266,8 +272,13 @@ pub const Parser = struct {
             while (self.current.kind == .comma) {
                 self.advanceToken();
                 self.skipNewlines();
-                const next_arg = try self.parseExpression();
-                args.append(self.allocator, next_arg) catch return DslError.OutOfMemory;
+                switch (try self.parseOneArg()) {
+                    .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
+                    .block_pass => |bp| {
+                        block_pass = bp;
+                        break;
+                    },
+                }
             }
         }
 
@@ -305,6 +316,7 @@ pub const Parser = struct {
                 .args = args_slice,
                 .blk = blk,
                 .block_params = params_slice,
+                .block_pass = block_pass,
             } },
         });
     }
@@ -605,13 +617,19 @@ pub const Parser = struct {
                     self.current.kind != .dot)
                 {
                     var args: std.ArrayList(*const Node) = .empty;
+                    var block_pass: ?*const Node = null;
                     const arg = try self.parseExpression();
                     args.append(self.allocator, arg) catch return DslError.OutOfMemory;
                     while (self.current.kind == .comma) {
                         self.advanceToken();
                         self.skipNewlines();
-                        const next_arg = try self.parseExpression();
-                        args.append(self.allocator, next_arg) catch return DslError.OutOfMemory;
+                        switch (try self.parseOneArg()) {
+                            .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
+                            .block_pass => |bp| {
+                                block_pass = bp;
+                                break;
+                            },
+                        }
                     }
 
                     // Parse optional block
@@ -648,18 +666,25 @@ pub const Parser = struct {
                             .args = args_slice,
                             .blk = blk,
                             .block_params = params_slice,
+                            .block_pass = block_pass,
                         } },
                     });
                 }
 
                 // Non-bare method call with parens: method(args)
                 if (self.current.kind == .lparen) {
-                    // method(args)
+                    // method(args) — may end with `&<primary>` block-pass.
                     self.advanceToken();
                     var args: std.ArrayList(*const Node) = .empty;
+                    var block_pass: ?*const Node = null;
                     while (self.current.kind != .rparen and self.current.kind != .eof) {
-                        const arg = try self.parseExpression();
-                        args.append(self.allocator, arg) catch return DslError.OutOfMemory;
+                        switch (try self.parseOneArg()) {
+                            .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
+                            .block_pass => |bp| {
+                                block_pass = bp;
+                                break;
+                            },
+                        }
                         if (self.current.kind == .comma) {
                             self.advanceToken();
                             self.skipNewlines();
@@ -701,6 +726,7 @@ pub const Parser = struct {
                             .args = args_slice,
                             .blk = blk,
                             .block_params = params_slice,
+                            .block_pass = block_pass,
                         } },
                     });
                 }
@@ -716,13 +742,19 @@ pub const Parser = struct {
                     self.current.kind != .dot)
                 {
                     var args: std.ArrayList(*const Node) = .empty;
+                    var block_pass: ?*const Node = null;
                     const arg = try self.parseExpression();
                     args.append(self.allocator, arg) catch return DslError.OutOfMemory;
                     while (self.current.kind == .comma) {
                         self.advanceToken();
                         self.skipNewlines();
-                        const next_arg = try self.parseExpression();
-                        args.append(self.allocator, next_arg) catch return DslError.OutOfMemory;
+                        switch (try self.parseOneArg()) {
+                            .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
+                            .block_pass => |bp| {
+                                block_pass = bp;
+                                break;
+                            },
+                        }
                     }
 
                     // Parse optional block
@@ -759,6 +791,7 @@ pub const Parser = struct {
                             .args = args_slice,
                             .blk = blk,
                             .block_params = params_slice,
+                            .block_pass = block_pass,
                         } },
                     });
                 }
@@ -1143,6 +1176,24 @@ pub const Parser = struct {
         }
 
         return parts_list.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+    }
+
+    /// Parse a single arg inside a method-call arg list. Returns either a
+    /// positional expression node or a block-pass payload (`&<primary>`).
+    /// Block-pass is always the last arg per Ruby grammar; callers break
+    /// out of their arg loop when they see one.
+    const ArgOutcome = union(enum) {
+        arg: *const Node,
+        block_pass: *const Node,
+    };
+
+    fn parseOneArg(self: *Parser) DslError!ArgOutcome {
+        if (self.current.kind == .ampersand) {
+            self.advanceToken();
+            const inner = try self.parsePrimary();
+            return .{ .block_pass = inner };
+        }
+        return .{ .arg = try self.parseExpression() };
     }
 
     fn parseBlockParams(self: *Parser, params: *std.ArrayList([]const u8)) DslError!void {

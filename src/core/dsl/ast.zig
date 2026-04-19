@@ -47,6 +47,9 @@ pub const MethodCall = struct {
     args: []const *const Node,
     blk: ?*const Node,
     block_params: []const []const u8,
+    /// Ruby's `&<expr>` block-pass arg (commonly `&:sym` for symbol-to-proc).
+    /// Exclusive with `blk`: parser accepts one form per call.
+    block_pass: ?*const Node = null,
 };
 
 pub const StringLiteral = struct {

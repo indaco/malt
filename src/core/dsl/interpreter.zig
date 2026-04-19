@@ -463,6 +463,33 @@ pub const Interpreter = struct {
                 }
             }
 
+            // `&:sym` block-pass on the common Enumerable methods. The symbol
+            // names a receiver builtin invoked per element — same effect as
+            // `{ |x| x.sym }` without the block allocation.
+            if (receiver_val == .array and mc.block_pass != null) {
+                const bp_val = try self.eval(mc.block_pass.?);
+                if (bp_val == .symbol) {
+                    return self.dispatchBlockPassSym(mc.method, receiver_val.array, bp_val.symbol, loc);
+                }
+                self.ctx.fallback_log_writer.log(.{
+                    .formula = self.ctx.formula_name,
+                    .reason = .unsupported_node,
+                    .detail = "block_pass with non-symbol expression",
+                    .loc = loc,
+                });
+            }
+
+            // Block-less `all?` / `any?` — Ruby semantics: truthiness of each element.
+            if (receiver_val == .array and mc.blk == null and mc.block_pass == null) {
+                if (std.mem.eql(u8, mc.method, "all?")) {
+                    for (receiver_val.array) |it| if (!it.isTruthy()) return Value{ .bool = false };
+                    return Value{ .bool = true };
+                } else if (std.mem.eql(u8, mc.method, "any?")) {
+                    for (receiver_val.array) |it| if (it.isTruthy()) return Value{ .bool = true };
+                    return Value{ .bool = false };
+                }
+            }
+
             // Look up in receiver builtins
             if (builtins_root.receiver_builtins.get(mc.method)) |func| {
                 return func(builtin_ctx, receiver_val, args_slice) catch |e| {
@@ -691,6 +718,110 @@ pub const Interpreter = struct {
             if (params.len > 0) self.ctx.setLocal(params[0], item);
             _ = self.eval(blk) catch |e| switch (e) {
                 DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
+                else => continue,
+            };
+        }
+        return Value{ .nil = {} };
+    }
+
+    /// Dispatch an Enumerable method whose block is `&:sym` shorthand. The
+    /// per-element behavior is "invoke `sym` as a receiver method on the
+    /// item", matched against the existing receiver-builtin table.
+    fn dispatchBlockPassSym(
+        self: *Interpreter,
+        method: []const u8,
+        items: []const Value,
+        sym: []const u8,
+        loc: SourceLoc,
+    ) DslError!Value {
+        if (std.mem.eql(u8, method, "all?")) return self.evalArrayAllByName(items, sym, loc);
+        if (std.mem.eql(u8, method, "any?")) return self.evalArrayAnyByName(items, sym, loc);
+        if (std.mem.eql(u8, method, "map")) return self.evalArrayMapByName(items, sym, loc);
+        if (std.mem.eql(u8, method, "select")) return self.evalArraySelectByName(items, sym, loc);
+        if (std.mem.eql(u8, method, "reject")) return self.evalArrayRejectByName(items, sym, loc);
+        if (std.mem.eql(u8, method, "each")) return self.evalArrayEachByName(items, sym, loc);
+        // Method doesn't route through the &:sym shortcut; log and return nil
+        // so the host formula can continue.
+        self.ctx.fallback_log_writer.log(.{
+            .formula = self.ctx.formula_name,
+            .reason = .unsupported_node,
+            .detail = method,
+            .loc = loc,
+        });
+        return Value{ .nil = {} };
+    }
+
+    /// Send the zero-arg method named `sym` to `item` via the receiver-builtin
+    /// table. Unknown sym is logged non-fatally and yields nil — same policy
+    /// as regular unknown receiver methods.
+    fn sendByName(self: *Interpreter, item: Value, sym: []const u8, loc: SourceLoc) DslError!Value {
+        const builtin_ctx = builtins_root.pathname.ExecCtx{
+            .allocator = self.allocator,
+            .cellar_path = self.ctx.cellar_path,
+            .malt_prefix = self.ctx.malt_prefix,
+        };
+        if (builtins_root.receiver_builtins.get(sym)) |func| {
+            return func(builtin_ctx, item, &.{}) catch |e| mapBuiltinError(e);
+        }
+        self.ctx.fallback_log_writer.log(.{
+            .formula = self.ctx.formula_name,
+            .reason = .unknown_method,
+            .detail = sym,
+            .loc = loc,
+        });
+        return Value{ .nil = {} };
+    }
+
+    fn evalArrayAllByName(self: *Interpreter, items: []const Value, sym: []const u8, loc: SourceLoc) DslError!Value {
+        for (items) |item| {
+            const v = try self.sendByName(item, sym, loc);
+            if (!v.isTruthy()) return Value{ .bool = false };
+        }
+        return Value{ .bool = true };
+    }
+
+    fn evalArrayAnyByName(self: *Interpreter, items: []const Value, sym: []const u8, loc: SourceLoc) DslError!Value {
+        for (items) |item| {
+            const v = try self.sendByName(item, sym, loc);
+            if (v.isTruthy()) return Value{ .bool = true };
+        }
+        return Value{ .bool = false };
+    }
+
+    fn evalArrayMapByName(self: *Interpreter, items: []const Value, sym: []const u8, loc: SourceLoc) DslError!Value {
+        var out: std.ArrayList(Value) = .empty;
+        for (items) |item| {
+            const v = try self.sendByName(item, sym, loc);
+            out.append(self.allocator, v) catch return DslError.OutOfMemory;
+        }
+        const slice = out.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+        return Value{ .array = slice };
+    }
+
+    fn evalArraySelectByName(self: *Interpreter, items: []const Value, sym: []const u8, loc: SourceLoc) DslError!Value {
+        var out: std.ArrayList(Value) = .empty;
+        for (items) |item| {
+            const v = try self.sendByName(item, sym, loc);
+            if (v.isTruthy()) out.append(self.allocator, item) catch return DslError.OutOfMemory;
+        }
+        const slice = out.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+        return Value{ .array = slice };
+    }
+
+    fn evalArrayRejectByName(self: *Interpreter, items: []const Value, sym: []const u8, loc: SourceLoc) DslError!Value {
+        var out: std.ArrayList(Value) = .empty;
+        for (items) |item| {
+            const v = try self.sendByName(item, sym, loc);
+            if (!v.isTruthy()) out.append(self.allocator, item) catch return DslError.OutOfMemory;
+        }
+        const slice = out.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+        return Value{ .array = slice };
+    }
+
+    fn evalArrayEachByName(self: *Interpreter, items: []const Value, sym: []const u8, loc: SourceLoc) DslError!Value {
+        for (items) |item| {
+            _ = self.sendByName(item, sym, loc) catch |e| switch (e) {
+                DslError.PostInstallFailed, DslError.PathSandboxViolation => return e,
                 else => continue,
             };
         }

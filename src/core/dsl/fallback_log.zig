@@ -53,26 +53,24 @@ pub const FallbackLog = struct {
     pub fn hasFatal(self: *const FallbackLog) bool {
         for (self.entries.items) |entry| {
             switch (entry.reason) {
-                .sandbox_violation, .system_command_failed, .parse_error => return true,
+                .sandbox_violation, .system_command_failed => return true,
                 else => {},
             }
         }
         return false;
     }
 
-    /// Print every fatal entry to stderr in `tag:line:col: message` form so
-    /// users debugging a broken `post_install` block can jump straight to
-    /// the offending line. `tag` is typically the formula name. The
-    /// non-fatal entries (unknown_method / unsupported_node) are
-    /// intentionally skipped — those drive the `--use-system-ruby`
-    /// fallback flow and would just be noise here.
+    /// Print every fatal-or-diagnostic entry in `tag:line:col: message` form.
+    /// `parse_error` is included so users see the exact file:line:col when the
+    /// DSL falls back to `--use-system-ruby`; it is not treated as fatal by
+    /// `hasFatal`, keeping the salvage path open.
     pub fn printFatal(self: *const FallbackLog, tag: []const u8) void {
         for (self.entries.items) |entry| {
-            const fatal = switch (entry.reason) {
+            const printable = switch (entry.reason) {
                 .sandbox_violation, .system_command_failed, .parse_error => true,
                 else => false,
             };
-            if (!fatal) continue;
+            if (!printable) continue;
             var buf: [1024]u8 = undefined;
             const formatted = if (entry.loc) |loc|
                 std.fmt.bufPrint(&buf, "  {s}:{d}:{d}: [{s}] {s}\n", .{
