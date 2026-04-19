@@ -165,6 +165,15 @@ pub fn renameAbsolute(old_path: []const u8, new_path: []const u8) !void {
     return std.Io.Dir.renameAbsolute(old_path, new_path, io_mod.ctx());
 }
 
+/// 0.15-style `readFileAlloc` convenience for absolute paths. Opens,
+/// reads up to `max_bytes`, closes - composes the existing primitives
+/// so callers don't reinvent the open/defer/read dance.
+pub fn readFileAbsoluteAlloc(allocator: std.mem.Allocator, absolute_path: []const u8, max_bytes: usize) ![]u8 {
+    const f = try openFileAbsolute(absolute_path, .{});
+    defer f.close();
+    return f.readToEndAlloc(allocator, max_bytes);
+}
+
 pub fn cwd() Dir {
     return .{ .inner = std.Io.Dir.cwd() };
 }

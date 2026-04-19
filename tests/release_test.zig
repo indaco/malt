@@ -64,6 +64,45 @@ test "pickAssetUrl returns the browser_download_url of the first match" {
     try testing.expectEqualStrings("https://example.com/malt.tgz", url);
 }
 
+test "pickAssetUrlByName finds checksums + sigstore bundle by exact name" {
+    const json =
+        \\[
+        \\  {"name":"malt_0.7.0_darwin_all.tar.gz","browser_download_url":"https://example.com/malt.tgz"},
+        \\  {"name":"checksums.txt","browser_download_url":"https://example.com/checksums.txt"},
+        \\  {"name":"checksums.txt.sigstore.json","browser_download_url":"https://example.com/sigstore.json"}
+        \\]
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+    const arr = switch (parsed.value) {
+        .array => |a| a,
+        else => return error.Unexpected,
+    };
+    try testing.expectEqualStrings(
+        "https://example.com/checksums.txt",
+        release.pickAssetUrlByName(arr, "checksums.txt") orelse return error.NoMatch,
+    );
+    try testing.expectEqualStrings(
+        "https://example.com/sigstore.json",
+        release.pickAssetUrlByName(arr, "checksums.txt.sigstore.json") orelse return error.NoMatch,
+    );
+}
+
+test "pickAssetUrlByName returns null for an unknown name" {
+    const json =
+        \\[
+        \\  {"name":"checksums.txt","browser_download_url":"https://example.com/checksums.txt"}
+        \\]
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+    const arr = switch (parsed.value) {
+        .array => |a| a,
+        else => return error.Unexpected,
+    };
+    try testing.expect(release.pickAssetUrlByName(arr, "does-not-exist.txt") == null);
+}
+
 test "pickAssetUrl returns null when nothing matches" {
     const json =
         \\[

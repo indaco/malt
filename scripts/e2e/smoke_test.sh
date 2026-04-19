@@ -155,9 +155,6 @@ run_ok t2.info.json -- "$MT_BIN" info jq --json
 run_ok t2.outdated -- "$MT_BIN" outdated
 run_ok t2.outdated.json -- "$MT_BIN" outdated --json
 run_ok t2.update -- "$MT_BIN" update
-# --check must not touch the binary; guards the self-update path as it
-# grows cosign verification.
-run_ok t2.version.update.check -- "$MT_BIN" version update --check
 run_ok t2.tap.list -- "$MT_BIN" tap
 
 # doctor: README documents exit 0/1/2 as valid semantics — accept all three on a
@@ -219,6 +216,12 @@ else
 
   # After uninstall, rollback on an uninstalled package should fail cleanly.
   run t3.rollback.none 1 -- "$MT_BIN" rollback tree
+
+  # Self-update's read-only path. Lives in tier 3 because it hits
+  # api.github.com/releases/latest — a shared 60/hr unauthenticated
+  # budget on CI runner IPs that flakes under load. Maintainers still
+  # exercise it via a full smoke run before shipping.
+  run_ok t3.version.update.check -- "$MT_BIN" version update --check
 
   # Issue #85 regression: zig pulls llvm@21 whose post_install uses Ruby's
   # `&:sym` block-pass shorthand. If the DSL parser or fatal-classification
