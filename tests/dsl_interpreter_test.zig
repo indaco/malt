@@ -2180,3 +2180,142 @@ test "interpreter: llvm@21 `write_config_files` sibling now registers and is cal
     // etc/clang/"" and both assertions fail. The invariant under test is
     // only "parses + executes without fatal", so accept whatever err.
 }
+
+// ---------------------------------------------------------------------------
+// Comparison operators (<, >, <=, >=, ==, !=) on ints and strings.
+// Unlocks `MacOS.version > macos_version`, `x >= 0`, etc.
+// ---------------------------------------------------------------------------
+
+test "interpreter: integer <, >, <=, >=, ==, != produce the expected bools" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\odie "1<2 failed" unless 1 < 2
+        \\odie "2>1 failed" unless 2 > 1
+        \\odie "2>=2 failed" unless 2 >= 2
+        \\odie "2<=2 failed" unless 2 <= 2
+        \\odie "1==1 failed" unless 1 == 1
+        \\odie "1!=2 failed" unless 1 != 2
+        \\odie "false: 1>2 fired" if 1 > 2
+        \\odie "false: 1==2 fired" if 1 == 2
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: string equality and lexicographic ordering" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\odie "abc==abc failed" unless "abc" == "abc"
+        \\odie "abc!=xyz failed" unless "abc" != "xyz"
+        \\odie "abc<abd failed" unless "abc" < "abd"
+        \\odie "zzz>aaa failed" unless "zzz" > "aaa"
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: compare on unknown types degrades non-fatally to false" {
+    // nil < 1 has no sensible answer — Ruby raises, we log and return false
+    // so the surrounding `unless` doesn't cascade into UB.
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\odie "nil<1 should not have fired true" if nil < 1
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+// ---------------------------------------------------------------------------
+// `.blank?` — nil/empty string check used across Homebrew guards.
+// ---------------------------------------------------------------------------
+
+test "interpreter: .blank? is true for empty string and nil, false otherwise" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\odie "empty.blank? failed" unless "".blank?
+        \\odie "nil.blank? failed" unless nil.blank?
+        \\odie "present.blank? fired" if "x".blank?
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+// ---------------------------------------------------------------------------
+// `if`/`unless` as an rvalue — `sysroot = if cond then "A" else "B" end`
+// shows up in llvm@21's write_config_files and many other formulas.
+// ---------------------------------------------------------------------------
+
+test "interpreter: if-else as the RHS of an assignment yields the matching branch" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\share.mkpath
+        \\picked = if true
+        \\  "A"
+        \\else
+        \\  "B"
+        \\end
+        \\(share/"out").write picked
+        \\odie "picked was not 'A'" unless picked == "A"
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: unless-expression picks the else branch when cond is true" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\v = unless true
+        \\  "NO"
+        \\else
+        \\  "YES"
+        \\end
+        \\odie "unless picked wrong branch" unless v == "YES"
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}
+
+test "interpreter: llvm@21 sysroot-assignment shape runs without fatal" {
+    // Distilled from write_config_files. Combines .blank? guard +
+    // logical-or + integer comparison + if-as-rvalue + interpolation.
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\macos_version = "15"
+        \\sysroot = if macos_version.blank? || macos_version > "14"
+        \\  "base"
+        \\else
+        \\  "numbered"
+        \\end
+        \\odie "sysroot branch wrong" unless sysroot == "base"
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+}

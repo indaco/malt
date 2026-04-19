@@ -495,3 +495,24 @@ test "lexer: a single < is still a less_than" {
     try expectToken(&lex, .identifier, "b");
     try expectKind(&lex, .eof);
 }
+
+// Comparison operators — `<=` and `>=` must each lex as a single token
+// (not `<`+`=` or `>`+`=`). Regression for `x >= 0` / `macos < version`.
+test "lexer: >= and <= are single tokens" {
+    var lex = Lexer.init("a >= b <= c");
+    try expectToken(&lex, .identifier, "a");
+    try expectKind(&lex, .greater_eq);
+    try expectToken(&lex, .identifier, "b");
+    try expectKind(&lex, .less_eq);
+    try expectToken(&lex, .identifier, "c");
+    try expectKind(&lex, .eof);
+}
+
+test "lexer: >== is >= then = (no greedy three-char grab)" {
+    var lex = Lexer.init(">== <<=");
+    try expectKind(&lex, .greater_eq);
+    try expectKind(&lex, .equals);
+    try expectKind(&lex, .less_less);
+    try expectKind(&lex, .equals);
+    try expectKind(&lex, .eof);
+}
