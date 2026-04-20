@@ -11,18 +11,20 @@ const malt = @import("malt");
 const testing = std.testing;
 const migrate = malt.cli_migrate;
 const output = malt.output;
+const io_mod = malt.io_mod;
+const color = malt.color;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
     extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 };
 
-// Reset the global output flags that prior tests may have flipped — migrate
-// reads `output.isDryRun()` to seed its local `dry_run` and calls
-// `output.setQuiet` when it sees `-q`/`--quiet`.
+// Reset globals other tests may have flipped. `setMode(.human)` matters for the
+// --json assertions below — JSON mode is sticky across tests otherwise.
 fn resetOutput() void {
     output.setQuiet(false);
     output.setDryRun(false);
+    output.setMode(.human);
 }
 
 fn scratchDir(suffix: []const u8) ![:0]u8 {
@@ -346,4 +348,553 @@ test "already-installed kegs are skipped without touching the network" {
     defer count_stmt.finalize();
     try testing.expect(try count_stmt.step());
     try testing.expectEqual(@as(i64, 1), count_stmt.columnInt(0));
+}
+
+// ── JSON builders: pure unit tests (no globals, no filesystem) ──────────
+
+fn parseAndCheck(bytes: []const u8) !std.json.Parsed(std.json.Value) {
+    return try std.json.parseFromSlice(std.json.Value, testing.allocator, bytes, .{});
+}
+
+test "buildDryRunJson emits a well-formed document with kegs + count" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const kegs = [_][]const u8{ "tree", "wget", "jq" };
+    try migrate.buildDryRunJson(&aw.writer, "/opt/homebrew", &kegs, true, 0);
+
+    const bytes = aw.written();
+    try testing.expect(std.mem.endsWith(u8, bytes, "}\n"));
+
+    const parsed = try parseAndCheck(bytes);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expect(root.get("dry_run").?.bool);
+    try testing.expectEqualStrings("/opt/homebrew", root.get("brew_prefix").?.string);
+    try testing.expectEqual(@as(i64, 3), root.get("count").?.integer);
+    const arr = root.get("kegs").?.array;
+    try testing.expectEqual(@as(usize, 3), arr.items.len);
+    try testing.expectEqualStrings("tree", arr.items[0].string);
+    try testing.expectEqualStrings("wget", arr.items[1].string);
+    try testing.expectEqualStrings("jq", arr.items[2].string);
+    try testing.expect(root.get("time_ms") != null);
+}
+
+test "buildDryRunJson emits empty-kegs shape for an empty Cellar" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try migrate.buildDryRunJson(&aw.writer, "/usr/local", &.{}, false, 0);
+
+    const parsed = try parseAndCheck(aw.written());
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expect(!root.get("dry_run").?.bool);
+    try testing.expectEqualStrings("/usr/local", root.get("brew_prefix").?.string);
+    try testing.expectEqual(@as(i64, 0), root.get("count").?.integer);
+    try testing.expectEqual(@as(usize, 0), root.get("kegs").?.array.items.len);
+}
+
+test "buildSummaryJson emits per-category arrays + counts object" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try migrate.buildSummaryJson(
+        &aw.writer,
+        "/opt/homebrew",
+        &.{ "tree", "wget" },
+        &.{"seeded"},
+        &.{"fancy-keg"},
+        &.{},
+        &.{"brokenpkg"},
+        0,
+    );
+
+    const parsed = try parseAndCheck(aw.written());
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expect(!root.get("dry_run").?.bool);
+    try testing.expectEqual(@as(usize, 2), root.get("migrated").?.array.items.len);
+    try testing.expectEqualStrings("tree", root.get("migrated").?.array.items[0].string);
+    try testing.expectEqual(@as(usize, 1), root.get("skipped_installed").?.array.items.len);
+    try testing.expectEqualStrings("seeded", root.get("skipped_installed").?.array.items[0].string);
+    try testing.expectEqual(@as(usize, 1), root.get("skipped_post_install").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), root.get("skipped_no_bottle").?.array.items.len);
+    try testing.expectEqual(@as(usize, 1), root.get("failed").?.array.items.len);
+    try testing.expectEqualStrings("brokenpkg", root.get("failed").?.array.items[0].string);
+
+    const counts = root.get("counts").?.object;
+    try testing.expectEqual(@as(i64, 2), counts.get("migrated").?.integer);
+    try testing.expectEqual(@as(i64, 1), counts.get("skipped_installed").?.integer);
+    try testing.expectEqual(@as(i64, 1), counts.get("skipped_post_install").?.integer);
+    try testing.expectEqual(@as(i64, 0), counts.get("skipped_no_bottle").?.integer);
+    try testing.expectEqual(@as(i64, 1), counts.get("failed").?.integer);
+}
+
+test "buildSummaryJson escapes adversarial keg names per RFC 8259" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const names = [_][]const u8{"weird\"\\keg"};
+    try migrate.buildSummaryJson(&aw.writer, "/opt/homebrew", &names, &.{}, &.{}, &.{}, &.{}, 0);
+
+    const parsed = try parseAndCheck(aw.written());
+    defer parsed.deinit();
+    try testing.expectEqualStrings("weird\"\\keg", parsed.value.object.get("migrated").?.array.items[0].string);
+}
+
+// ── End-to-end: capture stdout under --json, parse the payload ──────────
+
+test "dry-run with --json emits a parseable document on stdout" {
+    resetOutput();
+    const brew = try scratchDir("brew_json_dry");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt = try scratchDir("mt_json_dry");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(mt) catch {};
+        testing.allocator.free(mt);
+    }
+    try seedFakeBrew(brew, &.{ "tree", "wget" });
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{"--dry-run"});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expect(root.get("dry_run").?.bool);
+    try testing.expectEqual(@as(i64, 2), root.get("count").?.integer);
+    try testing.expectEqual(@as(usize, 2), root.get("kegs").?.array.items.len);
+}
+
+test "--json with empty Cellar emits an empty-kegs document (no human 'No kegs' line)" {
+    resetOutput();
+    const brew = try scratchDir("brew_json_empty");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt = try scratchDir("mt_json_empty");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(mt) catch {};
+        testing.allocator.free(mt);
+    }
+    try seedFakeBrew(brew, &.{});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 0), parsed.value.object.get("count").?.integer);
+}
+
+test "--json on an already-installed keg records it under skipped_installed" {
+    resetOutput();
+    const brew = try scratchDir("brew_json_inst");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    // ≤13-byte MALT_PREFIX — same Mach-O cap rationale as the sister test above.
+    const mt_z: [:0]const u8 = "/tmp/mt_mj";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    try seedFakeBrew(brew, &.{"seeded"});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    defer testing.allocator.free(db_dir);
+    try malt.fs_compat.cwd().makePath(db_dir);
+    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt.db", .{db_dir});
+    defer testing.allocator.free(db_path);
+
+    var db = try malt.sqlite.Database.open(db_path);
+    try malt.schema.initSchema(&db);
+    var stmt = try db.prepare(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES (?, ?, ?, ?, ?);
+    );
+    try stmt.bindText(1, "seeded");
+    try stmt.bindText(2, "seeded");
+    try stmt.bindText(3, "1.0");
+    try stmt.bindText(4, "0" ** 64);
+    try stmt.bindText(5, "/tmp/mt_mj/Cellar/seeded/1.0");
+    _ = try stmt.step();
+    stmt.finalize();
+    db.close();
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqual(@as(usize, 0), root.get("migrated").?.array.items.len);
+    try testing.expectEqual(@as(usize, 1), root.get("skipped_installed").?.array.items.len);
+    try testing.expectEqualStrings("seeded", root.get("skipped_installed").?.array.items[0].string);
+    try testing.expectEqual(@as(i64, 1), root.get("counts").?.object.get("skipped_installed").?.integer);
+}
+
+// ── Human summary: stderr capture pins specific lines ───────────────────
+
+fn containsLine(haystack: []const u8, needle: []const u8) bool {
+    return std.mem.indexOf(u8, haystack, needle) != null;
+}
+
+test "dry-run stderr pins the 'Found N packages' and 'Would migrate N' lines" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    const brew = try scratchDir("brew_stderr_dry");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt = try scratchDir("mt_stderr_dry");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(mt) catch {};
+        testing.allocator.free(mt);
+    }
+    try seedFakeBrew(brew, &.{ "tree", "wget", "jq" });
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{"--dry-run"});
+
+    try testing.expect(containsLine(buf.items, "Found 3 package(s) in Homebrew Cellar"));
+    try testing.expect(containsLine(buf.items, "Would migrate: tree"));
+    try testing.expect(containsLine(buf.items, "Would migrate: wget"));
+    try testing.expect(containsLine(buf.items, "Would migrate: jq"));
+    try testing.expect(containsLine(buf.items, "Would migrate 3 packages from Homebrew"));
+}
+
+// ── SIGINT handling ─────────────────────────────────────────────────────
+
+test "pre-set SIGINT flag short-circuits the per-keg loop before any API call" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    const brew = try scratchDir("brew_sigint");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt_z: [:0]const u8 = "/tmp/mt_si";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    try seedFakeBrew(brew, &.{"willbeskipped"});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Pre-set the flag so the pre-loop check fires before any API hit.
+    malt.main_mod.setInterruptedForTest(true);
+    defer malt.main_mod.setInterruptedForTest(false);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{});
+
+    try testing.expect(containsLine(buf.items, "Interrupted before migration"));
+    // Early-return must skip both per-keg success and final summary block.
+    try testing.expect(!containsLine(buf.items, "willbeskipped migrated"));
+    try testing.expect(!containsLine(buf.items, "Migration complete:"));
+}
+
+// ── Cellar-entry filter ─────────────────────────────────────────────────
+
+test "cellar scan ignores stray files and symlinks alongside keg directories" {
+    resetOutput();
+    const brew = try scratchDir("brew_filter");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt = try scratchDir("mt_filter");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(mt) catch {};
+        testing.allocator.free(mt);
+    }
+    try seedFakeBrew(brew, &.{"tree"});
+
+    // Plant a stray regular file + a dangling symlink in the Cellar root.
+    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar", .{brew});
+    defer testing.allocator.free(cellar);
+    const stray_file = try std.fmt.allocPrint(testing.allocator, "{s}/.DS_Store", .{cellar});
+    defer testing.allocator.free(stray_file);
+    const stray_link = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/dangling", .{cellar}, 0);
+    defer testing.allocator.free(stray_link);
+
+    const f = try malt.fs_compat.cwd().createFile(stray_file, .{});
+    f.close();
+    _ = std.c.symlink("/tmp/nonexistent_migrate_smoke_target", stray_link.ptr);
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{"--dry-run"});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqual(@as(i64, 1), root.get("count").?.integer);
+    const kegs = root.get("kegs").?.array;
+    try testing.expectEqual(@as(usize, 1), kegs.items.len);
+    try testing.expectEqualStrings("tree", kegs.items[0].string);
+}
+
+// ── Multi-keg mixed outcomes (skipped_installed + failed_api, offline) ──
+
+test "mixed outcomes: installed keg is skipped and unknown keg fails at API (404-cached)" {
+    resetOutput();
+    const brew = try scratchDir("brew_mixed");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    const mt_z: [:0]const u8 = "/tmp/mt_mx";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    try seedFakeBrew(brew, &.{ "seeded", "unknownpkg" });
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Seed malt DB: one keg already "installed" to exercise the skip path.
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    defer testing.allocator.free(db_dir);
+    try malt.fs_compat.cwd().makePath(db_dir);
+    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt.db", .{db_dir});
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    try malt.schema.initSchema(&db);
+    var stmt = try db.prepare(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES (?, ?, ?, ?, ?);
+    );
+    try stmt.bindText(1, "seeded");
+    try stmt.bindText(2, "seeded");
+    try stmt.bindText(3, "1.0");
+    try stmt.bindText(4, "0" ** 64);
+    try stmt.bindText(5, "/tmp/mt_mx/Cellar/seeded/1.0");
+    _ = try stmt.step();
+    stmt.finalize();
+    db.close();
+
+    // Pre-seed a 404 marker so fetchFormula fails offline (audit-documented pattern).
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try malt.fs_compat.cwd().makePath(cache_api);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_unknownpkg.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    const mf = try malt.fs_compat.cwd().createFile(marker, .{});
+    mf.close();
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqual(@as(usize, 0), root.get("migrated").?.array.items.len);
+    try testing.expectEqual(@as(usize, 1), root.get("skipped_installed").?.array.items.len);
+    try testing.expectEqualStrings("seeded", root.get("skipped_installed").?.array.items[0].string);
+    try testing.expectEqual(@as(usize, 1), root.get("failed").?.array.items.len);
+    try testing.expectEqualStrings("unknownpkg", root.get("failed").?.array.items[0].string);
+
+    const counts = root.get("counts").?.object;
+    try testing.expectEqual(@as(i64, 0), counts.get("migrated").?.integer);
+    try testing.expectEqual(@as(i64, 1), counts.get("skipped_installed").?.integer);
+    try testing.expectEqual(@as(i64, 1), counts.get("failed").?.integer);
+}
+
+// ── Lock contention ─────────────────────────────────────────────────────
+
+test "lock contention returns error.Aborted when db/malt.lock is already held" {
+    resetOutput();
+    const brew = try scratchDir("brew_lock");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    const mt_z: [:0]const u8 = "/tmp/mt_lk";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    try seedFakeBrew(brew, &.{"willnotreach"});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+    // Short timeout so contention fails fast instead of the 30 s default.
+    _ = c.setenv("MALT_LOCK_TIMEOUT_MS", "50", 1);
+    defer _ = c.unsetenv("MALT_LOCK_TIMEOUT_MS");
+
+    // Pre-acquire the lock externally so migrate's acquire hits timeout.
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    defer testing.allocator.free(db_dir);
+    try malt.fs_compat.cwd().makePath(db_dir);
+    const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt.lock", .{db_dir});
+    defer testing.allocator.free(lock_path);
+    var holder = try malt.lock.LockFile.acquire(lock_path, 1000);
+    defer holder.release();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(
+        error.Aborted,
+        migrate.execute(arena.allocator(), &.{}),
+    );
+}
+
+test "already-installed stderr pins the 'Migration complete' + 'Skipped (installed): 1' lines" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    const brew = try scratchDir("brew_stderr_inst");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    const mt_z: [:0]const u8 = "/tmp/mt_ms";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    try seedFakeBrew(brew, &.{"seeded"});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    defer testing.allocator.free(db_dir);
+    try malt.fs_compat.cwd().makePath(db_dir);
+    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt.db", .{db_dir});
+    defer testing.allocator.free(db_path);
+
+    var db = try malt.sqlite.Database.open(db_path);
+    try malt.schema.initSchema(&db);
+    var stmt = try db.prepare(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES (?, ?, ?, ?, ?);
+    );
+    try stmt.bindText(1, "seeded");
+    try stmt.bindText(2, "seeded");
+    try stmt.bindText(3, "1.0");
+    try stmt.bindText(4, "0" ** 64);
+    try stmt.bindText(5, "/tmp/mt_ms/Cellar/seeded/1.0");
+    _ = try stmt.step();
+    stmt.finalize();
+    db.close();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{});
+
+    try testing.expect(containsLine(buf.items, "Migration complete:"));
+    try testing.expect(containsLine(buf.items, "Migrated:              0"));
+    try testing.expect(containsLine(buf.items, "Skipped (installed):   1"));
 }

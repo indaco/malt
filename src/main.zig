@@ -19,6 +19,11 @@ pub fn isInterrupted() bool {
     return g_interrupted.load(.acquire);
 }
 
+/// Test-only flag override — raising real SIGINT would race the test runner.
+pub fn setInterruptedForTest(v: bool) void {
+    g_interrupted.store(v, .release);
+}
+
 fn sigintHandler(_: std.c.SIG) callconv(.c) void {
     g_interrupted.store(true, .release);
 }

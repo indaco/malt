@@ -19,6 +19,7 @@ const ghcr_mod = @import("../net/ghcr.zig");
 const api_mod = @import("../net/api.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const io_mod = @import("../ui/io.zig");
 const codesign = @import("../macho/codesign.zig");
 const ruby_sub = @import("../core/ruby_subprocess.zig");
 const dsl = @import("../core/dsl/root.zig");
@@ -40,6 +41,14 @@ pub fn detectBrewPrefix() []const u8 {
     return if (codesign.isArm64()) "/opt/homebrew" else "/usr/local";
 }
 
+/// Lock-acquire timeout. `MALT_LOCK_TIMEOUT_MS` overrides the 30 s default.
+fn lockTimeoutMs() u32 {
+    if (fs_compat.getenv("MALT_LOCK_TIMEOUT_MS")) |v| {
+        return std.fmt.parseInt(u32, v, 10) catch 30_000;
+    }
+    return 30_000;
+}
+
 /// Result of migrating a single keg.
 const KegResult = enum {
     migrated,
@@ -54,6 +63,8 @@ const KegResult = enum {
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "migrate")) return;
 
+    const start_ts = fs_compat.milliTimestamp();
+    const json_mode = output.isJson();
     var dry_run = output.isDryRun();
     // Ruby is opt-in per keg only. A bare --use-system-ruby across a
     // whole `migrate` would widen the trust boundary to every
@@ -114,7 +125,11 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     if (keg_names.items.len == 0) {
-        output.info("No kegs found in Homebrew Cellar", .{});
+        if (json_mode) {
+            try emitDryRunJson(allocator, brew_prefix, &.{}, dry_run, start_ts);
+        } else {
+            output.info("No kegs found in Homebrew Cellar", .{});
+        }
         return;
     }
 
@@ -122,11 +137,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // ── Dry-run mode: list and exit ─────────────────────────────────
     if (dry_run) {
-        for (keg_names.items) |name| {
-            output.info("  Would migrate: {s}", .{name});
+        if (json_mode) {
+            try emitDryRunJson(allocator, brew_prefix, keg_names.items, true, start_ts);
+        } else {
+            for (keg_names.items) |name| {
+                output.info("  Would migrate: {s}", .{name});
+            }
+            output.info("Would migrate {d} packages from Homebrew", .{keg_names.items.len});
+            output.warn("Run without --dry-run to perform migration", .{});
         }
-        output.info("Would migrate {d} packages from Homebrew", .{keg_names.items.len});
-        output.warn("Run without --dry-run to perform migration", .{});
         return;
     }
 
@@ -148,10 +167,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return error.Aborted;
     };
 
-    // Acquire lock
+    // Acquire lock; `MALT_LOCK_TIMEOUT_MS` tunes the 30 s default.
     var lock_path_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
-    var lk = lock_mod.LockFile.acquire(lock_path, 30000) catch {
+    var lk = lock_mod.LockFile.acquire(lock_path, lockTimeoutMs()) catch {
         output.err("Another mt process is running. Wait or run mt doctor.", .{});
         return error.Aborted;
     };
@@ -172,17 +191,31 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var linker = linker_mod.Linker.init(allocator, &db, prefix);
 
     // ── Step 4: Migrate each keg ────────────────────────────────────
-    var migrated: u32 = 0;
-    var skipped: u32 = 0;
-    var skipped_post_install: u32 = 0;
-    var failed: u32 = 0;
-
-    var skipped_names: std.ArrayList([]const u8) = .empty;
-    defer skipped_names.deinit(allocator);
+    // Per-category name lists: counts are derived lengths; JSON emits arrays verbatim.
+    var migrated_names: std.ArrayList([]const u8) = .empty;
+    defer migrated_names.deinit(allocator);
+    var skipped_installed_names: std.ArrayList([]const u8) = .empty;
+    defer skipped_installed_names.deinit(allocator);
+    var skipped_post_install_names: std.ArrayList([]const u8) = .empty;
+    defer skipped_post_install_names.deinit(allocator);
+    var skipped_no_bottle_names: std.ArrayList([]const u8) = .empty;
+    defer skipped_no_bottle_names.deinit(allocator);
     var failed_names: std.ArrayList([]const u8) = .empty;
     defer failed_names.deinit(allocator);
 
+    // Honour Ctrl-C raised during setup, before any network work starts.
+    const main_mod = @import("../main.zig");
+    if (main_mod.isInterrupted()) {
+        output.warn("Interrupted before migration.", .{});
+        return;
+    }
+
     for (keg_names.items) |keg_name| {
+        // Stop at the next keg boundary when the user hits Ctrl-C.
+        if (main_mod.isInterrupted()) {
+            output.warn("Interrupted — skipping remaining kegs.", .{});
+            break;
+        }
         const result = migrateKeg(
             allocator,
             keg_name,
@@ -197,28 +230,35 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         );
 
         switch (result) {
-            .migrated => {
-                migrated += 1;
-            },
-            .skipped_installed => {
-                skipped += 1;
-            },
-            .skipped_post_install => {
-                skipped_post_install += 1;
-                skipped_names.append(allocator, keg_name) catch {};
-            },
-            .skipped_no_bottle => {
-                skipped += 1;
-                skipped_names.append(allocator, keg_name) catch {};
-            },
-            .failed_api, .failed_download, .failed_install => {
-                failed += 1;
-                failed_names.append(allocator, keg_name) catch {};
-            },
+            .migrated => migrated_names.append(allocator, keg_name) catch {},
+            .skipped_installed => skipped_installed_names.append(allocator, keg_name) catch {},
+            .skipped_post_install => skipped_post_install_names.append(allocator, keg_name) catch {},
+            .skipped_no_bottle => skipped_no_bottle_names.append(allocator, keg_name) catch {},
+            .failed_api, .failed_download, .failed_install => failed_names.append(allocator, keg_name) catch {},
         }
     }
 
     // ── Step 5: Report ──────────────────────────────────────────────
+    if (json_mode) {
+        try emitSummaryJson(
+            allocator,
+            brew_prefix,
+            migrated_names.items,
+            skipped_installed_names.items,
+            skipped_post_install_names.items,
+            skipped_no_bottle_names.items,
+            failed_names.items,
+            start_ts,
+        );
+        return;
+    }
+
+    const migrated: u32 = @intCast(migrated_names.items.len);
+    // Preserve legacy lumping: human summary merges installed + no-bottle under "Skipped (installed)".
+    const skipped: u32 = @intCast(skipped_installed_names.items.len + skipped_no_bottle_names.items.len);
+    const skipped_post_install: u32 = @intCast(skipped_post_install_names.items.len);
+    const failed: u32 = @intCast(failed_names.items.len);
+
     output.info("", .{});
     output.info("Migration complete:", .{});
     output.info("  Migrated:              {d}", .{migrated});
@@ -226,7 +266,11 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         output.info("  Skipped (installed):   {d}", .{skipped});
     if (skipped_post_install > 0) {
         output.warn("  Skipped (post_install): {d}", .{skipped_post_install});
-        for (skipped_names.items) |name| {
+        for (skipped_post_install_names.items) |name| {
+            output.warn("    - {s} (needs post_install — use: brew install {s})", .{ name, name });
+        }
+        // Preserved legacy: no-bottle entries printed under the post_install warning.
+        for (skipped_no_bottle_names.items) |name| {
             output.warn("    - {s} (needs post_install — use: brew install {s})", .{ name, name });
         }
     }
@@ -538,6 +582,109 @@ fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
     defer stmt.finalize();
     stmt.bindText(1, name) catch return false;
     return stmt.step() catch false;
+}
+
+// ── JSON output ─────────────────────────────────────────────────────
+
+/// Build + flush the dry-run (or empty-Cellar) JSON document to stdout.
+fn emitDryRunJson(
+    allocator: std.mem.Allocator,
+    brew_prefix: []const u8,
+    keg_names: []const []const u8,
+    dry_run: bool,
+    start_ts: i64,
+) !void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try buildDryRunJson(&aw.writer, brew_prefix, keg_names, dry_run, start_ts);
+    io_mod.stdoutWriteAll(aw.written());
+}
+
+/// Build + flush the final-summary JSON document to stdout.
+fn emitSummaryJson(
+    allocator: std.mem.Allocator,
+    brew_prefix: []const u8,
+    migrated_names: []const []const u8,
+    skipped_installed_names: []const []const u8,
+    skipped_post_install_names: []const []const u8,
+    skipped_no_bottle_names: []const []const u8,
+    failed_names: []const []const u8,
+    start_ts: i64,
+) !void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try buildSummaryJson(
+        &aw.writer,
+        brew_prefix,
+        migrated_names,
+        skipped_installed_names,
+        skipped_post_install_names,
+        skipped_no_bottle_names,
+        failed_names,
+        start_ts,
+    );
+    io_mod.stdoutWriteAll(aw.written());
+}
+
+/// Dry-run JSON `{dry_run, brew_prefix, kegs, count, time_ms}`; `pub` for direct test assertions.
+pub fn buildDryRunJson(
+    w: anytype,
+    brew_prefix: []const u8,
+    keg_names: []const []const u8,
+    dry_run: bool,
+    start_ts: i64,
+) !void {
+    try w.writeAll("{\"dry_run\":");
+    try w.writeAll(if (dry_run) "true" else "false");
+    try w.writeAll(",\"brew_prefix\":");
+    try output.jsonStr(w, brew_prefix);
+    try w.writeAll(",\"kegs\":");
+    try output.jsonStringArray(w, keg_names);
+    var tail: [64]u8 = undefined;
+    const tail_str = try std.fmt.bufPrint(&tail, ",\"count\":{d}", .{keg_names.len});
+    try w.writeAll(tail_str);
+    try output.jsonTimeSuffix(w, start_ts);
+    try w.writeAll("}\n");
+}
+
+/// Final-summary JSON: per-category arrays + counts + time_ms; `pub` for direct test assertions.
+pub fn buildSummaryJson(
+    w: anytype,
+    brew_prefix: []const u8,
+    migrated_names: []const []const u8,
+    skipped_installed_names: []const []const u8,
+    skipped_post_install_names: []const []const u8,
+    skipped_no_bottle_names: []const []const u8,
+    failed_names: []const []const u8,
+    start_ts: i64,
+) !void {
+    try w.writeAll("{\"dry_run\":false,\"brew_prefix\":");
+    try output.jsonStr(w, brew_prefix);
+    try w.writeAll(",\"migrated\":");
+    try output.jsonStringArray(w, migrated_names);
+    try w.writeAll(",\"skipped_installed\":");
+    try output.jsonStringArray(w, skipped_installed_names);
+    try w.writeAll(",\"skipped_post_install\":");
+    try output.jsonStringArray(w, skipped_post_install_names);
+    try w.writeAll(",\"skipped_no_bottle\":");
+    try output.jsonStringArray(w, skipped_no_bottle_names);
+    try w.writeAll(",\"failed\":");
+    try output.jsonStringArray(w, failed_names);
+    var counts_buf: [256]u8 = undefined;
+    const counts = try std.fmt.bufPrint(
+        &counts_buf,
+        ",\"counts\":{{\"migrated\":{d},\"skipped_installed\":{d},\"skipped_post_install\":{d},\"skipped_no_bottle\":{d},\"failed\":{d}}}",
+        .{
+            migrated_names.len,
+            skipped_installed_names.len,
+            skipped_post_install_names.len,
+            skipped_no_bottle_names.len,
+            failed_names.len,
+        },
+    );
+    try w.writeAll(counts);
+    try output.jsonTimeSuffix(w, start_ts);
+    try w.writeAll("}\n");
 }
 
 /// Ensure all required directories under prefix exist.
