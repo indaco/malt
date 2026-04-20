@@ -187,6 +187,10 @@ const migrate_help =
     \\
     \\Flags:
     \\  --dry-run          Show what would be migrated
+    \\  --json             Emit a machine-readable summary on stdout (pairs with
+    \\                     --dry-run to list kegs, or with a real run to report
+    \\                     per-category names + counts for migrated / skipped /
+    \\                     failed).
     \\  --use-system-ruby=<name>,...  Run post_install via the system Ruby interpreter
     \\                     (experimental, sandboxed) for the named kegs only. A bare
     \\                     `--use-system-ruby` is not allowed here — it would widen

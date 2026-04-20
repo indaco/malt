@@ -6,9 +6,10 @@
 
 const std = @import("std");
 const testing = std.testing;
-const output = @import("malt").output;
-const io_mod = @import("malt").io_mod;
-const color = @import("malt").color;
+const malt = @import("malt");
+const output = malt.output;
+const io_mod = malt.io_mod;
+const color = malt.color;
 
 /// Set up stderr capture with an explicit color/emoji state. Returns a
 /// guard the caller defers to tear down both the capture and the state
@@ -75,6 +76,111 @@ test "jsonStr passes UTF-8 bytes through unchanged" {
     const got = try encode("café 🍺");
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("\"café 🍺\"", got);
+}
+
+// ── jsonStringArray: shared `["a","b",...]` writer ─────────────────────
+
+fn encodeArray(items: []const []const u8) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    errdefer aw.deinit();
+    try output.jsonStringArray(&aw.writer, items);
+    return aw.toOwnedSlice();
+}
+
+test "jsonStringArray writes [] for an empty slice" {
+    const got = try encodeArray(&.{});
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("[]", got);
+}
+
+test "jsonStringArray writes a single-quoted element with no separator" {
+    const got = try encodeArray(&.{"tree"});
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("[\"tree\"]", got);
+}
+
+test "jsonStringArray comma-separates multiple elements without trailing comma" {
+    const got = try encodeArray(&.{ "tree", "wget", "jq" });
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("[\"tree\",\"wget\",\"jq\"]", got);
+}
+
+test "jsonStringArray delegates per-element escaping to jsonStr" {
+    const got = try encodeArray(&.{ "a\"b", "c\\d", "e\nf" });
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("[\"a\\\"b\",\"c\\\\d\",\"e\\nf\"]", got);
+}
+
+test "jsonStringArray round-trips through std.json" {
+    const got = try encodeArray(&.{ "tree", "café 🍺", "weird\"name" });
+    defer testing.allocator.free(got);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, got, .{});
+    defer parsed.deinit();
+    const arr = parsed.value.array;
+    try testing.expectEqual(@as(usize, 3), arr.items.len);
+    try testing.expectEqualStrings("tree", arr.items[0].string);
+    try testing.expectEqualStrings("café 🍺", arr.items[1].string);
+    try testing.expectEqualStrings("weird\"name", arr.items[2].string);
+}
+
+test "jsonStringArray handles an element containing every short-form escape" {
+    const got = try encodeArray(&.{"a\"b\\c\nd\re\tf\x08g\x0ch"});
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("[\"a\\\"b\\\\c\\nd\\re\\tf\\bg\\fh\"]", got);
+}
+
+// ── jsonTimeSuffix: shared `,"time_ms":N` tail ─────────────────────────
+
+fn encodeTimeSuffix(start_ts: i64) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    errdefer aw.deinit();
+    try output.jsonTimeSuffix(&aw.writer, start_ts);
+    return aw.toOwnedSlice();
+}
+
+test "jsonTimeSuffix starts with the literal key prefix" {
+    const got = try encodeTimeSuffix(0);
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.startsWith(u8, got, ",\"time_ms\":"));
+}
+
+test "jsonTimeSuffix emits a non-negative integer for a past start_ts" {
+    // A milliTimestamp() captured just above is by definition ≤ the one
+    // fetched inside the helper, so the diff cannot be negative.
+    const start = malt.fs_compat.milliTimestamp();
+    const got = try encodeTimeSuffix(start);
+    defer testing.allocator.free(got);
+
+    const colon = std.mem.indexOfScalar(u8, got, ':').?;
+    const num_str = got[colon + 1 ..];
+    const n = try std.fmt.parseInt(i64, num_str, 10);
+    try testing.expect(n >= 0);
+}
+
+test "jsonTimeSuffix produces a large elapsed value for a far-past start_ts" {
+    const now = malt.fs_compat.milliTimestamp();
+    const got = try encodeTimeSuffix(now - 1_000_000);
+    defer testing.allocator.free(got);
+
+    const colon = std.mem.indexOfScalar(u8, got, ':').?;
+    const n = try std.fmt.parseInt(i64, got[colon + 1 ..], 10);
+    try testing.expect(n >= 1_000_000);
+}
+
+test "jsonTimeSuffix composes onto an open object to yield valid JSON" {
+    // Real callers concatenate the suffix onto a partial `{...` payload;
+    // exercise that assembly here to prove a consumer can parse the join.
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try aw.writer.writeAll("{\"ok\":true");
+    try output.jsonTimeSuffix(&aw.writer, 0);
+    try aw.writer.writeAll("}");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("ok").?.bool);
+    try testing.expect(parsed.value.object.get("time_ms").?.integer >= 0);
 }
 
 // Regression: under the test runner, `io_mod.stdoutFile()` must not

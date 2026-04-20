@@ -272,6 +272,24 @@ pub fn jsonStr(w: anytype, s: []const u8) !void {
     try w.writeAll("\"");
 }
 
+/// Write a `["a","b",...]` JSON array of RFC-8259-escaped strings to `w`.
+pub fn jsonStringArray(w: anytype, items: []const []const u8) !void {
+    try w.writeAll("[");
+    for (items, 0..) |item, i| {
+        if (i != 0) try w.writeAll(",");
+        try jsonStr(w, item);
+    }
+    try w.writeAll("]");
+}
+
+/// Write the `,"time_ms":N` suffix used by `--json` commands; `start_ts` is a `milliTimestamp()`.
+pub fn jsonTimeSuffix(w: anytype, start_ts: i64) !void {
+    const elapsed = fs_compat.milliTimestamp() - start_ts;
+    var buf: [32]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, ",\"time_ms\":{d}", .{elapsed}) catch return;
+    try w.writeAll(s);
+}
+
 /// Write JSON to stdout
 pub fn jsonOutput(allocator: std.mem.Allocator, value: anytype) !void {
     var aw: std.Io.Writer.Allocating = .init(allocator);

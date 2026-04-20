@@ -195,7 +195,7 @@ pub fn buildListJson(
         try w.writeAll("]");
     }
 
-    try writeTimeSuffix(w, start_ts);
+    try output.jsonTimeSuffix(w, start_ts);
     try w.writeAll("}\n");
 }
 
@@ -273,12 +273,4 @@ fn writeCaskRows(
             },
         }
     }
-}
-
-/// Write the ,"time_ms":N suffix for JSON output.
-fn writeTimeSuffix(w: anytype, start_ts: i64) !void {
-    const elapsed = fs_compat.milliTimestamp() - start_ts;
-    var time_buf: [32]u8 = undefined;
-    const time_str = std.fmt.bufPrint(&time_buf, ",\"time_ms\":{d}", .{elapsed}) catch return;
-    try w.writeAll(time_str);
 }
