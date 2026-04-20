@@ -29,6 +29,17 @@ fn inScope(scope: []const []const u8, name: []const u8) bool {
     return false;
 }
 
+/// Resolve the Homebrew install prefix. Respects `HOMEBREW_PREFIX` (set
+/// by `brew shellenv` and by users with a non-standard install), falls
+/// back to the arch-based default. Exposed so smoke tests can point the
+/// command at a fake Cellar under a scratch path.
+pub fn detectBrewPrefix() []const u8 {
+    if (fs_compat.getenv("HOMEBREW_PREFIX")) |p| {
+        if (p.len > 0) return p;
+    }
+    return if (codesign.isArm64()) "/opt/homebrew" else "/usr/local";
+}
+
 /// Result of migrating a single keg.
 const KegResult = enum {
     migrated,
@@ -71,7 +82,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // ── Step 1: Detect Homebrew prefix ──────────────────────────────
-    const brew_prefix = if (codesign.isArm64()) "/opt/homebrew" else "/usr/local";
+    const brew_prefix = detectBrewPrefix();
     var cellar_buf: [256]u8 = undefined;
     const brew_cellar = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{brew_prefix}) catch return;
 

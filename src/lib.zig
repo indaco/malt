@@ -39,6 +39,7 @@ pub const bundle_runner = @import("core/bundle/runner.zig");
 pub const cli_services = @import("cli/services.zig");
 pub const cli_bundle = @import("cli/bundle.zig");
 pub const cli_help = @import("cli/help.zig");
+pub const cli_migrate = @import("cli/migrate.zig");
 pub const cli_info = @import("cli/info.zig");
 pub const cli_uses = @import("cli/uses.zig");
 pub const cli_version_update = @import("cli/version_update.zig");
