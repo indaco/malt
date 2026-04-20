@@ -4,6 +4,70 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.8.0 - 2026-04-20
+
+### Highlights
+
+The native DSL grows up, self-update becomes as trustworthy as the install script, and malt finally renders correctly on light terminals.
+
+- **More of your toolchain installs end-to-end without touching Ruby.** v0.4.0 shipped the native interpreter; this release is the one where it actually covers the packages people install every day. `mt install zig` no longer trips a parse error on `llvm@21`. `openssl@3`, `gnupg`, `ca-certificates`, `libidn2` now run their post-install logic inline in Zig — the same work that used to require spawning a Ruby subprocess, with all the latency and ambient-trust cost that implied. And when a formula does reach for something the interpreter doesn't speak yet, you get a specific `--use-system-ruby=<name>` hint instead of a silent skip that pretended to succeed. "post_install completed" now means exactly that.
+- **`mt version update` closes its own trust gap.** Every release is now verified with cosign keyless signatures over `checksums.txt` (pinned to the release workflow identity) and SHA256 against the verified manifest before a single byte lands on disk — the same posture `install.sh` has had since v0.6.0. The binary swap itself is rename-based and atomic with a `.old` rollback, so a mid-flight failure can no longer leave a half-written executable. And when malt was installed through Homebrew, the updater steps aside and points at `brew upgrade --cask malt` rather than quietly desyncing Homebrew's install receipts.
+- **Light terminals render legibly.** A semantic palette spans four cells — dark vs. light × truecolor vs. basic — detected once at startup via OSC 11, with `COLORFGBG` and `MALT_THEME` fallbacks and every color pinned to WCAG AA contrast by unit test. Dark-terminal output is byte-identical to before; light-terminal users stop losing the `⚠` warn icon, the `--local` security warning, and `mt info` meta rows into the background.
+- **The rough edges you would have hit otherwise.** Post-install no longer reads silent fallbacks as success, gains a `--debug` flag that prints every DSL diagnostic, and emits structured per-package `post_install` status under `--json`. The release smoke job can now tell "tag exists but the asset hasn't propagated yet" apart from "the release is missing", so cold-release lag stops tripping false alarms.
+
+---
+
+### 🚀 Enhancements
+
+- **update:** defer self-update to brew for Homebrew-managed installs ([3879e10](https://github.com/indaco/malt/commit/3879e10)) ([#98](https://github.com/indaco/malt/pull/98))
+- **update:** atomic rename-based binary swap with .old rollback ([b488d5e](https://github.com/indaco/malt/commit/b488d5e)) ([#97](https://github.com/indaco/malt/pull/97))
+- **update:** verify releases with cosign + SHA256 before installing ([743196a](https://github.com/indaco/malt/commit/743196a)) ([#96](https://github.com/indaco/malt/pull/96))
+- **update:** add SHA256 and cosign verification primitives ([0680186](https://github.com/indaco/malt/commit/0680186)) ([#95](https://github.com/indaco/malt/pull/95))
+- **update:** classify install origin so self-update can respect brew ([6b873f9](https://github.com/indaco/malt/commit/6b873f9)) ([#93](https://github.com/indaco/malt/pull/93))
+- **dsl:** module constants, Set.new, pkgetc + CI corpus + backlog dashboard ([fcc0620](https://github.com/indaco/malt/commit/fcc0620)) ([#92](https://github.com/indaco/malt/pull/92))
+- **dsl:** comparison operators, .blank?, if-as-rvalue + corpus smoke ([82b3a04](https://github.com/indaco/malt/commit/82b3a04)) ([#91](https://github.com/indaco/malt/pull/91))
+- **dsl:** shovel operator (<<) on Array and String ([1a2c7c4](https://github.com/indaco/malt/commit/1a2c7c4)) ([#90](https://github.com/indaco/malt/pull/90))
+- **dsl:** Enumerable methods on hash receivers (.map/.each/.select/.reject) ([c7efb4d](https://github.com/indaco/malt/commit/c7efb4d)) ([#89](https://github.com/indaco/malt/pull/89))
+- **dsl:** Version-style accessors on strings (.major/.minor/.patch/.to_i) ([6363afb](https://github.com/indaco/malt/commit/6363afb)) ([#88](https://github.com/indaco/malt/pull/88))
+- **dsl:** def and return with sibling-helper extraction ([917e6f1](https://github.com/indaco/malt/commit/917e6f1)) ([#87](https://github.com/indaco/malt/pull/87))
+- **ui:** semantic palette for light + dark terminals ([c0eb98f](https://github.com/indaco/malt/commit/c0eb98f)) ([#83](https://github.com/indaco/malt/pull/83))
+
+### 🩹 Fixes
+
+- **purge:** run unused-deps before store-orphans in housekeeping ([57f756b](https://github.com/indaco/malt/commit/57f756b)) ([#106](https://github.com/indaco/malt/pull/106))
+- **github:** make bug report form label parse cleanly ([2777172](https://github.com/indaco/malt/commit/2777172)) ([#105](https://github.com/indaco/malt/pull/105))
+- **ui:** light palette — meta info recedes, basic variants align ([2017220](https://github.com/indaco/malt/commit/2017220)) ([#102](https://github.com/indaco/malt/pull/102))
+- **dsl:** harden post_install DSL — block-pass, ::, diagnostics ([4cc6d01](https://github.com/indaco/malt/commit/4cc6d01)) ([#86](https://github.com/indaco/malt/pull/86))
+- **release:** widen smoke wait and distinguish lag from missing release ([9f3514e](https://github.com/indaco/malt/commit/9f3514e)) ([#81](https://github.com/indaco/malt/pull/81))
+
+### 💅 Refactors
+
+- **update:** extract release-asset selection into src/update/release.zig ([fdbf2b1](https://github.com/indaco/malt/commit/fdbf2b1)) ([#94](https://github.com/indaco/malt/pull/94))
+
+### 📖 Documentation
+
+- **readme:** use the qualified tap form in the brew-install hint ([e16a375](https://github.com/indaco/malt/commit/e16a375)) ([#101](https://github.com/indaco/malt/pull/101))
+- **update:** document cosign verification, brew guard, and bypass asymmetry ([ca1435c](https://github.com/indaco/malt/commit/ca1435c)) ([#99](https://github.com/indaco/malt/pull/99))
+
+### 🏡 Chores
+
+- update coverage badge ([6685ce6](https://github.com/indaco/malt/commit/6685ce6)) ([#104](https://github.com/indaco/malt/pull/104))
+- **github:** add issue forms and PR template ([5d03683](https://github.com/indaco/malt/commit/5d03683)) ([#103](https://github.com/indaco/malt/pull/103))
+- **update:** tighten idioms, fill test gaps, add --cleanup ([4b2612e](https://github.com/indaco/malt/commit/4b2612e)) ([#100](https://github.com/indaco/malt/pull/100))
+
+### 🤖 CI
+
+- **release:** trigger the release workflow on tag push ([4a0ee06](https://github.com/indaco/malt/commit/4a0ee06)) ([#82](https://github.com/indaco/malt/pull/82))
+
+### Other
+
+- update benchmark results 2026-04-20 ([fa7db3a](https://github.com/indaco/malt/commit/fa7db3a))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+
 ## v0.7.0 - 2026-04-18
 
 ### 🚀 Enhancements
