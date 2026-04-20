@@ -393,9 +393,11 @@ pub const CaskInstaller = struct {
             fs_compat.deleteDirAbsolute(mount_point) catch {};
         }
 
-        // Find the .app bundle name (from JSON artifacts or by scanning mount point)
+        // Find the .app bundle name (from JSON artifacts or by scanning mount point).
+        // app_name_buf owns the fallback name past iterator teardown.
+        var app_name_buf: [256]u8 = undefined;
         const app_name = parseAppName(cask.parsed.value.object) orelse
-            self.findAppInDir(mount_point) orelse
+            findAppInDir(mount_point, &app_name_buf) orelse
             return error.InstallFailed;
 
         // Source and destination paths
@@ -443,9 +445,10 @@ pub const CaskInstaller = struct {
             else => return error.InstallFailed,
         }
 
-        // Find the .app
+        // Find the .app. app_name_buf owns the fallback past iterator teardown.
+        var app_name_buf: [256]u8 = undefined;
         const app_name = parseAppName(cask.parsed.value.object) orelse
-            self.findAppInDir(extract_dir) orelse
+            findAppInDir(extract_dir, &app_name_buf) orelse
             return error.InstallFailed;
 
         var src_buf: [512]u8 = undefined;
@@ -490,18 +493,6 @@ pub const CaskInstaller = struct {
         return isAppRunning(app_path);
     }
 
-    fn findAppInDir(_: *CaskInstaller, dir_path: []const u8) ?[]const u8 {
-        var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch return null;
-        defer dir.close();
-        var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
-            if (entry.kind == .directory and std.mem.endsWith(u8, entry.name, ".app")) {
-                return entry.name;
-            }
-        }
-        return null;
-    }
-
     fn recordCaskroom(self: *CaskInstaller, cask: *const Cask) !void {
         // Create Caskroom/{token}/{version}/ to match Homebrew layout
         var buf: [512]u8 = undefined;
@@ -511,6 +502,25 @@ pub const CaskInstaller = struct {
         fs_compat.cwd().makePath(caskroom_ver) catch {};
     }
 };
+
+/// Scan `dir_path` for a `.app` bundle and copy its name into `out_buf`.
+/// Returns a slice of `out_buf` (owned by the caller) — the iterator's
+/// internal entry buffer dies with the iterator, so the name must be
+/// copied out before `dir.close()` fires. Returns null if no `.app`
+/// exists, the directory can't be opened, or the name does not fit.
+pub fn findAppInDir(dir_path: []const u8, out_buf: []u8) ?[]const u8 {
+    var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch return null;
+    defer dir.close();
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind == .directory and std.mem.endsWith(u8, entry.name, ".app")) {
+            if (entry.name.len > out_buf.len) return null;
+            @memcpy(out_buf[0..entry.name.len], entry.name);
+            return out_buf[0..entry.name.len];
+        }
+    }
+    return null;
+}
 
 /// SHA256 buffer size — one positional read per 64 KiB.
 const sha256_read_chunk: usize = 64 * 1024;

@@ -398,6 +398,65 @@ test "verifyFileSha256 propagates FileNotFound rather than Sha256Mismatch" {
     );
 }
 
+// ── findAppInDir: owns the returned name past iterator teardown ─────
+
+fn scratchDir(tag: []const u8, buf: []u8) ![]const u8 {
+    const p = try std.fmt.bufPrint(buf, "/tmp/malt_cask_findapp_{s}_{d}", .{ tag, malt_fs.nanoTimestamp() });
+    try malt_fs.makeDirAbsolute(p);
+    return p;
+}
+
+test "findAppInDir returns the .app name copied into the caller buffer" {
+    // Pins the fall-through contract: when parseAppName finds no
+    // artifacts.app, the scan must hand back a name that outlives
+    // the directory iterator. Using a caller buffer makes that
+    // guarantee explicit.
+    var dir_buf: [128]u8 = undefined;
+    const dir_path = try scratchDir("ok", &dir_buf);
+    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+
+    var app_path_buf: [256]u8 = undefined;
+    const app_path = try std.fmt.bufPrint(&app_path_buf, "{s}/Foo.app", .{dir_path});
+    try malt_fs.makeDirAbsolute(app_path);
+
+    var out: [128]u8 = undefined;
+    const name = cask.findAppInDir(dir_path, &out) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Foo.app", name);
+    // The slice must be backed by the caller buffer, not iterator memory.
+    try testing.expect(@intFromPtr(name.ptr) == @intFromPtr(&out));
+}
+
+test "findAppInDir returns null when no .app bundle is present" {
+    var dir_buf: [128]u8 = undefined;
+    const dir_path = try scratchDir("none", &dir_buf);
+    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+
+    var readme_buf: [256]u8 = undefined;
+    const readme = try std.fmt.bufPrint(&readme_buf, "{s}/README", .{dir_path});
+    const f = try malt_fs.createFileAbsolute(readme, .{});
+    f.close();
+
+    var out: [64]u8 = undefined;
+    try testing.expect(cask.findAppInDir(dir_path, &out) == null);
+}
+
+test "findAppInDir returns null when the .app name exceeds the out-buffer" {
+    var dir_buf: [128]u8 = undefined;
+    const dir_path = try scratchDir("toolong", &dir_buf);
+    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+
+    var app_path_buf: [256]u8 = undefined;
+    const app_path = try std.fmt.bufPrint(
+        &app_path_buf,
+        "{s}/AReallyLongApplicationBundleName.app",
+        .{dir_path},
+    );
+    try malt_fs.makeDirAbsolute(app_path);
+
+    var out: [8]u8 = undefined; // too small on purpose
+    try testing.expect(cask.findAppInDir(dir_path, &out) == null);
+}
+
 test "verifyFileSha256 accepts only the exact-byte payload (collision check)" {
     // Two files that differ by a single byte must produce different
     // hashes — the chunk-boundary bug could otherwise let two files
