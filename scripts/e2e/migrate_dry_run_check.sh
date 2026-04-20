@@ -36,20 +36,20 @@ TMP=$(mktemp -d /tmp/mt_migcheck.XXX)
 trap 'rm -rf "$TMP"' EXIT
 
 # 1. What `brew` thinks is installed.
-brew list --formulae | sort -u > "$TMP/brew.txt"
+brew list --formulae | sort -u >"$TMP/brew.txt"
 
 # 2. What `mt migrate --dry-run` discovers in the same Cellar. JSON
 #    output is stable + parseable; the keg list lives at `.kegs`.
-"$MT_BIN" migrate --dry-run --json | jq -r '.kegs[]' | sort -u > "$TMP/mt.txt"
+"$MT_BIN" migrate --dry-run --json | jq -r '.kegs[]' | sort -u >"$TMP/mt.txt"
 
-BREW_N=$(wc -l < "$TMP/brew.txt" | tr -d ' ')
-MT_N=$(wc -l < "$TMP/mt.txt" | tr -d ' ')
+BREW_N=$(wc -l <"$TMP/brew.txt" | tr -d ' ')
+MT_N=$(wc -l <"$TMP/mt.txt" | tr -d ' ')
 
 echo "brew list --formulae : $BREW_N"
 echo "mt migrate --dry-run : $MT_N"
 echo
 
-if diff -u "$TMP/brew.txt" "$TMP/mt.txt" > "$TMP/diff.txt"; then
+if diff -u "$TMP/brew.txt" "$TMP/mt.txt" >"$TMP/diff.txt"; then
   echo "migrate-check: OK — keg sets match"
   exit 0
 fi
