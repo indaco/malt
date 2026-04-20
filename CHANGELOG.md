@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.8.1 - 2026-04-20
+
+### 🩹 Fixes
+
+- **cask:** handle extensionless download URLs via HEAD redirect resolution ([770bb34](https://github.com/indaco/malt/commit/770bb34)) ([#107](https://github.com/indaco/malt/pull/107))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.8.0 - 2026-04-20
 
 ### Highlights
