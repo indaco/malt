@@ -163,3 +163,72 @@ test "streamFile rejects a zero-length buffer" {
         fs.streamFile(f, &empty, .{ .context = @ptrCast(&ctx), .func = &AbortCtx.callback }),
     );
 }
+
+// ── readToEndAlloc: allocator-contract safety on short reads ─────────
+
+const TruncRacer = struct {
+    path: []const u8,
+    payload: []const u8,
+    stop: std.atomic.Value(bool),
+
+    fn run(self: *TruncRacer) void {
+        // Bounce the file between "full payload" and "empty" as fast as
+        // the kernel will let us. Any reader that stats BEFORE a truncate
+        // and reads AFTER it observes stat.size > bytes-available — the
+        // exact short-read race the fix has to survive.
+        while (!self.stop.load(.acquire)) {
+            const ft = fs.openFileAbsolute(self.path, .{ .mode = .read_write }) catch continue;
+            _ = ft.setEndPos(0) catch {};
+            ft.writeAll(self.payload) catch {};
+            ft.close();
+        }
+    }
+};
+
+test "readToEndAlloc honors allocator contract when the file shrinks between stat and read" {
+    // Racy truncate reproduces BUG-002: the old code returned `buf[0..n]`
+    // of an allocation sized to `stat.size`, so any short read (sparse
+    // file, concurrent truncate, fs size drift) tripped testing.allocator's
+    // length-mismatch trap on `free`. The fix informs the allocator via
+    // `resize` before returning the trimmed slice.
+    const alloc = testing.allocator;
+
+    var path_buf: [128]u8 = undefined;
+    const p = try tempFilePath("shortread", &path_buf);
+    defer fs.cwd().deleteFile(p) catch {};
+
+    const BIG: usize = 256 * 1024;
+    const payload = try alloc.alloc(u8, BIG);
+    defer alloc.free(payload);
+    @memset(payload, 'A');
+
+    try writeFile(p, payload);
+
+    var racer = TruncRacer{
+        .path = p,
+        .payload = payload,
+        .stop = std.atomic.Value(bool).init(false),
+    };
+    const thread = try std.Thread.spawn(.{}, TruncRacer.run, .{&racer});
+    defer {
+        racer.stop.store(true, .release);
+        thread.join();
+    }
+
+    // Many iterations so the race has ample chance to interleave stat
+    // before read. Under the buggy code a single short-read free traps
+    // the whole process; under the fix every free is contract-safe.
+    var iter: usize = 0;
+    while (iter < 128) : (iter += 1) {
+        const f = fs.openFileAbsolute(p, .{}) catch continue;
+        const got = f.readToEndAlloc(alloc, BIG * 2) catch {
+            f.close();
+            continue;
+        };
+        f.close();
+        // The canary: if the slice length disagrees with the tracked
+        // allocation length, testing.allocator's DebugAllocator will
+        // abort here.
+        alloc.free(got);
+    }
+}
