@@ -133,6 +133,66 @@ pub const HttpClient = struct {
         return @intFromEnum(response.head.status);
     }
 
+    pub const HeadResolved = struct {
+        final_url: []const u8,
+        content_disposition: ?[]const u8,
+        allocator: std.mem.Allocator,
+
+        pub fn deinit(self: *HeadResolved) void {
+            self.allocator.free(self.final_url);
+            if (self.content_disposition) |cd| self.allocator.free(cd);
+        }
+    };
+
+    const MAX_HEAD_REDIRECTS = 5;
+
+    /// HEAD request that manually follows redirects, returning the
+    /// final URL and Content-Disposition. The stdlib skips redirect
+    /// handling for HEAD, so we follow Location headers ourselves.
+    pub fn headResolved(self: *HttpClient, url: []const u8) !HeadResolved {
+        var current_url = try self.allocator.dupe(u8, url);
+        var cd_result: ?[]const u8 = null;
+
+        for (0..MAX_HEAD_REDIRECTS) |_| {
+            const uri = std.Uri.parse(current_url) catch {
+                break;
+            };
+
+            var req = self.client.request(.HEAD, uri, .{
+                .extra_headers = &.{},
+            }) catch break;
+            defer req.deinit();
+
+            req.sendBodiless() catch break;
+
+            var redirect_buf: [32 * 1024]u8 = undefined;
+            const response = req.receiveHead(&redirect_buf) catch break;
+
+            if (cd_result == null) {
+                if (response.head.content_disposition) |cd| {
+                    cd_result = try self.allocator.dupe(u8, cd);
+                }
+            }
+
+            const status: u16 = @intFromEnum(response.head.status);
+            if (status >= 301 and status <= 308) {
+                if (response.head.location) |loc| {
+                    const next = try self.allocator.dupe(u8, loc);
+                    self.allocator.free(current_url);
+                    current_url = next;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        return .{
+            .final_url = current_url,
+            .content_disposition = cd_result,
+            .allocator = self.allocator,
+        };
+    }
+
     /// Default maximum response body size for metadata (API JSON, tokens, etc.).
     /// The full Homebrew formula.json index is ~25 MB; 50 MB gives headroom.
     /// Bottle downloads bypass this via getWithHeaders (which sets no limit).
@@ -404,6 +464,37 @@ pub const HttpClient = struct {
         };
     }
 };
+
+fn formatUri(allocator: std.mem.Allocator, uri: std.Uri) ![]const u8 {
+    const scheme = uri.scheme;
+    const host = if (uri.host) |h| switch (h) {
+        .raw => |r| r,
+        .percent_encoded => |p| p,
+    } else "";
+    const path = switch (uri.path) {
+        .raw => |r| r,
+        .percent_encoded => |p| p,
+    };
+    const query = if (uri.query) |q| switch (q) {
+        .raw => |r| r,
+        .percent_encoded => |p| p,
+    } else null;
+    const fragment = if (uri.fragment) |f| switch (f) {
+        .raw => |r| r,
+        .percent_encoded => |p| p,
+    } else null;
+
+    if (fragment) |frag| {
+        if (query) |q| {
+            return std.fmt.allocPrint(allocator, "{s}://{s}{s}?{s}#{s}", .{ scheme, host, path, q, frag });
+        }
+        return std.fmt.allocPrint(allocator, "{s}://{s}{s}#{s}", .{ scheme, host, path, frag });
+    }
+    if (query) |q| {
+        return std.fmt.allocPrint(allocator, "{s}://{s}{s}?{s}", .{ scheme, host, path, q });
+    }
+    return std.fmt.allocPrint(allocator, "{s}://{s}{s}", .{ scheme, host, path });
+}
 
 /// Thread-safe pool of `HttpClient` instances with borrow/return
 /// semantics. Workers call `acquire()` to get exclusive access to an
