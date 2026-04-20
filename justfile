@@ -140,3 +140,33 @@ bench *args:
 [group('docs')]
 record-demo:
     ./scripts/record-demo.sh
+
+# Regenerate docs/contrast-previews/*.png for the four palette cells
+# (dark|light) × (truecolor|basic). Internal: only run after editing
+# the palette cells in src/ui/color.zig or the sample text in
+# scripts/contrast_preview.sh. Requires freeze on PATH
+# (`brew install charmbracelet/tap/freeze`).
+[group('docs')]
+[private]
+contrast-previews:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v freeze >/dev/null || {
+        echo "error: freeze not found — brew install charmbracelet/tap/freeze" >&2
+        exit 1
+    }
+    out=docs/contrast-previews
+    mkdir -p "$out"
+    # Dark variants take freeze's default charm theme + background.
+    THEME=dark  TIER=truecolor freeze -x "bash scripts/contrast_preview.sh" \
+        -o "$out/dark-truecolor.png"
+    THEME=dark  TIER=basic     freeze -x "bash scripts/contrast_preview.sh" \
+        -o "$out/dark-basic.png"
+    # Light variants force the github theme + white background so plain
+    # (uncoloured) body text renders dark on white instead of charm's
+    # light-grey default foreground.
+    THEME=light TIER=truecolor freeze -x "bash scripts/contrast_preview.sh" \
+        -t github -b '#ffffff' -o "$out/light-truecolor.png"
+    THEME=light TIER=basic     freeze -x "bash scripts/contrast_preview.sh" \
+        -t github -b '#ffffff' -o "$out/light-basic.png"
+    echo "Regenerated 4 contrast previews in $out/."

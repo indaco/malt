@@ -276,14 +276,16 @@ const dark_truecolor: Palette = .{
     .detail = "\x1b[38;2;148;163;184m",
 };
 
-// Light + truecolor — Tailwind sky-600 / amber-700 / green-700 / red-700 / slate-600.
+// Light + truecolor — Tailwind sky-600 / amber-700 / green-700 / red-700 / slate-400.
 // Yellow shifts to orange (amber-700) because only orange hits AA on white.
+// Detail uses slate-400 like the dark palette so meta info recedes under the
+// default-foreground body text instead of upstaging it in dark slate.
 const light_truecolor: Palette = .{
     .info = "\x1b[38;2;2;132;199m",
     .warn = "\x1b[38;2;180;83;9m",
     .success = "\x1b[38;2;21;128;61m",
     .err = "\x1b[38;2;185;28;28m",
-    .detail = "\x1b[38;2;71;85;105m",
+    .detail = "\x1b[38;2;148;163;184m",
 };
 
 // Dark + basic — legacy ANSI 8-colour palette malt has always used.
@@ -296,13 +298,15 @@ const dark_basic: Palette = .{
 };
 
 // Light + basic — swap hues that wash out on white: cyan→blue,
-// yellow→magenta, dim→bright_black. Green and red stay readable.
+// yellow→magenta. Detail reuses the dark-basic faint code so both basic
+// palettes render meta info identically — dropping into the default
+// foreground on terminals that ignore SGR 2.
 const light_basic: Palette = .{
     .info = "\x1b[34m",
     .warn = "\x1b[35m",
     .success = "\x1b[32m",
     .err = "\x1b[31m",
-    .detail = "\x1b[90m",
+    .detail = "\x1b[2m",
 };
 
 /// Pure palette lookup. Exposed so tests pin every cell.

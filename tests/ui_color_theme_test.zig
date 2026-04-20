@@ -172,7 +172,9 @@ test "paletteCode: light + truecolor palette (orange warn for AA contrast on whi
     try testing.expectEqualStrings("\x1b[38;2;180;83;9m", c(.warn, l, true));
     try testing.expectEqualStrings("\x1b[38;2;21;128;61m", c(.success, l, true));
     try testing.expectEqualStrings("\x1b[38;2;185;28;28m", c(.err, l, true));
-    try testing.expectEqualStrings("\x1b[38;2;71;85;105m", c(.detail, l, true));
+    // Detail mirrors the dark palette's slate-400 so meta info recedes
+    // instead of out-weighting the default-foreground body text.
+    try testing.expectEqualStrings("\x1b[38;2;148;163;184m", c(.detail, l, true));
 }
 
 test "paletteCode: dark + basic falls back to today's legacy palette" {
@@ -185,14 +187,15 @@ test "paletteCode: dark + basic falls back to today's legacy palette" {
     try testing.expectEqualStrings("\x1b[2m", c(.detail, d, false));
 }
 
-test "paletteCode: light + basic swaps fade-prone hues (cyan→blue, yellow→magenta, dim→grey)" {
+test "paletteCode: light + basic swaps fade-prone hues (cyan→blue, yellow→magenta) and shares dark-basic faint" {
     const c = color.paletteCode;
     const l = color.Background.light;
     try testing.expectEqualStrings("\x1b[34m", c(.info, l, false));
     try testing.expectEqualStrings("\x1b[35m", c(.warn, l, false));
     try testing.expectEqualStrings("\x1b[32m", c(.success, l, false));
     try testing.expectEqualStrings("\x1b[31m", c(.err, l, false));
-    try testing.expectEqualStrings("\x1b[90m", c(.detail, l, false));
+    // Same faint as dark-basic: both basic palettes render detail identically.
+    try testing.expectEqualStrings("\x1b[2m", c(.detail, l, false));
 }
 
 test "paletteCode: unknown background behaves like dark" {
