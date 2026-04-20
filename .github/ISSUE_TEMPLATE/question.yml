@@ -1,0 +1,48 @@
+name: Question
+description: Ask a question about using malt
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have a question about malt? We're here to help!
+
+        Before asking, please check:
+        - [README](https://github.com/indaco/malt#readme)
+        - [Existing issues](https://github.com/indaco/malt/issues)
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your Question
+      description: What would you like to know?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: topic
+    attributes:
+      label: Topic
+      description: What area does your question relate to?
+      options:
+        - Getting started / Installation
+        - Install / uninstall / upgrade
+        - Self-update (`mt version update`)
+        - Services (launchd)
+        - Bundles (Brewfile)
+        - Taps
+        - Rollback
+        - Ephemeral run (`mt run`)
+        - Post-install DSL interpreter
+        - Homebrew fallback
+        - Security / cosign verification
+        - Migration / backup / restore
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Add any additional context that might help us answer your question.
