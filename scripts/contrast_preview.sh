@@ -33,7 +33,7 @@ elif [[ "$TIER" == truecolor && "$THEME" == light ]]; then
   WARN=$'\033[38;2;180;83;9m'
   SUCCESS=$'\033[38;2;21;128;61m'
   ERR=$'\033[38;2;185;28;28m'
-  DETAIL=$'\033[38;2;71;85;105m'
+  DETAIL=$'\033[38;2;148;163;184m'
 elif [[ "$TIER" == basic && "$THEME" == dark ]]; then
   INFO=$'\033[36m'
   WARN=$'\033[33m'
@@ -45,7 +45,7 @@ else # basic + light
   WARN=$'\033[35m'
   SUCCESS=$'\033[32m'
   ERR=$'\033[31m'
-  DETAIL=$'\033[90m'
+  DETAIL=$'\033[2m'
 fi
 
 PFX_INFO="  ${INFO}▸${RESET} "
