@@ -929,13 +929,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     var grand_total: TierResult = .{};
 
-    if (opts.scope.store_orphans) {
-        const r = try runStoreOrphans(allocator, prefix, dry_run);
+    // unused-deps must run before store-orphans: removing a keg decrements
+    // its store ref to 0, and those fresh orphans only get swept on the
+    // second pass.
+    if (opts.scope.unused_deps) {
+        const r = try runUnusedDeps(allocator, prefix, dry_run);
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
-    if (opts.scope.unused_deps) {
-        const r = try runUnusedDeps(allocator, prefix, dry_run);
+    if (opts.scope.store_orphans) {
+        const r = try runStoreOrphans(allocator, prefix, dry_run);
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
