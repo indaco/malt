@@ -1356,6 +1356,18 @@ fn maybeRegisterService(
     };
 }
 
+/// HEAD-based fallback for extensionless cask URLs.
+/// Follows redirects to discover the real file extension.
+fn resolveCaskArtifactViaHead(allocator: std.mem.Allocator, url: []const u8) cask_mod.ArtifactType {
+    var http = client_mod.HttpClient.init(allocator);
+    defer http.deinit();
+
+    var resolved = http.headResolved(url) catch return .unknown;
+    defer resolved.deinit();
+
+    return cask_mod.resolveArtifactType(allocator, resolved.final_url, resolved.content_disposition);
+}
+
 /// Install a cask (DMG, ZIP, or PKG).
 fn installCask(
     allocator: std.mem.Allocator,
@@ -1382,7 +1394,13 @@ fn installCask(
         return;
     }
 
-    const artifact_type = cask_mod.artifactTypeFromUrl(cask.url);
+    var artifact_type = cask_mod.artifactTypeFromUrl(cask.url);
+
+    // Extensionless URLs (e.g. download APIs that 302 to the real file):
+    // resolve via HEAD to discover the final URL and Content-Disposition.
+    if (artifact_type == .unknown) {
+        artifact_type = resolveCaskArtifactViaHead(allocator, cask.url);
+    }
 
     if (dry_run) {
         output.info("Dry run: would install cask {s} {s} ({s})", .{
@@ -1408,6 +1426,7 @@ fn installCask(
 
     const prefix = atomic.maltPrefix();
     var installer = cask_mod.CaskInstaller.init(allocator, db, prefix);
+    installer.artifact_type_override = artifact_type;
 
     // Progress bar for cask download
     var bar = progress_mod.ProgressBar.init(cask.token, 0);

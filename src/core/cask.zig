@@ -93,6 +93,84 @@ pub fn artifactTypeFromUrl(url: []const u8) ArtifactType {
     return .unknown;
 }
 
+/// Detect artifact type from a Content-Disposition header value.
+/// Handles both `filename="X.dmg"` and `filename*=UTF-8''X.dmg`.
+pub fn artifactTypeFromContentDisposition(header: []const u8) ArtifactType {
+    const filename = extractFilename(header) orelse return .unknown;
+    return artifactTypeFromUrl(filename);
+}
+
+/// Combined resolution: URL extension first, then Content-Disposition.
+/// `content_disposition` is nullable — pass the header from a HEAD
+/// response when the URL alone is ambiguous.
+pub fn resolveArtifactType(
+    _: std.mem.Allocator,
+    url: []const u8,
+    content_disposition: ?[]const u8,
+) ArtifactType {
+    const from_url = artifactTypeFromUrl(url);
+    if (from_url != .unknown) return from_url;
+
+    if (content_disposition) |cd| {
+        const from_cd = artifactTypeFromContentDisposition(cd);
+        if (from_cd != .unknown) return from_cd;
+    }
+
+    return .unknown;
+}
+
+fn extractFilename(header: []const u8) ?[]const u8 {
+    // Try filename*= first (RFC 5987), then filename=
+    for ([_][]const u8{ "filename*=", "filename=" }) |key| {
+        var pos: usize = 0;
+        while (pos < header.len) {
+            if (std.mem.indexOfPos(u8, header, pos, key)) |start| {
+                var val_start = start + key.len;
+                // Skip whitespace after '='
+                while (val_start < header.len and header[val_start] == ' ') val_start += 1;
+
+                if (std.mem.eql(u8, key, "filename*=")) {
+                    // Skip charset and language: e.g. UTF-8''
+                    if (std.mem.indexOfPos(u8, header, val_start, "''")) |ticks| {
+                        val_start = ticks + 2;
+                    }
+                }
+
+                // Strip optional quotes
+                if (val_start < header.len and header[val_start] == '"') {
+                    val_start += 1;
+                    if (std.mem.indexOfPos(u8, header, val_start, "\"")) |end| {
+                        return header[val_start..end];
+                    }
+                }
+                // Unquoted: run until semicolon, space, or end
+                const end = blk: {
+                    for (header[val_start..], val_start..) |ch, i| {
+                        if (ch == ';' or ch == ' ') break :blk i;
+                    }
+                    break :blk header.len;
+                };
+                if (end > val_start) return header[val_start..end];
+                pos = val_start;
+            } else break;
+        }
+    }
+
+    // Also handle `filename =` (space before equals)
+    if (std.mem.indexOf(u8, header, "filename")) |fn_start| {
+        var i = fn_start + "filename".len;
+        while (i < header.len and (header[i] == ' ' or header[i] == '=')) i += 1;
+        if (i < header.len and header[i] == '"') {
+            i += 1;
+            if (std.mem.indexOfPos(u8, header, i, "\"")) |end| {
+                return header[i..end];
+            }
+        }
+    }
+
+    return null;
+}
+
 /// Extract the .app bundle name from cask JSON artifacts array.
 /// Homebrew cask JSON: "artifacts": [{"app": ["Firefox.app"]}, ...]
 pub fn parseAppName(obj: std.json.ObjectMap) ?[]const u8 {
@@ -130,6 +208,8 @@ pub const CaskInstaller = struct {
     prefix: [:0]const u8,
     db: *sqlite.Database,
     progress: ?client_mod.ProgressCallback,
+    /// Pre-resolved type for extensionless URLs (HEAD fallback).
+    artifact_type_override: ?ArtifactType = null,
 
     pub fn init(allocator: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]const u8) CaskInstaller {
         return .{ .allocator = allocator, .db = db, .prefix = prefix, .progress = null };
@@ -138,7 +218,7 @@ pub const CaskInstaller = struct {
     /// Install a cask. Downloads, verifies SHA256, and installs based on artifact type.
     /// Returns the installed app path on success.
     pub fn install(self: *CaskInstaller, cask: *const Cask) CaskError![]const u8 {
-        const artifact_type = artifactTypeFromUrl(cask.url);
+        const artifact_type = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
         if (artifact_type == .unknown) return CaskError.InstallFailed;
 
         // Ensure cache/Cask/ directory exists
@@ -248,7 +328,8 @@ pub const CaskInstaller = struct {
     // --- Private helpers ---
 
     fn downloadToCache(self: *CaskInstaller, cask: *const Cask, cache_dir: []const u8, progress: ?client_mod.ProgressCallback) ![]const u8 {
-        const ext_str = switch (artifactTypeFromUrl(cask.url)) {
+        const resolved = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
+        const ext_str = switch (resolved) {
             .dmg => ".dmg",
             .zip => ".zip",
             .pkg => ".pkg",

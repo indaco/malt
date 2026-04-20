@@ -53,6 +53,36 @@ test "CaskInstaller.install rejects a cask with an unknown artifact URL extensio
     try testing.expectError(cask.CaskError.InstallFailed, installer.install(&c));
 }
 
+test "artifact_type_override bypasses URL detection" {
+    // Extensionless URL would normally fail; override lets it proceed
+    // past the type gate (install still fails later, but not at the gate).
+    const extensionless_json =
+        \\{"token":"noext","name":["NoExt"],"version":"1.0",
+        \\ "url":"https://example.com/download?build=arm",
+        \\ "sha256":"no_check","homepage":"","desc":"","auto_updates":false,"artifacts":[]}
+    ;
+    var c = try cask.parseCask(testing.allocator, extensionless_json);
+    defer c.deinit();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const prefix: [:0]const u8 = "/tmp/mc4";
+    var installer = cask.CaskInstaller.init(testing.allocator, &db, prefix);
+
+    // Without override: fails at the type gate with InstallFailed
+    try testing.expectError(cask.CaskError.InstallFailed, installer.install(&c));
+
+    // With override: passes the type gate (gets further before failing)
+    installer.artifact_type_override = .dmg;
+    malt.fs_compat.cwd().makePath(prefix ++ "/cache/Cask") catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    const result = installer.install(&c);
+    // Should fail on download, not on the type gate
+    try testing.expectError(cask.CaskError.DownloadFailed, result);
+}
+
 test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row" {
     const test_cask_json =
         \\{"token":"firefox","name":["Firefox"],"version":"123.0","desc":"","homepage":"",
