@@ -330,7 +330,14 @@ pub const File = struct {
         const buf = try allocator.alloc(u8, @intCast(size));
         errdefer allocator.free(buf);
         const n = try self.inner.readPositionalAll(io, buf, 0);
-        return buf[0..n];
+        if (n == buf.len) return buf;
+        // Short read: shrink in place so caller-side `free` matches what
+        // we hand back — GPA traps on length mismatch, others leak the tail.
+        if (allocator.resize(buf, n)) return buf[0..n];
+        const shrunk = try allocator.alloc(u8, n);
+        @memcpy(shrunk, buf[0..n]);
+        allocator.free(buf);
+        return shrunk;
     }
 };
 
