@@ -2463,3 +2463,56 @@ test "interpreter: arena-owned path bindings leak-clean under testing.allocator"
     ;
     try dsl.executePostInstall(testing.allocator, &f, src, prefix, &flog);
 }
+
+// pushScope must propagate OOM instead of swallowing it. A silent failure
+// leaves the stack desynced: the next popScope tears down the caller's
+// scope, so outer locals disappear under memory pressure.
+test "ExecContext.pushScope propagates OOM from the arena" {
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+
+    var methods = std.StringHashMap(malt.dsl.ast.MethodDef).init(testing.allocator);
+    defer methods.deinit();
+
+    var ctx: dsl.ExecContext = .{
+        .arena = failing.allocator(),
+        .cellar_path = "",
+        .malt_prefix = "",
+        .paths = std.EnumArray(malt.dsl.interpreter.PathBinding, []const u8).initFill(""),
+        .scopes = .empty,
+        .sandbox_root = "",
+        .fallback_log_writer = &flog,
+        .formula_name = "test",
+        .methods = methods,
+        .return_value = .{ .nil = {} },
+    };
+
+    try testing.expectError(error.OutOfMemory, ctx.pushScope());
+    try testing.expectEqual(@as(usize, 0), ctx.scopes.items.len);
+}
+
+test "ExecContext.pushMethodScope propagates OOM from the arena" {
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+
+    var methods = std.StringHashMap(malt.dsl.ast.MethodDef).init(testing.allocator);
+    defer methods.deinit();
+
+    var ctx: dsl.ExecContext = .{
+        .arena = failing.allocator(),
+        .cellar_path = "",
+        .malt_prefix = "",
+        .paths = std.EnumArray(malt.dsl.interpreter.PathBinding, []const u8).initFill(""),
+        .scopes = .empty,
+        .sandbox_root = "",
+        .fallback_log_writer = &flog,
+        .formula_name = "test",
+        .methods = methods,
+        .return_value = .{ .nil = {} },
+    };
+
+    try testing.expectError(error.OutOfMemory, ctx.pushMethodScope());
+    try testing.expectEqual(@as(usize, 0), ctx.scopes.items.len);
+}

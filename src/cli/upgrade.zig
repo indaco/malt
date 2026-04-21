@@ -73,25 +73,41 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
     var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
 
+    // Per-package errors must not be swallowed: a batch that fails every
+    // item used to exit 0, hiding the failure from CI. We aggregate here
+    // and surface error.Aborted so main.zig maps it to a non-zero exit.
+    var any_failed = false;
+
     if (pkg_name) |name| {
         // Upgrade a specific package — try formula first, then cask
         if (!cask_only) {
             if (isFormulaInstalled(&db, name)) {
-                upgradeFormula(allocator, name, &db, &api, &http, prefix, dry_run) catch {};
+                upgradeFormula(allocator, name, &db, &api, &http, prefix, dry_run) catch {
+                    any_failed = true;
+                };
+                if (any_failed) return error.Aborted;
                 return;
             }
         }
         // Not a formula (or --cask): try cask
-        upgradeCask(allocator, name, &db, &api, prefix, dry_run) catch {};
+        upgradeCask(allocator, name, &db, &api, prefix, dry_run) catch {
+            any_failed = true;
+        };
     } else {
         // Upgrade all
         if (!cask_only) {
-            upgradeAllFormulas(allocator, &db, &api, &http, prefix, dry_run);
+            upgradeAllFormulas(allocator, &db, &api, &http, prefix, dry_run) catch {
+                any_failed = true;
+            };
         }
         if (!formula_only) {
-            upgradeAllCasks(allocator, &db, &api, prefix, dry_run);
+            upgradeAllCasks(allocator, &db, &api, prefix, dry_run) catch {
+                any_failed = true;
+            };
         }
     }
+
+    if (any_failed) return error.Aborted;
 }
 
 // ---------------------------------------------------------------------------
@@ -371,7 +387,8 @@ fn isFormulaInstalled(db: *sqlite.Database, name: []const u8) bool {
     return stmt.step() catch false;
 }
 
-/// Upgrade all outdated formulas.
+/// Upgrade all outdated formulas. Returns error.Aborted if any individual
+/// upgrade failed so the caller can propagate a non-zero exit.
 fn upgradeAllFormulas(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
@@ -379,7 +396,7 @@ fn upgradeAllFormulas(
     http: *client_mod.HttpClient,
     prefix: [:0]const u8,
     dry_run: bool,
-) void {
+) !void {
     var stmt = db.prepare("SELECT name, version FROM kegs ORDER BY name;") catch return;
     defer stmt.finalize();
 
@@ -405,8 +422,24 @@ fn upgradeAllFormulas(
         return;
     }
 
+    // Count separately from the name list so an OOM on the names append
+    // cannot hide a failure from the summary/exit-code contract.
+    var failed_count: usize = 0;
+    var failed_names: std.ArrayList([]const u8) = .empty;
+    defer failed_names.deinit(allocator);
+
     for (names.items) |name| {
-        upgradeFormula(allocator, name, db, api, http, prefix, dry_run) catch {};
+        upgradeFormula(allocator, name, db, api, http, prefix, dry_run) catch {
+            failed_count += 1;
+            failed_names.append(allocator, name) catch {};
+        };
+    }
+
+    if (failed_count > 0) {
+        const word: []const u8 = if (failed_count == 1) "formula" else "formulas";
+        output.err("{d} {s} failed to upgrade:", .{ failed_count, word });
+        for (failed_names.items) |name| output.err("  - {s}", .{name});
+        return error.Aborted;
     }
 }
 
@@ -467,20 +500,48 @@ fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Data
     output.success("{s} upgraded to {s}", .{ token, parsed_cask.version });
 }
 
-fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool) void {
+fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool) !void {
     var stmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch return;
     defer stmt.finalize();
 
-    var upgraded: u32 = 0;
-    while (stmt.step() catch false) {
-        const token_ptr = stmt.columnText(0) orelse continue;
-        const token = std.mem.sliceTo(token_ptr, 0);
-
-        upgradeCask(allocator, token, db, api, prefix, dry_run) catch {};
-        upgraded += 1;
+    // Collect tokens first so we can free the statement before driving
+    // per-cask upgrades; each upgrade opens its own statements.
+    var tokens: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (tokens.items) |t| allocator.free(t);
+        tokens.deinit(allocator);
     }
 
-    if (upgraded == 0) {
+    while (stmt.step() catch false) {
+        const token_ptr = stmt.columnText(0) orelse continue;
+        const token_slice = std.mem.sliceTo(token_ptr, 0);
+        const owned = allocator.dupe(u8, token_slice) catch continue;
+        tokens.append(allocator, owned) catch {
+            allocator.free(owned);
+            continue;
+        };
+    }
+
+    if (tokens.items.len == 0) {
         output.info("All casks are up to date.", .{});
+        return;
+    }
+
+    var failed_count: usize = 0;
+    var failed_tokens: std.ArrayList([]const u8) = .empty;
+    defer failed_tokens.deinit(allocator);
+
+    for (tokens.items) |token| {
+        upgradeCask(allocator, token, db, api, prefix, dry_run) catch {
+            failed_count += 1;
+            failed_tokens.append(allocator, token) catch {};
+        };
+    }
+
+    if (failed_count > 0) {
+        const word: []const u8 = if (failed_count == 1) "cask" else "casks";
+        output.err("{d} {s} failed to upgrade:", .{ failed_count, word });
+        for (failed_tokens.items) |token| output.err("  - {s}", .{token});
+        return error.Aborted;
     }
 }
