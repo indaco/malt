@@ -14,6 +14,7 @@ const api_mod = @import("../net/api.zig");
 const sandbox = @import("sandbox/macos.zig");
 const dsl_lexer = @import("dsl/lexer.zig");
 const dsl_parser = @import("dsl/parser.zig");
+const fs_atomic = @import("../fs/atomic.zig");
 
 pub const RubyError = error{
     RubyNotFound,
@@ -23,6 +24,7 @@ pub const RubyError = error{
     ScriptWriteFailed,
     PostInstallFailed,
     OutOfMemory,
+    InvalidInput,
 };
 
 /// Upper bound on a fetched formula .rb blob. The Homebrew-wide 99th
@@ -345,6 +347,13 @@ pub fn extractPostInstallBody(allocator: std.mem.Allocator, rb_path: []const u8)
 
 /// Generate the Ruby wrapper script that provides a FormulaStub sandbox
 /// and evaluates the post_install body.
+///
+/// `prefix`, `name`, `version` are interpolated into single-quoted Ruby
+/// literals. They MUST contain only bytes from the centralised charset in
+/// `fs/atomic.zig` — anything else (`'`, `\`, `\n`, control bytes, …)
+/// would break the literal or open an injection (BUG-007). We validate
+/// at the boundary rather than escape so the contract is one-line
+/// reviewable: pass → safe to interpolate, fail → InvalidInput.
 pub fn generateWrapper(
     allocator: std.mem.Allocator,
     name: []const u8,
@@ -352,6 +361,11 @@ pub fn generateWrapper(
     prefix: []const u8,
     post_install_body: []const u8,
 ) ![]const u8 {
+    if (prefix.len == 0 or name.len == 0 or version.len == 0) return error.InvalidInput;
+    for (prefix) |b| if (!fs_atomic.isAllowedPrefixByte(b)) return error.InvalidInput;
+    for (name) |b| if (!fs_atomic.isAllowedNameByte(b)) return error.InvalidInput;
+    for (version) |b| if (!fs_atomic.isAllowedNameByte(b)) return error.InvalidInput;
+
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
 
@@ -448,6 +462,14 @@ pub fn runPostInstall(
     version: []const u8,
     prefix: []const u8,
 ) RubyError!void {
+    // 0. Validate inputs at the boundary. A hostile Cellar dir name (the
+    //    on-disk source of `name` on the runPostInstall path) must die
+    //    here, not deeper in script generation or the sandbox spawn.
+    if (prefix.len == 0 or name.len == 0 or version.len == 0) return RubyError.InvalidInput;
+    for (prefix) |b| if (!fs_atomic.isAllowedPrefixByte(b)) return RubyError.InvalidInput;
+    for (name) |b| if (!fs_atomic.isAllowedNameByte(b)) return RubyError.InvalidInput;
+    for (version) |b| if (!fs_atomic.isAllowedNameByte(b)) return RubyError.InvalidInput;
+
     // 1. Find Ruby (caller-owned heap slice — see detectRuby contract).
     const ruby_path = detectRuby(allocator) orelse {
         output.err("No Ruby interpreter found. Tried:", .{});
