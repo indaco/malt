@@ -426,7 +426,7 @@ pub fn spawnFilteredWithHooks(
 
 const FdSinkCtx = struct { fd: c_int };
 
-fn fdSinkWrite(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+fn fdSinkWrite(ctx: *anyopaque, bytes: []const u8) term_sanitize.SinkError!void {
     const self: *FdSinkCtx = @ptrCast(@alignCast(ctx));
     var off: usize = 0;
     while (off < bytes.len) {

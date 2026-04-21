@@ -544,7 +544,7 @@ pub fn hashFileSha256(file_path: []const u8) ![64]u8 {
 }
 
 /// Bridge `streamFile`'s erased-context callback to `Sha256.update`.
-fn sha256Update(ctx: *anyopaque, chunk: []const u8) anyerror!void {
+fn sha256Update(ctx: *anyopaque, chunk: []const u8) fs_compat.StreamError!void {
     const hasher: *std.crypto.hash.sha2.Sha256 = @ptrCast(@alignCast(ctx));
     hasher.update(chunk);
 }

@@ -84,12 +84,17 @@ pub fn milliTimestamp() i64 {
     return @as(i64, ts.sec) * std.time.ms_per_s + @divTrunc(ts.nsec, std.time.ns_per_ms);
 }
 
+/// Closed error set surfaced by `StreamCallback.func`. Keeps callers
+/// exhaustive: a new callback failure mode must land here or it cannot
+/// be plumbed through the vtable.
+pub const StreamError = error{ OutOfMemory, CallbackAborted };
+
 /// Context + function pair for `streamFile`. The func receives every
 /// chunk exactly once, in order — any non-void error aborts the walk
 /// and propagates out to the caller.
 pub const StreamCallback = struct {
     context: *anyopaque,
-    func: *const fn (context: *anyopaque, chunk: []const u8) anyerror!void,
+    func: *const fn (context: *anyopaque, chunk: []const u8) StreamError!void,
 };
 
 /// Walk `file` from start to EOF in `buf`-sized chunks, invoking `cb`
