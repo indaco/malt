@@ -208,6 +208,29 @@ test "remove deletes a tap" {
     try testing.expectEqualStrings("c/d", taps[0].name);
 }
 
+// A missing schema previously turned into a silent no-op; now the
+// caller sees the underlying sqlite rc and can distinguish it from a
+// constraint violation or a bind failure.
+test "add surfaces SqliteError when schema is missing" {
+    var db = try openDb();
+    defer db.close();
+
+    try testing.expectError(
+        sqlite.SqliteError.PrepareFailed,
+        tap.add(&db, "user/repo", "https://x", valid_sha),
+    );
+}
+
+test "remove surfaces SqliteError when schema is missing" {
+    var db = try openDb();
+    defer db.close();
+
+    try testing.expectError(
+        sqlite.SqliteError.PrepareFailed,
+        tap.remove(&db, "user/repo"),
+    );
+}
+
 fn listAndFree(alloc: std.mem.Allocator, db: *sqlite.Database) !void {
     const taps = try tap.list(alloc, db);
     for (taps) |t| {

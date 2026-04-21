@@ -133,14 +133,14 @@ pub const Linker = struct {
             const link_path = std.fmt.bufPrint(&link_buf, "{s}/{s}/{s}", .{ self.prefix, subdir, entry.name }) catch continue;
 
             // Record in DB
-            var stmt = self.db.prepare(
+            var stmt = try self.db.prepare(
                 "INSERT OR REPLACE INTO links (keg_id, link_path, target) VALUES (?1, ?2, ?3);",
-            ) catch continue;
+            );
             defer stmt.finalize();
-            stmt.bindInt(1, keg_id) catch continue;
-            stmt.bindText(2, link_path) catch continue;
-            stmt.bindText(3, target) catch continue;
-            _ = stmt.step() catch {};
+            try stmt.bindInt(1, keg_id);
+            try stmt.bindText(2, link_path);
+            try stmt.bindText(3, target);
+            _ = try stmt.step();
         }
     }
 
@@ -167,23 +167,21 @@ pub const Linker = struct {
     }
 
     /// Remove all symlinks for a keg (from DB).
-    pub fn unlink(self: *Linker, keg_id: i64) !void {
-        // Query all links for this keg
-        var stmt = self.db.prepare("SELECT link_path FROM links WHERE keg_id = ?1;") catch return;
+    pub fn unlink(self: *Linker, keg_id: i64) sqlite.SqliteError!void {
+        var stmt = try self.db.prepare("SELECT link_path FROM links WHERE keg_id = ?1;");
         defer stmt.finalize();
-        stmt.bindInt(1, keg_id) catch return;
+        try stmt.bindInt(1, keg_id);
 
-        while (stmt.step() catch null) |has_row| {
-            if (!has_row) break;
+        while (try stmt.step()) {
             const link_path = stmt.columnText(0) orelse continue;
             const path_slice = std.mem.sliceTo(link_path, 0);
+            // Symlink may already be gone from the filesystem; DB row is the source of truth we're flushing.
             fs_compat.cwd().deleteFile(path_slice) catch {};
         }
 
-        // Delete from DB
-        var del_stmt = self.db.prepare("DELETE FROM links WHERE keg_id = ?1;") catch return;
+        var del_stmt = try self.db.prepare("DELETE FROM links WHERE keg_id = ?1;");
         defer del_stmt.finalize();
-        del_stmt.bindInt(1, keg_id) catch return;
-        _ = del_stmt.step() catch {};
+        try del_stmt.bindInt(1, keg_id);
+        _ = try del_stmt.step();
     }
 };

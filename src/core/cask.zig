@@ -55,28 +55,28 @@ pub fn parseCask(allocator: std.mem.Allocator, json_bytes: []const u8) !Cask {
 }
 
 /// Record cask installation in database.
-pub fn recordInstall(db: *sqlite.Database, cask: *const Cask, app_path: ?[]const u8) !void {
-    var stmt = db.prepare(
+pub fn recordInstall(db: *sqlite.Database, cask: *const Cask, app_path: ?[]const u8) sqlite.SqliteError!void {
+    var stmt = try db.prepare(
         "INSERT OR REPLACE INTO casks (token, name, version, url, sha256, app_path, auto_updates) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
-    ) catch return;
+    );
     defer stmt.finalize();
 
-    stmt.bindText(1, cask.token) catch return;
-    stmt.bindText(2, cask.name) catch return;
-    stmt.bindText(3, cask.version) catch return;
-    stmt.bindText(4, cask.url) catch return;
-    if (cask.sha256) |s| stmt.bindText(5, s) catch return else stmt.bindNull(5) catch return;
-    if (app_path) |p| stmt.bindText(6, p) catch return else stmt.bindNull(6) catch return;
-    stmt.bindInt(7, if (cask.auto_updates) 1 else 0) catch return;
-    _ = stmt.step() catch {};
+    try stmt.bindText(1, cask.token);
+    try stmt.bindText(2, cask.name);
+    try stmt.bindText(3, cask.version);
+    try stmt.bindText(4, cask.url);
+    if (cask.sha256) |s| try stmt.bindText(5, s) else try stmt.bindNull(5);
+    if (app_path) |p| try stmt.bindText(6, p) else try stmt.bindNull(6);
+    try stmt.bindInt(7, if (cask.auto_updates) 1 else 0);
+    _ = try stmt.step();
 }
 
 /// Remove cask record from database.
-pub fn removeRecord(db: *sqlite.Database, token: []const u8) !void {
-    var stmt = db.prepare("DELETE FROM casks WHERE token = ?1;") catch return;
+pub fn removeRecord(db: *sqlite.Database, token: []const u8) sqlite.SqliteError!void {
+    var stmt = try db.prepare("DELETE FROM casks WHERE token = ?1;");
     defer stmt.finalize();
-    stmt.bindText(1, token) catch return;
-    _ = stmt.step() catch {};
+    try stmt.bindText(1, token);
+    _ = try stmt.step();
 }
 
 /// Determine the artifact type from the cask download URL.

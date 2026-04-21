@@ -172,3 +172,14 @@ test "checkConflicts is empty when nothing is linked yet" {
     defer testing.allocator.free(conflicts);
     try testing.expectEqual(@as(usize, 0), conflicts.len);
 }
+
+// Without the `links` table, unlink's prepare fails. The rc used to
+// turn into a silent `return`, hiding "schema missing" from the caller.
+test "unlink surfaces SqliteError when links table is missing" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    // Intentionally no schema.initSchema — `links` does not exist.
+
+    var linker = linker_mod.Linker.init(testing.allocator, &db, "/tmp/malt_unused");
+    try testing.expectError(sqlite.SqliteError.PrepareFailed, linker.unlink(1));
+}

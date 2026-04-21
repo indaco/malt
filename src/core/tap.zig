@@ -23,31 +23,31 @@ pub fn add(
     name: []const u8,
     url: []const u8,
     commit_sha: ?[]const u8,
-) !void {
+) sqlite.SqliteError!void {
     // URL is sticky on conflict (URL doesn't change once registered);
     // commit_sha is sticky unless the caller passes a new one. Refresh
     // goes through `updateCommit` which forces a replacement.
-    var stmt = db.prepare(
+    var stmt = try db.prepare(
         \\INSERT INTO taps (name, url, commit_sha) VALUES (?1, ?2, ?3)
         \\ON CONFLICT(name) DO UPDATE SET
         \\    commit_sha = COALESCE(excluded.commit_sha, taps.commit_sha);
-    ) catch return;
+    );
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return;
-    stmt.bindText(2, url) catch return;
+    try stmt.bindText(1, name);
+    try stmt.bindText(2, url);
     if (commit_sha) |s| {
-        stmt.bindText(3, s) catch return;
+        try stmt.bindText(3, s);
     } else {
-        stmt.bindNull(3) catch return;
+        try stmt.bindNull(3);
     }
-    _ = stmt.step() catch {};
+    _ = try stmt.step();
 }
 
-pub fn remove(db: *sqlite.Database, name: []const u8) !void {
-    var stmt = db.prepare("DELETE FROM taps WHERE name = ?1;") catch return;
+pub fn remove(db: *sqlite.Database, name: []const u8) sqlite.SqliteError!void {
+    var stmt = try db.prepare("DELETE FROM taps WHERE name = ?1;");
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return;
-    _ = stmt.step() catch {};
+    try stmt.bindText(1, name);
+    _ = try stmt.step();
 }
 
 /// Replace the stored commit SHA for an existing tap. Called by

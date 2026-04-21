@@ -153,6 +153,32 @@ test "removeRecord removes cask from DB" {
     try std.testing.expect(!cask.isInstalled(&db, "firefox"));
 }
 
+// A schema-less DB makes `prepare` fail. Bubbling the SqliteError lets
+// the caller distinguish "table missing" from "constraint violation" —
+// previously both became a silent no-op.
+test "recordInstall surfaces SqliteError when schema is missing" {
+    var db = try openTestDb();
+    defer db.close();
+
+    var c = try cask.parseCask(std.testing.allocator, test_cask_json);
+    defer c.deinit();
+
+    try std.testing.expectError(
+        sqlite.SqliteError.PrepareFailed,
+        cask.recordInstall(&db, &c, "/Applications/Firefox.app"),
+    );
+}
+
+test "removeRecord surfaces SqliteError when schema is missing" {
+    var db = try openTestDb();
+    defer db.close();
+
+    try std.testing.expectError(
+        sqlite.SqliteError.PrepareFailed,
+        cask.removeRecord(&db, "firefox"),
+    );
+}
+
 // --- CaskInstaller.isOutdated ---
 
 test "isOutdated detects version mismatch" {
