@@ -10,6 +10,20 @@ const fs_compat = @import("compat.zig");
 /// pool of noise for zero benefit. Kept on libc alloc for clarity.
 const child_allocator = std.heap.c_allocator;
 
+/// archive entries can escape dest; reject before extract.
+/// Reject absolute, `..`-bearing, NUL-bearing, or empty names — `.`
+/// components are tolerated since tar routinely emits `./name`.
+pub fn isSafeEntryPath(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (name[0] == '/') return false;
+    if (std.mem.indexOfScalar(u8, name, 0) != null) return false;
+    var it = std.mem.splitScalar(u8, name, '/');
+    while (it.next()) |comp| {
+        if (std.mem.eql(u8, comp, "..")) return false;
+    }
+    return true;
+}
+
 /// Read up to `out.len` bytes from the file at `absolute_path`, returning how
 /// many were actually read. Used for the magic-byte sniff before handing a
 /// downloaded archive off to an external extractor.
@@ -43,6 +57,12 @@ pub fn extractTarGz(archive_path: []const u8, dest_dir: []const u8) !void {
         return error.ExtractionFailed;
     }
 
+    // Pre-scan: a single escaping entry (or symlink target) taints the
+    // whole archive. Extraction streams entries in order, so without a
+    // pre-scan a safe entry preceding a hostile one would already be on
+    // disk by the time the extractor errors out.
+    try validateTarGz(archive_path);
+
     const io = io_mod.ctx();
 
     var file = std.Io.Dir.openFileAbsolute(io, archive_path, .{}) catch return error.ExtractionFailed;
@@ -63,6 +83,33 @@ pub fn extractTarGz(archive_path: []const u8, dest_dir: []const u8) !void {
     defer dir.close(io);
 
     std.tar.pipeToFileSystem(io, dir, &decompress.reader, .{}) catch return error.ExtractionFailed;
+}
+
+fn validateTarGz(archive_path: []const u8) !void {
+    const io = io_mod.ctx();
+    var file = std.Io.Dir.openFileAbsolute(io, archive_path, .{}) catch return error.ExtractionFailed;
+    defer file.close(io);
+
+    var file_buf: [16 * 1024]u8 = undefined;
+    var file_reader = file.reader(io, &file_buf);
+    const input: *std.Io.Reader = &file_reader.interface;
+
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompress = std.compress.flate.Decompress.init(input, .gzip, &window);
+
+    var file_name_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var link_name_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var it: std.tar.Iterator = .init(&decompress.reader, .{
+        .file_name_buffer = &file_name_buffer,
+        .link_name_buffer = &link_name_buffer,
+    });
+
+    while (it.next() catch return error.ExtractionFailed) |entry| {
+        if (!isSafeEntryPath(entry.name)) return error.ExtractionFailed;
+        if (entry.kind == .sym_link and !isSafeEntryPath(entry.link_name)) {
+            return error.ExtractionFailed;
+        }
+    }
 }
 
 /// Extracts a tar.zst archive from the given input reader into output_dir.
@@ -87,6 +134,8 @@ pub fn extractZip(archive_path: []const u8, dest_dir: []const u8) !void {
         return error.ExtractionFailed;
     }
 
+    try validateZip(archive_path);
+
     // -q: quiet, -o: overwrite without prompting, -d: destination dir.
     const argv = [_][]const u8{ "unzip", "-q", "-o", archive_path, "-d", dest_dir };
     var child = fs_compat.Child.init(&argv, child_allocator);
@@ -100,11 +149,23 @@ pub fn extractZip(archive_path: []const u8, dest_dir: []const u8) !void {
     }
 }
 
+fn validateZip(archive_path: []const u8) !void {
+    // `-Z1` prints one entry name per line with no headers or sizes —
+    // a zero-column listing we can scan without parsing unzip's table.
+    const argv = [_][]const u8{ "unzip", "-Z1", archive_path };
+    try validateSubprocessListing(&argv);
+}
+
 /// Extracts a tar.xz archive file to a directory using the system `tar` command.
 /// Zig 0.15's xz decompressor uses the legacy I/O API which doesn't integrate
 /// with std.tar, so we shell out to the system tar (always available on macOS).
+/// `--no-same-permissions`/`--no-same-owner` stop tar from honouring archived
+/// uid/mode bits on extract — downloaded archives should not shape the
+/// on-disk identity of what they produce.
 pub fn extractTarXzFile(archive_path: []const u8, dest_dir: []const u8) !void {
-    const argv = [_][]const u8{ "tar", "xf", archive_path, "-C", dest_dir };
+    try validateTarListing(archive_path);
+
+    const argv = [_][]const u8{ "tar", "xf", archive_path, "-C", dest_dir, "--no-same-permissions", "--no-same-owner" };
     var child = fs_compat.Child.init(&argv, child_allocator);
     child.spawn() catch return error.ExtractionFailed;
     const term = child.wait() catch return error.ExtractionFailed;
@@ -113,5 +174,43 @@ pub fn extractTarXzFile(archive_path: []const u8, dest_dir: []const u8) !void {
             if (code != 0) return error.ExtractionFailed;
         },
         else => return error.ExtractionFailed,
+    }
+}
+
+fn validateTarListing(archive_path: []const u8) !void {
+    const argv = [_][]const u8{ "tar", "tf", archive_path };
+    try validateSubprocessListing(&argv);
+}
+
+/// Spawn `argv` expecting one entry name per stdout line, and reject the
+/// archive if any entry fails `isSafeEntryPath`. Shared by `extractZip`
+/// (via `unzip -Z1`) and `extractTarXzFile` (via `tar tf`).
+fn validateSubprocessListing(argv: []const []const u8) !void {
+    var child = fs_compat.Child.init(argv, child_allocator);
+    child.stdout_behavior = .pipe;
+    child.stderr_behavior = .ignore;
+    child.spawn() catch return error.ExtractionFailed;
+    const stdout = child.stdout orelse {
+        _ = child.wait() catch {};
+        return error.ExtractionFailed;
+    };
+    // 4 MiB cap: bottle/tap listings are orders of magnitude smaller;
+    // the bound just prevents a pathological archive from ballooning RAM.
+    const listing = fs_compat.readFileToEndAlloc(stdout, child_allocator, 4 * 1024 * 1024) catch {
+        _ = child.wait() catch {};
+        return error.ExtractionFailed;
+    };
+    defer child_allocator.free(listing);
+    const term = child.wait() catch return error.ExtractionFailed;
+    switch (term) {
+        .exited => |code| if (code != 0) return error.ExtractionFailed,
+        else => return error.ExtractionFailed,
+    }
+
+    var it = std.mem.splitScalar(u8, listing, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, "\r");
+        if (line.len == 0) continue;
+        if (!isSafeEntryPath(line)) return error.ExtractionFailed;
     }
 }
