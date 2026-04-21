@@ -61,6 +61,30 @@ test "raw services row insert is reflected by list and hasService" {
     try testing.expect(items[0].auto_start);
 }
 
+fn listAndFree(alloc: std.mem.Allocator, db: *sqlite.Database) !void {
+    const items = try supervisor.list(alloc, db);
+    supervisor.freeServiceInfos(alloc, items);
+}
+
+test "list: partial-dupe failure on any allocation leaves zero leaks" {
+    // BUG-010 regression guard: earlier row dupes used to leak when a later
+    // dupe or append failed, and already-populated rows were never walked.
+    var t = try TempDb.init("partial_dupe");
+    defer t.deinit();
+
+    // Two rows so the errdefer has to walk both completed and partial state.
+    try t.db.exec(
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start, last_status)
+        \\VALUES ('alpha', 'alpha-keg', '/tmp/a.plist', 1, 'registered');
+    );
+    try t.db.exec(
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start, last_status)
+        \\VALUES ('beta', 'beta-keg', '/tmp/b.plist', 0, 'stopped');
+    );
+
+    try testing.checkAllAllocationFailures(testing.allocator, listAndFree, .{&t.db});
+}
+
 test "tailLog returns last N lines of a small file" {
     var t = try TempDb.init("tail");
     defer t.deinit();
