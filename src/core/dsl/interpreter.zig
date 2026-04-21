@@ -211,6 +211,28 @@ pub const ExecContext = struct {
     }
 };
 
+/// Per-element error policy for `.each`-style iteration blocks. Hard
+/// errors (formula aborts, sandbox breach, control-flow signals, OOM)
+/// unwind; every non-fatal diagnostic is per-element and iteration
+/// advances to the next item. Exhaustive switch: a new `DslError` tag
+/// must be classified here, not silently swallowed by a catch-all.
+const IterAction = enum { propagate, cont };
+
+fn classifyIterError(e: DslError) IterAction {
+    return switch (e) {
+        DslError.PostInstallFailed,
+        DslError.PathSandboxViolation,
+        DslError.ReturnSignal,
+        DslError.OutOfMemory,
+        => .propagate,
+        DslError.ParseError,
+        DslError.UnknownMethod,
+        DslError.UnsupportedNode,
+        DslError.SystemCommandFailed,
+        => .cont,
+    };
+}
+
 pub const Interpreter = struct {
     ctx: *ExecContext,
     /// Mirror of `ctx.arena` — held for brevity in hot eval paths.
@@ -225,6 +247,7 @@ pub const Interpreter = struct {
 
     pub fn execute(self: *Interpreter, nodes: []const *const Node) DslError!void {
         for (nodes) |node| {
+            // Exhaustive: new DslError tags must be classified, not dropped.
             _ = self.eval(node) catch |e| switch (e) {
                 DslError.PostInstallFailed => return e,
                 DslError.PathSandboxViolation => {
@@ -243,9 +266,13 @@ pub const Interpreter = struct {
                     self.ctx.return_value = Value{ .nil = {} };
                     return;
                 },
-                DslError.UnknownMethod => continue, // Non-fatal
-                DslError.UnsupportedNode => continue, // Non-fatal
-                else => continue,
+                // Per-statement diagnostics — log upstream, keep going.
+                DslError.ParseError,
+                DslError.UnknownMethod,
+                DslError.UnsupportedNode,
+                DslError.SystemCommandFailed,
+                DslError.OutOfMemory,
+                => continue,
             };
         }
     }
@@ -320,6 +347,7 @@ pub const Interpreter = struct {
         // helper doesn't abort on a single unrecognised construct.
         var last: Value = Value{ .nil = {} };
         for (md.body) |stmt| {
+            // Exhaustive: new DslError tags must be classified, not dropped.
             last = self.eval(stmt) catch |e| switch (e) {
                 DslError.ReturnSignal => {
                     const v = self.ctx.return_value;
@@ -327,7 +355,12 @@ pub const Interpreter = struct {
                     return v;
                 },
                 DslError.UnknownMethod, DslError.UnsupportedNode => continue,
-                else => return e,
+                DslError.ParseError,
+                DslError.PathSandboxViolation,
+                DslError.PostInstallFailed,
+                DslError.SystemCommandFailed,
+                DslError.OutOfMemory,
+                => return e,
             };
         }
         return last;
@@ -669,9 +702,9 @@ pub const Interpreter = struct {
                 try self.ctx.pushScope();
                 defer self.ctx.popScope();
                 if (el.params.len > 0) try self.ctx.setLocal(el.params[0], item);
-                _ = self.evalBlockSlice(el.body) catch |e| switch (e) {
-                    DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal, DslError.OutOfMemory => return e,
-                    else => continue,
+                _ = self.evalBlockSlice(el.body) catch |e| switch (classifyIterError(e)) {
+                    .propagate => return e,
+                    .cont => continue,
                 };
             },
             .hash => |pairs| for (pairs) |pair| {
@@ -680,9 +713,9 @@ pub const Interpreter = struct {
                 try self.ctx.pushScope();
                 defer self.ctx.popScope();
                 try self.bindHashPair(el.params, pair);
-                _ = self.evalBlockSlice(el.body) catch |e| switch (e) {
-                    DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal, DslError.OutOfMemory => return e,
-                    else => continue,
+                _ = self.evalBlockSlice(el.body) catch |e| switch (classifyIterError(e)) {
+                    .propagate => return e,
+                    .cont => continue,
                 };
             },
             else => return Value{ .nil = {} },
@@ -691,15 +724,21 @@ pub const Interpreter = struct {
     }
 
     fn evalBeginRescue(self: *Interpreter, br: *const ast.BeginRescue) DslError!Value {
+        // Exhaustive: new DslError tags must be classified, not dropped.
         _ = self.evalBlockSlice(br.body) catch |e| switch (e) {
             // Sandbox violations are unrecoverable; `return` must unwind
             // past the rescue because Ruby's `rescue` does not catch
             // control-flow signals.
             DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
-            else => {
-                // Execute rescue body — catches PostInstallFailed (raise), SystemCommandFailed, etc.
-                return self.evalBlockSlice(br.rescue_body) catch Value{ .nil = {} };
-            },
+            // Rescue catches PostInstallFailed (raise), SystemCommandFailed,
+            // and non-fatal parse/dispatch diagnostics raised mid-body.
+            DslError.ParseError,
+            DslError.UnknownMethod,
+            DslError.UnsupportedNode,
+            DslError.PostInstallFailed,
+            DslError.SystemCommandFailed,
+            DslError.OutOfMemory,
+            => return self.evalBlockSlice(br.rescue_body) catch Value{ .nil = {} },
         };
         return Value{ .nil = {} };
     }
@@ -764,9 +803,9 @@ pub const Interpreter = struct {
             try self.ctx.pushScope();
             defer self.ctx.popScope();
             if (params.len > 0) try self.ctx.setLocal(params[0], item);
-            _ = self.eval(blk) catch |e| switch (e) {
-                DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal, DslError.OutOfMemory => return e,
-                else => continue,
+            _ = self.eval(blk) catch |e| switch (classifyIterError(e)) {
+                .propagate => return e,
+                .cont => continue,
             };
         }
         return Value{ .nil = {} };
@@ -794,9 +833,9 @@ pub const Interpreter = struct {
             try self.ctx.pushScope();
             defer self.ctx.popScope();
             try self.bindHashPair(params, pair);
-            _ = self.eval(blk) catch |e| switch (e) {
-                DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal, DslError.OutOfMemory => return e,
-                else => continue,
+            _ = self.eval(blk) catch |e| switch (classifyIterError(e)) {
+                .propagate => return e,
+                .cont => continue,
             };
         }
         return Value{ .nil = {} };
@@ -937,9 +976,19 @@ pub const Interpreter = struct {
 
     fn evalArrayEachByName(self: *Interpreter, items: []const Value, sym: []const u8, loc: SourceLoc) DslError!Value {
         for (items) |item| {
+            // Exhaustive: new DslError tags must be classified, not dropped.
+            // Narrower propagate-set than `evalArrayEach`: `&:sym` dispatch
+            // runs receiver builtins only, so anything past the two fatals
+            // is per-element and iteration continues.
             _ = self.sendByName(item, sym, loc) catch |e| switch (e) {
                 DslError.PostInstallFailed, DslError.PathSandboxViolation => return e,
-                else => continue,
+                DslError.ParseError,
+                DslError.UnknownMethod,
+                DslError.UnsupportedNode,
+                DslError.SystemCommandFailed,
+                DslError.OutOfMemory,
+                DslError.ReturnSignal,
+                => continue,
             };
         }
         return Value{ .nil = {} };
