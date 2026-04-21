@@ -13,7 +13,29 @@ pub const PrefixError = error{
     EmbeddedNul,
     TooLong,
     EmptyComponent,
+    DisallowedByte,
 };
+
+/// Single source of truth for the prefix charset. Matches
+/// `validatePathForProfile` in `core/sandbox/macos.zig` so anything that
+/// passes here is safe to interpolate into a Ruby single-quoted literal,
+/// a sandbox-profile path string, or a shell argv.
+pub fn isAllowedPrefixByte(b: u8) bool {
+    return switch (b) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '+', '-', '/' => true,
+        else => false,
+    };
+}
+
+/// Charset for a formula `name` or `version`. Same alphabet as the prefix
+/// minus `/` (a name with `/` would pierce a `{prefix}/Cellar/{name}/...`
+/// path) plus `@` (versioned formulae like `llvm@21`, `python@3.12`).
+pub fn isAllowedNameByte(b: u8) bool {
+    return switch (b) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '+', '-', '@' => true,
+        else => false,
+    };
+}
 
 /// Validate a candidate install prefix. Called at the env boundary so
 /// downstream code can assume absolute, NUL-free, traversal-free.
@@ -22,6 +44,10 @@ pub fn validatePrefix(prefix: []const u8) PrefixError!void {
     if (prefix.len > MAX_PREFIX_LEN) return PrefixError.TooLong;
     if (prefix[0] != '/') return PrefixError.NotAbsolute;
     if (std.mem.indexOfScalar(u8, prefix, 0) != null) return PrefixError.EmbeddedNul;
+    // Tight charset closes the BUG-007/BUG-019 injection class — quotes,
+    // backslashes, control bytes, parens etc. flow into single-quoted
+    // Ruby literals and sandbox-profile strings unchanged.
+    for (prefix) |b| if (!isAllowedPrefixByte(b)) return PrefixError.DisallowedByte;
 
     // Strip one trailing slash; `/opt/malt/` is fine, `//` inside is not.
     const trimmed = if (prefix.len > 1 and prefix[prefix.len - 1] == '/')
@@ -46,6 +72,7 @@ pub fn describePrefixError(e: PrefixError) []const u8 {
         PrefixError.EmbeddedNul => "contains NUL byte",
         PrefixError.TooLong => "exceeds 512 bytes",
         PrefixError.EmptyComponent => "contains empty path component ('//')",
+        PrefixError.DisallowedByte => "contains a byte outside [a-zA-Z0-9._+-/]",
     };
 }
 
