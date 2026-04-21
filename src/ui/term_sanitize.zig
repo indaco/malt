@@ -12,13 +12,19 @@
 
 const std = @import("std");
 
+/// Closed error set surfaced by `Sink.write_fn`. Every sink
+/// implementation must collapse its failure modes into this set so
+/// sanitizer callers can switch exhaustively instead of catching
+/// `anyerror`.
+pub const SinkError = error{WriteFailed};
+
 /// Bytes-out callback. The sink is allowed to fail; the sanitizer
 /// propagates that error to its caller.
 pub const Sink = struct {
     ctx: *anyopaque,
-    write_fn: *const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void,
+    write_fn: *const fn (ctx: *anyopaque, bytes: []const u8) SinkError!void,
 
-    pub fn write(self: Sink, bytes: []const u8) anyerror!void {
+    pub fn write(self: Sink, bytes: []const u8) SinkError!void {
         return self.write_fn(self.ctx, bytes);
     }
 };

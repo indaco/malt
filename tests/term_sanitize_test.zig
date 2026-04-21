@@ -16,9 +16,12 @@ const Buf = struct {
         return .{ .ctx = self, .write_fn = writeFn };
     }
 
-    fn writeFn(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+    fn writeFn(ctx: *anyopaque, bytes: []const u8) ts.SinkError!void {
         const self: *Buf = @ptrCast(@alignCast(ctx));
-        try self.list.appendSlice(testing.allocator, bytes);
+        // Test buffer backed by testing.allocator: collapse an allocator
+        // failure into the sink's single failure tag so the vtable stays
+        // closed.
+        self.list.appendSlice(testing.allocator, bytes) catch return error.WriteFailed;
     }
 
     fn deinit(self: *Buf) void {
@@ -33,6 +36,17 @@ fn check(input: []const u8, expected: []const u8) !void {
     try s.feed(input, buf.sink());
     try s.flush(buf.sink());
     try testing.expectEqualSlices(u8, expected, buf.list.items);
+}
+
+// Pin that `Sink.write_fn` returns a closed error set. A bare
+// `anyerror` here would let a hostile sink raise arbitrary tags and
+// defeat exhaustive switching at every caller.
+test "Sink.write_fn declares a closed error set" {
+    const FuncPtr = std.meta.fieldInfo(ts.Sink, .write_fn).type;
+    const FnType = @typeInfo(FuncPtr).pointer.child;
+    const RetT = @typeInfo(FnType).@"fn".return_type.?;
+    const ErrSet = @typeInfo(RetT).error_union.error_set;
+    try testing.expect(@typeInfo(ErrSet).error_set != null);
 }
 
 test "plain ASCII passes through" {
