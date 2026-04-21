@@ -137,6 +137,107 @@ test "generateWrapper emits a Ruby script containing the post_install body and p
     try testing.expect(std.mem.indexOf(u8, script, "2.3") != null);
 }
 
+// T-003: injection regression — every disallowed byte in any of prefix /
+// name / version must be rejected by generateWrapper, not silently
+// interpolated into the single-quoted Ruby literal. See BUG-007.
+
+test "generateWrapper rejects single quote in prefix" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.generateWrapper(testing.allocator, "pkg", "1.0", "/tmp/m'x", "ohai 'hi'\n"),
+    );
+}
+
+test "generateWrapper rejects backslash in prefix" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.generateWrapper(testing.allocator, "pkg", "1.0", "/tmp/m\\x", "ohai 'hi'\n"),
+    );
+}
+
+test "generateWrapper rejects newline in prefix" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.generateWrapper(testing.allocator, "pkg", "1.0", "/tmp/m\nx", "ohai 'hi'\n"),
+    );
+}
+
+test "generateWrapper rejects single quote in name" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.generateWrapper(testing.allocator, "p'k", "1.0", "/opt/malt", "ohai 'hi'\n"),
+    );
+}
+
+test "generateWrapper rejects backslash in name" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.generateWrapper(testing.allocator, "p\\k", "1.0", "/opt/malt", "ohai 'hi'\n"),
+    );
+}
+
+test "generateWrapper rejects newline in name" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.generateWrapper(testing.allocator, "p\nk", "1.0", "/opt/malt", "ohai 'hi'\n"),
+    );
+}
+
+test "generateWrapper rejects single quote in version" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.generateWrapper(testing.allocator, "pkg", "1'+exec()+'0", "/opt/malt", "ohai 'hi'\n"),
+    );
+}
+
+test "generateWrapper rejects backslash in version" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.generateWrapper(testing.allocator, "pkg", "1\\0", "/opt/malt", "ohai 'hi'\n"),
+    );
+}
+
+test "generateWrapper rejects newline in version" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.generateWrapper(testing.allocator, "pkg", "1\n0", "/opt/malt", "ohai 'hi'\n"),
+    );
+}
+
+test "generateWrapper accepts the @-versioned name format (llvm@21)" {
+    // Real-world formula names use `@` for major-version pinning.
+    const script = try ruby.generateWrapper(
+        testing.allocator,
+        "llvm@21",
+        "21.1.5",
+        "/opt/malt",
+        "ohai 'ok'\n",
+    );
+    defer testing.allocator.free(script);
+    try testing.expect(std.mem.indexOf(u8, script, "llvm@21") != null);
+}
+
+test "generateWrapper rejects empty name" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.generateWrapper(testing.allocator, "", "1.0", "/opt/malt", "ohai 'hi'\n"),
+    );
+}
+
+test "generateWrapper rejects empty version" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.generateWrapper(testing.allocator, "pkg", "", "/opt/malt", "ohai 'hi'\n"),
+    );
+}
+
+test "generateWrapper rejects empty prefix" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.generateWrapper(testing.allocator, "pkg", "1.0", "", "ohai 'hi'\n"),
+    );
+}
+
 test "fetchPostInstallFromGitHub returns null for an empty name" {
     try testing.expect(ruby.fetchPostInstallFromGitHub(testing.allocator, "") == null);
 }
@@ -247,6 +348,49 @@ test "extractPostInstallFromSource skips nested defs inside post_install body" {
     defer testing.allocator.free(body.?);
     try testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, body.?, "def post_install"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, body.?, "ohai \"hi\""));
+}
+
+// T-003: defense-in-depth — runPostInstall must reject hostile name /
+// version up front, before any of the lookup/IO work that would
+// eventually flow them into the wrapper. A Cellar directory whose name
+// or version embeds `'`, `\`, or a newline is a concrete attack on
+// `--use-system-ruby` (the directory listing flows back into name).
+
+test "runPostInstall rejects single-quote in name with InvalidInput" {
+    const err = ruby.runPostInstall(testing.allocator, "p'k", "1.0", "/opt/malt");
+    try testing.expectError(error.InvalidInput, err);
+}
+
+test "runPostInstall rejects backslash in name with InvalidInput" {
+    const err = ruby.runPostInstall(testing.allocator, "p\\k", "1.0", "/opt/malt");
+    try testing.expectError(error.InvalidInput, err);
+}
+
+test "runPostInstall rejects newline in version with InvalidInput" {
+    const err = ruby.runPostInstall(testing.allocator, "pkg", "1\n0", "/opt/malt");
+    try testing.expectError(error.InvalidInput, err);
+}
+
+test "runPostInstall rejects empty name/version/prefix with InvalidInput" {
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.runPostInstall(testing.allocator, "", "1.0", "/opt/malt"),
+    );
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.runPostInstall(testing.allocator, "pkg", "", "/opt/malt"),
+    );
+    try testing.expectError(
+        error.InvalidInput,
+        ruby.runPostInstall(testing.allocator, "pkg", "1.0", ""),
+    );
+}
+
+test "runPostInstall rejects hostile prefix with InvalidInput" {
+    // Even if the env-boundary check were bypassed, runPostInstall must
+    // not produce a syntax-corrupt wrapper.
+    const err = ruby.runPostInstall(testing.allocator, "pkg", "1.0", "/tmp/m'x");
+    try testing.expectError(error.InvalidInput, err);
 }
 
 test "detectRuby returns a heap-owned slice that the caller can free" {

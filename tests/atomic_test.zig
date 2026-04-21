@@ -116,6 +116,78 @@ test "validatePrefix: dotdot-like-but-not-exact component accepted" {
     try atomic.validatePrefix("/opt/malt..");
 }
 
+// T-003: tighten the prefix charset to close the Ruby-wrapper / sandbox-
+// profile injection vector. A MALT_PREFIX with a quote, backslash, or
+// control byte breaks the generated single-quoted Ruby literal — see
+// docs/analysis/2026-04-20-01-bugs.md BUG-007 / BUG-019.
+test "validatePrefix: single quote rejected" {
+    try testing.expectError(error.DisallowedByte, atomic.validatePrefix("/tmp/m'x"));
+}
+
+test "validatePrefix: double quote rejected" {
+    try testing.expectError(error.DisallowedByte, atomic.validatePrefix("/tmp/m\"x"));
+}
+
+test "validatePrefix: backslash rejected" {
+    try testing.expectError(error.DisallowedByte, atomic.validatePrefix("/tmp/m\\x"));
+}
+
+test "validatePrefix: newline rejected" {
+    try testing.expectError(error.DisallowedByte, atomic.validatePrefix("/tmp/m\nx"));
+}
+
+test "validatePrefix: control bytes rejected" {
+    // 0x01 .. 0x1f and 0x7f all constitute injection-grade noise in any
+    // shell-or-Ruby context the prefix flows into.
+    var path: [10]u8 = "/tmp/m_x_y".*;
+    inline for (.{ 0x01, 0x07, 0x1b, 0x1f, 0x7f }) |b| {
+        path[6] = b;
+        try testing.expectError(error.DisallowedByte, atomic.validatePrefix(&path));
+    }
+}
+
+test "validatePrefix: valid-but-unusual chars accepted (+ . - _)" {
+    // Real-world prefixes may include `+` (e.g. `/opt/malt+1.0`),
+    // `-` (`/opt/foo-bar`), `.`, `_`. They must keep passing.
+    try atomic.validatePrefix("/opt/malt+1.0");
+    try atomic.validatePrefix("/opt/foo-bar.baz_qux");
+    try atomic.validatePrefix("/opt/MALT");
+}
+
+test "isAllowedNameByte: name/version charset extends prefix with @" {
+    // Cellar dir names embed the formula name + version (e.g. `llvm@21`,
+    // `gcc@13`, `python@3.12`) — `@` must pass for those, but `/` must
+    // not (it would let a hostile name pierce the Cellar path).
+    const allowed = "abcXYZ0123456789._+-@";
+    for (allowed) |b| try testing.expect(atomic.isAllowedNameByte(b));
+    const denied = "/'\"\\\n\t (){}[]$|;&<>*?#";
+    for (denied) |b| try testing.expect(!atomic.isAllowedNameByte(b));
+    var b: u8 = 0;
+    while (b < 0x20) : (b += 1) try testing.expect(!atomic.isAllowedNameByte(b));
+    try testing.expect(!atomic.isAllowedNameByte(0x7f));
+}
+
+test "describePrefixError: DisallowedByte has a descriptive string" {
+    const desc = atomic.describePrefixError(error.DisallowedByte);
+    try testing.expect(desc.len > 0);
+}
+
+test "isAllowedPrefixByte: charset matches the documented contract" {
+    // Centralised predicate used by prefix/name/version validation.
+    // [a-zA-Z0-9._+\-/] — see docs/plan/tasks/T-003.md.
+    const allowed = "abcXYZ0123456789._+-/";
+    for (allowed) |b| try testing.expect(atomic.isAllowedPrefixByte(b));
+    const denied = "'\"\\\n\t (){}[]$|;&<>*?#";
+    for (denied) |b| try testing.expect(!atomic.isAllowedPrefixByte(b));
+    // Control bytes: every byte below 0x20 plus DEL.
+    var b: u8 = 0;
+    while (b < 0x20) : (b += 1) try testing.expect(!atomic.isAllowedPrefixByte(b));
+    try testing.expect(!atomic.isAllowedPrefixByte(0x7f));
+    // High bit: not in the allowed set either.
+    try testing.expect(!atomic.isAllowedPrefixByte(0x80));
+    try testing.expect(!atomic.isAllowedPrefixByte(0xff));
+}
+
 test "maltPrefixChecked: empty MALT_PREFIX returns Empty error" {
     setPrefix("");
     defer unsetPrefix();
