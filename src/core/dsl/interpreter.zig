@@ -35,6 +35,7 @@ pub const DslError = error{
     ReturnSignal,
 };
 
+/// Scopes are arena-backed — no deinit; the post_install arena frees locals.
 pub const Scope = struct {
     locals: std.StringHashMap(Value),
     /// Marks a def-call frame. Binding lookup stops here so a called
@@ -42,37 +43,60 @@ pub const Scope = struct {
     /// scoping for `def`.
     is_method_frame: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator) Scope {
-        return .{ .locals = std.StringHashMap(Value).init(allocator) };
-    }
-
-    pub fn deinit(self: *Scope) void {
-        self.locals.deinit();
+    pub fn init(arena: std.mem.Allocator) Scope {
+        return .{ .locals = std.StringHashMap(Value).init(arena) };
     }
 };
 
+/// Formula path binding slots. Storage order mirrors EnumArray indexing;
+/// `binding_map` translates DSL identifiers to these tags.
+pub const PathBinding = enum {
+    prefix,
+    bin,
+    sbin,
+    lib,
+    libexec,
+    include,
+    share,
+    pkgshare,
+    etc,
+    pkgetc,
+    var_dir,
+    opt_prefix,
+    homebrew_prefix,
+    homebrew_cellar,
+};
+
+const binding_map = std.StaticStringMap(PathBinding).initComptime(.{
+    .{ "prefix", PathBinding.prefix },
+    .{ "bin", PathBinding.bin },
+    .{ "sbin", PathBinding.sbin },
+    .{ "lib", PathBinding.lib },
+    .{ "libexec", PathBinding.libexec },
+    .{ "include", PathBinding.include },
+    .{ "share", PathBinding.share },
+    .{ "pkgshare", PathBinding.pkgshare },
+    .{ "etc", PathBinding.etc },
+    .{ "pkgetc", PathBinding.pkgetc },
+    .{ "var", PathBinding.var_dir },
+    .{ "opt_prefix", PathBinding.opt_prefix },
+    .{ "HOMEBREW_PREFIX", PathBinding.homebrew_prefix },
+    .{ "HOMEBREW_CELLAR", PathBinding.homebrew_cellar },
+});
+
 pub const ExecContext = struct {
-    allocator: std.mem.Allocator,
+    /// Caller-owned arena. Owns every path string, scope map, and the
+    /// methods table; deinit is a no-op because the caller tears it down.
+    arena: std.mem.Allocator,
 
-    // Formula path bindings (all Pathname values)
-    prefix: []const u8,
+    /// Cellar path for the current formula — also stored in `paths[.prefix]`,
+    /// kept as a direct field so builtins (sandbox validation) can read it
+    /// without a lookup.
     cellar_path: []const u8,
-    bin: []const u8,
-    sbin: []const u8,
-    lib: []const u8,
-    libexec: []const u8,
-    include_dir: []const u8,
-    share: []const u8,
-    pkgshare: []const u8,
-    etc: []const u8,
-    pkgetc: []const u8,
-    var_dir: []const u8,
-    opt_prefix: []const u8,
-
-    // Global constants
     malt_prefix: []const u8,
-    homebrew_prefix: []const u8,
-    homebrew_cellar: []const u8,
+
+    /// All formula path bindings, indexed by `PathBinding`.
+    paths: std.EnumArray(PathBinding, []const u8),
 
     // Local variable scope (stack for nested blocks)
     scopes: std.ArrayList(Scope),
@@ -86,9 +110,8 @@ pub const ExecContext = struct {
     // Formula name for fallback log entries
     formula_name: []const u8,
 
-    // User-defined methods from `def ... end` statements in the post_install
-    // body. Keyed by method name; entries borrow the AST allocated on the
-    // parser arena so no extra ownership is needed here.
+    /// User-defined methods from `def ... end`. Entries borrow the parser
+    /// arena; the map itself lives on `arena`.
     methods: std.StringHashMap(ast.MethodDef),
 
     // Value threaded through a `return` statement. The call-frame (or
@@ -96,42 +119,42 @@ pub const ExecContext = struct {
     return_value: Value,
 
     pub fn init(
-        allocator: std.mem.Allocator,
+        arena: std.mem.Allocator,
         formula: *const Formula,
         malt_prefix: []const u8,
         flog: *FallbackLog,
     ) ExecContext {
-        const cellar_path = std.fmt.allocPrint(allocator, "{s}/Cellar/{s}/{s}", .{
+        const cellar_path = std.fmt.allocPrint(arena, "{s}/Cellar/{s}/{s}", .{
             malt_prefix, formula.name, formula.version,
         }) catch malt_prefix;
 
+        var paths = std.EnumArray(PathBinding, []const u8).initUndefined();
+        paths.set(.prefix, cellar_path);
+        paths.set(.bin, joinPath(arena, cellar_path, "bin"));
+        paths.set(.sbin, joinPath(arena, cellar_path, "sbin"));
+        paths.set(.lib, joinPath(arena, cellar_path, "lib"));
+        paths.set(.libexec, joinPath(arena, cellar_path, "libexec"));
+        paths.set(.include, joinPath(arena, cellar_path, "include"));
+        paths.set(.share, joinPath(arena, cellar_path, "share"));
+        paths.set(.pkgshare, std.fmt.allocPrint(arena, "{s}/share/{s}", .{ cellar_path, formula.name }) catch cellar_path);
+        paths.set(.etc, joinPath(arena, malt_prefix, "etc"));
+        // pkgetc: bare identifier in homebrew core (gnutls, openssl@3 …).
+        paths.set(.pkgetc, std.fmt.allocPrint(arena, "{s}/etc/{s}", .{ malt_prefix, formula.name }) catch malt_prefix);
+        paths.set(.var_dir, joinPath(arena, malt_prefix, "var"));
+        paths.set(.opt_prefix, std.fmt.allocPrint(arena, "{s}/opt/{s}", .{ malt_prefix, formula.name }) catch malt_prefix);
+        paths.set(.homebrew_prefix, malt_prefix);
+        paths.set(.homebrew_cellar, joinPath(arena, malt_prefix, "Cellar"));
+
         var ctx = ExecContext{
-            .allocator = allocator,
-            .prefix = malt_prefix,
+            .arena = arena,
             .cellar_path = cellar_path,
-            .bin = joinPath(allocator, cellar_path, "bin"),
-            .sbin = joinPath(allocator, cellar_path, "sbin"),
-            .lib = joinPath(allocator, cellar_path, "lib"),
-            .libexec = joinPath(allocator, cellar_path, "libexec"),
-            .include_dir = joinPath(allocator, cellar_path, "include"),
-            .share = joinPath(allocator, cellar_path, "share"),
-            .pkgshare = std.fmt.allocPrint(allocator, "{s}/share/{s}", .{ cellar_path, formula.name }) catch cellar_path,
-            .etc = joinPath(allocator, malt_prefix, "etc"),
-            // Formula instance method `pkgetc` → `<prefix>/etc/<name>`.
-            // Homebrew exposes it as bare identifier inside post_install
-            // (gnutls, openssl@3…); registering it here resolves the
-            // most common `pkgetc` unknown_method across the corpus.
-            .pkgetc = std.fmt.allocPrint(allocator, "{s}/etc/{s}", .{ malt_prefix, formula.name }) catch malt_prefix,
-            .var_dir = joinPath(allocator, malt_prefix, "var"),
-            .opt_prefix = std.fmt.allocPrint(allocator, "{s}/opt/{s}", .{ malt_prefix, formula.name }) catch malt_prefix,
             .malt_prefix = malt_prefix,
-            .homebrew_prefix = malt_prefix,
-            .homebrew_cellar = joinPath(allocator, malt_prefix, "Cellar"),
+            .paths = paths,
             .scopes = .empty,
             .sandbox_root = malt_prefix,
             .fallback_log_writer = flog,
             .formula_name = formula.name,
-            .methods = std.StringHashMap(ast.MethodDef).init(allocator),
+            .methods = std.StringHashMap(ast.MethodDef).init(arena),
             .return_value = Value{ .nil = {} },
         };
 
@@ -140,9 +163,8 @@ pub const ExecContext = struct {
         return ctx;
     }
 
-    pub fn deinit(self: *ExecContext) void {
-        self.methods.deinit();
-    }
+    /// Arena owns every allocation — caller tears it down. No per-field free.
+    pub fn deinit(_: *ExecContext) void {}
 
     pub fn resolveBinding(self: *ExecContext, name: []const u8) ?Value {
         // Check local scopes (innermost first). Stop at the first
@@ -158,65 +180,26 @@ pub const ExecContext = struct {
             if (scope.is_method_frame) break;
         }
 
-        // Check formula path bindings
-        const bindings = std.StaticStringMap(void).initComptime(.{
-            .{ "prefix", {} },
-            .{ "bin", {} },
-            .{ "sbin", {} },
-            .{ "lib", {} },
-            .{ "libexec", {} },
-            .{ "include", {} },
-            .{ "share", {} },
-            .{ "pkgshare", {} },
-            .{ "etc", {} },
-            .{ "pkgetc", {} },
-            .{ "var", {} },
-            .{ "opt_prefix", {} },
-            .{ "HOMEBREW_PREFIX", {} },
-            .{ "HOMEBREW_CELLAR", {} },
-        });
-
-        if (bindings.has(name)) {
-            return self.getPathBinding(name);
+        if (binding_map.get(name)) |tag| {
+            return Value{ .pathname = self.paths.get(tag) };
         }
-
-        return null;
-    }
-
-    fn getPathBinding(self: *const ExecContext, name: []const u8) ?Value {
-        if (std.mem.eql(u8, name, "prefix")) return Value{ .pathname = self.cellar_path };
-        if (std.mem.eql(u8, name, "bin")) return Value{ .pathname = self.bin };
-        if (std.mem.eql(u8, name, "sbin")) return Value{ .pathname = self.sbin };
-        if (std.mem.eql(u8, name, "lib")) return Value{ .pathname = self.lib };
-        if (std.mem.eql(u8, name, "libexec")) return Value{ .pathname = self.libexec };
-        if (std.mem.eql(u8, name, "include")) return Value{ .pathname = self.include_dir };
-        if (std.mem.eql(u8, name, "share")) return Value{ .pathname = self.share };
-        if (std.mem.eql(u8, name, "pkgshare")) return Value{ .pathname = self.pkgshare };
-        if (std.mem.eql(u8, name, "pkgetc")) return Value{ .pathname = self.pkgetc };
-        if (std.mem.eql(u8, name, "etc")) return Value{ .pathname = self.etc };
-        if (std.mem.eql(u8, name, "var")) return Value{ .pathname = self.var_dir };
-        if (std.mem.eql(u8, name, "opt_prefix")) return Value{ .pathname = self.opt_prefix };
-        if (std.mem.eql(u8, name, "HOMEBREW_PREFIX")) return Value{ .pathname = self.homebrew_prefix };
-        if (std.mem.eql(u8, name, "HOMEBREW_CELLAR")) return Value{ .pathname = self.homebrew_cellar };
         return null;
     }
 
     pub fn pushScope(self: *ExecContext) void {
-        self.scopes.append(self.allocator, Scope.init(self.allocator)) catch {};
+        self.scopes.append(self.arena, Scope.init(self.arena)) catch {};
     }
 
     pub fn pushMethodScope(self: *ExecContext) void {
-        self.scopes.append(self.allocator, .{
-            .locals = std.StringHashMap(Value).init(self.allocator),
+        self.scopes.append(self.arena, .{
+            .locals = std.StringHashMap(Value).init(self.arena),
             .is_method_frame = true,
         }) catch {};
     }
 
     pub fn popScope(self: *ExecContext) void {
-        if (self.scopes.items.len > 0) {
-            var scope = self.scopes.pop() orelse return;
-            scope.deinit();
-        }
+        // Arena owns the scope's locals — dropping the stack slot is enough.
+        _ = self.scopes.pop();
     }
 
     pub fn setLocal(self: *ExecContext, name: []const u8, value: Value) void {
@@ -228,12 +211,13 @@ pub const ExecContext = struct {
 
 pub const Interpreter = struct {
     ctx: *ExecContext,
+    /// Mirror of `ctx.arena` — held for brevity in hot eval paths.
     allocator: std.mem.Allocator,
 
     pub fn init(ctx: *ExecContext) Interpreter {
         return .{
             .ctx = ctx,
-            .allocator = ctx.allocator,
+            .allocator = ctx.arena,
         };
     }
 
