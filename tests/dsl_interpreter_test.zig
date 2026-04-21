@@ -1785,6 +1785,53 @@ test "interpreter: return from inside .each exits the enclosing def" {
     // doesn't explode when `return` crosses a block boundary.
 }
 
+// Pin non-fatal error classification inside `.each`: a per-element
+// `SystemCommandFailed` must not abort the iteration — subsequent items
+// still run and the script completes cleanly.
+test "interpreter: .each past a failed `system` keeps iterating" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\share.mkpath
+        \\["a.txt", "b.txt"].each do |name|
+        \\  system "false"
+        \\  (share/name).write "x"
+        \\end
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+
+    inline for (.{ "a.txt", "b.txt" }) |name| {
+        const p = try std.fs.path.join(
+            testing.allocator,
+            &.{ prefix, "Cellar", "testpkg", "1.0", "share", name },
+        );
+        defer testing.allocator.free(p);
+        try malt.fs_compat.cwd().access(p, .{});
+    }
+}
+
+// Pin fatal error propagation inside `.each`: `raise` inside the block
+// must halt the post_install, not just the iteration.
+test "interpreter: raise inside .each aborts the post_install" {
+    var arena = testArena();
+    defer arena.deinit();
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src =
+        \\["a", "b", "c"].each do |x|
+        \\  raise "stop"
+        \\end
+        \\ohai "unreachable"
+    ;
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expectEqual(@as(?dsl.DslError, dsl.DslError.PostInstallFailed), err);
+}
+
 // ---------------------------------------------------------------------------
 // Block-pass (&:symbol) — the llvm@21 regression.
 //
