@@ -684,3 +684,120 @@ test "collectFormulaJobs leaves plain-version formulas unchanged" {
     try testing.expectEqualStrings("1.0", jobs.items[0].version_str);
     try testing.expect(std.mem.indexOf(u8, jobs.items[0].version_str, "_") == null);
 }
+
+/// Three-dep fixture with unique per-dep sha so the dep-dedup path inside
+/// `collectFormulaJobs` cannot collapse the dependencies into a single job.
+fn formulaJsonWithThreeDeps(
+    comptime name: []const u8,
+    comptime a: []const u8,
+    comptime b: []const u8,
+    comptime c: []const u8,
+) []const u8 {
+    return "{\"name\":\"" ++ name ++ "\"," ++
+        "\"full_name\":\"" ++ name ++ "\"," ++
+        "\"tap\":\"homebrew/core\"," ++
+        "\"desc\":\"\",\"homepage\":\"\",\"revision\":0," ++
+        "\"keg_only\":false,\"post_install_defined\":false," ++
+        "\"versions\":{\"stable\":\"1.0\"}," ++
+        "\"dependencies\":[\"" ++ a ++ "\",\"" ++ b ++ "\",\"" ++ c ++ "\"]," ++
+        "\"oldnames\":[]," ++
+        "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/" ++ name ++ "/blobs\"," ++
+        "\"files\":{" ++
+        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"r0\"}," ++
+        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"r0\"}," ++
+        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"r0\"}," ++
+        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-arm\",\"sha256\":\"r0\"}," ++
+        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"r1\"}," ++
+        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"r1\"}," ++
+        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"r1\"}," ++
+        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/root-x86\",\"sha256\":\"r1\"}" ++
+        "}}}}";
+}
+
+/// Dep fixture with a caller-supplied unique sha prefix so each dep's
+/// bottle is distinguishable from its siblings.
+fn bottleJsonUniqueSha(comptime name: []const u8, comptime tag: []const u8) []const u8 {
+    return "{\"name\":\"" ++ name ++ "\"," ++
+        "\"full_name\":\"" ++ name ++ "\"," ++
+        "\"tap\":\"homebrew/core\"," ++
+        "\"desc\":\"\",\"homepage\":\"\",\"revision\":0," ++
+        "\"keg_only\":false,\"post_install_defined\":false," ++
+        "\"versions\":{\"stable\":\"1.0\"}," ++
+        "\"dependencies\":[],\"oldnames\":[]," ++
+        "\"bottle\":{\"stable\":{\"root_url\":\"https://ghcr.io/v2/homebrew/core/" ++ name ++ "/blobs\"," ++
+        "\"files\":{" ++
+        "\"arm64_sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ tag ++ "a\"}," ++
+        "\"arm64_sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ tag ++ "a\"}," ++
+        "\"arm64_ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ tag ++ "a\"}," ++
+        "\"arm64_monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-arm\",\"sha256\":\"" ++ tag ++ "a\"}," ++
+        "\"sequoia\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ tag ++ "x\"}," ++
+        "\"sonoma\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ tag ++ "x\"}," ++
+        "\"ventura\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ tag ++ "x\"}," ++
+        "\"monterey\":{\"cellar\":\":any\",\"url\":\"https://ghcr.io/v2/" ++ name ++ "-x86\",\"sha256\":\"" ++ tag ++ "x\"}" ++
+        "}}}}";
+}
+
+test "collectFormulaJobs leaves no parsed-tree leaks under testing.allocator (>=3 deps)" {
+    // BUG-009 regression guard: every per-dep std.json.Parsed (and the
+    // root's) used to stay pinned for the whole install run. Here we
+    // run the full 3-dep resolve path under testing.allocator and
+    // free only the strings the caller knows it owns — anything else
+    // that survives is a parsed-tree leak and trips the allocator.
+    const alloc = testing.allocator;
+
+    var tdb = try TempDb.init("parsed_tree_leak");
+    defer tdb.deinit();
+
+    const cache_dir = "/tmp/malt_install_test_parsed_tree_leak_cache";
+    malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
+    malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
+
+    try seedCache(cache_dir, "dep_a", bottleJsonUniqueSha("dep_a", "aa"));
+    try seedCache(cache_dir, "dep_b", bottleJsonUniqueSha("dep_b", "bb"));
+    try seedCache(cache_dir, "dep_c", bottleJsonUniqueSha("dep_c", "cc"));
+
+    const root_json = formulaJsonWithThreeDeps("root", "dep_a", "dep_b", "dep_c");
+    try seedCache(cache_dir, "root", root_json);
+
+    var http_pool = try malt.client.HttpClientPool.init(alloc, 2);
+    defer http_pool.deinit();
+    var real_http = malt.client.HttpClient.init(alloc);
+    defer real_http.deinit();
+    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+
+    var store_inst: malt.store.Store = undefined;
+    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    defer {
+        // Caller-owned job strings: name/version/sha/url/cellar are duped
+        // into `alloc` so collectFormulaJobs can drop the parsed tree.
+        // `formula_json` is duped only for dep jobs; the main job borrows
+        // the caller-supplied input literal.
+        for (jobs.items) |job| {
+            alloc.free(job.name);
+            alloc.free(job.version_str);
+            alloc.free(job.sha256);
+            alloc.free(job.bottle_url);
+            alloc.free(job.cellar_type);
+            if (job.is_dep) alloc.free(job.formula_json);
+        }
+        jobs.deinit(alloc);
+    }
+
+    try install.collectFormulaJobs(
+        alloc,
+        "root",
+        root_json,
+        &api,
+        &http_pool,
+        &tdb.db,
+        &store_inst,
+        false,
+        &jobs,
+    );
+
+    // Three deps plus the root must all be queued (no dedup: every sha unique).
+    try testing.expectEqual(@as(usize, 4), jobs.items.len);
+    try testing.expectEqualStrings("root", jobs.items[3].name);
+    try testing.expect(!jobs.items[3].is_dep);
+}
