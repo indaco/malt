@@ -983,6 +983,52 @@ const FetchFormulaCtx = struct {
     }
 };
 
+/// Job-owned strings duped out of a parsed formula so its
+/// `std.json.Parsed` arena can be released as soon as
+/// `collectFormulaJobs` is done reading it. Lifetime matches the
+/// `DownloadJob` — freed by the install flow after the job completes.
+const JobStrings = struct {
+    name: []u8,
+    version_str: []u8,
+    sha256: []u8,
+    bottle_url: []u8,
+    cellar_type: []u8,
+
+    fn freeAll(self: JobStrings, a: std.mem.Allocator) void {
+        a.free(self.name);
+        a.free(self.version_str);
+        a.free(self.sha256);
+        a.free(self.bottle_url);
+        a.free(self.cellar_type);
+    }
+};
+
+/// Dupe the five borrowed slices that a `DownloadJob` needs from a
+/// parsed formula, so the parsed tree can be deinited immediately.
+/// Rolls back on partial failure via errdefer chain.
+fn dupeJobStrings(
+    a: std.mem.Allocator,
+    f: *const formula_mod.Formula,
+    b: formula_mod.BottleFile,
+) !JobStrings {
+    const name = try a.dupe(u8, f.name);
+    errdefer a.free(name);
+    const version_str = try a.dupe(u8, f.pkg_version);
+    errdefer a.free(version_str);
+    const sha256 = try a.dupe(u8, b.sha256);
+    errdefer a.free(sha256);
+    const bottle_url = try a.dupe(u8, b.url);
+    errdefer a.free(bottle_url);
+    const cellar_type = try a.dupe(u8, b.cellar);
+    return .{
+        .name = name,
+        .version_str = version_str,
+        .sha256 = sha256,
+        .bottle_url = bottle_url,
+        .cellar_type = cellar_type,
+    };
+}
+
 /// Collect download jobs for a formula and all its dependencies.
 /// Appends to the shared jobs list for parallel download.
 ///
@@ -1001,7 +1047,17 @@ pub fn collectFormulaJobs(
     jobs: *std.ArrayList(DownloadJob),
 ) !void {
     _ = store;
-    var formula = formula_mod.parseFormula(allocator, formula_json) catch |e| {
+
+    // Single arena for every parsed formula — root + each dep — so the
+    // std.json.Parsed trees and all the supplementary allocations made
+    // by `parseFormula` (dependencies/oldnames/service.run/pkg_version)
+    // are released at function exit. BUG-009 used to pin every parsed
+    // tree for the whole install run (~500 KB on ffmpeg).
+    var parse_arena = std.heap.ArenaAllocator.init(allocator);
+    defer parse_arena.deinit();
+    const parse_alloc = parse_arena.allocator();
+
+    var formula = formula_mod.parseFormula(parse_alloc, formula_json) catch |e| {
         output.err("Failed to parse formula JSON for '{s}': {s}", .{ pkg_name, @errorName(e) });
         return InstallError.FormulaNotFound;
     };
@@ -1009,12 +1065,22 @@ pub fn collectFormulaJobs(
     // Check if already installed
     if (!force and isInstalled(db, formula.name)) {
         output.info("{s} is already installed", .{formula.name});
-        formula.deinit();
         return;
     }
 
-    // Resolve dependencies
+    // Resolve dependencies. `deps_mod.resolve` forwards the allocator
+    // into `api.fetchFormula`, whose bytes come from `api.allocator`
+    // (the same caller allocator) — so the allocator here must match
+    // `allocator`, not `parse_arena.allocator()`, otherwise free on
+    // the API-allocated bytes is a no-op on the arena.
     const deps = deps_mod.resolve(allocator, formula.name, api, db) catch &.{};
+    defer {
+        for (deps) |d| allocator.free(d.name);
+        // `catch &.{}` yields a static empty slice with no backing
+        // allocation — freeing it would be "invalid free" on safe
+        // allocators.
+        if (deps.len > 0) allocator.free(deps);
+    }
 
     // Keep each already-installed dep's opt/ symlink pointing at its Cellar.
     const heal_prefix = atomic.maltPrefix();
@@ -1083,15 +1149,13 @@ pub fn collectFormulaJobs(
         if (dep.already_installed) continue;
         const dep_json = dep_jsons[i] orelse continue;
 
-        var dep_formula = formula_mod.parseFormula(allocator, dep_json) catch {
-            allocator.free(dep_json);
-            continue;
-        };
-        const dep_bottle = formula_mod.resolveBottle(allocator, &dep_formula) catch {
-            dep_formula.deinit();
-            allocator.free(dep_json);
-            continue;
-        };
+        // dep_json is moved into the job on success; any continue path
+        // before that transfer must free the bytes.
+        var dep_json_consumed = false;
+        defer if (!dep_json_consumed) allocator.free(dep_json);
+
+        var dep_formula = formula_mod.parseFormula(parse_alloc, dep_json) catch continue;
+        const dep_bottle = formula_mod.resolveBottle(parse_alloc, &dep_formula) catch continue;
 
         // Check for duplicate (another top-level pkg may share a dep)
         var is_dup = false;
@@ -1101,51 +1165,58 @@ pub fn collectFormulaJobs(
                 break;
             }
         }
-        if (is_dup) {
-            dep_formula.deinit();
-            allocator.free(dep_json);
-            continue;
-        }
+        if (is_dup) continue;
+
+        // Dupe the five borrowed slices out of the parsed tree into
+        // the caller allocator so parse_arena can release the tree.
+        const strs = dupeJobStrings(allocator, &dep_formula, dep_bottle) catch continue;
 
         jobs.append(allocator, .{
-            .name = dep_formula.name,
+            .name = strs.name,
             // pkg_version folds in the `_N` revision suffix so cellar
             // paths match the bottle's baked-in LC_LOAD_DYLIB entries.
-            .version_str = dep_formula.pkg_version,
-            .sha256 = dep_bottle.sha256,
-            .bottle_url = dep_bottle.url,
+            .version_str = strs.version_str,
+            .sha256 = strs.sha256,
+            .bottle_url = strs.bottle_url,
             .is_dep = true,
             .keg_only = dep_formula.keg_only,
             .post_install_defined = dep_formula.post_install_defined,
             .formula_json = dep_json,
-            .cellar_type = dep_bottle.cellar,
+            .cellar_type = strs.cellar_type,
             .label_width = 0,
             .line_index = 0,
             .multi = null,
             .bar = null,
             .store_sha256 = "",
             .succeeded = false,
-        }) catch continue;
+        }) catch {
+            strs.freeAll(allocator);
+            continue;
+        };
+        dep_json_consumed = true;
     }
 
     // Add main formula
-    const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
+    const bottle = formula_mod.resolveBottle(parse_alloc, &formula) catch {
         output.err("No bottle available for {s} on this platform", .{formula.name});
         return InstallError.NoBottle;
     };
 
+    const main_strs = dupeJobStrings(allocator, &formula, bottle) catch return InstallError.DownloadFailed;
+    errdefer main_strs.freeAll(allocator);
+
     jobs.append(allocator, .{
-        .name = formula.name,
+        .name = main_strs.name,
         // Same reason as the dep branch above: the cellar dir name
         // must carry the `_N` suffix when revision > 0.
-        .version_str = formula.pkg_version,
-        .sha256 = bottle.sha256,
-        .bottle_url = bottle.url,
+        .version_str = main_strs.version_str,
+        .sha256 = main_strs.sha256,
+        .bottle_url = main_strs.bottle_url,
         .is_dep = false,
         .keg_only = formula.keg_only,
         .post_install_defined = formula.post_install_defined,
         .formula_json = formula_json,
-        .cellar_type = bottle.cellar,
+        .cellar_type = main_strs.cellar_type,
         .label_width = 0,
         .line_index = 0,
         .multi = null,
