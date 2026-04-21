@@ -99,7 +99,11 @@ pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) SupervisorError!
     defer stmt.finalize();
 
     var buf: std.ArrayList(ServiceInfo) = .empty;
-    errdefer buf.deinit(allocator);
+    // ArrayList.deinit doesn't reach row sub-allocations; walk them too.
+    errdefer {
+        for (buf.items) |s| freeServiceInfoFields(allocator, s);
+        buf.deinit(allocator);
+    }
 
     while (stmt.step() catch return SupervisorError.DatabaseError) {
         const name_p = stmt.columnText(0) orelse continue;
@@ -107,26 +111,45 @@ pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) SupervisorError!
         const plist_p = stmt.columnText(2) orelse continue;
         const status_p = stmt.columnText(4);
 
-        const info: ServiceInfo = .{
-            .name = allocator.dupe(u8, std.mem.sliceTo(name_p, 0)) catch return SupervisorError.OutOfMemory,
-            .keg_name = allocator.dupe(u8, std.mem.sliceTo(keg_p, 0)) catch return SupervisorError.OutOfMemory,
-            .plist_path = allocator.dupe(u8, std.mem.sliceTo(plist_p, 0)) catch return SupervisorError.OutOfMemory,
+        // Build the row in locals so a later dupe failure can't strand an earlier one.
+        const name_owned = allocator.dupe(u8, std.mem.sliceTo(name_p, 0)) catch
+            return SupervisorError.OutOfMemory;
+        errdefer allocator.free(name_owned);
+        const keg_owned = allocator.dupe(u8, std.mem.sliceTo(keg_p, 0)) catch
+            return SupervisorError.OutOfMemory;
+        errdefer allocator.free(keg_owned);
+        const plist_owned = allocator.dupe(u8, std.mem.sliceTo(plist_p, 0)) catch
+            return SupervisorError.OutOfMemory;
+        errdefer allocator.free(plist_owned);
+        const status_owned = if (status_p) |p|
+            allocator.dupe(u8, std.mem.sliceTo(p, 0)) catch
+                return SupervisorError.OutOfMemory
+        else
+            allocator.dupe(u8, "unknown") catch
+                return SupervisorError.OutOfMemory;
+        errdefer allocator.free(status_owned);
+
+        buf.append(allocator, .{
+            .name = name_owned,
+            .keg_name = keg_owned,
+            .plist_path = plist_owned,
             .auto_start = stmt.columnBool(3),
-            .last_status = if (status_p) |p| allocator.dupe(u8, std.mem.sliceTo(p, 0)) catch return SupervisorError.OutOfMemory else allocator.dupe(u8, "unknown") catch return SupervisorError.OutOfMemory,
-        };
-        buf.append(allocator, info) catch return SupervisorError.OutOfMemory;
+            .last_status = status_owned,
+        }) catch return SupervisorError.OutOfMemory;
     }
 
     return buf.toOwnedSlice(allocator) catch return SupervisorError.OutOfMemory;
 }
 
+fn freeServiceInfoFields(allocator: std.mem.Allocator, info: ServiceInfo) void {
+    allocator.free(info.name);
+    allocator.free(info.keg_name);
+    allocator.free(info.plist_path);
+    allocator.free(info.last_status);
+}
+
 pub fn freeServiceInfos(allocator: std.mem.Allocator, services: []ServiceInfo) void {
-    for (services) |s| {
-        allocator.free(s.name);
-        allocator.free(s.keg_name);
-        allocator.free(s.plist_path);
-        allocator.free(s.last_status);
-    }
+    for (services) |s| freeServiceInfoFields(allocator, s);
     allocator.free(services);
 }
 
