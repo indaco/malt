@@ -242,9 +242,9 @@ pub const CaskInstaller = struct {
         self.verifySha256(cache_path, cask.sha256) catch
             return CaskError.Sha256Mismatch;
 
-        // Determine target: /Applications or ~/Applications
+        // Determine target: prefix-aware sandbox / /Applications / ~/Applications.
         var app_dir_buf: [512]u8 = undefined;
-        const app_dir = applicationsDir(&app_dir_buf);
+        const app_dir = applicationsDir(self.prefix, &app_dir_buf);
 
         // Install based on type
         const app_path = switch (artifact_type) {
@@ -573,29 +573,78 @@ fn isAppRunning(app_path: []const u8) bool {
     };
 }
 
-/// Determine the applications directory.
-/// Uses /Applications if writable, otherwise ~/Applications formatted into `out`.
-/// The caller owns `out`; the returned slice is either a compile-time literal
-/// (no aliasing) or a slice of `out` (lives as long as `out`).
-fn applicationsDir(out: []u8) []const u8 {
-    // Check if /Applications is writable
-    const test_path = "/Applications/.malt_write_test";
-    const file = fs_compat.createFileAbsolute(test_path, .{}) catch {
-        // Fallback to ~/Applications
-        if (fs_compat.getenv("HOME")) |home| {
-            const home_slice = std.mem.sliceTo(home, 0);
-            const home_apps = std.fmt.bufPrint(out, "{s}/Applications", .{home_slice}) catch return "/Applications";
-            fs_compat.makeDirAbsolute(home_apps) catch |e| switch (e) {
-                error.PathAlreadyExists => {},
-                else => return "/Applications",
-            };
-            return home_apps;
+/// True iff `prefix` is one of the well-known default install roots.
+/// These keep the legacy system `/Applications` behavior; anything else
+/// is treated as a sandbox and routes casks under the prefix.
+pub fn isDefaultPrefix(prefix: []const u8) bool {
+    const trimmed = if (prefix.len > 0 and prefix[prefix.len - 1] == '/')
+        prefix[0 .. prefix.len - 1]
+    else
+        prefix;
+    return std.mem.eql(u8, trimmed, "/opt/malt") or
+        std.mem.eql(u8, trimmed, "/opt/homebrew");
+}
+
+/// Pure resolver for "where do cask `.app` bundles go?" — split from
+/// the FS-touching wrapper so the policy is unit-testable. Priority:
+///   1. `MALT_APPDIR` env override (caller passes the value).
+///   2. Non-default prefix → `<prefix>/Applications` (sandboxed).
+///   3. Default prefix + writable system `/Applications` → `/Applications`.
+///   4. Default prefix + per-user `HOME` → `<HOME>/Applications`.
+///   5. Last resort → `/Applications` so a misconfigured host fails loudly.
+pub fn resolveAppDir(
+    prefix: []const u8,
+    env_appdir: ?[]const u8,
+    env_home: ?[]const u8,
+    system_writable: bool,
+    out: []u8,
+) []const u8 {
+    if (env_appdir) |dir| {
+        const slice = std.mem.sliceTo(dir, 0);
+        if (slice.len > 0 and slice.len <= out.len) {
+            @memcpy(out[0..slice.len], slice);
+            return out[0..slice.len];
         }
-        return "/Applications";
-    };
-    file.close();
-    fs_compat.cwd().deleteFile(test_path) catch {};
+    }
+    if (!isDefaultPrefix(prefix)) {
+        return std.fmt.bufPrint(out, "{s}/Applications", .{prefix}) catch "/Applications";
+    }
+    if (system_writable) return "/Applications";
+    if (env_home) |home| {
+        const home_slice = std.mem.sliceTo(home, 0);
+        return std.fmt.bufPrint(out, "{s}/Applications", .{home_slice}) catch "/Applications";
+    }
     return "/Applications";
+}
+
+/// Determine the applications directory honouring `MALT_PREFIX`. Wraps
+/// `resolveAppDir` with the env probes and an mkdir on the chosen path
+/// so `ditto`/`unzip` can write there immediately. The caller owns `out`;
+/// the returned slice is either a compile-time literal or a slice of `out`.
+fn applicationsDir(prefix: []const u8, out: []u8) []const u8 {
+    const env_appdir = fs_compat.getenv("MALT_APPDIR");
+    const env_home = fs_compat.getenv("HOME");
+
+    const test_path = "/Applications/.malt_write_test";
+    const probe = fs_compat.createFileAbsolute(test_path, .{});
+    const system_writable = if (probe) |f| blk: {
+        f.close();
+        fs_compat.cwd().deleteFile(test_path) catch {};
+        break :blk true;
+    } else |_| false;
+
+    const chosen = resolveAppDir(prefix, env_appdir, env_home, system_writable, out);
+
+    // mkdir the chosen path unless it's the system /Applications (which
+    // is a literal, not a slice of `out`, and either pre-exists or we
+    // already proved it unwritable above).
+    if (chosen.ptr != "/Applications".ptr) {
+        fs_compat.makeDirAbsolute(chosen) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return "/Applications",
+        };
+    }
+    return chosen;
 }
 
 /// Installed cask info with owned copies of strings.
