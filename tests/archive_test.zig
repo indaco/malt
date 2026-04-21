@@ -243,3 +243,121 @@ test "extractZip rejects a missing archive" {
 
     try testing.expectError(error.ExtractionFailed, archive.extractZip(base ++ "/nope.zip", base));
 }
+
+// tar-slip: pre-scan must reject the whole archive before any entry
+// lands. `-s` rewrites bad.txt's header name to `../escape.txt` so the
+// tarball claims a path outside dest. good.txt comes first in tar
+// order — if the extractor streamed entries it would write good.txt
+// before hitting the bad one, which the test forbids.
+test "extractTarGz rejects tar-slip and leaves dest untouched" {
+    const base = "/tmp/malt_archive_tarslip_targz";
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    try malt.fs_compat.makeDirAbsolute(base);
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    const dest = base ++ "/dest";
+    try malt.fs_compat.makeDirAbsolute(dest);
+
+    const src_dir = base ++ "/src";
+    try malt.fs_compat.makeDirAbsolute(src_dir);
+    {
+        const f = try malt.fs_compat.createFileAbsolute(src_dir ++ "/good.txt", .{});
+        try f.writeAll("safe");
+        f.close();
+    }
+    {
+        const f = try malt.fs_compat.createFileAbsolute(src_dir ++ "/bad.txt", .{});
+        try f.writeAll("hostile");
+        f.close();
+    }
+
+    const archive_path = base ++ "/hostile.tar.gz";
+    try runCmd(&.{ "tar", "czf", archive_path, "-C", src_dir, "-s", "|^bad.txt|../escape.txt|", "good.txt", "bad.txt" });
+
+    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(archive_path, dest));
+    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(dest ++ "/good.txt", .{}));
+    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(base ++ "/escape.txt", .{}));
+}
+
+// tar-slip for zip: macOS `zip` normalises `..` out at creation, so
+// we lean on python3's zipfile to emit the entry name verbatim.
+test "extractZip rejects tar-slip and leaves dest untouched" {
+    const base = "/tmp/malt_archive_tarslip_zip";
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    try malt.fs_compat.makeDirAbsolute(base);
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    const dest = base ++ "/dest";
+    try malt.fs_compat.makeDirAbsolute(dest);
+
+    const archive_path = base ++ "/hostile.zip";
+    const script = "import zipfile\n" ++
+        "with zipfile.ZipFile('" ++ archive_path ++ "', 'w') as z:\n" ++
+        "    z.writestr('good.txt', b'safe')\n" ++
+        "    z.writestr('../escape.txt', b'hostile')\n";
+    try runCmd(&.{ "python3", "-c", script });
+
+    try testing.expectError(error.ExtractionFailed, archive.extractZip(archive_path, dest));
+    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(dest ++ "/good.txt", .{}));
+    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(base ++ "/escape.txt", .{}));
+}
+
+test "extractTarXzFile rejects tar-slip and leaves dest untouched" {
+    const base = "/tmp/malt_archive_tarslip_tarxz";
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    try malt.fs_compat.makeDirAbsolute(base);
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    const dest = base ++ "/dest";
+    try malt.fs_compat.makeDirAbsolute(dest);
+
+    const src_dir = base ++ "/src";
+    try malt.fs_compat.makeDirAbsolute(src_dir);
+    {
+        const f = try malt.fs_compat.createFileAbsolute(src_dir ++ "/good.txt", .{});
+        try f.writeAll("safe");
+        f.close();
+    }
+    {
+        const f = try malt.fs_compat.createFileAbsolute(src_dir ++ "/bad.txt", .{});
+        try f.writeAll("hostile");
+        f.close();
+    }
+
+    const archive_path = base ++ "/hostile.tar.xz";
+    try runCmd(&.{ "tar", "cJf", archive_path, "-C", src_dir, "-s", "|^bad.txt|../escape.txt|", "good.txt", "bad.txt" });
+
+    try testing.expectError(error.ExtractionFailed, archive.extractTarXzFile(archive_path, dest));
+    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(dest ++ "/good.txt", .{}));
+    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(base ++ "/escape.txt", .{}));
+}
+
+test "extractTarGz rejects a symlink entry whose target escapes dest" {
+    const base = "/tmp/malt_archive_tarslip_targz_symlink";
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    try malt.fs_compat.makeDirAbsolute(base);
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    const dest = base ++ "/dest";
+    try malt.fs_compat.makeDirAbsolute(dest);
+
+    const src_dir = base ++ "/src";
+    try malt.fs_compat.makeDirAbsolute(src_dir);
+    try malt.fs_compat.symLinkAbsolute("/etc/passwd", src_dir ++ "/badlink", .{});
+
+    const archive_path = base ++ "/sym.tar.gz";
+    try runCmd(&.{ "tar", "czf", archive_path, "-C", src_dir, "badlink" });
+
+    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(archive_path, dest));
+    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(dest ++ "/badlink", .{}));
+}
+
+test "isSafeEntryPath rejects escape paths" {
+    try testing.expect(archive.isSafeEntryPath("a/b/c"));
+    try testing.expect(archive.isSafeEntryPath("./ok"));
+    try testing.expect(archive.isSafeEntryPath("a/./b"));
+    try testing.expect(archive.isSafeEntryPath("deep/dir/"));
+    try testing.expect(!archive.isSafeEntryPath(""));
+    try testing.expect(!archive.isSafeEntryPath("/abs/path"));
+    try testing.expect(!archive.isSafeEntryPath("../escape"));
+    try testing.expect(!archive.isSafeEntryPath("a/../b"));
+    try testing.expect(!archive.isSafeEntryPath("a/b/.."));
+    try testing.expect(!archive.isSafeEntryPath("..\x00"));
+    try testing.expect(!archive.isSafeEntryPath("ok\x00evil"));
+}
