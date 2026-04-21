@@ -487,3 +487,58 @@ test "verifyFileSha256 accepts only the exact-byte payload (collision check)" {
     // the old bug could have broken.
     try testing.expectError(error.Sha256Mismatch, cask.verifyFileSha256(bp, &hex_a));
 }
+
+// --- T-006b: applicationsDir is prefix-aware ---
+
+test "isDefaultPrefix: matches /opt/malt and /opt/homebrew exactly" {
+    try testing.expect(cask.isDefaultPrefix("/opt/malt"));
+    try testing.expect(cask.isDefaultPrefix("/opt/homebrew"));
+}
+
+test "isDefaultPrefix: tolerates trailing slash" {
+    try testing.expect(cask.isDefaultPrefix("/opt/malt/"));
+    try testing.expect(cask.isDefaultPrefix("/opt/homebrew/"));
+}
+
+test "isDefaultPrefix: rejects sandboxed and unrelated prefixes" {
+    try testing.expect(!cask.isDefaultPrefix("/tmp/mt.abc"));
+    try testing.expect(!cask.isDefaultPrefix("/usr/local"));
+    try testing.expect(!cask.isDefaultPrefix("/opt/maltx"));
+    try testing.expect(!cask.isDefaultPrefix(""));
+}
+
+test "resolveAppDir: MALT_APPDIR env override wins regardless of prefix" {
+    var buf: [128]u8 = undefined;
+    const got = cask.resolveAppDir("/tmp/mt.abc", "/custom/Apps", "/Users/me", true, &buf);
+    try testing.expectEqualStrings("/custom/Apps", got);
+
+    const got2 = cask.resolveAppDir("/opt/homebrew", "/elsewhere", "/Users/me", true, &buf);
+    try testing.expectEqualStrings("/elsewhere", got2);
+}
+
+test "resolveAppDir: non-default prefix routes to <prefix>/Applications" {
+    var buf: [128]u8 = undefined;
+    const got = cask.resolveAppDir("/tmp/mt.abc", null, "/Users/me", true, &buf);
+    try testing.expectEqualStrings("/tmp/mt.abc/Applications", got);
+}
+
+test "resolveAppDir: default prefix + writable system → /Applications" {
+    var buf: [128]u8 = undefined;
+    const got = cask.resolveAppDir("/opt/malt", null, "/Users/me", true, &buf);
+    try testing.expectEqualStrings("/Applications", got);
+}
+
+test "resolveAppDir: default prefix + not writable → ~/Applications" {
+    var buf: [128]u8 = undefined;
+    const got = cask.resolveAppDir("/opt/homebrew", null, "/Users/me", false, &buf);
+    try testing.expectEqualStrings("/Users/me/Applications", got);
+}
+
+test "resolveAppDir: default prefix + not writable + no HOME → /Applications fallback" {
+    // Last-resort fallback: if there's nowhere safer to put it, surface
+    // the system path so the install fails loudly rather than silently
+    // landing somewhere unexpected.
+    var buf: [128]u8 = undefined;
+    const got = cask.resolveAppDir("/opt/malt", null, null, false, &buf);
+    try testing.expectEqualStrings("/Applications", got);
+}
