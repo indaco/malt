@@ -80,7 +80,11 @@ pub fn getCommitSha(
 
 pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
     var taps: std.ArrayList(TapInfo) = .empty;
-    errdefer taps.deinit(allocator);
+    // ArrayList.deinit doesn't reach row sub-allocations; walk them too.
+    errdefer {
+        for (taps.items) |t| freeTapInfoFields(allocator, t);
+        taps.deinit(allocator);
+    }
 
     var stmt = try db.prepare("SELECT name, url, commit_sha FROM taps;");
     defer stmt.finalize();
@@ -88,13 +92,19 @@ pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
     while (try stmt.step()) {
         const n = stmt.columnText(0) orelse continue;
         const u = stmt.columnText(1) orelse continue;
+
+        // Build the row in locals so a later dupe failure can't strand an earlier one.
         const name_owned = try allocator.dupe(u8, std.mem.sliceTo(n, 0));
+        errdefer allocator.free(name_owned);
         const url_owned = try allocator.dupe(u8, std.mem.sliceTo(u, 0));
-        const sha_owned = if (stmt.columnText(2)) |s| blk: {
+        errdefer allocator.free(url_owned);
+        const sha_owned: ?[]const u8 = if (stmt.columnText(2)) |s| blk: {
             const trimmed = std.mem.sliceTo(s, 0);
             if (trimmed.len == 0) break :blk null;
             break :blk try allocator.dupe(u8, trimmed);
         } else null;
+        errdefer if (sha_owned) |sha| allocator.free(sha);
+
         try taps.append(allocator, .{
             .name = name_owned,
             .url = url_owned,
@@ -103,6 +113,12 @@ pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
     }
 
     return taps.toOwnedSlice(allocator);
+}
+
+fn freeTapInfoFields(allocator: std.mem.Allocator, info: TapInfo) void {
+    allocator.free(info.name);
+    allocator.free(info.url);
+    if (info.commit_sha) |sha| allocator.free(sha);
 }
 
 /// Resolve a tap formula — builds the full tap formula name.

@@ -208,6 +208,30 @@ test "remove deletes a tap" {
     try testing.expectEqualStrings("c/d", taps[0].name);
 }
 
+fn listAndFree(alloc: std.mem.Allocator, db: *sqlite.Database) !void {
+    const taps = try tap.list(alloc, db);
+    for (taps) |t| {
+        alloc.free(t.name);
+        alloc.free(t.url);
+        if (t.commit_sha) |sha| alloc.free(sha);
+    }
+    alloc.free(taps);
+}
+
+test "list: partial-dupe failure on any allocation leaves zero leaks" {
+    // BUG-011 regression guard: per-row dupes used to leak when a later
+    // dupe or append failed, and completed rows were never walked.
+    // Mix a pinned row with an unpinned one to exercise the optional-SHA branch.
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try tap.add(&db, "alpha/one", "https://github.com/alpha/one", valid_sha);
+    try tap.add(&db, "beta/two", "https://github.com/beta/two", null);
+
+    try testing.checkAllAllocationFailures(testing.allocator, listAndFree, .{&db});
+}
+
 test "resolveFormula joins user/repo/formula with slashes" {
     const s = try tap.resolveFormula(testing.allocator, "u", "r", "f");
     defer testing.allocator.free(s);
