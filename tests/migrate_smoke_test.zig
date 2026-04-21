@@ -898,3 +898,186 @@ test "already-installed stderr pins the 'Migration complete' + 'Skipped (install
     try testing.expect(containsLine(buf.items, "Migrated:              0"));
     try testing.expect(containsLine(buf.items, "Skipped (installed):   1"));
 }
+
+// ── Parsed-formula lifecycle pinning ────────────────────────────────────
+//
+// Drive `migrateKeg` through the `.skipped_no_bottle` branch (formula JSON
+// has no bottle for this platform). Pre-T-008 this branch manually calls
+// `formula.deinit()` + `allocator.free(formula_json)`; after collapse the
+// defer/errdefer pair must free exactly once on this path too — a double
+// free of `_parsed` would crash the sqlite/arena owner in the next run.
+
+test "skipped_no_bottle: cached formula with no platform bottle is categorized correctly" {
+    resetOutput();
+
+    const brew = try scratchDir("brew_nobottle");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    // ≤13-byte MALT_PREFIX — same Mach-O budget rationale as sister tests.
+    const mt_z: [:0]const u8 = "/tmp/mt_nb";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    try seedFakeBrew(brew, &.{"noplatform"});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Seed a formula-cache hit with an intentionally minimal payload — no
+    // bottle_files, no dependencies, no oldnames. `resolveBottle` returns
+    // NoBottleAvailable immediately and the branch's cleanup path runs.
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try malt.fs_compat.cwd().makePath(cache_api);
+    const cache_path = try std.fmt.allocPrint(testing.allocator, "{s}/formula_noplatform.json", .{cache_api});
+    defer testing.allocator.free(cache_path);
+    const cache_file = try malt.fs_compat.cwd().createFile(cache_path, .{});
+    defer cache_file.close();
+    try cache_file.writeAll(
+        \\{"name":"noplatform","full_name":"noplatform","tap":"homebrew/core","versions":{"stable":"1.0"}}
+    );
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqual(@as(usize, 1), root.get("skipped_no_bottle").?.array.items.len);
+    try testing.expectEqualStrings("noplatform", root.get("skipped_no_bottle").?.array.items[0].string);
+    try testing.expectEqual(@as(usize, 0), root.get("migrated").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), root.get("failed").?.array.items.len);
+    try testing.expectEqual(@as(i64, 1), root.get("counts").?.object.get("skipped_no_bottle").?.integer);
+}
+
+// ── Iterator-error surface: scanCellarKegs logs + preserves prior ──────
+//
+// `iter.next() catch null` silently collapsed the scan on any permission,
+// I/O, or stale-handle error — hiding every later keg behind a single bad
+// entry. A mock iterator that yields two kegs then `error.AccessDenied`
+// pins the replacement contract: prior entries survive, the failure is
+// logged, and the loop terminates without propagating the error.
+
+const MockDirEntry = struct {
+    name: []const u8,
+    kind: std.Io.File.Kind,
+};
+
+const MockIter = struct {
+    entries: []const MockDirEntry,
+    idx: usize = 0,
+    fail_after: ?usize = null,
+
+    pub fn next(self: *MockIter) !?MockDirEntry {
+        if (self.fail_after) |n| if (self.idx == n) {
+            self.idx += 1;
+            return error.AccessDenied;
+        };
+        if (self.idx >= self.entries.len) return null;
+        defer self.idx += 1;
+        return self.entries[self.idx];
+    }
+};
+
+test "scanCellarKegs warns and preserves prior names when iterator errors" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var names: std.ArrayList([]const u8) = .empty;
+    var mock = MockIter{
+        .entries = &.{
+            .{ .name = "tree", .kind = .directory },
+            .{ .name = "wget", .kind = .directory },
+        },
+        .fail_after = 2,
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    try migrate.scanCellarKegs(arena.allocator(), &mock, &names);
+
+    try testing.expectEqual(@as(usize, 2), names.items.len);
+    try testing.expectEqualStrings("tree", names.items[0]);
+    try testing.expectEqualStrings("wget", names.items[1]);
+    try testing.expect(containsLine(buf.items, "Cellar scan error"));
+    try testing.expect(containsLine(buf.items, "AccessDenied"));
+}
+
+test "scanCellarKegs skips non-directory entries and survives fail-first iterator" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var names: std.ArrayList([]const u8) = .empty;
+    var mock = MockIter{
+        .entries = &.{
+            .{ .name = ".DS_Store", .kind = .file },
+            .{ .name = "tree", .kind = .directory },
+        },
+        .fail_after = 0, // error on the very first call
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    try migrate.scanCellarKegs(arena.allocator(), &mock, &names);
+    try testing.expectEqual(@as(usize, 0), names.items.len);
+    try testing.expect(containsLine(buf.items, "Cellar scan error"));
+}
+
+// ── Leak discipline: execute must not leak under testing.allocator ──────
+//
+// Prior to T-008 the cellar scan duped every entry via `allocator.dupe`
+// into a plain `ArrayList([]const u8)` whose `deinit` only freed the
+// backing array — each per-entry dupe leaked. Existing tests masked this
+// by allocating through an arena; dropping the arena here turns the leak
+// into a test failure and guards the arena-scoped scan going forward.
+
+test "dry-run with 4 kegs under testing.allocator shows zero leaks" {
+    resetOutput();
+    const brew = try scratchDir("brew_noleak");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt = try scratchDir("mt_noleak");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(mt) catch {};
+        testing.allocator.free(mt);
+    }
+    try seedFakeBrew(brew, &.{ "tree", "wget", "jq", "ffmpeg" });
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    try migrate.execute(testing.allocator, &.{ "--dry-run", "--quiet" });
+}
