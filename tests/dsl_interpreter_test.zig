@@ -2427,3 +2427,39 @@ test "interpreter: empty Set.new() returns an array that iterates zero times" {
     const err = try runSnippet(&arena, src, prefix);
     try testing.expect(err == null);
 }
+
+test "interpreter: arena-owned path bindings leak-clean under testing.allocator" {
+    // Passes testing.allocator directly (no wrapping arena) to pin the
+    // invariant that every ExecContext path string lives on the arena
+    // created inside executePostInstall. Referencing every binding name
+    // forces resolveBinding through the full dispatch.
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const json = try minimalJson(testing.allocator, "testpkg", "1.0");
+    defer testing.allocator.free(json);
+
+    var f = try formula_mod.parseFormula(testing.allocator, json);
+    defer f.deinit();
+
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+
+    const src =
+        \\_a = prefix
+        \\_a = bin
+        \\_a = sbin
+        \\_a = lib
+        \\_a = libexec
+        \\_a = include
+        \\_a = share
+        \\_a = pkgshare
+        \\_a = etc
+        \\_a = pkgetc
+        \\_a = var
+        \\_a = opt_prefix
+        \\_a = HOMEBREW_PREFIX
+        \\_a = HOMEBREW_CELLAR
+    ;
+    try dsl.executePostInstall(testing.allocator, &f, src, prefix, &flog);
+}
