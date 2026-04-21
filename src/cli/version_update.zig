@@ -148,7 +148,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // --- download tarball + checksums (always needed for SHA verify) ---
     output.info("Downloading {s}...", .{archive_name});
     const tarball_path = try writeDownload(allocator, &http, tarball_url, scratch, archive_name);
+    defer allocator.free(tarball_path);
     const checksums_path = try writeDownload(allocator, &http, checksums_url, scratch, CHECKSUMS_NAME);
+    defer allocator.free(checksums_path);
 
     // --- verification phase ---
     try runVerification(.{
@@ -230,6 +232,7 @@ fn buildScratchDir(buf: []u8) ![]const u8 {
 }
 
 /// Download `url` into `dir/name`, return the absolute path.
+/// Caller owns the returned slice.
 fn writeDownload(
     allocator: std.mem.Allocator,
     http: *client_mod.HttpClient,
@@ -246,14 +249,26 @@ fn writeDownload(
         output.err("Download returned status {d} for {s}", .{ resp.status, url });
         return error.Aborted;
     }
+    return writeResponseBody(allocator, dir, name, resp.body);
+}
 
+/// Write `body` to `dir/name`, return the caller-owned absolute path.
+/// Split from `writeDownload` so the file-write half is reachable under
+/// `testing.allocator` without a live HTTP client (BUG-012 regression guard).
+pub fn writeResponseBody(
+    allocator: std.mem.Allocator,
+    dir: []const u8,
+    name: []const u8,
+    body: []const u8,
+) ![]const u8 {
     const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, name });
+    errdefer allocator.free(path);
     const f = fs_compat.createFileAbsolute(path, .{}) catch {
         output.err("Cannot create {s}", .{path});
         return error.Aborted;
     };
     defer f.close();
-    f.writeAll(resp.body) catch {
+    f.writeAll(body) catch {
         output.err("Failed to write {s}", .{path});
         return error.Aborted;
     };
@@ -286,6 +301,7 @@ fn runVerification(rv: RunVerification) !void {
         return error.Aborted;
     };
     const sigstore_path = try writeDownload(rv.allocator, rv.http, sigstore_url, rv.scratch, SIGSTORE_NAME);
+    defer rv.allocator.free(sigstore_path);
 
     output.info("Verifying cosign signature + SHA256 checksum...", .{});
     verify.verifyAll(rv.allocator, .{
