@@ -102,12 +102,28 @@ test "localErrorIsAnnounced covers errors with specific user-facing messages" {
 }
 
 test "localErrorIsAnnounced returns false for unexpected errors" {
-    // Genuinely surprising errors (e.g. OOM, DB failures without a
-    // prior message) keep the generic summary so the user sees
-    // *something* rather than silent failure.
-    try testing.expect(!install.localErrorIsAnnounced(error.OutOfMemory));
+    // DB/record failures reach the dispatch loop without a dedicated
+    // user-facing line, so the generic summary stays on for them.
     try testing.expect(!install.localErrorIsAnnounced(install.InstallError.RecordFailed));
     try testing.expect(!install.localErrorIsAnnounced(install.InstallError.LockError));
+}
+
+test "localErrorIsAnnounced parameter is narrowed to InstallError" {
+    // A widened `anyerror` makes the inner switch meaningless — any new
+    // InstallError tag compiles without a handler. Pin the narrowing.
+    const info = @typeInfo(@TypeOf(install.localErrorIsAnnounced)).@"fn";
+    try testing.expect(info.params[0].type.? == install.InstallError);
+}
+
+test "localErrorIsAnnounced handles every InstallError tag" {
+    // Comptime sweep: if a future tag is added without a switch arm,
+    // the exhaustive check in `localErrorIsAnnounced` already fails to
+    // compile. This test also fails the whole module to compile, making
+    // the missing coverage visible from `zig build test` output.
+    inline for (@typeInfo(install.InstallError).error_set.?) |err| {
+        const tag = @field(install.InstallError, err.name);
+        _ = install.localErrorIsAnnounced(tag);
+    }
 }
 
 // ─── describeLocalPermissionRisk ─────────────────────────────────────

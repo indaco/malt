@@ -1857,7 +1857,7 @@ fn installLocalFormula(
     prefix: []const u8,
     dry_run: bool,
     force: bool,
-) !void {
+) InstallError!void {
     // Expand a leading `~/` to `$HOME` so the common "drop it in
     // your dotfiles" path works without requiring shell expansion.
     var home_buf: [fs_compat.max_path_bytes]u8 = undefined;
@@ -1971,9 +1971,10 @@ pub fn isAllowedArchiveUrl(url: []const u8) bool {
 /// True when the given error has already surfaced a specific,
 /// user-facing `output.err` line from inside the install helpers, so
 /// the dispatch-loop shouldn't add a generic "Failed to install X: E"
-/// summary on top. Kept next to the helpers it mirrors so adding a new
-/// announced error type can't forget this call site.
-pub fn localErrorIsAnnounced(e: anyerror) bool {
+/// summary on top. Narrowed to `InstallError` so a new tag forces a
+/// compile error on unhandled paths instead of silently falling through
+/// the old `else =>` prong.
+pub fn localErrorIsAnnounced(e: InstallError) bool {
     return switch (e) {
         InstallError.LocalFormulaNotReadable,
         InstallError.InsecureArchiveUrl,
@@ -1981,7 +1982,20 @@ pub fn localErrorIsAnnounced(e: anyerror) bool {
         InstallError.DownloadFailed,
         InstallError.CellarFailed,
         => true,
-        else => false,
+
+        InstallError.NoPackages,
+        InstallError.DatabaseError,
+        InstallError.LockError,
+        InstallError.CaskNotFound,
+        InstallError.NoBottle,
+        InstallError.StoreFailed,
+        InstallError.LinkFailed,
+        InstallError.RecordFailed,
+        InstallError.PartialFailure,
+        InstallError.PrefixTooLong,
+        InstallError.PostInstallUnsupported,
+        InstallError.AmbiguousSystemRubyScope,
+        => false,
     };
 }
 
@@ -2059,7 +2073,7 @@ fn materializeRubyFormula(
     prefix: []const u8,
     dry_run: bool,
     force: bool,
-) !void {
+) InstallError!void {
     output.info("Found {s} {s}", .{ resolved.name, resolved.version });
 
     if (dry_run) {
