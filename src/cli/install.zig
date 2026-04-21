@@ -208,6 +208,42 @@ fn emitPostInstallJson(
     io_mod.stdoutWriteAll(aw.written());
 }
 
+/// Outcome of a single DSL post_install attempt. `.parse_failed` lets
+/// the caller fall through to the system-Ruby fallback instead of
+/// silently dropping the hook.
+pub const DslPostInstallOutcome = enum {
+    handled,
+    parse_failed,
+};
+
+/// Run one DSL post_install attempt against `job`. Owns the formula +
+/// FallbackLog lifetimes so callers don't have to replicate the cleanup
+/// chain across every candidate source (local .rb, GitHub fetch).
+///
+/// Pub so install-pure tests can pin the outcome contract directly.
+pub fn executeDslPostInstall(
+    allocator: std.mem.Allocator,
+    job: *const DownloadJob,
+    post_install_src: []const u8,
+    prefix: []const u8,
+    use_system_ruby_list: []const []const u8,
+) DslPostInstallOutcome {
+    var formula = formula_mod.parseFormula(allocator, job.formula_json) catch {
+        output.warn("post_install: failed to parse formula for {s}", .{job.name});
+        return .parse_failed;
+    };
+    defer formula.deinit();
+
+    var flog = dsl.FallbackLog.init(allocator);
+    defer flog.deinit();
+
+    // DSL errors reflect in `flog`; the router reads the log as the source
+    // of truth so silent skips downgrade the same as hard failures.
+    dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {};
+    routePostInstallOutcome(allocator, job.name, job.version_str, prefix, &flog, use_system_ruby_list);
+    return .handled;
+}
+
 /// A bottle download job for parallel processing.
 ///
 /// Public so integration tests can construct an empty jobs list and assert
@@ -764,12 +800,14 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // and subprocess wait overlap) while keeping cache pressure low.
     const mats = allocator.alloc(MaterializeResult, all_jobs.items.len) catch
         return InstallError.CellarFailed;
-    defer {
-        for (mats) |m| {
-            if (m.keg_path.len > 0) std.heap.c_allocator.free(m.keg_path);
-        }
-        allocator.free(mats);
-    }
+    // Two defers (LIFO): the keg-path loop needs `mats` alive, so free the
+    // outer slice last. Splits the two allocator contracts into distinct
+    // statements so the reader doesn't have to track which slice came from
+    // which allocator.
+    defer allocator.free(mats);
+    defer for (mats) |m| {
+        if (m.keg_path.len > 0) std.heap.c_allocator.free(m.keg_path);
+    };
     for (mats) |*m| m.* = .{ .ok = false, .keg_path = &[_]u8{}, .err = null };
 
     {
@@ -865,53 +903,31 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Execute post_install: try DSL interpreter first, fall back to
         // system Ruby subprocess when --use-system-ruby is set.
         if (job.post_install_defined) post_install: {
-            // Try to locate the .rb source file for DSL extraction
-            const tap_path = ruby_sub.findHomebrewCoreTap();
-            var rb_buf: [1024]u8 = undefined;
-            const rb_path = if (tap_path) |tp| ruby_sub.resolveFormulaRbPath(&rb_buf, tp, job.name) else null;
+            // Locate a DSL source: local tap first, GitHub fetch second.
+            const dsl_src: ?[]const u8 = blk: {
+                const tap_path = ruby_sub.findHomebrewCoreTap();
+                var rb_buf: [1024]u8 = undefined;
+                const rb_path = if (tap_path) |tp|
+                    ruby_sub.resolveFormulaRbPath(&rb_buf, tp, job.name)
+                else
+                    null;
+                if (rb_path) |sp| {
+                    if (ruby_sub.extractPostInstallBody(allocator, sp)) |s| break :blk s;
+                }
+                break :blk ruby_sub.fetchPostInstallFromGitHub(allocator, job.name);
+            };
 
-            if (rb_path) |src_path| {
-                if (ruby_sub.extractPostInstallBody(allocator, src_path)) |post_install_src| {
-                    defer allocator.free(post_install_src);
-
-                    var formula = formula_mod.parseFormula(allocator, job.formula_json) catch {
-                        output.warn("post_install: failed to parse formula for {s}", .{job.name});
-                        break :post_install;
-                    };
-                    defer formula.deinit();
-
-                    var flog = dsl.FallbackLog.init(allocator);
-                    defer flog.deinit();
-
-                    // Error from execute is already reflected in `flog`;
-                    // the outcome router uses the log as the source of
-                    // truth so silent-skips downgrade the same as hard
-                    // failures instead of reading as "completed".
-                    dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {};
-                    routePostInstallOutcome(allocator, job.name, job.version_str, prefix, &flog, use_system_ruby_list);
-                    break :post_install;
+            if (dsl_src) |src| {
+                defer allocator.free(src);
+                switch (executeDslPostInstall(allocator, job, src, prefix, use_system_ruby_list)) {
+                    .handled => break :post_install,
+                    // parse_failed leaves the DSL path unusable — fall through
+                    // so the system-Ruby fallback still has a chance to run.
+                    .parse_failed => {},
                 }
             }
 
-            // No local .rb source — try fetching from GitHub
-            if (ruby_sub.fetchPostInstallFromGitHub(allocator, job.name)) |post_install_src| {
-                defer allocator.free(post_install_src);
-
-                var formula = formula_mod.parseFormula(allocator, job.formula_json) catch {
-                    output.warn("post_install: failed to parse formula for {s}", .{job.name});
-                    break :post_install;
-                };
-                defer formula.deinit();
-
-                var flog = dsl.FallbackLog.init(allocator);
-                defer flog.deinit();
-
-                dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {};
-                routePostInstallOutcome(allocator, job.name, job.version_str, prefix, &flog, use_system_ruby_list);
-                break :post_install;
-            }
-
-            // No source available — fall back to subprocess or skip
+            // No usable DSL source — fall back to subprocess or skip.
             if (useSystemRubyForFormula(use_system_ruby_list, job.name)) {
                 output.warn("Running post_install for {s} via system Ruby...", .{job.name});
                 ruby_sub.runPostInstall(allocator, job.name, job.version_str, prefix) catch |e| {

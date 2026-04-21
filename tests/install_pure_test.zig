@@ -616,6 +616,73 @@ test "routePostInstallOutcome: --json status=fatal on sandbox violation" {
 }
 
 // ---------------------------------------------------------------------------
+// executeDslPostInstall — owns one DSL attempt against a job. The outcome
+// decides whether the caller falls through to the system-Ruby fallback.
+// ---------------------------------------------------------------------------
+
+fn stubJob(name: []const u8, formula_json: []const u8) install.DownloadJob {
+    return .{
+        .name = name,
+        .version_str = "1.0",
+        .sha256 = "aa",
+        .bottle_url = "",
+        .is_dep = false,
+        .keg_only = false,
+        .post_install_defined = true,
+        .formula_json = formula_json,
+        .cellar_type = ":any",
+        .label_width = 0,
+        .line_index = 0,
+        .multi = null,
+        .bar = null,
+        .store_sha256 = "",
+        .succeeded = true,
+    };
+}
+
+test "executeDslPostInstall returns .parse_failed when formula JSON is unparseable" {
+    // The parse-failure path must surface as a distinct outcome so the
+    // caller can still try the system-Ruby fallback instead of silently
+    // dropping the hook.
+    const prior_quiet = output_mod.isQuiet();
+    output_mod.setQuiet(true);
+    defer output_mod.setQuiet(prior_quiet);
+
+    const job = stubJob("bad-json", "not-a-json");
+    const outcome = install.executeDslPostInstall(
+        testing.allocator,
+        &job,
+        "# empty body",
+        "/tmp/irrelevant",
+        &.{},
+    );
+    try testing.expectEqual(install.DslPostInstallOutcome.parse_failed, outcome);
+}
+
+test "executeDslPostInstall returns .handled when DSL executes against a valid formula" {
+    color_mod.setForTest(false, false);
+    defer color_mod.setForTest(null, null);
+    const prior_quiet = output_mod.isQuiet();
+    output_mod.setQuiet(true);
+    defer output_mod.setQuiet(prior_quiet);
+
+    // Minimal valid JSON: parseFormula only requires `name`; an empty Ruby
+    // body compiles to zero nodes so the interpreter runs to completion.
+    const json =
+        \\{"name":"hello","full_name":"hello","versions":{"stable":"1.0"},"dependencies":[],"oldnames":[]}
+    ;
+    const job = stubJob("hello", json);
+    const outcome = install.executeDslPostInstall(
+        testing.allocator,
+        &job,
+        "# empty",
+        "/tmp/irrelevant",
+        &.{},
+    );
+    try testing.expectEqual(install.DslPostInstallOutcome.handled, outcome);
+}
+
+// ---------------------------------------------------------------------------
 // Invariants — pinned as tests so future refactors can't drift them silently:
 //   - per-formula FallbackLog isolation
 //   - deferred cleanup fires on labelled break
