@@ -154,8 +154,9 @@ fn applyRlimits(limits: Limits) SandboxError!void {
 
 /// Build a null-terminated envp array from an allowlist. Everything
 /// outside the allowlist is dropped — in particular DYLD_*, RUBYOPT,
-/// RUBYLIB, GEM_* and friends.
-fn buildEnvp(
+/// RUBYLIB, GEM_* and friends. Public so tests can feed a scrubbed env
+/// into `spawnFilteredWithHooks`.
+pub fn buildEnvp(
     allocator: std.mem.Allocator,
     env: ScrubbedEnv,
 ) SandboxError![:null]?[*:0]u8 {
@@ -181,15 +182,16 @@ fn buildEnvp(
     return list.toOwnedSliceSentinel(allocator, null) catch SandboxError.EnvBuildFailed;
 }
 
-fn freeEnvp(allocator: std.mem.Allocator, envp: [:null]?[*:0]u8) void {
+pub fn freeEnvp(allocator: std.mem.Allocator, envp: [:null]?[*:0]u8) void {
     var i: usize = 0;
     while (envp[i]) |s| : (i += 1) allocator.free(std.mem.span(s));
     allocator.free(envp[0 .. i + 1]);
 }
 
 /// Build a null-terminated argv array. Caller owns; free with
-/// `freeArgv`.
-fn buildArgv(
+/// `freeArgv`. Public so test binaries can drive `spawnFilteredWithHooks`
+/// without duplicating the sentinel-array plumbing.
+pub fn buildArgv(
     allocator: std.mem.Allocator,
     argv: []const []const u8,
 ) SandboxError![:null]?[*:0]u8 {
@@ -208,7 +210,7 @@ fn buildArgv(
     return list.toOwnedSliceSentinel(allocator, null) catch SandboxError.EnvBuildFailed;
 }
 
-fn freeArgv(allocator: std.mem.Allocator, argv: [:null]?[*:0]u8) void {
+pub fn freeArgv(allocator: std.mem.Allocator, argv: [:null]?[*:0]u8) void {
     var i: usize = 0;
     while (argv[i]) |s| : (i += 1) allocator.free(std.mem.span(s));
     allocator.free(argv[0 .. i + 1]);
@@ -281,56 +283,140 @@ fn spawnInherit(
     return @intCast(wexitstatus(status));
 }
 
+/// Sentinel-backed fd wrapper. `closeOnce` is idempotent and zeroes the
+/// value after close, so an errdefer registered on the same fd cannot
+/// double-close an fd that another code path already dropped explicitly.
+const Fd = struct {
+    value: c_int = -1,
+
+    fn closeOnce(self: *Fd) void {
+        if (self.value != -1) {
+            _ = std.c.close(self.value);
+            self.value = -1;
+        }
+    }
+};
+
+fn openPipe(reader: *Fd, writer: *Fd) SandboxError!void {
+    var buf: [2]c_int = undefined;
+    if (std.c.pipe(&buf) != 0) return SandboxError.ForkFailed;
+    reader.value = buf[0];
+    writer.value = buf[1];
+}
+
+/// Test-only hooks to drive rare error paths in `spawnFilteredWithHooks`.
+/// Production callers pass the zero-value default; only the in-module
+/// tests populate these fields, so the seam has no runtime cost in
+/// shipped builds.
+pub const SpawnHooks = struct {
+    /// Force the Nth (0-indexed) `std.Thread.spawn` call to fail with
+    /// `error.SystemResources`. Exercises the thread-spawn-failure path
+    /// without inducing real OS pressure.
+    fail_thread_spawn_on: ?u32 = null,
+    /// Invoked with the child's pid right after the parent `waitpid`s
+    /// it on an error path. Lets tests observe that the child was
+    /// reaped before the error propagates to the caller.
+    on_child_reaped: ?*const fn (pid: std.c.pid_t, ctx: ?*anyopaque) void = null,
+    ctx: ?*anyopaque = null,
+};
+
 fn spawnFiltered(
     argv_z: [:null]?[*:0]u8,
     envp: [:null]?[*:0]u8,
     limits: Limits,
 ) SandboxError!u8 {
-    var out_pipe: [2]c_int = undefined;
-    var err_pipe: [2]c_int = undefined;
-    if (std.c.pipe(&out_pipe) != 0) return SandboxError.ForkFailed;
-    errdefer {
-        _ = std.c.close(out_pipe[0]);
-        _ = std.c.close(out_pipe[1]);
-    }
-    if (std.c.pipe(&err_pipe) != 0) return SandboxError.ForkFailed;
-    errdefer {
-        _ = std.c.close(err_pipe[0]);
-        _ = std.c.close(err_pipe[1]);
-    }
+    return spawnFilteredWithHooks(argv_z, envp, limits, .{});
+}
+
+fn maybeSpawnFilter(
+    hooks: SpawnHooks,
+    call_idx: u32,
+    pipe_fd: c_int,
+    out_fd: c_int,
+) std.Thread.SpawnError!std.Thread {
+    if (hooks.fail_thread_spawn_on) |n| if (call_idx == n) return error.SystemResources;
+    return std.Thread.spawn(.{}, filterLoop, .{ pipe_fd, out_fd });
+}
+
+/// Kill a running child and block until it is reaped. Safe to call when
+/// the child is already gone — SIGKILL on a missing pid is ignored, and
+/// `waitpid` tolerates the zombie/reaped states we could land in.
+fn reapChild(pid: std.c.pid_t, hooks: SpawnHooks) void {
+    std.posix.kill(pid, std.posix.SIG.KILL) catch {}; // ESRCH means already dead
+    var status: c_int = 0;
+    _ = std.c.waitpid(pid, &status, 0);
+    if (hooks.on_child_reaped) |cb| cb(pid, hooks.ctx);
+}
+
+pub fn spawnFilteredWithHooks(
+    argv_z: [:null]?[*:0]u8,
+    envp: [:null]?[*:0]u8,
+    limits: Limits,
+    hooks: SpawnHooks,
+) SandboxError!u8 {
+    var out_r: Fd = .{};
+    var out_w: Fd = .{};
+    var err_r: Fd = .{};
+    var err_w: Fd = .{};
+    // Pre-fork guards: every live fd gets closed exactly once if pipe
+    // setup or fork fails before another owner (a reader thread or an
+    // explicit close) takes over.
+    errdefer out_r.closeOnce();
+    errdefer out_w.closeOnce();
+    errdefer err_r.closeOnce();
+    errdefer err_w.closeOnce();
+
+    try openPipe(&out_r, &out_w);
+    try openPipe(&err_r, &err_w);
 
     const pid = std.c.fork();
     if (pid < 0) return SandboxError.ForkFailed;
     if (pid == 0) {
         // Child: wire pipes to fd 1/2, drop the read ends, exec.
-        _ = std.c.close(out_pipe[0]);
-        _ = std.c.close(err_pipe[0]);
-        _ = std.c.dup2(out_pipe[1], 1);
-        _ = std.c.dup2(err_pipe[1], 2);
-        _ = std.c.close(out_pipe[1]);
-        _ = std.c.close(err_pipe[1]);
+        _ = std.c.close(out_r.value);
+        _ = std.c.close(err_r.value);
+        _ = std.c.dup2(out_w.value, 1);
+        _ = std.c.dup2(err_w.value, 2);
+        _ = std.c.close(out_w.value);
+        _ = std.c.close(err_w.value);
         applyRlimits(limits) catch std.c._exit(127);
         _ = std.c.execve(argv_z[0].?, argv_z.ptr, envp.ptr);
         std.c._exit(127);
     }
 
-    // Parent: drop write ends, spawn reader threads that sanitize
-    // into the parent's real stdout/stderr.
-    _ = std.c.close(out_pipe[1]);
-    _ = std.c.close(err_pipe[1]);
+    // Parent: drop write ends immediately. The child still owns its dup'd copies.
+    out_w.closeOnce();
+    err_w.closeOnce();
 
-    const out_thread = std.Thread.spawn(.{}, filterLoop, .{ out_pipe[0], @as(c_int, 1) }) catch
+    var out_thread: ?std.Thread = null;
+    var err_thread: ?std.Thread = null;
+    // Registered after a successful fork: on any later error, kill and
+    // reap the child first so reader threads' `read` calls return EOF,
+    // then join any reader threads that did start.
+    errdefer {
+        reapChild(pid, hooks);
+        if (out_thread) |t| t.join();
+        if (err_thread) |t| t.join();
+    }
+
+    out_thread = maybeSpawnFilter(hooks, 0, out_r.value, 1) catch
         return SandboxError.ForkFailed;
-    const err_thread = std.Thread.spawn(.{}, filterLoop, .{ err_pipe[0], @as(c_int, 2) }) catch
+    // Thread owns the read end now; its own `defer close` releases it.
+    out_r.value = -1;
+
+    err_thread = maybeSpawnFilter(hooks, 1, err_r.value, 2) catch
         return SandboxError.ForkFailed;
+    err_r.value = -1;
 
     var status: c_int = 0;
     const w = std.c.waitpid(pid, &status, 0);
 
-    // Reader threads exit when their pipe returns EOF (child's fd
-    // closed), so we can safely join after waitpid.
-    out_thread.join();
-    err_thread.join();
+    // Happy path: threads exit on EOF once the child is gone; join and
+    // clear the optionals so a late error cannot re-join.
+    out_thread.?.join();
+    err_thread.?.join();
+    out_thread = null;
+    err_thread = null;
 
     if (w < 0) return SandboxError.WaitFailed;
     if (wifsignaled(status)) return SandboxError.ChildSignaled;
