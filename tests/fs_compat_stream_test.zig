@@ -30,7 +30,7 @@ fn writeFile(path: []const u8, bytes: []const u8) !void {
 const Collector = struct {
     list: *std.ArrayList(u8),
 
-    fn callback(ctx: *anyopaque, chunk: []const u8) anyerror!void {
+    fn callback(ctx: *anyopaque, chunk: []const u8) fs.StreamError!void {
         const self: *Collector = @ptrCast(@alignCast(ctx));
         try self.list.appendSlice(testing.allocator, chunk);
     }
@@ -45,6 +45,19 @@ fn runStream(path: []const u8) !std.ArrayList(u8) {
     var buf: [TEST_CHUNK]u8 = undefined;
     try fs.streamFile(f, &buf, .{ .context = @ptrCast(&c), .func = &Collector.callback });
     return collected;
+}
+
+// ── callback-signature shape ─────────────────────────────────────────
+//
+// Pin that `StreamCallback.func` returns a closed error set, not
+// `anyerror`. A closed set lets every caller switch exhaustively on the
+// concrete tags; `anyerror` would swallow new tags silently.
+test "StreamCallback.func declares a closed error set" {
+    const FuncPtr = std.meta.fieldInfo(fs.StreamCallback, .func).type;
+    const FnType = @typeInfo(FuncPtr).pointer.child;
+    const RetT = @typeInfo(FnType).@"fn".return_type.?;
+    const ErrSet = @typeInfo(RetT).error_union.error_set;
+    try testing.expect(@typeInfo(ErrSet).error_set != null);
 }
 
 // ── size sweep: every boundary vs the chunk size ─────────────────────
@@ -113,7 +126,7 @@ const AbortCtx = struct {
     seen: usize = 0,
     abort_after: usize,
 
-    fn callback(ctx: *anyopaque, chunk: []const u8) anyerror!void {
+    fn callback(ctx: *anyopaque, chunk: []const u8) fs.StreamError!void {
         const self: *AbortCtx = @ptrCast(@alignCast(ctx));
         self.seen += chunk.len;
         if (self.seen > self.abort_after) return error.CallbackAborted;
