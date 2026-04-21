@@ -242,12 +242,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             use_system_ruby_scope.items,
         );
 
+        // OOM on per-category bookkeeping must not be swallowed: the summary
+        // counts and JSON arrays come from these lists, and a silent drop
+        // reports fewer failures than actually occurred.
         switch (result) {
-            .migrated => migrated_names.append(allocator, keg_name) catch {},
-            .skipped_installed => skipped_installed_names.append(allocator, keg_name) catch {},
-            .skipped_post_install => skipped_post_install_names.append(allocator, keg_name) catch {},
-            .skipped_no_bottle => skipped_no_bottle_names.append(allocator, keg_name) catch {},
-            .failed_api, .failed_download, .failed_install => failed_names.append(allocator, keg_name) catch {},
+            .migrated => try migrated_names.append(allocator, keg_name),
+            .skipped_installed => try skipped_installed_names.append(allocator, keg_name),
+            .skipped_post_install => try skipped_post_install_names.append(allocator, keg_name),
+            .skipped_no_bottle => try skipped_no_bottle_names.append(allocator, keg_name),
+            .failed_api, .failed_download, .failed_install => try failed_names.append(allocator, keg_name),
         }
     }
 

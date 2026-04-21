@@ -123,7 +123,7 @@ pub const ExecContext = struct {
         formula: *const Formula,
         malt_prefix: []const u8,
         flog: *FallbackLog,
-    ) ExecContext {
+    ) DslError!ExecContext {
         const cellar_path = std.fmt.allocPrint(arena, "{s}/Cellar/{s}/{s}", .{
             malt_prefix, formula.name, formula.version,
         }) catch malt_prefix;
@@ -158,8 +158,8 @@ pub const ExecContext = struct {
             .return_value = Value{ .nil = {} },
         };
 
-        // Push initial scope
-        ctx.pushScope();
+        // OOM here would leave callers with a zero-depth stack; surface it.
+        try ctx.pushScope();
         return ctx;
     }
 
@@ -186,15 +186,18 @@ pub const ExecContext = struct {
         return null;
     }
 
-    pub fn pushScope(self: *ExecContext) void {
-        self.scopes.append(self.arena, Scope.init(self.arena)) catch {};
+    // OOM on a scope push must not be swallowed: a silent drop leaves the
+    // matching popScope tearing down the caller's scope, so outer locals
+    // vanish and subsequent lookups return stale/nil under memory pressure.
+    pub fn pushScope(self: *ExecContext) DslError!void {
+        self.scopes.append(self.arena, Scope.init(self.arena)) catch return DslError.OutOfMemory;
     }
 
-    pub fn pushMethodScope(self: *ExecContext) void {
+    pub fn pushMethodScope(self: *ExecContext) DslError!void {
         self.scopes.append(self.arena, .{
             .locals = std.StringHashMap(Value).init(self.arena),
             .is_method_frame = true,
-        }) catch {};
+        }) catch return DslError.OutOfMemory;
     }
 
     pub fn popScope(self: *ExecContext) void {
@@ -202,10 +205,9 @@ pub const ExecContext = struct {
         _ = self.scopes.pop();
     }
 
-    pub fn setLocal(self: *ExecContext, name: []const u8, value: Value) void {
-        if (self.scopes.items.len > 0) {
-            self.scopes.items[self.scopes.items.len - 1].locals.put(name, value) catch {};
-        }
+    pub fn setLocal(self: *ExecContext, name: []const u8, value: Value) DslError!void {
+        if (self.scopes.items.len == 0) return;
+        self.scopes.items[self.scopes.items.len - 1].locals.put(name, value) catch return DslError.OutOfMemory;
     }
 };
 
@@ -304,12 +306,12 @@ pub const Interpreter = struct {
         md: ast.MethodDef,
         args: []const Value,
     ) DslError!Value {
-        self.ctx.pushMethodScope();
+        try self.ctx.pushMethodScope();
         defer self.ctx.popScope();
 
         for (md.params, 0..) |pname, i| {
             const v = if (i < args.len) args[i] else Value{ .nil = {} };
-            self.ctx.setLocal(pname, v);
+            try self.ctx.setLocal(pname, v);
         }
 
         // Ruby implicit-return: the last expression's value is the method's
@@ -380,7 +382,7 @@ pub const Interpreter = struct {
 
     fn evalAssignment(self: *Interpreter, a: *const ast.Assignment) DslError!Value {
         const val = try self.eval(a.value);
-        self.ctx.setLocal(a.name, val);
+        try self.ctx.setLocal(a.name, val);
         return val;
     }
 
@@ -664,22 +666,22 @@ pub const Interpreter = struct {
         const iterable = try self.eval(el.iterable);
         switch (iterable) {
             .array => |items| for (items) |item| {
-                self.ctx.pushScope();
+                try self.ctx.pushScope();
                 defer self.ctx.popScope();
-                if (el.params.len > 0) self.ctx.setLocal(el.params[0], item);
+                if (el.params.len > 0) try self.ctx.setLocal(el.params[0], item);
                 _ = self.evalBlockSlice(el.body) catch |e| switch (e) {
-                    DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
+                    DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal, DslError.OutOfMemory => return e,
                     else => continue,
                 };
             },
             .hash => |pairs| for (pairs) |pair| {
                 // Hash iteration yields (key, value) — matches Ruby's
                 // `hash.each do |k, v|` and the llvm@21 post_install shape.
-                self.ctx.pushScope();
+                try self.ctx.pushScope();
                 defer self.ctx.popScope();
-                self.bindHashPair(el.params, pair);
+                try self.bindHashPair(el.params, pair);
                 _ = self.evalBlockSlice(el.body) catch |e| switch (e) {
-                    DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
+                    DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal, DslError.OutOfMemory => return e,
                     else => continue,
                 };
             },
@@ -717,9 +719,9 @@ pub const Interpreter = struct {
     fn evalArraySelect(self: *Interpreter, items: []const Value, params: []const []const u8, blk: *const Node) DslError!Value {
         var result: std.ArrayList(Value) = .empty;
         for (items) |item| {
-            self.ctx.pushScope();
+            try self.ctx.pushScope();
             defer self.ctx.popScope();
-            if (params.len > 0) self.ctx.setLocal(params[0], item);
+            if (params.len > 0) try self.ctx.setLocal(params[0], item);
             const val = try self.eval(blk);
             if (val.isTruthy()) {
                 result.append(self.allocator, item) catch return DslError.OutOfMemory;
@@ -732,9 +734,9 @@ pub const Interpreter = struct {
     fn evalArrayMap(self: *Interpreter, items: []const Value, params: []const []const u8, blk: *const Node) DslError!Value {
         var result: std.ArrayList(Value) = .empty;
         for (items) |item| {
-            self.ctx.pushScope();
+            try self.ctx.pushScope();
             defer self.ctx.popScope();
-            if (params.len > 0) self.ctx.setLocal(params[0], item);
+            if (params.len > 0) try self.ctx.setLocal(params[0], item);
             const val = try self.eval(blk);
             result.append(self.allocator, val) catch return DslError.OutOfMemory;
         }
@@ -745,9 +747,9 @@ pub const Interpreter = struct {
     fn evalArrayReject(self: *Interpreter, items: []const Value, params: []const []const u8, blk: *const Node) DslError!Value {
         var result: std.ArrayList(Value) = .empty;
         for (items) |item| {
-            self.ctx.pushScope();
+            try self.ctx.pushScope();
             defer self.ctx.popScope();
-            if (params.len > 0) self.ctx.setLocal(params[0], item);
+            if (params.len > 0) try self.ctx.setLocal(params[0], item);
             const val = try self.eval(blk);
             if (!val.isTruthy()) {
                 result.append(self.allocator, item) catch return DslError.OutOfMemory;
@@ -759,11 +761,11 @@ pub const Interpreter = struct {
 
     fn evalArrayEach(self: *Interpreter, items: []const Value, params: []const []const u8, blk: *const Node) DslError!Value {
         for (items) |item| {
-            self.ctx.pushScope();
+            try self.ctx.pushScope();
             defer self.ctx.popScope();
-            if (params.len > 0) self.ctx.setLocal(params[0], item);
+            if (params.len > 0) try self.ctx.setLocal(params[0], item);
             _ = self.eval(blk) catch |e| switch (e) {
-                DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
+                DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal, DslError.OutOfMemory => return e,
                 else => continue,
             };
         }
@@ -774,26 +776,26 @@ pub const Interpreter = struct {
     /// positional params → classic `|k, v|`; one param → the pair is
     /// bound to it (same shape as Ruby's `|kv|` destructuring). Zero
     /// params is legal but useless — nothing to reference.
-    fn bindHashPair(self: *Interpreter, params: []const []const u8, pair: Value.HashPair) void {
+    fn bindHashPair(self: *Interpreter, params: []const []const u8, pair: Value.HashPair) DslError!void {
         if (params.len == 0) return;
         if (params.len == 1) {
-            const arr = self.allocator.alloc(Value, 2) catch return;
+            const arr = self.allocator.alloc(Value, 2) catch return DslError.OutOfMemory;
             arr[0] = pair.key;
             arr[1] = pair.value;
-            self.ctx.setLocal(params[0], Value{ .array = arr });
+            try self.ctx.setLocal(params[0], Value{ .array = arr });
             return;
         }
-        self.ctx.setLocal(params[0], pair.key);
-        self.ctx.setLocal(params[1], pair.value);
+        try self.ctx.setLocal(params[0], pair.key);
+        try self.ctx.setLocal(params[1], pair.value);
     }
 
     fn evalHashEach(self: *Interpreter, pairs: []const Value.HashPair, params: []const []const u8, blk: *const Node) DslError!Value {
         for (pairs) |pair| {
-            self.ctx.pushScope();
+            try self.ctx.pushScope();
             defer self.ctx.popScope();
-            self.bindHashPair(params, pair);
+            try self.bindHashPair(params, pair);
             _ = self.eval(blk) catch |e| switch (e) {
-                DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal => return e,
+                DslError.PostInstallFailed, DslError.PathSandboxViolation, DslError.ReturnSignal, DslError.OutOfMemory => return e,
                 else => continue,
             };
         }
@@ -803,9 +805,9 @@ pub const Interpreter = struct {
     fn evalHashMap(self: *Interpreter, pairs: []const Value.HashPair, params: []const []const u8, blk: *const Node) DslError!Value {
         var out: std.ArrayList(Value) = .empty;
         for (pairs) |pair| {
-            self.ctx.pushScope();
+            try self.ctx.pushScope();
             defer self.ctx.popScope();
-            self.bindHashPair(params, pair);
+            try self.bindHashPair(params, pair);
             const v = try self.eval(blk);
             out.append(self.allocator, v) catch return DslError.OutOfMemory;
         }
@@ -816,9 +818,9 @@ pub const Interpreter = struct {
     fn evalHashSelect(self: *Interpreter, pairs: []const Value.HashPair, params: []const []const u8, blk: *const Node) DslError!Value {
         var out: std.ArrayList(Value.HashPair) = .empty;
         for (pairs) |pair| {
-            self.ctx.pushScope();
+            try self.ctx.pushScope();
             defer self.ctx.popScope();
-            self.bindHashPair(params, pair);
+            try self.bindHashPair(params, pair);
             const v = try self.eval(blk);
             if (v.isTruthy()) out.append(self.allocator, pair) catch return DslError.OutOfMemory;
         }
@@ -829,9 +831,9 @@ pub const Interpreter = struct {
     fn evalHashReject(self: *Interpreter, pairs: []const Value.HashPair, params: []const []const u8, blk: *const Node) DslError!Value {
         var out: std.ArrayList(Value.HashPair) = .empty;
         for (pairs) |pair| {
-            self.ctx.pushScope();
+            try self.ctx.pushScope();
             defer self.ctx.popScope();
-            self.bindHashPair(params, pair);
+            try self.bindHashPair(params, pair);
             const v = try self.eval(blk);
             if (!v.isTruthy()) out.append(self.allocator, pair) catch return DslError.OutOfMemory;
         }
@@ -1058,7 +1060,7 @@ pub fn executePostInstall(
         return e;
     };
 
-    var ctx = ExecContext.init(a, formula, malt_prefix, flog);
+    var ctx = try ExecContext.init(a, formula, malt_prefix, flog);
     defer ctx.deinit();
     var interp = Interpreter.init(&ctx);
     try interp.execute(nodes);

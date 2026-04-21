@@ -656,20 +656,25 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // token round-trips into 1. `prefetchTokens` is best-effort;
         // on any error we leave the cache empty and workers fall back
         // to per-repo fetches (the old behaviour, one round-trip each).
+        // OOM during prefetch bookkeeping must not be swallowed: subsequent
+        // install phases depend on allocator integrity. Token prefetch itself
+        // stays best-effort — a cache miss falls back to per-worker fetches.
         var repo_set: std.StringHashMapUnmanaged(void) = .empty;
         defer repo_set.deinit(allocator);
         for (all_jobs.items) |*job| {
             if (job.succeeded) continue;
             const ref = parseGhcrUrl(job.bottle_url) orelse continue;
-            repo_set.put(allocator, ref.repo, {}) catch {};
+            try repo_set.put(allocator, ref.repo, {});
         }
         if (repo_set.count() > 0) {
             var repos: std.ArrayList([]const u8) = .empty;
             defer repos.deinit(allocator);
-            repos.ensureTotalCapacity(allocator, repo_set.count()) catch {};
+            try repos.ensureTotalCapacity(allocator, repo_set.count());
             var it = repo_set.keyIterator();
-            while (it.next()) |k| repos.append(allocator, k.*) catch {};
+            while (it.next()) |k| try repos.append(allocator, k.*);
             const pre_http = http_pool.acquire();
+            // Best-effort cache warm — any failure (OOM or network) is
+            // absorbed so workers fall back to per-repo fetchToken calls.
             ghcr.prefetchTokens(pre_http, repos.items) catch {};
             http_pool.release(pre_http);
         }
@@ -812,9 +817,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             break;
         }
 
+        // OOM on failed-keg bookkeeping must not be swallowed: the subsequent
+        // findFailedDep check relies on this map, and a silent drop would
+        // let dependents install on top of a broken graph.
         if (!job.succeeded) {
             output.err("Download failed for {s}, skipping", .{job.name});
-            failed_kegs.put(job.name, {}) catch {};
+            try failed_kegs.put(job.name, {});
             failed_count += 1;
             continue;
         }
@@ -825,7 +833,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 "Failed to materialize {s}: {s} ({s})",
                 .{ job.name, @errorName(err), cellar_mod.describeError(err) },
             );
-            failed_kegs.put(job.name, {}) catch {};
+            try failed_kegs.put(job.name, {});
             failed_count += 1;
             continue;
         }
@@ -840,7 +848,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 .{ job.name, failed_dep },
             );
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
-            failed_kegs.put(job.name, {}) catch {};
+            try failed_kegs.put(job.name, {});
             failed_count += 1;
             continue;
         }
@@ -849,7 +857,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             // The underlying error was already logged with a tag by
             // linkAndRecord — just record that this job failed so its
             // dependents in the rest of the loop get skipped above.
-            failed_kegs.put(job.name, {}) catch {};
+            try failed_kegs.put(job.name, {});
             failed_count += 1;
             continue;
         };
