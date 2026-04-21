@@ -374,8 +374,9 @@ fn migrateKeg(
 
         linker.link(keg.path, formula.name, keg_id) catch {
             output.warn("    {s}: some links could not be created", .{keg_name});
+            // Best-effort cleanup after a link failure; the user already sees the failure above.
             linker.unlink(keg_id) catch {};
-            deleteKeg(db, keg_id);
+            deleteKeg(db, keg_id) catch {};
             cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
@@ -554,11 +555,11 @@ fn recordKeg(
     return keg_id;
 }
 
-fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
-    var stmt = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return;
+fn deleteKeg(db: *sqlite.Database, keg_id: i64) sqlite.SqliteError!void {
+    var stmt = try db.prepare("DELETE FROM kegs WHERE id = ?1;");
     defer stmt.finalize();
-    stmt.bindInt(1, keg_id) catch return;
-    _ = stmt.step() catch {};
+    try stmt.bindInt(1, keg_id);
+    _ = try stmt.step();
 }
 
 fn recordDeps(db: *sqlite.Database, keg_id: i64, formula: *const formula_mod.Formula) void {
