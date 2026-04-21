@@ -142,6 +142,15 @@ pub const HttpClient = struct {
             self.allocator.free(self.final_url);
             if (self.content_disposition) |cd| self.allocator.free(cd);
         }
+
+        /// Swap `final_url` to a fresh dupe of `new_url`. The old slice is
+        /// only freed after the new dupe succeeds, so an OOM here leaves
+        /// the struct's invariants intact for `deinit`.
+        pub fn replaceFinalUrl(self: *HeadResolved, new_url: []const u8) !void {
+            const next = try self.allocator.dupe(u8, new_url);
+            self.allocator.free(self.final_url);
+            self.final_url = next;
+        }
     };
 
     const MAX_HEAD_REDIRECTS = 5;
@@ -150,13 +159,17 @@ pub const HttpClient = struct {
     /// final URL and Content-Disposition. The stdlib skips redirect
     /// handling for HEAD, so we follow Location headers ourselves.
     pub fn headResolved(self: *HttpClient, url: []const u8) !HeadResolved {
-        var current_url = try self.allocator.dupe(u8, url);
-        var cd_result: ?[]const u8 = null;
+        // Build the result eagerly so a single errdefer covers every dupe
+        // inside the redirect loop; on success the caller takes ownership.
+        var resolved: HeadResolved = .{
+            .final_url = try self.allocator.dupe(u8, url),
+            .content_disposition = null,
+            .allocator = self.allocator,
+        };
+        errdefer resolved.deinit();
 
         for (0..MAX_HEAD_REDIRECTS) |_| {
-            const uri = std.Uri.parse(current_url) catch {
-                break;
-            };
+            const uri = std.Uri.parse(resolved.final_url) catch break;
 
             var req = self.client.request(.HEAD, uri, .{
                 .extra_headers = &.{},
@@ -168,29 +181,23 @@ pub const HttpClient = struct {
             var redirect_buf: [32 * 1024]u8 = undefined;
             const response = req.receiveHead(&redirect_buf) catch break;
 
-            if (cd_result == null) {
+            if (resolved.content_disposition == null) {
                 if (response.head.content_disposition) |cd| {
-                    cd_result = try self.allocator.dupe(u8, cd);
+                    resolved.content_disposition = try self.allocator.dupe(u8, cd);
                 }
             }
 
             const status: u16 = @intFromEnum(response.head.status);
             if (status >= 301 and status <= 308) {
                 if (response.head.location) |loc| {
-                    const next = try self.allocator.dupe(u8, loc);
-                    self.allocator.free(current_url);
-                    current_url = next;
+                    try resolved.replaceFinalUrl(loc);
                     continue;
                 }
             }
             break;
         }
 
-        return .{
-            .final_url = current_url,
-            .content_disposition = cd_result,
-            .allocator = self.allocator,
-        };
+        return resolved;
     }
 
     /// Default maximum response body size for metadata (API JSON, tokens, etc.).
