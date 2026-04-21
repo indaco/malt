@@ -99,10 +99,33 @@ pre-commit:
     git add "${files[@]}"
     echo "Auto-formatted ${#files[@]} staged .zig file(s)."
 
-# Pre-push hook: everything that CI checks, plus shell-lint.
+# Pre-push hook: everything that CI checks, plus shell-lint. When the
+# diff vs origin/main touches the install/extract/download surface,
+# additionally runs the heavy install smoke (~7-10 min, ~750 MB).
+# Set MALT_SKIP_SMOKE=1 to bypass the smoke check (e.g. for a doc-only
+# follow-up push you've already verified).
 [group('hooks')]
 pre-push: fmt-check test shell-lint
-    @echo "All pre-push checks passed."
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "${MALT_SKIP_SMOKE:-0}" = "1" ]; then
+        echo "▸ MALT_SKIP_SMOKE=1 — skipping install smoke"
+    elif git rev-parse --verify origin/main >/dev/null 2>&1 \
+        && git diff --name-only origin/main...HEAD 2>/dev/null \
+        | grep -qE '^(src/cli/install\.zig|src/core/bottle\.zig|src/core/cask\.zig|src/fs/archive\.zig|src/fs/atomic\.zig|src/net/client\.zig|src/net/ghcr\.zig|scripts/local-smoke-install\.sh)$'; then
+        echo "▸ Install/extract/download surface touched — running install smoke"
+        ./scripts/local-smoke-install.sh
+    else
+        echo "▸ Install/extract/download surface untouched — skipping install smoke"
+    fi
+    echo "All pre-push checks passed."
+
+# Local-only install smoke. Heavy: ~7-10 min, downloads ~750 MB.
+# Sandboxes into a temp MALT_PREFIX/MALT_CACHE; never touches /opt/malt.
+# Auto-runs from `pre-push` when install/extract/download paths change.
+[group('test')]
+smoke-install: build
+    @./scripts/local-smoke-install.sh
 
 # Install git hooks (pre-commit + pre-push)
 [group('hooks')]
