@@ -24,6 +24,42 @@ pub fn isSafeEntryPath(name: []const u8) bool {
     return true;
 }
 
+/// Symlink targets may legitimately use `..` to point at a sibling within
+/// the extracted bundle (e.g. Apple `.xctoolchain`'s `usr/bin -> ../../../bin`).
+/// Resolve `link_name` lexically against `dirname(entry_name)` and reject
+/// only when the result would escape the extraction root, or when the
+/// target is absolute, empty, or NUL-bearing. `entry_name` is assumed to
+/// have already passed `isSafeEntryPath`.
+pub fn isSafeSymlinkTarget(entry_name: []const u8, link_name: []const u8) bool {
+    if (link_name.len == 0) return false;
+    if (link_name[0] == '/') return false;
+    if (std.mem.indexOfScalar(u8, link_name, 0) != null) return false;
+
+    // Parent depth: components in entry_name minus the symlink's own slot.
+    var parent_depth: usize = 0;
+    var name_it = std.mem.splitScalar(u8, entry_name, '/');
+    while (name_it.next()) |comp| {
+        if (comp.len == 0 or std.mem.eql(u8, comp, ".")) continue;
+        if (std.mem.eql(u8, comp, "..")) return false;
+        parent_depth += 1;
+    }
+    if (parent_depth == 0) return false;
+    parent_depth -= 1;
+
+    var depth = parent_depth;
+    var link_it = std.mem.splitScalar(u8, link_name, '/');
+    while (link_it.next()) |comp| {
+        if (comp.len == 0 or std.mem.eql(u8, comp, ".")) continue;
+        if (std.mem.eql(u8, comp, "..")) {
+            if (depth == 0) return false;
+            depth -= 1;
+        } else {
+            depth += 1;
+        }
+    }
+    return true;
+}
+
 /// Read up to `out.len` bytes from the file at `absolute_path`, returning how
 /// many were actually read. Used for the magic-byte sniff before handing a
 /// downloaded archive off to an external extractor.
@@ -106,7 +142,7 @@ fn validateTarGz(archive_path: []const u8) !void {
 
     while (it.next() catch return error.ExtractionFailed) |entry| {
         if (!isSafeEntryPath(entry.name)) return error.ExtractionFailed;
-        if (entry.kind == .sym_link and !isSafeEntryPath(entry.link_name)) {
+        if (entry.kind == .sym_link and !isSafeSymlinkTarget(entry.name, entry.link_name)) {
             return error.ExtractionFailed;
         }
     }

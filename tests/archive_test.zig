@@ -361,3 +361,81 @@ test "isSafeEntryPath rejects escape paths" {
     try testing.expect(!archive.isSafeEntryPath("..\x00"));
     try testing.expect(!archive.isSafeEntryPath("ok\x00evil"));
 }
+
+test "isSafeSymlinkTarget: accepts intra-bundle relative targets" {
+    // The llvm@21 / .xctoolchain shape: ../../../bin from a 5-deep dir
+    // resolves to a sibling at depth 2 — safely inside the extraction root.
+    try testing.expect(archive.isSafeSymlinkTarget(
+        "llvm@21/21.1.8/Toolchains/LLVM21.1.8.xctoolchain/usr/bin",
+        "../../../bin",
+    ));
+    // Sibling next to the symlink (the common bottle shape).
+    try testing.expect(archive.isSafeSymlinkTarget("a/b/link", "sibling"));
+    // Up one level into a sibling subtree.
+    try testing.expect(archive.isSafeSymlinkTarget("a/b/c/link", "../d"));
+    // `.` and empty components are no-ops.
+    try testing.expect(archive.isSafeSymlinkTarget("a/b/link", "./c/./d"));
+}
+
+test "isSafeSymlinkTarget: rejects targets that escape the root" {
+    // One `..` too many — entry sits at depth 1 (parent depth 0).
+    try testing.expect(!archive.isSafeSymlinkTarget("link", "../escape"));
+    // 4 `..` from a 3-deep parent overshoots.
+    try testing.expect(!archive.isSafeSymlinkTarget("a/b/c/link", "../../../../etc"));
+    // Mid-path overshoot: pops to root then climbs back — still escaped at the pop.
+    try testing.expect(!archive.isSafeSymlinkTarget("a/link", "../../oops/back"));
+}
+
+test "isSafeSymlinkTarget: rejects absolute, empty, and NUL-bearing targets" {
+    try testing.expect(!archive.isSafeSymlinkTarget("a/b/link", "/etc/passwd"));
+    try testing.expect(!archive.isSafeSymlinkTarget("a/b/link", ""));
+    try testing.expect(!archive.isSafeSymlinkTarget("a/b/link", "ok\x00evil"));
+}
+
+test "extractTarGz accepts a symlink whose relative target stays inside dest" {
+    // Mirrors the llvm@21 bottle layout that broke after T-004:
+    // a deep symlink whose `..`-only target resolves to a sibling within
+    // the extracted tree. Pre-fix this errored out as `ExtractionFailed`.
+    const base = "/tmp/malt_archive_targz_intra_symlink";
+    malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    try malt.fs_compat.makeDirAbsolute(base);
+    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+
+    const src_root = base ++ "/src";
+    try malt.fs_compat.makeDirAbsolute(src_root);
+    var src_dir = try malt.fs_compat.openDirAbsolute(src_root, .{});
+    defer {
+        var sd = src_dir;
+        sd.close();
+    }
+    try src_dir.makePath("bin");
+    try src_dir.makePath("Toolchains/x.xctoolchain/usr");
+    {
+        const f = try src_dir.createFile("bin/llvm-tool", .{});
+        try f.writeAll("#!/bin/sh\n");
+        f.close();
+    }
+    // Symlink target uses `..` to point at the sibling `bin` dir — exactly
+    // the shape Apple .xctoolchain bundles ship with.
+    var usr_dir = try src_dir.openDir("Toolchains/x.xctoolchain/usr", .{});
+    defer {
+        var ud = usr_dir;
+        ud.close();
+    }
+    try usr_dir.symLink("../../../bin", "bin", .{});
+
+    const archive_path = base ++ "/payload.tar.gz";
+    try runTar(&.{ "tar", "czf", archive_path, "-C", base, "src" });
+    try malt.fs_compat.deleteTreeAbsolute(src_root);
+
+    try archive.extractTarGz(archive_path, base);
+
+    var link_buf: [64]u8 = undefined;
+    var dest_dir = try malt.fs_compat.openDirAbsolute(base, .{});
+    defer {
+        var dd = dest_dir;
+        dd.close();
+    }
+    const target = try dest_dir.readLink("src/Toolchains/x.xctoolchain/usr/bin", &link_buf);
+    try testing.expectEqualStrings("../../../bin", target);
+}
