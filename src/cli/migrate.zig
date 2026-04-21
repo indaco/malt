@@ -49,6 +49,24 @@ fn lockTimeoutMs() u32 {
     return 30_000;
 }
 
+/// Arena-own Cellar names and log iterator errors instead of silently
+/// truncating the scan — `iter.next() catch null` used to hide every
+/// later keg behind the first bad entry. `anytype` for mock iterators.
+pub fn scanCellarKegs(
+    arena: std.mem.Allocator,
+    iter: anytype,
+    names: *std.ArrayList([]const u8),
+) !void {
+    while (true) {
+        const entry = iter.next() catch |err| {
+            output.warn("Cellar scan error: {s}; keeping {d} entries already found", .{ @errorName(err), names.items.len });
+            break;
+        } orelse break;
+        if (entry.kind != .directory) continue;
+        try names.append(arena, try arena.dupe(u8, entry.name));
+    }
+}
+
 /// Result of migrating a single keg.
 const KegResult = enum {
     migrated,
@@ -111,18 +129,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer dir.close();
 
+    // Uniform scan-lifetime dupes → one arena, no per-entry free plumbing.
+    var scan_arena = std.heap.ArenaAllocator.init(allocator);
+    defer scan_arena.deinit();
     var keg_names: std.ArrayList([]const u8) = .empty;
-    defer keg_names.deinit(allocator);
 
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        if (entry.kind != .directory) continue;
-        const owned = allocator.dupe(u8, entry.name) catch continue;
-        keg_names.append(allocator, owned) catch {
-            allocator.free(owned);
-            continue;
-        };
-    }
+    try scanCellarKegs(scan_arena.allocator(), &iter, &keg_names);
 
     if (keg_names.items.len == 0) {
         if (json_mode) {
@@ -301,23 +314,22 @@ fn migrateKeg(
         return .skipped_installed;
     }
 
-    // 2. Resolve formula via Homebrew API
+    // Two `defer`s below collapse six per-branch cleanups.
     const formula_json = api.fetchFormula(keg_name) catch {
         output.err("  {s}: not found in Homebrew API", .{keg_name});
         return .failed_api;
     };
+    defer allocator.free(formula_json);
 
     var formula = formula_mod.parseFormula(allocator, formula_json) catch {
         output.err("  {s}: failed to parse formula JSON", .{keg_name});
-        allocator.free(formula_json);
         return .failed_api;
     };
+    defer formula.deinit();
 
     // 3. Resolve bottle for this platform
     const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
         output.warn("  {s}: no bottle available for this platform", .{keg_name});
-        formula.deinit();
-        allocator.free(formula_json);
         return .skipped_no_bottle;
     };
 
@@ -326,8 +338,6 @@ fn migrateKeg(
     // 5. Download bottle via GHCR (skip if already in store)
     if (!store.exists(bottle.sha256)) {
         if (!downloadBottle(allocator, ghcr, http, store, bottle.url, bottle.sha256, keg_name)) {
-            formula.deinit();
-            allocator.free(formula_json);
             return .failed_download;
         }
     } else {
@@ -348,8 +358,6 @@ fn migrateKeg(
         formula.pkg_version,
     ) catch {
         output.err("    {s}: failed to materialize", .{keg_name});
-        formula.deinit();
-        allocator.free(formula_json);
         return .failed_install;
     };
 
@@ -358,8 +366,6 @@ fn migrateKeg(
         const keg_id = recordKeg(db, &formula, bottle.sha256, keg.path, "direct") catch {
             output.err("    {s}: failed to record in database", .{keg_name});
             cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
-            formula.deinit();
-            allocator.free(formula_json);
             return .failed_install;
         };
 
@@ -368,8 +374,6 @@ fn migrateKeg(
             linker.unlink(keg_id) catch {};
             deleteKeg(db, keg_id);
             cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
-            formula.deinit();
-            allocator.free(formula_json);
             return .failed_install;
         };
         linker.linkOpt(formula.name, formula.pkg_version) catch {};
@@ -377,8 +381,6 @@ fn migrateKeg(
     } else {
         const keg_id = recordKeg(db, &formula, bottle.sha256, keg.path, "direct") catch {
             cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
-            formula.deinit();
-            allocator.free(formula_json);
             return .failed_install;
         };
         linker.linkOpt(formula.name, formula.pkg_version) catch {};
