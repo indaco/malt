@@ -7,6 +7,7 @@
 //! runs without a Ruby toolchain.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const sandbox = @import("malt").sandbox_macos;
 
@@ -76,4 +77,83 @@ test "ScrubbedEnv type smoke — only allowlisted keys" {
 test "SANDBOX_PATH restricts to system directories only" {
     // Nothing in the minimal PATH should be user-writable.
     try testing.expectEqualStrings("/usr/bin:/bin:/usr/sbin:/sbin", sandbox.SANDBOX_PATH);
+}
+
+// Reap-on-error tests: drive the thread-spawn-failure path via the
+// `SpawnHooks` injector and assert the parent reaped the child before
+// returning. /usr/bin/true is a stable short-lived child on macOS — the
+// exact binary does not matter since we're testing parent behaviour.
+
+const ReapObserver = struct {
+    reaped_pid: std.c.pid_t = -1,
+    call_count: u32 = 0,
+    fn cb(pid: std.c.pid_t, ctx: ?*anyopaque) void {
+        // ctx is always &ReapObserver from the test caller below.
+        const self: *ReapObserver = @ptrCast(@alignCast(ctx.?));
+        self.reaped_pid = pid;
+        self.call_count += 1;
+    }
+};
+
+fn childProcessExists(pid: std.c.pid_t) bool {
+    // `kill(pid, 0)` returns 0 while the pid still names a live or
+    // zombie process we own; -1/ESRCH once it has been reaped.
+    return std.c.kill(pid, @enumFromInt(0)) == 0;
+}
+
+test "spawnFilteredWithHooks reaps child when first reader-thread spawn fails" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const argv = [_][]const u8{"/usr/bin/true"};
+    const argv_z = try sandbox.buildArgv(testing.allocator, argv[0..]);
+    defer sandbox.freeArgv(testing.allocator, argv_z);
+
+    const envp = try sandbox.buildEnvp(testing.allocator, .{
+        .home = "/tmp",
+        .path = sandbox.SANDBOX_PATH,
+        .malt_prefix = "/tmp",
+        .tmpdir = "/tmp",
+    });
+    defer sandbox.freeEnvp(testing.allocator, envp);
+
+    var obs: ReapObserver = .{};
+    const result = sandbox.spawnFilteredWithHooks(argv_z, envp, .{}, .{
+        .fail_thread_spawn_on = 0,
+        .on_child_reaped = ReapObserver.cb,
+        .ctx = &obs,
+    });
+
+    try testing.expectError(error.ForkFailed, result);
+    try testing.expectEqual(@as(u32, 1), obs.call_count);
+    try testing.expect(obs.reaped_pid > 0);
+    // Process must be gone — the reap fix waited on it before returning.
+    try testing.expect(!childProcessExists(obs.reaped_pid));
+}
+
+test "spawnFilteredWithHooks reaps child and joins out-thread when second spawn fails" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const argv = [_][]const u8{"/usr/bin/true"};
+    const argv_z = try sandbox.buildArgv(testing.allocator, argv[0..]);
+    defer sandbox.freeArgv(testing.allocator, argv_z);
+
+    const envp = try sandbox.buildEnvp(testing.allocator, .{
+        .home = "/tmp",
+        .path = sandbox.SANDBOX_PATH,
+        .malt_prefix = "/tmp",
+        .tmpdir = "/tmp",
+    });
+    defer sandbox.freeEnvp(testing.allocator, envp);
+
+    var obs: ReapObserver = .{};
+    const result = sandbox.spawnFilteredWithHooks(argv_z, envp, .{}, .{
+        .fail_thread_spawn_on = 1,
+        .on_child_reaped = ReapObserver.cb,
+        .ctx = &obs,
+    });
+
+    try testing.expectError(error.ForkFailed, result);
+    try testing.expectEqual(@as(u32, 1), obs.call_count);
+    try testing.expect(obs.reaped_pid > 0);
+    try testing.expect(!childProcessExists(obs.reaped_pid));
 }
