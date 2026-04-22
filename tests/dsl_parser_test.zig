@@ -950,3 +950,312 @@ test "parser: llvm@21 post_install snippet parses with block-pass" {
     try testing.expectEqualStrings("all?", cond_mc.method);
     try testing.expect(cond_mc.block_pass != null);
 }
+
+// ---------------------------------------------------------------------------
+// Per-helper coverage for parsePrimary arms
+// ---------------------------------------------------------------------------
+//
+// One focused test per parsePrimary arm that the broader suite did not
+// already exercise directly. Keeps each new helper under its own
+// regression guard so a future bug lands with a pinpoint failure.
+
+test "parser: float literal" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "x = 1.5");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    const asg = nodes[0].kind.assignment;
+    try testing.expectEqualStrings("x", asg.name);
+    try testing.expectEqual(@as(f64, 1.5), asg.value.kind.float_literal);
+}
+
+test "parser: symbol literal strips leading colon" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, ":ok");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    try testing.expectEqualStrings("ok", nodes[0].kind.symbol_literal);
+}
+
+test "parser: regex literal stored as single-part string" {
+    // parseRegexLit keeps the full `/re/` lexeme so the interpreter can
+    // treat it as a string until a real regex engine is wired up.
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "/abc/");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    const sl = nodes[0].kind.string_literal;
+    try testing.expectEqual(@as(usize, 1), sl.parts.len);
+    try testing.expectEqualStrings("/abc/", sl.parts[0].literal);
+}
+
+test "parser: single-quoted string has no interpolation" {
+    // A `#{…}` sequence inside single quotes must survive as literal
+    // text, never as an interpolation part.
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "'hello #{name}'");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    const sl = nodes[0].kind.string_literal;
+    try testing.expectEqual(@as(usize, 1), sl.parts.len);
+    try testing.expectEqualStrings("hello #{name}", sl.parts[0].literal);
+}
+
+test "parser: heredoc body lowers to heredoc_literal" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "<<~EOS\n  body\nEOS\n");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    try testing.expectEqualStrings("  body\n", nodes[0].kind.heredoc_literal);
+}
+
+test "parser: paren expression returns inner node verbatim" {
+    // parseParenExpr must unwrap to the inner expression; no
+    // paren-wrapper node is introduced.
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "(42)");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    try testing.expectEqual(@as(i64, 42), nodes[0].kind.int_literal);
+}
+
+test "parser: Formula lookup rewrites to method_call" {
+    // Formula["name"] → Formula.lookup(name). Pinned so the identifier
+    // arm's peek/rewrite stays stable even without the heredoc edge.
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "Formula[\"openssl\"]");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("Formula.lookup", mc.method);
+    try testing.expectEqual(@as(usize, 1), mc.args.len);
+    try testing.expectEqualStrings("openssl", mc.args[0].kind.string_literal.parts[0].literal);
+}
+
+test "parser: always-bare cp keeps (expr) as grouped primary" {
+    // cp / cp_r are always-bare; a leading `(` must be parsed as the
+    // grouped-expression primary, not as a paren-delimited arg list.
+    // Regression guard for the `cp (lib/"libfoo.so").parent, dst` shape.
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "cp (lib/\"libfoo.so\").parent, dst");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("cp", mc.method);
+    try testing.expectEqual(@as(usize, 2), mc.args.len);
+    try testing.expectEqualStrings("parent", mc.args[0].kind.method_call.method);
+    try testing.expectEqualStrings("dst", mc.args[1].kind.identifier);
+}
+
+// ---------------------------------------------------------------------------
+// parsePrimary corpus snapshot
+// ---------------------------------------------------------------------------
+//
+// Pins the AST shape across every primary form in one shot. Any future
+// change in parsePrimary (or its helpers) that perturbs the tree -
+// node order, method name, literal value, block-pass wiring - will
+// flip this test red. Keeps the corpus-level byte-identity invariant
+// the T-024a refactor requires.
+
+fn dumpNode(w: *std.Io.Writer, node: *const Node) !void {
+    try w.writeByte('(');
+    try w.writeAll(@tagName(node.kind));
+    switch (node.kind) {
+        .int_literal => |v| try w.print(" {d}", .{v}),
+        .float_literal => |v| try w.print(" {d}", .{v}),
+        .bool_literal => |v| try w.print(" {}", .{v}),
+        .nil_literal => {},
+        .symbol_literal => |name| try w.print(" :{s}", .{name}),
+        .identifier => |name| try w.print(" {s}", .{name}),
+        .heredoc_literal => |body| try w.print(" {d}b", .{body.len}),
+        .string_literal => |sl| {
+            try w.writeByte(' ');
+            for (sl.parts) |p| switch (p) {
+                .literal => |lit| try w.print("L\"{s}\"", .{lit}),
+                .interpolation => |inner| {
+                    try w.writeAll("I");
+                    try dumpNode(w, inner);
+                },
+            };
+        },
+        .interpolation => |parts| {
+            for (parts) |p| {
+                try w.writeByte(' ');
+                try dumpNode(w, p);
+            }
+        },
+        .path_join => |pj| {
+            try w.writeByte(' ');
+            try dumpNode(w, pj.left);
+            try w.writeByte(' ');
+            try dumpNode(w, pj.right);
+        },
+        .assignment => |asg| {
+            try w.print(" {s}=", .{asg.name});
+            try dumpNode(w, asg.value);
+        },
+        .array_literal => |elems| for (elems) |e| {
+            try w.writeByte(' ');
+            try dumpNode(w, e);
+        },
+        .hash_literal => |entries| for (entries) |he| {
+            try w.writeAll(" {");
+            try dumpNode(w, he.key);
+            try w.writeAll("=>");
+            try dumpNode(w, he.value);
+            try w.writeByte('}');
+        },
+        .method_call => |mc| {
+            try w.print(" m={s}", .{mc.method});
+            if (mc.receiver) |recv| {
+                try w.writeAll(" r=");
+                try dumpNode(w, recv);
+            }
+            for (mc.args) |a| {
+                try w.writeByte(' ');
+                try dumpNode(w, a);
+            }
+            if (mc.block_pass) |bp| {
+                try w.writeAll(" &");
+                try dumpNode(w, bp);
+            }
+            if (mc.blk) |b| {
+                try w.writeAll(" [|");
+                for (mc.block_params, 0..) |p, i| {
+                    if (i > 0) try w.writeByte(',');
+                    try w.writeAll(p);
+                }
+                try w.writeAll("|");
+                try dumpNode(w, b);
+                try w.writeByte(']');
+            }
+        },
+        .block => |stmts| for (stmts) |s| {
+            try w.writeByte(' ');
+            try dumpNode(w, s);
+        },
+        .postfix_if => |pi| {
+            try w.writeAll(" body=");
+            try dumpNode(w, pi.body);
+            try w.writeAll(" cond=");
+            try dumpNode(w, pi.condition);
+        },
+        .postfix_unless => |pu| {
+            try w.writeAll(" body=");
+            try dumpNode(w, pu.body);
+            try w.writeAll(" cond=");
+            try dumpNode(w, pu.condition);
+        },
+        .if_else, .unless_statement, .each_loop, .begin_rescue, .method_def, .return_statement => {},
+        .raise_statement => |rs| if (rs.message) |m| {
+            try w.writeByte(' ');
+            try dumpNode(w, m);
+        },
+        .logical_and, .logical_or => |lb| {
+            try w.writeByte(' ');
+            try dumpNode(w, lb.left);
+            try w.writeByte(' ');
+            try dumpNode(w, lb.right);
+        },
+        .logical_not => |inner| {
+            try w.writeByte(' ');
+            try dumpNode(w, inner);
+        },
+    }
+    try w.writeByte(')');
+}
+
+fn dumpNodes(w: *std.Io.Writer, nodes: []const *const Node) !void {
+    for (nodes, 0..) |n, i| {
+        if (i > 0) try w.writeByte('\n');
+        try dumpNode(w, n);
+    }
+}
+
+test "parser: corpus AST snapshot pins every primary form" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // One source that covers every arm of parsePrimary: literals (int,
+    // hex, octal, float, bool, nil, symbol, regex), strings (single,
+    // double with interpolation), %w, heredoc, Dir[..], Formula[..],
+    // ENV[..] read+write, paren expression, array and hash literals,
+    // plain identifier, bare call, paren call, always-bare call,
+    // and a block-pass.
+    const Case = struct { src: []const u8, want: []const u8 };
+    const cases = [_]Case{
+        .{ .src = "n = 42", .want = "(assignment n=(int_literal 42))" },
+        .{ .src = "p = 0x10", .want = "(assignment p=(int_literal 16))" },
+        .{ .src = "o = 0o17", .want = "(assignment o=(int_literal 15))" },
+        .{ .src = "f = 1.5", .want = "(assignment f=(float_literal 1.5))" },
+        .{ .src = "t = true", .want = "(assignment t=(bool_literal true))" },
+        .{ .src = "u = false", .want = "(assignment u=(bool_literal false))" },
+        .{ .src = "z = nil", .want = "(assignment z=(nil_literal))" },
+        .{ .src = "sym = :ok", .want = "(assignment sym=(symbol_literal :ok))" },
+        .{ .src = "r = /re/", .want = "(assignment r=(string_literal L\"/re/\"))" },
+        .{
+            .src = "s1 = \"hello #{name}\"",
+            .want = "(assignment s1=(string_literal L\"hello \"I(identifier name)))",
+        },
+        .{ .src = "s2 = 'single'", .want = "(assignment s2=(string_literal L\"single\"))" },
+        .{
+            .src = "w = %w[a b c]",
+            .want = "(assignment w=(array_literal (string_literal L\"a\") (string_literal L\"b\") (string_literal L\"c\")))",
+        },
+        .{
+            .src = "arr = [1, 2, 3]",
+            .want = "(assignment arr=(array_literal (int_literal 1) (int_literal 2) (int_literal 3)))",
+        },
+        .{
+            .src = "h = { name: \"n\", \"age\" => 1 }",
+            .want = "(assignment h=(hash_literal {(symbol_literal :name)=>(string_literal L\"n\")} {(string_literal L\"age\")=>(int_literal 1)}))",
+        },
+        .{ .src = "grp = (42)", .want = "(assignment grp=(int_literal 42))" },
+        .{
+            .src = "d = Dir[\"*.rb\"]",
+            .want = "(assignment d=(method_call m=Dir.glob (string_literal L\"*.rb\")))",
+        },
+        .{
+            .src = "fx = Formula[\"openssl\"]",
+            .want = "(assignment fx=(method_call m=Formula.lookup (string_literal L\"openssl\")))",
+        },
+        .{
+            .src = "e = ENV[\"X\"]",
+            .want = "(assignment e=(method_call m=ENV.get (string_literal L\"X\")))",
+        },
+        .{
+            .src = "ENV[\"Y\"] = \"y\"",
+            .want = "(method_call m=ENV.set (string_literal L\"Y\") (string_literal L\"y\"))",
+        },
+        .{
+            .src = "cp a, b",
+            .want = "(method_call m=cp (identifier a) (identifier b))",
+        },
+        .{
+            .src = "system \"make\", \"install\"",
+            .want = "(method_call m=system (string_literal L\"make\") (string_literal L\"install\"))",
+        },
+        .{ .src = "puts(a)", .want = "(method_call m=puts (identifier a))" },
+        .{
+            .src = "xs.all?(&:exist?)",
+            .want = "(method_call m=all? r=(identifier xs) &(symbol_literal :exist?))",
+        },
+        .{ .src = "name", .want = "(identifier name)" },
+    };
+
+    var buf: [2 * 1024]u8 = undefined;
+    for (cases) |c| {
+        const nodes = try parseSource(&arena, c.src);
+        var aw: std.Io.Writer = .fixed(&buf);
+        try dumpNodes(&aw, nodes);
+        try testing.expectEqualStrings(c.want, aw.buffered());
+    }
+}

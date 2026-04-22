@@ -339,79 +339,114 @@ pub const Parser = struct {
         var args: std.ArrayList(*const Node) = .empty;
         var block_pass: ?*const Node = null;
         if (self.current.kind == .lparen) {
-            self.advanceToken();
-            while (self.current.kind != .rparen and self.current.kind != .eof) {
-                self.skipNewlines();
-                if (self.current.kind == .rparen) break;
-                switch (try self.parseOneArg()) {
-                    .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
-                    .block_pass => |bp| {
-                        block_pass = bp;
-                        break;
-                    },
-                }
-                self.skipNewlines();
-                if (self.current.kind == .comma) {
-                    self.advanceToken();
-                    self.skipNewlines();
-                }
-            }
-            if (self.current.kind == .rparen) self.advanceToken();
-        } else if (isExprStart(self.current.kind) and
-            self.current.kind != .newline and
-            self.current.kind != .kw_if and
-            self.current.kind != .kw_unless and
-            self.current.kind != .kw_do and
-            self.current.kind != .kw_end and
-            self.current.kind != .dot)
-        {
+            try self.parseParenArgList(&args, &block_pass);
+        } else if (self.currentLooksLikeBareArg()) {
             // Bare arguments (no parens) — common for ohai, system, etc.
-            const arg = try self.parseExpression();
-            args.append(self.allocator, arg) catch return DslError.OutOfMemory;
-            while (self.current.kind == .comma) {
+            try self.parseBareArgList(&args, &block_pass);
+        }
+
+        return self.finishCallWithBlock(loc, receiver, method, &args, block_pass);
+    }
+
+    /// Shared bare-argument guard: the current token could start an
+    /// expression AND is not one of the keywords that signal statement
+    /// boundaries (if/unless/end/do/dot/newline). Used by every call
+    /// form that accepts paren-less arguments.
+    fn currentLooksLikeBareArg(self: *const Parser) bool {
+        const k = self.current.kind;
+        return isExprStart(k) and k != .newline and k != .kw_if and
+            k != .kw_unless and k != .kw_end and k != .kw_do and k != .dot;
+    }
+
+    /// Collect a paren-delimited argument list; stops at the matching
+    /// `)` or on a block-pass `&<primary>`. Consumes the closing paren.
+    fn parseParenArgList(
+        self: *Parser,
+        args: *std.ArrayList(*const Node),
+        block_pass_out: *?*const Node,
+    ) DslError!void {
+        self.advanceToken(); // consume '('
+        while (self.current.kind != .rparen and self.current.kind != .eof) {
+            self.skipNewlines();
+            if (self.current.kind == .rparen) break;
+            switch (try self.parseOneArg()) {
+                .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
+                .block_pass => |bp| {
+                    block_pass_out.* = bp;
+                    break;
+                },
+            }
+            self.skipNewlines();
+            if (self.current.kind == .comma) {
                 self.advanceToken();
                 self.skipNewlines();
-                switch (try self.parseOneArg()) {
-                    .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
-                    .block_pass => |bp| {
-                        block_pass = bp;
-                        break;
-                    },
-                }
             }
         }
+        if (self.current.kind == .rparen) self.advanceToken();
+    }
 
-        // Parse optional block
-        var blk: ?*const Node = null;
-        var block_params: std.ArrayList([]const u8) = .empty;
-        if (self.current.kind == .kw_do) {
+    /// Collect a paren-less bare argument list (`method a, b, &:sym`).
+    /// The caller has already verified `currentLooksLikeBareArg()`.
+    fn parseBareArgList(
+        self: *Parser,
+        args: *std.ArrayList(*const Node),
+        block_pass_out: *?*const Node,
+    ) DslError!void {
+        const first = try self.parseExpression();
+        args.append(self.allocator, first) catch return DslError.OutOfMemory;
+        while (self.current.kind == .comma) {
             self.advanceToken();
-            try self.parseBlockParams(&block_params);
-            const body = try self.parseBlock();
-            if (self.current.kind == .kw_end) self.advanceToken();
-            blk = try self.allocNode(.{
-                .loc = loc,
-                .kind = .{ .block = body },
-            });
-        } else if (self.current.kind == .lbrace) {
-            self.advanceToken();
-            try self.parseBlockParams(&block_params);
-            const body = try self.parseBlock();
-            if (self.current.kind == .rbrace) self.advanceToken();
-            blk = try self.allocNode(.{
-                .loc = loc,
-                .kind = .{ .block = body },
-            });
+            self.skipNewlines();
+            switch (try self.parseOneArg()) {
+                .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
+                .block_pass => |bp| {
+                    block_pass_out.* = bp;
+                    break;
+                },
+            }
         }
+    }
 
+    /// Consume an optional `do |params| … end` or `{ |params| … }` tail
+    /// and return the resulting block node, or null if neither is
+    /// present. Block params are appended into `params_out`.
+    fn parseOptionalBlock(
+        self: *Parser,
+        loc: SourceLoc,
+        params_out: *std.ArrayList([]const u8),
+    ) DslError!?*const Node {
+        const close: TokenKind = switch (self.current.kind) {
+            .kw_do => .kw_end,
+            .lbrace => .rbrace,
+            else => return null,
+        };
+        self.advanceToken();
+        try self.parseBlockParams(params_out);
+        const body = try self.parseBlock();
+        if (self.current.kind == close) self.advanceToken();
+        return try self.allocNode(.{ .loc = loc, .kind = .{ .block = body } });
+    }
+
+    /// Finalise a method_call node: handle the optional block tail and
+    /// own the args / block_params slices. Shared between every call
+    /// form so the ownership/cleanup pattern lives in one place.
+    fn finishCallWithBlock(
+        self: *Parser,
+        loc: SourceLoc,
+        receiver: ?*const Node,
+        name: []const u8,
+        args: *std.ArrayList(*const Node),
+        block_pass: ?*const Node,
+    ) DslError!*const Node {
+        var block_params: std.ArrayList([]const u8) = .empty;
+        const blk = try self.parseOptionalBlock(loc, &block_params);
         const args_slice = args.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
         const params_slice = block_params.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
-
         return self.allocNode(.{
             .loc = loc,
             .kind = .{ .method_call = .{
                 .receiver = receiver,
-                .method = method,
+                .method = name,
                 .args = args_slice,
                 .blk = blk,
                 .block_params = params_slice,
@@ -420,551 +455,345 @@ pub const Parser = struct {
         });
     }
 
+    /// Dispatches one primary production to its form-specific helper.
+    /// Each helper captures its own `loc`, advances past its tokens,
+    /// and returns a fully-constructed Node. No shared mutation here.
     fn parsePrimary(self: *Parser) DslError!*const Node {
+        return switch (self.current.kind) {
+            .string_double => self.parseDoubleQuotedString(),
+            .string_single => self.parseSingleQuotedString(),
+            .percent_w => self.parsePercentWArray(),
+            .heredoc_start => self.parseHeredocStart(),
+            .heredoc_body => self.parseHeredocBody(),
+            .integer => self.parseIntegerLit(),
+            .float_lit => self.parseFloatLit(),
+            .kw_true => self.parseBoolLit(true),
+            .kw_false => self.parseBoolLit(false),
+            .kw_nil => self.parseNilLit(),
+            .symbol => self.parseSymbolLit(),
+            .regex => self.parseRegexLit(),
+            .identifier => self.parseIdentifierForm(),
+            .lbracket => self.parseArrayLit(),
+            .lbrace => self.parseHashLit(),
+            .lparen => self.parseParenExpr(),
+            else => self.emitError("unexpected token in expression"),
+        };
+    }
+
+    fn parseDoubleQuotedString(self: *Parser) DslError!*const Node {
         const loc = self.currentLoc();
+        const raw = self.current.lexeme;
+        self.advanceToken();
+        // Strip surrounding `"..."`, then lower `#{...}` into interpolation parts.
+        const content = if (raw.len >= 2) raw[1 .. raw.len - 1] else raw;
+        const parts = try self.parseStringInterpolation(content, loc);
+        return self.allocNode(.{
+            .loc = loc,
+            .kind = .{ .string_literal = .{ .parts = parts } },
+        });
+    }
 
-        switch (self.current.kind) {
-            .string_double => {
-                const raw = self.current.lexeme;
+    fn parseSingleQuotedString(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        const raw = self.current.lexeme;
+        self.advanceToken();
+        // Single-quoted strings have no interpolation — one literal part.
+        const content = if (raw.len >= 2) raw[1 .. raw.len - 1] else raw;
+        const parts = self.allocator.alloc(ast.StringPart, 1) catch return DslError.OutOfMemory;
+        parts[0] = .{ .literal = content };
+        return self.allocNode(.{
+            .loc = loc,
+            .kind = .{ .string_literal = .{ .parts = parts } },
+        });
+    }
+
+    fn parseHeredocStart(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        self.advanceToken();
+        const body = if (self.current.kind == .heredoc_body) self.current.lexeme else "";
+        if (self.current.kind == .heredoc_body) self.advanceToken();
+        return self.allocNode(.{ .loc = loc, .kind = .{ .heredoc_literal = body } });
+    }
+
+    fn parseHeredocBody(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        const body = self.current.lexeme;
+        self.advanceToken();
+        return self.allocNode(.{ .loc = loc, .kind = .{ .heredoc_literal = body } });
+    }
+
+    fn parseIntegerLit(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        const val = parseIntValue(self.current.lexeme);
+        self.advanceToken();
+        return self.allocNode(.{ .loc = loc, .kind = .{ .int_literal = val } });
+    }
+
+    fn parseFloatLit(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        const val = std.fmt.parseFloat(f64, self.current.lexeme) catch 0.0;
+        self.advanceToken();
+        return self.allocNode(.{ .loc = loc, .kind = .{ .float_literal = val } });
+    }
+
+    fn parseBoolLit(self: *Parser, v: bool) DslError!*const Node {
+        const loc = self.currentLoc();
+        self.advanceToken();
+        return self.allocNode(.{ .loc = loc, .kind = .{ .bool_literal = v } });
+    }
+
+    fn parseNilLit(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        self.advanceToken();
+        return self.allocNode(.{ .loc = loc, .kind = .{ .nil_literal = {} } });
+    }
+
+    fn parseSymbolLit(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        const raw = self.current.lexeme;
+        self.advanceToken();
+        // Strip the leading `:`; the lexeme is `:name`.
+        const name = if (raw.len > 1) raw[1..] else raw;
+        return self.allocNode(.{ .loc = loc, .kind = .{ .symbol_literal = name } });
+    }
+
+    /// Regex literals are stored as a single-part string literal until
+    /// a real regex engine is added; keeps the interpreter path uniform.
+    fn parseRegexLit(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        const raw = self.current.lexeme;
+        self.advanceToken();
+        const parts = self.allocator.alloc(ast.StringPart, 1) catch return DslError.OutOfMemory;
+        parts[0] = .{ .literal = raw };
+        return self.allocNode(.{
+            .loc = loc,
+            .kind = .{ .string_literal = .{ .parts = parts } },
+        });
+    }
+
+    fn parsePercentWArray(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        // %w[word1 word2 ...] — split by whitespace into a string array.
+        // Pre-count and bulk-allocate so a typical %w[...] costs three
+        // allocs (StringParts, Nodes, *Node slice) instead of 1+2*N.
+        const content = self.current.lexeme;
+        self.advanceToken();
+
+        var counter = std.mem.tokenizeAny(u8, content, " \t\n\r");
+        var n: usize = 0;
+        while (counter.next()) |_| n += 1;
+        if (n == 0) {
+            const empty: []const *const Node = &.{};
+            return self.allocNode(.{ .loc = loc, .kind = .{ .array_literal = empty } });
+        }
+
+        const parts = self.allocator.alloc(ast.StringPart, n) catch return DslError.OutOfMemory;
+        const nodes = self.allocator.alloc(Node, n) catch return DslError.OutOfMemory;
+        const elems = self.allocator.alloc(*const Node, n) catch return DslError.OutOfMemory;
+
+        var it = std.mem.tokenizeAny(u8, content, " \t\n\r");
+        var i: usize = 0;
+        while (it.next()) |word| : (i += 1) {
+            parts[i] = .{ .literal = word };
+            nodes[i] = .{
+                .loc = loc,
+                .kind = .{ .string_literal = .{ .parts = parts[i .. i + 1] } },
+            };
+            elems[i] = &nodes[i];
+        }
+        return self.allocNode(.{ .loc = loc, .kind = .{ .array_literal = elems } });
+    }
+
+    fn parseArrayLit(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        self.advanceToken(); // '['
+        var elems: std.ArrayList(*const Node) = .empty;
+        while (self.current.kind != .rbracket and self.current.kind != .eof) {
+            self.skipNewlines();
+            if (self.current.kind == .rbracket) break;
+            const elem = try self.parseExpression();
+            elems.append(self.allocator, elem) catch return DslError.OutOfMemory;
+            self.skipNewlines();
+            if (self.current.kind == .comma) self.advanceToken();
+        }
+        if (self.current.kind == .rbracket) self.advanceToken();
+        const slice = elems.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+        return self.allocNode(.{ .loc = loc, .kind = .{ .array_literal = slice } });
+    }
+
+    fn parseHashLit(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        self.advanceToken(); // '{'
+        var entries: std.ArrayList(ast.HashEntry) = .empty;
+        while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            self.skipNewlines();
+            if (self.current.kind == .rbrace) break;
+
+            // Ruby's `{ name: value }` shorthand lowers to a symbol key —
+            // recognise `identifier:` (single colon, not `::`) so the
+            // identifier does not resolve as a method at eval time.
+            const key_loc = self.currentLoc();
+            var key: *const Node = undefined;
+            if (self.current.kind == .identifier) {
+                const lex_before = self.lexer.*;
+                const ident_lexeme = self.current.lexeme;
                 self.advanceToken();
-                // Strip quotes
-                const content = if (raw.len >= 2) raw[1 .. raw.len - 1] else raw;
-                // Parse interpolation segments #{...}
-                const parts = try self.parseStringInterpolation(content, loc);
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .string_literal = .{ .parts = parts } },
-                });
-            },
-            .string_single => {
-                const raw = self.current.lexeme;
-                self.advanceToken();
-                // Strip quotes — single-quoted strings have no interpolation
-                const content = if (raw.len >= 2) raw[1 .. raw.len - 1] else raw;
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .string_literal = .{
-                        .parts = blk: {
-                            const parts = self.allocator.alloc(ast.StringPart, 1) catch return DslError.OutOfMemory;
-                            parts[0] = .{ .literal = content };
-                            break :blk parts;
-                        },
-                    } },
-                });
-            },
-            .percent_w => {
-                // %w[word1 word2 ...] — split by whitespace into a string
-                // array. Pre-count and bulk-allocate so a typical %w[...]
-                // costs three allocs (StringParts, Nodes, *Node slice)
-                // instead of 1+2*N from the previous per-word loop.
-                const content = self.current.lexeme;
-                self.advanceToken();
-
-                var counter = std.mem.tokenizeAny(u8, content, " \t\n\r");
-                var n: usize = 0;
-                while (counter.next()) |_| n += 1;
-                if (n == 0) {
-                    const empty: []const *const Node = &.{};
-                    return self.allocNode(.{
-                        .loc = loc,
-                        .kind = .{ .array_literal = empty },
-                    });
-                }
-
-                const parts = self.allocator.alloc(ast.StringPart, n) catch return DslError.OutOfMemory;
-                const nodes = self.allocator.alloc(Node, n) catch return DslError.OutOfMemory;
-                const elems = self.allocator.alloc(*const Node, n) catch return DslError.OutOfMemory;
-
-                var it = std.mem.tokenizeAny(u8, content, " \t\n\r");
-                var i: usize = 0;
-                while (it.next()) |word| : (i += 1) {
-                    parts[i] = .{ .literal = word };
-                    nodes[i] = .{
-                        .loc = loc,
-                        .kind = .{ .string_literal = .{ .parts = parts[i .. i + 1] } },
-                    };
-                    elems[i] = &nodes[i];
-                }
-
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .array_literal = elems },
-                });
-            },
-            .heredoc_start => {
-                // Advance past start, next token should be heredoc_body
-                self.advanceToken();
-                const body_lexeme = if (self.current.kind == .heredoc_body) self.current.lexeme else "";
-                if (self.current.kind == .heredoc_body) self.advanceToken();
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .heredoc_literal = body_lexeme },
-                });
-            },
-            .heredoc_body => {
-                const body_lexeme = self.current.lexeme;
-                self.advanceToken();
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .heredoc_literal = body_lexeme },
-                });
-            },
-            .integer => {
-                const val = parseIntValue(self.current.lexeme);
-                self.advanceToken();
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .int_literal = val },
-                });
-            },
-            .float_lit => {
-                const val = std.fmt.parseFloat(f64, self.current.lexeme) catch 0.0;
-                self.advanceToken();
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .float_literal = val },
-                });
-            },
-            .kw_true => {
-                self.advanceToken();
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .bool_literal = true },
-                });
-            },
-            .kw_false => {
-                self.advanceToken();
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .bool_literal = false },
-                });
-            },
-            .kw_nil => {
-                self.advanceToken();
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .nil_literal = {} },
-                });
-            },
-            .symbol => {
-                const raw = self.current.lexeme;
-                self.advanceToken();
-                // Strip leading :
-                const name = if (raw.len > 1) raw[1..] else raw;
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .symbol_literal = name },
-                });
-            },
-            .regex => {
-                // Store regex as a string for now
-                const raw = self.current.lexeme;
-                self.advanceToken();
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .string_literal = .{
-                        .parts = blk: {
-                            const parts = self.allocator.alloc(ast.StringPart, 1) catch return DslError.OutOfMemory;
-                            parts[0] = .{ .literal = raw };
-                            break :blk parts;
-                        },
-                    } },
-                });
-            },
-            .identifier => {
-                const name = self.current.lexeme;
-
-                // --- Dir[expr] → Dir.glob(expr) ---
-                if (std.mem.eql(u8, name, "Dir")) {
-                    // `lexer.peek()` saves *every* field `next()` may
-                    // mutate — including the heredoc state — so a
-                    // `Dir<<~EOS` peek restores cleanly instead of
-                    // leaving the lexer mid-collection.
-                    const peek_tok = self.lexer.peek();
-                    if (peek_tok.kind == .lbracket) {
-                        self.advanceToken(); // consume "Dir"
-                        self.advanceToken(); // consume "["
-                        var args: std.ArrayList(*const Node) = .empty;
-                        while (self.current.kind != .rbracket and self.current.kind != .eof) {
-                            const arg = try self.parseExpression();
-                            args.append(self.allocator, arg) catch return DslError.OutOfMemory;
-                            if (self.current.kind == .comma) {
-                                self.advanceToken();
-                                self.skipNewlines();
-                            }
-                        }
-                        if (self.current.kind == .rbracket) self.advanceToken();
-                        const args_slice = args.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
-                        return self.allocNode(.{
-                            .loc = loc,
-                            .kind = .{ .method_call = .{
-                                .receiver = null,
-                                .method = "Dir.glob",
-                                .args = args_slice,
-                                .blk = null,
-                                .block_params = &.{},
-                            } },
-                        });
-                    }
-                }
-
-                // --- Formula["name"] → Formula.lookup(name) ---
-                if (std.mem.eql(u8, name, "Formula")) {
-                    // Same reasoning as the `Dir` peek above: only
-                    // `lexer.peek()` saves the heredoc state.
-                    const peek_tok3 = self.lexer.peek();
-                    if (peek_tok3.kind == .lbracket) {
-                        self.advanceToken(); // consume "Formula"
-                        self.advanceToken(); // consume "["
-                        const name_expr = try self.parseExpression();
-                        if (self.current.kind == .rbracket) self.advanceToken();
-                        const args = self.allocator.alloc(*const Node, 1) catch return DslError.OutOfMemory;
-                        args[0] = name_expr;
-                        return self.allocNode(.{
-                            .loc = loc,
-                            .kind = .{ .method_call = .{
-                                .receiver = null,
-                                .method = "Formula.lookup",
-                                .args = args,
-                                .blk = null,
-                                .block_params = &.{},
-                            } },
-                        });
-                    }
-                }
-
-                // --- ENV["key"] read / ENV["key"] = value write ---
-                if (std.mem.eql(u8, name, "ENV")) {
-                    // Same reasoning as the `Dir` peek above: only
-                    // `lexer.peek()` saves the heredoc state.
-                    const peek_tok2 = self.lexer.peek();
-                    if (peek_tok2.kind == .lbracket) {
-                        self.advanceToken(); // consume "ENV"
-                        self.advanceToken(); // consume "["
-                        const key_expr = try self.parseExpression();
-                        if (self.current.kind == .rbracket) self.advanceToken();
-
-                        // Check for assignment: ENV["key"] = value
-                        if (self.current.kind == .equals) {
-                            self.advanceToken(); // consume =
-                            const val_expr = try self.parseExpression();
-                            // Emit as method_call to "ENV.set" with key and value args
-                            var args: std.ArrayList(*const Node) = .empty;
-                            args.append(self.allocator, key_expr) catch return DslError.OutOfMemory;
-                            args.append(self.allocator, val_expr) catch return DslError.OutOfMemory;
-                            const args_slice = args.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
-                            return self.allocNode(.{
-                                .loc = loc,
-                                .kind = .{ .method_call = .{
-                                    .receiver = null,
-                                    .method = "ENV.set",
-                                    .args = args_slice,
-                                    .blk = null,
-                                    .block_params = &.{},
-                                } },
-                            });
-                        }
-
-                        // Read form: ENV["key"]
-                        var args: std.ArrayList(*const Node) = .empty;
-                        args.append(self.allocator, key_expr) catch return DslError.OutOfMemory;
-                        const args_slice = args.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
-                        return self.allocNode(.{
-                            .loc = loc,
-                            .kind = .{ .method_call = .{
-                                .receiver = null,
-                                .method = "ENV.get",
-                                .args = args_slice,
-                                .blk = null,
-                                .block_params = &.{},
-                            } },
-                        });
-                    }
-                }
-
-                self.advanceToken();
-
-                // For methods that are ALWAYS bare-call (never use parens),
-                // parse args as expressions — `cp (expr).method, dest`
-                // needs `(expr)` parsed as grouped expression, not arg-list delimiters.
-                if (isAlwaysBareMethod(name) and isExprStart(self.current.kind) and
-                    self.current.kind != .newline and
-                    self.current.kind != .kw_if and
-                    self.current.kind != .kw_unless and
-                    self.current.kind != .kw_end and
-                    self.current.kind != .kw_do and
-                    self.current.kind != .dot)
-                {
-                    var args: std.ArrayList(*const Node) = .empty;
-                    var block_pass: ?*const Node = null;
-                    const arg = try self.parseExpression();
-                    args.append(self.allocator, arg) catch return DslError.OutOfMemory;
-                    while (self.current.kind == .comma) {
-                        self.advanceToken();
-                        self.skipNewlines();
-                        switch (try self.parseOneArg()) {
-                            .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
-                            .block_pass => |bp| {
-                                block_pass = bp;
-                                break;
-                            },
-                        }
-                    }
-
-                    // Parse optional block
-                    var blk: ?*const Node = null;
-                    var block_params: std.ArrayList([]const u8) = .empty;
-                    if (self.current.kind == .kw_do) {
-                        self.advanceToken();
-                        try self.parseBlockParams(&block_params);
-                        const body = try self.parseBlock();
-                        if (self.current.kind == .kw_end) self.advanceToken();
-                        blk = try self.allocNode(.{
-                            .loc = loc,
-                            .kind = .{ .block = body },
-                        });
-                    } else if (self.current.kind == .lbrace) {
-                        self.advanceToken();
-                        try self.parseBlockParams(&block_params);
-                        const body = try self.parseBlock();
-                        if (self.current.kind == .rbrace) self.advanceToken();
-                        blk = try self.allocNode(.{
-                            .loc = loc,
-                            .kind = .{ .block = body },
-                        });
-                    }
-
-                    const args_slice = args.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
-                    const params_slice = block_params.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
-
-                    return self.allocNode(.{
-                        .loc = loc,
-                        .kind = .{ .method_call = .{
-                            .receiver = null,
-                            .method = name,
-                            .args = args_slice,
-                            .blk = blk,
-                            .block_params = params_slice,
-                            .block_pass = block_pass,
-                        } },
-                    });
-                }
-
-                // Non-bare method call with parens: method(args)
-                if (self.current.kind == .lparen) {
-                    // method(args) — may end with `&<primary>` block-pass.
+                if (self.current.kind == .colon) {
                     self.advanceToken();
-                    var args: std.ArrayList(*const Node) = .empty;
-                    var block_pass: ?*const Node = null;
-                    while (self.current.kind != .rparen and self.current.kind != .eof) {
-                        switch (try self.parseOneArg()) {
-                            .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
-                            .block_pass => |bp| {
-                                block_pass = bp;
-                                break;
-                            },
-                        }
-                        if (self.current.kind == .comma) {
-                            self.advanceToken();
-                            self.skipNewlines();
-                        }
-                    }
-                    if (self.current.kind == .rparen) self.advanceToken();
-
-                    // Parse optional block
-                    var blk: ?*const Node = null;
-                    var block_params: std.ArrayList([]const u8) = .empty;
-                    if (self.current.kind == .kw_do) {
-                        self.advanceToken();
-                        try self.parseBlockParams(&block_params);
-                        const body = try self.parseBlock();
-                        if (self.current.kind == .kw_end) self.advanceToken();
-                        blk = try self.allocNode(.{
-                            .loc = loc,
-                            .kind = .{ .block = body },
-                        });
-                    } else if (self.current.kind == .lbrace) {
-                        self.advanceToken();
-                        try self.parseBlockParams(&block_params);
-                        const body = try self.parseBlock();
-                        if (self.current.kind == .rbrace) self.advanceToken();
-                        blk = try self.allocNode(.{
-                            .loc = loc,
-                            .kind = .{ .block = body },
-                        });
-                    }
-
-                    const args_slice = args.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
-                    const params_slice = block_params.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
-
-                    return self.allocNode(.{
-                        .loc = loc,
-                        .kind = .{ .method_call = .{
-                            .receiver = null,
-                            .method = name,
-                            .args = args_slice,
-                            .blk = blk,
-                            .block_params = params_slice,
-                            .block_pass = block_pass,
-                        } },
+                    key = try self.allocNode(.{
+                        .loc = key_loc,
+                        .kind = .{ .symbol_literal = ident_lexeme },
                     });
-                }
-
-                // Check if this is a bare method call with arguments (no parens)
-                // Only for known methods that take bare args
-                if (isBareCallMethod(name) and isExprStart(self.current.kind) and
-                    self.current.kind != .newline and
-                    self.current.kind != .kw_if and
-                    self.current.kind != .kw_unless and
-                    self.current.kind != .kw_end and
-                    self.current.kind != .kw_do and
-                    self.current.kind != .dot)
-                {
-                    var args: std.ArrayList(*const Node) = .empty;
-                    var block_pass: ?*const Node = null;
-                    const arg = try self.parseExpression();
-                    args.append(self.allocator, arg) catch return DslError.OutOfMemory;
-                    while (self.current.kind == .comma) {
-                        self.advanceToken();
-                        self.skipNewlines();
-                        switch (try self.parseOneArg()) {
-                            .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
-                            .block_pass => |bp| {
-                                block_pass = bp;
-                                break;
-                            },
-                        }
-                    }
-
-                    // Parse optional block
-                    var blk: ?*const Node = null;
-                    var block_params: std.ArrayList([]const u8) = .empty;
-                    if (self.current.kind == .kw_do) {
-                        self.advanceToken();
-                        try self.parseBlockParams(&block_params);
-                        const body = try self.parseBlock();
-                        if (self.current.kind == .kw_end) self.advanceToken();
-                        blk = try self.allocNode(.{
-                            .loc = loc,
-                            .kind = .{ .block = body },
-                        });
-                    } else if (self.current.kind == .lbrace) {
-                        self.advanceToken();
-                        try self.parseBlockParams(&block_params);
-                        const body = try self.parseBlock();
-                        if (self.current.kind == .rbrace) self.advanceToken();
-                        blk = try self.allocNode(.{
-                            .loc = loc,
-                            .kind = .{ .block = body },
-                        });
-                    }
-
-                    const args_slice = args.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
-                    const params_slice = block_params.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
-
-                    return self.allocNode(.{
-                        .loc = loc,
-                        .kind = .{ .method_call = .{
-                            .receiver = null,
-                            .method = name,
-                            .args = args_slice,
-                            .blk = blk,
-                            .block_params = params_slice,
-                            .block_pass = block_pass,
-                        } },
-                    });
-                }
-
-                // Plain identifier
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .identifier = name },
-                });
-            },
-            .lbracket => {
-                // Array literal
-                self.advanceToken();
-                var elems: std.ArrayList(*const Node) = .empty;
-                while (self.current.kind != .rbracket and self.current.kind != .eof) {
-                    self.skipNewlines();
-                    if (self.current.kind == .rbracket) break;
-                    const elem = try self.parseExpression();
-                    elems.append(self.allocator, elem) catch return DslError.OutOfMemory;
-                    self.skipNewlines();
-                    if (self.current.kind == .comma) self.advanceToken();
-                }
-                if (self.current.kind == .rbracket) self.advanceToken();
-                const slice = elems.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .array_literal = slice },
-                });
-            },
-            .lbrace => {
-                // Hash literal. Ruby's shorthand `{ name: value }` lowers
-                // to a symbol key — recognise the `identifier:` case so
-                // it doesn't get resolved as an unknown method/identifier
-                // at interpret time.
-                self.advanceToken();
-                var entries: std.ArrayList(ast.HashEntry) = .empty;
-                while (self.current.kind != .rbrace and self.current.kind != .eof) {
-                    self.skipNewlines();
-                    if (self.current.kind == .rbrace) break;
-
-                    const key_loc = self.currentLoc();
-                    var key: *const Node = undefined;
-                    // Peek: if we see `identifier : ...` (single colon, not `::`),
-                    // treat the identifier as a symbol literal.
-                    if (self.current.kind == .identifier) {
-                        const lex_before = self.lexer.*;
-                        const ident_lexeme = self.current.lexeme;
-                        self.advanceToken();
-                        if (self.current.kind == .colon) {
-                            self.advanceToken();
-                            key = try self.allocNode(.{
-                                .loc = key_loc,
-                                .kind = .{ .symbol_literal = ident_lexeme },
-                            });
-                            const value = try self.parseExpression();
-                            entries.append(self.allocator, .{ .key = key, .value = value }) catch return DslError.OutOfMemory;
-                            self.skipNewlines();
-                            if (self.current.kind == .comma) self.advanceToken();
-                            continue;
-                        }
-                        // Not shorthand — rewind and parse as a full expression.
-                        self.lexer.* = lex_before;
-                        self.current = self.lexer.next();
-                    }
-
-                    key = try self.parseExpression();
-                    if (self.current.kind == .fat_arrow) {
-                        self.advanceToken();
-                    } else if (self.current.kind == .colon) {
-                        self.advanceToken();
-                    }
-
                     const value = try self.parseExpression();
                     entries.append(self.allocator, .{ .key = key, .value = value }) catch return DslError.OutOfMemory;
                     self.skipNewlines();
                     if (self.current.kind == .comma) self.advanceToken();
+                    continue;
                 }
-                if (self.current.kind == .rbrace) self.advanceToken();
-                const slice = entries.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
-                return self.allocNode(.{
-                    .loc = loc,
-                    .kind = .{ .hash_literal = slice },
-                });
-            },
-            .lparen => {
+                // Not shorthand — rewind and re-parse as a full expression.
+                self.lexer.* = lex_before;
+                self.current = self.lexer.next();
+            }
+
+            key = try self.parseExpression();
+            if (self.current.kind == .fat_arrow or self.current.kind == .colon) {
                 self.advanceToken();
-                const inner = try self.parseExpression();
-                if (self.current.kind == .rparen) self.advanceToken();
-                return inner;
-            },
-            else => {
-                return self.emitError("unexpected token in expression");
-            },
+            }
+
+            const value = try self.parseExpression();
+            entries.append(self.allocator, .{ .key = key, .value = value }) catch return DslError.OutOfMemory;
+            self.skipNewlines();
+            if (self.current.kind == .comma) self.advanceToken();
         }
+        if (self.current.kind == .rbrace) self.advanceToken();
+        const slice = entries.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+        return self.allocNode(.{ .loc = loc, .kind = .{ .hash_literal = slice } });
+    }
+
+    fn parseParenExpr(self: *Parser) DslError!*const Node {
+        self.advanceToken(); // '('
+        const inner = try self.parseExpression();
+        if (self.current.kind == .rparen) self.advanceToken();
+        return inner;
+    }
+
+    /// An identifier at expression position can be a plain reference,
+    /// a call (bare, paren, or always-bare), or an `X[...]` index form
+    /// for the built-in pseudo-modules `Dir`, `Formula`, `ENV`.
+    fn parseIdentifierForm(self: *Parser) DslError!*const Node {
+        const loc = self.currentLoc();
+        const name = self.current.lexeme;
+
+        // `lexer.peek()` saves every field `next()` may mutate —
+        // including heredoc state — so a `Dir<<~EOS` peek restores
+        // cleanly instead of leaving the lexer mid-collection.
+        if (std.mem.eql(u8, name, "Dir") and self.lexer.peek().kind == .lbracket)
+            return self.parseDirIndex(loc);
+        if (std.mem.eql(u8, name, "Formula") and self.lexer.peek().kind == .lbracket)
+            return self.parseFormulaIndex(loc);
+        if (std.mem.eql(u8, name, "ENV") and self.lexer.peek().kind == .lbracket)
+            return self.parseEnvIndex(loc);
+
+        self.advanceToken(); // consume identifier
+
+        // Always-bare methods (`cp`, `cp_r`) must be checked before the
+        // lparen arm so `cp (expr).method, dest` keeps `(expr)` grouped
+        // instead of consuming `(...)` as a paren-arg list.
+        const starts_bare = self.currentLooksLikeBareArg();
+        if (isAlwaysBareMethod(name) and starts_bare) return self.parseBareMethodCall(loc, name);
+        if (self.current.kind == .lparen) return self.parseParenCall(loc, name);
+        if (isBareCallMethod(name) and starts_bare) return self.parseBareMethodCall(loc, name);
+
+        return self.allocNode(.{ .loc = loc, .kind = .{ .identifier = name } });
+    }
+
+    /// Build a bare (no receiver, no block) method_call node — shared
+    /// by the Dir/Formula/ENV index rewrites.
+    fn makeStaticMethodCall(
+        self: *Parser,
+        loc: SourceLoc,
+        name: []const u8,
+        args: []const *const Node,
+    ) DslError!*const Node {
+        return self.allocNode(.{
+            .loc = loc,
+            .kind = .{ .method_call = .{
+                .receiver = null,
+                .method = name,
+                .args = args,
+                .blk = null,
+                .block_params = &.{},
+            } },
+        });
+    }
+
+    /// `Dir[expr, expr, ...]` → `Dir.glob(expr, expr, ...)`.
+    fn parseDirIndex(self: *Parser, loc: SourceLoc) DslError!*const Node {
+        self.advanceToken(); // 'Dir'
+        self.advanceToken(); // '['
+        var args: std.ArrayList(*const Node) = .empty;
+        while (self.current.kind != .rbracket and self.current.kind != .eof) {
+            const arg = try self.parseExpression();
+            args.append(self.allocator, arg) catch return DslError.OutOfMemory;
+            if (self.current.kind == .comma) {
+                self.advanceToken();
+                self.skipNewlines();
+            }
+        }
+        if (self.current.kind == .rbracket) self.advanceToken();
+        const args_slice = args.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+        return self.makeStaticMethodCall(loc, "Dir.glob", args_slice);
+    }
+
+    /// `Formula[name]` → `Formula.lookup(name)`.
+    fn parseFormulaIndex(self: *Parser, loc: SourceLoc) DslError!*const Node {
+        self.advanceToken(); // 'Formula'
+        self.advanceToken(); // '['
+        const name_expr = try self.parseExpression();
+        if (self.current.kind == .rbracket) self.advanceToken();
+        const args = self.allocator.alloc(*const Node, 1) catch return DslError.OutOfMemory;
+        args[0] = name_expr;
+        return self.makeStaticMethodCall(loc, "Formula.lookup", args);
+    }
+
+    /// `ENV[key]` reads → `ENV.get(key)`; `ENV[key] = value` writes
+    /// → `ENV.set(key, value)`.
+    fn parseEnvIndex(self: *Parser, loc: SourceLoc) DslError!*const Node {
+        self.advanceToken(); // 'ENV'
+        self.advanceToken(); // '['
+        const key_expr = try self.parseExpression();
+        if (self.current.kind == .rbracket) self.advanceToken();
+
+        if (self.current.kind == .equals) {
+            self.advanceToken();
+            const val_expr = try self.parseExpression();
+            const args = self.allocator.alloc(*const Node, 2) catch return DslError.OutOfMemory;
+            args[0] = key_expr;
+            args[1] = val_expr;
+            return self.makeStaticMethodCall(loc, "ENV.set", args);
+        }
+
+        const args = self.allocator.alloc(*const Node, 1) catch return DslError.OutOfMemory;
+        args[0] = key_expr;
+        return self.makeStaticMethodCall(loc, "ENV.get", args);
+    }
+
+    /// Paren-delimited call: `name(args)`.
+    fn parseParenCall(self: *Parser, loc: SourceLoc, name: []const u8) DslError!*const Node {
+        var args: std.ArrayList(*const Node) = .empty;
+        var block_pass: ?*const Node = null;
+        try self.parseParenArgList(&args, &block_pass);
+        return self.finishCallWithBlock(loc, null, name, &args, block_pass);
+    }
+
+    /// Bare (paren-less) call: `name a, b [&:sym] [do |x| … end]`.
+    /// Used for both always-bare methods (cp, cp_r) and bare-capable
+    /// methods (system, ohai, …).
+    fn parseBareMethodCall(self: *Parser, loc: SourceLoc, name: []const u8) DslError!*const Node {
+        var args: std.ArrayList(*const Node) = .empty;
+        var block_pass: ?*const Node = null;
+        try self.parseBareArgList(&args, &block_pass);
+        return self.finishCallWithBlock(loc, null, name, &args, block_pass);
     }
 
     fn parseIf(self: *Parser) DslError!*const Node {
