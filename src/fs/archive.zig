@@ -24,19 +24,20 @@ pub fn isSafeEntryPath(name: []const u8) bool {
     return true;
 }
 
-/// Symlink targets may legitimately use `..` to point at a sibling within
-/// the extracted bundle (e.g. Apple `.xctoolchain`'s `usr/bin -> ../../../bin`).
+/// Symlink targets may climb to a sibling inside the bundle (Apple
+/// `.xctoolchain`) or one level above it — bottles reach sibling formulas
+/// via `<prefix>/opt/<name>`, resolved against the implicit Cellar parent.
 /// Resolve `link_name` lexically against `dirname(entry_name)` and reject
-/// only when the result would escape the extraction root, or when the
-/// target is absolute, empty, or NUL-bearing. `entry_name` is assumed to
-/// have already passed `isSafeEntryPath`.
+/// climbs deeper than that, plus absolute, empty, or NUL-bearing targets.
+/// `entry_name` is assumed to have passed `isSafeEntryPath`, so a later
+/// entry cannot chain through the escape beyond the prefix parent.
 pub fn isSafeSymlinkTarget(entry_name: []const u8, link_name: []const u8) bool {
     if (link_name.len == 0) return false;
     if (link_name[0] == '/') return false;
     if (std.mem.indexOfScalar(u8, link_name, 0) != null) return false;
 
     // Parent depth: components in entry_name minus the symlink's own slot.
-    var parent_depth: usize = 0;
+    var parent_depth: isize = 0;
     var name_it = std.mem.splitScalar(u8, entry_name, '/');
     while (name_it.next()) |comp| {
         if (comp.len == 0 or std.mem.eql(u8, comp, ".")) continue;
@@ -51,8 +52,10 @@ pub fn isSafeSymlinkTarget(entry_name: []const u8, link_name: []const u8) bool {
     while (link_it.next()) |comp| {
         if (comp.len == 0 or std.mem.eql(u8, comp, ".")) continue;
         if (std.mem.eql(u8, comp, "..")) {
-            if (depth == 0) return false;
             depth -= 1;
+            // -1 lands in the prefix parent (legitimate bottle shape);
+            // anything beyond is genuine escape.
+            if (depth < -1) return false;
         } else {
             depth += 1;
         }
