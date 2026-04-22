@@ -42,7 +42,8 @@ pub fn sleepNanos(ns: u64) void {
 }
 
 pub fn randomBytes(buf: []u8) void {
-    std.c.arc4random_buf(buf.ptr, buf.len);
+    // std.Io.random is portable and infallible — no libc return to ignore.
+    io_mod.ctx().random(buf);
 }
 
 pub fn randomInt(comptime T: type) T {
