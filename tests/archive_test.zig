@@ -412,9 +412,10 @@ test "isSafeSymlinkTarget: rejects absolute, empty, and NUL-bearing targets" {
 }
 
 test "extractTarGz accepts a symlink whose relative target stays inside dest" {
-    // Mirrors the llvm@21 bottle layout that broke after T-004:
-    // a deep symlink whose `..`-only target resolves to a sibling within
-    // the extracted tree. Pre-fix this errored out as `ExtractionFailed`.
+    // Mirrors the llvm@21 bottle layout: a deep symlink whose `..`-only
+    // target resolves to a sibling within the extracted tree. Rejecting
+    // these would break every Homebrew bottle that ships xctoolchain-style
+    // cross-dir links.
     const base = "/tmp/malt_archive_targz_intra_symlink";
     malt.fs_compat.deleteTreeAbsolute(base) catch {};
     try malt.fs_compat.makeDirAbsolute(base);

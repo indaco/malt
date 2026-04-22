@@ -137,9 +137,9 @@ test "generateWrapper emits a Ruby script containing the post_install body and p
     try testing.expect(std.mem.indexOf(u8, script, "2.3") != null);
 }
 
-// T-003: injection regression — every disallowed byte in any of prefix /
+// Injection regression — every disallowed byte in any of prefix /
 // name / version must be rejected by generateWrapper, not silently
-// interpolated into the single-quoted Ruby literal. See BUG-007.
+// interpolated into the single-quoted Ruby literal.
 
 test "generateWrapper rejects single quote in prefix" {
     try testing.expectError(
@@ -415,11 +415,11 @@ test "ca-certificates-shape: dispatcher with unparseable siblings leaves flog cl
     try testing.expectEqual(@as(usize, 0), flog.entries.items.len);
 }
 
-// T-003: defense-in-depth — runPostInstall must reject hostile name /
-// version up front, before any of the lookup/IO work that would
-// eventually flow them into the wrapper. A Cellar directory whose name
-// or version embeds `'`, `\`, or a newline is a concrete attack on
-// `--use-system-ruby` (the directory listing flows back into name).
+// Defense-in-depth — runPostInstall must reject hostile name / version
+// up front, before any of the lookup/IO work that would eventually flow
+// them into the wrapper. A Cellar directory whose name or version embeds
+// `'`, `\`, or a newline is a concrete attack on `--use-system-ruby`
+// (the directory listing flows back into name).
 
 test "runPostInstall rejects single-quote in name with InvalidInput" {
     const err = ruby.runPostInstall(testing.allocator, "p'k", "1.0", "/opt/malt");

@@ -116,10 +116,9 @@ test "validatePrefix: dotdot-like-but-not-exact component accepted" {
     try atomic.validatePrefix("/opt/malt..");
 }
 
-// T-003: tighten the prefix charset to close the Ruby-wrapper / sandbox-
-// profile injection vector. A MALT_PREFIX with a quote, backslash, or
-// control byte breaks the generated single-quoted Ruby literal — see
-// docs/analysis/2026-04-20-01-bugs.md BUG-007 / BUG-019.
+// Tighten the prefix charset to close the Ruby-wrapper / sandbox-profile
+// injection vector. A MALT_PREFIX with a quote, backslash, or control byte
+// breaks the generated single-quoted Ruby literal the wrapper interpolates.
 test "validatePrefix: single quote rejected" {
     try testing.expectError(error.DisallowedByte, atomic.validatePrefix("/tmp/m'x"));
 }
@@ -174,7 +173,7 @@ test "describePrefixError: DisallowedByte has a descriptive string" {
 
 test "isAllowedPrefixByte: charset matches the documented contract" {
     // Centralised predicate used by prefix/name/version validation.
-    // [a-zA-Z0-9._+\-/] — see docs/plan/tasks/T-003.md.
+    // Contract: [a-zA-Z0-9._+\-/].
     const allowed = "abcXYZ0123456789._+-/";
     for (allowed) |b| try testing.expect(atomic.isAllowedPrefixByte(b));
     const denied = "'\"\\\n\t (){}[]$|;&<>*?#";
