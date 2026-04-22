@@ -329,6 +329,12 @@ pub const File = struct {
         return self.inner.setPermissions(io_mod.ctx(), std.Io.File.Permissions.fromMode(@intCast(mode)));
     }
 
+    /// Block until pending contents and metadata are on disk. Callers that
+    /// rename-for-atomicity must sync first — POSIX rename is not durable.
+    pub fn sync(self: File) !void {
+        return self.inner.sync(io_mod.ctx());
+    }
+
     pub fn readToEndAlloc(self: File, allocator: std.mem.Allocator, max_bytes: usize) ![]u8 {
         const io = io_mod.ctx();
         const st = try self.inner.stat(io);
@@ -418,6 +424,13 @@ pub const Dir = struct {
 
     pub fn rename(self: Dir, old_sub_path: []const u8, new_sub_path: []const u8) !void {
         return self.inner.rename(old_sub_path, self.inner, new_sub_path, io_mod.ctx());
+    }
+
+    /// Flush directory metadata. `std.Io.Dir` has no sync vtable entry, so
+    /// drop to POSIX `fsync(2)` on the underlying fd — same primitive the
+    /// lock release path uses.
+    pub fn sync(self: Dir) !void {
+        if (std.c.fsync(self.inner.handle) != 0) return error.SyncFailed;
     }
 
     pub fn openDir(self: Dir, sub_path: []const u8, options: OpenOptions) !Dir {
