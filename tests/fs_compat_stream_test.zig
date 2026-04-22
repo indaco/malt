@@ -198,6 +198,31 @@ const TruncRacer = struct {
     }
 };
 
+// ── randomBytes / randomInt: non-constant output ────────────────────
+//
+// Pin that the CSPRNG helpers actually fill the buffer. The underlying
+// binding could silently return zeros on a future port; a hard-coded
+// "all-zero" output would make `atomic.createTempDir` deterministic —
+// the exact smell BUG-013 warns about.
+
+test "randomBytes produces non-equal buffers on consecutive calls" {
+    var a: [32]u8 = undefined;
+    var b: [32]u8 = undefined;
+    fs.randomBytes(&a);
+    fs.randomBytes(&b);
+    try testing.expect(!std.mem.eql(u8, &a, &b));
+    // Also rule out "returned zeros" — a broken impl could output a
+    // different pair of constants; cheaper to just reject all-zero.
+    const zero: [32]u8 = @splat(0);
+    try testing.expect(!std.mem.eql(u8, &a, &zero));
+}
+
+test "randomInt produces non-equal values on consecutive calls" {
+    const a = fs.randomInt(u64);
+    const b = fs.randomInt(u64);
+    try testing.expect(a != b);
+}
+
 test "readToEndAlloc honors allocator contract when the file shrinks between stat and read" {
     // Racy truncate reproduces BUG-002: the old code returned `buf[0..n]`
     // of an allocation sized to `stat.size`, so any short read (sparse
