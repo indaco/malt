@@ -284,6 +284,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
 
 /// macOS version codenames in descending order (newest first).
 const macos_arm64_platforms = [_][]const u8{
+    "arm64_tahoe",
     "arm64_sequoia",
     "arm64_sonoma",
     "arm64_ventura",
@@ -291,6 +292,7 @@ const macos_arm64_platforms = [_][]const u8{
 };
 
 const macos_x86_platforms = [_][]const u8{
+    "tahoe",
     "sequoia",
     "sonoma",
     "ventura",

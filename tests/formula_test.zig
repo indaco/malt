@@ -2,6 +2,7 @@
 //! Tests for formula JSON parsing, alias resolution, and bottle selection.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const formula_mod = @import("malt").formula;
 
@@ -113,6 +114,53 @@ test "handle missing bottle for platform" {
 
     const result = formula_mod.resolveBottle(alloc, &formula);
     try testing.expectError(formula_mod.FormulaError.NoBottleAvailable, result);
+}
+
+test "resolveBottle prefers tahoe over sequoia on current arch" {
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Bottle map advertises both tahoe and sequoia variants for both arches.
+    // Newer-OS preference: tahoe must win on macOS 26 for the current arch.
+    const json =
+        \\{
+        \\  "name": "rust",
+        \\  "full_name": "rust",
+        \\  "tap": "homebrew/core",
+        \\  "desc": "",
+        \\  "homepage": "",
+        \\  "license": "",
+        \\  "revision": 0,
+        \\  "keg_only": false,
+        \\  "post_install_defined": false,
+        \\  "versions": { "stable": "1.0", "head": null },
+        \\  "dependencies": [],
+        \\  "oldnames": [],
+        \\  "bottle": {
+        \\    "stable": {
+        \\      "root_url": "https://example.com",
+        \\      "files": {
+        \\        "arm64_tahoe":   { "cellar": ":any", "url": "u1", "sha256": "arm64_tahoe_sha" },
+        \\        "arm64_sequoia": { "cellar": ":any", "url": "u2", "sha256": "arm64_sequoia_sha" },
+        \\        "tahoe":         { "cellar": ":any", "url": "u3", "sha256": "tahoe_sha" },
+        \\        "sequoia":       { "cellar": ":any", "url": "u4", "sha256": "sequoia_sha" }
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+    var formula = try formula_mod.parseFormula(alloc, json);
+    defer formula.deinit();
+
+    const bottle = try formula_mod.resolveBottle(alloc, &formula);
+
+    const expected_sha = switch (builtin.cpu.arch) {
+        .aarch64 => "arm64_tahoe_sha",
+        .x86_64 => "tahoe_sha",
+        else => "arm64_tahoe_sha",
+    };
+    try testing.expectEqualStrings(expected_sha, bottle.sha256);
 }
 
 test "parse formula with post_install_defined true" {
