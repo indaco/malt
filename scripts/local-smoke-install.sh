@@ -10,13 +10,19 @@
 #   • mt install node           — large dependency graph (24 packages),
 #                                 exercises parallel download + post_install.
 #   • mt install zig            — formula bottle path with intra-bundle
-#                                 relative symlinks (the .xctoolchain layout
-#                                 that broke in T-004 and was fixed in T-004a).
-#   • mt install --cask raycast — cask DMG path. Exercises headResolved
-#                                 redirect-follow + DMG mount/install
-#                                 (the path covered by T-006).
+#                                 relative symlinks (.xctoolchain layout).
+#   • mt install rust           — sibling-formula symlinks (rust -> llvm)
+#                                 plus ca-certificates as a dep — pins the
+#                                 dispatcher post_install path end-to-end.
+#   • mt install go             — classic large-bottle formula, no post_install.
+#   • mt install --cask raycast — cask DMG path + /Applications artifact.
+#                                 Exercises headResolved redirect-follow
+#                                 + DMG mount/install.
+#   • mt install --cask copilot-cli — cask `binary` artifact (symlinks a CLI
+#                                 into $PREFIX/bin). Exercises the
+#                                 non-/Applications cask codepath.
 #
-# Time/bandwidth: ~10–15 min, ~1.5 GB downloaded fresh.
+# Time/bandwidth: ~15–25 min, ~3 GB downloaded fresh.
 #
 # Cleanup: on success (FAIL=0), every cask installed by this run is
 # `mt uninstall`-ed and every formula too — so /Applications and any
@@ -24,8 +30,9 @@
 # EXIT trap wipes the temp PREFIX/CACHE/LOGDIR. On failure, artifacts
 # stay around for triage (matches scripts/local-bench.sh behavior).
 #
-# Cask installs are SKIPPED when the target /Applications/<App>.app
+# App casks are SKIPPED when the target /Applications/<App>.app
 # already exists — we never trample the user's pre-existing apps.
+# Binary casks land under $MALT_PREFIX/bin so they never need that guard.
 #
 # Usage:
 #   ./scripts/local-smoke-install.sh
@@ -112,6 +119,17 @@ install_cask() {
   fi
 }
 
+# Install a cask whose only artifact is a `binary` (CLI tool) — no
+# /Applications slot, so the app-pre-exists guard does not apply. The
+# binary symlink lands under $MALT_PREFIX/bin, so it cannot collide
+# with anything outside the sandbox.
+install_binary_cask() {
+  local tag="$1" cask="$2"
+  if run "$tag" "$MT_BIN" install --cask "$cask"; then
+    INSTALLED_CASKS+=("$cask")
+  fi
+}
+
 # Reverse what we installed. Casks first because they touch /Applications;
 # formulas second (they live entirely under MALT_PREFIX, but uninstalling
 # also exercises the uninstall path). Best-effort: a stuck uninstall must
@@ -139,7 +157,10 @@ printf '  MT_BIN=%s\n\n' "$MT_BIN"
 run smoke.update "$MT_BIN" update
 install_formula smoke.install.node node
 install_formula smoke.install.zig zig
+install_formula smoke.install.rust rust
+install_formula smoke.install.go go
 install_cask smoke.install.cask.raycast raycast Raycast.app
+install_binary_cask smoke.install.cask.copilot-cli copilot-cli
 
 printf '\n── Summary ───────────────────────────────────────\n'
 printf '  passed: %d\n' "$PASS"
