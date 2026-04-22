@@ -21,7 +21,9 @@ pub fn cloneTree(src_path: []const u8, dst_path: []const u8) CloneError!void {
     const rc = c.clonefile(&src_z, &dst_z, 0);
     if (rc == 0) return;
 
-    const e = std.posix.errno(rc);
+    // clonefile(2) is libc-style: -1 on error with errno set globally.
+    // Read errno directly; std.posix.errno expects a Zig-syscall return.
+    const e: std.c.E = @enumFromInt(std.c._errno().*);
     switch (e) {
         .OPNOTSUPP => {
             copyTreeFallback(src_path, dst_path) catch return error.IoError;
