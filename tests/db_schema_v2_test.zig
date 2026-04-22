@@ -108,6 +108,41 @@ test "services table accepts inserts and enforces PK" {
     try testing.expectError(sqlite.SqliteError.ConstraintViolation, dup_result);
 }
 
+test "Database.open accepts a 1 KB path" {
+    // Synthetic 1 KB path: we don't need sqlite to actually open it,
+    // just to confirm the internal cap no longer rejects ~1 KB inputs.
+    var buf: [1024]u8 = undefined;
+    @memset(&buf, 'a');
+    buf[0] = '/';
+    const path: []const u8 = buf[0..1024];
+
+    if (sqlite.Database.open(path)) |db_val| {
+        var db = db_val;
+        db.close();
+    } else |err| {
+        try testing.expect(err != sqlite.SqliteError.PathTooLong);
+    }
+}
+
+test "Database.exec accepts 12 KB SQL" {
+    var tdb = try TempDb.init("exec_12kb");
+    defer tdb.deinit();
+
+    try tdb.db.exec("CREATE TABLE big(v TEXT);");
+
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(testing.allocator);
+    try list.appendSlice(testing.allocator, "INSERT INTO big(v) VALUES");
+    const row = "('xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'),";
+    while (list.items.len < 12 * 1024) {
+        try list.appendSlice(testing.allocator, row);
+    }
+    list.items[list.items.len - 1] = ';';
+    try testing.expect(list.items.len >= 12 * 1024);
+
+    try tdb.db.exec(list.items);
+}
+
 test "bundle_members cascade-deletes with bundle" {
     var tdb = try TempDb.init("cascade");
     defer tdb.deinit();
