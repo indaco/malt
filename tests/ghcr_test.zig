@@ -111,6 +111,28 @@ test "hasTokenFor is false before any fetch and true after a direct cache seed" 
     try testing.expect(!g.hasTokenFor("homebrew/core/tree"));
 }
 
+// ── GHCR error classification ──────────────────────────────────────
+
+test "classifyGhcrStatus: 404 maps to DownloadHttpClientError" {
+    try testing.expectEqual(ghcr.GhcrError.DownloadHttpClientError, ghcr.GhcrClient.classifyGhcrStatus(404));
+}
+
+test "classifyGhcrStatus: 410 maps to DownloadHttpClientError" {
+    try testing.expectEqual(ghcr.GhcrError.DownloadHttpClientError, ghcr.GhcrClient.classifyGhcrStatus(410));
+}
+
+test "classifyGhcrStatus: 429 maps to DownloadRateLimited" {
+    try testing.expectEqual(ghcr.GhcrError.DownloadRateLimited, ghcr.GhcrClient.classifyGhcrStatus(429));
+}
+
+test "classifyGhcrStatus: 500 maps to DownloadHttpServerError" {
+    try testing.expectEqual(ghcr.GhcrError.DownloadHttpServerError, ghcr.GhcrClient.classifyGhcrStatus(500));
+}
+
+test "classifyGhcrStatus: 503 maps to DownloadHttpServerError" {
+    try testing.expectEqual(ghcr.GhcrError.DownloadHttpServerError, ghcr.GhcrClient.classifyGhcrStatus(503));
+}
+
 test "hasTokenFor treats expired tokens as cache-miss" {
     var pool = try client_mod.HttpClientPool.init(testing.allocator, 1);
     defer pool.deinit();
