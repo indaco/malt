@@ -8,6 +8,7 @@ const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
 const install_cmd = @import("../cli/install.zig");
 const archive_mod = @import("../fs/archive.zig");
+const hash_mod = @import("hash.zig");
 
 pub const CaskError = error{
     ParseFailed,
@@ -707,31 +708,11 @@ pub fn findAppInDir(dir_path: []const u8, out_buf: []u8) ?[]const u8 {
     return null;
 }
 
-/// SHA256 buffer size — one positional read per 64 KiB.
-const sha256_read_chunk: usize = 64 * 1024;
-
-/// Compute the SHA256 of `file_path` as lowercase hex. Streams via
-/// `fs_compat.streamFile` so the file-reading loop lives in exactly
-/// one place — no more hand-rolled offset bookkeeping.
+/// Compute the SHA256 of `file_path` as lowercase hex. Delegates to
+/// the shared streaming helper so the chunk loop and buffer size are
+/// defined in exactly one place.
 pub fn hashFileSha256(file_path: []const u8) ![64]u8 {
-    const file = try fs_compat.openFileAbsolute(file_path, .{});
-    defer file.close();
-
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    var read_buf: [sha256_read_chunk]u8 = undefined;
-    try fs_compat.streamFile(file, &read_buf, .{
-        .context = @ptrCast(&hasher),
-        .func = &sha256Update,
-    });
-    var hash: [32]u8 = undefined;
-    hasher.final(&hash);
-    return std.fmt.bytesToHex(hash, .lower);
-}
-
-/// Bridge `streamFile`'s erased-context callback to `Sha256.update`.
-fn sha256Update(ctx: *anyopaque, chunk: []const u8) fs_compat.StreamError!void {
-    const hasher: *std.crypto.hash.sha2.Sha256 = @ptrCast(@alignCast(ctx));
-    hasher.update(chunk);
+    return hash_mod.hashFileSha256Hex(file_path);
 }
 
 /// Verify `file_path` hashes to `expected` (lowercase hex). A null
