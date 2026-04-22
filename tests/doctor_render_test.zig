@@ -164,6 +164,24 @@ test "null detail omits the em-dash entirely" {
 const malt = @import("malt");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
+const patch = malt.patch;
+
+// ── external-tool availability check ─────────────────────────────────
+//
+// Guards the doctor row that surfaces `install_name_tool` (today) or
+// `patchelf` (after the Linux backend lands). The tool name is read
+// from the facade so the check is platform-agnostic at the call site.
+
+test "doctor.externalToolAvailable returns true when the tool is on PATH" {
+    // `install_name_tool` is part of Xcode Command Line Tools and is
+    // always installed in the repo's dev environment — any bot that
+    // can build malt can find it.
+    try testing.expect(malt.doctor.externalToolAvailable(patch.external_tool_name));
+}
+
+test "doctor.externalToolAvailable returns false for a clearly-missing binary" {
+    try testing.expect(!malt.doctor.externalToolAvailable("mt_no_such_binary_ever_xyz"));
+}
 
 fn seedKeg(db: *sqlite.Database, name: []const u8, tap: []const u8, full_name: []const u8) !void {
     var stmt = try db.prepare(

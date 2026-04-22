@@ -19,6 +19,7 @@ pub const io_mod = @import("ui/io.zig");
 pub const codesign = @import("macho/codesign.zig");
 pub const parser = @import("macho/parser.zig");
 pub const patcher = @import("macho/patcher.zig");
+pub const patch = @import("core/patch.zig");
 pub const api = @import("net/api.zig");
 pub const client = @import("net/client.zig");
 pub const output = @import("ui/output.zig");

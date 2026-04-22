@@ -21,8 +21,17 @@
 #   • mt install --cask copilot-cli — cask `binary` artifact (symlinks a CLI
 #                                 into $PREFIX/bin). Exercises the
 #                                 non-/Applications cask codepath.
+#   • mt install python@3.14 (long prefix) — install_name_tool overflow
+#                                 fallback. python@3.14 has the tightest
+#                                 @@HOMEBREW_CELLAR@@ slots in homebrew/core;
+#                                 under any prefix > 12 bytes the in-place
+#                                 patcher overflows by one byte and the
+#                                 fallback grows the slot via subprocess.
+#                                 The case verifies otool sees the long
+#                                 path AND python3.14 actually loads at
+#                                 runtime under the long prefix.
 #
-# Time/bandwidth: ~15–25 min, ~3 GB downloaded fresh.
+# Time/bandwidth: ~20-30 min, ~3.5 GB downloaded fresh.
 #
 # Cleanup: on success (FAIL=0), every cask installed by this run is
 # `mt uninstall`-ed and every formula too — so /Applications and any
@@ -49,13 +58,18 @@ if [[ ! -x "$MT_BIN" ]]; then
 fi
 MT_BIN="$(cd "$(dirname "$MT_BIN")" && pwd)/$(basename "$MT_BIN")"
 
-# Short prefix template — the Mach-O in-place patcher caps at 13 bytes
-# because Homebrew bottles hard-code `/opt/homebrew` (13 bytes) in
-# LC_LOAD_DYLIB entries. `/tmp/mt.XXX` keeps us at 11 bytes with room.
+# Short prefix for the main loop. Most bottles' load-command slots fit
+# any reasonable prefix in-place; using 11 bytes keeps the fast path
+# in scope for the bulk of the run. The python@3.14 case below uses
+# its own 13-byte prefix to actively exercise the install_name_tool
+# overflow fallback.
 PREFIX=$(mktemp -d /tmp/mt.XXX)
 CACHE=$(mktemp -d /tmp/mc.XXX)
 LOGDIR=$(mktemp -d /tmp/ml.XXX)
-trap 'rm -rf "$PREFIX" "$CACHE" "$LOGDIR"' EXIT
+# /tmp/mt_tahoe + /tmp/mc_tahoe are the python overflow-fallback case's
+# fixed sandbox paths; sweep them too so an early abort never strands
+# them on disk.
+trap 'rm -rf "$PREFIX" "$CACHE" "$LOGDIR" /tmp/mt_tahoe /tmp/mc_tahoe' EXIT
 
 export MALT_PREFIX="$PREFIX"
 export MALT_CACHE="$CACHE"
@@ -130,6 +144,47 @@ install_binary_cask() {
   fi
 }
 
+# python@3.14 + a >12-byte MALT_PREFIX is the canonical install_name_tool
+# overflow case: tight @@HOMEBREW_CELLAR@@ slots overflow by one byte
+# and the in-place patcher hands them to install_name_tool. We pin both
+# the patched-binary shape (otool sees the long path) and the runtime
+# (python3.14 imports ssl, proving the rewritten LC_LOAD_DYLIBs resolve
+# under dyld). Self-contained: own prefix/cache, own cleanup.
+install_python_overflow_fallback() {
+  local tag="smoke.install.python_overflow_fallback"
+  # Fixed paths so the global EXIT trap below can reach them by literal
+  # name without inheriting the function's locals (which are unset
+  # under `set -u` once the function returns).
+  local long_prefix=/tmp/mt_tahoe # 13 bytes — just over the placeholder
+  local long_cache=/tmp/mc_tahoe
+  rm -rf "$long_prefix" "$long_cache"
+
+  if MALT_PREFIX="$long_prefix" MALT_CACHE="$long_cache" \
+    run "$tag" "$MT_BIN" install python@3.14; then
+    local libpath
+    libpath=$(find "$long_prefix/Cellar/python@3.14" -name 'libpython3.14.dylib' 2>/dev/null | head -1)
+    if [[ -n "$libpath" ]] && otool -L "$libpath" 2>/dev/null | grep -q "$long_prefix"; then
+      printf '  PASS  [%s.otool] long prefix in LC_LOAD_DYLIB\n' "$tag"
+      PASS=$((PASS + 1))
+    else
+      printf '  FAIL  [%s.otool] %s missing from LC_LOAD_DYLIB\n' "$tag" "$long_prefix"
+      FAIL=$((FAIL + 1))
+      FAILURES+=("$tag.otool")
+    fi
+    if MALT_PREFIX="$long_prefix" "$long_prefix/bin/python3.14" \
+      -c 'import ssl' >/dev/null 2>&1; then
+      printf '  PASS  [%s.runtime] python3.14 imports ssl under long prefix\n' "$tag"
+      PASS=$((PASS + 1))
+    else
+      printf '  FAIL  [%s.runtime] python3.14 dyld broken under long prefix\n' "$tag"
+      FAIL=$((FAIL + 1))
+      FAILURES+=("$tag.runtime")
+    fi
+    MALT_PREFIX="$long_prefix" "$MT_BIN" uninstall python@3.14 >/dev/null 2>&1 || true
+  fi
+  rm -rf "$long_prefix" "$long_cache"
+}
+
 # Reverse what we installed. Casks first because they touch /Applications;
 # formulas second (they live entirely under MALT_PREFIX, but uninstalling
 # also exercises the uninstall path). Best-effort: a stuck uninstall must
@@ -161,6 +216,7 @@ install_formula smoke.install.rust rust
 install_formula smoke.install.go go
 install_cask smoke.install.cask.raycast raycast Raycast.app
 install_binary_cask smoke.install.cask.copilot-cli copilot-cli
+install_python_overflow_fallback
 
 printf '\n── Summary ───────────────────────────────────────\n'
 printf '  passed: %d\n' "$PASS"

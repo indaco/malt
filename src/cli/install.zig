@@ -28,22 +28,18 @@ const supervisor_mod = @import("../core/services/supervisor.zig");
 const plist_mod = @import("../core/services/plist.zig");
 const help = @import("help.zig");
 
-/// Maximum safe byte length for MALT_PREFIX.
-///
-/// Homebrew bottles hard-code `/opt/homebrew` (13 bytes) in LC_LOAD_DYLIB
-/// load-command paths. `malt` rewrites that prefix in place during
-/// materialize, and the replacement path must not be longer than the
-/// original or the load command will not fit its pre-allocated slot and
-/// dyld will refuse to load the binary.
-///
-/// Keeping MALT_PREFIX ≤ 13 bytes guarantees the rewrite always fits,
-/// matching the rationale called out in README.md (§"Directory Layout").
-pub const max_prefix_len: usize = "/opt/homebrew".len;
+/// Upper bound on MALT_PREFIX byte length. This is a sanity cap, not a
+/// correctness gate: the Mach-O relocation pipeline (see
+/// `src/core/patch.zig`) grows overflowing load-command slots via
+/// `install_name_tool`, so realistic prefixes of any practical length
+/// work without preflight rejection. The cap just keeps pathological
+/// values from reaching the subprocess.
+pub const max_prefix_sane_len: usize = 256;
 
-pub const PrefixError = error{PrefixTooLong};
+pub const PrefixError = error{PrefixAbsurd};
 
-/// Refuse to proceed when MALT_PREFIX exceeds `max_prefix_len`. Exposed so
-/// `mt doctor` can reuse the same rule.
+/// Reject MALT_PREFIX values past the sanity cap. Exposed so `mt doctor`
+/// can reuse the same rule.
 /// Parsed `<repo>@<digest>` reference from a GHCR blob URL.
 /// Both fields are slices into the input URL — no allocation; valid
 /// for the lifetime of the caller's string.
@@ -68,8 +64,8 @@ pub fn parseGhcrUrl(url: []const u8) ?GhcrRef {
     };
 }
 
-pub fn checkPrefixLength(prefix: []const u8) PrefixError!void {
-    if (prefix.len > max_prefix_len) return error.PrefixTooLong;
+pub fn checkPrefixSane(prefix: []const u8) PrefixError!void {
+    if (prefix.len > max_prefix_sane_len) return error.PrefixAbsurd;
 }
 
 pub const InstallError = error{
@@ -88,10 +84,10 @@ pub const InstallError = error{
     /// or was skipped because an ancestor dep failed. Returned from `execute`
     /// so `main` exits non-zero.
     PartialFailure,
-    /// MALT_PREFIX is longer than the Mach-O in-place patching budget. Set
-    /// before any network activity so the user can fix it without waiting on
-    /// a multi-gigabyte download that will inevitably fail.
-    PrefixTooLong,
+    /// MALT_PREFIX is absurdly long (exceeds the 256-byte sanity cap).
+    /// Raised before any network activity so pathological values never
+    /// reach the relocation subprocess.
+    PrefixAbsurd,
     /// Formula defines a Ruby `post_install` hook that malt cannot execute.
     /// Raised before any dep resolution or job queueing so nothing is
     /// downloaded, materialised, or linked for the affected package.
@@ -496,21 +492,18 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Initialize infrastructure
     const prefix = atomic.maltPrefix();
 
-    // Pre-flight: refuse the install if MALT_PREFIX is longer than the
-    // Mach-O in-place patching budget. We catch this BEFORE any network
-    // activity so users do not spend minutes downloading bottles that are
-    // guaranteed to fail at patch time.
-    checkPrefixLength(prefix) catch |err| switch (err) {
-        error.PrefixTooLong => {
+    // Sanity cap: refuse absurdly long prefixes before any network
+    // activity. Realistic values sail through — install_name_tool grows
+    // overflowing load-command slots into the bottle's __LINKEDIT
+    // padding.
+    checkPrefixSane(prefix) catch |err| switch (err) {
+        error.PrefixAbsurd => {
             output.err(
-                "MALT_PREFIX '{s}' is {d} bytes, which exceeds the {d}-byte budget for Mach-O in-place patching.",
-                .{ prefix, prefix.len, max_prefix_len },
+                "MALT_PREFIX '{s}' is {d} bytes, beyond the {d}-byte sanity cap.",
+                .{ prefix, prefix.len, max_prefix_sane_len },
             );
-            output.err("Homebrew bottles hard-code `/opt/homebrew` (13 bytes) in LC_LOAD_DYLIB", .{});
-            output.err("entries, and malt replaces that prefix in place — the replacement must", .{});
-            output.err("not be longer or dyld will fail to load the binaries at runtime.", .{});
-            output.err("Set MALT_PREFIX to a shorter path (e.g. /opt/malt or /tmp/mt) and retry.", .{});
-            return InstallError.PrefixTooLong;
+            output.err("Set MALT_PREFIX to a reasonable path and retry.", .{});
+            return InstallError.PrefixAbsurd;
         },
     };
 
@@ -2068,7 +2061,7 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
         InstallError.LinkFailed,
         InstallError.RecordFailed,
         InstallError.PartialFailure,
-        InstallError.PrefixTooLong,
+        InstallError.PrefixAbsurd,
         InstallError.PostInstallUnsupported,
         InstallError.AmbiguousSystemRubyScope,
         => false,
