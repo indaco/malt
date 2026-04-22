@@ -4,7 +4,58 @@ pub const LockError = error{
     Timeout,
     OpenFailed,
     WriteFailed,
+    /// ENOLCK: kernel advisory-lock slots exhausted — not contention, so surface distinctly.
+    LockResourceExhausted,
 };
+
+/// Cap on EINTR retries so a signal storm can't spin the acquire loop forever.
+pub const MAX_EINTR_RETRIES: u32 = 5;
+
+/// Mapping of a non-zero `flock` errno to a loop action. Pure so it's unit-testable.
+pub const FlockOutcome = enum {
+    retry_later, // EAGAIN — sleep and try again within the deadline.
+    interrupted, // EINTR — retry immediately (bounded).
+    resource_exhausted, // ENOLCK — kernel lock table full.
+    open_failed, // EBADF / EINVAL / … — treat as a hard failure.
+};
+
+pub fn classifyFlockErrno(errno: std.c.E) FlockOutcome {
+    return switch (errno) {
+        .AGAIN => .retry_later,
+        .INTR => .interrupted,
+        .NOLCK => .resource_exhausted,
+        else => .open_failed,
+    };
+}
+
+/// Next action for the acquire loop, from the current `flock` probe plus loop state.
+pub const AcquireStep = enum {
+    acquired,
+    sleep_and_retry,
+    timeout,
+    retry_interrupted,
+    interrupted_exhausted,
+    resource_exhausted,
+    open_failed,
+};
+
+pub const AcquireProbe = struct {
+    rc: c_int,
+    errno: std.c.E,
+    elapsed_ns: u128,
+    deadline_ns: u128,
+    eintr_retries: u32,
+};
+
+pub fn nextAcquireStep(p: AcquireProbe) AcquireStep {
+    if (p.rc == 0) return .acquired;
+    return switch (classifyFlockErrno(p.errno)) {
+        .retry_later => if (p.elapsed_ns >= p.deadline_ns) .timeout else .sleep_and_retry,
+        .interrupted => if (p.eintr_retries >= MAX_EINTR_RETRIES) .interrupted_exhausted else .retry_interrupted,
+        .resource_exhausted => .resource_exhausted,
+        .open_failed => .open_failed,
+    };
+}
 
 pub const LockFile = struct {
     fd: std.posix.fd_t,
@@ -20,22 +71,26 @@ pub const LockFile = struct {
             .CREAT = true,
         }, @as(std.c.mode_t, 0o644));
         if (fd < 0) return error.OpenFailed;
+        errdefer _ = std.c.close(fd);
 
         const deadline_ns: u128 = @as(u128, @intCast(timeout_ms)) * std.time.ns_per_ms;
         var elapsed_ns: u128 = 0;
+        var eintr_retries: u32 = 0;
         const sleep_ns: u64 = 100 * std.time.ns_per_ms;
 
-        while (true) {
-            // Try non-blocking exclusive lock.
+        acquire_loop: while (true) {
             const rc = std.c.flock(fd, std.c.LOCK.EX | std.c.LOCK.NB);
-            if (rc == 0) break;
-            const errno = std.posix.errno(rc);
-            switch (errno) {
-                .AGAIN => {
-                    if (elapsed_ns >= deadline_ns) {
-                        _ = std.c.close(fd);
-                        return error.Timeout;
-                    }
+            // errno is read unconditionally; ignored on rc==0 inside nextAcquireStep.
+            const step = nextAcquireStep(.{
+                .rc = rc,
+                .errno = std.posix.errno(rc),
+                .elapsed_ns = elapsed_ns,
+                .deadline_ns = deadline_ns,
+                .eintr_retries = eintr_retries,
+            });
+            switch (step) {
+                .acquired => break :acquire_loop,
+                .sleep_and_retry => {
                     const ts: std.c.timespec = .{
                         .sec = @intCast(sleep_ns / std.time.ns_per_s),
                         .nsec = @intCast(sleep_ns % std.time.ns_per_s),
@@ -43,10 +98,11 @@ pub const LockFile = struct {
                     _ = std.c.nanosleep(&ts, null);
                     elapsed_ns += sleep_ns;
                 },
-                else => {
-                    _ = std.c.close(fd);
-                    return error.OpenFailed;
-                },
+                .retry_interrupted => eintr_retries += 1,
+                .timeout => return error.Timeout,
+                .resource_exhausted => return error.LockResourceExhausted,
+                // Exhausted EINTR retries collapse into OpenFailed — no new tag in scope.
+                .interrupted_exhausted, .open_failed => return error.OpenFailed,
             }
         }
 
@@ -78,6 +134,18 @@ pub const LockFile = struct {
         };
     }
 
+    /// Bounded retry on WouldBlock so a future O_NONBLOCK flip can't silently hide a held lock.
+    fn readHolderBytes(fd: std.posix.fd_t, buf: []u8) ?usize {
+        var attempts: u2 = 0;
+        while (attempts < 2) : (attempts += 1) {
+            return std.posix.read(fd, buf) catch |err| switch (err) {
+                error.WouldBlock => continue,
+                else => return null,
+            };
+        }
+        return null;
+    }
+
     /// Release the advisory lock and close the file descriptor.
     ///
     /// Truncates the file to 0 bytes before unlocking so subsequent
@@ -104,7 +172,7 @@ pub const LockFile = struct {
         defer _ = std.c.close(fd);
 
         var buf: [32]u8 = undefined;
-        const n = std.posix.read(fd, &buf) catch return null;
+        const n = readHolderBytes(fd, &buf) orelse return null;
         if (n == 0) return null;
 
         const trimmed = std.mem.trimEnd(u8, buf[0..n], &[_]u8{ '\n', '\r', ' ' });
