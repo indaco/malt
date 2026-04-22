@@ -4,9 +4,10 @@
 const std = @import("std");
 const testing = std.testing;
 const macho = std.macho;
-const parser = @import("malt").parser;
-const patcher = @import("malt").patcher;
-const codesign = @import("malt").codesign;
+const malt = @import("malt");
+const parser = malt.parser;
+const patcher = malt.patcher;
+const codesign = malt.codesign;
 
 test "isMachO detects MH_MAGIC_64" {
     var buf: [4]u8 = undefined;
@@ -204,4 +205,82 @@ test "parse rejects a cmdsize shorter than the generic load_command" {
     const lc = std.mem.bytesAsValue(macho.load_command, buf[header_size..][0..lc_size]);
     lc.* = .{ .cmd = .LOAD_DYLIB, .cmdsize = 1 }; // bogus tiny cmdsize
     try testing.expectError(parser.ParseError.InvalidLoadCommand, parser.parse(testing.allocator, buf));
+}
+
+test "patchPaths preserves trailing NUL at max_path_len-1 boundary" {
+    // Pins the NUL-terminator invariant for an LC_LOAD_DYLIB slot whose
+    // path fills exactly `max_path_len - 1` content bytes. The guard must
+    // leave the last slot byte as 0 so dyld never reads past the path.
+
+    const lc_size = @sizeOf(macho.dylib_command);
+    const header_size = @sizeOf(macho.mach_header_64);
+
+    // cmdsize chosen so the path region is 16 bytes (multiple-of-8 align).
+    // max_path_len = cmdsize - name_offset = 40 - 24 = 16.
+    const name_offset: u32 = @intCast(lc_size);
+    const cmdsize_aligned: u32 = @intCast(lc_size + 16);
+    const max_path_len: usize = cmdsize_aligned - name_offset;
+
+    // Slot layout: "/opt/aaaaaaaaaa" + NUL → 15 content bytes + terminator.
+    const old_path = "/opt/aaaaaaaaaa"; // 15 bytes, == max_path_len - 1.
+    try testing.expectEqual(max_path_len - 1, old_path.len);
+
+    const total_len = header_size + cmdsize_aligned;
+    const buf = try testing.allocator.alloc(u8, total_len);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+
+    const header = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    header.* = .{
+        .magic = macho.MH_MAGIC_64,
+        .ncmds = 1,
+        .sizeofcmds = cmdsize_aligned,
+    };
+
+    const dy = std.mem.bytesAsValue(macho.dylib_command, buf[header_size..][0..lc_size]);
+    dy.* = .{
+        .cmd = .LOAD_DYLIB,
+        .cmdsize = cmdsize_aligned,
+        .dylib = .{
+            .name = name_offset,
+            .timestamp = 0,
+            .current_version = 0,
+            .compatibility_version = 0,
+        },
+    };
+    @memcpy(buf[header_size + lc_size ..][0..old_path.len], old_path);
+    // buf[header_size + lc_size + 15] stays 0 from the earlier @memset.
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var dir_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_abs_len = try std.Io.Dir.realPath(tmp.dir, malt.io_mod.ctx(), &dir_path_buf);
+    var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const full_path = try std.fmt.bufPrint(
+        &full_path_buf,
+        "{s}/fixture.bin",
+        .{dir_path_buf[0..dir_abs_len]},
+    );
+    {
+        const f = try malt.fs_compat.createFileAbsolute(full_path, .{});
+        defer f.close();
+        try f.writeAll(buf);
+    }
+
+    // Same-length patch: new_path_len == max_path_len - 1.
+    const result = try patcher.patchPaths(
+        testing.allocator,
+        full_path,
+        "/opt/",
+        "/bin/",
+    );
+    try testing.expectEqual(@as(u32, 1), result.patched_count);
+
+    const patched = try malt.fs_compat.readFileAbsoluteAlloc(testing.allocator, full_path, 1024);
+    defer testing.allocator.free(patched);
+
+    const slot = patched[header_size + lc_size ..][0..max_path_len];
+    try testing.expectEqualStrings("/bin/aaaaaaaaaa", slot[0 .. max_path_len - 1]);
+    try testing.expectEqual(@as(u8, 0), slot[max_path_len - 1]);
 }

@@ -57,8 +57,8 @@ pub fn patchPaths(
         const suffix = lcp.path[old_prefix.len..];
         const new_path_len = new_prefix.len + suffix.len;
 
-        // PATH LENGTH GUARD (CRITICAL)
-        if (new_path_len >= lcp.max_path_len) {
+        // +1 budgets the NUL terminator so the memset below writes at least one zero.
+        if (new_path_len + 1 > lcp.max_path_len) {
             return PatchError.PathTooLong;
         }
 
