@@ -84,7 +84,24 @@ test "Content-Disposition: returns unknown for no filename" {
 test "Content-Disposition: returns unknown for non-matching extension" {
     try testing.expectEqual(
         cask.ArtifactType.unknown,
-        cask.artifactTypeFromContentDisposition("attachment; filename=\"archive.tar.gz\""),
+        cask.artifactTypeFromContentDisposition("attachment; filename=\"archive.bin\""),
+    );
+}
+
+// A `.tar.gz` filename surfaced through Content-Disposition must resolve
+// to tar_gz — download endpoints that 302 to a versioned release URL
+// sometimes expose the extension only via the header.
+test "Content-Disposition: extracts .tar.gz from filename" {
+    try testing.expectEqual(
+        cask.ArtifactType.tar_gz,
+        cask.artifactTypeFromContentDisposition("attachment; filename=\"release.tar.gz\""),
+    );
+}
+
+test "Content-Disposition: extracts .tgz from filename" {
+    try testing.expectEqual(
+        cask.ArtifactType.tar_gz,
+        cask.artifactTypeFromContentDisposition("attachment; filename=\"release.tgz\""),
     );
 }
 
@@ -147,7 +164,19 @@ test "resolveArtifactType handles Content-Disposition with unknown ext" {
     const result = cask.resolveArtifactType(
         testing.allocator,
         "https://example.com/download",
-        "attachment; filename=\"archive.tar.gz\"",
+        "attachment; filename=\"archive.bin\"",
     );
     try testing.expectEqual(cask.ArtifactType.unknown, result);
+}
+
+// The HEAD fallback must surface tar.gz for extensionless release URLs
+// (e.g. `releases/latest/download`) when the filename only appears in
+// the Content-Disposition header.
+test "resolveArtifactType falls back to Content-Disposition for .tar.gz" {
+    const result = cask.resolveArtifactType(
+        testing.allocator,
+        "https://releases.example.com/v1.0/download?build=arm",
+        "attachment; filename=\"tool.tar.gz\"",
+    );
+    try testing.expectEqual(cask.ArtifactType.tar_gz, result);
 }

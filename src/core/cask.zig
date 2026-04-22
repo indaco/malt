@@ -1,5 +1,5 @@
 //! malt — cask module
-//! Cask JSON parsing and installation (DMG, PKG, ZIP).
+//! Cask JSON parsing and installation (DMG, PKG, ZIP, tar.gz).
 
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
@@ -7,6 +7,7 @@ const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
 const install_cmd = @import("../cli/install.zig");
+const archive_mod = @import("../fs/archive.zig");
 
 pub const CaskError = error{
     ParseFailed,
@@ -81,16 +82,22 @@ pub fn removeRecord(db: *sqlite.Database, token: []const u8) sqlite.SqliteError!
 }
 
 /// Determine the artifact type from the cask download URL.
-pub const ArtifactType = enum { dmg, zip, pkg, unknown };
+/// `tar_gz` covers both `.tar.gz` and `.tgz` — the two spellings are
+/// treated as a single container format here; the extractor is the same.
+pub const ArtifactType = enum { dmg, zip, pkg, tar_gz, unknown };
 
 pub fn artifactTypeFromUrl(url: []const u8) ArtifactType {
     if (std.mem.endsWith(u8, url, ".dmg")) return .dmg;
     if (std.mem.endsWith(u8, url, ".zip")) return .zip;
     if (std.mem.endsWith(u8, url, ".pkg")) return .pkg;
+    if (std.mem.endsWith(u8, url, ".tar.gz")) return .tar_gz;
+    if (std.mem.endsWith(u8, url, ".tgz")) return .tar_gz;
     // Some URLs have query params after extension
     if (std.mem.indexOf(u8, url, ".dmg?") != null or std.mem.indexOf(u8, url, ".dmg#") != null) return .dmg;
     if (std.mem.indexOf(u8, url, ".zip?") != null or std.mem.indexOf(u8, url, ".zip#") != null) return .zip;
     if (std.mem.indexOf(u8, url, ".pkg?") != null or std.mem.indexOf(u8, url, ".pkg#") != null) return .pkg;
+    if (std.mem.indexOf(u8, url, ".tar.gz?") != null or std.mem.indexOf(u8, url, ".tar.gz#") != null) return .tar_gz;
+    if (std.mem.indexOf(u8, url, ".tgz?") != null or std.mem.indexOf(u8, url, ".tgz#") != null) return .tar_gz;
     return .unknown;
 }
 
@@ -175,6 +182,49 @@ fn extractFilename(header: []const u8) ?[]const u8 {
 /// Extract the .app bundle name from cask JSON artifacts array.
 /// Homebrew cask JSON: "artifacts": [{"app": ["Firefox.app"]}, ...]
 pub fn parseAppName(obj: std.json.ObjectMap) ?[]const u8 {
+    const arr = firstArtifactArray(obj, "app") orelse return null;
+    if (arr.items.len == 0) return null;
+    return switch (arr.items[0]) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+/// Source name of the first `binary` artifact — the file to locate
+/// inside the extracted archive. Homebrew JSON shape:
+///   "artifacts": [{"binary": ["<source>"]}, ...]
+///   "artifacts": [{"binary": ["<source>", {"target": "<alias>"}]}, ...]
+pub fn parseBinaryName(obj: std.json.ObjectMap) ?[]const u8 {
+    const arr = firstArtifactArray(obj, "binary") orelse return null;
+    if (arr.items.len == 0) return null;
+    return switch (arr.items[0]) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+/// Rename hint for a `binary` artifact, e.g. the symlink should be
+/// `codex` while the file on disk is `codex-aarch64-apple-darwin`.
+/// Null when no target override is present.
+pub fn parseBinaryTarget(obj: std.json.ObjectMap) ?[]const u8 {
+    const arr = firstArtifactArray(obj, "binary") orelse return null;
+    for (arr.items[1..]) |item| {
+        switch (item) {
+            .object => |o| {
+                if (o.get("target")) |tv| {
+                    return switch (tv) {
+                        .string => |s| s,
+                        else => null,
+                    };
+                }
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn firstArtifactArray(obj: std.json.ObjectMap, key: []const u8) ?std.json.Array {
     const artifacts_val = obj.get("artifacts") orelse return null;
     const artifacts = switch (artifacts_val) {
         .array => |a| a,
@@ -183,16 +233,9 @@ pub fn parseAppName(obj: std.json.ObjectMap) ?[]const u8 {
     for (artifacts.items) |item| {
         switch (item) {
             .object => |art_obj| {
-                if (art_obj.get("app")) |app_val| {
-                    switch (app_val) {
-                        .array => |app_arr| {
-                            if (app_arr.items.len > 0) {
-                                return switch (app_arr.items[0]) {
-                                    .string => |s| s,
-                                    else => null,
-                                };
-                            }
-                        },
+                if (art_obj.get(key)) |val| {
+                    switch (val) {
+                        .array => |arr| return arr,
                         else => {},
                     }
                 }
@@ -252,6 +295,7 @@ pub const CaskInstaller = struct {
             .dmg => self.installDmg(cache_path, app_dir, cask) catch return CaskError.InstallFailed,
             .zip => self.installZip(cache_path, app_dir, cask) catch return CaskError.InstallFailed,
             .pkg => self.installPkg(cache_path) catch return CaskError.InstallFailed,
+            .tar_gz => self.installTarGz(cache_path, app_dir, cask) catch return CaskError.InstallFailed,
             .unknown => return CaskError.InstallFailed,
         };
 
@@ -301,7 +345,7 @@ pub const CaskInstaller = struct {
 
         // Remove cache entry
         var cache_buf: [512]u8 = undefined;
-        for ([_][]const u8{ ".dmg", ".zip", ".pkg" }) |ext| {
+        for ([_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz" }) |ext| {
             const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask/{s}{s}", .{ self.prefix, token, ext }) catch continue;
             fs_compat.cwd().deleteFile(cache_file) catch {};
         }
@@ -334,6 +378,7 @@ pub const CaskInstaller = struct {
             .dmg => ".dmg",
             .zip => ".zip",
             .pkg => ".pkg",
+            .tar_gz => ".tar.gz",
             .unknown => ".bin",
         };
         const dest = try std.fmt.allocPrint(self.allocator, "{s}/{s}{s}", .{ cache_dir, cask.token, ext_str });
@@ -475,6 +520,122 @@ pub const CaskInstaller = struct {
         return dst_app;
     }
 
+    /// Install a `.tar.gz` cask. Two shapes are supported:
+    ///   1. `binary` artifacts — extract into `Caskroom/<token>/<version>/`
+    ///      and symlink the first `binary` entry into `<prefix>/bin/`.
+    ///   2. `app` artifacts — extract and promote the `.app` to `app_dir`,
+    ///      mirroring the zip path for the rare tar.gz-wrapped bundle.
+    ///
+    /// Returns the bin symlink for binary casks, the `.app` path for app
+    /// casks — whichever the uninstaller needs to remove later.
+    fn installTarGz(
+        self: *CaskInstaller,
+        archive_path: []const u8,
+        app_dir: []const u8,
+        cask: *const Cask,
+    ) ![]const u8 {
+        // Caskroom/<token>/<version>/ doubles as the extraction root so
+        // the extracted payload is already at its final home — binaries
+        // then just need a stable symlink off `<prefix>/bin/`.
+        var caskroom_buf: [512]u8 = undefined;
+        const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{
+            self.prefix, cask.token, cask.version,
+        }) catch return error.InstallFailed;
+        fs_compat.cwd().makePath(caskroom_ver) catch return error.InstallFailed;
+
+        archive_mod.extractTarGz(archive_path, caskroom_ver) catch return error.InstallFailed;
+
+        if (parseBinaryName(cask.parsed.value.object)) |src_name| {
+            const link_name = parseBinaryTarget(cask.parsed.value.object) orelse
+                std.fs.path.basename(src_name);
+            return try self.linkCaskBinary(caskroom_ver, src_name, link_name);
+        }
+
+        // Fallback: .app inside a tar.gz (uncommon but valid). Reuse the
+        // zip path's "promote .app to app_dir" shape.
+        var app_name_buf: [256]u8 = undefined;
+        const app_name = parseAppName(cask.parsed.value.object) orelse
+            findAppInDir(caskroom_ver, &app_name_buf) orelse
+            return error.InstallFailed;
+
+        var src_buf: [512]u8 = undefined;
+        const src_app = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ caskroom_ver, app_name }) catch
+            return error.InstallFailed;
+
+        const dst_app = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ app_dir, app_name });
+        errdefer self.allocator.free(dst_app);
+
+        fs_compat.deleteTreeAbsolute(dst_app) catch {};
+        const mv_argv = [_][]const u8{ "ditto", src_app, dst_app };
+        var mv_child = fs_compat.Child.init(&mv_argv, std.heap.c_allocator);
+        mv_child.spawn() catch return error.InstallFailed;
+        const mv_term = mv_child.wait() catch return error.InstallFailed;
+        switch (mv_term) {
+            .exited => |code| if (code != 0) return error.InstallFailed,
+            else => return error.InstallFailed,
+        }
+        return dst_app;
+    }
+
+    /// Resolve the source path of a `binary` artifact. Three shapes
+    /// appear in the wild:
+    ///   - Bare name (`copilot`) — walk the extraction tree.
+    ///   - Relative path (`darwin-arm64/btp`) — join to the extraction
+    ///     root; matches the `Caskroom/<token>/<version>/` layout.
+    ///   - Homebrew `$HOMEBREW_PREFIX/...` absolute path — rewrite the
+    ///     prefix to malt's active one; the tail already points at the
+    ///     extracted file since Caskroom lives under the prefix.
+    /// Returned slice is owned by the caller.
+    fn resolveCaskBinaryPath(self: *CaskInstaller, root: []const u8, src: []const u8) ![]u8 {
+        const env_prefix = "$HOMEBREW_PREFIX/";
+        if (std.mem.startsWith(u8, src, env_prefix)) {
+            return try std.fmt.allocPrint(
+                self.allocator,
+                "{s}/{s}",
+                .{ self.prefix, src[env_prefix.len..] },
+            );
+        }
+        if (std.mem.indexOfScalar(u8, src, '/') != null) {
+            return try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ root, src });
+        }
+        return (findFileInTree(self.allocator, root, src) catch null) orelse
+            error.InstallFailed;
+    }
+
+    /// Resolve `src_name` inside `caskroom_ver`, chmod +x, and symlink
+    /// it at `<prefix>/bin/<link_name>`. `src_name` and `link_name`
+    /// diverge when the cask uses the `binary [..., {target: ...}]`
+    /// rename form. Returns the symlink path — stored as `app_path` so
+    /// `uninstall` knows what to remove.
+    fn linkCaskBinary(
+        self: *CaskInstaller,
+        caskroom_ver: []const u8,
+        src_name: []const u8,
+        link_name: []const u8,
+    ) ![]const u8 {
+        const abs_bin = try self.resolveCaskBinaryPath(caskroom_ver, src_name);
+        defer self.allocator.free(abs_bin);
+
+        // Archives sometimes land without the x-bit when built on CI.
+        const exec_file = fs_compat.openFileAbsolute(abs_bin, .{ .mode = .read_write }) catch
+            return error.InstallFailed;
+        exec_file.chmod(0o755) catch {};
+        exec_file.close();
+
+        var bin_parent_buf: [512]u8 = undefined;
+        const bin_parent = std.fmt.bufPrint(&bin_parent_buf, "{s}/bin", .{self.prefix}) catch
+            return error.InstallFailed;
+        fs_compat.cwd().makePath(bin_parent) catch return error.InstallFailed;
+
+        const link_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ bin_parent, link_name });
+        errdefer self.allocator.free(link_path);
+
+        // Replace any stale symlink/file so reinstalls are idempotent.
+        fs_compat.cwd().deleteFile(link_path) catch {};
+        fs_compat.symLinkAbsolute(abs_bin, link_path, .{}) catch return error.InstallFailed;
+        return link_path;
+    }
+
     fn installPkg(self: *CaskInstaller, pkg_path: []const u8) ![]const u8 {
         // PKG installs require sudo — the caller must confirm
         const argv = [_][]const u8{ "sudo", "installer", "-pkg", pkg_path, "-target", "/" };
@@ -503,6 +664,29 @@ pub const CaskInstaller = struct {
         fs_compat.cwd().makePath(caskroom_ver) catch {};
     }
 };
+
+/// Walk `root` looking for a regular file whose basename equals `name`
+/// and return its absolute path (owned by the caller). tar.gz archives
+/// often nest the binary one or two levels deep, so the installer can't
+/// assume it sits at the extraction root. Returns null on no match.
+pub fn findFileInTree(
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    name: []const u8,
+) !?[]u8 {
+    var dir = fs_compat.openDirAbsolute(root, .{ .iterate = true }) catch return null;
+    defer dir.close();
+
+    var walker = dir.walk(allocator) catch return null;
+    defer walker.deinit();
+
+    while (walker.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.eql(u8, std.fs.path.basename(entry.path), name)) continue;
+        return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, entry.path });
+    }
+    return null;
+}
 
 /// Scan `dir_path` for a `.app` bundle and copy its name into `out_buf`.
 /// Returns a slice of `out_buf` (owned by the caller) — the iterator's

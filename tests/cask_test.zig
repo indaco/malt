@@ -30,7 +30,25 @@ test "artifactTypeFromUrl handles query params after .zip" {
 }
 
 test "artifactTypeFromUrl returns unknown for unsupported" {
-    try std.testing.expectEqual(cask.ArtifactType.unknown, cask.artifactTypeFromUrl("https://example.com/App.tar.gz"));
+    try std.testing.expectEqual(cask.ArtifactType.unknown, cask.artifactTypeFromUrl("https://example.com/App.bin"));
+}
+
+// `.tar.gz` and `.tgz` must map to the same tar_gz container, including
+// the query/fragment variants CDNs like to append.
+test "artifactTypeFromUrl detects .tar.gz" {
+    try std.testing.expectEqual(cask.ArtifactType.tar_gz, cask.artifactTypeFromUrl("https://example.com/app.tar.gz"));
+}
+
+test "artifactTypeFromUrl detects .tgz" {
+    try std.testing.expectEqual(cask.ArtifactType.tar_gz, cask.artifactTypeFromUrl("https://example.com/app.tgz"));
+}
+
+test "artifactTypeFromUrl handles query params after .tar.gz" {
+    try std.testing.expectEqual(cask.ArtifactType.tar_gz, cask.artifactTypeFromUrl("https://cdn.example.com/app.tar.gz?v=1"));
+}
+
+test "artifactTypeFromUrl handles fragment after .tgz" {
+    try std.testing.expectEqual(cask.ArtifactType.tar_gz, cask.artifactTypeFromUrl("https://cdn.example.com/app.tgz#sha=abc"));
 }
 
 // --- parseCask ---
@@ -101,6 +119,110 @@ test "parseAppName returns null for no artifacts" {
 
     const app_name = cask.parseAppName(c.parsed.value.object);
     try std.testing.expect(app_name == null);
+}
+
+// --- parseBinaryName ---
+//
+// tar.gz casks ship a CLI: the installable is the first entry of an
+// `artifacts[].binary` array, not an `app` bundle. parseBinaryName must
+// skip past unrelated artifact blocks (`zap`, `uninstall`, …) and return
+// the binary's basename.
+
+const binary_cask_json =
+    \\{
+    \\  "token": "tool",
+    \\  "name": ["Tool"],
+    \\  "version": "1.0.0",
+    \\  "desc": "Example CLI",
+    \\  "homepage": "https://example.com",
+    \\  "url": "https://example.com/tool-darwin-arm64.tar.gz",
+    \\  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    \\  "auto_updates": true,
+    \\  "artifacts": [
+    \\    {"binary": ["tool"]},
+    \\    {"zap": [{"trash": "~/.tool"}]}
+    \\  ]
+    \\}
+;
+
+test "parseBinaryName extracts binary from artifacts" {
+    var c = try cask.parseCask(std.testing.allocator, binary_cask_json);
+    defer c.deinit();
+
+    const name = cask.parseBinaryName(c.parsed.value.object);
+    try std.testing.expect(name != null);
+    try std.testing.expectEqualStrings("tool", name.?);
+}
+
+test "parseBinaryName returns null for an app-only cask" {
+    // An app cask (Firefox) has no `binary` artifact — parseBinaryName
+    // must not mistakenly return the `app` entry.
+    var c = try cask.parseCask(std.testing.allocator, test_cask_json);
+    defer c.deinit();
+
+    try std.testing.expect(cask.parseBinaryName(c.parsed.value.object) == null);
+}
+
+test "parseAppName returns null for a binary-only cask" {
+    // Symmetric guard: the binary cask must not trip parseAppName.
+    var c = try cask.parseCask(std.testing.allocator, binary_cask_json);
+    defer c.deinit();
+
+    try std.testing.expect(cask.parseAppName(c.parsed.value.object) == null);
+}
+
+// Some casks ship a binary whose on-disk name differs from the command
+// users type — e.g. `codex` published as `codex-aarch64-apple-darwin`.
+// The Homebrew shape is `"binary": ["<src>", {"target": "<alias>"}]`.
+test "parseBinaryTarget extracts the rename target" {
+    const json =
+        \\{"token":"t","name":["T"],"version":"1","url":"https://x.com/a.tar.gz",
+        \\ "sha256":"no_check","homepage":"","desc":"","auto_updates":false,
+        \\ "artifacts":[{"binary":["tool-aarch64-apple-darwin",{"target":"tool"}]}]}
+    ;
+    var c = try cask.parseCask(std.testing.allocator, json);
+    defer c.deinit();
+
+    try std.testing.expectEqualStrings("tool-aarch64-apple-darwin", cask.parseBinaryName(c.parsed.value.object).?);
+    try std.testing.expectEqualStrings("tool", cask.parseBinaryTarget(c.parsed.value.object).?);
+}
+
+test "parseBinaryTarget returns null when no rename is present" {
+    var c = try cask.parseCask(std.testing.allocator, binary_cask_json);
+    defer c.deinit();
+
+    try std.testing.expect(cask.parseBinaryTarget(c.parsed.value.object) == null);
+}
+
+// Some casks encode the binary source as a relative path inside the
+// archive (e.g. `darwin-arm64/btp`). parseBinaryName must return the
+// raw source — path resolution is the installer's job.
+test "parseBinaryName preserves a path-qualified source" {
+    const json =
+        \\{"token":"t","name":["T"],"version":"1","url":"https://x.com/a.tar.gz",
+        \\ "sha256":"no_check","homepage":"","desc":"","auto_updates":false,
+        \\ "artifacts":[{"binary":["darwin-arm64/tool"]}]}
+    ;
+    var c = try cask.parseCask(std.testing.allocator, json);
+    defer c.deinit();
+
+    try std.testing.expectEqualStrings("darwin-arm64/tool", cask.parseBinaryName(c.parsed.value.object).?);
+}
+
+test "parseBinaryName skips non-binary artifact entries" {
+    // Order-insensitive: the binary can sit behind uninstall/zap blocks.
+    const json =
+        \\{"token":"t","name":["T"],"version":"1","url":"https://x.com/a.tar.gz",
+        \\ "sha256":"no_check","homepage":"","desc":"","auto_updates":false,
+        \\ "artifacts":[
+        \\   {"uninstall":[{"delete":"/tmp/x"}]},
+        \\   {"binary":["cli"]}
+        \\ ]}
+    ;
+    var c = try cask.parseCask(std.testing.allocator, json);
+    defer c.deinit();
+
+    try std.testing.expectEqualStrings("cli", cask.parseBinaryName(c.parsed.value.object).?);
 }
 
 // --- DB operations ---
@@ -464,6 +586,68 @@ test "findAppInDir returns null when no .app bundle is present" {
 
     var out: [64]u8 = undefined;
     try testing.expect(cask.findAppInDir(dir_path, &out) == null);
+}
+
+// ── findFileInTree: locates the binary inside a nested archive ──────
+
+test "findFileInTree returns absolute path for a file at the root" {
+    var dir_buf: [128]u8 = undefined;
+    const dir_path = try scratchDir("flat", &dir_buf);
+    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+
+    var file_buf: [256]u8 = undefined;
+    const file_path = try std.fmt.bufPrint(&file_buf, "{s}/tool", .{dir_path});
+    const f = try malt_fs.createFileAbsolute(file_path, .{});
+    f.close();
+
+    const got = (try cask.findFileInTree(testing.allocator, dir_path, "tool")) orelse
+        return error.TestUnexpectedResult;
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(file_path, got);
+}
+
+test "findFileInTree finds a binary nested one level deep" {
+    // Archives often wrap the binary in a versioned dir (e.g.
+    // `tool-darwin-arm64/tool`). The installer must walk past that
+    // wrapper to link the binary.
+    var dir_buf: [128]u8 = undefined;
+    const dir_path = try scratchDir("nested", &dir_buf);
+    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+
+    var sub_buf: [256]u8 = undefined;
+    const sub = try std.fmt.bufPrint(&sub_buf, "{s}/tool-darwin-arm64", .{dir_path});
+    try malt_fs.makeDirAbsolute(sub);
+
+    var file_buf: [384]u8 = undefined;
+    const file_path = try std.fmt.bufPrint(&file_buf, "{s}/tool", .{sub});
+    const f = try malt_fs.createFileAbsolute(file_path, .{});
+    f.close();
+
+    const got = (try cask.findFileInTree(testing.allocator, dir_path, "tool")) orelse
+        return error.TestUnexpectedResult;
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.endsWith(u8, got, "/tool-darwin-arm64/tool"));
+}
+
+test "findFileInTree returns null when the file is absent" {
+    var dir_buf: [128]u8 = undefined;
+    const dir_path = try scratchDir("absent", &dir_buf);
+    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+
+    try testing.expect((try cask.findFileInTree(testing.allocator, dir_path, "tool")) == null);
+}
+
+test "findFileInTree ignores directories sharing the basename" {
+    // A directory matching `name` must not masquerade as the binary.
+    var dir_buf: [128]u8 = undefined;
+    const dir_path = try scratchDir("dironly", &dir_buf);
+    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+
+    var sub_buf: [256]u8 = undefined;
+    const sub = try std.fmt.bufPrint(&sub_buf, "{s}/tool", .{dir_path});
+    try malt_fs.makeDirAbsolute(sub);
+
+    try testing.expect((try cask.findFileInTree(testing.allocator, dir_path, "tool")) == null);
 }
 
 test "findAppInDir returns null when the .app name exceeds the out-buffer" {
