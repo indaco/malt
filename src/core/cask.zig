@@ -6,6 +6,7 @@ const fs_compat = @import("../fs/compat.zig");
 
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
+const install_cmd = @import("../cli/install.zig");
 
 pub const CaskError = error{
     ParseFailed,
@@ -558,7 +559,9 @@ pub fn verifyFileSha256(file_path: []const u8, expected: ?[]const u8) !void {
     if (std.mem.eql(u8, expected_hash, "no_check")) return;
 
     const got = try hashFileSha256(file_path);
-    if (!std.mem.eql(u8, &got, expected_hash)) return error.Sha256Mismatch;
+    // Constant-time SHA compare — mirrors install.zig to close the
+    // byte-by-byte timing oracle on the expected hash.
+    if (!install_cmd.constantTimeEql(u8, &got, expected_hash)) return error.Sha256Mismatch;
 }
 
 /// Check if an application is currently running by its path.

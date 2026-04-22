@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
+const install_cmd = @import("../cli/install.zig");
 
 pub const ChecksumError = error{
     /// `bytes` did not hash to the value named in `expected_hex`.
@@ -28,7 +29,9 @@ pub fn verifySha256(bytes: []const u8, expected_hex: []const u8) ChecksumError!v
     var actual: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &actual, .{});
 
-    if (!std.mem.eql(u8, &expected, &actual)) return error.ChecksumMismatch;
+    // Constant-time SHA compare — mirrors install.zig to close the
+    // byte-by-byte timing oracle on the expected hash.
+    if (!install_cmd.constantTimeEql(u8, &expected, &actual)) return error.ChecksumMismatch;
 }
 
 /// Find the SHA256 hex for `archive_name` in a GoReleaser-style

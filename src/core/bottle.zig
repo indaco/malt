@@ -8,6 +8,7 @@ const archive = @import("../fs/archive.zig");
 const atomic = @import("../fs/atomic.zig");
 const client_mod = @import("../net/client.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
+const install_cmd = @import("../cli/install.zig");
 
 pub const BottleError = error{
     DownloadFailed,
@@ -49,8 +50,9 @@ pub fn download(
     std.crypto.hash.sha2.Sha256.hash(body.items, &hash, .{});
     const computed_hex = std.fmt.bytesToHex(hash, .lower);
 
-    // Verify SHA256
-    if (!std.mem.eql(u8, &computed_hex, expected_sha256)) {
+    // Constant-time SHA compare — same reasoning as install.zig: deny a
+    // byte-by-byte timing oracle against the expected hash.
+    if (!install_cmd.constantTimeEql(u8, &computed_hex, expected_sha256)) {
         // Clean up dest_dir on mismatch
         fs_compat.deleteTreeAbsolute(dest_dir) catch {};
         return BottleError.Sha256Mismatch;
