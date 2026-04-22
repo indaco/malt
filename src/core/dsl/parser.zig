@@ -576,17 +576,11 @@ pub const Parser = struct {
 
                 // --- Dir[expr] → Dir.glob(expr) ---
                 if (std.mem.eql(u8, name, "Dir")) {
-                    // Peek to see if next token is [
-                    const saved_pos2 = self.lexer.pos;
-                    const saved_line2 = self.lexer.line;
-                    const saved_col2 = self.lexer.col;
-                    const saved_lwv2 = self.lexer.last_was_value;
-                    const peek_tok = self.lexer.next();
-                    self.lexer.pos = saved_pos2;
-                    self.lexer.line = saved_line2;
-                    self.lexer.col = saved_col2;
-                    self.lexer.last_was_value = saved_lwv2;
-
+                    // `lexer.peek()` saves *every* field `next()` may
+                    // mutate — including the heredoc state — so a
+                    // `Dir<<~EOS` peek restores cleanly instead of
+                    // leaving the lexer mid-collection.
+                    const peek_tok = self.lexer.peek();
                     if (peek_tok.kind == .lbracket) {
                         self.advanceToken(); // consume "Dir"
                         self.advanceToken(); // consume "["
@@ -616,16 +610,9 @@ pub const Parser = struct {
 
                 // --- Formula["name"] → Formula.lookup(name) ---
                 if (std.mem.eql(u8, name, "Formula")) {
-                    const saved_pos4 = self.lexer.pos;
-                    const saved_line4 = self.lexer.line;
-                    const saved_col4 = self.lexer.col;
-                    const saved_lwv4 = self.lexer.last_was_value;
-                    const peek_tok3 = self.lexer.next();
-                    self.lexer.pos = saved_pos4;
-                    self.lexer.line = saved_line4;
-                    self.lexer.col = saved_col4;
-                    self.lexer.last_was_value = saved_lwv4;
-
+                    // Same reasoning as the `Dir` peek above: only
+                    // `lexer.peek()` saves the heredoc state.
+                    const peek_tok3 = self.lexer.peek();
                     if (peek_tok3.kind == .lbracket) {
                         self.advanceToken(); // consume "Formula"
                         self.advanceToken(); // consume "["
@@ -648,16 +635,9 @@ pub const Parser = struct {
 
                 // --- ENV["key"] read / ENV["key"] = value write ---
                 if (std.mem.eql(u8, name, "ENV")) {
-                    const saved_pos3 = self.lexer.pos;
-                    const saved_line3 = self.lexer.line;
-                    const saved_col3 = self.lexer.col;
-                    const saved_lwv3 = self.lexer.last_was_value;
-                    const peek_tok2 = self.lexer.next();
-                    self.lexer.pos = saved_pos3;
-                    self.lexer.line = saved_line3;
-                    self.lexer.col = saved_col3;
-                    self.lexer.last_was_value = saved_lwv3;
-
+                    // Same reasoning as the `Dir` peek above: only
+                    // `lexer.peek()` saves the heredoc state.
+                    const peek_tok2 = self.lexer.peek();
                     if (peek_tok2.kind == .lbracket) {
                         self.advanceToken(); // consume "ENV"
                         self.advanceToken(); // consume "["
