@@ -33,6 +33,14 @@ fn mapError(rc: c_int, comptime default: SqliteError) SqliteError {
 /// This is safe because all bound text outlives the statement step.
 const SQLITE_STATIC: c.sqlite3_destructor_type = null;
 
+/// Maximum DB path length accepted by `Database.open`. Stack-buffered null
+/// copy; deeply nested test prefixes and custom MALT_PREFIX values fit.
+pub const MAX_PATH_LEN: usize = 2048;
+
+/// Maximum SQL length accepted by `Database.exec`. Migration bundles with
+/// many inline statements fit without forcing callers to split.
+pub const MAX_SQL_LEN: usize = 16384;
+
 pub const Statement = struct {
     stmt: *c.sqlite3_stmt,
 
@@ -106,7 +114,7 @@ pub const Database = struct {
     pub fn open(path: []const u8) SqliteError!Database {
         // SQLite requires a null-terminated path. Copy into a stack buffer
         // and add the sentinel, since callers may pass bufPrint output.
-        var path_buf: [512]u8 = undefined;
+        var path_buf: [MAX_PATH_LEN]u8 = undefined;
         if (path.len >= path_buf.len) return SqliteError.PathTooLong;
         @memcpy(path_buf[0..path.len], path);
         path_buf[path.len] = 0;
@@ -146,7 +154,7 @@ pub const Database = struct {
     /// through unchanged. `sqlite3_exec` itself is C-string-only, so we copy
     /// into a stack buffer and append the sentinel.
     pub fn exec(self: *Database, sql: []const u8) SqliteError!void {
-        var buf: [4096]u8 = undefined;
+        var buf: [MAX_SQL_LEN]u8 = undefined;
         if (sql.len >= buf.len) return SqliteError.ExecFailed;
         @memcpy(buf[0..sql.len], sql);
         buf[sql.len] = 0;
