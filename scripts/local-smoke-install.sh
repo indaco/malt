@@ -66,7 +66,10 @@ MT_BIN="$(cd "$(dirname "$MT_BIN")" && pwd)/$(basename "$MT_BIN")"
 PREFIX=$(mktemp -d /tmp/mt.XXX)
 CACHE=$(mktemp -d /tmp/mc.XXX)
 LOGDIR=$(mktemp -d /tmp/ml.XXX)
-trap 'rm -rf "$PREFIX" "$CACHE" "$LOGDIR"' EXIT
+# /tmp/mt_tahoe + /tmp/mc_tahoe are the python overflow-fallback case's
+# fixed sandbox paths; sweep them too so an early abort never strands
+# them on disk.
+trap 'rm -rf "$PREFIX" "$CACHE" "$LOGDIR" /tmp/mt_tahoe /tmp/mc_tahoe' EXIT
 
 export MALT_PREFIX="$PREFIX"
 export MALT_CACHE="$CACHE"
@@ -149,10 +152,12 @@ install_binary_cask() {
 # under dyld). Self-contained: own prefix/cache, own cleanup.
 install_python_overflow_fallback() {
   local tag="smoke.install.python_overflow_fallback"
+  # Fixed paths so the global EXIT trap below can reach them by literal
+  # name without inheriting the function's locals (which are unset
+  # under `set -u` once the function returns).
   local long_prefix=/tmp/mt_tahoe # 13 bytes — just over the placeholder
   local long_cache=/tmp/mc_tahoe
   rm -rf "$long_prefix" "$long_cache"
-  trap 'rm -rf "$PREFIX" "$CACHE" "$LOGDIR" "$long_prefix" "$long_cache"' EXIT
 
   if MALT_PREFIX="$long_prefix" MALT_CACHE="$long_cache" \
     run "$tag" "$MT_BIN" install python@3.14; then
