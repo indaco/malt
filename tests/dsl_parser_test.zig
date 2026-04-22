@@ -584,6 +584,58 @@ test "parser: Dir glob pattern" {
     try testing.expectEqual(@as(usize, 1), mc.args.len);
 }
 
+test "parser: Dir peek preserves heredoc lexer state" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // When `Dir` is immediately followed by `<<~EOS`, parsePrimary's peek
+    // for `[` calls lexer.next() which starts a heredoc and mutates
+    // heredoc_terminator / heredoc_collecting. A correct peek restores
+    // that state; a buggy one leaves the lexer mid-collection, so the
+    // subsequent advanceToken() collects from the wrong position and
+    // swallows the `<<~EOS` start marker into the body.
+    const nodes = try parseSource(&arena, "Dir<<~EOS\n  body\nEOS\n");
+
+    try testing.expectEqual(@as(usize, 2), nodes.len);
+    try testing.expectEqualStrings("Dir", nodes[0].kind.identifier);
+
+    const body = nodes[1].kind.heredoc_literal;
+    try testing.expect(std.mem.indexOf(u8, body, "<<~") == null);
+    try testing.expectEqualStrings("  body\n", body);
+}
+
+test "parser: Formula peek preserves heredoc lexer state" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // Same invariant as the Dir peek: the `Formula[` lookahead must not
+    // leak heredoc state if the peek consumes a `<<~EOS` start marker.
+    const nodes = try parseSource(&arena, "Formula<<~EOS\n  body\nEOS\n");
+
+    try testing.expectEqual(@as(usize, 2), nodes.len);
+    try testing.expectEqualStrings("Formula", nodes[0].kind.identifier);
+
+    const body = nodes[1].kind.heredoc_literal;
+    try testing.expect(std.mem.indexOf(u8, body, "<<~") == null);
+    try testing.expectEqualStrings("  body\n", body);
+}
+
+test "parser: ENV peek preserves heredoc lexer state" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // Same invariant as the Dir peek: the `ENV[` lookahead must not
+    // leak heredoc state if the peek consumes a `<<~EOS` start marker.
+    const nodes = try parseSource(&arena, "ENV<<~EOS\n  body\nEOS\n");
+
+    try testing.expectEqual(@as(usize, 2), nodes.len);
+    try testing.expectEqualStrings("ENV", nodes[0].kind.identifier);
+
+    const body = nodes[1].kind.heredoc_literal;
+    try testing.expect(std.mem.indexOf(u8, body, "<<~") == null);
+    try testing.expectEqualStrings("  body\n", body);
+}
+
 test "parser: ENV read" {
     var arena = testArena();
     defer arena.deinit();
