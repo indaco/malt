@@ -178,3 +178,55 @@ test "copyTreeFallback errors when source directory does not exist" {
         clonefile.copyTreeFallback("/not/a/real/source/dir", "/tmp/malt_clonefile_nowhere"),
     );
 }
+
+// BUG-014 regression: before the errno fix, clonefile(2)'s -1 return was
+// passed to std.posix.errno, which on some stdlib versions never surfaced
+// OPNOTSUPP — non-APFS volumes errored instead of falling back. The test
+// needs a writable non-APFS mount to actually run; CI points at one via
+// MALT_TEST_NON_APFS_DIR. On the common macOS dev box every visible mount
+// is APFS, so we skip with a clear message instead of inventing one.
+test "cloneTree falls back to copyTree on a non-APFS volume" {
+    const non_apfs_dir = malt.fs_compat.getenv("MALT_TEST_NON_APFS_DIR") orelse {
+        std.log.warn(
+            "skipping non-APFS fallback test: set MALT_TEST_NON_APFS_DIR to a writable non-APFS mount to enable",
+            .{},
+        );
+        return error.SkipZigTest;
+    };
+    if (clonefile.isApfs(non_apfs_dir)) {
+        std.log.warn(
+            "skipping non-APFS fallback test: MALT_TEST_NON_APFS_DIR={s} is APFS",
+            .{non_apfs_dir},
+        );
+        return error.SkipZigTest;
+    }
+
+    // Source on the repo tmp root (APFS in CI's macOS runner); dst on the
+    // caller-provided non-APFS mount so clonefile(2) returns ENOTSUP.
+    const src_root = tmpRoot("nonapfs_src");
+    defer malt.fs_compat.deleteTreeAbsolute(src_root) catch {};
+    try setupSourceTree(src_root);
+
+    var src_buf: [512]u8 = undefined;
+    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{src_root});
+
+    var dst_buf: [512]u8 = undefined;
+    const dst = try std.fmt.bufPrint(
+        &dst_buf,
+        "{s}/malt_clonefile_nonapfs_dst",
+        .{non_apfs_dir},
+    );
+    malt.fs_compat.deleteTreeAbsolute(dst) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(dst) catch {};
+
+    // Without the fix, OPNOTSUPP is misclassified and this returns IoError.
+    try clonefile.cloneTree(src, dst);
+
+    var verify_buf: [512]u8 = undefined;
+    const copied = try std.fmt.bufPrint(&verify_buf, "{s}/hello.txt", .{dst});
+    const f = try malt.fs_compat.cwd().openFile(copied, .{});
+    defer f.close();
+    var contents: [16]u8 = undefined;
+    const n = try f.readAll(&contents);
+    try testing.expectEqualStrings("hi\n", contents[0..n]);
+}
