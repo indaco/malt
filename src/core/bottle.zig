@@ -15,8 +15,16 @@ pub const BottleError = error{
     Sha256Mismatch,
     ExtractionFailed,
     OutOfMemory,
+    PathTooLong,
     IoError,
 };
+
+/// Formats `<dest_dir>/bottle.tar.gz` into `buf`; distinguishes path overflow
+/// from allocation failure so callers can surface a precise message.
+pub fn buildTmpArchivePath(buf: []u8, dest_dir: []const u8) BottleError![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}/bottle.tar.gz", .{dest_dir}) catch
+        return BottleError.PathTooLong;
+}
 
 pub const BottleResult = struct {
     sha256: []const u8,
@@ -66,8 +74,7 @@ pub fn download(
 
     // Write bottle to temp file for extraction
     var tmp_path_buf: [512]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&tmp_path_buf, "{s}/bottle.tar.gz", .{dest_dir}) catch
-        return BottleError.OutOfMemory;
+    const tmp_path = try buildTmpArchivePath(&tmp_path_buf, dest_dir);
 
     const tmp_file = fs_compat.createFileAbsolute(tmp_path, .{}) catch return BottleError.IoError;
     tmp_file.writeAll(body.items) catch {

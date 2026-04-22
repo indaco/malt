@@ -39,3 +39,17 @@ test "verify returns false for a mismatching sha256" {
 test "verify returns false when the file does not exist" {
     try testing.expect(!try bottle.verify(testing.allocator, "/tmp/malt_bottle_verify_missing_xyz", "00" ** 32));
 }
+
+test "buildTmpArchivePath returns PathTooLong for an oversized dest_dir" {
+    // 500-char dest_dir overflows the fixed tmp-path buffer; the distinct
+    // tag prevents users from seeing "out of memory" for a path problem.
+    var buf: [512]u8 = undefined;
+    const long_dest = "/" ++ ("a" ** 499);
+    try testing.expectError(bottle.BottleError.PathTooLong, bottle.buildTmpArchivePath(&buf, long_dest));
+}
+
+test "buildTmpArchivePath joins a normal dest_dir with the archive name" {
+    var buf: [512]u8 = undefined;
+    const path = try bottle.buildTmpArchivePath(&buf, "/tmp/malt_bottle_buildpath_ok");
+    try testing.expectEqualStrings("/tmp/malt_bottle_buildpath_ok/bottle.tar.gz", path);
+}
