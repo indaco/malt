@@ -335,21 +335,29 @@ fn downloadWorker(
     const http = http_pool.acquire();
     defer http_pool.release(http);
 
-    // Download with transient-failure retry.
-    // GHCR CDN occasionally returns truncated responses or drops connections
-    // under parallel load (21-dep installs like `node` can trigger this).
-    // Retry up to 3 times with exponential backoff (100ms, 400ms) before giving up.
     const max_attempts: u8 = 3;
     const retry_delays_ms = [_]u64{ 100, 400 };
     var dl_attempt: u8 = 0;
     var dl_ok = false;
+    var last_err: bottle_mod.BottleError = bottle_mod.BottleError.DownloadFailed;
     while (dl_attempt < max_attempts) : (dl_attempt += 1) {
         if (bottle_mod.download(allocator, ghcr, http, repo, digest, job.sha256, tmp_dir, progress_cb)) |_| {
             dl_ok = true;
             break;
-        } else |_| {
-            // Wipe the partial tmp and retry
+        } else |dl_err| {
+            last_err = dl_err;
             atomic.cleanupTempDir(tmp_dir);
+            if (dl_err == bottle_mod.BottleError.DownloadPermanent) {
+                output.err("  {s}: permanent HTTP error (404/410), not retrying", .{job.name});
+                break;
+            }
+            if (dl_err == bottle_mod.BottleError.ExtractionFailed or
+                dl_err == bottle_mod.BottleError.Sha256Mismatch or
+                dl_err == bottle_mod.BottleError.PathTooLong)
+            {
+                output.err("  {s}: {s}", .{ job.name, @errorName(dl_err) });
+                break;
+            }
             if (dl_attempt + 1 < max_attempts) {
                 fs_compat.sleepNanos(retry_delays_ms[dl_attempt] * std.time.ns_per_ms);
             }
@@ -357,10 +365,10 @@ fn downloadWorker(
     }
     if (!dl_ok) {
         bar.finish();
-        output.err("  Download failed: {s} (after {d} attempts)", .{ job.name, max_attempts });
+        if (dl_attempt >= max_attempts) {
+            output.err("  {s}: {s} (after {d} attempts)", .{ job.name, @errorName(last_err), max_attempts });
+        }
         allocator.free(tmp_dir);
-        // Thread worker: caller inspects DownloadJob.success rather than
-        // receiving an error — exit the worker, let the coordinator abort.
         return;
     }
     bar.finish();
