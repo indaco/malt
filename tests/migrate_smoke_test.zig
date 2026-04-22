@@ -902,10 +902,9 @@ test "already-installed stderr pins the 'Migration complete' + 'Skipped (install
 // ── Parsed-formula lifecycle pinning ────────────────────────────────────
 //
 // Drive `migrateKeg` through the `.skipped_no_bottle` branch (formula JSON
-// has no bottle for this platform). Pre-T-008 this branch manually calls
-// `formula.deinit()` + `allocator.free(formula_json)`; after collapse the
-// defer/errdefer pair must free exactly once on this path too — a double
-// free of `_parsed` would crash the sqlite/arena owner in the next run.
+// has no bottle for this platform). The defer/errdefer pair must free
+// exactly once on this path — a double free of `_parsed` would crash the
+// sqlite/arena owner in the next run.
 
 test "skipped_no_bottle: cached formula with no platform bottle is categorized correctly" {
     resetOutput();
@@ -1054,11 +1053,10 @@ test "scanCellarKegs skips non-directory entries and survives fail-first iterato
 
 // ── Leak discipline: execute must not leak under testing.allocator ──────
 //
-// Prior to T-008 the cellar scan duped every entry via `allocator.dupe`
-// into a plain `ArrayList([]const u8)` whose `deinit` only freed the
-// backing array — each per-entry dupe leaked. Existing tests masked this
-// by allocating through an arena; dropping the arena here turns the leak
-// into a test failure and guards the arena-scoped scan going forward.
+// A plain `ArrayList([]const u8)` whose `deinit` only frees the backing
+// array would leak every per-entry `allocator.dupe`. Dropping the arena
+// here turns any such leak into a test failure and guards the arena-scoped
+// scan going forward.
 
 test "dry-run with 4 kegs under testing.allocator shows zero leaks" {
     resetOutput();

@@ -1063,7 +1063,7 @@ test "parser: always-bare cp keeps (expr) as grouped primary" {
 // change in parsePrimary (or its helpers) that perturbs the tree -
 // node order, method name, literal value, block-pass wiring - will
 // flip this test red. Keeps the corpus-level byte-identity invariant
-// the T-024a refactor requires.
+// the parsePrimary split relies on.
 
 fn dumpNode(w: *std.Io.Writer, node: *const Node) !void {
     try w.writeByte('(');

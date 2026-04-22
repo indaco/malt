@@ -698,7 +698,7 @@ test "verifyFileSha256 accepts only the exact-byte payload (collision check)" {
     try testing.expectError(error.Sha256Mismatch, cask.verifyFileSha256(bp, &hex_a));
 }
 
-// --- T-006b: applicationsDir is prefix-aware ---
+// --- applicationsDir is prefix-aware ---
 
 test "isDefaultPrefix: matches /opt/malt and /opt/homebrew exactly" {
     try testing.expect(cask.isDefaultPrefix("/opt/malt"));
