@@ -78,6 +78,11 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
 /// whole parse — some fat archives carry legacy arches (PPC, arm64e, arm64_32)
 /// whose parseMachO64 call can legitimately return InvalidMagic /
 /// UnsupportedArch / TruncatedFile.
+///
+/// `InvalidLoadCommand` is deliberately *not* swallowed: it signals structural
+/// corruption in an otherwise recognised slice, and silently skipping it would
+/// leave the patcher free to rewrite the surviving slices and produce a
+/// half-patched fat binary. Bubble it up so the caller aborts the whole patch.
 fn parseFat(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
     if (data.len < 8) return ParseError.TruncatedFile;
 
@@ -100,8 +105,8 @@ fn parseFat(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
 
         if (slice_offset + slice_size > data.len) return ParseError.TruncatedFile;
 
-        // Parse this slice. Skip unrecognised slices (legacy arches etc.)
-        // rather than failing the whole file.
+        // Skip legacy/unsupported slices; bubble structural corruption.
+        // See the doc comment above for the full policy.
         const slice_result = parseMachO64(
             allocator,
             data[slice_offset .. slice_offset + slice_size],
@@ -111,8 +116,9 @@ fn parseFat(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
             ParseError.UnsupportedArch,
             ParseError.TruncatedFile,
             => continue,
-            ParseError.InvalidLoadCommand => continue,
-            ParseError.OutOfMemory => return e,
+            ParseError.InvalidLoadCommand,
+            ParseError.OutOfMemory,
+            => return e,
         };
         // Transfer the slice's LoadCommandPath values (struct-by-value) into
         // the aggregated list, then free the slice's container. The `path`

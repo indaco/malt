@@ -188,6 +188,47 @@ test "parse rejects a fat archive whose slice extends beyond data" {
     try testing.expectError(parser.ParseError.TruncatedFile, parser.parse(testing.allocator, &buf));
 }
 
+test "parse bubbles InvalidLoadCommand from a corrupt fat slice" {
+    // A fat archive whose only slice is a Mach-O 64 with a bogus load
+    // command (cmdsize < sizeof(load_command)). The parser must surface
+    // the structural corruption instead of silently skipping the slice
+    // like it does for legacy arches (InvalidMagic / UnsupportedArch /
+    // TruncatedFile).
+    const macho_header_size = @sizeOf(macho.mach_header_64);
+    const lc_size = @sizeOf(macho.load_command);
+    const slice_len = macho_header_size + lc_size;
+
+    // Fat header (big-endian): magic(4), nfat_arch(4), fat_arch(20).
+    const fat_header_len: usize = 8 + 20;
+    const total_len = fat_header_len + slice_len;
+
+    const buf = try testing.allocator.alloc(u8, total_len);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+
+    std.mem.writeInt(u32, buf[0..4], macho.FAT_MAGIC, .big);
+    std.mem.writeInt(u32, buf[4..8], 1, .big); // nfat_arch = 1
+    // fat_arch entry at offset 8: cputype, cpusubtype, offset, size, align.
+    std.mem.writeInt(u32, buf[16..20], @intCast(fat_header_len), .big);
+    std.mem.writeInt(u32, buf[20..24], @intCast(slice_len), .big);
+
+    // Slice body: mach_header_64 + one corrupt load command.
+    const slice = buf[fat_header_len..];
+    const header = std.mem.bytesAsValue(macho.mach_header_64, slice[0..macho_header_size]);
+    header.* = .{
+        .magic = macho.MH_MAGIC_64,
+        .ncmds = 1,
+        .sizeofcmds = lc_size,
+    };
+    const lc = std.mem.bytesAsValue(macho.load_command, slice[macho_header_size..][0..lc_size]);
+    lc.* = .{ .cmd = .LOAD_DYLIB, .cmdsize = 1 }; // bogus tiny cmdsize
+
+    try testing.expectError(
+        parser.ParseError.InvalidLoadCommand,
+        parser.parse(testing.allocator, buf),
+    );
+}
+
 test "parse rejects a cmdsize shorter than the generic load_command" {
     const header_size = @sizeOf(macho.mach_header_64);
     const lc_size = @sizeOf(macho.load_command);
