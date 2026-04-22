@@ -118,19 +118,17 @@ test "collectFormulaJobs queues a formula with a post_install hook" {
 
 // --- Pure helper tests (no DB / network) ---
 
-test "checkPrefixLength accepts prefix at the limit" {
-    try install.checkPrefixLength("/opt/homebrew");
+test "checkPrefixSane accepts a realistic developer-length prefix" {
+    try install.checkPrefixSane("/Users/somebody/malt");
 }
 
-test "checkPrefixLength accepts a short prefix" {
-    try install.checkPrefixLength("/opt/m");
+test "checkPrefixSane accepts a short prefix" {
+    try install.checkPrefixSane("/opt/m");
 }
 
-test "checkPrefixLength rejects a too-long prefix" {
-    try testing.expectError(
-        install.PrefixError.PrefixTooLong,
-        install.checkPrefixLength("/opt/homebrew-longer"),
-    );
+test "checkPrefixSane rejects an absurdly long prefix" {
+    const huge = "/" ++ "a" ** 300;
+    try testing.expectError(install.PrefixError.PrefixAbsurd, install.checkPrefixSane(huge));
 }
 
 test "isTapFormula detects three-part user/repo/formula names" {

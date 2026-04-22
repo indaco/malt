@@ -87,15 +87,20 @@ test "parseTapName returns null on an incomplete string" {
     try testing.expect(install.parseTapName("user/repo") == null);
 }
 
-test "checkPrefixLength rejects a prefix longer than the Mach-O budget" {
-    const too_long = "/" ++ "x" ** 64;
-    try testing.expectError(error.PrefixTooLong, install.checkPrefixLength(too_long));
+test "checkPrefixSane accepts realistic prefixes (up to the 256-byte sanity cap)" {
+    try install.checkPrefixSane("/opt/malt");
+    try install.checkPrefixSane("/usr/local");
+    try install.checkPrefixSane("/opt/homebrew");
+    try install.checkPrefixSane("/tmp/mt_tahoe");
+    try install.checkPrefixSane("/Users/someuser/malt");
+    // Nothing special about 13 bytes any more — install_name_tool's
+    // headerpad fallback absorbs the overflow.
+    try install.checkPrefixSane("/var/folders/qp/mt_prefix_under_128_bytes_long_enough_to_matter");
 }
 
-test "checkPrefixLength accepts prefixes up to the Mach-O budget" {
-    try install.checkPrefixLength("/opt/malt");
-    try install.checkPrefixLength("/usr/local");
-    try install.checkPrefixLength("/opt/homebrew");
+test "checkPrefixSane rejects absurdly long prefixes at the 256-byte cap" {
+    const huge = "/" ++ "x" ** 512;
+    try testing.expectError(error.PrefixAbsurd, install.checkPrefixSane(huge));
 }
 
 test "parseRubyFormula extracts version/url/sha256 from a flat formula body" {

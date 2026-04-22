@@ -14,6 +14,7 @@ const color = @import("../ui/color.zig");
 const help = @import("help.zig");
 const install_mod = @import("install.zig");
 const parser = @import("../macho/parser.zig");
+const patch = @import("../core/patch.zig");
 const perms_mod = @import("../core/perms.zig");
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -124,21 +125,25 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    // 3b. Prefix length — Mach-O in-place patching budget.
-    //     A long MALT_PREFIX cannot fit inside the load-command slot and will
-    //     silently break every bottle that hard-codes /opt/homebrew paths.
-    install_mod.checkPrefixLength(prefix) catch {
-        var pl_buf: [256]u8 = undefined;
-        const pl_msg = std.fmt.bufPrint(
-            &pl_buf,
-            "MALT_PREFIX '{s}' is {d} bytes, exceeds {d}-byte Mach-O patch budget. Set MALT_PREFIX to a shorter path.",
-            .{ prefix, prefix.len, install_mod.max_prefix_len },
-        ) catch "MALT_PREFIX exceeds the Mach-O patch budget. Set MALT_PREFIX to a shorter path.";
-        printCheck("Prefix length", .err_status, pl_msg);
-        errors += 1;
-    };
-    if (prefix.len <= install_mod.max_prefix_len) {
-        printCheck("Prefix length", .ok, null);
+    // 3b. External relocation tool — required by the Mach-O overflow
+    //     fallback. Bottles whose load-command slots don't fit the new
+    //     prefix get grown via this binary; without it, installs of
+    //     those bottles fail. Realistic prefixes fit in-place for most
+    //     bottles, so this is a warning (not an error) when absent.
+    {
+        const tool = patch.external_tool_name;
+        if (externalToolAvailable(tool)) {
+            printCheck(tool, .ok, null);
+        } else {
+            var et_buf: [256]u8 = undefined;
+            const et_msg = std.fmt.bufPrint(
+                &et_buf,
+                "`{s}` not found on PATH. Install Xcode Command Line Tools: xcode-select --install",
+                .{tool},
+            ) catch "External relocation tool missing. Install Xcode Command Line Tools.";
+            printCheck(tool, .warn_status, et_msg);
+            warnings += 1;
+        }
     }
 
     // 4. APFS volume
@@ -564,6 +569,30 @@ fn hasUnpatchedPlaceholder(
     for (macho.paths) |lcp| {
         if (std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_PREFIX@@") != null) return true;
         if (std.mem.indexOf(u8, lcp.path, "@@HOMEBREW_CELLAR@@") != null) return true;
+    }
+    return false;
+}
+
+/// Fast existence check for a platform relocation tool on PATH.
+/// Tries `/usr/bin/<tool>` first (where Xcode Command Line Tools land
+/// install_name_tool) and then walks `PATH` entry-by-entry. `pub` so
+/// the doctor render test can exercise both branches.
+pub fn externalToolAvailable(tool: []const u8) bool {
+    // Fast path for the common macOS case — avoids allocating a PATH
+    // walk on every `mt doctor` invocation.
+    var fast_buf: [64]u8 = undefined;
+    const fast_path = std.fmt.bufPrint(&fast_buf, "/usr/bin/{s}", .{tool}) catch null;
+    if (fast_path) |p| {
+        if (fs_compat.accessAbsolute(p, .{})) |_| return true else |_| {}
+    }
+
+    const path_env = fs_compat.getenv("PATH") orelse return false;
+    var it = std.mem.splitScalar(u8, path_env, ':');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const full = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, tool }) catch continue;
+        if (fs_compat.accessAbsolute(full, .{})) |_| return true else |_| {}
     }
     return false;
 }

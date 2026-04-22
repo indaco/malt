@@ -334,32 +334,24 @@ test "binary files are skipped by text patching without error" {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// P4 — Pre-flight MALT_PREFIX length check
+// Prefix sanity cap (upper guardrail, no longer a Mach-O in-place budget)
 // ---------------------------------------------------------------------------
 
-test "checkPrefixLength accepts prefixes within the Mach-O patch budget" {
-    try install_mod.checkPrefixLength("/opt/malt");
-    try install_mod.checkPrefixLength("/opt/homebrew"); // exactly 13 bytes — boundary
-    try install_mod.checkPrefixLength("/tmp/mt");
+test "checkPrefixSane accepts realistic MALT_PREFIX values" {
+    try install_mod.checkPrefixSane("/opt/malt");
+    try install_mod.checkPrefixSane("/opt/homebrew");
+    try install_mod.checkPrefixSane("/tmp/mt");
+    try install_mod.checkPrefixSane("/tmp/mt_tahoe"); // 13 bytes — formerly rejected
+    try install_mod.checkPrefixSane("/var/folders/abc/def/ghi/jkl/mno/prefix");
 }
 
-test "checkPrefixLength rejects prefixes that overflow the budget" {
-    try testing.expectError(
-        error.PrefixTooLong,
-        install_mod.checkPrefixLength("/var/folders/abc/def/ghi/jkl/mno/prefix"),
-    );
-    try testing.expectError(
-        error.PrefixTooLong,
-        install_mod.checkPrefixLength("/opt/homebrew/"), // 14 bytes — just over
-    );
-}
-
-test "max_prefix_len matches the /opt/homebrew budget" {
-    try testing.expectEqual(@as(usize, "/opt/homebrew".len), install_mod.max_prefix_len);
+test "checkPrefixSane rejects absurd prefixes at the 256-byte cap" {
+    const huge = "/" ++ "x" ** 512;
+    try testing.expectError(error.PrefixAbsurd, install_mod.checkPrefixSane(huge));
 }
 
 // ---------------------------------------------------------------------------
-// P5 — CellarError.describeError covers every tag
+// CellarError.describeError covers every tag
 // ---------------------------------------------------------------------------
 
 test "describeError returns a non-empty, distinct message for every CellarError" {
@@ -367,6 +359,8 @@ test "describeError returns a non-empty, distinct message for every CellarError"
         cellar_mod.CellarError.CloneFailed,
         cellar_mod.CellarError.PatchFailed,
         cellar_mod.CellarError.PathTooLong,
+        cellar_mod.CellarError.InsufficientHeaderPad,
+        cellar_mod.CellarError.InstallNameToolMissing,
         cellar_mod.CellarError.CodesignFailed,
         cellar_mod.CellarError.RemoveFailed,
         cellar_mod.CellarError.OutOfMemory,

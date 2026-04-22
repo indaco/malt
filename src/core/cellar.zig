@@ -4,7 +4,14 @@
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
 const clonefile = @import("../fs/clonefile.zig");
-const patcher = @import("../macho/patcher.zig");
+// Binary-format-agnostic relocation facade. The Linux task plugs in
+// an ELF backend behind the same surface, so cellar never reaches past
+// it into `macho/patcher.zig` for load-command work.
+const patch = @import("patch.zig");
+// `patchTextFiles` is byte-level text substitution, not a format
+// concern, so it still lives on the Mach-O module — safe to import
+// directly without widening the facade.
+const text_patcher = @import("../macho/patcher.zig");
 const codesign = @import("../macho/codesign.zig");
 const atomic = @import("../fs/atomic.zig");
 
@@ -12,6 +19,15 @@ pub const CellarError = error{
     CloneFailed,
     PatchFailed,
     PathTooLong,
+    /// A bottle's load-command slot overflowed AND the install_name_tool
+    /// fallback reported that the binary's __LINKEDIT padding is
+    /// exhausted. Only actionable by shortening MALT_PREFIX or
+    /// rebuilding the bottle with `-headerpad_max_install_names`.
+    InsufficientHeaderPad,
+    /// `install_name_tool` is not on PATH. Surfaced separately so
+    /// `mt doctor` / user messaging can point at Xcode Command Line
+    /// Tools as the remediation.
+    InstallNameToolMissing,
     CodesignFailed,
     RemoveFailed,
     OutOfMemory,
@@ -24,6 +40,8 @@ pub fn describeError(err: CellarError) []const u8 {
         CellarError.CloneFailed => "APFS clonefile or copy failed",
         CellarError.PatchFailed => "Mach-O or text-file path patching failed",
         CellarError.PathTooLong => "new prefix path is longer than the bottle was built with",
+        CellarError.InsufficientHeaderPad => "install_name_tool: bottle built without -headerpad_max_install_names",
+        CellarError.InstallNameToolMissing => "install_name_tool not found on PATH (install Xcode Command Line Tools)",
         CellarError.CodesignFailed => "codesign re-signing failed",
         CellarError.RemoveFailed => "cellar directory removal failed",
         CellarError.OutOfMemory => "out of memory",
@@ -187,6 +205,8 @@ pub fn materializeWithCellar(
         &modified_macho_paths,
     ) catch |e| switch (e) {
         CellarError.PathTooLong => return CellarError.PathTooLong,
+        CellarError.InsufficientHeaderPad => return CellarError.InsufficientHeaderPad,
+        CellarError.InstallNameToolMissing => return CellarError.InstallNameToolMissing,
         else => return CellarError.PatchFailed,
     };
 
@@ -194,13 +214,13 @@ pub fn materializeWithCellar(
     // placeholders appear in scripts, .pc files, and configs regardless of
     // whether the bottle is relocatable. Text files don't carry code
     // signatures so they don't feed back into the codesign list.
-    const text_replacements = [_]patcher.Replacement{
+    const text_replacements = [_]text_patcher.Replacement{
         .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix },
         .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar },
         .{ .old = "/opt/homebrew", .new = new_prefix },
         .{ .old = "/usr/local", .new = new_prefix },
     };
-    _ = patcher.patchTextFiles(allocator, cellar_path, &text_replacements) catch |e| {
+    _ = text_patcher.patchTextFiles(allocator, cellar_path, &text_replacements) catch |e| {
         std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
     };
 
@@ -244,9 +264,14 @@ const Replacement = struct {
 /// are *not* added to the list — their ad-hoc signature is still valid
 /// and they don't need re-signing.
 ///
-/// `PathTooLong` is surfaced as a real error (MALT_PREFIX exceeded the
-/// in-place patching budget); other per-file errors are skipped so a
-/// single bad binary does not fail the whole materialize.
+/// Slots that overflow their load-command region are deferred to
+/// `install_name_tool` — Homebrew bottles ship ~4 KiB of `__LINKEDIT`
+/// padding for that exact purpose, which the slow path uses to grow
+/// the slot. A non-zero subprocess exit that reports padding
+/// exhaustion surfaces `InsufficientHeaderPad` so the user can
+/// shorten MALT_PREFIX or rebuild the bottle; anything else falls
+/// through to the generic `PatchFailed`. Per-file I/O errors are
+/// skipped so a single bad binary does not abort the whole materialize.
 fn walkMachOAndPatch(
     allocator: std.mem.Allocator,
     dir_path: []const u8,
@@ -260,6 +285,13 @@ fn walkMachOAndPatch(
     defer walker.deinit();
 
     const parser_mod = @import("../macho/parser.zig");
+
+    // `cellar.Replacement` is its own type alias; convert once for
+    // the facade's shape.
+    var patch_reps_buf: [8]patch.Replacement = undefined;
+    std.debug.assert(replacements.len <= patch_reps_buf.len);
+    for (replacements, 0..) |r, i| patch_reps_buf[i] = .{ .old = r.old, .new = r.new };
+    const patch_reps = patch_reps_buf[0..replacements.len];
 
     while (walker.next() catch null) |entry| {
         if (entry.kind != .file) continue;
@@ -280,15 +312,23 @@ fn walkMachOAndPatch(
 
         if (!parser_mod.isMachO(&magic_buf)) continue;
 
-        var any_modified = false;
-        for (replacements) |r| {
-            const result = patcher.patchPaths(allocator, full_path, r.old, r.new) catch |e| switch (e) {
-                error.PathTooLong => return CellarError.PathTooLong,
-                else => continue,
+        // One read/write per file for all replacements. Slots that fit
+        // are rewritten in process; slots that overflow are queued for
+        // the install_name_tool fallback below.
+        var outcome = patch.patchPathsCollecting(allocator, full_path, patch_reps) catch
+            continue;
+        defer outcome.deinit(allocator);
+
+        if (outcome.overflow.len > 0) {
+            patch.flushOverflow(allocator, full_path, outcome.overflow) catch |e| switch (e) {
+                patch.FallbackError.InsufficientHeaderPad => return CellarError.InsufficientHeaderPad,
+                patch.FallbackError.InstallNameToolMissing => return CellarError.InstallNameToolMissing,
+                patch.FallbackError.OutOfMemory => return CellarError.OutOfMemory,
+                else => return CellarError.PatchFailed,
             };
-            if (result.patched_count > 0) any_modified = true;
         }
 
+        const any_modified = outcome.patched_count > 0 or outcome.overflow.len > 0;
         if (any_modified) {
             // Transfer ownership of `full_path` into the modified list.
             // On append failure, let the defer free it and carry on —

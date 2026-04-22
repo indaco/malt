@@ -56,8 +56,6 @@ fn seedFormulaCache(prefix: []const u8, name: []const u8, json: []const u8) !voi
 }
 
 test "execute --dry-run prints a plan for a cached formula" {
-    // The Mach-O in-place patching budget is "/opt/homebrew".len (13 bytes),
-    // so the test prefix must be short enough to pass checkPrefixLength.
     const prefix_z: [:0]const u8 = "/tmp/mm";
     malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
     try malt.fs_compat.cwd().makePath(prefix_z);
@@ -167,12 +165,15 @@ test "execute --dry-run with an already-installed package short-circuits" {
     try install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "seeded" });
 }
 
-test "execute refuses to run when MALT_PREFIX exceeds the Mach-O budget" {
-    const too_long = "/tmp/malt_install_exec_too_long_" ++ "x" ** 64;
+test "execute refuses to run when MALT_PREFIX is absurdly long (> 256 bytes)" {
+    // The former 12-byte Mach-O ceiling is gone — install_name_tool
+    // grows overflowing slots into __LINKEDIT padding. What remains is
+    // a cheap upper bound on pathological values.
+    const too_long = "/tmp/malt_install_exec_absurdly_long_" ++ "x" ** 400;
     defer _ = c.unsetenv("MALT_PREFIX");
     _ = c.setenv("MALT_PREFIX", too_long, 1);
     try testing.expectError(
-        install.InstallError.PrefixTooLong,
+        install.InstallError.PrefixAbsurd,
         install.execute(testing.allocator, &.{"wget"}),
     );
 }
