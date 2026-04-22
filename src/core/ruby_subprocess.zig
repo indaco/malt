@@ -182,17 +182,22 @@ pub fn extractPostInstallFromSource(allocator: std.mem.Allocator, source: []cons
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    // Siblings first — they're registered as user methods by the interpreter
-    // before the post_install body runs. Each sibling is parse-checked in
-    // isolation so a complex helper (e.g. ca-certificates's keychain scan)
-    // doesn't trip the whole post_install extraction; we simply skip the
-    // sibling and let it fall through to `--use-system-ruby` later.
+    // Siblings first — registered as user methods before the post_install
+    // body runs. On parse fail we emit an empty stub under the sibling's
+    // name so a dispatcher post_install (ca-certificates, …) resolves to a
+    // no-op instead of logging `unknown_method` and tripping hasErrors().
     var pos: usize = 0;
     while (findAnyDefBlockAtIndent(source, pos, post_install_span.indent)) |span| {
         const is_self = std.mem.eql(u8, span.name, "post_install");
-        if (!is_self and canParseBlock(allocator, source[span.block_start..span.block_end])) {
-            out.appendSlice(allocator, source[span.block_start..span.block_end]) catch return null;
-            out.append(allocator, '\n') catch return null;
+        if (!is_self) {
+            if (canParseBlock(allocator, source[span.block_start..span.block_end])) {
+                out.appendSlice(allocator, source[span.block_start..span.block_end]) catch return null;
+                out.append(allocator, '\n') catch return null;
+            } else {
+                out.appendSlice(allocator, "def ") catch return null;
+                out.appendSlice(allocator, span.name) catch return null;
+                out.appendSlice(allocator, "\nend\n") catch return null;
+            }
         }
         pos = span.block_end;
     }

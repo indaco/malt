@@ -350,6 +350,71 @@ test "extractPostInstallFromSource skips nested defs inside post_install body" {
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, body.?, "ohai \"hi\""));
 }
 
+// ca-certificates-shaped regression: the real formula's `macos_post_install`
+// and `linux_post_install` bodies use Ruby we can't parse (Tempfile, scan
+// blocks, keyword args, `ensure`), so the dispatcher post_install ends up
+// calling helpers that weren't registered. Pre-v0.7.0 that was a silent
+// skip; the "partially skipped" warning that now fires on every TLS-using
+// install is a regression we pin here end-to-end: extract + run → clean log.
+test "ca-certificates-shape: dispatcher with unparseable siblings leaves flog clean" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Trailing `.` is a reliable parser diagnostic ("expected method name
+    // after '.'") — canParseBlock returns false for both sibling bodies.
+    const src =
+        \\class CaCertificates < Formula
+        \\  def macos_post_install
+        \\    foo.
+        \\  end
+        \\
+        \\  def linux_post_install
+        \\    bar.
+        \\  end
+        \\
+        \\  def post_install
+        \\    if OS.mac?
+        \\      macos_post_install
+        \\    else
+        \\      linux_post_install
+        \\    end
+        \\  end
+        \\end
+    ;
+
+    const body = ruby.extractPostInstallFromSource(alloc, src) orelse
+        return error.TestUnexpectedResult;
+
+    const json =
+        \\{
+        \\  "name": "ca-certificates",
+        \\  "full_name": "ca-certificates",
+        \\  "tap": "homebrew/core",
+        \\  "desc": "test",
+        \\  "homepage": "https://example.com",
+        \\  "license": "MIT",
+        \\  "revision": 0,
+        \\  "keg_only": false,
+        \\  "post_install_defined": true,
+        \\  "versions": { "stable": "2026-03-19", "head": null },
+        \\  "dependencies": [],
+        \\  "oldnames": [],
+        \\  "bottle": { "stable": { "root_url": "https://example.com", "files": {} } }
+        \\}
+    ;
+    var f = try malt.formula.parseFormula(alloc, json);
+    defer f.deinit();
+
+    var flog = malt.dsl.FallbackLog.init(alloc);
+    defer flog.deinit();
+
+    try malt.dsl.executePostInstall(alloc, &f, body, "/tmp/malt_cacerts_test", &flog);
+
+    try testing.expect(!flog.hasFatal());
+    try testing.expectEqual(@as(usize, 0), flog.entries.items.len);
+}
+
 // T-003: defense-in-depth — runPostInstall must reject hostile name /
 // version up front, before any of the lookup/IO work that would
 // eventually flow them into the wrapper. A Cellar directory whose name
