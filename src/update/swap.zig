@@ -47,12 +47,15 @@ pub fn atomicReplace(target_path: []const u8, new_path: []const u8) SwapError!vo
     errdefer fs_compat.deleteFileAbsolute(staged_path) catch {};
 
     // Set mode on the staged file so we never leave a non-executable
-    // malt in place if the rename succeeds but chmod races.
+    // malt in place if the rename succeeds but chmod races. Sync before
+    // close: a rename is not durable without a prior fsync, so a power
+    // loss after rename could otherwise expose a partial binary.
     {
         const f = fs_compat.openFileAbsolute(staged_path, .{ .mode = .read_write }) catch
             return error.StagingFailed;
         defer f.close();
         f.chmod(0o755) catch return error.StagingFailed;
+        f.sync() catch return error.StagingFailed;
     }
 
     // Clear any .old left by a crashed prior run before we overwrite it.
@@ -65,4 +68,12 @@ pub fn atomicReplace(target_path: []const u8, new_path: []const u8) SwapError!vo
     // Atomic rename #2: staged -> target. If this fails the errdefers
     // above restore .old to target and delete the stage.
     fs_compat.renameAbsolute(staged_path, target_path) catch return error.RollbackFailed;
+
+    // Flush the parent so both rename dirents are durable. Swallowing
+    // errors here is fine: the swap already succeeded in the page cache;
+    // only a power loss in the next few ms could lose the dirents and
+    // there is nothing to roll back to at this point.
+    var dir = fs_compat.openDirAbsolute(target_dir, .{}) catch return;
+    defer dir.close();
+    dir.sync() catch {};
 }
