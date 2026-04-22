@@ -2,6 +2,7 @@
 //! Re-exports all modules that tests need to access.
 
 pub const cask = @import("core/cask.zig");
+pub const hash = @import("core/hash.zig");
 pub const cellar = @import("core/cellar.zig");
 pub const deps = @import("core/deps.zig");
 pub const formula = @import("core/formula.zig");
