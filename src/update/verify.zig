@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
+const hash = @import("../core/hash.zig");
 const install_cmd = @import("../cli/install.zig");
 
 pub const ChecksumError = error{
@@ -114,13 +115,14 @@ pub fn verifyAll(allocator: std.mem.Allocator, in: VerifyInputs) VerifyError!voi
         return error.ReadFailed;
     defer allocator.free(checksums);
 
-    const expected = lookupSha256(checksums, in.archive_name) orelse return error.ChecksumMissing;
+    const expected_hex = lookupSha256(checksums, in.archive_name) orelse return error.ChecksumMissing;
+    if (expected_hex.len != 64) return error.InvalidHex;
+    var expected: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&expected, expected_hex) catch return error.InvalidHex;
 
-    const tarball = fs_compat.readFileAbsoluteAlloc(allocator, in.tarball_path, 1 << 28) catch
-        return error.ReadFailed;
-    defer allocator.free(tarball);
-
-    return verifySha256(tarball, expected);
+    // Stream to bound RSS during self-update — the tarball can be 256 MiB.
+    const actual = hash.hashFileSha256Raw(in.tarball_path) catch return error.ReadFailed;
+    if (!install_cmd.constantTimeEql(u8, &expected, &actual)) return error.ChecksumMismatch;
 }
 
 /// Shell out to `cosign verify-blob` with the same flags `install.sh` uses.

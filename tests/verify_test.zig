@@ -239,6 +239,132 @@ test "verifyAll reports ReadFailed when the tarball cannot be read" {
     try testing.expectError(error.ReadFailed, verify.verifyAll(testing.allocator, fx.inputs()));
 }
 
+// --- verifyAll (multi-chunk tarball) --------------------------------------
+//
+// Pins the tarball-hashing path across the switch to streaming SHA256.
+// A 160 KiB payload (2.5x the 64 KiB read chunk) forces the stream
+// loop through multiple iterations — if any later chunk ever stops
+// reaching the hasher, these tests catch it.
+
+fn patternedPayload(alloc: std.mem.Allocator, size: usize) ![]u8 {
+    const buf = try alloc.alloc(u8, size);
+    for (buf, 0..) |*b, i| b.* = @intCast((i *% 131 +% 7) & 0xFF);
+    return buf;
+}
+
+fn sha256Hex(bytes: []const u8) [64]u8 {
+    var raw: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &raw, .{});
+    return std.fmt.bytesToHex(raw, .lower);
+}
+
+test "verifyAll streams a large tarball without loading it whole (smoke)" {
+    // Gated: MALT_VERIFY_SMOKE_MIB=N enables a realistic self-update-sized
+    // run. Measured under `/usr/bin/time -l`, peak RSS stays flat as N
+    // grows — the fixture below writes the tarball in 64 KiB chunks so
+    // the test itself never holds the whole payload in memory.
+    const env = fs_compat.getenv("MALT_VERIFY_SMOKE_MIB") orelse return error.SkipZigTest;
+    const mib = std.fmt.parseInt(usize, env, 10) catch return error.SkipZigTest;
+    if (mib == 0) return error.SkipZigTest;
+    const total: usize = mib * 1024 * 1024;
+
+    const dir = "/tmp/malt_verifyall_smoke";
+    fs_compat.deleteTreeAbsolute(dir) catch {};
+    try fs_compat.makeDirAbsolute(dir);
+    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+
+    const tarball = try std.fmt.allocPrint(testing.allocator, "{s}/malt.tgz", .{dir});
+    defer testing.allocator.free(tarball);
+    const checksums = try std.fmt.allocPrint(testing.allocator, "{s}/checksums.txt", .{dir});
+    defer testing.allocator.free(checksums);
+    const sigstore = try std.fmt.allocPrint(testing.allocator, "{s}/checksums.txt.sigstore.json", .{dir});
+    defer testing.allocator.free(sigstore);
+    const cosign_bin = try std.fmt.allocPrint(testing.allocator, "{s}/fake_cosign", .{dir});
+    defer testing.allocator.free(cosign_bin);
+
+    // Stream-write the tarball while hashing the same bytes. A 64 KiB
+    // pattern buffer is the only payload-sized allocation this test makes.
+    var chunk: [64 * 1024]u8 = undefined;
+    for (&chunk, 0..) |*b, i| b.* = @intCast((i *% 131 +% 7) & 0xFF);
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    {
+        const tf = try fs_compat.createFileAbsolute(tarball, .{});
+        defer tf.close();
+        var remaining = total;
+        while (remaining > 0) {
+            const n = @min(remaining, chunk.len);
+            try tf.writeAll(chunk[0..n]);
+            hasher.update(chunk[0..n]);
+            remaining -= n;
+        }
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    const hex = std.fmt.bytesToHex(digest, .lower);
+
+    const line = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}  {s}\n",
+        .{ hex, ARCHIVE_NAME },
+    );
+    defer testing.allocator.free(line);
+    try writeFile(checksums, line);
+
+    try writeFile(sigstore, "{}");
+    try writeFakeCosign(cosign_bin, 0);
+
+    try verify.verifyAll(testing.allocator, .{
+        .cosign_bin = cosign_bin,
+        .tarball_path = tarball,
+        .checksums_path = checksums,
+        .sigstore_path = sigstore,
+        .archive_name = ARCHIVE_NAME,
+        .cert_identity_regex = "^https://example\\.com/",
+        .oidc_issuer = "https://example.com",
+    });
+}
+
+test "verifyAll accepts a multi-chunk tarball whose hash matches" {
+    const payload = try patternedPayload(testing.allocator, 160 * 1024);
+    defer testing.allocator.free(payload);
+
+    const hex = sha256Hex(payload);
+    const line = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}  {s}\n",
+        .{ hex, ARCHIVE_NAME },
+    );
+    defer testing.allocator.free(line);
+
+    var fx = try Fixture.setup(testing.allocator, "multi_ok", payload, line, 0);
+    defer fx.deinit(testing.allocator);
+    try verify.verifyAll(testing.allocator, fx.inputs());
+}
+
+test "verifyAll rejects a multi-chunk tarball whose content was tampered" {
+    const payload = try patternedPayload(testing.allocator, 160 * 1024);
+    defer testing.allocator.free(payload);
+
+    const hex = sha256Hex(payload);
+    const line = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}  {s}\n",
+        .{ hex, ARCHIVE_NAME },
+    );
+    defer testing.allocator.free(line);
+
+    // Flip one byte deep inside the second chunk — within the range
+    // that the old chunk-0-only bug used to skip.
+    const tampered = try testing.allocator.dupe(u8, payload);
+    defer testing.allocator.free(tampered);
+    tampered[80 * 1024] ^= 0x01;
+
+    var fx = try Fixture.setup(testing.allocator, "multi_bad", tampered, line, 0);
+    defer fx.deinit(testing.allocator);
+    try testing.expectError(error.ChecksumMismatch, verify.verifyAll(testing.allocator, fx.inputs()));
+}
+
 test "verifyCosignBlob errors when cosign exits non-zero" {
     const path = "/tmp/malt_fake_cosign_fail";
     try writeFakeCosign(path, 1);
