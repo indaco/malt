@@ -377,13 +377,32 @@ test "isSafeSymlinkTarget: accepts intra-bundle relative targets" {
     try testing.expect(archive.isSafeSymlinkTarget("a/b/link", "./c/./d"));
 }
 
-test "isSafeSymlinkTarget: rejects targets that escape the root" {
-    // One `..` too many — entry sits at depth 1 (parent depth 0).
-    try testing.expect(!archive.isSafeSymlinkTarget("link", "../escape"));
-    // 4 `..` from a 3-deep parent overshoots.
-    try testing.expect(!archive.isSafeSymlinkTarget("a/b/c/link", "../../../../etc"));
-    // Mid-path overshoot: pops to root then climbs back — still escaped at the pop.
-    try testing.expect(!archive.isSafeSymlinkTarget("a/link", "../../oops/back"));
+test "isSafeSymlinkTarget: accepts prefix-relative targets one level above root" {
+    // Rust bottle shape: 7 ../ from a 6-deep parent lands in the prefix
+    // parent and descends into the sibling formula's opt path.
+    try testing.expect(archive.isSafeSymlinkTarget(
+        "rust/1.95.0/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy",
+        "../../../../../../../opt/llvm/bin/llvm-objcopy",
+    ));
+    // Minimum case: top-level entry climbing exactly to the prefix parent.
+    try testing.expect(archive.isSafeSymlinkTarget("link", "../opt/sibling"));
+    // Deep entry whose `..` run lands at the prefix parent, then descends.
+    try testing.expect(archive.isSafeSymlinkTarget(
+        "a/b/c/link",
+        "../../../../etc/shared",
+    ));
+}
+
+test "isSafeSymlinkTarget: rejects targets that climb beyond the prefix parent" {
+    // +2 from a top-level entry — one step past the prefix parent.
+    try testing.expect(!archive.isSafeSymlinkTarget("link", "../../escape"));
+    // +2 from a deeper entry: 5 `..` from parent_depth 3 underflows by two.
+    try testing.expect(!archive.isSafeSymlinkTarget(
+        "a/b/c/link",
+        "../../../../../etc",
+    ));
+    // Mid-path overshoot: pops past the prefix parent before climbing back.
+    try testing.expect(!archive.isSafeSymlinkTarget("a/link", "../../../oops/back"));
 }
 
 test "isSafeSymlinkTarget: rejects absolute, empty, and NUL-bearing targets" {
