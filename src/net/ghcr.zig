@@ -147,6 +147,11 @@ pub const GhcrClient = struct {
     ///
     /// `http` is a caller-owned client — typically borrowed from a
     /// `HttpClientPool` so the TLS context is reused across requests.
+    ///
+    /// **Ownership.** The returned slice is an owned dupe allocated
+    /// from `self.allocator`; the caller must `defer self.allocator.free(token)`.
+    /// A borrowed return would race `clearCache` between mutex release
+    /// and the caller's use.
     pub fn fetchToken(
         self: *GhcrClient,
         http: *client_mod.HttpClient,
@@ -158,7 +163,9 @@ pub const GhcrClient = struct {
 
         const now = fs_compat.timestamp();
         if (self.cached_token) |t| {
-            if (now < self.token_expiry and self.cached_scopes.contains(repo)) return t;
+            if (now < self.token_expiry and self.cached_scopes.contains(repo)) {
+                return self.allocator.dupe(u8, t) catch GhcrError.OutOfMemory;
+            }
             self.clearCache();
         }
 
@@ -176,11 +183,16 @@ pub const GhcrClient = struct {
             return GhcrError.InvalidResponse;
         errdefer self.allocator.free(token);
 
+        // Keep the caller's copy independent from the cache so a later
+        // `clearCache` can't free memory still in flight.
+        const cached_copy = self.allocator.dupe(u8, token) catch return GhcrError.OutOfMemory;
+        errdefer self.allocator.free(cached_copy);
+
         const repo_dup = self.allocator.dupe(u8, repo) catch return GhcrError.OutOfMemory;
         errdefer self.allocator.free(repo_dup);
         try self.cached_scopes.put(self.allocator, repo_dup, {});
 
-        self.cached_token = token;
+        self.cached_token = cached_copy;
         self.token_expiry = now + 270; // 4.5 min buffer before 5 min expiry
         return token;
     }
@@ -199,8 +211,10 @@ pub const GhcrClient = struct {
         body_out: *std.ArrayList(u8),
         progress: ?client_mod.ProgressCallback,
     ) GhcrError!void {
-        // Get token through the mutex-protected cache (avoids redundant fetches)
+        // Get token through the mutex-protected cache (avoids redundant fetches).
+        // `fetchToken` returns an owned dupe — free before leaving.
         const token = self.fetchToken(http, repo) catch return GhcrError.TokenFetchFailed;
+        defer self.allocator.free(token);
 
         // Build URL: https://ghcr.io/v2/{repo}/blobs/{digest}
         var url_buf: [512]u8 = undefined;
