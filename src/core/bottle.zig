@@ -12,6 +12,8 @@ const install_cmd = @import("../cli/install.zig");
 
 pub const BottleError = error{
     DownloadFailed,
+    DownloadPermanent,
+    DownloadRateLimited,
     Sha256Mismatch,
     ExtractionFailed,
     OutOfMemory,
@@ -51,7 +53,13 @@ pub fn download(
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
 
-    ghcr.downloadBlob(allocator, http, repo, digest, &body, progress) catch return BottleError.DownloadFailed;
+    ghcr.downloadBlob(allocator, http, repo, digest, &body, progress) catch |e| {
+        return switch (e) {
+            ghcr_mod.GhcrError.DownloadHttpClientError => BottleError.DownloadPermanent,
+            ghcr_mod.GhcrError.DownloadRateLimited => BottleError.DownloadRateLimited,
+            else => BottleError.DownloadFailed,
+        };
+    };
 
     // Compute SHA256 of downloaded data
     var hash: [32]u8 = undefined;

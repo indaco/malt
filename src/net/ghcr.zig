@@ -10,6 +10,11 @@ const io_mod = @import("../ui/io.zig");
 pub const GhcrError = error{
     TokenFetchFailed,
     DownloadFailed,
+    DownloadTimeout,
+    DownloadConnectionReset,
+    DownloadHttpClientError,
+    DownloadHttpServerError,
+    DownloadRateLimited,
     Unauthorized,
     InvalidResponse,
     OutOfMemory,
@@ -211,17 +216,13 @@ pub const GhcrClient = struct {
         body_out: *std.ArrayList(u8),
         progress: ?client_mod.ProgressCallback,
     ) GhcrError!void {
-        // Get token through the mutex-protected cache (avoids redundant fetches).
-        // `fetchToken` returns an owned dupe — free before leaving.
         const token = self.fetchToken(http, repo) catch return GhcrError.TokenFetchFailed;
         defer self.allocator.free(token);
 
-        // Build URL: https://ghcr.io/v2/{repo}/blobs/{digest}
         var url_buf: [512]u8 = undefined;
         const url = std.fmt.bufPrint(&url_buf, "https://ghcr.io/v2/{s}/blobs/{s}", .{ repo, digest }) catch
             return GhcrError.OutOfMemory;
 
-        // Download with cached token
         var auth_buf: [2048]u8 = undefined;
         const auth_value = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token}) catch
             return GhcrError.OutOfMemory;
@@ -234,9 +235,26 @@ pub const GhcrClient = struct {
             return GhcrError.DownloadFailed;
         defer resp.deinit();
 
-        if (resp.status != 200) return GhcrError.DownloadFailed;
+        if (resp.status == 401) return GhcrError.Unauthorized;
+        if (resp.status != 200) {
+            return classifyGhcrStatus(resp.status);
+        }
 
         body_out.appendSlice(allocator, resp.body) catch return GhcrError.OutOfMemory;
+    }
+
+    pub fn classifyGhcrStatus(status: u16) GhcrError {
+        if (client_mod.classifyStatus(status)) |dl_err| {
+            return switch (dl_err) {
+                error.RateLimited => GhcrError.DownloadRateLimited,
+                error.HttpClientError => GhcrError.DownloadHttpClientError,
+                error.HttpServerError => GhcrError.DownloadHttpServerError,
+                error.Timeout => GhcrError.DownloadTimeout,
+                error.ConnectionReset => GhcrError.DownloadConnectionReset,
+                else => GhcrError.DownloadFailed,
+            };
+        }
+        return GhcrError.DownloadFailed;
     }
 };
 

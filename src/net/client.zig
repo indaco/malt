@@ -2,6 +2,60 @@ const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
 const io_mod = @import("../ui/io.zig");
 
+pub const DownloadError = error{
+    Timeout,
+    ConnectionReset,
+    HttpClientError,
+    HttpServerError,
+    RateLimited,
+    TlsDowngradeRefused,
+    ResponseTooLarge,
+    ReadFailed,
+};
+
+pub const DownloadDiagnostic = struct {
+    status: ?u16,
+    url: []const u8,
+    bytes_read: u64,
+    err: DownloadError,
+
+    pub fn isPermanent(self: DownloadDiagnostic) bool {
+        return switch (self.err) {
+            error.HttpClientError => blk: {
+                const s = self.status orelse break :blk false;
+                break :blk s == 404 or s == 410;
+            },
+            error.TlsDowngradeRefused, error.ResponseTooLarge => true,
+            else => false,
+        };
+    }
+};
+
+pub fn classifyStatus(status: u16) ?DownloadError {
+    if (status >= 200 and status < 400) return null;
+    if (status == 429) return error.RateLimited;
+    if (status >= 400 and status < 500) return error.HttpClientError;
+    if (status >= 500) return error.HttpServerError;
+    return null;
+}
+
+pub fn isTransientError(err: DownloadError) bool {
+    return switch (err) {
+        error.Timeout, error.ConnectionReset, error.HttpServerError, error.RateLimited, error.ReadFailed => true,
+        error.HttpClientError, error.TlsDowngradeRefused, error.ResponseTooLarge => false,
+    };
+}
+
+/// Compute read-timeout in nanoseconds scaled by Content-Length.
+/// Floor: 30 s. Scale: content_length / min_bandwidth (64 KiB/s).
+pub fn scaledTimeoutNs(content_length: ?u64) u64 {
+    const floor_ns: u64 = 30 * std.time.ns_per_s;
+    const cl = content_length orelse return floor_ns;
+    const min_bandwidth: u64 = 64 * 1024; // 64 KiB/s
+    const transfer_ns = (cl / min_bandwidth) * std.time.ns_per_s;
+    return @max(floor_ns, transfer_ns);
+}
+
 /// Optional progress reporting for long downloads.
 /// `bytes_so_far`: total bytes received so far (after decompression).
 /// `content_length`: total expected bytes from HTTP header, or null if unknown.
@@ -297,10 +351,9 @@ pub const HttpClient = struct {
         while (true) {
             const result = self.doGetLimited(url, extra_headers, max_bytes, progress);
             if (result) |resp| {
-                // Retry on transient server errors
-                if (resp.status == 429 or resp.status == 503 or resp.status == 504) {
-                    resp.allocator.free(resp.body);
-                    if (attempt < MAX_RETRIES) {
+                if (classifyStatus(resp.status)) |dl_err| {
+                    if (isTransientError(dl_err) and attempt < MAX_RETRIES) {
+                        resp.allocator.free(resp.body);
                         std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms)), .awake) catch {};
                         attempt += 1;
                         continue;
@@ -308,7 +361,6 @@ pub const HttpClient = struct {
                 }
                 return resp;
             } else |err| {
-                // Retry on connection errors
                 if (attempt < MAX_RETRIES) {
                     std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms)), .awake) catch {};
                     attempt += 1;
@@ -383,7 +435,10 @@ pub const HttpClient = struct {
         // implementation slept in 1 s ticks and could stall `join()` by
         // up to a full second per request — that was the entire warm
         // install floor (see docs/perf/results.md).
-        const effective_timeout = if (max_bytes > MAX_METADATA_BYTES) BLOB_TIMEOUT_NS else self.timeout_ns;
+        const effective_timeout = if (max_bytes > MAX_METADATA_BYTES)
+            @max(BLOB_TIMEOUT_NS, scaledTimeoutNs(content_length))
+        else
+            self.timeout_ns;
         var request_done: std.Io.Event = .unset;
         const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
             &request_done,
