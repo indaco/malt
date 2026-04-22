@@ -801,3 +801,18 @@ test "collectFormulaJobs leaves no parsed-tree leaks under testing.allocator (>=
     try testing.expectEqualStrings("root", jobs.items[3].name);
     try testing.expect(!jobs.items[3].is_dep);
 }
+
+test "collectFetchWorkerCount clamps to MAX_COLLECT_FETCH_WORKERS" {
+    // Pool invariant: the dep-fetch phase never spawns more than
+    // MAX_COLLECT_FETCH_WORKERS threads, even on heavy graphs (40+ deps).
+    // The old one-thread-per-dep loop would scale linearly; the pool
+    // caps it so threads never outnumber HTTP client pool slots.
+    const cap = install.MAX_COLLECT_FETCH_WORKERS;
+
+    try testing.expectEqual(@as(usize, 0), install.collectFetchWorkerCount(0));
+    try testing.expectEqual(@as(usize, 1), install.collectFetchWorkerCount(1));
+    try testing.expectEqual(cap, install.collectFetchWorkerCount(cap));
+    try testing.expectEqual(cap, install.collectFetchWorkerCount(cap + 1));
+    try testing.expectEqual(cap, install.collectFetchWorkerCount(40));
+    try testing.expectEqual(cap, install.collectFetchWorkerCount(128));
+}

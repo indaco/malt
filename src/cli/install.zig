@@ -1007,6 +1007,40 @@ const FetchFormulaCtx = struct {
     }
 };
 
+/// Maximum concurrent workers for the dep-fetch phase of
+/// `collectFormulaJobs`. Matches the install-time HTTP client pool so
+/// workers never block on `pool.acquire` — extra workers would just sit
+/// idle waiting for a client.
+pub const MAX_COLLECT_FETCH_WORKERS: usize = 4;
+
+/// Bounded worker count for a given dep-fetch load. Exposed so tests
+/// can pin the "no more than N threads" invariant without scraping
+/// `std.Thread.spawn` call counts.
+pub fn collectFetchWorkerCount(deps_to_fetch: usize) usize {
+    return @min(MAX_COLLECT_FETCH_WORKERS, deps_to_fetch);
+}
+
+/// Shared state for the dep-fetch pool. Mirrors `MaterializePool`: a
+/// single atomic index hands out `ctxs` slots to workers until the
+/// array is drained. Already-installed deps are skipped in-thread.
+const FetchJobsPool = struct {
+    next_idx: std.atomic.Value(usize),
+    ctxs: []FetchFormulaCtx,
+    deps: []const deps_mod.ResolvedDep,
+};
+
+/// Thread entry-point for the bounded dep-fetch pool. Each worker
+/// grabs the next `ctxs` index atomically and runs the fetch until the
+/// index passes the end, skipping deps that are already installed.
+fn collectFetchPoolWorker(pool: *FetchJobsPool) void {
+    while (true) {
+        const idx = pool.next_idx.fetchAdd(1, .acq_rel);
+        if (idx >= pool.ctxs.len) return;
+        if (pool.deps[idx].already_installed) continue;
+        pool.ctxs[idx].run();
+    }
+}
+
 /// Job-owned strings duped out of a parsed formula so its
 /// `std.json.Parsed` arena can be released as soon as
 /// `collectFormulaJobs` is done reading it. Lifetime matches the
@@ -1141,21 +1175,39 @@ pub fn collectFormulaJobs(
             };
         }
 
-        const threads = allocator.alloc(std.Thread, deps.len) catch return InstallError.DownloadFailed;
-        defer allocator.free(threads);
-
-        var spawned: usize = 0;
-        for (deps, 0..) |dep, i| {
-            if (dep.already_installed) continue;
-            if (std.Thread.spawn(.{}, FetchFormulaCtx.run, .{&ctxs[i]})) |t| {
-                threads[spawned] = t;
-                spawned += 1;
-            } else |_| {
-                // Spawn failure → run inline on the caller thread.
-                ctxs[i].run();
-            }
+        // Bounded pool: one-thread-per-dep over-allocated stacks and
+        // queued on the 4-slot HTTP client pool anyway. Workers share
+        // an atomic index and drain `ctxs` — same pattern as
+        // `materializePoolWorker`.
+        var to_fetch: usize = 0;
+        for (deps) |d| {
+            if (!d.already_installed) to_fetch += 1;
         }
-        for (threads[0..spawned]) |t| t.join();
+
+        if (to_fetch > 0) {
+            const worker_count = collectFetchWorkerCount(to_fetch);
+            var pool_ctx: FetchJobsPool = .{
+                .next_idx = std.atomic.Value(usize).init(0),
+                .ctxs = ctxs,
+                .deps = deps,
+            };
+
+            const threads = allocator.alloc(std.Thread, worker_count) catch
+                return InstallError.DownloadFailed;
+            defer allocator.free(threads);
+
+            var spawned: usize = 0;
+            for (0..worker_count) |_| {
+                if (std.Thread.spawn(.{}, collectFetchPoolWorker, .{&pool_ctx})) |t| {
+                    threads[spawned] = t;
+                    spawned += 1;
+                } else |_| {
+                    // Spawn failure → drain remaining work inline.
+                    collectFetchPoolWorker(&pool_ctx);
+                }
+            }
+            for (threads[0..spawned]) |t| t.join();
+        }
 
         // Dupe each fetched JSON into the caller's allocator so the
         // memory outlives per-worker `arena.deinit()` — downstream
