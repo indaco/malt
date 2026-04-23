@@ -71,7 +71,7 @@ pub fn routePostInstallOutcome(
             if (output.isVerbose()) flog.printUnknown(name);
             if (output.isDebug()) flog.printFatal(name);
             ruby_sub.runPostInstall(allocator, name, version_str, prefix) catch |e| {
-                output.warn("post_install subprocess failed for {s}: {s}", .{ name, @errorName(e) });
+                output.warn("post_install subprocess failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
                 break :blk .ruby_fallback_failed;
             };
             // Symmetric with the native "completed" info so scripted users
@@ -200,7 +200,7 @@ pub fn drive(
     if (useSystemRubyForFormula(use_system_ruby_list, name)) {
         output.warn("Running post_install for {s} via system Ruby...", .{name});
         ruby_sub.runPostInstall(allocator, name, version_str, prefix) catch |e| {
-            output.warn("post_install failed for {s}: {s}", .{ name, @errorName(e) });
+            output.warn("post_install failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
         };
     } else {
         output.warn("{s}: post_install skipped (use --use-system-ruby={s} or brew install {s})", .{ name, name, name });

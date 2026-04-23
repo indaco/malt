@@ -6,7 +6,6 @@
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
 const builtin = @import("builtin");
-const output = @import("../ui/output.zig");
 const codesign = @import("../macho/codesign.zig");
 const pins = @import("pins.zig");
 const http_client = @import("../net/client.zig");
@@ -26,6 +25,21 @@ pub const RubyError = error{
     OutOfMemory,
     InvalidInput,
 };
+
+/// Human-readable hint for each RubyError variant. CLI renders these so
+/// core/* itself emits no UI.
+pub fn describeError(err: RubyError) []const u8 {
+    return switch (err) {
+        RubyError.RubyNotFound => "no Ruby interpreter found (tried /opt/homebrew, /usr/local, rbenv, asdf, PATH)",
+        RubyError.TapNotFound => "homebrew-core tap not found; run `brew tap --force homebrew/core`",
+        RubyError.FormulaSourceNotFound => "formula .rb source not found in the homebrew-core tap",
+        RubyError.PostInstallBodyNotFound => "could not extract post_install body from formula source",
+        RubyError.ScriptWriteFailed => "could not write the temporary Ruby wrapper script",
+        RubyError.PostInstallFailed => "post_install script failed to run or exited non-zero",
+        RubyError.OutOfMemory => "out of memory running post_install",
+        RubyError.InvalidInput => "invalid formula name, version, or prefix",
+    };
+}
 
 /// Upper bound on a fetched formula .rb blob. The Homebrew-wide 99th
 /// percentile is ~40 KiB; 1 MiB is orders of magnitude of headroom
@@ -133,16 +147,9 @@ pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8
     // ([a-z0-9@._+-]) — the URL path substitutes the name directly.
     api_mod.validateName(name) catch return null;
 
-    const expected_hash = pins.expectedSha256(name) orelse {
-        // Fail-closed: no manifest entry, no fetch. Logged so users
-        // hitting this path know *why* rather than guessing that the
-        // network is down.
-        output.warn(
-            "post_install fetch refused for {s}: no entry in pins_manifest.txt (run scripts/gen-pins.sh)",
-            .{name},
-        );
-        return null;
-    };
+    // Fail-closed: no manifest entry, no fetch. The caller decides whether
+    // to warn — core stays headless.
+    const expected_hash = pins.expectedSha256(name) orelse return null;
 
     var url_buf: [512]u8 = undefined;
     const url = std.fmt.bufPrint(
@@ -161,13 +168,7 @@ pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8
 
     var actual_hex: [pins.SHA256_HEX_LEN]u8 = undefined;
     pins.sha256Hex(resp.body, &actual_hex);
-    if (!std.mem.eql(u8, actual_hex[0..], expected_hash)) {
-        output.err(
-            "post_install fetch refused for {s}: SHA256 mismatch at pinned commit (expected {s}, got {s})",
-            .{ name, expected_hash, actual_hex[0..] },
-        );
-        return null;
-    }
+    if (!std.mem.eql(u8, actual_hex[0..], expected_hash)) return null;
 
     return extractPostInstallFromSource(allocator, resp.body);
 }
@@ -475,38 +476,24 @@ pub fn runPostInstall(
     for (name) |b| if (!fs_atomic.isAllowedNameByte(b)) return RubyError.InvalidInput;
     for (version) |b| if (!fs_atomic.isAllowedNameByte(b)) return RubyError.InvalidInput;
 
+    // Core returns outcomes; UI renders at the boundary — the CLI caller
+    // maps each RubyError variant to user-facing text.
+
     // 1. Find Ruby (caller-owned heap slice — see detectRuby contract).
-    const ruby_path = detectRuby(allocator) orelse {
-        output.err("No Ruby interpreter found. Tried:", .{});
-        output.err("  /opt/homebrew/opt/ruby/bin/ruby", .{});
-        output.err("  /usr/local/opt/ruby/bin/ruby", .{});
-        output.err("  ~/.rbenv/shims/ruby, ~/.asdf/shims/ruby", .{});
-        output.err("  /usr/bin/ruby", .{});
-        output.err("  PATH search", .{});
-        return RubyError.RubyNotFound;
-    };
+    const ruby_path = detectRuby(allocator) orelse return RubyError.RubyNotFound;
     defer allocator.free(ruby_path);
 
     // 2. Find homebrew-core tap
-    const tap_path = findHomebrewCoreTap() orelse {
-        output.err("homebrew-core tap not found. Required for --use-system-ruby.", .{});
-        output.err("Run: brew tap --force homebrew/core", .{});
-        return RubyError.TapNotFound;
-    };
+    const tap_path = findHomebrewCoreTap() orelse return RubyError.TapNotFound;
 
     // 3. Resolve .rb source file
     var rb_buf: [1024]u8 = undefined;
-    const rb_path = resolveFormulaRbPath(&rb_buf, tap_path, name) orelse {
-        output.err("Formula source not found: {s}", .{name});
-        output.err("Expected at: {s}/Formula/{c}/{s}.rb", .{ tap_path, name[0], name });
+    const rb_path = resolveFormulaRbPath(&rb_buf, tap_path, name) orelse
         return RubyError.FormulaSourceNotFound;
-    };
 
     // 4. Extract post_install body
-    const body = extractPostInstallBody(allocator, rb_path) orelse {
-        output.err("Could not extract post_install body from {s}", .{rb_path});
+    const body = extractPostInstallBody(allocator, rb_path) orelse
         return RubyError.PostInstallBodyNotFound;
-    };
     defer allocator.free(body);
 
     // 5. Generate wrapper script
@@ -572,12 +559,6 @@ pub fn runPostInstall(
         prefix,
         env,
         .{},
-    ) catch |e| {
-        output.err("post_install sandbox spawn failed: {s}", .{@errorName(e)});
-        return RubyError.PostInstallFailed;
-    };
-    if (exit_code != 0) {
-        output.err("post_install script exited with code {d}", .{exit_code});
-        return RubyError.PostInstallFailed;
-    }
+    ) catch return RubyError.PostInstallFailed;
+    if (exit_code != 0) return RubyError.PostInstallFailed;
 }

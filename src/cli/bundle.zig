@@ -107,20 +107,54 @@ fn cmdInstall(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     defer allocator.free(path);
     output.info("using bundle file: {s}", .{path});
 
-    var manifest = try readManifest(allocator, path);
+    var diag = brewfile_mod.Diagnostics.init(allocator);
+    defer diag.deinit();
+    var manifest = try readManifest(allocator, path, &diag);
     defer manifest.deinit();
+    for (diag.warnings.items) |w| output.warn("{s}", .{w});
 
     var db = try openDb();
     defer db.close();
     schema.initSchema(&db) catch {};
 
-    runner_mod.run(allocator, &db, manifest, .{
+    var report = runner_mod.run(allocator, &db, manifest, .{
         .dry_run = dry_run,
         .dispatcher = &default_dispatcher,
     }) catch |e| {
         output.err("bundle install failed: {s}", .{@errorName(e)});
         return BundleError.RunnerFailed;
     };
+    defer report.deinit();
+
+    for (report.previews) |p| switch (p.kind) {
+        .tap => output.info("would run: malt tap {s}", .{p.name}),
+        .formula => output.info("would run: malt install {s}", .{p.name}),
+        .cask => output.info("would run: malt install --cask {s}", .{p.name}),
+        .service_start => output.info("would run: malt services start {s}", .{p.name}),
+    };
+    var any_hard = false;
+    for (report.failures) |f| switch (f.kind) {
+        .tap => {
+            output.err("tap failed: {s}", .{f.name});
+            any_hard = true;
+        },
+        .formula => {
+            output.err("install failed: {s}", .{f.name});
+            any_hard = true;
+        },
+        .cask => {
+            output.err("cask install failed: {s}", .{f.name});
+            any_hard = true;
+        },
+        // Service auto-start is best-effort; warn but don't fail the bundle.
+        .service_start => output.warn("could not auto-start service: {s}", .{f.name}),
+    };
+    if (report.db_record_error) |name| {
+        output.err("could not record bundle in database: {s}", .{name});
+        any_hard = true;
+    }
+
+    if (any_hard) return BundleError.RunnerFailed;
     output.success("bundle install complete", .{});
 }
 
@@ -232,8 +266,11 @@ fn cmdImport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
         return BundleError.InvalidArgs;
     }
     const path = rest[0];
-    var manifest = try readManifest(allocator, path);
+    var diag = brewfile_mod.Diagnostics.init(allocator);
+    defer diag.deinit();
+    var manifest = try readManifest(allocator, path, &diag);
     defer manifest.deinit();
+    for (diag.warnings.items) |w| output.warn("{s}", .{w});
 
     var db = try openDb();
     defer db.close();
@@ -291,7 +328,11 @@ fn resolveBundlefile(allocator: std.mem.Allocator, explicit: ?[]const u8) ![]con
     return BundleError.BundlefileNotFound;
 }
 
-fn readManifest(allocator: std.mem.Allocator, path: []const u8) !manifest_mod.Manifest {
+fn readManifest(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    diag: ?*brewfile_mod.Diagnostics,
+) !manifest_mod.Manifest {
     const file = if (std.fs.path.isAbsolute(path))
         fs_compat.openFileAbsolute(path, .{}) catch return BundleError.BundlefileNotFound
     else
@@ -307,7 +348,7 @@ fn readManifest(allocator: std.mem.Allocator, path: []const u8) !manifest_mod.Ma
     if (std.mem.endsWith(u8, path, ".json")) {
         return manifest_mod.parseJson(allocator, body) catch return BundleError.BundlefileParse;
     }
-    return brewfile_mod.parse(allocator, body) catch return BundleError.BundlefileParse;
+    return brewfile_mod.parse(allocator, body, diag) catch return BundleError.BundlefileParse;
 }
 
 fn writeManifest(

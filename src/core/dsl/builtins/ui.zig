@@ -1,8 +1,9 @@
 //! malt — DSL builtin: UI operations
-//! Maps ohai/opoo/odie to src/ui/output.zig
+//! Maps ohai/opoo/odie to src/ui/output.zig — the sole UI channel the
+//! DSL is allowed. Direct stderr writes were removed per the "core
+//! returns outcomes" layering (R3).
 
 const std = @import("std");
-const fs_compat = @import("../../../fs/compat.zig");
 const output = @import("../../../ui/output.zig");
 const values = @import("../values.zig");
 const pathname = @import("pathname.zig");
@@ -15,12 +16,7 @@ const ExecCtx = pathname.ExecCtx;
 pub fn ohai(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return Value{ .nil = {} };
     const msg = args[0].asString(ctx.allocator) catch return Value{ .nil = {} };
-    var buf: [4096]u8 = undefined;
-    const formatted = std.fmt.bufPrint(&buf, "{s}", .{msg}) catch return Value{ .nil = {} };
-    const f = fs_compat.stderrFile();
-    f.writeAll("  > ") catch {};
-    f.writeAll(formatted) catch {};
-    f.writeAll("\n") catch {};
+    output.info("{s}", .{msg});
     return Value{ .nil = {} };
 }
 
@@ -28,12 +24,7 @@ pub fn ohai(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
 pub fn opoo(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return Value{ .nil = {} };
     const msg = args[0].asString(ctx.allocator) catch return Value{ .nil = {} };
-    var buf: [4096]u8 = undefined;
-    const formatted = std.fmt.bufPrint(&buf, "{s}", .{msg}) catch return Value{ .nil = {} };
-    const f = fs_compat.stderrFile();
-    f.writeAll("  ! ") catch {};
-    f.writeAll(formatted) catch {};
-    f.writeAll("\n") catch {};
+    output.warn("{s}", .{msg});
     return Value{ .nil = {} };
 }
 
@@ -41,11 +32,6 @@ pub fn opoo(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
 pub fn odie(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len == 0) return BuiltinError.PostInstallFailed;
     const msg = args[0].asString(ctx.allocator) catch return BuiltinError.PostInstallFailed;
-    var buf: [4096]u8 = undefined;
-    const formatted = std.fmt.bufPrint(&buf, "{s}", .{msg}) catch return BuiltinError.PostInstallFailed;
-    const f = fs_compat.stderrFile();
-    f.writeAll("  x ") catch {};
-    f.writeAll(formatted) catch {};
-    f.writeAll("\n") catch {};
+    output.err("{s}", .{msg});
     return BuiltinError.PostInstallFailed;
 }

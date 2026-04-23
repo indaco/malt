@@ -28,12 +28,10 @@
 
 const std = @import("std");
 const fs_compat = @import("../../fs/compat.zig");
-const io_mod = @import("../../ui/io.zig");
 const builtin = @import("builtin");
 const sqlite = @import("../../db/sqlite.zig");
 const plist_mod = @import("plist.zig");
 const atomic = @import("../../fs/atomic.zig");
-const output = @import("../../ui/output.zig");
 
 pub const SupervisorError = error{
     OsNotSupported,
