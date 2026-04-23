@@ -16,6 +16,17 @@ const c = struct {
     extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 };
 
+test "SupervisorCtx bundles allocator and db into one param" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .db = &db };
+    try testing.expectError(error.ServiceNotFound, supervisor.start(ctx, "absent"));
+    try testing.expectError(error.ServiceNotFound, supervisor.stop(ctx, "absent"));
+    try testing.expectError(error.ServiceNotFound, supervisor.restart(ctx, "absent"));
+}
+
 test "describeError returns a distinct message per tag" {
     const msgs = [_][]const u8{
         supervisor.describeError(error.OsNotSupported),
@@ -69,7 +80,7 @@ test "list is empty on a fresh database and hasService returns false" {
     defer db.close();
     try schema.initSchema(&db);
 
-    const list = try supervisor.list(testing.allocator, &db);
+    const list = try supervisor.list(.{ .allocator = testing.allocator, .db = &db });
     defer supervisor.freeServiceInfos(testing.allocator, list);
     try testing.expectEqual(@as(usize, 0), list.len);
     try testing.expect(!supervisor.hasService(&db, "anything"));
@@ -99,11 +110,12 @@ test "register writes a plist and a DB row that list reports back" {
         .stdout_path = "/tmp/malt_sup_register/out.log",
         .stderr_path = "/tmp/malt_sup_register/err.log",
     };
-    try supervisor.register(testing.allocator, &db, spec, "testkeg", true, cellar, prefix);
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .db = &db };
+    try supervisor.register(ctx, spec, "testkeg", true, cellar, prefix);
 
     try testing.expect(supervisor.hasService(&db, "com.malt.test.svc"));
 
-    const list = try supervisor.list(testing.allocator, &db);
+    const list = try supervisor.list(ctx);
     defer supervisor.freeServiceInfos(testing.allocator, list);
     try testing.expectEqual(@as(usize, 1), list.len);
     try testing.expectEqualStrings("com.malt.test.svc", list[0].name);
@@ -139,9 +151,10 @@ test "start/stop/restart return ServiceNotFound when no DB row exists" {
     defer db.close();
     try schema.initSchema(&db);
 
-    try testing.expectError(error.ServiceNotFound, supervisor.start(testing.allocator, &db, "absent"));
-    try testing.expectError(error.ServiceNotFound, supervisor.stop(testing.allocator, &db, "absent"));
-    try testing.expectError(error.ServiceNotFound, supervisor.restart(testing.allocator, &db, "absent"));
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .db = &db };
+    try testing.expectError(error.ServiceNotFound, supervisor.start(ctx, "absent"));
+    try testing.expectError(error.ServiceNotFound, supervisor.stop(ctx, "absent"));
+    try testing.expectError(error.ServiceNotFound, supervisor.restart(ctx, "absent"));
 }
 
 test "stopAndUnregister is a no-op on an absent service and still wipes the row" {
@@ -162,7 +175,7 @@ test "stopAndUnregister is a no-op on an absent service and still wipes the row"
     stmt.finalize();
 
     try testing.expect(supervisor.hasService(&db, "ghost"));
-    supervisor.stopAndUnregister(testing.allocator, &db, "ghost");
+    supervisor.stopAndUnregister(.{ .allocator = testing.allocator, .db = &db }, "ghost");
     try testing.expect(!supervisor.hasService(&db, "ghost"));
 }
 

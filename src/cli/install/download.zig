@@ -22,6 +22,17 @@ const record = @import("record.zig");
 
 const InstallError = record.InstallError;
 
+/// Named-field bundle for `collectFormulaJobs` so callers stop threading
+/// six pointers through every call. Opens a DI seam for tests to swap in
+/// fakes by replacing fields.
+pub const InstallJobDeps = struct {
+    allocator: std.mem.Allocator,
+    api: *api_mod.BrewApi,
+    http_pool: *client_mod.HttpClientPool,
+    db: *sqlite.Database,
+    store: *store_mod.Store,
+};
+
 /// A bottle download job for parallel processing.
 ///
 /// Public so integration tests can construct an empty jobs list and assert
@@ -281,17 +292,16 @@ fn dupeJobStrings(
 /// (already-installed, post_install_defined) with a real SQLite DB and
 /// without a live Homebrew API connection.
 pub fn collectFormulaJobs(
-    allocator: std.mem.Allocator,
+    ctx: InstallJobDeps,
     pkg_name: []const u8,
     formula_json: []const u8,
-    api: *api_mod.BrewApi,
-    http_pool: *client_mod.HttpClientPool,
-    db: *sqlite.Database,
-    store: *store_mod.Store,
     force: bool,
     jobs: *std.ArrayList(DownloadJob),
 ) !void {
-    _ = store;
+    const allocator = ctx.allocator;
+    const api = ctx.api;
+    const http_pool = ctx.http_pool;
+    const db = ctx.db;
 
     // Single arena for every parsed formula — root + each dep — so the
     // std.json.Parsed trees and all the supplementary allocations made

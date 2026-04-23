@@ -98,13 +98,9 @@ test "collectFormulaJobs queues a formula with a post_install hook" {
     defer jobs.deinit(alloc);
 
     try install.collectFormulaJobs(
-        alloc,
+        .{ .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst },
         "needs-ruby",
         json,
-        &api,
-        &http,
-        &tdb.db,
-        &store_inst,
         false,
         &jobs,
     );
@@ -335,13 +331,9 @@ test "collectFormulaJobs queues the main formula when nothing is installed" {
     defer jobs.deinit(alloc);
 
     try install.collectFormulaJobs(
-        alloc,
+        .{ .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst },
         "hello",
         json,
-        &api,
-        &http,
-        &tdb.db,
-        &store_inst,
         false,
         &jobs,
     );
@@ -377,13 +369,9 @@ test "collectFormulaJobs no-ops when the formula is already installed" {
     defer jobs.deinit(alloc);
 
     try install.collectFormulaJobs(
-        alloc,
+        .{ .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst },
         "hello",
         json,
-        &api,
-        &http,
-        &tdb.db,
-        &store_inst,
         false, // force=false
         &jobs,
     );
@@ -464,13 +452,9 @@ test "collectFormulaJobs queues a dep and its parent from a seeded cache" {
     defer jobs.deinit(alloc);
 
     try install.collectFormulaJobs(
-        alloc,
+        .{ .allocator = alloc, .api = &api, .http_pool = &http_pool, .db = &tdb.db, .store = &store_inst },
         "alpha",
         root_json,
-        &api,
-        &http_pool,
-        &tdb.db,
-        &store_inst,
         false,
         &jobs,
     );
@@ -514,8 +498,9 @@ test "collectFormulaJobs deduplicates deps already queued by a prior call" {
     var jobs: std.ArrayList(install.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
-    try install.collectFormulaJobs(alloc, "alpha", root_a, &api, &http_pool, &tdb.db, &store_inst, false, &jobs);
-    try install.collectFormulaJobs(alloc, "omega", root_b, &api, &http_pool, &tdb.db, &store_inst, false, &jobs);
+    const deps_ctx: install.InstallJobDeps = .{ .allocator = alloc, .api = &api, .http_pool = &http_pool, .db = &tdb.db, .store = &store_inst };
+    try install.collectFormulaJobs(deps_ctx, "alpha", root_a, false, &jobs);
+    try install.collectFormulaJobs(deps_ctx, "omega", root_b, false, &jobs);
 
     // beta should appear exactly once. jobs: [beta, alpha, omega]
     var beta_count: usize = 0;
@@ -543,13 +528,9 @@ test "collectFormulaJobs surfaces FormulaNotFound for unparseable JSON" {
     try testing.expectError(
         install.InstallError.FormulaNotFound,
         install.collectFormulaJobs(
-            alloc,
+            .{ .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst },
             "broken",
             "not-a-json",
-            &api,
-            &http,
-            &tdb.db,
-            &store_inst,
             false,
             &jobs,
         ),
@@ -582,13 +563,9 @@ test "collectFormulaJobs with post_install leaves the DB untouched" {
     defer jobs.deinit(alloc);
 
     _ = install.collectFormulaJobs(
-        alloc,
+        .{ .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst },
         "needs-ruby",
         json,
-        &api,
-        &http,
-        &tdb.db,
-        &store_inst,
         false,
         &jobs,
     ) catch {};
@@ -645,7 +622,13 @@ test "collectFormulaJobs carries the _<revision> suffix in version_str" {
     var jobs: std.ArrayList(install.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
-    try install.collectFormulaJobs(alloc, "rev", json, &api, &http, &tdb.db, &store_inst, false, &jobs);
+    try install.collectFormulaJobs(
+        .{ .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst },
+        "rev",
+        json,
+        false,
+        &jobs,
+    );
 
     try testing.expectEqual(@as(usize, 1), jobs.items.len);
     try testing.expectEqualStrings("10.47_1", jobs.items[0].version_str);
@@ -676,7 +659,13 @@ test "collectFormulaJobs leaves plain-version formulas unchanged" {
     var jobs: std.ArrayList(install.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
-    try install.collectFormulaJobs(alloc, "needs-ruby", json, &api, &http, &tdb.db, &store_inst, false, &jobs);
+    try install.collectFormulaJobs(
+        .{ .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst },
+        "needs-ruby",
+        json,
+        false,
+        &jobs,
+    );
 
     try testing.expectEqual(@as(usize, 1), jobs.items.len);
     try testing.expectEqualStrings("1.0", jobs.items[0].version_str);
@@ -783,13 +772,9 @@ test "collectFormulaJobs leaves no parsed-tree leaks under testing.allocator (>=
     }
 
     try install.collectFormulaJobs(
-        alloc,
+        .{ .allocator = alloc, .api = &api, .http_pool = &http_pool, .db = &tdb.db, .store = &store_inst },
         "root",
         root_json,
-        &api,
-        &http_pool,
-        &tdb.db,
-        &store_inst,
         false,
         &jobs,
     );
