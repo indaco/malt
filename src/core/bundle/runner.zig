@@ -8,6 +8,9 @@
 //! depends on no `cli/*` module, so bundle tests link without dragging in
 //! the whole CLI surface.
 //!
+//! core returns outcomes; UI renders at the boundary — `run()` produces a
+//! `Report` that the caller (`cli/bundle.zig`) renders via `ui/output.*`.
+//!
 //! Each underlying primitive (install, tap, services start) is already
 //! idempotent, so running a bundle twice is a no-op for already-installed
 //! members.
@@ -19,11 +22,9 @@ const sqlite = @import("../../db/sqlite.zig");
 const schema = @import("../../db/schema.zig");
 const lock_mod = @import("../../db/lock.zig");
 const atomic = @import("../../fs/atomic.zig");
-const output = @import("../../ui/output.zig");
 const manifest_mod = @import("manifest.zig");
 
 pub const RunnerError = error{
-    MemberFailed,
     DatabaseError,
     LockFailed,
     IoFailed,
@@ -36,7 +37,6 @@ pub const RunnerError = error{
 
 pub fn describeError(err: RunnerError) []const u8 {
     return switch (err) {
-        RunnerError.MemberFailed => "at least one bundle member failed to install",
         RunnerError.DatabaseError => "database error during bundle install",
         RunnerError.LockFailed => "could not acquire bundle lock",
         RunnerError.IoFailed => "filesystem error during bundle install",
@@ -44,6 +44,45 @@ pub fn describeError(err: RunnerError) []const u8 {
         RunnerError.NoDispatcher => "bundle runner called without a dispatcher and without malt_bin",
     };
 }
+
+pub const MemberKind = enum { tap, formula, cask, service_start };
+
+/// One member whose install call returned a non-null error. `name` is
+/// borrowed from the caller's `Manifest`; the caller must keep the
+/// manifest alive until `Report.deinit`.
+pub const MemberError = struct {
+    kind: MemberKind,
+    name: []const u8,
+    err: anyerror,
+};
+
+/// Entry in the dry-run preview list — what the CLI would render as
+/// "would run: malt …" without actually forking.
+pub const MemberPreview = struct {
+    kind: MemberKind,
+    name: []const u8,
+};
+
+/// Structured outcome of a `run()` call. The runner emits no UI; the
+/// CLI renders this report via `ui/output.*`.
+pub const Report = struct {
+    allocator: std.mem.Allocator,
+    failures: []MemberError,
+    previews: []MemberPreview,
+    /// When `recordBundle` failed (non-dry-run only), the `@errorName`
+    /// of the cause. Borrowed from `@errorName`, so no free needed.
+    db_record_error: ?[]const u8 = null,
+
+    pub fn hasFailure(self: Report) bool {
+        return self.failures.len > 0 or self.db_record_error != null;
+    }
+
+    pub fn deinit(self: *Report) void {
+        self.allocator.free(self.failures);
+        self.allocator.free(self.previews);
+        self.* = undefined;
+    }
+};
 
 /// Layering seam: the CLI wires up a concrete implementation that forwards
 /// to `cli/install`, `cli/tap`, `cli/services`. Keeping this as an injected
@@ -70,7 +109,7 @@ pub const Options = struct {
     prefix: ?[]const u8 = null,
     /// In-process dispatcher injected from the CLI layer. Null is legal
     /// for `dry_run` and subprocess (`malt_bin`) paths; otherwise the
-    /// runner returns `RunnerError.NoDispatcher`.
+    /// runner records `NoDispatcher` as each member's failure.
     dispatcher: ?*const Dispatcher = null,
 };
 
@@ -79,7 +118,7 @@ pub fn run(
     db: *sqlite.Database,
     manifest: manifest_mod.Manifest,
     opts: Options,
-) RunnerError!void {
+) RunnerError!Report {
     const bundle_name = if (manifest.name.len > 0) manifest.name else "unnamed";
 
     // Bundles directory + advisory lock for idempotency.
@@ -99,46 +138,51 @@ pub fn run(
         null;
     defer if (lock) |*l| l.release();
 
-    var any_failed = false;
+    var failures: std.ArrayList(MemberError) = .empty;
+    errdefer failures.deinit(allocator);
+    var previews: std.ArrayList(MemberPreview) = .empty;
+    errdefer previews.deinit(allocator);
 
     // 1. taps
     for (manifest.taps) |t| {
-        callMember(allocator, .{ .tap = t }, opts) catch {
-            output.err("tap failed: {s}", .{t});
-            any_failed = true;
-        };
+        try recordMember(allocator, .{ .tap = t }, opts, &failures, &previews);
     }
 
     // 2. formulas
     for (manifest.formulas) |f| {
-        callMember(allocator, .{ .formula = f.name }, opts) catch {
-            output.err("install failed: {s}", .{f.name});
-            any_failed = true;
-        };
+        try recordMember(allocator, .{ .formula = f.name }, opts, &failures, &previews);
     }
 
     // 3. casks
     for (manifest.casks) |c| {
-        callMember(allocator, .{ .cask = c.name }, opts) catch {
-            output.err("cask install failed: {s}", .{c.name});
-            any_failed = true;
-        };
+        try recordMember(allocator, .{ .cask = c.name }, opts, &failures, &previews);
     }
 
     // 4. services start (auto_start only). Best-effort.
     for (manifest.services) |s| {
         if (!s.auto_start) continue;
-        callMember(allocator, .{ .service_start = s.name }, opts) catch {
-            output.warn("could not auto-start service: {s}", .{s.name});
-        };
+        try recordMember(allocator, .{ .service_start = s.name }, opts, &failures, &previews);
     }
 
-    // 5. Record bundle and members in DB (even in dry-run skip).
+    var db_record_error: ?[]const u8 = null;
+    // 5. Record bundle and members in DB (even on partial failure). Skipped
+    //    in dry-run so the preview path stays read-only.
     if (!opts.dry_run) recordBundle(allocator, db, manifest) catch |e| {
-        output.err("could not record bundle in database: {s}", .{@errorName(e)});
+        db_record_error = @errorName(e);
     };
 
-    if (any_failed) return RunnerError.MemberFailed;
+    // Own each slice before composing the return so an OOM on the second
+    // toOwnedSlice cannot orphan the first.
+    const owned_failures = failures.toOwnedSlice(allocator) catch return RunnerError.OutOfMemory;
+    errdefer allocator.free(owned_failures);
+    const owned_previews = previews.toOwnedSlice(allocator) catch return RunnerError.OutOfMemory;
+
+    return .{
+        .allocator = allocator,
+        .failures = owned_failures,
+        .previews = owned_previews,
+        .db_record_error = db_record_error,
+    };
 }
 
 const MemberCall = union(enum) {
@@ -146,19 +190,49 @@ const MemberCall = union(enum) {
     formula: []const u8,
     cask: []const u8,
     service_start: []const u8,
+
+    fn kind(self: MemberCall) MemberKind {
+        return switch (self) {
+            .tap => .tap,
+            .formula => .formula,
+            .cask => .cask,
+            .service_start => .service_start,
+        };
+    }
+
+    fn name(self: MemberCall) []const u8 {
+        return switch (self) {
+            .tap => |n| n,
+            .formula => |n| n,
+            .cask => |n| n,
+            .service_start => |n| n,
+        };
+    }
 };
 
-fn callMember(allocator: std.mem.Allocator, call: MemberCall, opts: Options) !void {
+fn recordMember(
+    allocator: std.mem.Allocator,
+    call: MemberCall,
+    opts: Options,
+    failures: *std.ArrayList(MemberError),
+    previews: *std.ArrayList(MemberPreview),
+) RunnerError!void {
     if (opts.dry_run) {
-        switch (call) {
-            .tap => |n| output.info("would run: malt tap {s}", .{n}),
-            .formula => |n| output.info("would run: malt install {s}", .{n}),
-            .cask => |n| output.info("would run: malt install --cask {s}", .{n}),
-            .service_start => |n| output.info("would run: malt services start {s}", .{n}),
-        }
+        previews.append(allocator, .{ .kind = call.kind(), .name = call.name() }) catch
+            return RunnerError.OutOfMemory;
         return;
     }
 
+    callMember(allocator, call, opts) catch |e| {
+        failures.append(allocator, .{
+            .kind = call.kind(),
+            .name = call.name(),
+            .err = e,
+        }) catch return RunnerError.OutOfMemory;
+    };
+}
+
+fn callMember(allocator: std.mem.Allocator, call: MemberCall, opts: Options) !void {
     // Test escape hatch: when malt_bin is set, fall back to subprocess so
     // tests can substitute /usr/bin/false to assert exit-code propagation.
     if (opts.malt_bin) |bin| return runSubprocess(allocator, bin, call);

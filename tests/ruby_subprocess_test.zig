@@ -458,6 +458,16 @@ test "runPostInstall rejects hostile prefix with InvalidInput" {
     try testing.expectError(error.InvalidInput, err);
 }
 
+test "describeError covers every RubyError variant with a user hint" {
+    // Core returns outcomes; UI renders at the boundary — this helper is
+    // the single source of truth for the user-facing text per variant.
+    inline for (comptime @typeInfo(ruby.RubyError).error_set.?) |v| {
+        const err = @field(ruby.RubyError, v.name);
+        const msg = ruby.describeError(err);
+        try testing.expect(msg.len > 0);
+    }
+}
+
 test "detectRuby returns a heap-owned slice that the caller can free" {
     // On any machine that has Ruby available, the contract requires the
     // returned slice to be allocator-owned so the call site can pair it

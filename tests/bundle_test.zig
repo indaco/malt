@@ -62,7 +62,8 @@ test "dry-run runner does not fork and skips DB write" {
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
+    var report = try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
+    defer report.deinit();
 
     var stmt = try t.db.prepare("SELECT COUNT(*) FROM bundles;");
     defer stmt.finalize();
@@ -78,14 +79,16 @@ test "non-dry runner with mocked malt_bin records bundle even on member failure"
     defer m.deinit();
 
     // Use /usr/bin/false: spawns succeed but each call exits non-zero.
-    // The runner should still record the bundle row before returning the
-    // aggregate MemberFailed error.
-    const result = runner.run(testing.allocator, &t.db, m, .{
+    // The runner should still record the bundle row despite every member
+    // landing in the failures list.
+    var report = try runner.run(testing.allocator, &t.db, m, .{
         .dry_run = false,
         .malt_bin = "/usr/bin/false",
         .prefix = t.dir,
     });
-    try testing.expectError(runner.RunnerError.MemberFailed, result);
+    defer report.deinit();
+    try testing.expect(report.hasFailure());
+    try testing.expectEqual(@as(usize, 4), report.failures.len);
 
     var stmt = try t.db.prepare("SELECT COUNT(*) FROM bundles WHERE name='devtools';");
     defer stmt.finalize();
@@ -119,11 +122,13 @@ test "runner routes members through the provided dispatcher" {
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    try runner.run(testing.allocator, &t.db, m, .{
+    var report = try runner.run(testing.allocator, &t.db, m, .{
         .dry_run = false,
         .prefix = t.dir,
         .dispatcher = &dispatcher,
     });
+    defer report.deinit();
+    try testing.expect(!report.hasFailure());
 
     try testing.expectEqual(@as(usize, 1), calls.taps.items.len);
     try testing.expectEqualStrings("homebrew/cask-fonts", calls.taps.items[0]);
@@ -187,6 +192,57 @@ const Calls = struct {
     }
 };
 
+test "runner returns Report with per-member failures, not a bool" {
+    // Pins the contract: the runner collects structured failures so the
+    // CLI layer can render; core/* itself emits no UI.
+    var t = try TempDb.init("report_failures");
+    defer t.deinit();
+
+    var m = try buildManifest(testing.allocator);
+    defer m.deinit();
+
+    var report = try runner.run(testing.allocator, &t.db, m, .{
+        .dry_run = false,
+        .malt_bin = "/usr/bin/false",
+        .prefix = t.dir,
+    });
+    defer report.deinit();
+
+    try testing.expect(report.hasFailure());
+    // 1 tap + 2 formulas + 1 cask all exit non-zero under /usr/bin/false.
+    try testing.expectEqual(@as(usize, 4), report.failures.len);
+    try testing.expectEqual(runner.MemberKind.tap, report.failures[0].kind);
+    try testing.expectEqualStrings("homebrew/cask-fonts", report.failures[0].name);
+    try testing.expectEqual(runner.MemberKind.formula, report.failures[1].kind);
+    try testing.expectEqualStrings("wget", report.failures[1].name);
+    try testing.expectEqual(runner.MemberKind.formula, report.failures[2].kind);
+    try testing.expectEqualStrings("jq", report.failures[2].name);
+    try testing.expectEqual(runner.MemberKind.cask, report.failures[3].kind);
+    try testing.expectEqualStrings("ghostty", report.failures[3].name);
+    try testing.expectEqual(@as(usize, 0), report.previews.len);
+}
+
+test "dry-run report captures previews, no failures, no DB write" {
+    var t = try TempDb.init("report_previews");
+    defer t.deinit();
+
+    var m = try buildManifest(testing.allocator);
+    defer m.deinit();
+
+    var report = try runner.run(testing.allocator, &t.db, m, .{
+        .dry_run = true,
+        .prefix = t.dir,
+    });
+    defer report.deinit();
+
+    try testing.expect(!report.hasFailure());
+    try testing.expectEqual(@as(usize, 0), report.failures.len);
+    // 1 tap + 2 formulas + 1 cask = 4 previews.
+    try testing.expectEqual(@as(usize, 4), report.previews.len);
+    try testing.expectEqual(runner.MemberKind.tap, report.previews[0].kind);
+    try testing.expectEqualStrings("homebrew/cask-fonts", report.previews[0].name);
+}
+
 test "runner refuses in-process bundle install with no dispatcher and no malt_bin" {
     var t = try TempDb.init("no_dispatcher");
     defer t.deinit();
@@ -194,14 +250,16 @@ test "runner refuses in-process bundle install with no dispatcher and no malt_bi
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    const result = runner.run(testing.allocator, &t.db, m, .{
+    var report = try runner.run(testing.allocator, &t.db, m, .{
         .dry_run = false,
         .prefix = t.dir,
     });
-    try testing.expectError(runner.RunnerError.MemberFailed, result);
+    defer report.deinit();
+    try testing.expect(report.hasFailure());
+    try testing.expectEqual(@as(usize, 4), report.failures.len);
+    // Each member's err is RunnerError.NoDispatcher on this path.
+    for (report.failures) |f| try testing.expectEqual(anyerror.NoDispatcher, f.err);
 
-    // The bundle row must NOT exist when the very first member bombed out
-    // with NoDispatcher — we only record after attempting all members.
     var stmt = try t.db.prepare("SELECT COUNT(*) FROM bundles WHERE name='devtools';");
     defer stmt.finalize();
     _ = try stmt.step();
@@ -222,10 +280,11 @@ test "round-trip: parse Brewfile fixture, run dry, no panic" {
         \\# real-world dotfiles often have these:
         \\whalebrew "foo/bar"
     ;
-    var m = try malt.bundle_brewfile.parse(testing.allocator, fixture);
+    var m = try malt.bundle_brewfile.parse(testing.allocator, fixture, null);
     defer m.deinit();
 
-    try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
+    var report = try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
+    defer report.deinit();
 }
 
 test "real-world Brewfile shapes parse without error" {
@@ -269,12 +328,13 @@ test "real-world Brewfile shapes parse without error" {
     var t = try TempDb.init("realworld");
     defer t.deinit();
 
-    var m = try malt.bundle_brewfile.parse(testing.allocator, fixture);
+    var m = try malt.bundle_brewfile.parse(testing.allocator, fixture, null);
     defer m.deinit();
 
     try testing.expect(m.taps.len >= 3);
     try testing.expect(m.formulas.len >= 8);
     try testing.expect(m.casks.len >= 3);
 
-    try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
+    var report = try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
+    defer report.deinit();
 }

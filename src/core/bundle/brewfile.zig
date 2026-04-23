@@ -11,7 +11,6 @@
 
 const std = @import("std");
 const manifest_mod = @import("manifest.zig");
-const output = @import("../../ui/output.zig");
 
 pub const BrewfileError = error{
     UnexpectedToken,
@@ -44,7 +43,29 @@ const Line = struct {
     num: usize,
 };
 
-pub fn parse(parent: std.mem.Allocator, brewfile_text: []const u8) BrewfileError!manifest_mod.Manifest {
+/// Caller-owned out-bag for non-fatal parser warnings (currently: unknown
+/// directives we skip). Core returns outcomes; UI renders at the
+/// boundary — `cli/bundle.zig` drains this into `output.warn`.
+pub const Diagnostics = struct {
+    allocator: std.mem.Allocator,
+    warnings: std.ArrayList([]const u8),
+
+    pub fn init(allocator: std.mem.Allocator) Diagnostics {
+        return .{ .allocator = allocator, .warnings = .empty };
+    }
+
+    pub fn deinit(self: *Diagnostics) void {
+        for (self.warnings.items) |w| self.allocator.free(w);
+        self.warnings.deinit(self.allocator);
+        self.* = undefined;
+    }
+};
+
+pub fn parse(
+    parent: std.mem.Allocator,
+    brewfile_text: []const u8,
+    diag: ?*Diagnostics,
+) BrewfileError!manifest_mod.Manifest {
     var m = manifest_mod.Manifest.init(parent);
     errdefer m.deinit();
     const a = m.allocator();
@@ -69,7 +90,7 @@ pub fn parse(parent: std.mem.Allocator, brewfile_text: []const u8) BrewfileError
             return BrewfileError.BlocksUnsupported;
         }
 
-        try parseLine(a, trimmed, line_no, &taps, &formulas, &casks, &services);
+        try parseLine(a, trimmed, line_no, &taps, &formulas, &casks, &services, diag);
     }
 
     m.taps = taps.toOwnedSlice(a) catch return BrewfileError.OutOfMemory;
@@ -88,6 +109,7 @@ fn parseLine(
     formulas: *std.ArrayList(manifest_mod.FormulaEntry),
     casks: *std.ArrayList(manifest_mod.CaskEntry),
     services: *std.ArrayList(manifest_mod.ServiceEntry),
+    diag: ?*Diagnostics,
 ) BrewfileError!void {
     _ = line_no;
 
@@ -147,8 +169,14 @@ fn parseLine(
         // Recognised but not yet installable by malt — record as formulas w/ a
         // synthetic prefix so users see them round-tripped.
         formulas.append(a, .{ .name = first }) catch return BrewfileError.OutOfMemory;
-    } else {
-        output.warn("skipping unknown Brewfile directive: {s}", .{directive});
+    } else if (diag) |d| {
+        const msg = std.fmt.allocPrint(
+            d.allocator,
+            "skipping unknown Brewfile directive: {s}",
+            .{directive},
+        ) catch return BrewfileError.OutOfMemory;
+        errdefer d.allocator.free(msg);
+        d.warnings.append(d.allocator, msg) catch return BrewfileError.OutOfMemory;
     }
 }
 
