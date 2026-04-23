@@ -5,9 +5,9 @@
 //! against a buffer writer in hermetic tests.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
 const output = @import("../../ui/output.zig");
 const color = @import("../../ui/color.zig");
+const io_mod = @import("../../ui/io.zig");
 
 pub const CheckStatus = enum { ok, warn_status, err_status };
 
@@ -76,14 +76,14 @@ pub fn renderCheckRow(
 
 pub fn printCheck(name: []const u8, status: CheckStatus, detail: ?[]const u8) void {
     if (output.isQuiet()) return;
-    const f = fs_compat.stderrFile();
-    var write_buf: [1024]u8 = undefined;
-    var file_writer = f.writer(&write_buf);
-    const w = &file_writer.interface;
-    // Best-effort stderr row: an I/O failure here is unrecoverable diagnostics.
-    renderCheckRow(w, status, name, detail, .{
+    // `File.writer.flush` writes positionally from offset 0, overwriting
+    // prior rows when stderr is a regular file; stream via `stderrWriteAll`.
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    // Truncation of an oversized row is acceptable — `buffered()` still emits what fit.
+    renderCheckRow(&w, status, name, detail, .{
         .color = color.isColorEnabled(),
         .emoji = color.isEmojiEnabled(),
     }) catch {};
-    w.flush() catch {};
+    io_mod.stderrWriteAll(w.buffered());
 }
