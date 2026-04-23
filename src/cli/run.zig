@@ -49,7 +49,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         // Already installed — just exec it
         output.info("Running installed {s}...", .{pkg_name});
-        return try execBinary(bin_path, cmd_args);
+        return try execBinary(allocator, bin_path, cmd_args);
     }
 }
 
@@ -149,10 +149,10 @@ fn ephemeralRun(
     const stderr = fs_compat.stderrFile();
     stderr.writeAll("---\n") catch {};
 
-    try execBinary(bin_path, cmd_args);
+    try execBinary(allocator, bin_path, cmd_args);
 }
 
-fn execBinary(path: []const u8, cmd_args: []const []const u8) !void {
+fn execBinary(allocator: std.mem.Allocator, path: []const u8, cmd_args: []const []const u8) !void {
     // Build argv: [path] ++ cmd_args
     var argv_buf: [64][]const u8 = undefined;
     argv_buf[0] = path;
@@ -161,7 +161,7 @@ fn execBinary(path: []const u8, cmd_args: []const []const u8) !void {
         argv_buf[i] = arg;
     }
 
-    var child = fs_compat.Child.init(argv_buf[0 .. argc + 1], std.heap.c_allocator);
+    var child = fs_compat.Child.init(argv_buf[0 .. argc + 1], allocator);
     child.spawn() catch {
         output.err("Failed to execute binary", .{});
         return error.Aborted;
