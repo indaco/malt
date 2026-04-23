@@ -40,6 +40,7 @@ test:
 # Run tests under kcov, print line-coverage percentage, and refresh
 # the README badge SVG at .github/badges/coverage.svg.
 # HTML report lands at coverage/merged/kcov-merged/index.html.
+
 # Requires kcov (brew install kcov). Internet is needed for the badge fetch.
 [group('test')]
 coverage:
@@ -61,6 +62,7 @@ fmt:
 
 # Requires shellcheck + shfmt on PATH (`brew install shellcheck shfmt`).
 # Project convention: 2-space indent across every shell script.
+
 # Lint shell scripts with shellcheck + shfmt.
 [group('lint')]
 shell-lint:
@@ -79,30 +81,44 @@ lint: fmt-check build test
 # ---------------------------------------------------------------------------
 # Git hooks
 # ---------------------------------------------------------------------------
-
-# Pre-commit hook: auto-format staged .zig files in place and re-stage them
-# so the formatted version is what actually lands in the commit.
-# Note: if you `git add -p` partial hunks of a file, this will pick up the
-# unstaged hunks too — a known limitation of format-on-commit hooks.
+# Pre-commit hook: auto-format staged .zig + .sh files in place, re-stage
+# them, and shellcheck the staged shell set so unfixable lint blocks the
+# commit. Note: if you `git add -p` partial hunks of a file, this will
+# pick up the unstaged hunks too — a known limitation of format-on-commit
+# hooks.
 [group('hooks')]
 pre-commit:
     #!/usr/bin/env bash
     set -euo pipefail
-    files=()
+
+    zig_files=()
     while IFS= read -r f; do
-        files+=("$f")
+        zig_files+=("$f")
     done < <(git diff --cached --name-only --diff-filter=ACM | grep -E '\.zig$' || true)
-    if [ ${#files[@]} -eq 0 ]; then
-        exit 0
+    if [ ${#zig_files[@]} -gt 0 ]; then
+        zig fmt "${zig_files[@]}"
+        git add "${zig_files[@]}"
+        echo "Auto-formatted ${#zig_files[@]} staged .zig file(s)."
     fi
-    zig fmt "${files[@]}"
-    git add "${files[@]}"
-    echo "Auto-formatted ${#files[@]} staged .zig file(s)."
+
+    sh_files=()
+    while IFS= read -r f; do
+        sh_files+=("$f")
+    done < <(git diff --cached --name-only --diff-filter=ACM | grep -E '\.sh$' || true)
+    if [ ${#sh_files[@]} -gt 0 ]; then
+        shfmt -i 2 -w "${sh_files[@]}"
+        git add "${sh_files[@]}"
+        echo "Auto-formatted ${#sh_files[@]} staged .sh file(s)."
+        # shellcheck after shfmt — anything left is not auto-fixable and
+        # should block the commit so issues don't slip past local hooks.
+        shellcheck "${sh_files[@]}"
+    fi
 
 # Pre-push hook: everything that CI checks, plus shell-lint. When the
 # diff vs origin/main touches the install/extract/download surface,
 # additionally runs the heavy install smoke (~7-10 min, ~750 MB).
 # Set MALT_SKIP_SMOKE=1 to bypass the smoke check (e.g. for a doc-only
+
 # follow-up push you've already verified).
 [group('hooks')]
 pre-push: fmt-check test shell-lint
@@ -122,6 +138,7 @@ pre-push: fmt-check test shell-lint
 
 # Local-only install smoke. Heavy: ~7-10 min, downloads ~750 MB.
 # Sandboxes into a temp MALT_PREFIX/MALT_CACHE; never touches /opt/malt.
+
 # Auto-runs from `pre-push` when install/extract/download paths change.
 [group('test')]
 smoke-install: build
@@ -147,13 +164,24 @@ hooks-uninstall:
 # ---------------------------------------------------------------------------
 # Benchmarks
 # ---------------------------------------------------------------------------
-
 # Run local benchmarks against malt + peer tools (tree, wget, ffmpeg by default).
 # Pass extra package names as args; set env vars on the command itself
+
 # (e.g. `BENCH_TRUE_COLD=1 just bench`, `SKIP_OTHERS=1 just bench wget`).
 [group('bench')]
 bench *args:
-    ./scripts/bench.sh {{args}}
+    ./scripts/bench.sh {{ args }}
+
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
+# Remove Zig build artifacts (.zig-cache, zig-out, coverage) and test
+# scratch directories under /tmp. Handles read-only test fixtures that
+
+# defeat a plain `rm -rf`.
+[group('clean')]
+clean:
+    ./scripts/clean.sh
 
 # ---------------------------------------------------------------------------
 # Docs & media
@@ -168,6 +196,7 @@ record-demo:
 # (dark|light) × (truecolor|basic). Internal: only run after editing
 # the palette cells in src/ui/color.zig or the sample text in
 # scripts/contrast_preview.sh. Requires freeze on PATH
+
 # (`brew install charmbracelet/tap/freeze`).
 [group('docs')]
 [private]
