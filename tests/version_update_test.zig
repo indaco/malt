@@ -105,3 +105,110 @@ test "writeResponseBody: createFileAbsolute failure leaves zero leaked allocatio
     );
     try testing.expectError(error.Aborted, result);
 }
+
+// --- resolveTwinRegularFile ---------------------------------------------
+//
+// install.sh ships two independent binaries (`malt` and `mt`). The updater
+// has to swap both in lockstep, otherwise `malt --version` and `mt --version`
+// drift apart. These tests pin the twin-detection contract.
+
+fn writeFile(path: []const u8, content: []const u8) !void {
+    const f = try fs_compat.createFileAbsolute(path, .{});
+    defer f.close();
+    try f.writeAll(content);
+}
+
+fn makeScratch(allocator: std.mem.Allocator, tag: []const u8) ![]u8 {
+    const dir = try std.fmt.allocPrint(allocator, "/tmp/malt_twin_test_{s}", .{tag});
+    fs_compat.deleteTreeAbsolute(dir) catch {};
+    try fs_compat.makeDirAbsolute(dir);
+    return dir;
+}
+
+test "resolveTwinRegularFile: returns sibling mt when invoked as malt" {
+    const dir = try makeScratch(testing.allocator, "malt_to_mt");
+    defer {
+        fs_compat.deleteTreeAbsolute(dir) catch {};
+        testing.allocator.free(dir);
+    }
+
+    const malt_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    defer testing.allocator.free(malt_path);
+    const mt_path = try std.fmt.allocPrint(testing.allocator, "{s}/mt", .{dir});
+    defer testing.allocator.free(mt_path);
+    try writeFile(malt_path, "m");
+    try writeFile(mt_path, "m");
+
+    var buf: [fs_compat.max_path_bytes]u8 = undefined;
+    const twin = updater.resolveTwinRegularFile(malt_path, &buf) orelse return error.ExpectedTwin;
+    try testing.expectEqualStrings(mt_path, twin);
+}
+
+test "resolveTwinRegularFile: returns sibling malt when invoked as mt" {
+    const dir = try makeScratch(testing.allocator, "mt_to_malt");
+    defer {
+        fs_compat.deleteTreeAbsolute(dir) catch {};
+        testing.allocator.free(dir);
+    }
+
+    const malt_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    defer testing.allocator.free(malt_path);
+    const mt_path = try std.fmt.allocPrint(testing.allocator, "{s}/mt", .{dir});
+    defer testing.allocator.free(mt_path);
+    try writeFile(malt_path, "m");
+    try writeFile(mt_path, "m");
+
+    var buf: [fs_compat.max_path_bytes]u8 = undefined;
+    const twin = updater.resolveTwinRegularFile(mt_path, &buf) orelse return error.ExpectedTwin;
+    try testing.expectEqualStrings(malt_path, twin);
+}
+
+test "resolveTwinRegularFile: returns null when sibling is a symlink" {
+    // A symlink already tracks its target: swapping the real file is enough,
+    // no second swap required.
+    const dir = try makeScratch(testing.allocator, "symlink_twin");
+    defer {
+        fs_compat.deleteTreeAbsolute(dir) catch {};
+        testing.allocator.free(dir);
+    }
+
+    const malt_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    defer testing.allocator.free(malt_path);
+    const mt_path = try std.fmt.allocPrint(testing.allocator, "{s}/mt", .{dir});
+    defer testing.allocator.free(mt_path);
+    try writeFile(malt_path, "m");
+    try fs_compat.symLinkAbsolute(malt_path, mt_path, .{});
+
+    var buf: [fs_compat.max_path_bytes]u8 = undefined;
+    try testing.expect(updater.resolveTwinRegularFile(malt_path, &buf) == null);
+}
+
+test "resolveTwinRegularFile: returns null when no sibling exists" {
+    const dir = try makeScratch(testing.allocator, "no_twin");
+    defer {
+        fs_compat.deleteTreeAbsolute(dir) catch {};
+        testing.allocator.free(dir);
+    }
+
+    const malt_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
+    defer testing.allocator.free(malt_path);
+    try writeFile(malt_path, "m");
+
+    var buf: [fs_compat.max_path_bytes]u8 = undefined;
+    try testing.expect(updater.resolveTwinRegularFile(malt_path, &buf) == null);
+}
+
+test "resolveTwinRegularFile: returns null for unrelated basenames" {
+    const dir = try makeScratch(testing.allocator, "other_name");
+    defer {
+        fs_compat.deleteTreeAbsolute(dir) catch {};
+        testing.allocator.free(dir);
+    }
+
+    const other_path = try std.fmt.allocPrint(testing.allocator, "{s}/something-else", .{dir});
+    defer testing.allocator.free(other_path);
+    try writeFile(other_path, "x");
+
+    var buf: [fs_compat.max_path_bytes]u8 = undefined;
+    try testing.expect(updater.resolveTwinRegularFile(other_path, &buf) == null);
+}

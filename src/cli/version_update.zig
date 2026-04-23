@@ -190,11 +190,20 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     const self_exe = self_exe_buf[0..n];
 
+    // install.sh ships two independent binaries (`malt` and `mt`) side by
+    // side; swapping only the invoked one leaves the other on the old
+    // version. Detect the twin so we can update both in lockstep.
+    var twin_buf: [fs_compat.max_path_bytes]u8 = undefined;
+    const twin_path: ?[]const u8 = resolveTwinRegularFile(self_exe, &twin_buf);
+
     // --- confirm with the user unless --yes. TTY-only by design: CI
     //     or scripted runs must pass --yes explicitly. ---
     if (!opts.yes) {
-        var prompt_buf: [160]u8 = undefined;
-        const prompt = std.fmt.bufPrint(&prompt_buf, "Replace {s} with {s}? Type 'yes' to confirm: ", .{ self_exe, latest }) catch "Type 'yes' to confirm: ";
+        var prompt_buf: [320]u8 = undefined;
+        const prompt = if (twin_path) |tp|
+            std.fmt.bufPrint(&prompt_buf, "Replace {s} and {s} with {s}? Type 'yes' to confirm: ", .{ self_exe, tp, latest }) catch "Type 'yes' to confirm: "
+        else
+            std.fmt.bufPrint(&prompt_buf, "Replace {s} with {s}? Type 'yes' to confirm: ", .{ self_exe, latest }) catch "Type 'yes' to confirm: ";
         if (!output.confirmTyped("yes", prompt)) {
             output.info("Aborted", .{});
             return;
@@ -219,7 +228,47 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         },
     };
 
+    if (twin_path) |tp| {
+        output.info("Replacing {s}...", .{tp});
+        swap.atomicReplace(tp, new_binary) catch |e| {
+            // Don't roll back self: one updated binary beats a forced
+            // downgrade on the one the user just invoked. Surface the
+            // manual fix so they can close the gap.
+            output.err("Failed to replace {s}: {s}", .{ tp, @errorName(e) });
+            output.warn("{s} is now {s} but {s} is still the previous version.", .{ self_exe, latest, tp });
+            output.info("Finish manually: sudo cp {s} {s}", .{ new_binary, tp });
+            output.info("Updated to {s} (previous {s} kept at {s}.old)", .{ latest, std.fs.path.basename(self_exe), self_exe });
+            return;
+        };
+        output.info("Updated {s} and {s} to {s} (previous kept at *.old)", .{ self_exe, tp, latest });
+        return;
+    }
+
     output.info("Updated to {s} (previous kept at {s}.old)", .{ latest, self_exe });
+}
+
+/// Return the sibling binary path (`malt` ↔ `mt`) next to `self_exe`, but
+/// only when it is a plain regular file that needs its own swap. Symlinks
+/// track their target automatically after a swap, so we skip those.
+/// Returned slice points into `buf`.
+pub fn resolveTwinRegularFile(self_exe: []const u8, buf: []u8) ?[]const u8 {
+    const base = std.fs.path.basename(self_exe);
+    const twin_base: []const u8 =
+        if (std.mem.eql(u8, base, "malt")) "mt" else if (std.mem.eql(u8, base, "mt")) "malt" else return null;
+    const dir = std.fs.path.dirname(self_exe) orelse return null;
+
+    const twin_path = std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, twin_base }) catch return null;
+
+    // `readLinkAbsolute` is the cheapest lstat here: success = symlink
+    // (skip), `error.NotLink` = regular file to update, anything else
+    // (missing, permission) = nothing we can usefully replace.
+    var link_buf: [fs_compat.max_path_bytes]u8 = undefined;
+    if (fs_compat.readLinkAbsolute(twin_path, &link_buf)) |_| {
+        return null;
+    } else |err| switch (err) {
+        error.NotLink => return twin_path,
+        else => return null,
+    }
 }
 
 /// Build `$TMPDIR/malt-update-<pid>/`. Falls back to `/tmp` when
