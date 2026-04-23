@@ -251,6 +251,47 @@ test "countMissingLocalSources mixes stale and present rows correctly" {
     try testing.expectEqual(@as(u32, 2), got.stale);
 }
 
+// ── table-driven walker ─────────────────────────────────────────────
+// Pins the walker tally independently of real check bodies — adding a
+// new check should not require re-testing aggregate counting.
+
+fn fakeOk(_: doctor.CheckCtx, _: []const u8) doctor.CheckResult {
+    return .ok;
+}
+fn fakeWarn(_: doctor.CheckCtx, _: []const u8) doctor.CheckResult {
+    return .warn_status;
+}
+fn fakeErr(_: doctor.CheckCtx, _: []const u8) doctor.CheckResult {
+    return .err_status;
+}
+
+test "runChecks tallies ok/warn/err into the summary counters" {
+    const fake = [_]doctor.Check{
+        .{ .name = "a", .run = fakeOk },
+        .{ .name = "b", .run = fakeWarn },
+        .{ .name = "c", .run = fakeWarn },
+        .{ .name = "d", .run = fakeErr },
+        .{ .name = "e", .run = fakeOk },
+    };
+
+    const tally = doctor.runChecks(
+        .{ .allocator = testing.allocator, .prefix = "/tmp" },
+        &fake,
+    );
+    try testing.expectEqual(@as(u32, 2), tally.warnings);
+    try testing.expectEqual(@as(u32, 1), tally.errors);
+}
+
+test "runChecks on an empty table returns zero counters" {
+    const empty = [_]doctor.Check{};
+    const tally = doctor.runChecks(
+        .{ .allocator = testing.allocator, .prefix = "/tmp" },
+        &empty,
+    );
+    try testing.expectEqual(@as(u32, 0), tally.warnings);
+    try testing.expectEqual(@as(u32, 0), tally.errors);
+}
+
 // ── printCheck streaming behaviour ───────────────────────────────────
 // Bugs here only surface when stderr is a regular file — we drive
 // `printCheck` through the same capture path those sinks hit.

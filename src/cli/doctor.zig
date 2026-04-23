@@ -24,12 +24,66 @@ pub const CheckStyle = render.CheckStyle;
 pub const renderCheckRow = render.renderCheckRow;
 pub const printCheck = render.printCheck;
 
+/// Shared context passed to every check.
+pub const CheckCtx = struct {
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+};
+
+/// Per-check outcome; same tags the row renderer uses so the walker
+/// can tally without re-translating.
+pub const CheckResult = render.CheckStatus;
+
+/// One entry in the health walk. `run` prints its row(s) and returns
+/// the walker's tally tag.
+pub const Check = struct {
+    name: []const u8,
+    run: *const fn (ctx: CheckCtx, name: []const u8) CheckResult,
+};
+
+pub const Tally = struct {
+    warnings: u32 = 0,
+    errors: u32 = 0,
+};
+
+// Single source of truth for the health walk — append one entry to add
+// a check.
+const checks = [_]Check{
+    .{ .name = "MALT_PREFIX", .run = checkMaltPrefix },
+    .{ .name = "SQLite integrity", .run = checkSqliteIntegrity },
+    .{ .name = "Directory structure", .run = checkDirectoryStructure },
+    .{ .name = "Stale lock", .run = checkStaleLock },
+    .{ .name = patch.external_tool_name, .run = checkExternalTool },
+    .{ .name = "APFS volume", .run = checkApfs },
+    .{ .name = "Prefix permissions", .run = checkPrefixPermissions },
+    .{ .name = "API reachable", .run = checkApiReachable },
+    .{ .name = "Orphaned store entries", .run = checkOrphanedStore },
+    .{ .name = "Missing kegs", .run = checkMissingKegs },
+    .{ .name = "Broken symlinks", .run = checkBrokenSymlinks },
+    .{ .name = "Mach-O placeholders", .run = checkMachOPlaceholders },
+    .{ .name = "Disk space", .run = checkDiskSpace },
+    .{ .name = "Local formula sources", .run = checkLocalSources },
+};
+
+/// Walks the table and tallies warn/err contributions. Exposed so
+/// tests can drive a fake table hermetically.
+pub fn runChecks(ctx: CheckCtx, table: []const Check) Tally {
+    var tally: Tally = .{};
+    for (table) |c| {
+        switch (c.run(ctx, c.name)) {
+            .ok => {},
+            .warn_status => tally.warnings += 1,
+            .err_status => tally.errors += 1,
+        }
+    }
+    return tally;
+}
+
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "doctor")) return;
 
     const prefix = atomic.maltPrefix();
 
-    // Check for --post-install-status flag
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--post-install-status")) {
             post_install.checkPostInstallStatus(allocator, prefix);
@@ -37,412 +91,437 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    var warnings: u32 = 0;
-    var errors: u32 = 0;
-
     output.info("Running health checks...", .{});
+    const tally = runChecks(.{ .allocator = allocator, .prefix = prefix }, &checks);
 
-    // 0. MALT_PREFIX visibility. atomic.maltPrefix() already aborts on a
-    //    malformed env, so by this point the value is validated — doctor
-    //    just surfaces it for operator context.
-    {
-        const is_default = std.mem.eql(u8, prefix, "/opt/malt");
-        var pbuf: [600]u8 = undefined;
-        const detail = std.fmt.bufPrint(
-            &pbuf,
-            "{s} {s}",
-            .{ prefix, if (is_default) "(default)" else "(from MALT_PREFIX)" },
-        ) catch prefix;
-        printCheck("MALT_PREFIX", .ok, detail);
-    }
-
-    // 1. SQLite integrity
-    blk: {
-        var db_path_buf: [512]u8 = undefined;
-        const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch break :blk;
-        var db = sqlite.Database.open(db_path) catch {
-            printCheck("SQLite integrity", .err_status, "Cannot open database");
-            errors += 1;
-            break :blk;
-        };
-        defer db.close();
-
-        schema.initSchema(&db) catch {};
-
-        var stmt = db.prepare("PRAGMA integrity_check;") catch {
-            printCheck("SQLite integrity", .err_status, "Cannot run integrity check");
-            errors += 1;
-            break :blk;
-        };
-        defer stmt.finalize();
-
-        if (stmt.step() catch false) {
-            const result = stmt.columnText(0);
-            if (result) |r| {
-                const txt = std.mem.sliceTo(r, 0);
-                if (std.mem.eql(u8, txt, "ok")) {
-                    printCheck("SQLite integrity", .ok, null);
-                } else {
-                    printCheck("SQLite integrity", .err_status, "Database may be corrupt");
-                    errors += 1;
-                }
-            }
-        }
-    }
-
-    // 2. Check required directories exist
-    const dirs = [_][]const u8{ "store", "Cellar", "Caskroom", "opt", "bin", "lib", "tmp", "cache", "db" };
-    for (dirs) |dir| {
-        var buf: [512]u8 = undefined;
-        const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, dir }) catch continue;
-        fs_compat.accessAbsolute(p, .{}) catch {
-            var msg_buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&msg_buf, "Missing directory: {s}", .{p}) catch continue;
-            printCheck("Directory structure", .warn_status, msg);
-            warnings += 1;
-            continue;
-        };
-    }
-    printCheck("Directory structure", .ok, null);
-
-    // 3. Stale lock
-    blk2: {
-        var lock_buf: [512]u8 = undefined;
-        const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch break :blk2;
-        const pid = lock_mod.LockFile.holderPid(lock_path);
-        if (pid) |p| {
-            // Check if PID is still running via kill(pid, 0)
-            const is_alive = blk_alive: {
-                if (std.c.kill(p, @enumFromInt(0)) != 0) break :blk_alive false;
-                break :blk_alive true;
-            };
-            if (is_alive) {
-                var pid_buf: [128]u8 = undefined;
-                const pid_str = std.fmt.bufPrint(&pid_buf, "Lock held by active PID {d}", .{p}) catch "Lock held";
-                printCheck("Stale lock", .warn_status, pid_str);
-                warnings += 1;
-            } else {
-                var pid_buf: [128]u8 = undefined;
-                const pid_str = std.fmt.bufPrint(&pid_buf, "Stale lock from dead PID {d}. Run: rm {s}", .{ p, lock_path }) catch "Stale lock detected";
-                printCheck("Stale lock", .warn_status, pid_str);
-                warnings += 1;
-            }
-        } else {
-            printCheck("Stale lock", .ok, null);
-        }
-    }
-
-    // 3b. External relocation tool — required by the Mach-O overflow
-    //     fallback. Bottles whose load-command slots don't fit the new
-    //     prefix get grown via this binary; without it, installs of
-    //     those bottles fail. Realistic prefixes fit in-place for most
-    //     bottles, so this is a warning (not an error) when absent.
-    {
-        const tool = patch.external_tool_name;
-        if (externalToolAvailable(tool)) {
-            printCheck(tool, .ok, null);
-        } else {
-            var et_buf: [256]u8 = undefined;
-            const et_msg = std.fmt.bufPrint(
-                &et_buf,
-                "`{s}` not found on PATH. Install Xcode Command Line Tools: xcode-select --install",
-                .{tool},
-            ) catch "External relocation tool missing. Install Xcode Command Line Tools.";
-            printCheck(tool, .warn_status, et_msg);
-            warnings += 1;
-        }
-    }
-
-    // 4. APFS volume
-    if (clonefile.isApfs(prefix)) {
-        printCheck("APFS volume", .ok, null);
-    } else {
-        printCheck("APFS volume", .warn_status, "Not on APFS — clonefile unavailable");
-        warnings += 1;
-    }
-
-    // 4b. Prefix permissions — surfaces world/group-writable paths or
-    //     unexpected ownership. Only meaningful on shared systems, but
-    //     cheap to check and a clear signal when someone's chmod'd the
-    //     tree.
-    blk_perms: {
-        const findings = perms_mod.walkPrefix(
-            allocator,
-            prefix,
-            perms_mod.currentUid(),
-            32, // cap so pathological trees don't balloon doctor's memory
-        ) catch {
-            printCheck("Prefix permissions", .warn_status, "Walk failed");
-            warnings += 1;
-            break :blk_perms;
-        };
-        defer perms_mod.freeFindings(allocator, findings);
-
-        if (findings.len == 0) {
-            printCheck("Prefix permissions", .ok, null);
-        } else {
-            var pm_buf: [256]u8 = undefined;
-            const pm_msg = std.fmt.bufPrint(
-                &pm_buf,
-                "{d} path(s) with weak permissions under {s} — run `ls -l` or `chmod`",
-                .{ findings.len, prefix },
-            ) catch "Weak-permission paths under prefix";
-            printCheck("Prefix permissions", .warn_status, pm_msg);
-            warnings += 1;
-            // First couple as a hint so the user knows where to look.
-            for (findings[0..@min(findings.len, 3)]) |f| {
-                var line_buf: [1024]u8 = undefined;
-                const reason = if (f.report.other_writable)
-                    "other-writable"
-                else if (f.report.group_writable)
-                    "group-writable"
-                else
-                    "wrong owner";
-                const line = std.fmt.bufPrint(&line_buf, "        {s} ({s})", .{ f.path, reason }) catch continue;
-                std.debug.print("{s}\n", .{line});
-            }
-        }
-    }
-
-    // 5. API reachable
-    blk3: {
-        var http = client_mod.HttpClient.init(allocator);
-        defer http.deinit();
-        const status = http.head("https://formulae.brew.sh") catch {
-            printCheck("API reachable", .warn_status, "Cannot reach formulae.brew.sh");
-            warnings += 1;
-            break :blk3;
-        };
-        if (status >= 200 and status < 400) {
-            printCheck("API reachable", .ok, null);
-        } else {
-            printCheck("API reachable", .warn_status, "API returned error status");
-            warnings += 1;
-        }
-    }
-
-    // 6. Orphaned store entries — directories in store/ with no DB reference
-    blk6: {
-        var db_path_buf2: [512]u8 = undefined;
-        const db_path2 = std.fmt.bufPrint(&db_path_buf2, "{s}/db/malt.db", .{prefix}) catch break :blk6;
-        var db2 = sqlite.Database.open(db_path2) catch break :blk6;
-        defer db2.close();
-
-        var store_path_buf: [512]u8 = undefined;
-        const store_path = std.fmt.bufPrint(&store_path_buf, "{s}/store", .{prefix}) catch break :blk6;
-        var store_dir = fs_compat.openDirAbsolute(store_path, .{ .iterate = true }) catch {
-            // store/ doesn't exist or can't be read — not an error, just skip
-            printCheck("Orphaned store entries", .ok, null);
-            break :blk6;
-        };
-        defer store_dir.close();
-
-        var orphan_count: u32 = 0;
-        var iter = store_dir.iterate();
-        while (iter.next() catch null) |entry| {
-            // Each entry in store/ is a sha256 directory; check if it exists in store_refs
-            var stmt = db2.prepare(
-                "SELECT refcount FROM store_refs WHERE store_sha256 = ?1;",
-            ) catch continue;
-            defer stmt.finalize();
-            stmt.bindText(1, entry.name) catch continue;
-            const has_row = stmt.step() catch false;
-            if (has_row) {
-                const refcount = stmt.columnInt(0);
-                if (refcount <= 0) orphan_count += 1;
-            } else {
-                // Not in DB at all — orphaned
-                orphan_count += 1;
-            }
-        }
-
-        if (orphan_count > 0) {
-            var msg_buf2: [256]u8 = undefined;
-            const msg2 = std.fmt.bufPrint(&msg_buf2, "{d} orphaned store entry(s). Run: mt purge --store-orphans", .{orphan_count}) catch "Orphaned store entries found. Run: mt purge --store-orphans";
-            printCheck("Orphaned store entries", .warn_status, msg2);
-            warnings += 1;
-        } else {
-            printCheck("Orphaned store entries", .ok, null);
-        }
-    }
-
-    // 7. Missing kegs — DB keg entries whose Cellar path doesn't exist on disk
-    blk7: {
-        var db_path_buf3: [512]u8 = undefined;
-        const db_path3 = std.fmt.bufPrint(&db_path_buf3, "{s}/db/malt.db", .{prefix}) catch break :blk7;
-        var db3 = sqlite.Database.open(db_path3) catch break :blk7;
-        defer db3.close();
-
-        var stmt = db3.prepare("SELECT name, version, cellar_path FROM kegs;") catch break :blk7;
-        defer stmt.finalize();
-
-        var missing_count: u32 = 0;
-        while (stmt.step() catch false) {
-            const cellar_raw = stmt.columnText(2) orelse continue;
-            const cellar_path = std.mem.sliceTo(cellar_raw, 0);
-            fs_compat.accessAbsolute(cellar_path, .{}) catch {
-                missing_count += 1;
-            };
-        }
-
-        if (missing_count > 0) {
-            var msg_buf3: [256]u8 = undefined;
-            const msg3 = std.fmt.bufPrint(&msg_buf3, "{d} keg(s) in DB but missing on disk. Reinstall affected packages", .{missing_count}) catch "Missing keg directories detected. Reinstall affected packages";
-            printCheck("Missing kegs", .err_status, msg3);
-            errors += 1;
-        } else {
-            printCheck("Missing kegs", .ok, null);
-        }
-    }
-
-    // 8. Broken symlinks — walk bin/, lib/, include/, share/, sbin/ under prefix
-    {
-        const link_dirs = [_][]const u8{ "bin", "lib", "include", "share", "sbin" };
-        var broken_count: u32 = 0;
-
-        for (link_dirs) |subdir| {
-            var dir_buf: [512]u8 = undefined;
-            const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
-            var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch continue;
-            defer dir.close();
-
-            var dir_iter = dir.iterate();
-            while (dir_iter.next() catch null) |entry| {
-                if (entry.kind == .sym_link) {
-                    // Try to stat the symlink target
-                    _ = dir.statFile(entry.name) catch {
-                        broken_count += 1;
-                        continue;
-                    };
-                }
-            }
-        }
-
-        if (broken_count > 0) {
-            var msg_buf4: [256]u8 = undefined;
-            const msg4 = std.fmt.bufPrint(&msg_buf4, "{d} broken symlink(s). Run: mt purge --housekeeping", .{broken_count}) catch "Broken symlinks found. Run: mt purge --housekeeping";
-            printCheck("Broken symlinks", .warn_status, msg4);
-            warnings += 1;
-        } else {
-            printCheck("Broken symlinks", .ok, null);
-        }
-    }
-
-    // 8b. Unpatched Mach-O placeholders — scan Cellar/**/* for binaries whose
-    //     LC_LOAD_DYLIB / LC_RPATH load commands still contain literal
-    //     @@HOMEBREW_PREFIX@@ or @@HOMEBREW_CELLAR@@ tokens. These fail at
-    //     runtime with `dyld: Symbol not found`.
-    blk_mach: {
-        var cellar_root_buf: [512]u8 = undefined;
-        const cellar_root = std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{prefix}) catch break :blk_mach;
-
-        var cellar_dir = fs_compat.openDirAbsolute(cellar_root, .{ .iterate = true }) catch {
-            // No Cellar yet — nothing to scan.
-            printCheck("Mach-O placeholders", .ok, null);
-            break :blk_mach;
-        };
-        defer cellar_dir.close();
-
-        var walker = cellar_dir.walk(allocator) catch {
-            printCheck("Mach-O placeholders", .warn_status, "Could not walk Cellar tree");
-            warnings += 1;
-            break :blk_mach;
-        };
-        defer walker.deinit();
-
-        var bad_count: u32 = 0;
-        var first_bad_buf: [256]u8 = undefined;
-        var first_bad_len: usize = 0;
-
-        while (walker.next() catch null) |entry| {
-            if (entry.kind != .file) continue;
-            if (hasUnpatchedPlaceholder(allocator, &cellar_dir, entry.path) catch false) {
-                bad_count += 1;
-                if (first_bad_len == 0) {
-                    const s = std.fmt.bufPrint(&first_bad_buf, "{s}", .{entry.path}) catch continue;
-                    first_bad_len = s.len;
-                }
-            }
-        }
-
-        if (bad_count > 0) {
-            var msg_buf_m: [512]u8 = undefined;
-            const msg_m = std.fmt.bufPrint(
-                &msg_buf_m,
-                "{d} Mach-O file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Reinstall the affected packages.",
-                .{ bad_count, first_bad_buf[0..first_bad_len] },
-            ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
-            printCheck("Mach-O placeholders", .err_status, msg_m);
-            errors += 1;
-        } else {
-            printCheck("Mach-O placeholders", .ok, null);
-        }
-    }
-
-    // 9. Disk space — warn if < 1 GB free on the malt prefix volume
-    blk9: {
-        const posix_path = std.posix.toPosixPath(prefix) catch break :blk9;
-        var stat_buf: mount_c.struct_statfs = undefined;
-        const rc = mount_c.statfs(&posix_path, &stat_buf);
-        if (rc != 0) {
-            printCheck("Disk space", .warn_status, "Cannot determine free disk space");
-            warnings += 1;
-            break :blk9;
-        }
-
-        const free_bytes: u64 = @as(u64, @intCast(stat_buf.f_bavail)) * @as(u64, @intCast(stat_buf.f_bsize));
-        const one_gb: u64 = 1024 * 1024 * 1024;
-        if (free_bytes < one_gb) {
-            const free_mb = free_bytes / (1024 * 1024);
-            var msg_buf5: [256]u8 = undefined;
-            const msg5 = std.fmt.bufPrint(&msg_buf5, "Only {d} MB free (< 1 GB). Free up disk space", .{free_mb}) catch "Low disk space (< 1 GB free)";
-            printCheck("Disk space", .warn_status, msg5);
-            warnings += 1;
-        } else {
-            printCheck("Disk space", .ok, null);
-        }
-    }
-
-    // 10. Local-install source tracking — every keg with `tap='local'`
-    //     remembers the absolute realpath of the `.rb` it was installed
-    //     from. If that file has since been moved or deleted, the keg
-    //     still works but `mt info <name>` will keep quoting a stale
-    //     path. Advisory only.
-    blk_local: {
-        var db_path_buf: [512]u8 = undefined;
-        const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch break :blk_local;
-        var db = sqlite.Database.open(db_path) catch break :blk_local;
-        defer db.close();
-
-        const missing = countMissingLocalSources(allocator, &db);
-        if (missing.total == 0) {
-            printCheck("Local formula sources", .ok, null);
-        } else if (missing.stale == 0) {
-            printCheck("Local formula sources", .ok, null);
-        } else {
-            var msg_buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(
-                &msg_buf,
-                "{d}/{d} local keg(s) reference a .rb that no longer exists on disk. Run `mt info <name>` to see which.",
-                .{ missing.stale, missing.total },
-            ) catch "Some local kegs reference a .rb that no longer exists.";
-            printCheck("Local formula sources", .warn_status, msg);
-            warnings += 1;
-        }
-    }
-
-    // Summary + exit code. Blank line first so the summary separates
-    // visually from the check rows above it.
     output.plain("", .{});
-    if (errors > 0) {
-        output.err("{d} error(s), {d} warning(s)", .{ errors, warnings });
+    if (tally.errors > 0) {
+        output.err("{d} error(s), {d} warning(s)", .{ tally.errors, tally.warnings });
         std.process.exit(2);
-    } else if (warnings > 0) {
-        output.warn("{d} warning(s)", .{warnings});
+    } else if (tally.warnings > 0) {
+        output.warn("{d} warning(s)", .{tally.warnings});
         std.process.exit(1);
     } else {
         output.success("Your malt installation is healthy", .{});
     }
+}
+
+// ── individual checks ────────────────────────────────────────────────
+// `atomic.maltPrefix()` validates the prefix upstream, so checks treat
+// it as trusted.
+
+fn checkMaltPrefix(ctx: CheckCtx, name: []const u8) CheckResult {
+    const is_default = std.mem.eql(u8, ctx.prefix, "/opt/malt");
+    var pbuf: [600]u8 = undefined;
+    const detail = std.fmt.bufPrint(
+        &pbuf,
+        "{s} {s}",
+        .{ ctx.prefix, if (is_default) "(default)" else "(from MALT_PREFIX)" },
+    ) catch ctx.prefix;
+    printCheck(name, .ok, detail);
+    return .ok;
+}
+
+fn checkSqliteIntegrity(ctx: CheckCtx, name: []const u8) CheckResult {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}) catch {
+        printCheck(name, .err_status, "Prefix path too long");
+        return .err_status;
+    };
+    var db = sqlite.Database.open(db_path) catch {
+        printCheck(name, .err_status, "Cannot open database");
+        return .err_status;
+    };
+    defer db.close();
+
+    schema.initSchema(&db) catch {};
+
+    var stmt = db.prepare("PRAGMA integrity_check;") catch {
+        printCheck(name, .err_status, "Cannot run integrity check");
+        return .err_status;
+    };
+    defer stmt.finalize();
+
+    if (stmt.step() catch false) {
+        if (stmt.columnText(0)) |r| {
+            const txt = std.mem.sliceTo(r, 0);
+            if (std.mem.eql(u8, txt, "ok")) {
+                printCheck(name, .ok, null);
+                return .ok;
+            }
+            printCheck(name, .err_status, "Database may be corrupt");
+            return .err_status;
+        }
+    }
+    // PRAGMA yielded no row — unreachable in practice; stay silent.
+    return .ok;
+}
+
+fn checkDirectoryStructure(ctx: CheckCtx, name: []const u8) CheckResult {
+    const dirs = [_][]const u8{ "store", "Cellar", "Caskroom", "opt", "bin", "lib", "tmp", "cache", "db" };
+    var first_missing_buf: [512]u8 = undefined;
+    var first_missing_len: usize = 0;
+    var missing: u32 = 0;
+    for (dirs) |dir| {
+        var buf: [512]u8 = undefined;
+        const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ ctx.prefix, dir }) catch continue;
+        fs_compat.accessAbsolute(p, .{}) catch {
+            if (first_missing_len == 0) {
+                const s = std.fmt.bufPrint(&first_missing_buf, "{s}", .{p}) catch &[_]u8{};
+                first_missing_len = s.len;
+            }
+            missing += 1;
+        };
+    }
+    if (missing == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    var msg_buf: [640]u8 = undefined;
+    const msg = if (missing == 1)
+        std.fmt.bufPrint(&msg_buf, "Missing directory: {s}", .{first_missing_buf[0..first_missing_len]}) catch "Missing directory"
+    else
+        std.fmt.bufPrint(&msg_buf, "{d} missing directories (first: {s})", .{ missing, first_missing_buf[0..first_missing_len] }) catch "Missing directories";
+    printCheck(name, .warn_status, msg);
+    return .warn_status;
+}
+
+fn checkStaleLock(ctx: CheckCtx, name: []const u8) CheckResult {
+    var lock_buf: [512]u8 = undefined;
+    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{ctx.prefix}) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    const pid = lock_mod.LockFile.holderPid(lock_path);
+    if (pid) |p| {
+        const is_alive = std.c.kill(p, @enumFromInt(0)) == 0;
+        var pid_buf: [256]u8 = undefined;
+        if (is_alive) {
+            const s = std.fmt.bufPrint(&pid_buf, "Lock held by active PID {d}", .{p}) catch "Lock held";
+            printCheck(name, .warn_status, s);
+        } else {
+            const s = std.fmt.bufPrint(&pid_buf, "Stale lock from dead PID {d}. Run: rm {s}", .{ p, lock_path }) catch "Stale lock detected";
+            printCheck(name, .warn_status, s);
+        }
+        return .warn_status;
+    }
+    printCheck(name, .ok, null);
+    return .ok;
+}
+
+fn checkExternalTool(_: CheckCtx, name: []const u8) CheckResult {
+    // Row title is also the PATH binary to probe.
+    if (externalToolAvailable(name)) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    var et_buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &et_buf,
+        "`{s}` not found on PATH. Install Xcode Command Line Tools: xcode-select --install",
+        .{name},
+    ) catch "External relocation tool missing. Install Xcode Command Line Tools.";
+    printCheck(name, .warn_status, msg);
+    return .warn_status;
+}
+
+fn checkApfs(ctx: CheckCtx, name: []const u8) CheckResult {
+    if (clonefile.isApfs(ctx.prefix)) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    printCheck(name, .warn_status, "Not on APFS — clonefile unavailable");
+    return .warn_status;
+}
+
+fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
+    // Cap the walk so pathological trees don't balloon doctor's memory.
+    const findings = perms_mod.walkPrefix(
+        ctx.allocator,
+        ctx.prefix,
+        perms_mod.currentUid(),
+        32,
+    ) catch {
+        printCheck(name, .warn_status, "Walk failed");
+        return .warn_status;
+    };
+    defer perms_mod.freeFindings(ctx.allocator, findings);
+
+    if (findings.len == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    var pm_buf: [256]u8 = undefined;
+    const pm_msg = std.fmt.bufPrint(
+        &pm_buf,
+        "{d} path(s) with weak permissions under {s} — run `ls -l` or `chmod`",
+        .{ findings.len, ctx.prefix },
+    ) catch "Weak-permission paths under prefix";
+    printCheck(name, .warn_status, pm_msg);
+    // First few as a hint so the user knows where to look.
+    for (findings[0..@min(findings.len, 3)]) |f| {
+        var line_buf: [1024]u8 = undefined;
+        const reason = if (f.report.other_writable)
+            "other-writable"
+        else if (f.report.group_writable)
+            "group-writable"
+        else
+            "wrong owner";
+        const line = std.fmt.bufPrint(&line_buf, "        {s} ({s})", .{ f.path, reason }) catch continue;
+        std.debug.print("{s}\n", .{line});
+    }
+    return .warn_status;
+}
+
+fn checkApiReachable(ctx: CheckCtx, name: []const u8) CheckResult {
+    var http = client_mod.HttpClient.init(ctx.allocator);
+    defer http.deinit();
+    const status = http.head("https://formulae.brew.sh") catch {
+        printCheck(name, .warn_status, "Cannot reach formulae.brew.sh");
+        return .warn_status;
+    };
+    if (status >= 200 and status < 400) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    printCheck(name, .warn_status, "API returned error status");
+    return .warn_status;
+}
+
+fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    var db = sqlite.Database.open(db_path) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer db.close();
+
+    var store_path_buf: [512]u8 = undefined;
+    const store_path = std.fmt.bufPrint(&store_path_buf, "{s}/store", .{ctx.prefix}) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    var store_dir = fs_compat.openDirAbsolute(store_path, .{ .iterate = true }) catch {
+        // store/ missing or unreadable — not an error, just skip.
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer store_dir.close();
+
+    var orphan_count: u32 = 0;
+    var iter = store_dir.iterate();
+    while (iter.next() catch null) |entry| {
+        // Each entry is a sha256 dir; classify via store_refs.
+        var stmt = db.prepare(
+            "SELECT refcount FROM store_refs WHERE store_sha256 = ?1;",
+        ) catch continue;
+        defer stmt.finalize();
+        stmt.bindText(1, entry.name) catch continue;
+        const has_row = stmt.step() catch false;
+        if (has_row) {
+            if (stmt.columnInt(0) <= 0) orphan_count += 1;
+        } else {
+            orphan_count += 1;
+        }
+    }
+
+    if (orphan_count == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    var msg_buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "{d} orphaned store entry(s). Run: mt purge --store-orphans",
+        .{orphan_count},
+    ) catch "Orphaned store entries found. Run: mt purge --store-orphans";
+    printCheck(name, .warn_status, msg);
+    return .warn_status;
+}
+
+fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    var db = sqlite.Database.open(db_path) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer db.close();
+
+    var stmt = db.prepare("SELECT name, version, cellar_path FROM kegs;") catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer stmt.finalize();
+
+    var missing_count: u32 = 0;
+    while (stmt.step() catch false) {
+        const cellar_raw = stmt.columnText(2) orelse continue;
+        const cellar_path = std.mem.sliceTo(cellar_raw, 0);
+        fs_compat.accessAbsolute(cellar_path, .{}) catch {
+            missing_count += 1;
+        };
+    }
+
+    if (missing_count == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    var msg_buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "{d} keg(s) in DB but missing on disk. Reinstall affected packages",
+        .{missing_count},
+    ) catch "Missing keg directories detected. Reinstall affected packages";
+    printCheck(name, .err_status, msg);
+    return .err_status;
+}
+
+fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
+    const link_dirs = [_][]const u8{ "bin", "lib", "include", "share", "sbin" };
+    var broken_count: u32 = 0;
+
+    for (link_dirs) |subdir| {
+        var dir_buf: [512]u8 = undefined;
+        const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ ctx.prefix, subdir }) catch continue;
+        var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch continue;
+        defer dir.close();
+
+        var dir_iter = dir.iterate();
+        while (dir_iter.next() catch null) |entry| {
+            if (entry.kind == .sym_link) {
+                _ = dir.statFile(entry.name) catch {
+                    broken_count += 1;
+                    continue;
+                };
+            }
+        }
+    }
+
+    if (broken_count == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    var msg_buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "{d} broken symlink(s). Run: mt purge --housekeeping",
+        .{broken_count},
+    ) catch "Broken symlinks found. Run: mt purge --housekeeping";
+    printCheck(name, .warn_status, msg);
+    return .warn_status;
+}
+
+fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
+    var cellar_root_buf: [512]u8 = undefined;
+    const cellar_root = std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{ctx.prefix}) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+
+    var cellar_dir = fs_compat.openDirAbsolute(cellar_root, .{ .iterate = true }) catch {
+        // No Cellar yet — nothing to scan.
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer cellar_dir.close();
+
+    var walker = cellar_dir.walk(ctx.allocator) catch {
+        printCheck(name, .warn_status, "Could not walk Cellar tree");
+        return .warn_status;
+    };
+    defer walker.deinit();
+
+    var bad_count: u32 = 0;
+    var first_bad_buf: [256]u8 = undefined;
+    var first_bad_len: usize = 0;
+
+    while (walker.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (hasUnpatchedPlaceholder(ctx.allocator, &cellar_dir, entry.path) catch false) {
+            bad_count += 1;
+            if (first_bad_len == 0) {
+                const s = std.fmt.bufPrint(&first_bad_buf, "{s}", .{entry.path}) catch continue;
+                first_bad_len = s.len;
+            }
+        }
+    }
+
+    if (bad_count == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    var msg_buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "{d} Mach-O file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Reinstall the affected packages.",
+        .{ bad_count, first_bad_buf[0..first_bad_len] },
+    ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
+    printCheck(name, .err_status, msg);
+    return .err_status;
+}
+
+fn checkDiskSpace(ctx: CheckCtx, name: []const u8) CheckResult {
+    const posix_path = std.posix.toPosixPath(ctx.prefix) catch {
+        printCheck(name, .warn_status, "Cannot determine free disk space");
+        return .warn_status;
+    };
+    var stat_buf: mount_c.struct_statfs = undefined;
+    const rc = mount_c.statfs(&posix_path, &stat_buf);
+    if (rc != 0) {
+        printCheck(name, .warn_status, "Cannot determine free disk space");
+        return .warn_status;
+    }
+
+    const free_bytes: u64 = @as(u64, @intCast(stat_buf.f_bavail)) * @as(u64, @intCast(stat_buf.f_bsize));
+    const one_gb: u64 = 1024 * 1024 * 1024;
+    if (free_bytes >= one_gb) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    const free_mb = free_bytes / (1024 * 1024);
+    var msg_buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "Only {d} MB free (< 1 GB). Free up disk space",
+        .{free_mb},
+    ) catch "Low disk space (< 1 GB free)";
+    printCheck(name, .warn_status, msg);
+    return .warn_status;
+}
+
+fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    var db = sqlite.Database.open(db_path) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer db.close();
+
+    const missing = countMissingLocalSources(ctx.allocator, &db);
+    if (missing.total == 0 or missing.stale == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    var msg_buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "{d}/{d} local keg(s) reference a .rb that no longer exists on disk. Run `mt info <name>` to see which.",
+        .{ missing.stale, missing.total },
+    ) catch "Some local kegs reference a .rb that no longer exists.";
+    printCheck(name, .warn_status, msg);
+    return .warn_status;
 }
 
 /// True if `rel_path` inside `base_dir` is a Mach-O binary with at least one
