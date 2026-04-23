@@ -58,6 +58,16 @@ test "validate: /usr/bin/env rejected as interpreter bait" {
     try expectHeadRejected("/usr/bin/env", error.InterpreterBait);
 }
 
+test "validate: every forbidden interpreter head rejected" {
+    const heads = [_][]const u8{
+        "/bin/sh",       "/bin/bash",       "/bin/zsh",
+        "/bin/ksh",      "/usr/bin/sh",     "/usr/bin/bash",
+        "/usr/bin/zsh",  "/usr/bin/env",    "/usr/bin/ksh",
+        "/usr/bin/tcsh", "/usr/bin/python", "/usr/bin/perl",
+    };
+    for (heads) |h| try expectHeadRejected(h, error.InterpreterBait);
+}
+
 test "validate: head outside cellar and prefix/opt rejected" {
     try expectHeadRejected("/usr/local/bin/evil", error.PathEscape);
 }
