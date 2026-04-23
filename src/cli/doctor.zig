@@ -5,16 +5,24 @@ const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
-const store_mod = @import("../core/store.zig");
 const lock_mod = @import("../db/lock.zig");
 const atomic = @import("../fs/atomic.zig");
 const clonefile = @import("../fs/clonefile.zig");
 const output = @import("../ui/output.zig");
-const color = @import("../ui/color.zig");
 const help = @import("help.zig");
 const parser = @import("../macho/parser.zig");
 const patch = @import("../core/patch.zig");
 const perms_mod = @import("../core/perms.zig");
+const client_mod = @import("../net/client.zig");
+const mount_c = @import("c_mount");
+
+const render = @import("doctor/render.zig");
+const post_install = @import("doctor/post_install.zig");
+
+pub const CheckStatus = render.CheckStatus;
+pub const CheckStyle = render.CheckStyle;
+pub const renderCheckRow = render.renderCheckRow;
+const printCheck = render.printCheck;
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "doctor")) return;
@@ -24,7 +32,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Check for --post-install-status flag
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--post-install-status")) {
-            checkPostInstallStatus(allocator, prefix);
+            post_install.checkPostInstallStatus(allocator, prefix);
             return;
         }
     }
@@ -198,7 +206,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // 5. API reachable
     blk3: {
-        var http = @import("../net/client.zig").HttpClient.init(allocator);
+        var http = client_mod.HttpClient.init(allocator);
         defer http.deinit();
         const status = http.head("https://formulae.brew.sh") catch {
             printCheck("API reachable", .warn_status, "Cannot reach formulae.brew.sh");
@@ -373,7 +381,6 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // 9. Disk space — warn if < 1 GB free on the malt prefix volume
     blk9: {
-        const mount_c = @import("c_mount");
         const posix_path = std.posix.toPosixPath(prefix) catch break :blk9;
         var stat_buf: mount_c.struct_statfs = undefined;
         const rc = mount_c.statfs(&posix_path, &stat_buf);
@@ -438,104 +445,6 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 }
 
-/// Check post_install DSL support status for installed formulae.
-/// Called when `malt doctor --post-install-status` is passed.
-fn checkPostInstallStatus(allocator: std.mem.Allocator, prefix: []const u8) void {
-    const ruby_sub = @import("../core/ruby_subprocess.zig");
-    const dsl = @import("../core/dsl/root.zig");
-    const formula_mod = @import("../core/formula.zig");
-    const api_mod = @import("../net/api.zig");
-    const client_mod = @import("../net/client.zig");
-
-    output.info("Post-install DSL status:", .{});
-
-    // Open DB to get installed packages
-    var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return;
-    var db = sqlite.Database.open(db_path) catch return;
-    defer db.close();
-
-    var stmt = db.prepare("SELECT name, version FROM kegs;") catch return;
-    defer stmt.finalize();
-
-    var native_count: u32 = 0;
-    var partial_count: u32 = 0;
-    var no_pi_count: u32 = 0;
-    var total: u32 = 0;
-
-    // Check each installed formula
-    var http = client_mod.HttpClient.init(allocator);
-    defer http.deinit();
-
-    var cache_buf: [512]u8 = undefined;
-    const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch return;
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
-
-    while (stmt.step() catch false) {
-        const name_raw = stmt.columnText(0) orelse continue;
-        const name = std.mem.sliceTo(name_raw, 0);
-        total += 1;
-
-        // Fetch formula JSON to check post_install_defined
-        const formula_json = api.fetchFormula(name) catch {
-            no_pi_count += 1;
-            continue;
-        };
-        var formula = formula_mod.parseFormula(allocator, formula_json) catch {
-            allocator.free(formula_json);
-            no_pi_count += 1;
-            continue;
-        };
-        defer formula.deinit();
-
-        if (!formula.post_install_defined) {
-            no_pi_count += 1;
-            continue;
-        }
-
-        // Has post_install — try to get source and test-parse it
-        const tap_path = ruby_sub.findHomebrewCoreTap();
-        var rb_buf: [1024]u8 = undefined;
-        const rb_path = if (tap_path) |tp| ruby_sub.resolveFormulaRbPath(&rb_buf, tp, name) else null;
-
-        const post_install_src = if (rb_path) |src_path|
-            ruby_sub.extractPostInstallBody(allocator, src_path)
-        else
-            ruby_sub.fetchPostInstallFromGitHub(allocator, name);
-
-        if (post_install_src) |src| {
-            defer allocator.free(src);
-
-            var flog = dsl.FallbackLog.init(allocator);
-            defer flog.deinit();
-
-            // Dry-run the DSL (don't actually execute, just parse)
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-
-            var lexer = dsl.lexer.Lexer.init(src);
-            var prs = dsl.parser.Parser.init(a, &lexer);
-            _ = prs.parseBlock() catch {
-                partial_count += 1;
-                output.warn("  {s}: parse error", .{name});
-                continue;
-            };
-            native_count += 1;
-            output.success("  {s}: DSL supported (parseable)", .{name});
-        } else {
-            partial_count += 1;
-            output.warn("  {s}: source not available", .{name});
-        }
-    }
-
-    output.info("", .{});
-    output.info("Installed: {d} total, {d} without post_install, {d} with post_install", .{ total, no_pi_count, native_count + partial_count });
-    if (native_count + partial_count > 0) {
-        output.info("DSL parseable: {d}/{d} ({d}%)", .{ native_count, native_count + partial_count, if (native_count + partial_count > 0) 100 * native_count / (native_count + partial_count) else 0 });
-    }
-}
-
 /// True if `rel_path` inside `base_dir` is a Mach-O binary with at least one
 /// load command that still contains `@@HOMEBREW_PREFIX@@` or
 /// `@@HOMEBREW_CELLAR@@`. Any I/O or parser error is treated as "not bad" —
@@ -596,27 +505,6 @@ pub fn externalToolAvailable(tool: []const u8) bool {
     return false;
 }
 
-pub const CheckStatus = enum { ok, warn_status, err_status };
-
-pub const CheckStyle = struct {
-    /// Emit ANSI colour codes. False for plain terminals and tests.
-    color: bool,
-    /// Use the ✓/⚠/✗ glyphs. False falls back to ASCII */!/x.
-    emoji: bool,
-};
-
-fn glyphFor(status: CheckStatus, emoji: bool) []const u8 {
-    return if (emoji) switch (status) {
-        .ok => "✓",
-        .warn_status => "⚠",
-        .err_status => "✗",
-    } else switch (status) {
-        .ok => "*",
-        .warn_status => "!",
-        .err_status => "x",
-    };
-}
-
 /// Summary of how many locally-installed kegs still point at their
 /// original `.rb` source. `total` counts rows with `tap='local'`;
 /// `stale` counts the subset whose `full_name` no longer exists on
@@ -650,67 +538,3 @@ pub fn countMissingLocalSources(
     }
     return census;
 }
-
-fn statusCode(status: CheckStatus) []const u8 {
-    return switch (status) {
-        .ok => color.SemanticStyle.success.code(),
-        .warn_status => color.SemanticStyle.warn.code(),
-        .err_status => color.SemanticStyle.err.code(),
-    };
-}
-
-/// Render one check row. Pure (no stderr / global state), so tests
-/// can drive it against a buffer writer and assert on the bytes.
-pub fn renderCheckRow(
-    writer: anytype,
-    status: CheckStatus,
-    name: []const u8,
-    detail: ?[]const u8,
-    style_opts: CheckStyle,
-) !void {
-    const glyph = glyphFor(status, style_opts.emoji);
-    try writer.writeAll("  ");
-    if (style_opts.color) {
-        try writer.writeAll(statusCode(status));
-        try writer.writeAll(glyph);
-        try writer.writeAll(color.Style.reset.code());
-    } else {
-        try writer.writeAll(glyph);
-    }
-    try writer.writeAll(" ");
-    try writer.writeAll(name);
-
-    if (detail) |d| {
-        if (style_opts.color) {
-            try writer.writeAll(" ");
-            try writer.writeAll(color.SemanticStyle.detail.code());
-            try writer.writeAll("— ");
-            try writer.writeAll(d);
-            try writer.writeAll(color.Style.reset.code());
-        } else {
-            try writer.writeAll(" — ");
-            try writer.writeAll(d);
-        }
-    }
-    try writer.writeAll("\n");
-}
-
-fn printCheck(name: []const u8, status: CheckStatus, detail: ?[]const u8) void {
-    if (output.isQuiet()) return;
-    const f = fs_compat.stderrFile();
-    var w = FileWriter{ .file = f };
-    renderCheckRow(&w, status, name, detail, .{
-        .color = color.isColorEnabled(),
-        .emoji = color.isEmojiEnabled(),
-    }) catch {};
-}
-
-/// Thin writer shim so renderCheckRow can call `writer.writeAll`
-/// against `fs_compat.File`. We only need `writeAll`; nothing else.
-const FileWriter = struct {
-    file: fs_compat.File,
-
-    pub fn writeAll(self: *FileWriter, bytes: []const u8) !void {
-        return self.file.writeAll(bytes);
-    }
-};
