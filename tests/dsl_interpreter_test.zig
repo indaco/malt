@@ -57,7 +57,11 @@ fn runSnippet(
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    dsl.executePostInstall(alloc, &f, ruby_src, malt_prefix, &flog) catch |e| {
+    dsl.executePostInstall(alloc, .{
+        .name = f.name,
+        .version = f.version,
+        .pkg_version = f.pkg_version,
+    }, ruby_src, malt_prefix, &flog) catch |e| {
         return @as(?dsl.DslError, e);
     };
     return null;
@@ -820,7 +824,11 @@ test "interpreter: unknown method is logged in fallback log" {
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    dsl.executePostInstall(alloc, &f, "unknown_method_xyz", prefix, &flog) catch {};
+    dsl.executePostInstall(alloc, .{
+        .name = f.name,
+        .version = f.version,
+        .pkg_version = f.pkg_version,
+    }, "unknown_method_xyz", prefix, &flog) catch {};
 
     // Verify fallback log has at least one entry
     try testing.expect(flog.hasErrors());
@@ -1516,7 +1524,11 @@ test "parse_error: malformed source populates fallback log with location" {
     defer flog.deinit();
 
     // Stray `]` with no matching open — a guaranteed parser error.
-    const result = dsl.executePostInstall(alloc, &f, "ohai \"hi\"\n]\n", prefix, &flog);
+    const result = dsl.executePostInstall(alloc, .{
+        .name = f.name,
+        .version = f.version,
+        .pkg_version = f.pkg_version,
+    }, "ohai \"hi\"\n]\n", prefix, &flog);
     try testing.expectError(dsl.DslError.ParseError, result);
 
     // The diagnostics from Parser.diagnostics should now be on the log
@@ -2508,7 +2520,11 @@ test "interpreter: arena-owned path bindings leak-clean under testing.allocator"
         \\_a = HOMEBREW_PREFIX
         \\_a = HOMEBREW_CELLAR
     ;
-    try dsl.executePostInstall(testing.allocator, &f, src, prefix, &flog);
+    try dsl.executePostInstall(testing.allocator, .{
+        .name = f.name,
+        .version = f.version,
+        .pkg_version = f.pkg_version,
+    }, src, prefix, &flog);
 }
 
 // pushScope must propagate OOM instead of swallowing it. A silent failure
@@ -2526,7 +2542,7 @@ test "ExecContext.pushScope propagates OOM from the arena" {
         .arena = failing.allocator(),
         .cellar_path = "",
         .malt_prefix = "",
-        .paths = std.EnumArray(malt.dsl.interpreter.PathBinding, []const u8).initFill(""),
+        .paths = std.EnumArray(malt.dsl.context.PathBinding, []const u8).initFill(""),
         ._scopes = .empty,
         .sandbox_root = "",
         .fallback_log_writer = &flog,
@@ -2551,7 +2567,7 @@ test "ExecContext.pushMethodScope propagates OOM from the arena" {
         .arena = failing.allocator(),
         .cellar_path = "",
         .malt_prefix = "",
-        .paths = std.EnumArray(malt.dsl.interpreter.PathBinding, []const u8).initFill(""),
+        .paths = std.EnumArray(malt.dsl.context.PathBinding, []const u8).initFill(""),
         ._scopes = .empty,
         .sandbox_root = "",
         .fallback_log_writer = &flog,
@@ -2562,4 +2578,54 @@ test "ExecContext.pushMethodScope propagates OOM from the arena" {
 
     try testing.expectError(error.OutOfMemory, ctx.pushMethodScope());
     try testing.expectEqual(@as(usize, 0), ctx.scopeDepth());
+}
+
+// Pins the decoupled `FormulaRef` entrypoint: ExecContext must build its
+// path table from the narrow projection (name, version, pkg_version)
+// without importing the formula domain. Asserting paths rather than
+// construction proves both the API shape and the interpolation contract.
+test "ExecContext.init with FormulaRef projects cellar + pkgshare paths" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var flog = dsl.FallbackLog.init(a);
+    defer flog.deinit();
+
+    const prefix = "/opt/testmalt";
+    var ctx = try dsl.ExecContext.init(a, .{
+        .name = "ffmpeg",
+        .version = "7.1.2",
+        .pkg_version = "7.1.2",
+    }, prefix, &flog);
+    defer ctx.deinit();
+
+    try testing.expectEqualStrings("/opt/testmalt/Cellar/ffmpeg/7.1.2", ctx.cellar_path);
+    try testing.expectEqualStrings("/opt/testmalt/Cellar/ffmpeg/7.1.2/bin", ctx.paths.get(.bin));
+    try testing.expectEqualStrings("/opt/testmalt/Cellar/ffmpeg/7.1.2/share/ffmpeg", ctx.paths.get(.pkgshare));
+    try testing.expectEqualStrings("/opt/testmalt/etc/ffmpeg", ctx.paths.get(.pkgetc));
+    try testing.expectEqualStrings("/opt/testmalt/opt/ffmpeg", ctx.paths.get(.opt_prefix));
+    try testing.expectEqualStrings("ffmpeg", ctx.formula_name);
+}
+
+// Pins the full entrypoint on FormulaRef: callers construct the narrow
+// projection and the DSL module never sees `Formula`. The snippet
+// exercises a binding so the interpolated `share/<name>` path name
+// is observable through the fallback log.
+test "executePostInstall accepts FormulaRef and binds formula_name" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var flog = dsl.FallbackLog.init(a);
+    defer flog.deinit();
+
+    try dsl.executePostInstall(
+        a,
+        .{ .name = "acme", .version = "9.9.9", .pkg_version = "9.9.9" },
+        "_ = pkgshare\n",
+        "/opt/testmalt",
+        &flog,
+    );
+    try testing.expect(!flog.hasErrors());
 }
