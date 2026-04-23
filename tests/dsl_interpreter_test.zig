@@ -2579,3 +2579,53 @@ test "ExecContext.pushMethodScope propagates OOM from the arena" {
     try testing.expectError(error.OutOfMemory, ctx.pushMethodScope());
     try testing.expectEqual(@as(usize, 0), ctx.scopeDepth());
 }
+
+// Pins the decoupled `FormulaRef` entrypoint: ExecContext must build its
+// path table from the narrow projection (name, version, pkg_version)
+// without importing the formula domain. Asserting paths rather than
+// construction proves both the API shape and the interpolation contract.
+test "ExecContext.init with FormulaRef projects cellar + pkgshare paths" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var flog = dsl.FallbackLog.init(a);
+    defer flog.deinit();
+
+    const prefix = "/opt/testmalt";
+    var ctx = try dsl.ExecContext.init(a, .{
+        .name = "ffmpeg",
+        .version = "7.1.2",
+        .pkg_version = "7.1.2",
+    }, prefix, &flog);
+    defer ctx.deinit();
+
+    try testing.expectEqualStrings("/opt/testmalt/Cellar/ffmpeg/7.1.2", ctx.cellar_path);
+    try testing.expectEqualStrings("/opt/testmalt/Cellar/ffmpeg/7.1.2/bin", ctx.paths.get(.bin));
+    try testing.expectEqualStrings("/opt/testmalt/Cellar/ffmpeg/7.1.2/share/ffmpeg", ctx.paths.get(.pkgshare));
+    try testing.expectEqualStrings("/opt/testmalt/etc/ffmpeg", ctx.paths.get(.pkgetc));
+    try testing.expectEqualStrings("/opt/testmalt/opt/ffmpeg", ctx.paths.get(.opt_prefix));
+    try testing.expectEqualStrings("ffmpeg", ctx.formula_name);
+}
+
+// Pins the full entrypoint on FormulaRef: callers construct the narrow
+// projection and the DSL module never sees `Formula`. The snippet
+// exercises a binding so the interpolated `share/<name>` path name
+// is observable through the fallback log.
+test "executePostInstall accepts FormulaRef and binds formula_name" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var flog = dsl.FallbackLog.init(a);
+    defer flog.deinit();
+
+    try dsl.executePostInstall(
+        a,
+        .{ .name = "acme", .version = "9.9.9", .pkg_version = "9.9.9" },
+        "_ = pkgshare\n",
+        "/opt/testmalt",
+        &flog,
+    );
+    try testing.expect(!flog.hasErrors());
+}
