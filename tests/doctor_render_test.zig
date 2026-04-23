@@ -17,18 +17,6 @@ comptime {
     // no-op, just documents the shared assumption.
 }
 
-const Buf = struct {
-    list: std.ArrayList(u8) = .empty,
-
-    pub fn writeAll(self: *Buf, bytes: []const u8) !void {
-        try self.list.appendSlice(testing.allocator, bytes);
-    }
-
-    fn deinit(self: *Buf) void {
-        self.list.deinit(testing.allocator);
-    }
-};
-
 fn render(
     status: doctor.CheckStatus,
     name: []const u8,
@@ -39,9 +27,10 @@ fn render(
     color.setTruecolorForTest(false);
     defer color.setBackgroundForTest(null);
     defer color.setTruecolorForTest(null);
-    var buf: Buf = .{};
-    try doctor.renderCheckRow(&buf, status, name, detail, opts);
-    return buf.list.toOwnedSlice(testing.allocator);
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    errdefer aw.deinit();
+    try doctor.renderCheckRow(&aw.writer, status, name, detail, opts);
+    return aw.toOwnedSlice();
 }
 
 // ── plain (no color, no emoji) ───────────────────────────────────────
