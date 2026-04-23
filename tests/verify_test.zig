@@ -131,6 +131,43 @@ test "verifyCosignBlob accepts a cosign that exits 0" {
     try verify.verifyCosignBlob(testing.allocator, args);
 }
 
+// libc env mutators: Zig 0.16 has no std wrapper for these and the
+// regression test needs a scoped PATH change to prove bare-name lookup.
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "verifyCosignBlob finds a bare 'cosign' via PATH (regression: gh#151)" {
+    // Before: `fs_compat.Child.spawn` initialized Threaded with an empty
+    // environ, so PATH resolution fell back to Zig's hard-coded
+    // `/usr/local/bin:/bin/:/usr/bin` and missed `/opt/homebrew/bin`. Drop
+    // a fake `cosign` into a scratch dir, prepend to PATH, and assert
+    // bare-name spawn resolves it.
+    const dir = "/tmp/malt_cosign_path_lookup";
+    fs_compat.deleteTreeAbsolute(dir) catch {};
+    try fs_compat.makeDirAbsolute(dir);
+    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+
+    try writeFakeCosign(dir ++ "/cosign", 0);
+
+    // Snapshot PATH before mutating: `getenv` points into libc's environ,
+    // which `setenv` may realloc, so copy into a stable sentinel buffer.
+    // PATH is a colon-joined list, so size the buffer generously.
+    var orig_buf: [8192]u8 = undefined;
+    const orig_raw = fs_compat.getenv("PATH") orelse "";
+    if (orig_raw.len >= orig_buf.len) return error.SkipZigTest;
+    @memcpy(orig_buf[0..orig_raw.len], orig_raw);
+    orig_buf[orig_raw.len] = 0;
+
+    var new_path_buf: [8192]u8 = undefined;
+    const new_path = try std.fmt.bufPrintZ(&new_path_buf, "{s}:{s}", .{ dir, orig_raw });
+    if (setenv("PATH", new_path.ptr, 1) != 0) return error.SetEnvFailed;
+    defer _ = if (orig_raw.len == 0) unsetenv("PATH") else setenv("PATH", @ptrCast(&orig_buf), 1);
+
+    var args = fake_args;
+    args.cosign_bin = "cosign";
+    try verify.verifyCosignBlob(testing.allocator, args);
+}
+
 // --- verifyAll (end-to-end, local fixtures) ------------------------------
 //
 // Exercises the composed trust chain without HTTP: caller stages three

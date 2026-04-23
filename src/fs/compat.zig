@@ -199,6 +199,19 @@ pub fn stdinFile() File {
     return .{ .inner = std.Io.File.stdin() };
 }
 
+/// View of the parent process's `environ` as a `std.process.Environ`.
+/// `std.Io.Threaded.init(.., .{})` defaults to an empty environ, which makes
+/// child spawns inherit nothing and forces PATH lookup onto a hard-coded
+/// `/usr/local/bin:/bin/:/usr/bin` (see
+/// `std.Io.Threaded.default_PATH`) — that fallback misses `/opt/homebrew/bin`
+/// on Apple Silicon, so `cosign` installed by Homebrew can't be found.
+pub fn processEnviron() std.process.Environ {
+    var n: usize = 0;
+    while (std.c.environ[n] != null) : (n += 1) {}
+    const slice: [:null]const ?[*:0]const u8 = @ptrCast(std.c.environ[0..n :null]);
+    return .{ .block = .{ .slice = slice } };
+}
+
 /// 0.15-style `std.process.Child` shim. The 0.16 API moved spawn/wait into
 /// free functions on `std.process` that take an `Io`; this wrapper preserves
 /// the two-step `init` → `spawn` → `wait` call shape so existing callers
@@ -228,8 +241,9 @@ pub const Child = struct {
         // allocator, which is fine for write-only stderr but blows up the
         // moment `std.process.spawn` tries to dup argv / env into its
         // arena. Build a per-call `Threaded` io rooted at the caller's
-        // allocator so spawn allocations succeed.
-        var threaded: std.Io.Threaded = .init(self.allocator, .{});
+        // allocator — and seeded with the real environ so PATH resolution
+        // and the child's env match the parent (see `processEnviron`).
+        var threaded: std.Io.Threaded = .init(self.allocator, .{ .environ = processEnviron() });
         defer threaded.deinit();
         const spawned = try std.process.spawn(threaded.io(), .{
             .argv = self.argv,
