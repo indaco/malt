@@ -10,6 +10,8 @@ const std = @import("std");
 const testing = std.testing;
 const doctor = @import("malt").doctor;
 const color = @import("malt").color;
+const io_mod = @import("malt").io_mod;
+const output = @import("malt").output;
 
 // Pin the palette so escape-string assertions stay deterministic
 // across terminals. Tests below run against dark+basic.
@@ -247,4 +249,96 @@ test "countMissingLocalSources mixes stale and present rows correctly" {
     const got = doctor.countMissingLocalSources(testing.allocator, &db);
     try testing.expectEqual(@as(u32, 3), got.total);
     try testing.expectEqual(@as(u32, 2), got.stale);
+}
+
+// ── printCheck streaming behaviour ───────────────────────────────────
+// Bugs here only surface when stderr is a regular file — we drive
+// `printCheck` through the same capture path those sinks hit.
+
+const PrintCheckCapture = struct {
+    buf: *std.ArrayList(u8),
+    prior_quiet: bool,
+
+    fn init(buf: *std.ArrayList(u8), color_on: bool, emoji_on: bool, quiet: bool) PrintCheckCapture {
+        const prior_quiet = output.isQuiet();
+        color.setForTest(color_on, emoji_on);
+        color.setBackgroundForTest(color.Background.dark);
+        color.setTruecolorForTest(false);
+        output.setQuiet(quiet);
+        io_mod.beginStderrCapture(testing.allocator, buf);
+        return .{ .buf = buf, .prior_quiet = prior_quiet };
+    }
+
+    fn deinit(self: PrintCheckCapture) void {
+        io_mod.endStderrCapture();
+        color.setForTest(null, null);
+        color.setBackgroundForTest(null);
+        color.setTruecolorForTest(null);
+        output.setQuiet(self.prior_quiet);
+    }
+};
+
+test "printCheck appends consecutive rows instead of overwriting" {
+    // Regression: positional `File.writer.flush` clobbered prior rows
+    // when stderr was a regular file.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = PrintCheckCapture.init(&buf, false, false, false);
+    defer cap.deinit();
+
+    doctor.printCheck("Row A", .ok, null);
+    doctor.printCheck("Row B", .warn_status, "detail b");
+    doctor.printCheck("Row C", .err_status, null);
+
+    const s = buf.items;
+    try testing.expect(std.mem.indexOf(u8, s, "Row A") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "Row B") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "Row C") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "detail b") != null);
+}
+
+test "printCheck emits plain-mode bytes identical to renderCheckRow" {
+    var cap_buf: std.ArrayList(u8) = .empty;
+    defer cap_buf.deinit(testing.allocator);
+    const cap = PrintCheckCapture.init(&cap_buf, false, false, false);
+    defer cap.deinit();
+
+    doctor.printCheck("APFS volume", .warn_status, "Not on APFS");
+
+    try testing.expectEqualStrings(
+        "  ! APFS volume — Not on APFS\n",
+        cap_buf.items,
+    );
+}
+
+test "printCheck honours quiet mode and emits nothing" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = PrintCheckCapture.init(&buf, false, false, true);
+    defer cap.deinit();
+
+    doctor.printCheck("Should not appear", .err_status, "hidden");
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+test "printCheck handles null detail without em-dash separator" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = PrintCheckCapture.init(&buf, false, false, false);
+    defer cap.deinit();
+
+    doctor.printCheck("Stale lock", .ok, null);
+    try testing.expectEqualStrings("  * Stale lock\n", buf.items);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "—") == null);
+}
+
+test "printCheck colour+emoji mode wraps glyph in ANSI" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = PrintCheckCapture.init(&buf, true, true, false);
+    defer cap.deinit();
+
+    doctor.printCheck("X", .err_status, null);
+    // Red glyph + reset; no em-dash since detail is null.
+    try testing.expectEqualStrings("  \x1b[31m✗\x1b[0m X\n", buf.items);
 }

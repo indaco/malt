@@ -22,7 +22,7 @@ const post_install = @import("doctor/post_install.zig");
 pub const CheckStatus = render.CheckStatus;
 pub const CheckStyle = render.CheckStyle;
 pub const renderCheckRow = render.renderCheckRow;
-const printCheck = render.printCheck;
+pub const printCheck = render.printCheck;
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "doctor")) return;
