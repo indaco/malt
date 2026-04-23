@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.9.2 - 2026-04-23
+
+### 🩹 Fixes
+
+- **update:** cosign PATH lookup + twin 'malt'/'mt' swap ([592b2a7](https://github.com/indaco/malt/commit/592b2a7)) ([#152](https://github.com/indaco/malt/pull/152))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.9.1 - 2026-04-23
 
 ### Highlights
