@@ -22,6 +22,13 @@ pub fn describeError(err: ServicesError) []const u8 {
     };
 }
 
+/// Primitive entry point for core/bundle's dispatcher: start a single
+/// service. Argv parsing stays in `execute`; this is the non-argv seam.
+pub fn servicesStart(allocator: std.mem.Allocator, name: []const u8) !void {
+    const argv = [_][]const u8{ "start", name };
+    return execute(allocator, &argv);
+}
+
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0 or
         std.mem.eql(u8, args[0], "-h") or
