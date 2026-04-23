@@ -349,7 +349,7 @@ pub fn hasService(db: *sqlite.Database, name: []const u8) bool {
     return stmt.step() catch false;
 }
 
-pub fn tailLog(allocator: std.mem.Allocator, path: []const u8, n: usize, writer: anytype) SupervisorError!void {
+pub fn tailLog(allocator: std.mem.Allocator, path: []const u8, n: usize, writer: *std.Io.Writer) SupervisorError!void {
     const f = fs_compat.openFileAbsolute(path, .{}) catch return SupervisorError.IoFailed;
     defer f.close();
     const stat = f.stat() catch return SupervisorError.IoFailed;

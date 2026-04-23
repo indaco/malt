@@ -169,7 +169,7 @@ fn writeJsonOutput(
 /// array for that section rather than truncating the whole document.
 pub fn buildListJson(
     db: *sqlite.Database,
-    w: anytype,
+    w: *std.Io.Writer,
     show_formula: bool,
     show_cask: bool,
     show_pinned: bool,
@@ -203,7 +203,7 @@ const RowShape = enum { installed, legacy };
 
 fn writeFormulaRows(
     db: *sqlite.Database,
-    w: anytype,
+    w: *std.Io.Writer,
     show_pinned: bool,
     shape: RowShape,
     first: *bool,
@@ -243,7 +243,7 @@ fn writeFormulaRows(
 
 fn writeCaskRows(
     db: *sqlite.Database,
-    w: anytype,
+    w: *std.Io.Writer,
     shape: RowShape,
     first: *bool,
 ) !void {

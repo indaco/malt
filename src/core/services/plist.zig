@@ -124,7 +124,7 @@ fn checkString(s: []const u8) ValidationError!void {
     if (std.mem.indexOfScalar(u8, s, 0) != null) return ValidationError.EmbeddedNul;
 }
 
-pub fn render(spec: ServiceSpec, writer: anytype) !void {
+pub fn render(spec: ServiceSpec, writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\<?xml version="1.0" encoding="UTF-8"?>
         \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -188,7 +188,7 @@ pub fn render(spec: ServiceSpec, writer: anytype) !void {
     try writer.writeAll("</dict>\n</plist>\n");
 }
 
-fn writeEscaped(writer: anytype, s: []const u8) !void {
+fn writeEscaped(writer: *std.Io.Writer, s: []const u8) !void {
     for (s) |c| {
         switch (c) {
             '&' => try writer.writeAll("&amp;"),
