@@ -203,7 +203,7 @@ pub fn confirmTyped(expected: []const u8, prompt: []const u8) bool {
 /// Write a dim `key:` prefix followed by padding so the value starts at
 /// column `col`. Callers that need to emit a list (or any non-`bufPrint`
 /// value) use this helper and then write the value themselves.
-pub fn writeFieldKey(w: anytype, colorize: bool, col: usize, key: []const u8) !void {
+pub fn writeFieldKey(w: *std.Io.Writer, colorize: bool, col: usize, key: []const u8) !void {
     if (colorize) try w.writeAll(color.SemanticStyle.detail.code());
     try w.writeAll(key);
     try w.writeAll(":");
@@ -218,7 +218,7 @@ pub fn writeFieldKey(w: anytype, colorize: bool, col: usize, key: []const u8) !v
 /// When `colorize` is true the key and its colon are wrapped in dim
 /// ANSI codes so the value stands out against aligned-key prefixes.
 pub fn writeField(
-    w: anytype,
+    w: *std.Io.Writer,
     scratch: []u8,
     colorize: bool,
     col: usize,
@@ -239,10 +239,7 @@ pub fn writeField(
 /// escapes for `"`, `\`, and control characters. Use this wherever handwritten
 /// JSON output embeds an identifier, tap name, version string, file path, or
 /// anything else that might contain special characters.
-///
-/// Kept as `anytype` so it works with both the legacy `std.io.GenericWriter`
-/// and the new `std.Io.Writer` interface; the common path is branch-free.
-pub fn jsonStr(w: anytype, s: []const u8) !void {
+pub fn jsonStr(w: *std.Io.Writer, s: []const u8) !void {
     try w.writeAll("\"");
     var start: usize = 0;
     for (s, 0..) |byte, i| {
@@ -273,7 +270,7 @@ pub fn jsonStr(w: anytype, s: []const u8) !void {
 }
 
 /// Write a `["a","b",...]` JSON array of RFC-8259-escaped strings to `w`.
-pub fn jsonStringArray(w: anytype, items: []const []const u8) !void {
+pub fn jsonStringArray(w: *std.Io.Writer, items: []const []const u8) !void {
     try w.writeAll("[");
     for (items, 0..) |item, i| {
         if (i != 0) try w.writeAll(",");
@@ -283,7 +280,7 @@ pub fn jsonStringArray(w: anytype, items: []const []const u8) !void {
 }
 
 /// Write the `,"time_ms":N` suffix used by `--json` commands; `start_ts` is a `milliTimestamp()`.
-pub fn jsonTimeSuffix(w: anytype, start_ts: i64) !void {
+pub fn jsonTimeSuffix(w: *std.Io.Writer, start_ts: i64) !void {
     const elapsed = fs_compat.milliTimestamp() - start_ts;
     var buf: [32]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, ",\"time_ms\":{d}", .{elapsed}) catch return;
