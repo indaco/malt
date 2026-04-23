@@ -56,11 +56,20 @@ pub const max_arg_len: usize = 4096;
 /// actually ships its own cellar-local `sh` it must invoke it via its
 /// cellar path — not `/bin/sh`, which launchd would happily run with
 /// whatever argv follows.
-const forbidden_heads = [_][]const u8{
-    "/bin/sh",      "/bin/bash",     "/bin/zsh",        "/bin/ksh",
-    "/usr/bin/sh",  "/usr/bin/bash", "/usr/bin/zsh",    "/usr/bin/env",
-    "/usr/bin/ksh", "/usr/bin/tcsh", "/usr/bin/python", "/usr/bin/perl",
-};
+const forbidden_heads = std.StaticStringMap(void).initComptime(.{
+    .{ "/bin/sh", {} },
+    .{ "/bin/bash", {} },
+    .{ "/bin/zsh", {} },
+    .{ "/bin/ksh", {} },
+    .{ "/usr/bin/sh", {} },
+    .{ "/usr/bin/bash", {} },
+    .{ "/usr/bin/zsh", {} },
+    .{ "/usr/bin/env", {} },
+    .{ "/usr/bin/ksh", {} },
+    .{ "/usr/bin/tcsh", {} },
+    .{ "/usr/bin/python", {} },
+    .{ "/usr/bin/perl", {} },
+});
 
 /// Validate a ServiceSpec before it's rendered to a plist. All writes
 /// to disk and all `launchctl bootstrap` calls flow through this gate;
@@ -92,9 +101,7 @@ pub fn validate(
 
     const head = spec.program_args[0];
     if (head.len == 0 or head[0] != '/') return ValidationError.RelativeExecutable;
-    for (forbidden_heads) |h| {
-        if (std.mem.eql(u8, head, h)) return ValidationError.InterpreterBait;
-    }
+    if (forbidden_heads.has(head)) return ValidationError.InterpreterBait;
 
     // Allowed roots: formula's own cellar, OR malt_prefix/opt. Both
     // checked with a component-boundary-aware prefix match so
