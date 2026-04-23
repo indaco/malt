@@ -97,7 +97,7 @@ pub fn parse(
     m.formulas = formulas.toOwnedSlice(a) catch return BrewfileError.OutOfMemory;
     m.casks = casks.toOwnedSlice(a) catch return BrewfileError.OutOfMemory;
     m.services = services.toOwnedSlice(a) catch return BrewfileError.OutOfMemory;
-    m.version = manifest_mod.SCHEMA_VERSION;
+    m.version = manifest_mod.schema_version;
     return m;
 }
 

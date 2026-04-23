@@ -32,15 +32,15 @@ pub const Sink = struct {
 /// CSI parameter buffer cap. Real SGR/cursor sequences rarely exceed
 /// a handful of bytes; an attacker can still overflow, in which case
 /// we drop the whole sequence at its final byte.
-pub const CSI_PARAM_MAX: usize = 32;
-pub const OUT_BUF: usize = 256;
+pub const csi_param_max: usize = 32;
+pub const out_buf: usize = 256;
 
 pub const Sanitizer = struct {
     state: State = .normal,
-    csi_buf: [CSI_PARAM_MAX]u8 = undefined,
+    csi_buf: [csi_param_max]u8 = undefined,
     csi_len: usize = 0,
     csi_overflow: bool = false,
-    out_buf: [OUT_BUF]u8 = undefined,
+    out_buf: [out_buf]u8 = undefined,
     out_len: usize = 0,
 
     const State = enum {

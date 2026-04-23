@@ -89,7 +89,7 @@ pub const HttpClient = struct {
     client: std.http.Client,
 
     /// Per-request timeout in nanoseconds. Default: 30 seconds.
-    timeout_ns: u64 = DEFAULT_TIMEOUT_NS,
+    timeout_ns: u64 = default_timeout_ns,
 
     /// Lazily-allocated decompression windows, reused across requests. These
     /// are sized for the worst case per encoding (zstd ~128 KiB, flate
@@ -100,9 +100,9 @@ pub const HttpClient = struct {
     zstd_window: ?[]u8 = null,
     flate_window: ?[]u8 = null,
 
-    const DEFAULT_TIMEOUT_NS: u64 = 30 * std.time.ns_per_s;
+    const default_timeout_ns: u64 = 30 * std.time.ns_per_s;
     /// Blob downloads (bottles, cask DMGs) get a much longer timeout.
-    const BLOB_TIMEOUT_NS: u64 = 600 * std.time.ns_per_s; // 10 minutes
+    const blob_timeout_ns: u64 = 600 * std.time.ns_per_s; // 10 minutes
 
     pub fn init(allocator: std.mem.Allocator) HttpClient {
         return .{
@@ -155,7 +155,7 @@ pub const HttpClient = struct {
     }
 
     /// Perform a GET request with extra headers (e.g. Authorization for blob downloads).
-    /// Uses the larger MAX_BLOB_BYTES limit since this is typically used for bottle downloads.
+    /// Uses the larger max_blob_bytes limit since this is typically used for bottle downloads.
     /// The caller owns the returned `Response` and must call `deinit` on it.
     pub fn getWithHeaders(
         self: *HttpClient,
@@ -163,7 +163,7 @@ pub const HttpClient = struct {
         extra_headers: []const std.http.Header,
         progress: ?ProgressCallback,
     ) !Response {
-        return self.doGetWithRetry(url, extra_headers, MAX_BLOB_BYTES, progress);
+        return self.doGetWithRetry(url, extra_headers, max_blob_bytes, progress);
     }
 
     /// Perform a HEAD request and return only the HTTP status code.
@@ -207,7 +207,7 @@ pub const HttpClient = struct {
         }
     };
 
-    const MAX_HEAD_REDIRECTS = 5;
+    const max_head_redirects = 5;
 
     /// HEAD request that manually follows redirects, returning the
     /// final URL and Content-Disposition. The stdlib skips redirect
@@ -222,7 +222,7 @@ pub const HttpClient = struct {
         };
         errdefer resolved.deinit();
 
-        for (0..MAX_HEAD_REDIRECTS) |_| {
+        for (0..max_head_redirects) |_| {
             const uri = std.Uri.parse(resolved.final_url) catch break;
 
             var req = self.client.request(.HEAD, uri, .{
@@ -257,15 +257,15 @@ pub const HttpClient = struct {
     /// Default maximum response body size for metadata (API JSON, tokens, etc.).
     /// The full Homebrew formula.json index is ~25 MB; 50 MB gives headroom.
     /// Bottle downloads bypass this via getWithHeaders (which sets no limit).
-    const MAX_METADATA_BYTES: usize = 50 * 1024 * 1024;
+    const max_metadata_bytes: usize = 50 * 1024 * 1024;
 
     /// Bottle responses can be 500+ MB. We cap at 2 GB to prevent true OOM.
-    const MAX_BLOB_BYTES: usize = 2 * 1024 * 1024 * 1024;
+    const max_blob_bytes: usize = 2 * 1024 * 1024 * 1024;
 
     // ---- internal helper ----
 
-    const MAX_RETRIES = 3;
-    const RETRY_DELAYS_MS = [_]u64{ 1000, 2000, 4000 };
+    const max_retries = 3;
+    const retry_delays_ms = [_]u64{ 1000, 2000, 4000 };
 
     /// Writer wrapper that counts bytes written, enforces an upper bound, and
     /// optionally fires a progress callback. The bound is checked on every
@@ -337,7 +337,7 @@ pub const HttpClient = struct {
         url: []const u8,
         extra_headers: []const std.http.Header,
     ) !Response {
-        return self.doGetWithRetry(url, extra_headers, MAX_METADATA_BYTES, null);
+        return self.doGetWithRetry(url, extra_headers, max_metadata_bytes, null);
     }
 
     fn doGetWithRetry(
@@ -352,17 +352,17 @@ pub const HttpClient = struct {
             const result = self.doGetLimited(url, extra_headers, max_bytes, progress);
             if (result) |resp| {
                 if (classifyStatus(resp.status)) |dl_err| {
-                    if (isTransientError(dl_err) and attempt < MAX_RETRIES) {
+                    if (isTransientError(dl_err) and attempt < max_retries) {
                         resp.allocator.free(resp.body);
-                        std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms)), .awake) catch {};
+                        std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch {};
                         attempt += 1;
                         continue;
                     }
                 }
                 return resp;
             } else |err| {
-                if (attempt < MAX_RETRIES) {
-                    std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(RETRY_DELAYS_MS[attempt] * std.time.ns_per_ms)), .awake) catch {};
+                if (attempt < max_retries) {
+                    std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch {};
                     attempt += 1;
                     continue;
                 }
@@ -435,8 +435,8 @@ pub const HttpClient = struct {
         // implementation slept in 1 s ticks and could stall `join()` by
         // up to a full second per request — that was the entire warm
         // install floor (see docs/perf/results.md).
-        const effective_timeout = if (max_bytes > MAX_METADATA_BYTES)
-            @max(BLOB_TIMEOUT_NS, scaledTimeoutNs(content_length))
+        const effective_timeout = if (max_bytes > max_metadata_bytes)
+            @max(blob_timeout_ns, scaledTimeoutNs(content_length))
         else
             self.timeout_ns;
         var request_done: std.Io.Event = .unset;

@@ -86,7 +86,7 @@ test "validate: embedded NUL in arg rejected" {
 }
 
 test "validate: oversize arg rejected" {
-    var big: [plist.MAX_ARG_LEN + 1]u8 = undefined;
+    var big: [plist.max_arg_len + 1]u8 = undefined;
     @memset(&big, 'a');
     const args = [_][]const u8{ "/opt/malt/Cellar/foo/1.0/bin/foo", big[0..] };
     try testing.expectError(error.ArgTooLong, plist.validate(.{
@@ -98,7 +98,7 @@ test "validate: oversize arg rejected" {
 }
 
 test "validate: too many args rejected" {
-    var args: [plist.MAX_PROGRAM_ARGS + 1][]const u8 = undefined;
+    var args: [plist.max_program_args + 1][]const u8 = undefined;
     args[0] = "/opt/malt/Cellar/foo/1.0/bin/foo";
     for (args[1..]) |*a| a.* = "x";
     try testing.expectError(error.TooManyArgs, plist.validate(.{

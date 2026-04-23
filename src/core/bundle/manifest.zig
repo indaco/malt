@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const schema_version: u32 = 1;
 
 pub const ManifestError = error{
     UnsupportedVersion,
@@ -42,7 +42,7 @@ pub const ServiceEntry = struct {
 pub const Manifest = struct {
     arena: std.heap.ArenaAllocator,
     name: []const u8 = "",
-    version: u32 = SCHEMA_VERSION,
+    version: u32 = schema_version,
     formulas: []FormulaEntry = &.{},
     casks: []CaskEntry = &.{},
     taps: [][]const u8 = &.{},
@@ -76,8 +76,8 @@ pub fn parseJson(parent: std.mem.Allocator, json_text: []const u8) ManifestError
 
     if (obj.get("version")) |v| {
         if (v != .integer) return ManifestError.MalformedJson;
-        if (v.integer != @as(i64, SCHEMA_VERSION)) return ManifestError.UnsupportedVersion;
-        manifest.version = SCHEMA_VERSION;
+        if (v.integer != @as(i64, schema_version)) return ManifestError.UnsupportedVersion;
+        manifest.version = schema_version;
     }
 
     if (obj.get("name")) |v| {

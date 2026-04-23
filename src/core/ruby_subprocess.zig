@@ -44,7 +44,7 @@ pub fn describeError(err: RubyError) []const u8 {
 /// Upper bound on a fetched formula .rb blob. The Homebrew-wide 99th
 /// percentile is ~40 KiB; 1 MiB is orders of magnitude of headroom
 /// without giving a hostile response room to grow.
-const MAX_FORMULA_RB_BYTES: usize = 1024 * 1024;
+const max_formula_rb_bytes: usize = 1024 * 1024;
 
 /// Detect a usable Ruby interpreter. Returns a caller-owned absolute path
 /// or null. Caller must free the returned slice with `allocator.free`.
@@ -164,7 +164,7 @@ pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8
     var resp = http.get(url) catch return null;
     defer resp.deinit();
     if (resp.status != 200) return null;
-    if (resp.body.len == 0 or resp.body.len > MAX_FORMULA_RB_BYTES) return null;
+    if (resp.body.len == 0 or resp.body.len > max_formula_rb_bytes) return null;
 
     var actual_hex: [pins.SHA256_HEX_LEN]u8 = undefined;
     pins.sha256Hex(resp.body, &actual_hex);

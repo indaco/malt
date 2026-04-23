@@ -397,13 +397,13 @@ fn populateFromInstalled(manifest: *manifest_mod.Manifest, db: *sqlite.Database)
 
     manifest.formulas = formulas.toOwnedSlice(a) catch return BundleError.DatabaseError;
     manifest.casks = casks.toOwnedSlice(a) catch return BundleError.DatabaseError;
-    manifest.version = manifest_mod.SCHEMA_VERSION;
+    manifest.version = manifest_mod.schema_version;
 }
 
 fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, name: []const u8) !void {
     const a = manifest.allocator();
     manifest.name = a.dupe(u8, name) catch return BundleError.DatabaseError;
-    manifest.version = manifest_mod.SCHEMA_VERSION;
+    manifest.version = manifest_mod.schema_version;
 
     var taps: std.ArrayList([]const u8) = .empty;
     var formulas: std.ArrayList(manifest_mod.FormulaEntry) = .empty;

@@ -4,7 +4,7 @@ const clonefile = @import("clonefile.zig");
 
 /// 512 bytes: ~4× real Homebrew prefix length, still small enough that
 /// anything past it is either a bug or overflow bait.
-pub const MAX_PREFIX_LEN: usize = 512;
+pub const max_prefix_len: usize = 512;
 
 pub const PrefixError = error{
     Empty,
@@ -41,7 +41,7 @@ pub fn isAllowedNameByte(b: u8) bool {
 /// downstream code can assume absolute, NUL-free, traversal-free.
 pub fn validatePrefix(prefix: []const u8) PrefixError!void {
     if (prefix.len == 0) return PrefixError.Empty;
-    if (prefix.len > MAX_PREFIX_LEN) return PrefixError.TooLong;
+    if (prefix.len > max_prefix_len) return PrefixError.TooLong;
     if (prefix[0] != '/') return PrefixError.NotAbsolute;
     if (std.mem.indexOfScalar(u8, prefix, 0) != null) return PrefixError.EmbeddedNul;
     // Tight charset closes the BUG-007/BUG-019 injection class — quotes,

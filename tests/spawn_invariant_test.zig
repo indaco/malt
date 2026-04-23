@@ -34,13 +34,13 @@ fn stripLineComment(line: []const u8) []const u8 {
 }
 
 // Files in src/core/services/plist.zig legitimately name the forbidden
-// interpreter paths in FORBIDDEN_HEADS — they're the *rejection list*
+// interpreter paths in forbidden_heads — they're the *rejection list*
 // for formula-declared services. Exempt that exact context.
 fn allowedContext(path: []const u8, line: []const u8) bool {
     if (std.mem.endsWith(u8, path, "core/services/plist.zig")) {
-        // FORBIDDEN_HEADS declaration + error docstrings — both live in
+        // forbidden_heads declaration + error docstrings — both live in
         // that file by design. Any other usage still has to pass.
-        if (std.mem.indexOf(u8, line, "FORBIDDEN_HEADS") != null) return true;
+        if (std.mem.indexOf(u8, line, "forbidden_heads") != null) return true;
         // Quoted-string list entries: `"/bin/sh",`
         if (std.mem.indexOf(u8, line, "\"/bin/") != null) return true;
         if (std.mem.indexOf(u8, line, "\"/usr/bin/") != null) return true;
