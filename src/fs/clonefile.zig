@@ -13,8 +13,10 @@ pub const CloneError = error{
 
 /// Clone a directory tree using the macOS APFS clonefile(2) syscall.
 /// Falls back to a recursive copy when the filesystem does not support
-/// copy-on-write clones (ENOTSUP).
-pub fn cloneTree(src_path: []const u8, dst_path: []const u8) CloneError!void {
+/// copy-on-write clones (ENOTSUP). `allocator` only participates in the
+/// fallback path (for the directory walker); APFS-native clones are a
+/// single syscall and do not allocate.
+pub fn cloneTree(allocator: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) CloneError!void {
     const src_z = std.posix.toPosixPath(src_path) catch return error.IoError;
     const dst_z = std.posix.toPosixPath(dst_path) catch return error.IoError;
 
@@ -26,7 +28,7 @@ pub fn cloneTree(src_path: []const u8, dst_path: []const u8) CloneError!void {
     const e: std.c.E = @enumFromInt(std.c._errno().*);
     switch (e) {
         .OPNOTSUPP => {
-            copyTreeFallback(src_path, dst_path) catch return error.IoError;
+            copyTreeFallback(allocator, src_path, dst_path) catch return error.IoError;
         },
         .EXIST => return error.AlreadyExists,
         .ACCES, .PERM => return error.PermissionDenied,
@@ -46,7 +48,7 @@ pub fn isApfs(path: []const u8) bool {
     return std.mem.eql(u8, fs_name, "apfs");
 }
 
-pub fn copyTreeFallback(src_path: []const u8, dst_path: []const u8) !void {
+pub fn copyTreeFallback(allocator: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) !void {
     // Open source directory.
     var src_dir = fs_compat.openDirAbsolute(src_path, .{ .iterate = true }) catch return error.FileNotFound;
     defer src_dir.close();
@@ -61,7 +63,7 @@ pub fn copyTreeFallback(src_path: []const u8, dst_path: []const u8) !void {
     defer dst_dir.close();
 
     // Walk the source tree.
-    var walker = src_dir.walk(std.heap.c_allocator) catch return error.OutOfMemory;
+    var walker = src_dir.walk(allocator) catch return error.OutOfMemory;
     defer walker.deinit();
 
     while (walker.next() catch return error.AccessDenied) |entry| {

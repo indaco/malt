@@ -154,7 +154,7 @@ pub fn materializeWithCellar(
     }
 
     // Clone from store to Cellar
-    clonefile.cloneTree(src, cellar_path) catch return CellarError.CloneFailed;
+    clonefile.cloneTree(allocator, src, cellar_path) catch return CellarError.CloneFailed;
 
     const new_prefix = atomic.maltPrefix();
 

@@ -110,10 +110,10 @@ pub fn maltPrefix() [:0]const u8 {
 /// from a crash standpoint, but the end state (dst present, src absent)
 /// matches `rename` semantics; a crash mid-way leaves the tmp source
 /// intact for the next housekeeping sweep to clean up.
-pub fn atomicRename(src_path: []const u8, dst_path: []const u8) !void {
+pub fn atomicRename(allocator: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) !void {
     fs_compat.renameAbsolute(src_path, dst_path) catch |e| switch (e) {
         error.CrossDevice => {
-            try clonefile.cloneTree(src_path, dst_path);
+            try clonefile.cloneTree(allocator, src_path, dst_path);
             fs_compat.deleteTreeAbsolute(src_path) catch {};
         },
         else => return e,

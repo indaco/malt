@@ -293,7 +293,7 @@ test "atomicRename moves a file within the same filesystem" {
     try f.writeAll("payload");
     f.close();
 
-    try atomic.atomicRename(src, dst);
+    try atomic.atomicRename(testing.allocator, src, dst);
     try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(src, .{}));
 
     const moved = try malt.fs_compat.openFileAbsolute(dst, .{});
@@ -401,7 +401,7 @@ test "atomicRename moves a directory tree within the same filesystem" {
         try f.writeAll("payload");
     }
 
-    try atomic.atomicRename(src, dst);
+    try atomic.atomicRename(testing.allocator, src, dst);
     try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(src, .{}));
 
     var moved = try malt.fs_compat.openDirAbsolute(dst, .{});
