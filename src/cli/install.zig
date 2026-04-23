@@ -743,7 +743,7 @@ fn maybeRegisterService(
         .keep_alive = def.keep_alive,
     };
 
-    supervisor_mod.register(allocator, db, spec, formula.name, false, cellar_path, prefix) catch |err| {
+    supervisor_mod.register(.{ .allocator = allocator, .db = db }, spec, formula.name, false, cellar_path, prefix) catch |err| {
         output.warn("could not register service for {s}: {s}", .{ formula.name, @errorName(err) });
     };
 }

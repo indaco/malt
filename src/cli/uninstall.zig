@@ -113,7 +113,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Stop and unregister any associated launchd service before tearing down
     // files. The service name we register matches the formula name.
-    supervisor_mod.stopAndUnregister(allocator, &db, name);
+    supervisor_mod.stopAndUnregister(.{ .allocator = allocator, .db = &db }, name);
 
     // Unlink symlinks
     var lnk = linker.Linker.init(allocator, &db, prefix);

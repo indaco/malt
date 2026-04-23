@@ -58,6 +58,14 @@ pub fn describeError(err: SupervisorError) []const u8 {
     };
 }
 
+/// Named-field bundle for supervisor entrypoints that would otherwise
+/// thread `(allocator, db)` through every call. Opens a DI seam for
+/// tests to swap in fakes by replacing fields.
+pub const SupervisorCtx = struct {
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+};
+
 pub const ServiceInfo = struct {
     name: []const u8,
     keg_name: []const u8,
@@ -91,8 +99,9 @@ pub fn logPath(allocator: std.mem.Allocator, name: []const u8, stream: enum { st
 }
 
 /// List services from the `services` table.
-pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) SupervisorError![]ServiceInfo {
-    var stmt = db.prepare("SELECT name, keg_name, plist_path, auto_start, last_status FROM services ORDER BY name;") catch
+pub fn list(ctx: SupervisorCtx) SupervisorError![]ServiceInfo {
+    const allocator = ctx.allocator;
+    var stmt = ctx.db.prepare("SELECT name, keg_name, plist_path, auto_start, last_status FROM services ORDER BY name;") catch
         return SupervisorError.DatabaseError;
     defer stmt.finalize();
 
@@ -159,8 +168,7 @@ pub fn freeServiceInfos(allocator: std.mem.Allocator, services: []ServiceInfo) v
 /// before the plist lands on disk or launchctl sees it. See
 /// `plist_mod.validate`.
 pub fn register(
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
+    ctx: SupervisorCtx,
     spec: plist_mod.ServiceSpec,
     keg_name: []const u8,
     auto_start: bool,
@@ -169,6 +177,7 @@ pub fn register(
 ) SupervisorError!void {
     if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
 
+    const allocator = ctx.allocator;
     plist_mod.validate(spec, cellar_path, malt_prefix) catch return SupervisorError.InvalidService;
 
     const dir = try serviceDir(allocator, spec.label);
@@ -195,7 +204,7 @@ pub fn register(
     plist_mod.render(spec, &aw.writer) catch return SupervisorError.IoFailed;
     file.writeAll(aw.written()) catch return SupervisorError.IoFailed;
 
-    var stmt = db.prepare(
+    var stmt = ctx.db.prepare(
         \\INSERT OR REPLACE INTO services(name, keg_name, plist_path, auto_start, last_status)
         \\VALUES (?, ?, ?, ?, 'registered');
     ) catch return SupervisorError.DatabaseError;
@@ -236,36 +245,38 @@ fn lookupPlistPath(allocator: std.mem.Allocator, db: *sqlite.Database, name: []c
     return allocator.dupe(u8, std.mem.sliceTo(p, 0)) catch return SupervisorError.OutOfMemory;
 }
 
-pub fn start(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) SupervisorError!void {
+pub fn start(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
     if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
-    const plist_path = try lookupPlistPath(allocator, db, name);
+    const allocator = ctx.allocator;
+    const plist_path = try lookupPlistPath(allocator, ctx.db, name);
     defer allocator.free(plist_path);
     const domain = userDomain(allocator) catch return SupervisorError.OutOfMemory;
     defer allocator.free(domain);
 
     try runLaunchctl(allocator, &.{ "launchctl", "bootstrap", domain, plist_path });
-    setStatus(db, name, "running") catch {};
+    setStatus(ctx.db, name, "running") catch {};
 }
 
-pub fn stop(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) SupervisorError!void {
+pub fn stop(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
     if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
-    const plist_path = try lookupPlistPath(allocator, db, name);
+    const allocator = ctx.allocator;
+    const plist_path = try lookupPlistPath(allocator, ctx.db, name);
     defer allocator.free(plist_path);
     const domain = userDomain(allocator) catch return SupervisorError.OutOfMemory;
     defer allocator.free(domain);
 
     try runLaunchctl(allocator, &.{ "launchctl", "bootout", domain, plist_path });
-    setStatus(db, name, "stopped") catch {};
+    setStatus(ctx.db, name, "stopped") catch {};
 }
 
-pub fn restart(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) SupervisorError!void {
-    stop(allocator, db, name) catch {};
-    try start(allocator, db, name);
+pub fn restart(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
+    stop(ctx, name) catch {};
+    try start(ctx, name);
 }
 
-pub fn stopAndUnregister(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) void {
-    stop(allocator, db, name) catch {};
-    var stmt = db.prepare("DELETE FROM services WHERE name = ?;") catch return;
+pub fn stopAndUnregister(ctx: SupervisorCtx, name: []const u8) void {
+    stop(ctx, name) catch {};
+    var stmt = ctx.db.prepare("DELETE FROM services WHERE name = ?;") catch return;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return;
     _ = stmt.step() catch {};

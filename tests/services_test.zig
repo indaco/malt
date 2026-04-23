@@ -37,7 +37,7 @@ test "list returns empty initially" {
     var t = try TempDb.init("empty");
     defer t.deinit();
 
-    const items = try supervisor.list(testing.allocator, &t.db);
+    const items = try supervisor.list(.{ .allocator = testing.allocator, .db = &t.db });
     defer supervisor.freeServiceInfos(testing.allocator, items);
     try testing.expectEqual(@as(usize, 0), items.len);
 }
@@ -54,7 +54,7 @@ test "raw services row insert is reflected by list and hasService" {
     try testing.expect(supervisor.hasService(&t.db, "redis"));
     try testing.expect(!supervisor.hasService(&t.db, "missing"));
 
-    const items = try supervisor.list(testing.allocator, &t.db);
+    const items = try supervisor.list(.{ .allocator = testing.allocator, .db = &t.db });
     defer supervisor.freeServiceInfos(testing.allocator, items);
     try testing.expectEqual(@as(usize, 1), items.len);
     try testing.expectEqualStrings("redis", items[0].name);
@@ -62,7 +62,7 @@ test "raw services row insert is reflected by list and hasService" {
 }
 
 fn listAndFree(alloc: std.mem.Allocator, db: *sqlite.Database) !void {
-    const items = try supervisor.list(alloc, db);
+    const items = try supervisor.list(.{ .allocator = alloc, .db = db });
     supervisor.freeServiceInfos(alloc, items);
 }
 

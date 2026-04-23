@@ -71,16 +71,17 @@ fn cmdOne(allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const []co
         return ServicesError.InvalidArgs;
     }
     const name = rest[0];
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = allocator, .db = db };
     switch (op) {
-        .start => try supervisor.start(allocator, db, name),
-        .stop => try supervisor.stop(allocator, db, name),
-        .restart => try supervisor.restart(allocator, db, name),
+        .start => try supervisor.start(ctx, name),
+        .stop => try supervisor.stop(ctx, name),
+        .restart => try supervisor.restart(ctx, name),
     }
     output.success("services {s}: {s}", .{ @tagName(op), name });
 }
 
 fn cmdList(allocator: std.mem.Allocator, db: *sqlite.Database) !void {
-    const items = try supervisor.list(allocator, db);
+    const items = try supervisor.list(.{ .allocator = allocator, .db = db });
     defer supervisor.freeServiceInfos(allocator, items);
     if (items.len == 0) {
         output.info("no services registered", .{});
