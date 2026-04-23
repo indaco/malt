@@ -42,6 +42,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     return run(allocator, args, .add);
 }
 
+/// Primitive entry point for core/bundle's dispatcher: add a single tap by
+/// name. Argv parsing stays in `execute`; this is the non-argv seam.
+pub fn tapAdd(allocator: std.mem.Allocator, name: []const u8) !void {
+    const argv = [_][]const u8{name};
+    return run(allocator, &argv, .add);
+}
+
 pub fn executeUntap(allocator: std.mem.Allocator, args: []const []const u8) !void {
     return run(allocator, args, .remove);
 }

@@ -385,6 +385,26 @@ fn downloadWorker(
     job.succeeded = true;
 }
 
+pub const InstallAllOpts = struct {
+    /// Treat every package as a cask; equivalent to `--cask`.
+    cask: bool = false,
+};
+
+/// Non-argv primitive used by `core/bundle/runner.zig` via its injected
+/// `Dispatcher`. Argv parsing stays in `execute`; this seam is what lets
+/// core/bundle share orchestration without importing `cli/*`.
+pub fn installAll(
+    allocator: std.mem.Allocator,
+    packages: []const []const u8,
+    opts: InstallAllOpts,
+) !void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    if (opts.cask) try argv.append(allocator, "--cask");
+    for (packages) |p| try argv.append(allocator, p);
+    return execute(allocator, argv.items);
+}
+
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "install")) return;
 
