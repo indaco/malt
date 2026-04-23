@@ -58,7 +58,8 @@ pub fn nextAcquireStep(p: AcquireProbe) AcquireStep {
 }
 
 pub const LockFile = struct {
-    fd: std.posix.fd_t,
+    /// Owned by the LockFile; touch only via `release` / `holderPid`.
+    _fd: std.posix.fd_t,
     path: []const u8,
 
     /// Acquire an exclusive advisory lock at `path`, retrying with 100 ms
@@ -129,7 +130,7 @@ pub const LockFile = struct {
         }
 
         return LockFile{
-            .fd = fd,
+            ._fd = fd,
             .path = path,
         };
     }
@@ -154,13 +155,13 @@ pub const LockFile = struct {
     /// left in place — removing it would race against other processes
     /// that may already have it open.
     pub fn release(self: *LockFile) void {
-        _ = std.c.ftruncate(self.fd, 0);
+        _ = std.c.ftruncate(self._fd, 0);
         // fsync before unlock so a crash between truncate and close can't
         // leave a stale PID in the lock file — `doctor` would otherwise
         // report a phantom holder.
-        _ = std.c.fsync(self.fd);
-        _ = std.c.flock(self.fd, std.c.LOCK.UN);
-        _ = std.c.close(self.fd);
+        _ = std.c.fsync(self._fd);
+        _ = std.c.flock(self._fd, std.c.LOCK.UN);
+        _ = std.c.close(self._fd);
     }
 
     /// Read the PID from an existing lock file.  Returns null when the file
