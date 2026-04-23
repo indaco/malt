@@ -62,7 +62,7 @@ test "cloneTree duplicates a small directory tree" {
     var dst_buf: [512]u8 = undefined;
     const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst", .{root});
 
-    try clonefile.cloneTree(src, dst);
+    try clonefile.cloneTree(testing.allocator, src, dst);
 
     // Verify the cloned top-level file exists with the same contents.
     var verify_buf: [512]u8 = undefined;
@@ -97,7 +97,7 @@ test "cloneTree fails with AlreadyExists when dst already exists" {
     // On non-APFS filesystems the fallback may overwrite gracefully, so we
     // only assert the error on APFS.
     try malt.fs_compat.makeDirAbsolute(dst);
-    const result = clonefile.cloneTree(src, dst);
+    const result = clonefile.cloneTree(testing.allocator, src, dst);
     if (clonefile.isApfs("/tmp")) {
         try testing.expectError(clonefile.CloneError.AlreadyExists, result);
     } else {
@@ -111,6 +111,7 @@ test "cloneTree errors on a missing source when the fallback path is taken" {
     // not exist. clonefile(2) will fail with ENOENT → IoError. We also
     // cover the non-APFS fallback with a missing src below.
     const result = clonefile.cloneTree(
+        testing.allocator,
         "/definitely/not/a/real/path",
         "/tmp/malt_clonefile_test_missing_dst",
     );
@@ -134,7 +135,7 @@ test "copyTreeFallback duplicates files, subdirs, and symlinks" {
     const link_path = try std.fmt.bufPrint(&link_path_buf, "{s}/link.txt", .{src});
     malt.fs_compat.cwd().symLink("hello.txt", link_path, .{}) catch {};
 
-    try clonefile.copyTreeFallback(src, dst);
+    try clonefile.copyTreeFallback(testing.allocator, src, dst);
 
     // Verify the top-level file is present.
     var check_buf: [512]u8 = undefined;
@@ -163,7 +164,7 @@ test "copyTreeFallback is idempotent when the destination already exists" {
     const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst_idem", .{root});
 
     try malt.fs_compat.makeDirAbsolute(dst);
-    try clonefile.copyTreeFallback(src, dst);
+    try clonefile.copyTreeFallback(testing.allocator, src, dst);
 
     // Verify the nested file was still copied.
     var check_buf: [512]u8 = undefined;
@@ -175,7 +176,7 @@ test "copyTreeFallback is idempotent when the destination already exists" {
 test "copyTreeFallback errors when source directory does not exist" {
     try testing.expectError(
         error.FileNotFound,
-        clonefile.copyTreeFallback("/not/a/real/source/dir", "/tmp/malt_clonefile_nowhere"),
+        clonefile.copyTreeFallback(testing.allocator, "/not/a/real/source/dir", "/tmp/malt_clonefile_nowhere"),
     );
 }
 
@@ -220,7 +221,7 @@ test "cloneTree falls back to copyTree on a non-APFS volume" {
     defer malt.fs_compat.deleteTreeAbsolute(dst) catch {};
 
     // Without the fix, OPNOTSUPP is misclassified and this returns IoError.
-    try clonefile.cloneTree(src, dst);
+    try clonefile.cloneTree(testing.allocator, src, dst);
 
     var verify_buf: [512]u8 = undefined;
     const copied = try std.fmt.bufPrint(&verify_buf, "{s}/hello.txt", .{dst});

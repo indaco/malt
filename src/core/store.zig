@@ -41,7 +41,7 @@ pub const Store = struct {
         // Check if already committed (idempotent)
         fs_compat.cwd().access(dst, .{}) catch {
             // Not exists — do the rename
-            atomic.atomicRename(src, dst) catch return StoreError.CommitFailed;
+            atomic.atomicRename(self.allocator, src, dst) catch return StoreError.CommitFailed;
             return;
         };
         // Already exists — idempotent success

@@ -140,13 +140,13 @@ fn cmdLogs(allocator: std.mem.Allocator, rest: []const []const u8) !void {
 
 fn openDb() !sqlite.Database {
     const prefix = atomic.maltPrefix();
-    var buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "{s}/db/malt.db", .{prefix}) catch
+    var db_dir_buf: [512]u8 = undefined;
+    const db_dir = std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix}) catch
         return ServicesError.DatabaseError;
-    const db_dir = std.fmt.allocPrint(std.heap.page_allocator, "{s}/db", .{prefix}) catch
-        return ServicesError.DatabaseError;
-    defer std.heap.page_allocator.free(db_dir);
     fs_compat.cwd().makePath(db_dir) catch {};
+    var path_buf: [512]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/malt.db", .{db_dir}) catch
+        return ServicesError.DatabaseError;
     return sqlite.Database.open(path);
 }
 

@@ -12,7 +12,7 @@ const schema = malt.schema;
 test "isAppRunningPub returns false for a path no pgrep match can cover" {
     // An impossible sentinel path — pgrep will not match, so isAppRunning
     // exits non-zero and the wrapper returns false.
-    try testing.expect(!cask.CaskInstaller.isAppRunningPub("/nonexistent/Sentinel-path-never-running.app"));
+    try testing.expect(!cask.CaskInstaller.isAppRunningPub(testing.allocator, "/nonexistent/Sentinel-path-never-running.app"));
 }
 
 test "CaskInstaller.uninstall on a missing token returns UninstallFailed" {

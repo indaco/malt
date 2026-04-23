@@ -168,7 +168,7 @@ fn uninstallCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Da
     // Check if running (unless --force)
     if (!force) {
         if (info.appPath()) |app_path| {
-            if (cask_mod.CaskInstaller.isAppRunningPub(app_path)) {
+            if (cask_mod.CaskInstaller.isAppRunningPub(allocator, app_path)) {
                 output.err("{s} appears to be running. Quit the app first, or use --force.", .{token});
                 return error.Aborted;
             }

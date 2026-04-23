@@ -9,6 +9,7 @@ const client_mod = @import("../net/client.zig");
 const install_cmd = @import("../cli/install.zig");
 const archive_mod = @import("../fs/archive.zig");
 const hash_mod = @import("hash.zig");
+const child_mod = @import("child.zig");
 
 pub const CaskError = error{
     ParseFailed,
@@ -342,7 +343,7 @@ pub const CaskInstaller = struct {
             const app_path = std.mem.sliceTo(p, 0);
 
             // Check if the app is running (best-effort)
-            if (isAppRunning(app_path)) return CaskError.UninstallFailed;
+            if (isAppRunning(self.allocator, app_path)) return CaskError.UninstallFailed;
 
             // Remove the app bundle
             fs_compat.deleteTreeAbsolute(app_path) catch {};
@@ -432,20 +433,12 @@ pub const CaskInstaller = struct {
             "-mountpoint", mount_point,
             dmg_path,
         };
-        var mount_child = fs_compat.Child.init(&mount_argv, std.heap.c_allocator);
-        mount_child.spawn() catch return error.InstallFailed;
-        const mount_term = mount_child.wait() catch return error.InstallFailed;
-        switch (mount_term) {
-            .exited => |code| if (code != 0) return error.InstallFailed,
-            else => return error.InstallFailed,
-        }
+        child_mod.runOrFail(self.allocator, &mount_argv) catch return error.InstallFailed;
 
-        // Ensure we unmount on any exit
+        // Ensure we unmount on any exit — best-effort, swallow detach errors.
         defer {
             const detach_argv = [_][]const u8{ "hdiutil", "detach", mount_point, "-quiet" };
-            var detach = fs_compat.Child.init(&detach_argv, std.heap.c_allocator);
-            detach.spawn() catch {};
-            _ = detach.wait() catch {};
+            child_mod.runOrFail(self.allocator, &detach_argv) catch {};
             fs_compat.deleteDirAbsolute(mount_point) catch {};
         }
 
@@ -469,13 +462,7 @@ pub const CaskInstaller = struct {
 
         // Copy .app bundle using ditto (preserves resource forks, xattrs)
         const ditto_argv = [_][]const u8{ "ditto", src_app, dst_app };
-        var ditto_child = fs_compat.Child.init(&ditto_argv, std.heap.c_allocator);
-        ditto_child.spawn() catch return error.InstallFailed;
-        const ditto_term = ditto_child.wait() catch return error.InstallFailed;
-        switch (ditto_term) {
-            .exited => |code| if (code != 0) return error.InstallFailed,
-            else => return error.InstallFailed,
-        }
+        child_mod.runOrFail(self.allocator, &ditto_argv) catch return error.InstallFailed;
 
         return dst_app;
     }
@@ -493,13 +480,7 @@ pub const CaskInstaller = struct {
 
         // Extract with ditto -xk (handles macOS-specific ZIP features)
         const ditto_argv = [_][]const u8{ "ditto", "-xk", zip_path, extract_dir };
-        var ditto_child = fs_compat.Child.init(&ditto_argv, std.heap.c_allocator);
-        ditto_child.spawn() catch return error.InstallFailed;
-        const ditto_term = ditto_child.wait() catch return error.InstallFailed;
-        switch (ditto_term) {
-            .exited => |code| if (code != 0) return error.InstallFailed,
-            else => return error.InstallFailed,
-        }
+        child_mod.runOrFail(self.allocator, &ditto_argv) catch return error.InstallFailed;
 
         // Find the .app. app_name_buf owns the fallback past iterator teardown.
         var app_name_buf: [256]u8 = undefined;
@@ -519,13 +500,7 @@ pub const CaskInstaller = struct {
 
         // Move .app to /Applications
         const mv_argv = [_][]const u8{ "ditto", src_app, dst_app };
-        var mv_child = fs_compat.Child.init(&mv_argv, std.heap.c_allocator);
-        mv_child.spawn() catch return error.InstallFailed;
-        const mv_term = mv_child.wait() catch return error.InstallFailed;
-        switch (mv_term) {
-            .exited => |code| if (code != 0) return error.InstallFailed,
-            else => return error.InstallFailed,
-        }
+        child_mod.runOrFail(self.allocator, &mv_argv) catch return error.InstallFailed;
 
         return dst_app;
     }
@@ -577,13 +552,7 @@ pub const CaskInstaller = struct {
 
         fs_compat.deleteTreeAbsolute(dst_app) catch {};
         const mv_argv = [_][]const u8{ "ditto", src_app, dst_app };
-        var mv_child = fs_compat.Child.init(&mv_argv, std.heap.c_allocator);
-        mv_child.spawn() catch return error.InstallFailed;
-        const mv_term = mv_child.wait() catch return error.InstallFailed;
-        switch (mv_term) {
-            .exited => |code| if (code != 0) return error.InstallFailed,
-            else => return error.InstallFailed,
-        }
+        child_mod.runOrFail(self.allocator, &mv_argv) catch return error.InstallFailed;
         return dst_app;
     }
 
@@ -649,20 +618,14 @@ pub const CaskInstaller = struct {
     fn installPkg(self: *CaskInstaller, pkg_path: []const u8) ![]const u8 {
         // PKG installs require sudo — the caller must confirm
         const argv = [_][]const u8{ "sudo", "installer", "-pkg", pkg_path, "-target", "/" };
-        var child = fs_compat.Child.init(&argv, std.heap.c_allocator);
-        child.spawn() catch return error.InstallFailed;
-        const term = child.wait() catch return error.InstallFailed;
-        switch (term) {
-            .exited => |code| if (code != 0) return error.InstallFailed,
-            else => return error.InstallFailed,
-        }
+        child_mod.runOrFail(self.allocator, &argv) catch return error.InstallFailed;
         // PKG installs don't have a single app path — record the pkg location
         return std.fmt.allocPrint(self.allocator, "{s}", .{pkg_path}) catch return error.OutOfMemory;
     }
 
     /// Public wrapper for isAppRunning (used by uninstall.zig).
-    pub fn isAppRunningPub(app_path: []const u8) bool {
-        return isAppRunning(app_path);
+    pub fn isAppRunningPub(allocator: std.mem.Allocator, app_path: []const u8) bool {
+        return isAppRunning(allocator, app_path);
     }
 
     fn recordCaskroom(self: *CaskInstaller, cask: *const Cask) !void {
@@ -739,14 +702,14 @@ pub fn verifyFileSha256(file_path: []const u8, expected: ?[]const u8) !void {
 }
 
 /// Check if an application is currently running by its path.
-fn isAppRunning(app_path: []const u8) bool {
+fn isAppRunning(allocator: std.mem.Allocator, app_path: []const u8) bool {
     const argv = [_][]const u8{ "pgrep", "-f", app_path };
-    var child = fs_compat.Child.init(&argv, std.heap.c_allocator);
+    var child = fs_compat.Child.init(&argv, allocator);
     child.spawn() catch return false;
     const term = child.wait() catch return false;
     return switch (term) {
         .exited => |code| code == 0, // pgrep exits 0 if match found
-        else => false,
+        .signal, .stopped, .unknown => false,
     };
 }
 
