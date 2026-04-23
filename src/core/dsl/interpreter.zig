@@ -98,8 +98,9 @@ pub const ExecContext = struct {
     /// All formula path bindings, indexed by `PathBinding`.
     paths: std.EnumArray(PathBinding, []const u8),
 
-    // Local variable scope (stack for nested blocks)
-    scopes: std.ArrayList(Scope),
+    /// Local-variable scope stack for nested blocks. Mutated by
+    /// `pushScope`/`popScope`/`setLocal`; do not touch from builtins.
+    _scopes: std.ArrayList(Scope),
 
     // Sandbox root for path validation
     sandbox_root: []const u8,
@@ -150,7 +151,7 @@ pub const ExecContext = struct {
             .cellar_path = cellar_path,
             .malt_prefix = malt_prefix,
             .paths = paths,
-            .scopes = .empty,
+            ._scopes = .empty,
             .sandbox_root = malt_prefix,
             .fallback_log_writer = flog,
             .formula_name = formula.name,
@@ -170,10 +171,10 @@ pub const ExecContext = struct {
         // Check local scopes (innermost first). Stop at the first
         // is_method_frame scope so a def doesn't leak through caller
         // locals (Ruby lexical-scope behaviour for `def`).
-        var i = self.scopes.items.len;
+        var i = self._scopes.items.len;
         while (i > 0) {
             i -= 1;
-            const scope = &self.scopes.items[i];
+            const scope = &self._scopes.items[i];
             if (scope.locals.get(name)) |val| {
                 return val;
             }
@@ -190,11 +191,11 @@ pub const ExecContext = struct {
     // matching popScope tearing down the caller's scope, so outer locals
     // vanish and subsequent lookups return stale/nil under memory pressure.
     pub fn pushScope(self: *ExecContext) DslError!void {
-        self.scopes.append(self.arena, Scope.init(self.arena)) catch return DslError.OutOfMemory;
+        self._scopes.append(self.arena, Scope.init(self.arena)) catch return DslError.OutOfMemory;
     }
 
     pub fn pushMethodScope(self: *ExecContext) DslError!void {
-        self.scopes.append(self.arena, .{
+        self._scopes.append(self.arena, .{
             .locals = std.StringHashMap(Value).init(self.arena),
             .is_method_frame = true,
         }) catch return DslError.OutOfMemory;
@@ -202,12 +203,17 @@ pub const ExecContext = struct {
 
     pub fn popScope(self: *ExecContext) void {
         // Arena owns the scope's locals — dropping the stack slot is enough.
-        _ = self.scopes.pop();
+        _ = self._scopes.pop();
     }
 
     pub fn setLocal(self: *ExecContext, name: []const u8, value: Value) DslError!void {
-        if (self.scopes.items.len == 0) return;
-        self.scopes.items[self.scopes.items.len - 1].locals.put(name, value) catch return DslError.OutOfMemory;
+        if (self._scopes.items.len == 0) return;
+        self._scopes.items[self._scopes.items.len - 1].locals.put(name, value) catch return DslError.OutOfMemory;
+    }
+
+    /// Current scope-stack depth. Tests use this to pin push/pop invariants.
+    pub fn scopeDepth(self: *const ExecContext) usize {
+        return self._scopes.items.len;
     }
 };
 
@@ -1098,7 +1104,7 @@ pub fn executePostInstall(
         // Surface accumulated parse diagnostics through the fallback log
         // so the CLI can print them with file:line context. Without this
         // the diagnostics ArrayList was filled and then dropped on return.
-        for (parser.diagnostics.items) |d| {
+        for (parser.diagnostics()) |d| {
             flog.log(.{
                 .formula = formula.name,
                 .reason = .parse_error,

@@ -24,6 +24,20 @@ fn parseSource(arena: *std.heap.ArenaAllocator, src: []const u8) ![]const *const
     return p.parseBlock();
 }
 
+// Accessor pins the read-only diagnostics surface: callers borrow a slice,
+// never mutate the backing list.
+test "parser: diagnostics() accessor returns accumulated entries" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var lex = Lexer.init(")");
+    var p = Parser.init(arena.allocator(), &lex);
+    _ = p.parseBlock() catch {};
+
+    const diags = p.diagnostics();
+    try testing.expect(diags.len >= 1);
+}
+
 // ---------------------------------------------------------------------------
 // Simple method calls
 // ---------------------------------------------------------------------------
