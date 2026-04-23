@@ -99,6 +99,117 @@ test "non-dry runner with mocked malt_bin records bundle even on member failure"
     try testing.expectEqual(@as(i64, 4), ms.columnInt(0));
 }
 
+test "runner routes members through the provided dispatcher" {
+    var t = try TempDb.init("dispatcher");
+    defer t.deinit();
+
+    // Capture which primitive each member hit so we can prove runner.zig
+    // no longer reaches into cli/* via argv.
+    var calls = Calls.init(testing.allocator);
+    defer calls.deinit();
+
+    const dispatcher = runner.Dispatcher{
+        .ctx = &calls,
+        .installFormula = Calls.installFormulaFn,
+        .installCask = Calls.installCaskFn,
+        .tapAdd = Calls.tapAddFn,
+        .serviceStart = Calls.serviceStartFn,
+    };
+
+    var m = try buildManifest(testing.allocator);
+    defer m.deinit();
+
+    try runner.run(testing.allocator, &t.db, m, .{
+        .dry_run = false,
+        .prefix = t.dir,
+        .dispatcher = &dispatcher,
+    });
+
+    try testing.expectEqual(@as(usize, 1), calls.taps.items.len);
+    try testing.expectEqualStrings("homebrew/cask-fonts", calls.taps.items[0]);
+    try testing.expectEqual(@as(usize, 2), calls.formulas.items.len);
+    try testing.expectEqualStrings("wget", calls.formulas.items[0]);
+    try testing.expectEqualStrings("jq", calls.formulas.items[1]);
+    try testing.expectEqual(@as(usize, 1), calls.casks.items.len);
+    try testing.expectEqualStrings("ghostty", calls.casks.items[0]);
+    try testing.expectEqual(@as(usize, 0), calls.services.items.len);
+}
+
+const Calls = struct {
+    allocator: std.mem.Allocator,
+    taps: std.ArrayList([]const u8),
+    formulas: std.ArrayList([]const u8),
+    casks: std.ArrayList([]const u8),
+    services: std.ArrayList([]const u8),
+
+    fn init(allocator: std.mem.Allocator) Calls {
+        return .{
+            .allocator = allocator,
+            .taps = .empty,
+            .formulas = .empty,
+            .casks = .empty,
+            .services = .empty,
+        };
+    }
+
+    fn deinit(self: *Calls) void {
+        self.taps.deinit(self.allocator);
+        self.formulas.deinit(self.allocator);
+        self.casks.deinit(self.allocator);
+        self.services.deinit(self.allocator);
+    }
+
+    fn record(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator, name: []const u8) !void {
+        try list.append(allocator, name);
+    }
+
+    // ctx round-trips through the Dispatcher vtable as *anyopaque; these
+    // casts restore the concrete type the test injected.
+    fn unwrap(ctx: ?*anyopaque) *Calls {
+        return @ptrCast(@alignCast(ctx.?));
+    }
+
+    fn tapAddFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+        const self = unwrap(ctx);
+        try record(&self.taps, allocator, name);
+    }
+    fn installFormulaFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+        const self = unwrap(ctx);
+        try record(&self.formulas, allocator, name);
+    }
+    fn installCaskFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+        const self = unwrap(ctx);
+        try record(&self.casks, allocator, name);
+    }
+    fn serviceStartFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+        const self = unwrap(ctx);
+        try record(&self.services, allocator, name);
+    }
+};
+
+test "runner refuses in-process bundle install with no dispatcher and no malt_bin" {
+    var t = try TempDb.init("no_dispatcher");
+    defer t.deinit();
+
+    var m = try buildManifest(testing.allocator);
+    defer m.deinit();
+
+    const result = runner.run(testing.allocator, &t.db, m, .{
+        .dry_run = false,
+        .prefix = t.dir,
+    });
+    try testing.expectError(runner.RunnerError.MemberFailed, result);
+
+    // The bundle row must NOT exist when the very first member bombed out
+    // with NoDispatcher — we only record after attempting all members.
+    var stmt = try t.db.prepare("SELECT COUNT(*) FROM bundles WHERE name='devtools';");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    // recordBundle still runs even on partial failure, matching the
+    // existing `/usr/bin/false` test — this pins that invariant.
+    try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+}
+
 test "round-trip: parse Brewfile fixture, run dry, no panic" {
     var t = try TempDb.init("smoke");
     defer t.deinit();

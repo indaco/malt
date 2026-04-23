@@ -1,15 +1,16 @@
 //! malt — bundle runner
 //!
-//! Installs every member of a `Manifest` by calling the matching command
-//! module's `execute` function in-process. Each underlying primitive
-//! (`install`, `tap`, `services start`) is already idempotent, so running a
-//! bundle twice is a no-op for already-installed members. Avoiding a
-//! subprocess per member keeps SQLite warm and removes per-fork output noise.
+//! Installs every member of a `Manifest` by routing each item through a
+//! caller-supplied `Dispatcher` (in-process) or a fallback `malt` subprocess
+//! (when `Options.malt_bin` is set — tests use that to assert exit-code
+//! propagation via `/usr/bin/false`). In-process is the production default:
+//! it keeps SQLite warm and avoids per-fork output noise. The runner itself
+//! depends on no `cli/*` module, so bundle tests link without dragging in
+//! the whole CLI surface.
 //!
-//! `Options.malt_bin` is honoured only by the legacy subprocess fallback,
-//! which the test suite still uses when it wants to assert exit-code
-//! propagation against a fake binary like `/usr/bin/false`. Production
-//! callers leave it null.
+//! Each underlying primitive (install, tap, services start) is already
+//! idempotent, so running a bundle twice is a no-op for already-installed
+//! members.
 
 const std = @import("std");
 const fs_compat = @import("../../fs/compat.zig");
@@ -20,9 +21,6 @@ const lock_mod = @import("../../db/lock.zig");
 const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
 const manifest_mod = @import("manifest.zig");
-const install_cmd = @import("../../cli/install.zig");
-const tap_cmd = @import("../../cli/tap.zig");
-const services_cmd = @import("../../cli/services.zig");
 
 pub const RunnerError = error{
     MemberFailed,
@@ -30,6 +28,10 @@ pub const RunnerError = error{
     LockFailed,
     IoFailed,
     OutOfMemory,
+    /// Production builds need a `Dispatcher` wired from the CLI layer;
+    /// absence means the caller forgot to provide one and we refuse to
+    /// silently do nothing.
+    NoDispatcher,
 };
 
 pub fn describeError(err: RunnerError) []const u8 {
@@ -39,19 +41,37 @@ pub fn describeError(err: RunnerError) []const u8 {
         RunnerError.LockFailed => "could not acquire bundle lock",
         RunnerError.IoFailed => "filesystem error during bundle install",
         RunnerError.OutOfMemory => "out of memory during bundle install",
+        RunnerError.NoDispatcher => "bundle runner called without a dispatcher and without malt_bin",
     };
 }
+
+/// Layering seam: the CLI wires up a concrete implementation that forwards
+/// to `cli/install`, `cli/tap`, `cli/services`. Keeping this as an injected
+/// interface is what lets `core/bundle/runner.zig` avoid a `cli/*` import.
+pub const Dispatcher = struct {
+    ctx: ?*anyopaque = null,
+    installFormula: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void,
+    installCask: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void,
+    tapAdd: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void,
+    serviceStart: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void,
+};
 
 pub const Options = struct {
     /// When true, report what would be installed without forking subprocesses.
     dry_run: bool = false,
-    /// Override the binary used for member installs. When null, `malt` from
-    /// $PATH is used.
+    /// Override the binary used for member installs. When set, each member
+    /// is run via subprocess — test suites use this to substitute
+    /// `/usr/bin/false` and assert exit-code propagation. Production
+    /// callers leave it null and provide a `dispatcher` instead.
     malt_bin: ?[]const u8 = null,
     /// Override the install prefix used for the bundle lockfile. Tests use
     /// this to keep the lock under their per-test temp directory; production
     /// callers leave it null (which falls back to `MALT_PREFIX`).
     prefix: ?[]const u8 = null,
+    /// In-process dispatcher injected from the CLI layer. Null is legal
+    /// for `dry_run` and subprocess (`malt_bin`) paths; otherwise the
+    /// runner returns `RunnerError.NoDispatcher`.
+    dispatcher: ?*const Dispatcher = null,
 };
 
 pub fn run(
@@ -143,11 +163,12 @@ fn callMember(allocator: std.mem.Allocator, call: MemberCall, opts: Options) !vo
     // tests can substitute /usr/bin/false to assert exit-code propagation.
     if (opts.malt_bin) |bin| return runSubprocess(allocator, bin, call);
 
+    const d = opts.dispatcher orelse return RunnerError.NoDispatcher;
     switch (call) {
-        .tap => |n| try tap_cmd.execute(allocator, &.{n}),
-        .formula => |n| try install_cmd.execute(allocator, &.{n}),
-        .cask => |n| try install_cmd.execute(allocator, &.{ "--cask", n }),
-        .service_start => |n| try services_cmd.execute(allocator, &.{ "start", n }),
+        .tap => |n| try d.tapAdd(d.ctx, allocator, n),
+        .formula => |n| try d.installFormula(d.ctx, allocator, n),
+        .cask => |n| try d.installCask(d.ctx, allocator, n),
+        .service_start => |n| try d.serviceStart(d.ctx, allocator, n),
     }
 }
 

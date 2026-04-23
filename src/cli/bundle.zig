@@ -11,6 +11,39 @@ const manifest_mod = @import("../core/bundle/manifest.zig");
 const brewfile_mod = @import("../core/bundle/brewfile.zig");
 const brewfile_emit = @import("../core/bundle/brewfile_emit.zig");
 const runner_mod = @import("../core/bundle/runner.zig");
+const install_cmd = @import("install.zig");
+const tap_cmd = @import("tap.zig");
+const services_cmd = @import("services.zig");
+
+// Default in-process dispatcher: the CLI layer supplies this so the
+// runner can stay ignorant of cli/* while still calling into the real
+// install/tap/services primitives.
+fn cliInstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+    _ = ctx;
+    return install_cmd.installAll(allocator, &.{name}, .{});
+}
+
+fn cliInstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+    _ = ctx;
+    return install_cmd.installAll(allocator, &.{name}, .{ .cask = true });
+}
+
+fn cliTapAdd(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+    _ = ctx;
+    return tap_cmd.tapAdd(allocator, name);
+}
+
+fn cliServiceStart(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+    _ = ctx;
+    return services_cmd.servicesStart(allocator, name);
+}
+
+const default_dispatcher = runner_mod.Dispatcher{
+    .installFormula = cliInstallFormula,
+    .installCask = cliInstallCask,
+    .tapAdd = cliTapAdd,
+    .serviceStart = cliServiceStart,
+};
 
 pub const BundleError = error{
     InvalidArgs,
@@ -81,7 +114,10 @@ fn cmdInstall(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     defer db.close();
     schema.initSchema(&db) catch {};
 
-    runner_mod.run(allocator, &db, manifest, .{ .dry_run = dry_run }) catch |e| {
+    runner_mod.run(allocator, &db, manifest, .{
+        .dry_run = dry_run,
+        .dispatcher = &default_dispatcher,
+    }) catch |e| {
         output.err("bundle install failed: {s}", .{@errorName(e)});
         return BundleError.RunnerFailed;
     };
