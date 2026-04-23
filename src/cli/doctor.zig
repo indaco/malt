@@ -12,7 +12,6 @@ const clonefile = @import("../fs/clonefile.zig");
 const output = @import("../ui/output.zig");
 const color = @import("../ui/color.zig");
 const help = @import("help.zig");
-const install_mod = @import("install.zig");
 const parser = @import("../macho/parser.zig");
 const patch = @import("../core/patch.zig");
 const perms_mod = @import("../core/perms.zig");
