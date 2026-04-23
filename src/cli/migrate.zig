@@ -572,7 +572,7 @@ fn emitSummaryJson(
 
 /// Dry-run JSON `{dry_run, brew_prefix, kegs, count, time_ms}`; `pub` for direct test assertions.
 pub fn buildDryRunJson(
-    w: anytype,
+    w: *std.Io.Writer,
     brew_prefix: []const u8,
     keg_names: []const []const u8,
     dry_run: bool,
@@ -593,7 +593,7 @@ pub fn buildDryRunJson(
 
 /// Final-summary JSON: per-category arrays + counts + time_ms; `pub` for direct test assertions.
 pub fn buildSummaryJson(
-    w: anytype,
+    w: *std.Io.Writer,
     brew_prefix: []const u8,
     migrated_names: []const []const u8,
     skipped_installed_names: []const []const u8,

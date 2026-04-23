@@ -236,14 +236,12 @@ fn writeApiCaskJson(
 
 // --- pure encoders (testable) -----------------------------------------------
 //
-// The four `encode*` fns below are the isolated pieces that turn a
-// parsed `Formula` / `Cask` into bytes. They take any writer target
-// — `std.fs.File` in the CLI, `ArrayList` in tests — so the emission
-// shape (install hint wording, JSON keys, line order) can be asserted
-// without touching the filesystem.
+// The `encode*` fns below turn a parsed `Formula` / `Cask` into bytes.
+// Tests drive them with a buffered `std.Io.Writer.Allocating` so the
+// emission shape can be asserted without touching the filesystem.
 
 pub fn encodeApiFormulaHuman(
-    w: anytype,
+    w: *std.Io.Writer,
     scratch: []u8,
     f: *const formula_mod.Formula,
     quiet: bool,
@@ -267,7 +265,7 @@ pub fn encodeApiFormulaHuman(
 }
 
 pub fn encodeApiCaskHuman(
-    w: anytype,
+    w: *std.Io.Writer,
     scratch: []u8,
     c: *const cask_mod.Cask,
     quiet: bool,
@@ -287,7 +285,7 @@ pub fn encodeApiCaskHuman(
 /// (e.g. "stable" for formulas) and optional plain `suffix` (e.g.
 /// "(cask)"). Emits the header line terminator itself.
 fn encodeHeader(
-    w: anytype,
+    w: *std.Io.Writer,
     colorize: bool,
     name: []const u8,
     middle: []const u8,
@@ -312,7 +310,7 @@ fn encodeHeader(
     try w.writeAll("\n");
 }
 
-pub fn encodeApiFormulaJson(w: anytype, f: *const formula_mod.Formula) !void {
+pub fn encodeApiFormulaJson(w: *std.Io.Writer, f: *const formula_mod.Formula) !void {
     try w.writeAll("{\"name\":");
     try output.jsonStr(w, f.name);
     try w.writeAll(",\"type\":\"formula\",\"installed\":false,\"version\":");
@@ -331,7 +329,7 @@ pub fn encodeApiFormulaJson(w: anytype, f: *const formula_mod.Formula) !void {
     try w.writeAll("]}\n");
 }
 
-pub fn encodeApiCaskJson(w: anytype, c: *const cask_mod.Cask) !void {
+pub fn encodeApiCaskJson(w: *std.Io.Writer, c: *const cask_mod.Cask) !void {
     try w.writeAll("{\"name\":");
     try output.jsonStr(w, c.token);
     try w.writeAll(",\"type\":\"cask\",\"installed\":false,\"version\":");
@@ -355,7 +353,7 @@ pub fn encodeApiCaskJson(w: anytype, c: *const cask_mod.Cask) !void {
 /// `mt` are surfaced so readers of this line learn the alias exists
 /// without having to consult --help.
 pub fn encodeInstallHint(
-    w: anytype,
+    w: *std.Io.Writer,
     scratch: []u8,
     name: []const u8,
     quiet: bool,
@@ -382,7 +380,7 @@ pub fn encodeInstallHint(
 /// Same safety profile as the existing `bufPrint` + `writeAll`
 /// pattern used elsewhere in this file — avoids duplicating the
 /// 4 KiB stack buffer at every call site.
-fn writeLine(w: anytype, scratch: []u8, comptime fmt: []const u8, args: anytype) !void {
+fn writeLine(w: *std.Io.Writer, scratch: []u8, comptime fmt: []const u8, args: anytype) !void {
     const line = std.fmt.bufPrint(scratch, fmt, args) catch return;
     try w.writeAll(line);
 }

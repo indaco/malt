@@ -41,7 +41,7 @@ fn statusCode(status: CheckStatus) []const u8 {
 /// Render one check row. Pure (no stderr / global state), so tests
 /// can drive it against a buffer writer and assert on the bytes.
 pub fn renderCheckRow(
-    writer: anytype,
+    writer: *std.Io.Writer,
     status: CheckStatus,
     name: []const u8,
     detail: ?[]const u8,
@@ -77,19 +77,13 @@ pub fn renderCheckRow(
 pub fn printCheck(name: []const u8, status: CheckStatus, detail: ?[]const u8) void {
     if (output.isQuiet()) return;
     const f = fs_compat.stderrFile();
-    var w = FileWriter{ .file = f };
-    renderCheckRow(&w, status, name, detail, .{
+    var write_buf: [1024]u8 = undefined;
+    var file_writer = f.writer(&write_buf);
+    const w = &file_writer.interface;
+    // Best-effort stderr row: an I/O failure here is unrecoverable diagnostics.
+    renderCheckRow(w, status, name, detail, .{
         .color = color.isColorEnabled(),
         .emoji = color.isEmojiEnabled(),
     }) catch {};
+    w.flush() catch {};
 }
-
-/// Thin writer shim so renderCheckRow can call `writer.writeAll`
-/// against `fs_compat.File`. We only need `writeAll`; nothing else.
-const FileWriter = struct {
-    file: fs_compat.File,
-
-    pub fn writeAll(self: *FileWriter, bytes: []const u8) !void {
-        return self.file.writeAll(bytes);
-    }
-};

@@ -174,7 +174,7 @@ pub fn writeJson(
 /// Pure encoder: emits `{"formula":"<target>","uses":["a","b"]}\n`.
 /// Exposed for tests so the output shape can be asserted without a
 /// live file descriptor.
-pub fn encodeJson(w: anytype, target: []const u8, dependents: [][]const u8) !void {
+pub fn encodeJson(w: *std.Io.Writer, target: []const u8, dependents: [][]const u8) !void {
     try w.writeAll("{\"formula\":");
     try output.jsonStr(w, target);
     try w.writeAll(",\"uses\":[");

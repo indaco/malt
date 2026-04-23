@@ -213,7 +213,7 @@ fn emitJson(
     try stdout.writeAll("}\n");
 }
 
-fn writeJson(w: anytype, field: []const u8, r: KindResults, query: []const u8) !void {
+fn writeJson(w: *std.Io.Writer, field: []const u8, r: KindResults, query: []const u8) !void {
     var first = true;
     if (r.exact) {
         try writeJsonObj(w, field, query);
@@ -227,7 +227,7 @@ fn writeJson(w: anytype, field: []const u8, r: KindResults, query: []const u8) !
     }
 }
 
-fn writeJsonObj(w: anytype, field: []const u8, value: []const u8) !void {
+fn writeJsonObj(w: *std.Io.Writer, field: []const u8, value: []const u8) !void {
     try w.writeAll("{\"");
     try w.writeAll(field);
     try w.writeAll("\":");

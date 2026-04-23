@@ -3,7 +3,7 @@
 const std = @import("std");
 const manifest_mod = @import("manifest.zig");
 
-pub fn emit(manifest: manifest_mod.Manifest, writer: anytype) !void {
+pub fn emit(manifest: manifest_mod.Manifest, writer: *std.Io.Writer) !void {
     for (manifest.taps) |t| {
         try writer.print("tap \"{s}\"\n", .{t});
     }

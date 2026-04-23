@@ -158,7 +158,7 @@ pub fn parseJson(parent: std.mem.Allocator, json_text: []const u8) ManifestError
     return manifest;
 }
 
-pub fn emitJson(manifest: Manifest, writer: anytype) !void {
+pub fn emitJson(manifest: Manifest, writer: *std.Io.Writer) !void {
     try writer.writeAll("{\n");
     try writer.print("  \"name\": \"{s}\",\n", .{manifest.name});
     try writer.print("  \"version\": {d}", .{manifest.version});
