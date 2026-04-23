@@ -287,6 +287,50 @@ test "round-trip: parse Brewfile fixture, run dry, no panic" {
     defer report.deinit();
 }
 
+test "bundle install honors the global --dry-run flag set by main.zig" {
+    // Repro for T-034a: main.zig consumes `--dry-run` before it reaches
+    // `cmdInstall`, so the local arm never fires and the runner ran with
+    // `dry_run = false`. Pin the contract: when `output.isDryRun()` is true,
+    // the runner must skip `recordBundle`, leaving the `bundles` table empty.
+    const dir_z: [:0]const u8 = "/tmp/malt_bundle_dry_run_cli_wire";
+    malt.fs_compat.deleteTreeAbsolute(dir_z) catch {};
+    try malt.fs_compat.cwd().makePath(dir_z);
+    defer malt.fs_compat.deleteTreeAbsolute(dir_z) catch {};
+
+    _ = c.setenv("MALT_PREFIX", dir_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Empty-but-valid Brewfile: parser yields an empty manifest, so the
+    // dispatcher is never called and the only observable side-effect is
+    // the `recordBundle` insert — which dry-run must suppress.
+    const bf_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{dir_z});
+    defer testing.allocator.free(bf_path);
+    {
+        const f = try malt.fs_compat.cwd().createFile(bf_path, .{});
+        defer f.close();
+        try f.writeAll("# empty\n");
+    }
+
+    malt.output.setDryRun(true);
+    defer malt.output.setDryRun(false);
+
+    try malt.cli_bundle.execute(testing.allocator, &.{ "install", bf_path });
+
+    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{dir_z});
+    defer testing.allocator.free(db_path);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT COUNT(*) FROM bundles;");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
+}
+
+const c = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+};
+
 test "real-world Brewfile shapes parse without error" {
     // Regression canary: shapes pulled from popular public dotfiles repos.
     // We assert parse + dry-run succeed; we do not assert specific counts so

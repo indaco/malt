@@ -89,14 +89,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn cmdInstall(allocator: std.mem.Allocator, rest: []const []const u8) !void {
-    var dry_run = false;
+    // main.zig strips the global `--dry-run` from argv; reading the
+    // module-global here keeps bundle install aligned with every other
+    // subcommand (install, upgrade, purge, …) and with its envelope.
+    const dry_run = output.isDryRun();
     var explicit_path: ?[]const u8 = null;
-    var i: usize = 0;
-    while (i < rest.len) : (i += 1) {
-        const a = rest[i];
-        if (std.mem.eql(u8, a, "--dry-run")) {
-            dry_run = true;
-        } else if (std.mem.startsWith(u8, a, "-")) {
+    for (rest) |a| {
+        if (std.mem.startsWith(u8, a, "-")) {
             output.warn("ignored flag: {s}", .{a});
         } else {
             explicit_path = a;
