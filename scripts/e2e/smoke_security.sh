@@ -178,11 +178,11 @@ fi
 
 # The pinned commit constant should be a 40-char lowercase hex SHA.
 PINS_ZIG="$ROOT/src/core/pins.zig"
-sha=$(grep -E 'HOMEBREW_CORE_COMMIT_SHA.*=.*"' "$PINS_ZIG" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+sha=$(grep -E 'homebrew_core_commit_sha.*=.*"' "$PINS_ZIG" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 if [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
   manual_pass s2.pins.commit-sha "pinned commit: $sha"
 else
-  manual_fail s2.pins.commit-sha "HOMEBREW_CORE_COMMIT_SHA is not 40-char hex: '$sha'"
+  manual_fail s2.pins.commit-sha "homebrew_core_commit_sha is not 40-char hex: '$sha'"
 fi
 
 # ── Tier 3 — install.sh fail-closed regression harness ────────────────

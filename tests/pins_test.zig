@@ -9,10 +9,12 @@ const std = @import("std");
 const testing = std.testing;
 const pins = @import("malt").pins;
 
-test "HOMEBREW_CORE_COMMIT_SHA is a 40-char lowercase hex digest" {
-    const sha = pins.HOMEBREW_CORE_COMMIT_SHA;
-    try testing.expectEqual(@as(usize, 40), sha.len);
-    for (sha) |c| switch (c) {
+test "homebrew_core_commit_sha is a [40]u8 lowercase hex digest" {
+    // Fixed-array typing: the length is a property of the type, not a
+    // runtime field. Asserting the type itself catches accidental
+    // regressions to `[]const u8`.
+    comptime std.debug.assert(@TypeOf(pins.homebrew_core_commit_sha) == [40]u8);
+    for (pins.homebrew_core_commit_sha) |c| switch (c) {
         '0'...'9', 'a'...'f' => {},
         else => return error.TestUnexpectedResult,
     };

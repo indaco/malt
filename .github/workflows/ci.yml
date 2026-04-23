@@ -100,7 +100,7 @@ jobs:
 
       - name: Regenerate against committed pin
         run: |
-          PINNED=$(grep -E 'HOMEBREW_CORE_COMMIT_SHA.*=.*"' src/core/pins.zig \
+          PINNED=$(grep -E 'homebrew_core_commit_sha.*=.*"' src/core/pins.zig \
             | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           echo "committed pin: $PINNED"
           ./scripts/gen-pins.sh "$PINNED"
