@@ -37,6 +37,7 @@ pub const DownloadJob = download_mod.DownloadJob;
 pub const MAX_COLLECT_FETCH_WORKERS = download_mod.MAX_COLLECT_FETCH_WORKERS;
 pub const collectFetchWorkerCount = download_mod.collectFetchWorkerCount;
 pub const collectFormulaJobs = download_mod.collectFormulaJobs;
+pub const InstallJobDeps = download_mod.InstallJobDeps;
 pub const findFailedDep = download_mod.findFailedDep;
 const progressBridge = download_mod.progressBridge;
 const downloadWorker = download_mod.downloadWorker;
@@ -342,7 +343,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
 
             // Collect jobs for this formula + its deps
-            collectFormulaJobs(allocator, pkg_name, formula_json, &api, &http_pool, &db, &store, force, &all_jobs) catch |e| {
+            collectFormulaJobs(.{
+                .allocator = allocator,
+                .api = &api,
+                .http_pool = &http_pool,
+                .db = &db,
+                .store = &store,
+            }, pkg_name, formula_json, force, &all_jobs) catch |e| {
                 output.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
                 continue;
             };
