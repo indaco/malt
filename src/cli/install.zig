@@ -8,7 +8,6 @@ const cask_mod = @import("../core/cask.zig");
 const cellar_mod = @import("../core/cellar.zig");
 const formula_mod = @import("../core/formula.zig");
 const linker_mod = @import("../core/linker.zig");
-const ruby_sub = @import("../core/ruby_subprocess.zig");
 const plist_mod = @import("../core/services/plist.zig");
 const supervisor_mod = @import("../core/services/supervisor.zig");
 const store_mod = @import("../core/store.zig");
@@ -62,7 +61,7 @@ pub const PostInstallStatus = post_install_mod.PostInstallStatus;
 pub const routePostInstallOutcome = post_install_mod.routePostInstallOutcome;
 pub const DslPostInstallOutcome = post_install_mod.DslPostInstallOutcome;
 pub const executeDslPostInstall = post_install_mod.executeDslPostInstall;
-const useSystemRubyForFormula = post_install_mod.useSystemRubyForFormula;
+pub const drive = post_install_mod.drive;
 const record_mod = @import("install/record.zig");
 pub const InstallError = record_mod.InstallError;
 pub const localErrorIsAnnounced = record_mod.localErrorIsAnnounced;
@@ -609,42 +608,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             continue;
         };
 
-        // Execute post_install: try DSL interpreter first, fall back to
-        // system Ruby subprocess when --use-system-ruby is set.
-        if (job.post_install_defined) post_install: {
-            // Locate a DSL source: local tap first, GitHub fetch second.
-            const dsl_src: ?[]const u8 = blk: {
-                const tap_path = ruby_sub.findHomebrewCoreTap();
-                var rb_buf: [1024]u8 = undefined;
-                const rb_path = if (tap_path) |tp|
-                    ruby_sub.resolveFormulaRbPath(&rb_buf, tp, job.name)
-                else
-                    null;
-                if (rb_path) |sp| {
-                    if (ruby_sub.extractPostInstallBody(allocator, sp)) |s| break :blk s;
-                }
-                break :blk ruby_sub.fetchPostInstallFromGitHub(allocator, job.name);
-            };
-
-            if (dsl_src) |src| {
-                defer allocator.free(src);
-                switch (executeDslPostInstall(allocator, job, src, prefix, use_system_ruby_list)) {
-                    .handled => break :post_install,
-                    // parse_failed leaves the DSL path unusable — fall through
-                    // so the system-Ruby fallback still has a chance to run.
-                    .parse_failed => {},
-                }
-            }
-
-            // No usable DSL source — fall back to subprocess or skip.
-            if (useSystemRubyForFormula(use_system_ruby_list, job.name)) {
-                output.warn("Running post_install for {s} via system Ruby...", .{job.name});
-                ruby_sub.runPostInstall(allocator, job.name, job.version_str, prefix) catch |e| {
-                    output.warn("post_install failed for {s}: {s}", .{ job.name, @errorName(e) });
-                };
-            } else {
-                output.warn("{s}: post_install skipped (use --use-system-ruby={s} or brew install {s})", .{ job.name, job.name, job.name });
-            }
+        if (job.post_install_defined) {
+            drive(allocator, job.name, job.version_str, job.formula_json, prefix, use_system_ruby_list);
         }
     }
 

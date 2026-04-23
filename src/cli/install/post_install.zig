@@ -1,6 +1,8 @@
 //! Post-install routing for formulas that declare a Ruby hook.
 //! Prefers the native DSL interpreter and, when a per-formula scope
-//! opts in, falls back to a sandboxed `ruby` subprocess.
+//! opts in, falls back to a sandboxed `ruby` subprocess. Single source
+//! of truth for both `install` and `migrate` so users see byte-identical
+//! human + JSON envelopes regardless of which command did the work.
 
 const std = @import("std");
 const formula_mod = @import("../../core/formula.zig");
@@ -117,20 +119,23 @@ pub const DslPostInstallOutcome = enum {
     parse_failed,
 };
 
-/// Run one DSL post_install attempt against `job`. Owns the formula +
-/// FallbackLog lifetimes so callers don't have to replicate the cleanup
-/// chain across every candidate source (local .rb, GitHub fetch).
+/// Run one DSL post_install attempt for a formula. Owns the parsed
+/// formula + FallbackLog lifetimes so callers don't have to replicate
+/// the cleanup chain across every candidate source (local .rb, GitHub).
 ///
-/// Pub so install-pure tests can pin the outcome contract directly.
+/// Narrow inputs (name + version + json bytes) keep migrate decoupled
+/// from install's `DownloadJob` shape.
 pub fn executeDslPostInstall(
     allocator: std.mem.Allocator,
-    job: *const DownloadJob,
+    name: []const u8,
+    version_str: []const u8,
+    formula_json: []const u8,
     post_install_src: []const u8,
     prefix: []const u8,
     use_system_ruby_list: []const []const u8,
 ) DslPostInstallOutcome {
-    var formula = formula_mod.parseFormula(allocator, job.formula_json) catch {
-        output.warn("post_install: failed to parse formula for {s}", .{job.name});
+    var formula = formula_mod.parseFormula(allocator, formula_json) catch {
+        output.warn("post_install: failed to parse formula for {s}", .{name});
         return .parse_failed;
     };
     defer formula.deinit();
@@ -141,6 +146,63 @@ pub fn executeDslPostInstall(
     // DSL errors reflect in `flog`; the router reads the log as the source
     // of truth so silent skips downgrade the same as hard failures.
     dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {};
-    routePostInstallOutcome(allocator, job.name, job.version_str, prefix, &flog, use_system_ruby_list);
+    routePostInstallOutcome(allocator, name, version_str, prefix, &flog, use_system_ruby_list);
     return .handled;
+}
+
+/// Locate a DSL post_install body for `name`: prefer a locally cloned
+/// homebrew-core tap, fall back to the pinned GitHub fetch. Returned
+/// slice (when non-null) is owned by the caller.
+fn locateDslSource(allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
+    const tap_path = ruby_sub.findHomebrewCoreTap();
+    var rb_buf: [1024]u8 = undefined;
+    const rb_path = if (tap_path) |tp|
+        ruby_sub.resolveFormulaRbPath(&rb_buf, tp, name)
+    else
+        null;
+    if (rb_path) |sp| {
+        if (ruby_sub.extractPostInstallBody(allocator, sp)) |s| return s;
+    }
+    return ruby_sub.fetchPostInstallFromGitHub(allocator, name);
+}
+
+/// End-to-end post_install dispatch shared by `install` and `migrate`:
+/// locate a DSL source, run it through the interpreter and route the
+/// outcome, or fall back to a system-Ruby subprocess (when the formula
+/// is in `--use-system-ruby` scope) or the unified skip hint. Both
+/// commands route through here so human + JSON envelopes match exactly.
+pub fn drive(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    version_str: []const u8,
+    formula_json: []const u8,
+    prefix: []const u8,
+    use_system_ruby_list: []const []const u8,
+) void {
+    if (locateDslSource(allocator, name)) |src| {
+        defer allocator.free(src);
+        switch (executeDslPostInstall(
+            allocator,
+            name,
+            version_str,
+            formula_json,
+            src,
+            prefix,
+            use_system_ruby_list,
+        )) {
+            .handled => return,
+            // parse_failed leaves the DSL path unusable — fall through so
+            // the system-Ruby fallback still has a chance to run.
+            .parse_failed => {},
+        }
+    }
+
+    if (useSystemRubyForFormula(use_system_ruby_list, name)) {
+        output.warn("Running post_install for {s} via system Ruby...", .{name});
+        ruby_sub.runPostInstall(allocator, name, version_str, prefix) catch |e| {
+            output.warn("post_install failed for {s}: {s}", .{ name, @errorName(e) });
+        };
+    } else {
+        output.warn("{s}: post_install skipped (use --use-system-ruby={s} or brew install {s})", .{ name, name, name });
+    }
 }

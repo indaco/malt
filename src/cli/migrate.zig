@@ -21,14 +21,8 @@ const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const io_mod = @import("../ui/io.zig");
 const codesign = @import("../macho/codesign.zig");
-const ruby_sub = @import("../core/ruby_subprocess.zig");
-const dsl = @import("../core/dsl/root.zig");
+const post_install_mod = @import("install/post_install.zig");
 const help = @import("help.zig");
-
-fn inScope(scope: []const []const u8, name: []const u8) bool {
-    for (scope) |n| if (std.mem.eql(u8, n, name)) return true;
-    return false;
-}
 
 /// Resolve the Homebrew install prefix. Respects `HOMEBREW_PREFIX` (set
 /// by `brew shellenv` and by users with a non-standard install), falls
@@ -391,75 +385,15 @@ fn migrateKeg(
         recordDeps(db, keg_id, &formula);
     }
 
-    // Execute post_install: try DSL interpreter first, fall back to
-    // system Ruby subprocess when --use-system-ruby is set.
-    if (formula.post_install_defined) post_install: {
-        const tap_path = ruby_sub.findHomebrewCoreTap();
-        var rb_buf: [1024]u8 = undefined;
-        const rb_path = if (tap_path) |tp| ruby_sub.resolveFormulaRbPath(&rb_buf, tp, formula.name) else null;
-
-        if (rb_path) |src_path| {
-            if (ruby_sub.extractPostInstallBody(allocator, src_path)) |post_install_src| {
-                defer allocator.free(post_install_src);
-
-                var flog = dsl.FallbackLog.init(allocator);
-                defer flog.deinit();
-
-                dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {
-                    if (flog.hasFatal()) {
-                        output.warn("  post_install DSL failed for {s} (fatal)", .{formula.name});
-                        flog.printFatal(formula.name);
-                        break :post_install;
-                    }
-                    if (inScope(use_system_ruby_scope, formula.name)) {
-                        ruby_sub.runPostInstall(allocator, formula.name, formula.pkg_version, prefix) catch |e| {
-                            output.warn("  post_install subprocess failed for {s}: {s}", .{ formula.name, @errorName(e) });
-                        };
-                    } else {
-                        output.warn("  {s}: post_install partially skipped (use --use-system-ruby={s} to attempt via Ruby)", .{ formula.name, formula.name });
-                    }
-                    break :post_install;
-                };
-                output.info("  post_install completed for {s}", .{formula.name});
-                break :post_install;
-            }
-        }
-
-        // No local .rb source — try fetching from GitHub
-        if (ruby_sub.fetchPostInstallFromGitHub(allocator, formula.name)) |post_install_src| {
-            defer allocator.free(post_install_src);
-
-            var flog2 = dsl.FallbackLog.init(allocator);
-            defer flog2.deinit();
-
-            dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog2) catch {
-                if (flog2.hasFatal()) {
-                    output.warn("  post_install DSL failed for {s} (fatal)", .{formula.name});
-                    flog2.printFatal(formula.name);
-                    break :post_install;
-                }
-                if (inScope(use_system_ruby_scope, formula.name)) {
-                    ruby_sub.runPostInstall(allocator, formula.name, formula.pkg_version, prefix) catch |e| {
-                        output.warn("  post_install subprocess failed for {s}: {s}", .{ formula.name, @errorName(e) });
-                    };
-                } else {
-                    output.warn("  {s}: post_install partially skipped (use --use-system-ruby={s} to attempt via Ruby)", .{ formula.name, formula.name });
-                }
-                break :post_install;
-            };
-            output.info("  post_install completed for {s}", .{formula.name});
-            break :post_install;
-        }
-
-        // No source available — fall back to subprocess or skip
-        if (inScope(use_system_ruby_scope, formula.name)) {
-            output.warn("  Running post_install for {s} via system Ruby...", .{formula.name});
-            ruby_sub.runPostInstall(allocator, formula.name, formula.pkg_version, prefix) catch |e| {
-                output.warn("  post_install failed for {s}: {s}", .{ formula.name, @errorName(e) });
-            };
-        } else {
-            output.warn("  {s}: post_install skipped (use --use-system-ruby={s} or brew install {s})", .{ formula.name, formula.name, formula.name });
-        }
+    if (formula.post_install_defined) {
+        post_install_mod.drive(
+            allocator,
+            formula.name,
+            formula.pkg_version,
+            formula_json,
+            prefix,
+            use_system_ruby_scope,
+        );
     }
 
     const keg_only_suffix: []const u8 = if (formula.keg_only) " (keg-only — dependency only)" else "";
