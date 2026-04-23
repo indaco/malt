@@ -145,7 +145,11 @@ pub fn executeDslPostInstall(
 
     // DSL errors reflect in `flog`; the router reads the log as the source
     // of truth so silent skips downgrade the same as hard failures.
-    dsl.executePostInstall(allocator, &formula, post_install_src, prefix, &flog) catch {};
+    dsl.executePostInstall(allocator, .{
+        .name = formula.name,
+        .version = formula.version,
+        .pkg_version = formula.pkg_version,
+    }, post_install_src, prefix, &flog) catch {};
     routePostInstallOutcome(allocator, name, version_str, prefix, &flog, use_system_ruby_list);
     return .handled;
 }

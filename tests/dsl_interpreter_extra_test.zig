@@ -58,7 +58,11 @@ fn run(ruby_src: []const u8) !void {
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    try dsl.executePostInstall(alloc, &f, ruby_src, prefix, &flog);
+    try dsl.executePostInstall(alloc, .{
+        .name = f.name,
+        .version = f.version,
+        .pkg_version = f.pkg_version,
+    }, ruby_src, prefix, &flog);
 }
 
 test "string interpolation inside post_install" {

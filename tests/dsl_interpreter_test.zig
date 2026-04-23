@@ -57,7 +57,11 @@ fn runSnippet(
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    dsl.executePostInstall(alloc, &f, ruby_src, malt_prefix, &flog) catch |e| {
+    dsl.executePostInstall(alloc, .{
+        .name = f.name,
+        .version = f.version,
+        .pkg_version = f.pkg_version,
+    }, ruby_src, malt_prefix, &flog) catch |e| {
         return @as(?dsl.DslError, e);
     };
     return null;
@@ -820,7 +824,11 @@ test "interpreter: unknown method is logged in fallback log" {
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    dsl.executePostInstall(alloc, &f, "unknown_method_xyz", prefix, &flog) catch {};
+    dsl.executePostInstall(alloc, .{
+        .name = f.name,
+        .version = f.version,
+        .pkg_version = f.pkg_version,
+    }, "unknown_method_xyz", prefix, &flog) catch {};
 
     // Verify fallback log has at least one entry
     try testing.expect(flog.hasErrors());
@@ -1516,7 +1524,11 @@ test "parse_error: malformed source populates fallback log with location" {
     defer flog.deinit();
 
     // Stray `]` with no matching open — a guaranteed parser error.
-    const result = dsl.executePostInstall(alloc, &f, "ohai \"hi\"\n]\n", prefix, &flog);
+    const result = dsl.executePostInstall(alloc, .{
+        .name = f.name,
+        .version = f.version,
+        .pkg_version = f.pkg_version,
+    }, "ohai \"hi\"\n]\n", prefix, &flog);
     try testing.expectError(dsl.DslError.ParseError, result);
 
     // The diagnostics from Parser.diagnostics should now be on the log
@@ -2508,7 +2520,11 @@ test "interpreter: arena-owned path bindings leak-clean under testing.allocator"
         \\_a = HOMEBREW_PREFIX
         \\_a = HOMEBREW_CELLAR
     ;
-    try dsl.executePostInstall(testing.allocator, &f, src, prefix, &flog);
+    try dsl.executePostInstall(testing.allocator, .{
+        .name = f.name,
+        .version = f.version,
+        .pkg_version = f.pkg_version,
+    }, src, prefix, &flog);
 }
 
 // pushScope must propagate OOM instead of swallowing it. A silent failure
@@ -2526,7 +2542,7 @@ test "ExecContext.pushScope propagates OOM from the arena" {
         .arena = failing.allocator(),
         .cellar_path = "",
         .malt_prefix = "",
-        .paths = std.EnumArray(malt.dsl.interpreter.PathBinding, []const u8).initFill(""),
+        .paths = std.EnumArray(malt.dsl.context.PathBinding, []const u8).initFill(""),
         ._scopes = .empty,
         .sandbox_root = "",
         .fallback_log_writer = &flog,
@@ -2551,7 +2567,7 @@ test "ExecContext.pushMethodScope propagates OOM from the arena" {
         .arena = failing.allocator(),
         .cellar_path = "",
         .malt_prefix = "",
-        .paths = std.EnumArray(malt.dsl.interpreter.PathBinding, []const u8).initFill(""),
+        .paths = std.EnumArray(malt.dsl.context.PathBinding, []const u8).initFill(""),
         ._scopes = .empty,
         .sandbox_root = "",
         .fallback_log_writer = &flog,
