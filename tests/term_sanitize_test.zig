@@ -158,7 +158,7 @@ test "SOS always dropped" {
 // ── CSI overflow fails closed ───────────────────────────────────────
 
 test "CSI with oversized params fails closed" {
-    var big: [ts.CSI_PARAM_MAX + 10]u8 = undefined;
+    var big: [ts.csi_param_max + 10]u8 = undefined;
     @memset(&big, '1');
     var input: std.ArrayList(u8) = .empty;
     defer input.deinit(testing.allocator);

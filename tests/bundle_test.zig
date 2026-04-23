@@ -37,7 +37,7 @@ fn buildManifest(parent: std.mem.Allocator) !manifest_mod.Manifest {
     var m = manifest_mod.Manifest.init(parent);
     const a = m.allocator();
     m.name = try a.dupe(u8, "devtools");
-    m.version = manifest_mod.SCHEMA_VERSION;
+    m.version = manifest_mod.schema_version;
 
     const taps = try a.alloc([]const u8, 1);
     taps[0] = try a.dupe(u8, "homebrew/cask-fonts");

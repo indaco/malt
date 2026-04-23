@@ -82,15 +82,15 @@ test "validatePrefix: NUL byte rejected" {
     try testing.expectError(error.EmbeddedNul, atomic.validatePrefix("/opt/malt\x00"));
 }
 
-test "validatePrefix: length > MAX_PREFIX_LEN rejected" {
-    var buf: [atomic.MAX_PREFIX_LEN + 1]u8 = undefined;
+test "validatePrefix: length > max_prefix_len rejected" {
+    var buf: [atomic.max_prefix_len + 1]u8 = undefined;
     @memset(&buf, 'a');
     buf[0] = '/';
     try testing.expectError(error.TooLong, atomic.validatePrefix(&buf));
 }
 
-test "validatePrefix: length == MAX_PREFIX_LEN accepted" {
-    var buf: [atomic.MAX_PREFIX_LEN]u8 = undefined;
+test "validatePrefix: length == max_prefix_len accepted" {
+    var buf: [atomic.max_prefix_len]u8 = undefined;
     @memset(&buf, 'a');
     buf[0] = '/';
     try atomic.validatePrefix(&buf);

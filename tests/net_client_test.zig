@@ -233,8 +233,8 @@ test "scaledTimeoutNs: 0-length file returns floor" {
     try testing.expectEqual(@as(u64, 30 * std.time.ns_per_s), client.scaledTimeoutNs(0));
 }
 
-test "scaledTimeoutNs: null combined with BLOB_TIMEOUT_NS keeps 10-min minimum" {
-    // Blob downloads use @max(BLOB_TIMEOUT_NS, scaledTimeoutNs(cl)).
+test "scaledTimeoutNs: null combined with blob_timeout_ns keeps 10-min minimum" {
+    // Blob downloads use @max(blob_timeout_ns, scaledTimeoutNs(cl)).
     // When Content-Length is null (chunked), scaledTimeoutNs returns 30s,
     // but the blob floor must dominate.
     const blob_timeout = 600 * std.time.ns_per_s;

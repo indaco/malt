@@ -13,19 +13,19 @@ else
     std.debug.simple_panic;
 
 /// Global interrupt flag — set by SIGINT handler, checked at install step boundaries.
-var g_interrupted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var interrupted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 pub fn isInterrupted() bool {
-    return g_interrupted.load(.acquire);
+    return interrupted.load(.acquire);
 }
 
 /// Test-only flag override — raising real SIGINT would race the test runner.
 pub fn setInterruptedForTest(v: bool) void {
-    g_interrupted.store(v, .release);
+    interrupted.store(v, .release);
 }
 
 fn sigintHandler(_: std.c.SIG) callconv(.c) void {
-    g_interrupted.store(true, .release);
+    interrupted.store(true, .release);
 }
 
 // CLI command modules
@@ -131,7 +131,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     };
 
-    // Register SIGINT handler so Ctrl-C sets g_interrupted instead of
+    // Register SIGINT handler so Ctrl-C sets interrupted instead of
     // immediately killing the process. Install commands check the flag at
     // step boundaries and clean up before exiting.
     const act = std.posix.Sigaction{

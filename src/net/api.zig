@@ -6,13 +6,13 @@ const fs_compat = @import("../fs/compat.zig");
 const atomic = @import("../fs/atomic.zig");
 const client_mod = @import("client.zig");
 
-const BASE_URL = "https://formulae.brew.sh/api";
-const CACHE_TTL_SECS: i64 = 300; // 5 minutes
+const base_url = "https://formulae.brew.sh/api";
+const cache_ttl_secs: i64 = 300; // 5 minutes
 
 /// Names-index TTL. The full Homebrew name list changes on the order of days
 /// (new formulae merged, tokens renamed), so a 24 h window avoids burning
 /// ~40 MiB of fetch per search while still picking up changes within a day.
-pub const INDEX_TTL_SECS: i64 = 24 * 60 * 60;
+pub const index_ttl_secs: i64 = 24 * 60 * 60;
 
 pub const ApiError = error{
     NotFound,
@@ -136,7 +136,7 @@ pub const BrewApi = struct {
     pub fn fetchFormula(self: *BrewApi, name: []const u8) ApiError![]const u8 {
         try validateName(name);
         var url_buf: [512]u8 = undefined;
-        const url = std.fmt.bufPrint(&url_buf, BASE_URL ++ "/formula/{s}.json", .{name}) catch
+        const url = std.fmt.bufPrint(&url_buf, base_url ++ "/formula/{s}.json", .{name}) catch
             return ApiError.OutOfMemory;
         return self.fetchCached(name, url, "formula_");
     }
@@ -145,7 +145,7 @@ pub const BrewApi = struct {
     pub fn fetchCask(self: *BrewApi, token: []const u8) ApiError![]const u8 {
         try validateName(token);
         var url_buf: [512]u8 = undefined;
-        const url = std.fmt.bufPrint(&url_buf, BASE_URL ++ "/cask/{s}.json", .{token}) catch
+        const url = std.fmt.bufPrint(&url_buf, base_url ++ "/cask/{s}.json", .{token}) catch
             return ApiError.OutOfMemory;
         return self.fetchCached(token, url, "cask_");
     }
@@ -189,7 +189,7 @@ pub const BrewApi = struct {
         const stat = fs_compat.cwd().statFile(cache_path) catch return false;
         const now = fs_compat.timestamp();
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
-        return now - mtime_secs <= CACHE_TTL_SECS;
+        return now - mtime_secs <= cache_ttl_secs;
     }
 
     /// Fetch the newline-delimited names index for all formulae or casks.
@@ -205,8 +205,8 @@ pub const BrewApi = struct {
         if (self.readNamesIndex(key)) |cached| return cached;
 
         const url: []const u8 = switch (kind) {
-            .formula => BASE_URL ++ "/formula.json",
-            .cask => BASE_URL ++ "/cask.json",
+            .formula => base_url ++ "/formula.json",
+            .cask => base_url ++ "/cask.json",
         };
         var resp = self.http.get(url) catch return ApiError.ApiUnreachable;
         defer resp.deinit();
@@ -228,7 +228,7 @@ pub const BrewApi = struct {
         const stat = fs_compat.cwd().statFile(p) catch return null;
         const now = fs_compat.timestamp();
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
-        if (now - mtime_secs > INDEX_TTL_SECS) return null;
+        if (now - mtime_secs > index_ttl_secs) return null;
 
         const file = fs_compat.cwd().openFile(p, .{}) catch return null;
         defer file.close();
@@ -306,7 +306,7 @@ pub const BrewApi = struct {
         const stat = fs_compat.cwd().statFile(cache_path) catch return null;
         const now = fs_compat.timestamp();
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
-        if (now - mtime_secs > CACHE_TTL_SECS) return null;
+        if (now - mtime_secs > cache_ttl_secs) return null;
 
         // Read file
         const file = fs_compat.cwd().openFile(cache_path, .{}) catch return null;
@@ -353,13 +353,13 @@ pub const BrewApi = struct {
         const stat = fs_compat.cwd().statFile(cache_path) catch return false;
         const now = fs_compat.timestamp();
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
-        if (now - mtime_secs > CACHE_TTL_SECS) return false;
+        if (now - mtime_secs > cache_ttl_secs) return false;
         return true;
     }
 
     /// Write a zero-byte marker file to record that this key 404s. The
     /// file's mtime is the TTL anchor — `readNotFoundCache` checks it
-    /// against `CACHE_TTL_SECS`. Best-effort; failures are silent so a
+    /// against `cache_ttl_secs`. Best-effort; failures are silent so a
     /// missing cache dir never breaks an install.
     pub fn writeNotFoundCache(self: *const BrewApi, key: []const u8, prefix: []const u8) void {
         var dir_buf: [512]u8 = undefined;
@@ -377,9 +377,9 @@ pub const BrewApi = struct {
     }
 
     /// Maximum cache size (200 MB). Entries are evicted by age (oldest first).
-    const MAX_CACHE_BYTES: u64 = 200 * 1024 * 1024;
+    const max_cache_bytes: u64 = 200 * 1024 * 1024;
 
-    /// Evict oldest cache entries until total size is under MAX_CACHE_BYTES.
+    /// Evict oldest cache entries until total size is under max_cache_bytes.
     /// Called by `malt cleanup` and `malt doctor`.
     pub fn evictCache(self: *BrewApi) u32 {
         var dir_buf: [512]u8 = undefined;
@@ -405,7 +405,7 @@ pub const BrewApi = struct {
             total_size += stat.size;
         }
 
-        if (total_size <= MAX_CACHE_BYTES) return 0;
+        if (total_size <= max_cache_bytes) return 0;
 
         // Sort by mtime ascending (oldest first)
         std.mem.sort(Entry, entries.items, {}, struct {
@@ -416,7 +416,7 @@ pub const BrewApi = struct {
 
         var evicted: u32 = 0;
         for (entries.items) |entry| {
-            if (total_size <= MAX_CACHE_BYTES) break;
+            if (total_size <= max_cache_bytes) break;
             const name = entry.name_buf[0..entry.name_len];
             dir.deleteFile(name) catch continue;
             total_size -|= entry.size;

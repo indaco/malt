@@ -20,14 +20,14 @@ const release = @import("../update/release.zig");
 const verify = @import("../update/verify.zig");
 const swap = @import("../update/swap.zig");
 
-const CURRENT_VERSION = @import("../version.zig").value;
-const RELEASES_API = "https://api.github.com/repos/indaco/malt/releases/latest";
-const CHECKSUMS_NAME = "checksums.txt";
-const SIGSTORE_NAME = "checksums.txt.sigstore.json";
+const current_version = @import("../version.zig").value;
+const releases_api = "https://api.github.com/repos/indaco/malt/releases/latest";
+const checksums_name = "checksums.txt";
+const sigstore_name = "checksums.txt.sigstore.json";
 // Pins the signature to the exact workflow that produced the release.
 // A token able to upload a replacement checksums.txt cannot forge this.
-const CERT_IDENTITY_REGEX = "^https://github.com/indaco/malt/\\.github/workflows/release\\.yml@";
-const OIDC_ISSUER = "https://token.actions.githubusercontent.com";
+const cert_identity_regex = "^https://github.com/indaco/malt/\\.github/workflows/release\\.yml@";
+const oidc_issuer = "https://token.actions.githubusercontent.com";
 
 pub const Opts = struct {
     check: bool = false,
@@ -61,13 +61,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    output.info("Current version: {s}", .{CURRENT_VERSION});
+    output.info("Current version: {s}", .{current_version});
     output.info("Checking for updates...", .{});
 
     var http = client_mod.HttpClient.init(allocator);
     defer http.deinit();
 
-    var resp = http.get(RELEASES_API) catch {
+    var resp = http.get(releases_api) catch {
         output.err("Cannot reach GitHub API", .{});
         return error.Aborted;
     };
@@ -97,11 +97,11 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     const latest = if (tag.len > 0 and tag[0] == 'v') tag[1..] else tag;
 
-    if (std.mem.eql(u8, latest, CURRENT_VERSION)) {
-        output.info("Already up to date ({s})", .{CURRENT_VERSION});
+    if (std.mem.eql(u8, latest, current_version)) {
+        output.info("Already up to date ({s})", .{current_version});
         return;
     }
-    output.info("New version available: {s} (current: {s})", .{ latest, CURRENT_VERSION });
+    output.info("New version available: {s} (current: {s})", .{ latest, current_version });
 
     if (opts.check) {
         output.info("Run 'mt version update' to install", .{});
@@ -128,8 +128,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         output.err("No matching binary found for darwin {s}", .{arch_str});
         return error.Aborted;
     };
-    const checksums_url = release.pickAssetUrlByName(assets, CHECKSUMS_NAME) orelse {
-        output.err("Release is missing {s}", .{CHECKSUMS_NAME});
+    const checksums_url = release.pickAssetUrlByName(assets, checksums_name) orelse {
+        output.err("Release is missing {s}", .{checksums_name});
         return error.Aborted;
     };
     const archive_name = std.fs.path.basename(tarball_url);
@@ -149,7 +149,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     output.info("Downloading {s}...", .{archive_name});
     const tarball_path = try writeDownload(allocator, &http, tarball_url, scratch, archive_name);
     defer allocator.free(tarball_path);
-    const checksums_path = try writeDownload(allocator, &http, checksums_url, scratch, CHECKSUMS_NAME);
+    const checksums_path = try writeDownload(allocator, &http, checksums_url, scratch, checksums_name);
     defer allocator.free(checksums_path);
 
     // --- verification phase ---
@@ -345,11 +345,11 @@ fn runVerification(rv: RunVerification) !void {
         return;
     }
 
-    const sigstore_url = release.pickAssetUrlByName(rv.assets, SIGSTORE_NAME) orelse {
-        output.err("Release is missing {s}", .{SIGSTORE_NAME});
+    const sigstore_url = release.pickAssetUrlByName(rv.assets, sigstore_name) orelse {
+        output.err("Release is missing {s}", .{sigstore_name});
         return error.Aborted;
     };
-    const sigstore_path = try writeDownload(rv.allocator, rv.http, sigstore_url, rv.scratch, SIGSTORE_NAME);
+    const sigstore_path = try writeDownload(rv.allocator, rv.http, sigstore_url, rv.scratch, sigstore_name);
     defer rv.allocator.free(sigstore_path);
 
     output.info("Verifying cosign signature + SHA256 checksum...", .{});
@@ -358,8 +358,8 @@ fn runVerification(rv: RunVerification) !void {
         .checksums_path = rv.checksums_path,
         .sigstore_path = sigstore_path,
         .archive_name = rv.archive_name,
-        .cert_identity_regex = CERT_IDENTITY_REGEX,
-        .oidc_issuer = OIDC_ISSUER,
+        .cert_identity_regex = cert_identity_regex,
+        .oidc_issuer = oidc_issuer,
     }) catch |e| switch (e) {
         error.CosignNotFound => {
             output.err("cosign is required to verify the release signature.", .{});
@@ -368,11 +368,11 @@ fn runVerification(rv: RunVerification) !void {
             return error.Aborted;
         },
         error.CosignVerifyFailed => {
-            output.err("cosign signature verification failed for {s}", .{CHECKSUMS_NAME});
+            output.err("cosign signature verification failed for {s}", .{checksums_name});
             return error.Aborted;
         },
         error.ChecksumMissing => {
-            output.err("Checksum for {s} not listed in {s}", .{ rv.archive_name, CHECKSUMS_NAME });
+            output.err("Checksum for {s} not listed in {s}", .{ rv.archive_name, checksums_name });
             return error.Aborted;
         },
         error.ChecksumMismatch => {

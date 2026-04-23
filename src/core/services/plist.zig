@@ -48,15 +48,15 @@ pub const ValidationError = error{
 };
 
 /// Cap on argv count. Real launchd services carry fewer than a dozen.
-pub const MAX_PROGRAM_ARGS: usize = 64;
+pub const max_program_args: usize = 64;
 /// Cap on a single argv or path string.
-pub const MAX_ARG_LEN: usize = 4096;
+pub const max_arg_len: usize = 4096;
 
 /// Reject launchd interpreters as the leading executable. If a formula
 /// actually ships its own cellar-local `sh` it must invoke it via its
 /// cellar path — not `/bin/sh`, which launchd would happily run with
 /// whatever argv follows.
-const FORBIDDEN_HEADS = [_][]const u8{
+const forbidden_heads = [_][]const u8{
     "/bin/sh",      "/bin/bash",     "/bin/zsh",        "/bin/ksh",
     "/usr/bin/sh",  "/usr/bin/bash", "/usr/bin/zsh",    "/usr/bin/env",
     "/usr/bin/ksh", "/usr/bin/tcsh", "/usr/bin/python", "/usr/bin/perl",
@@ -78,7 +78,7 @@ pub fn validate(
     malt_prefix: []const u8,
 ) ValidationError!void {
     if (spec.program_args.len == 0) return ValidationError.Empty;
-    if (spec.program_args.len > MAX_PROGRAM_ARGS) return ValidationError.TooManyArgs;
+    if (spec.program_args.len > max_program_args) return ValidationError.TooManyArgs;
 
     for (spec.program_args) |a| try checkString(a);
     try checkString(spec.label);
@@ -92,7 +92,7 @@ pub fn validate(
 
     const head = spec.program_args[0];
     if (head.len == 0 or head[0] != '/') return ValidationError.RelativeExecutable;
-    for (FORBIDDEN_HEADS) |h| {
+    for (forbidden_heads) |h| {
         if (std.mem.eql(u8, head, h)) return ValidationError.InterpreterBait;
     }
 
@@ -120,7 +120,7 @@ pub fn validate(
 }
 
 fn checkString(s: []const u8) ValidationError!void {
-    if (s.len > MAX_ARG_LEN) return ValidationError.ArgTooLong;
+    if (s.len > max_arg_len) return ValidationError.ArgTooLong;
     if (std.mem.indexOfScalar(u8, s, 0) != null) return ValidationError.EmbeddedNul;
 }
 
