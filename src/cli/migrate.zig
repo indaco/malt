@@ -72,6 +72,19 @@ const KegResult = enum {
     failed_install,
 };
 
+/// Named-field bundle for the shared state `migrateKeg` threads across
+/// every keg in the loop. Opens a DI seam for tests to swap in fakes.
+const MigrateDeps = struct {
+    api: *api_mod.BrewApi,
+    ghcr: *ghcr_mod.GhcrClient,
+    http: *client_mod.HttpClient,
+    store: *store_mod.Store,
+    linker: *linker_mod.Linker,
+    db: *sqlite.Database,
+    prefix: []const u8,
+    use_system_ruby_scope: []const []const u8,
+};
+
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "migrate")) return;
 
@@ -223,18 +236,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.warn("Interrupted — skipping remaining kegs.", .{});
             break;
         }
-        const result = migrateKeg(
-            allocator,
-            keg_name,
-            &api,
-            &ghcr,
-            &http,
-            &store,
-            &linker,
-            &db,
-            prefix,
-            use_system_ruby_scope.items,
-        );
+        const result = migrateKeg(allocator, keg_name, .{
+            .api = &api,
+            .ghcr = &ghcr,
+            .http = &http,
+            .store = &store,
+            .linker = &linker,
+            .db = &db,
+            .prefix = prefix,
+            .use_system_ruby_scope = use_system_ruby_scope.items,
+        });
 
         // OOM on per-category bookkeeping must not be swallowed: the summary
         // counts and JSON arrays come from these lists, and a silent drop
@@ -296,23 +307,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 fn migrateKeg(
     allocator: std.mem.Allocator,
     keg_name: []const u8,
-    api: *api_mod.BrewApi,
-    ghcr: *ghcr_mod.GhcrClient,
-    http: *client_mod.HttpClient,
-    store: *store_mod.Store,
-    linker: *linker_mod.Linker,
-    db: *sqlite.Database,
-    prefix: []const u8,
-    use_system_ruby_scope: []const []const u8,
+    deps: MigrateDeps,
 ) KegResult {
     // 1. Check if already installed in malt
-    if (isInstalled(db, keg_name)) {
+    if (isInstalled(deps.db, keg_name)) {
         output.info("  {s}: already installed, skipping", .{keg_name});
         return .skipped_installed;
     }
 
     // Two `defer`s below collapse six per-branch cleanups.
-    const formula_json = api.fetchFormula(keg_name) catch {
+    const formula_json = deps.api.fetchFormula(keg_name) catch {
         output.err("  {s}: not found in Homebrew API", .{keg_name});
         return .failed_api;
     };
@@ -333,8 +337,8 @@ fn migrateKeg(
     output.info("  Migrating {s} {s}...", .{ formula.name, formula.version });
 
     // 5. Download bottle via GHCR (skip if already in store)
-    if (!store.exists(bottle.sha256)) {
-        if (!downloadBottle(allocator, ghcr, http, store, bottle.url, bottle.sha256, keg_name)) {
+    if (!deps.store.exists(bottle.sha256)) {
+        if (!downloadBottle(allocator, deps.ghcr, deps.http, deps.store, bottle.url, bottle.sha256, keg_name)) {
             return .failed_download;
         }
     } else {
@@ -342,14 +346,14 @@ fn migrateKeg(
     }
 
     // Increment store refcount
-    store.incrementRef(bottle.sha256) catch |e| {
+    deps.store.incrementRef(bottle.sha256) catch |e| {
         std.log.warn("refcount increment failed for {s}: {s}", .{ keg_name, @errorName(e) });
     };
 
     // 6. Materialize to cellar
     const keg = cellar_mod.materialize(
         allocator,
-        prefix,
+        deps.prefix,
         bottle.sha256,
         formula.name,
         formula.pkg_version,
@@ -360,29 +364,29 @@ fn migrateKeg(
 
     // 7. Record in DB + link
     if (!formula.keg_only) {
-        const keg_id = recordKeg(db, &formula, bottle.sha256, keg.path, "direct") catch {
+        const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
             output.err("    {s}: failed to record in database", .{keg_name});
-            cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
+            cellar_mod.remove(deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
 
-        linker.link(keg.path, formula.name, keg_id) catch {
+        deps.linker.link(keg.path, formula.name, keg_id) catch {
             output.warn("    {s}: some links could not be created", .{keg_name});
             // Best-effort cleanup after a link failure; the user already sees the failure above.
-            linker.unlink(keg_id) catch {};
-            deleteKeg(db, keg_id) catch {};
-            cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
+            deps.linker.unlink(keg_id) catch {};
+            deleteKeg(deps.db, keg_id) catch {};
+            cellar_mod.remove(deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
-        linker.linkOpt(formula.name, formula.pkg_version) catch {};
-        recordDeps(db, keg_id, &formula);
+        deps.linker.linkOpt(formula.name, formula.pkg_version) catch {};
+        recordDeps(deps.db, keg_id, &formula);
     } else {
-        const keg_id = recordKeg(db, &formula, bottle.sha256, keg.path, "direct") catch {
-            cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
+        const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
+            cellar_mod.remove(deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
-        linker.linkOpt(formula.name, formula.pkg_version) catch {};
-        recordDeps(db, keg_id, &formula);
+        deps.linker.linkOpt(formula.name, formula.pkg_version) catch {};
+        recordDeps(deps.db, keg_id, &formula);
     }
 
     if (formula.post_install_defined) {
@@ -391,8 +395,8 @@ fn migrateKeg(
             formula.name,
             formula.pkg_version,
             formula_json,
-            prefix,
-            use_system_ruby_scope,
+            deps.prefix,
+            deps.use_system_ruby_scope,
         );
     }
 
