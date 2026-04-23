@@ -126,7 +126,7 @@ else
   SED_INPLACE=(sed -i '')
 fi
 "${SED_INPLACE[@]}" \
-  "s|^pub const HOMEBREW_CORE_COMMIT_SHA: \\[\\]const u8 = .*|pub const HOMEBREW_CORE_COMMIT_SHA: []const u8 = \"${COMMIT}\";|" \
+  "s|^pub const homebrew_core_commit_sha: \\[40\\]u8 = .*|pub const homebrew_core_commit_sha: [40]u8 = \"${COMMIT}\".*;|" \
   src/core/pins.zig
 
 # Regenerate the manifest.
@@ -144,7 +144,7 @@ cat >"$TMP" <<'HEADER'
 # entry are refused — the code path is fail-closed.
 #
 # Regenerate with: scripts/gen-pins.sh
-# Pinned commit lives in src/core/pins.zig (HOMEBREW_CORE_COMMIT_SHA).
+# Pinned commit lives in src/core/pins.zig (homebrew_core_commit_sha).
 #
 # Lines starting with '#' and blank lines are ignored.
 HEADER

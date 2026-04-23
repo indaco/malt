@@ -155,7 +155,7 @@ pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8
     const url = std.fmt.bufPrint(
         &url_buf,
         "https://raw.githubusercontent.com/Homebrew/homebrew-core/{s}/Formula/{c}/{s}.rb",
-        .{ pins.HOMEBREW_CORE_COMMIT_SHA, name[0], name },
+        .{ &pins.homebrew_core_commit_sha, name[0], name },
     ) catch return null;
 
     var http = http_client.HttpClient.init(allocator);

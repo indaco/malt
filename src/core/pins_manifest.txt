@@ -7,7 +7,7 @@
 # entry are refused — the code path is fail-closed.
 #
 # Regenerate with: scripts/gen-pins.sh
-# Pinned commit lives in src/core/pins.zig (HOMEBREW_CORE_COMMIT_SHA).
+# Pinned commit lives in src/core/pins.zig (homebrew_core_commit_sha).
 #
 # Lines starting with '#' and blank lines are ignored.
 

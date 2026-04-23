@@ -16,8 +16,11 @@ const std = @import("std");
 /// TOFU window against a silent upstream rewrite; this constant nails
 /// the fetch URL to a single tree an auditor can reproduce.
 ///
+/// Fixed-array type: the 40-char length is a comptime property, so no
+/// slice header is emitted at use sites.
+///
 /// Bump at release time via `scripts/gen-pins.sh`.
-pub const HOMEBREW_CORE_COMMIT_SHA: []const u8 = "5d3790f92c7873f1fd8e5e2ecd6fbc689a78a96f";
+pub const homebrew_core_commit_sha: [40]u8 = "5d3790f92c7873f1fd8e5e2ecd6fbc689a78a96f".*;
 
 const MANIFEST_TEXT: []const u8 = @embedFile("pins_manifest.txt");
 

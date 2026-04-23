@@ -32,7 +32,7 @@ jobs:
       - name: Compute short SHA for PR metadata
         id: pin
         run: |
-          SHA=$(grep -E 'HOMEBREW_CORE_COMMIT_SHA.*=.*"' src/core/pins.zig \
+          SHA=$(grep -E 'homebrew_core_commit_sha.*=.*"' src/core/pins.zig \
             | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           echo "sha=$SHA" >>"$GITHUB_OUTPUT"
           echo "short=${SHA:0:12}" >>"$GITHUB_OUTPUT"
