@@ -19,6 +19,16 @@ const linker_mod = @import("../core/linker.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
 const help = @import("help.zig");
 
+const UpgradeFlag = enum { quiet, cask, formula, dry_run };
+
+const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
+    .{ "-q", .quiet },
+    .{ "--quiet", .quiet },
+    .{ "--cask", .cask },
+    .{ "--formula", .formula },
+    .{ "--dry-run", .dry_run },
+});
+
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "upgrade")) return;
 
@@ -27,15 +37,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var dry_run = output.isDryRun();
     var pkg_name: ?[]const u8 = null;
 
+    // StaticStringMap + exhaustive switch: every flag routes to a handler.
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
-            output.setQuiet(true);
-        } else if (std.mem.eql(u8, arg, "--cask")) {
-            cask_only = true;
-        } else if (std.mem.eql(u8, arg, "--formula")) {
-            formula_only = true;
-        } else if (std.mem.eql(u8, arg, "--dry-run")) {
-            dry_run = true;
+        if (upgrade_flag_map.get(arg)) |flag| switch (flag) {
+            .quiet => output.setQuiet(true),
+            .cask => cask_only = true,
+            .formula => formula_only = true,
+            .dry_run => dry_run = true,
         } else if (arg.len > 0 and arg[0] != '-') {
             if (pkg_name == null) pkg_name = arg;
         }

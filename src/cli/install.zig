@@ -93,6 +93,29 @@ pub fn installAll(
     return execute(allocator, argv.items);
 }
 
+const InstallFlag = enum {
+    cask,
+    formula,
+    dry_run,
+    force,
+    local,
+    use_system_ruby,
+    quiet,
+    json,
+};
+
+const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
+    .{ "--cask", .cask },
+    .{ "--formula", .formula },
+    .{ "--dry-run", .dry_run },
+    .{ "--force", .force },
+    .{ "--local", .local },
+    .{ "--use-system-ruby", .use_system_ruby },
+    .{ "--quiet", .quiet },
+    .{ "-q", .quiet },
+    .{ "--json", .json },
+});
+
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "install")) return;
 
@@ -120,29 +143,26 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // leaving it to shape-based autodetection.
     var local_only = false;
 
+    // StaticStringMap + exhaustive switch: the compiler checks every flag
+    // has a handler, so adding a new variant without wiring it fails to build.
     for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--cask")) {
-            force_cask = true;
-        } else if (std.mem.eql(u8, arg, "--formula")) {
-            force_formula = true;
-        } else if (std.mem.eql(u8, arg, "--dry-run")) {
-            dry_run = true;
-        } else if (std.mem.eql(u8, arg, "--force")) {
-            force = true;
-        } else if (std.mem.eql(u8, arg, "--local")) {
-            local_only = true;
-        } else if (std.mem.eql(u8, arg, "--use-system-ruby")) {
-            use_system_ruby_bare = true;
-        } else if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
+        if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
             const list = arg["--use-system-ruby=".len..];
             var it = std.mem.splitScalar(u8, list, ',');
             while (it.next()) |name| {
                 if (name.len > 0) try use_system_ruby_scope.append(allocator, name);
             }
-        } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
-            output.setQuiet(true);
-        } else if (std.mem.eql(u8, arg, "--json")) {
-            output.setMode(.json);
+            continue;
+        }
+        if (install_flag_map.get(arg)) |flag| switch (flag) {
+            .cask => force_cask = true,
+            .formula => force_formula = true,
+            .dry_run => dry_run = true,
+            .force => force = true,
+            .local => local_only = true,
+            .use_system_ruby => use_system_ruby_bare = true,
+            .quiet => output.setQuiet(true),
+            .json => output.setMode(.json),
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             packages.append(allocator, arg) catch return error.OutOfMemory;
         }
