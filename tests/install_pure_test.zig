@@ -621,29 +621,11 @@ test "routePostInstallOutcome: --json status=fatal on sandbox violation" {
 }
 
 // ---------------------------------------------------------------------------
-// executeDslPostInstall — owns one DSL attempt against a job. The outcome
-// decides whether the caller falls through to the system-Ruby fallback.
+// executeDslPostInstall — owns one DSL attempt against a parsed formula.
+// The outcome decides whether the caller falls through to the system-Ruby
+// fallback. Narrow inputs (name + version + json bytes) so install and
+// migrate share the same entry without forging a DownloadJob.
 // ---------------------------------------------------------------------------
-
-fn stubJob(name: []const u8, formula_json: []const u8) install.DownloadJob {
-    return .{
-        .name = name,
-        .version_str = "1.0",
-        .sha256 = "aa",
-        .bottle_url = "",
-        .is_dep = false,
-        .keg_only = false,
-        .post_install_defined = true,
-        .formula_json = formula_json,
-        .cellar_type = ":any",
-        .label_width = 0,
-        .line_index = 0,
-        .multi = null,
-        .bar = null,
-        .store_sha256 = "",
-        .succeeded = true,
-    };
-}
 
 test "executeDslPostInstall returns .parse_failed when formula JSON is unparseable" {
     // The parse-failure path must surface as a distinct outcome so the
@@ -653,10 +635,11 @@ test "executeDslPostInstall returns .parse_failed when formula JSON is unparseab
     output_mod.setQuiet(true);
     defer output_mod.setQuiet(prior_quiet);
 
-    const job = stubJob("bad-json", "not-a-json");
     const outcome = install.executeDslPostInstall(
         testing.allocator,
-        &job,
+        "bad-json",
+        "1.0",
+        "not-a-json",
         "# empty body",
         "/tmp/irrelevant",
         &.{},
@@ -676,15 +659,57 @@ test "executeDslPostInstall returns .handled when DSL executes against a valid f
     const json =
         \\{"name":"hello","full_name":"hello","versions":{"stable":"1.0"},"dependencies":[],"oldnames":[]}
     ;
-    const job = stubJob("hello", json);
     const outcome = install.executeDslPostInstall(
         testing.allocator,
-        &job,
+        "hello",
+        "1.0",
+        json,
         "# empty",
         "/tmp/irrelevant",
         &.{},
     );
     try testing.expectEqual(install.DslPostInstallOutcome.handled, outcome);
+}
+
+// ---------------------------------------------------------------------------
+// drive — full post_install flow shared by install + migrate. Locates a
+// DSL source, runs it through executeDslPostInstall, or falls back to the
+// system-Ruby subprocess. Tested via the no-source / no-scope leaf so both
+// commands route the "user must opt in" hint through one code path.
+// ---------------------------------------------------------------------------
+
+test "drive: no DSL source and no scope match emits the unified skip hint" {
+    color_mod.setForTest(false, false);
+    defer color_mod.setForTest(null, null);
+    const prior_quiet = output_mod.isQuiet();
+    output_mod.setQuiet(false);
+    defer output_mod.setQuiet(prior_quiet);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    // A name guaranteed to miss every DSL source: not a real formula, no
+    // .rb on disk, no pin manifest entry → fetchPostInstallFromGitHub
+    // returns null, so drive lands on the skip leaf.
+    install.drive(
+        testing.allocator,
+        "__nonexistent_test_formula_xyz__",
+        "1.0",
+        "{}",
+        "/tmp/irrelevant",
+        &.{},
+    );
+
+    // The skip hint is the byte-for-byte string both install and migrate
+    // must print so scripted users see the same "opt in" message.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        buf.items,
+        "post_install skipped (use --use-system-ruby=__nonexistent_test_formula_xyz__ or brew install __nonexistent_test_formula_xyz__)",
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "Running post_install") == null);
 }
 
 // ---------------------------------------------------------------------------
