@@ -84,38 +84,54 @@ const Command = enum {
     version,
 };
 
-const command_map = std.StaticStringMap(Command).initComptime(.{
-    .{ "install", .install },
-    .{ "uninstall", .uninstall },
-    .{ "remove", .uninstall },
-    .{ "upgrade", .upgrade },
-    .{ "update", .update },
-    .{ "outdated", .outdated },
-    .{ "list", .list },
-    .{ "ls", .list },
-    .{ "info", .info },
-    .{ "search", .search },
-    .{ "doctor", .doctor },
-    .{ "tap", .tap },
-    .{ "untap", .untap },
-    .{ "migrate", .migrate },
-    .{ "rollback", .rollback },
-    .{ "link", .link },
-    .{ "unlink", .unlink },
-    .{ "run", .run },
-    .{ "completions", .completions },
-    .{ "backup", .backup },
-    .{ "restore", .restore },
-    .{ "purge", .purge },
-    .{ "services", .services },
-    .{ "bundle", .bundle },
-    .{ "uses", .uses },
-    .{ "help", .help },
-    .{ "--help", .help },
-    .{ "-h", .help },
-    .{ "version", .version_cmd },
-    .{ "--version", .version },
-});
+/// Aliases live beside their canonical tag so there's one source of
+/// truth; `command_map` below is synthesised from this at comptime.
+const command_names = [_]struct {
+    tag: Command,
+    names: []const []const u8,
+}{
+    .{ .tag = .install, .names = &.{"install"} },
+    .{ .tag = .uninstall, .names = &.{ "uninstall", "remove" } },
+    .{ .tag = .upgrade, .names = &.{"upgrade"} },
+    .{ .tag = .update, .names = &.{"update"} },
+    .{ .tag = .outdated, .names = &.{"outdated"} },
+    .{ .tag = .list, .names = &.{ "list", "ls" } },
+    .{ .tag = .info, .names = &.{"info"} },
+    .{ .tag = .search, .names = &.{"search"} },
+    .{ .tag = .doctor, .names = &.{"doctor"} },
+    .{ .tag = .tap, .names = &.{"tap"} },
+    .{ .tag = .untap, .names = &.{"untap"} },
+    .{ .tag = .migrate, .names = &.{"migrate"} },
+    .{ .tag = .rollback, .names = &.{"rollback"} },
+    .{ .tag = .link, .names = &.{"link"} },
+    .{ .tag = .unlink, .names = &.{"unlink"} },
+    .{ .tag = .run, .names = &.{"run"} },
+    .{ .tag = .version_cmd, .names = &.{"version"} },
+    .{ .tag = .completions, .names = &.{"completions"} },
+    .{ .tag = .backup, .names = &.{"backup"} },
+    .{ .tag = .restore, .names = &.{"restore"} },
+    .{ .tag = .purge, .names = &.{"purge"} },
+    .{ .tag = .services, .names = &.{"services"} },
+    .{ .tag = .bundle, .names = &.{"bundle"} },
+    .{ .tag = .uses, .names = &.{"uses"} },
+    .{ .tag = .help, .names = &.{ "help", "--help", "-h" } },
+    .{ .tag = .version, .names = &.{"--version"} },
+};
+
+const command_map = blk: {
+    @setEvalBranchQuota(10_000);
+    var total: usize = 0;
+    for (command_names) |entry| total += entry.names.len;
+    var pairs: [total]struct { []const u8, Command } = undefined;
+    var i: usize = 0;
+    for (command_names) |entry| {
+        for (entry.names) |name| {
+            pairs[i] = .{ name, entry.tag };
+            i += 1;
+        }
+    }
+    break :blk std.StaticStringMap(Command).initComptime(pairs);
+};
 
 pub fn main(init: std.process.Init.Minimal) !void {
     // In debug builds, use GeneralPurposeAllocator as the backing

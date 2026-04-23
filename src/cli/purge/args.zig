@@ -82,59 +82,80 @@ pub const Target = struct {
     category: Category,
 };
 
+const Flag = enum {
+    store_orphans,
+    unused_deps,
+    cache,
+    downloads,
+    stale_casks,
+    old_versions,
+    housekeeping,
+    wipe,
+    yes,
+    backup,
+    keep_cache,
+    remove_binary,
+};
+
+const flag_map = std.StaticStringMap(Flag).initComptime(.{
+    .{ "--store-orphans", .store_orphans },
+    .{ "--unused-deps", .unused_deps },
+    .{ "--cache", .cache },
+    .{ "--downloads", .downloads },
+    .{ "--stale-casks", .stale_casks },
+    .{ "--old-versions", .old_versions },
+    .{ "--housekeeping", .housekeeping },
+    .{ "--wipe", .wipe },
+    .{ "--yes", .yes },
+    .{ "-y", .yes },
+    .{ "--backup", .backup },
+    .{ "-b", .backup },
+    .{ "--keep-cache", .keep_cache },
+    .{ "--remove-binary", .remove_binary },
+});
+
 pub fn parseArgs(args: []const []const u8) Error!Options {
     var opts: Options = .{};
     var i: usize = 0;
+    // StaticStringMap + exhaustive switch: every flag must map to a handler.
     while (i < args.len) : (i += 1) {
         const arg = args[i];
 
-        // Scope flags
-        if (std.mem.eql(u8, arg, "--store-orphans")) {
-            opts.scope.store_orphans = true;
-        } else if (std.mem.eql(u8, arg, "--unused-deps")) {
-            opts.scope.unused_deps = true;
-        } else if (std.mem.eql(u8, arg, "--cache")) {
-            opts.scope.cache = true;
-        } else if (std.mem.startsWith(u8, arg, "--cache=")) {
+        // Prefix forms can't live in the exact-match map.
+        if (std.mem.startsWith(u8, arg, "--cache=")) {
             opts.scope.cache = true;
             opts.cache_days = std.fmt.parseInt(i64, arg["--cache=".len..], 10) catch
                 return Error.InvalidArgs;
-        } else if (std.mem.eql(u8, arg, "--downloads")) {
-            opts.scope.downloads = true;
-        } else if (std.mem.eql(u8, arg, "--stale-casks")) {
-            opts.scope.stale_casks = true;
-        } else if (std.mem.eql(u8, arg, "--old-versions")) {
-            opts.scope.old_versions = true;
-        } else if (std.mem.eql(u8, arg, "--housekeeping")) {
-            opts.scope.store_orphans = true;
-            opts.scope.unused_deps = true;
-            opts.scope.cache = true;
-            opts.scope.stale_casks = true;
-        } else if (std.mem.eql(u8, arg, "--wipe")) {
-            opts.scope.wipe = true;
+            continue;
         }
-
-        // Shared flags
-        else if (std.mem.eql(u8, arg, "--yes") or std.mem.eql(u8, arg, "-y")) {
-            opts.yes = true;
-        } else if (std.mem.eql(u8, arg, "--backup") or std.mem.eql(u8, arg, "-b")) {
-            if (i + 1 >= args.len) return Error.InvalidArgs;
-            i += 1;
-            opts.backup_path = args[i];
-        } else if (std.mem.startsWith(u8, arg, "--backup=")) {
+        if (std.mem.startsWith(u8, arg, "--backup=")) {
             opts.backup_path = arg["--backup=".len..];
+            continue;
         }
 
-        // --wipe-only flags
-        else if (std.mem.eql(u8, arg, "--keep-cache")) {
-            opts.keep_cache = true;
-        } else if (std.mem.eql(u8, arg, "--remove-binary")) {
-            opts.remove_binary = true;
-        }
-
-        // Anything else is invalid (positionals included)
-        else {
-            return Error.InvalidArgs;
+        const flag = flag_map.get(arg) orelse return Error.InvalidArgs;
+        switch (flag) {
+            .store_orphans => opts.scope.store_orphans = true,
+            .unused_deps => opts.scope.unused_deps = true,
+            .cache => opts.scope.cache = true,
+            .downloads => opts.scope.downloads = true,
+            .stale_casks => opts.scope.stale_casks = true,
+            .old_versions => opts.scope.old_versions = true,
+            .housekeeping => {
+                opts.scope.store_orphans = true;
+                opts.scope.unused_deps = true;
+                opts.scope.cache = true;
+                opts.scope.stale_casks = true;
+            },
+            .wipe => opts.scope.wipe = true,
+            .yes => opts.yes = true,
+            .backup => {
+                if (i + 1 >= args.len) return Error.InvalidArgs;
+                i += 1;
+                opts.backup_path = args[i];
+            },
+            .keep_cache => opts.keep_cache = true,
+            .remove_binary => opts.remove_binary = true,
         }
     }
 
