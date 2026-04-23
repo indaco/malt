@@ -10,7 +10,7 @@ pub const FallbackReason = enum {
     unsupported_node,
     sandbox_violation,
     system_command_failed,
-    /// Parser diagnostic propagated from `Parser.diagnostics` after a
+    /// Parser diagnostic propagated from `Parser.diagnostics()` after a
     /// `parseBlock` failure. Carries the offending line/col in `loc`.
     parse_error,
 };

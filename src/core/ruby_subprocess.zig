@@ -220,7 +220,7 @@ fn canParseBlock(allocator: std.mem.Allocator, src: []const u8) bool {
     var lex = dsl_lexer.Lexer.init(src);
     var p = dsl_parser.Parser.init(arena.allocator(), &lex);
     _ = p.parseBlock() catch return false;
-    return p.diagnostics.items.len == 0;
+    return p.diagnostics().len == 0;
 }
 
 /// Span describing a single `def NAME ... end` block at a known indent.

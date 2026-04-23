@@ -11,6 +11,9 @@ pub const FormulaError = error{
     NoBottleAvailable,
 };
 
+/// Bottle descriptor for one platform. All three strings borrow from the
+/// JSON source that backs the parent `Formula._parsed`; callers that hold
+/// a `BottleFile` beyond `Formula.deinit()` must dupe first.
 pub const BottleFile = struct {
     cellar: []const u8,
     url: []const u8,
@@ -43,27 +46,47 @@ pub fn pkgVersion(buf: []u8, version: []const u8, revision: i64) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}_{d}", .{ version, revision });
 }
 
+/// Parsed Homebrew formula. Unless otherwise noted, every `[]const u8` and
+/// `[]const []const u8` field borrows from `_parsed`; valid only until
+/// `deinit()`. The exception is `pkg_version`, which is allocated on the
+/// caller's allocator so it can outlive revision-zero callers that reuse
+/// `version`.
 pub const Formula = struct {
+    /// Borrowed from `_parsed`.
     name: []const u8,
+    /// Borrowed from `_parsed`.
     full_name: []const u8,
+    /// Borrowed from `_parsed`.
     tap: []const u8,
+    /// Borrowed from `_parsed`.
     desc: []const u8,
+    /// Borrowed from `_parsed`.
     version: []const u8,
     /// Canonical on-disk version name: equals `version` when
-    /// `revision == 0`, else `<version>_<revision>`. Use this for
-    /// every Cellar/opt/receipt path — never raw `version`.
+    /// `revision == 0` (borrowed from `_parsed`), else
+    /// `<version>_<revision>` allocated on the caller's allocator.
+    /// Use this for every Cellar/opt/receipt path — never raw `version`.
     pkg_version: []const u8,
     revision: i64,
+    /// Borrowed from `_parsed` when present.
     license: ?[]const u8,
+    /// Borrowed from `_parsed`.
     homepage: []const u8,
+    /// Outer slice allocated on the caller's allocator; element strings
+    /// borrow from `_parsed`.
     dependencies: []const []const u8,
     keg_only: bool,
     post_install_defined: bool,
+    /// Map keys and `BottleFile` string fields borrow from `_parsed`.
     bottle_files: ?std.json.ArrayHashMap(BottleFile),
+    /// Borrowed from `_parsed`.
     bottle_root_url: ?[]const u8,
+    /// Outer slice allocated on the caller's allocator; element strings
+    /// borrow from `_parsed`.
     oldnames: []const []const u8,
     /// Optional launchd service block. Populated when the upstream formula
     /// JSON contains a `service` object with at least a `run` array.
+    /// All string fields inside borrow from `_parsed`.
     service: ?ServiceDef = null,
 
     /// Holds the parsed JSON tree. Must stay alive as long as the Formula

@@ -19,13 +19,22 @@ pub const CaskError = error{
     OutOfMemory,
 };
 
+/// Parsed Homebrew cask. Every `[]const u8` borrows from `parsed`; valid
+/// only until `deinit()`. Callers holding strings past that point must dupe.
 pub const Cask = struct {
+    /// Borrowed from `parsed`.
     token: []const u8,
+    /// Borrowed from `parsed`.
     name: []const u8,
+    /// Borrowed from `parsed`.
     version: []const u8,
+    /// Borrowed from `parsed`.
     desc: []const u8,
+    /// Borrowed from `parsed`.
     homepage: []const u8,
+    /// Borrowed from `parsed`.
     url: []const u8,
+    /// Borrowed from `parsed` when present.
     sha256: ?[]const u8,
     auto_updates: bool,
 

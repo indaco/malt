@@ -27,7 +27,8 @@ pub const Diagnostic = struct {
 pub const Parser = struct {
     lexer: *Lexer,
     allocator: std.mem.Allocator,
-    diagnostics: std.ArrayList(Diagnostic),
+    /// Use `diagnostics()` from outside; the list is append-only internal state.
+    _diagnostics: std.ArrayList(Diagnostic),
     current: Token,
 
     pub fn init(allocator: std.mem.Allocator, lex: *Lexer) Parser {
@@ -35,9 +36,14 @@ pub const Parser = struct {
         return .{
             .lexer = lex,
             .allocator = allocator,
-            .diagnostics = .empty,
+            ._diagnostics = .empty,
             .current = first,
         };
+    }
+
+    /// Read-only view of the accumulated parse diagnostics.
+    pub fn diagnostics(self: *const Parser) []const Diagnostic {
+        return self._diagnostics.items;
     }
 
     /// Parse a complete post_install block body (sequence of statements).
@@ -1173,7 +1179,7 @@ pub const Parser = struct {
     }
 
     fn emitError(self: *Parser, message: []const u8) DslError {
-        self.diagnostics.append(self.allocator, .{
+        self._diagnostics.append(self.allocator, .{
             .loc = self.currentLoc(),
             .message = message,
             .severity = .err,

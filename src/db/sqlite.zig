@@ -42,12 +42,13 @@ pub const MAX_PATH_LEN: usize = 2048;
 pub const MAX_SQL_LEN: usize = 16384;
 
 pub const Statement = struct {
-    stmt: *c.sqlite3_stmt,
+    /// Raw sqlite handle; touch only via the methods below.
+    _stmt: *c.sqlite3_stmt,
 
     /// Advance the statement. Returns true when a data row is available (SQLITE_ROW),
     /// false when execution is complete (SQLITE_DONE).
     pub fn step(self: *Statement) SqliteError!bool {
-        const rc = c.sqlite3_step(self.stmt);
+        const rc = c.sqlite3_step(self._stmt);
         if (rc == c.SQLITE_ROW) return true;
         if (rc == c.SQLITE_DONE) return false;
         return mapError(rc, SqliteError.StepFailed);
@@ -55,19 +56,19 @@ pub const Statement = struct {
 
     /// Finalize (destroy) the prepared statement, releasing all resources.
     pub fn finalize(self: *Statement) void {
-        _ = c.sqlite3_finalize(self.stmt);
+        _ = c.sqlite3_finalize(self._stmt);
     }
 
     /// Reset the statement so it can be re-executed with new bindings.
     pub fn reset(self: *Statement) SqliteError!void {
-        const rc = c.sqlite3_reset(self.stmt);
+        const rc = c.sqlite3_reset(self._stmt);
         if (rc != c.SQLITE_OK) return mapError(rc, SqliteError.StepFailed);
     }
 
     /// Bind a text value to the 1-indexed parameter at `idx`.
     pub fn bindText(self: *Statement, idx: u32, text: []const u8) SqliteError!void {
         const rc = c.sqlite3_bind_text(
-            self.stmt,
+            self._stmt,
             @intCast(idx),
             @ptrCast(text.ptr),
             @intCast(text.len),
@@ -78,36 +79,37 @@ pub const Statement = struct {
 
     /// Bind a 64-bit integer value to the 1-indexed parameter at `idx`.
     pub fn bindInt(self: *Statement, idx: u32, val: i64) SqliteError!void {
-        const rc = c.sqlite3_bind_int64(self.stmt, @intCast(idx), val);
+        const rc = c.sqlite3_bind_int64(self._stmt, @intCast(idx), val);
         if (rc != c.SQLITE_OK) return mapError(rc, SqliteError.BindFailed);
     }
 
     /// Bind NULL to the 1-indexed parameter at `idx`.
     pub fn bindNull(self: *Statement, idx: u32) SqliteError!void {
-        const rc = c.sqlite3_bind_null(self.stmt, @intCast(idx));
+        const rc = c.sqlite3_bind_null(self._stmt, @intCast(idx));
         if (rc != c.SQLITE_OK) return mapError(rc, SqliteError.BindFailed);
     }
 
     /// Return the text value of column `idx` (0-indexed), or null if the column is SQL NULL.
     pub fn columnText(self: *Statement, idx: u32) ?[*:0]const u8 {
-        const ptr = c.sqlite3_column_text(self.stmt, @intCast(idx));
+        const ptr = c.sqlite3_column_text(self._stmt, @intCast(idx));
         if (ptr == null) return null;
         return ptr;
     }
 
     /// Return the 64-bit integer value of column `idx` (0-indexed).
     pub fn columnInt(self: *Statement, idx: u32) i64 {
-        return c.sqlite3_column_int64(self.stmt, @intCast(idx));
+        return c.sqlite3_column_int64(self._stmt, @intCast(idx));
     }
 
     /// Return the boolean interpretation of column `idx` (0-indexed): true when non-zero.
     pub fn columnBool(self: *Statement, idx: u32) bool {
-        return c.sqlite3_column_int64(self.stmt, @intCast(idx)) != 0;
+        return c.sqlite3_column_int64(self._stmt, @intCast(idx)) != 0;
     }
 };
 
 pub const Database = struct {
-    handle: *c.sqlite3,
+    /// Raw sqlite handle; touch only via the methods below.
+    _handle: *c.sqlite3,
 
     /// Open (or create) a database file at `path`.
     /// Configures pragmas: journal_mode=WAL, foreign_keys=ON, busy_timeout=5000.
@@ -133,7 +135,7 @@ pub const Database = struct {
             return SqliteError.OpenFailed;
         }
 
-        var self = Database{ .handle = db.? };
+        var self = Database{ ._handle = db.? };
 
         // Set recommended pragmas.
         self.exec("PRAGMA journal_mode=WAL;") catch return SqliteError.OpenFailed;
@@ -145,7 +147,7 @@ pub const Database = struct {
 
     /// Close the database connection and release resources.
     pub fn close(self: *Database) void {
-        _ = c.sqlite3_close(self.handle);
+        _ = c.sqlite3_close(self._handle);
     }
 
     /// Execute one or more SQL statements that return no result rows.
@@ -159,7 +161,7 @@ pub const Database = struct {
         @memcpy(buf[0..sql.len], sql);
         buf[sql.len] = 0;
         const c_sql: [*:0]const u8 = buf[0..sql.len :0];
-        const rc = c.sqlite3_exec(self.handle, c_sql, null, null, null);
+        const rc = c.sqlite3_exec(self._handle, c_sql, null, null, null);
         if (rc != c.SQLITE_OK) return mapError(rc, SqliteError.ExecFailed);
     }
 
@@ -168,9 +170,9 @@ pub const Database = struct {
     /// no copy needed.
     pub fn prepare(self: *Database, sql: []const u8) SqliteError!Statement {
         var stmt: ?*c.sqlite3_stmt = null;
-        const rc = c.sqlite3_prepare_v2(self.handle, sql.ptr, @intCast(sql.len), &stmt, null);
+        const rc = c.sqlite3_prepare_v2(self._handle, sql.ptr, @intCast(sql.len), &stmt, null);
         if (rc != c.SQLITE_OK) return mapError(rc, SqliteError.PrepareFailed);
-        return Statement{ .stmt = stmt.? };
+        return Statement{ ._stmt = stmt.? };
     }
 
     /// Begin an immediate transaction.
@@ -186,6 +188,6 @@ pub const Database = struct {
     /// Roll back the current transaction.  Errors are intentionally ignored
     /// because this is typically called from an errdefer path.
     pub fn rollback(self: *Database) void {
-        _ = c.sqlite3_exec(self.handle, "ROLLBACK;", null, null, null);
+        _ = c.sqlite3_exec(self._handle, "ROLLBACK;", null, null, null);
     }
 };

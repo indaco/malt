@@ -2527,7 +2527,7 @@ test "ExecContext.pushScope propagates OOM from the arena" {
         .cellar_path = "",
         .malt_prefix = "",
         .paths = std.EnumArray(malt.dsl.interpreter.PathBinding, []const u8).initFill(""),
-        .scopes = .empty,
+        ._scopes = .empty,
         .sandbox_root = "",
         .fallback_log_writer = &flog,
         .formula_name = "test",
@@ -2536,7 +2536,7 @@ test "ExecContext.pushScope propagates OOM from the arena" {
     };
 
     try testing.expectError(error.OutOfMemory, ctx.pushScope());
-    try testing.expectEqual(@as(usize, 0), ctx.scopes.items.len);
+    try testing.expectEqual(@as(usize, 0), ctx.scopeDepth());
 }
 
 test "ExecContext.pushMethodScope propagates OOM from the arena" {
@@ -2552,7 +2552,7 @@ test "ExecContext.pushMethodScope propagates OOM from the arena" {
         .cellar_path = "",
         .malt_prefix = "",
         .paths = std.EnumArray(malt.dsl.interpreter.PathBinding, []const u8).initFill(""),
-        .scopes = .empty,
+        ._scopes = .empty,
         .sandbox_root = "",
         .fallback_log_writer = &flog,
         .formula_name = "test",
@@ -2561,5 +2561,5 @@ test "ExecContext.pushMethodScope propagates OOM from the arena" {
     };
 
     try testing.expectError(error.OutOfMemory, ctx.pushMethodScope());
-    try testing.expectEqual(@as(usize, 0), ctx.scopes.items.len);
+    try testing.expectEqual(@as(usize, 0), ctx.scopeDepth());
 }
