@@ -130,25 +130,18 @@ pub fn renderRubyProfile(
     return aw.toOwnedSlice() catch SandboxError.ProfileBuildFailed;
 }
 
-/// RLIMIT constants. Zig's `std.posix.rlimit_resource` is an enum on
-/// macOS whose integer values match the platform headers; we name
-/// them here so the call sites below stay readable.
-const RLIMIT = struct {
-    const CPU: std.posix.rlimit_resource = @enumFromInt(0);
-    const FSIZE: std.posix.rlimit_resource = @enumFromInt(1);
-    const AS: std.posix.rlimit_resource = @enumFromInt(5);
-};
-
 fn applyRlimits(limits: Limits) SandboxError!void {
     const as_max: std.posix.rlim_t = @intCast(limits.address_space_bytes);
     const fs_max: std.posix.rlim_t = @intCast(limits.file_size_bytes);
     const cpu_max: std.posix.rlim_t = @intCast(limits.cpu_seconds);
 
-    std.posix.setrlimit(RLIMIT.CPU, .{ .cur = cpu_max, .max = cpu_max }) catch
+    // On macOS `.AS` is a `pub const` alias for `.RSS` inside the
+    // rlimit_resource namespace — same BSD lineage as RLIMIT_AS == RLIMIT_RSS.
+    std.posix.setrlimit(.CPU, .{ .cur = cpu_max, .max = cpu_max }) catch
         return SandboxError.RlimitFailed;
-    std.posix.setrlimit(RLIMIT.FSIZE, .{ .cur = fs_max, .max = fs_max }) catch
+    std.posix.setrlimit(.FSIZE, .{ .cur = fs_max, .max = fs_max }) catch
         return SandboxError.RlimitFailed;
-    std.posix.setrlimit(RLIMIT.AS, .{ .cur = as_max, .max = as_max }) catch
+    std.posix.setrlimit(.AS, .{ .cur = as_max, .max = as_max }) catch
         return SandboxError.RlimitFailed;
 }
 
