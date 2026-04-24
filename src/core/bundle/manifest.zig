@@ -206,3 +206,78 @@ pub fn emitJson(manifest: Manifest, writer: *std.Io.Writer) !void {
 
     try writer.writeAll("\n}\n");
 }
+
+test "parse minimal JSON" {
+    const testing = std.testing;
+    const json =
+        \\{"name": "tiny", "version": 1, "formulas": [{"name": "wget"}]}
+    ;
+    var m = try parseJson(testing.allocator, json);
+    defer m.deinit();
+
+    try testing.expectEqualStrings("tiny", m.name);
+    try testing.expectEqual(@as(u32, 1), m.version);
+    try testing.expectEqual(@as(usize, 1), m.formulas.len);
+    try testing.expectEqualStrings("wget", m.formulas[0].name);
+}
+
+test "parse full JSON with all member kinds" {
+    const testing = std.testing;
+    const json =
+        \\{
+        \\  "name": "devtools",
+        \\  "version": 1,
+        \\  "taps": ["homebrew/cask-fonts"],
+        \\  "formulas": [{"name": "wget"}, {"name": "jq", "version": "1.7"}],
+        \\  "casks": [{"name": "ghostty"}],
+        \\  "services": [{"name": "postgresql@16", "auto_start": true}]
+        \\}
+    ;
+    var m = try parseJson(testing.allocator, json);
+    defer m.deinit();
+
+    try testing.expectEqualStrings("devtools", m.name);
+    try testing.expectEqual(@as(usize, 1), m.taps.len);
+    try testing.expectEqualStrings("homebrew/cask-fonts", m.taps[0]);
+    try testing.expectEqual(@as(usize, 2), m.formulas.len);
+    try testing.expectEqualStrings("jq", m.formulas[1].name);
+    try testing.expectEqualStrings("1.7", m.formulas[1].version.?);
+    try testing.expectEqual(@as(usize, 1), m.casks.len);
+    try testing.expectEqualStrings("ghostty", m.casks[0].name);
+    try testing.expectEqual(@as(usize, 1), m.services.len);
+    try testing.expect(m.services[0].auto_start);
+}
+
+test "reject version mismatch" {
+    const testing = std.testing;
+    const json =
+        \\{"name": "x", "version": 2}
+    ;
+    try testing.expectError(ManifestError.UnsupportedVersion, parseJson(testing.allocator, json));
+}
+
+test "reject malformed json" {
+    const testing = std.testing;
+    try testing.expectError(ManifestError.MalformedJson, parseJson(testing.allocator, "not json at all"));
+}
+
+test "round-trip parse emit parse" {
+    const testing = std.testing;
+    const json =
+        \\{"name": "rt", "version": 1, "formulas": [{"name": "wget"}], "casks": [{"name": "ghostty"}]}
+    ;
+    var m1 = try parseJson(testing.allocator, json);
+    defer m1.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try emitJson(m1, &aw.writer);
+
+    var m2 = try parseJson(testing.allocator, aw.written());
+    defer m2.deinit();
+
+    try testing.expectEqualStrings(m1.name, m2.name);
+    try testing.expectEqual(m1.formulas.len, m2.formulas.len);
+    try testing.expectEqualStrings(m1.formulas[0].name, m2.formulas[0].name);
+    try testing.expectEqual(m1.casks.len, m2.casks.len);
+}

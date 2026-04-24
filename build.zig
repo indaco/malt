@@ -132,7 +132,6 @@ pub fn build(b: *std.Build) void {
         "tests/dsl_sandbox_test.zig",
         "tests/dsl_interpreter_test.zig",
         "tests/db_schema_v2_test.zig",
-        "tests/bundle_manifest_test.zig",
         "tests/bundle_brewfile_test.zig",
         "tests/services_plist_test.zig",
         "tests/services_test.zig",
@@ -140,10 +139,8 @@ pub fn build(b: *std.Build) void {
         "tests/atomic_test.zig",
         "tests/lock_test.zig",
         "tests/tap_test.zig",
-        "tests/values_test.zig",
         "tests/fallback_log_test.zig",
         "tests/help_test.zig",
-        "tests/bottle_verify_test.zig",
         "tests/archive_test.zig",
         "tests/ghcr_test.zig",
         "tests/linker_core_test.zig",
@@ -164,7 +161,6 @@ pub fn build(b: *std.Build) void {
         "tests/install_execute_test.zig",
         "tests/fs_compat_stream_test.zig",
         "tests/fs_compat_lint_test.zig",
-        "tests/fs_compat_sync_test.zig",
         "tests/fs_compat_primitives_test.zig",
         "tests/ui_color_theme_test.zig",
         "tests/install_local_test.zig",
@@ -181,8 +177,6 @@ pub fn build(b: *std.Build) void {
         "tests/upgrade_test.zig",
         "tests/hash_test.zig",
         "tests/patcher_test.zig",
-        "tests/patch_facade_test.zig",
-        "tests/child_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");
@@ -210,6 +204,43 @@ pub fn build(b: *std.Build) void {
     malt_lib.addImport("c_sqlite", host_c_mods.c_sqlite);
     malt_lib.addImport("c_clonefile", host_c_mods.c_clonefile);
     malt_lib.addImport("c_mount", host_c_mods.c_mount);
+
+    // Inline `test` blocks inside src/*.zig only run when their file is in
+    // the same module as the test root — crossing `addImport("malt", ...)`
+    // drops them. This target uses src/lib.zig as the test root so every
+    // colocated unit test is compiled into a runnable binary.
+    const lib_test_module = b.createModule(.{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    lib_test_module.addCSourceFile(.{
+        .file = b.path("vendor/sqlite3.c"),
+        .flags = &.{
+            "-DSQLITE_OMIT_LOAD_EXTENSION",
+            "-DSQLITE_THREADSAFE=1",
+            "-DSQLITE_DQS=0",
+        },
+    });
+    lib_test_module.addIncludePath(b.path("vendor/"));
+    lib_test_module.addIncludePath(b.path("c/"));
+    lib_test_module.addOptions("version_string", version_options);
+    lib_test_module.addImport("c_sqlite", host_c_mods.c_sqlite);
+    lib_test_module.addImport("c_clonefile", host_c_mods.c_clonefile);
+    lib_test_module.addImport("c_mount", host_c_mods.c_mount);
+
+    const lib_tests = b.addTest(.{
+        .name = "lib_tests",
+        .root_module = lib_test_module,
+    });
+    const run_lib_tests = b.addRunArtifact(lib_tests);
+    test_step.dependOn(&run_lib_tests.step);
+
+    const install_lib_tests = b.addInstallArtifact(lib_tests, .{
+        .dest_dir = .{ .override = .{ .custom = "test-bin" } },
+    });
+    test_bin_step.dependOn(&install_lib_tests.step);
 
     @setEvalBranchQuota(16000);
     inline for (test_modules) |test_file| {

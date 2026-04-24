@@ -28,3 +28,18 @@ pub fn runOrFail(
         .signal, .stopped, .unknown => return error.NonZeroExit,
     }
 }
+
+test "runOrFail returns void on exit code 0" {
+    const argv = [_][]const u8{"/usr/bin/true"};
+    try runOrFail(std.testing.allocator, &argv);
+}
+
+test "runOrFail returns NonZeroExit on a non-zero exit" {
+    const argv = [_][]const u8{"/usr/bin/false"};
+    try std.testing.expectError(ChildError.NonZeroExit, runOrFail(std.testing.allocator, &argv));
+}
+
+test "runOrFail returns SpawnFailed when program does not exist" {
+    const argv = [_][]const u8{"/nonexistent/binary/malt_child_test"};
+    try std.testing.expectError(ChildError.SpawnFailed, runOrFail(std.testing.allocator, &argv));
+}
