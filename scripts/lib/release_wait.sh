@@ -21,15 +21,29 @@
 # "fail" — the name the smoke script already defines).
 
 # Configurable via env so tests can compress the wait to milliseconds.
-WAIT_BUDGET_SECONDS="${WAIT_BUDGET_SECONDS:-300}" # 5 minutes default
-WAIT_POLL_INTERVAL="${WAIT_POLL_INTERVAL:-5}"     # 5s between probes
+# Default is 10m: /releases/latest can lag the goreleaser publish by
+# several minutes on a cold release (observed > 5m in v0.9.2).
+WAIT_BUDGET_SECONDS="${WAIT_BUDGET_SECONDS:-600}"
+WAIT_POLL_INTERVAL="${WAIT_POLL_INTERVAL:-5}" # 5s between probes
 MALT_SMOKE_API_BASE="${MALT_SMOKE_API_BASE:-https://api.github.com/repos/indaco/malt}"
+
+# Optional token. Unauthenticated GitHub API is 60 req/hr per IP, and
+# macos-14 runners share IPs — a busy window plus aggressive polling
+# drops us to 403s that look identical to "tag not ready yet". The
+# smoke workflow passes the job's GITHUB_TOKEN here to lift the ceiling
+# to 5000/hr and keep polls honest.
+MALT_SMOKE_API_TOKEN="${MALT_SMOKE_API_TOKEN:-}"
 
 # Returns 0 when GitHub's tag-specific release endpoint responds 200.
 release_tag_exists() {
   local tag="$1"
-  local code
+  local code auth_args=()
+  if [ -n "$MALT_SMOKE_API_TOKEN" ]; then
+    auth_args=(-H "Authorization: Bearer ${MALT_SMOKE_API_TOKEN}")
+  fi
+  # set -u-safe array splat (bash 3.2 rejects "${arr[@]}" when empty).
   code=$(curl -fsSL -o /dev/null -w '%{http_code}' --max-time 10 \
+    ${auth_args[@]+"${auth_args[@]}"} \
     "${MALT_SMOKE_API_BASE}/releases/tags/${tag}" 2>/dev/null || true)
   [ "$code" = "200" ]
 }
@@ -38,8 +52,12 @@ release_tag_exists() {
 # Strict match (no partial) so v0.7.0 cannot accept v0.7.00.
 release_latest_matches() {
   local tag="$1"
-  local body
+  local body auth_args=()
+  if [ -n "$MALT_SMOKE_API_TOKEN" ]; then
+    auth_args=(-H "Authorization: Bearer ${MALT_SMOKE_API_TOKEN}")
+  fi
   body=$(curl -fsSL --max-time 10 \
+    ${auth_args[@]+"${auth_args[@]}"} \
     "${MALT_SMOKE_API_BASE}/releases/latest" 2>/dev/null || true)
   # Require the exact closing quote so prefix-only tags don't match.
   printf '%s' "$body" | grep -q "\"tag_name\": *\"${tag}\""
