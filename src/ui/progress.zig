@@ -3,7 +3,9 @@
 //!
 //! Every stderr write in this file is best-effort: a draw failure must not
 //! abort the work the bar is reporting on (download, install, migration).
-//! That is why each `writeAll` below ends in `catch {}`.
+//! Each print group assembles its bytes in a stack buffer and hits stderr
+//! once so EPIPE surfaces at a single catch site instead of corrupting
+//! mid-chain output.
 
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
@@ -28,17 +30,14 @@ pub const MultiProgress = struct {
         const tty = stderr.supportsAnsiEscapeCodes();
 
         // Hide cursor, disable autowrap, reserve lines by printing empty placeholders.
-        // Autowrap is disabled so that if a bar row exceeds the terminal width, the
-        // overflow is clipped at the right edge instead of flowing onto a second
-        // visual line — wrapping would break the ESC[NA cursor-up math that each
-        // bar uses to update its dedicated line.
+        // Autowrap disabled so an over-width bar clips instead of wrapping —
+        // wrapping would break the ESC[NA cursor-up math each bar relies on.
         if (tty and !output.isQuiet()) {
-            stderr.writeAll("\x1b[?25l") catch {}; // hide cursor
-            stderr.writeAll("\x1b[?7l") catch {}; // disable autowrap
-            var i: u8 = 0;
-            while (i < count) : (i += 1) {
-                stderr.writeAll("\n") catch {};
-            }
+            var buf: [multi_init_max_bytes]u8 = undefined;
+            const prefix = "\x1b[?25l\x1b[?7l"; // hide cursor + disable autowrap
+            @memcpy(buf[0..prefix.len], prefix);
+            @memset(buf[prefix.len .. prefix.len + count], '\n');
+            stderr.writeAll(buf[0 .. prefix.len + count]) catch {};
         }
 
         return .{
@@ -52,11 +51,13 @@ pub const MultiProgress = struct {
     /// Must be called after all download threads have joined.
     pub fn finish(self: *MultiProgress) void {
         if (self.is_tty and !output.isQuiet()) {
-            const stderr = fs_compat.stderrFile();
-            stderr.writeAll("\x1b[?7h") catch {}; // re-enable autowrap
-            stderr.writeAll("\x1b[?25h\r") catch {}; // show cursor + column 0
+            // Re-enable autowrap, show cursor, return to col 0.
+            fs_compat.stderrFile().writeAll("\x1b[?7h\x1b[?25h\r") catch {};
         }
     }
+
+    /// "\x1b[?25l" (6) + "\x1b[?7l" (5) + up to u8-max newlines.
+    const multi_init_max_bytes: usize = 6 + 5 + std.math.maxInt(u8);
 };
 
 pub const ProgressBar = struct {
@@ -457,14 +458,7 @@ pub const Spinner = struct {
         if (output.isQuiet()) return;
 
         if (!self.is_tty) {
-            // Non-TTY: emit a single dim info line and return. No animation.
-            const f = fs_compat.stderrFile();
-            const pfx: []const u8 = if (color.isEmojiEnabled()) "  \xe2\x96\xb8 " else "  > ";
-            if (color.isColorEnabled()) f.writeAll(color.SemanticStyle.detail.code()) catch {};
-            f.writeAll(pfx) catch {};
-            f.writeAll(self.message) catch {};
-            if (color.isColorEnabled()) f.writeAll(color.Style.reset.code()) catch {};
-            f.writeAll("\n") catch {};
+            self.writeFallbackLine();
             return;
         }
 
@@ -472,17 +466,42 @@ pub const Spinner = struct {
         f.writeAll("\x1b[?25l") catch {}; // hide cursor
         self.active = true;
         self.thread = std.Thread.spawn(.{}, spinLoop, .{self}) catch blk: {
-            // Thread spawn failed: fall back to a single static line.
+            // Thread spawn failed: restore cursor and emit the static fallback line.
             self.active = false;
             f.writeAll("\x1b[?25h") catch {};
-            const pfx: []const u8 = if (color.isEmojiEnabled()) "  \xe2\x96\xb8 " else "  > ";
-            if (color.isColorEnabled()) f.writeAll(color.SemanticStyle.detail.code()) catch {};
-            f.writeAll(pfx) catch {};
-            f.writeAll(self.message) catch {};
-            if (color.isColorEnabled()) f.writeAll(color.Style.reset.code()) catch {};
-            f.writeAll("\n") catch {};
+            self.writeFallbackLine();
             break :blk null;
         };
+    }
+
+    /// Assemble one dim info line ("<detail>pfx message<reset>\n") in a
+    /// stack buffer and write it once so EPIPE surfaces at a single site.
+    fn writeFallbackLine(self: *const Spinner) void {
+        var buf: [512]u8 = undefined;
+        var pos: usize = 0;
+        const use_color = color.isColorEnabled();
+
+        if (use_color) {
+            const detail = color.SemanticStyle.detail.code();
+            @memcpy(buf[pos .. pos + detail.len], detail);
+            pos += detail.len;
+        }
+        const pfx: []const u8 = if (color.isEmojiEnabled()) "  \xe2\x96\xb8 " else "  > ";
+        @memcpy(buf[pos .. pos + pfx.len], pfx);
+        pos += pfx.len;
+        const reset_len = if (use_color) color.Style.reset.code().len else 0;
+        const msg_len = @min(self.message.len, buf.len - pos - reset_len - 1);
+        @memcpy(buf[pos .. pos + msg_len], self.message[0..msg_len]);
+        pos += msg_len;
+        if (use_color) {
+            const reset_code = color.Style.reset.code();
+            @memcpy(buf[pos .. pos + reset_code.len], reset_code);
+            pos += reset_code.len;
+        }
+        buf[pos] = '\n';
+        pos += 1;
+
+        fs_compat.stderrFile().writeAll(buf[0..pos]) catch {};
     }
 
     /// Signal the background thread to exit, join it, then clear the line

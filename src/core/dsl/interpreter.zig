@@ -557,11 +557,13 @@ pub const Interpreter = struct {
         if (rs.message) |msg_node| {
             const msg = try self.eval(msg_node);
             const msg_str = msg.asString(self.allocator) catch "raise";
-            const f = fs_compat.stderrFile();
-            // Diagnostic print; returning DslError below is the real signal.
-            f.writeAll("  x ") catch {};
-            f.writeAll(msg_str) catch {};
-            f.writeAll("\n") catch {};
+            // Assemble once so EPIPE hits a single detectable site; the real
+            // signal is DslError.PostInstallFailed below, so both the
+            // assembly OOM and the stream failure are tolerated.
+            if (std.fmt.allocPrint(self.allocator, "  x {s}\n", .{msg_str})) |line| {
+                defer self.allocator.free(line);
+                fs_compat.stderrFile().writeAll(line) catch {};
+            } else |_| {}
         }
         return DslError.PostInstallFailed;
     }
