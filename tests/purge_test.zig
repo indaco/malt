@@ -126,6 +126,24 @@ test "parseArgs rejects positional arguments" {
     try testing.expectError(purge.Error.InvalidArgs, purge.parseArgs(&argv));
 }
 
+// ── Category.label ───────────────────────────────────────────────────────
+
+test "Category.label pins every tag to its user-facing string" {
+    // Guards the @tagName collapse: non-trivial mappings (linked_dir,
+    // Cellar/Caskroom capitalisation, prefix_root) must stay; trivial
+    // ones must match the tag name byte-for-byte.
+    try testing.expectEqualStrings("linked", purge.Category.label(.linked_dir));
+    try testing.expectEqualStrings("opt", purge.Category.label(.opt));
+    try testing.expectEqualStrings("Cellar", purge.Category.label(.cellar));
+    try testing.expectEqualStrings("Caskroom", purge.Category.label(.caskroom));
+    try testing.expectEqualStrings("store", purge.Category.label(.store));
+    try testing.expectEqualStrings("cache", purge.Category.label(.cache));
+    try testing.expectEqualStrings("tmp", purge.Category.label(.tmp));
+    try testing.expectEqualStrings("db", purge.Category.label(.db));
+    try testing.expectEqualStrings("prefix", purge.Category.label(.prefix_root));
+    try testing.expectEqualStrings("binary", purge.Category.label(.binary));
+}
+
 // ── buildPlan ────────────────────────────────────────────────────────────
 
 fn findCategory(plan: []const purge.Target, cat: purge.Category) ?usize {

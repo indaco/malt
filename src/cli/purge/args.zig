@@ -62,17 +62,13 @@ pub const Category = enum {
     binary, // /usr/local/bin/{mt,malt} — opt-in via --remove-binary
 
     pub fn label(self: Category) []const u8 {
+        // @tagName covers the trivial tags so a rename can't desync label from source.
         return switch (self) {
             .linked_dir => "linked",
-            .opt => "opt",
             .cellar => "Cellar",
             .caskroom => "Caskroom",
-            .store => "store",
-            .cache => "cache",
-            .tmp => "tmp",
-            .db => "db",
             .prefix_root => "prefix",
-            .binary => "binary",
+            .opt, .store, .cache, .tmp, .db, .binary => @tagName(self),
         };
     }
 };
