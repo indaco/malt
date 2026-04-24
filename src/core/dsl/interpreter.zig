@@ -558,6 +558,7 @@ pub const Interpreter = struct {
             const msg = try self.eval(msg_node);
             const msg_str = msg.asString(self.allocator) catch "raise";
             const f = fs_compat.stderrFile();
+            // Diagnostic print; returning DslError below is the real signal.
             f.writeAll("  x ") catch {};
             f.writeAll(msg_str) catch {};
             f.writeAll("\n") catch {};

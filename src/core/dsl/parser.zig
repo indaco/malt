@@ -1163,6 +1163,7 @@ pub const Parser = struct {
     }
 
     fn emitError(self: *Parser, message: []const u8) DslError {
+        // OOM here means we lose one diagnostic entry; ParseError still propagates.
         self._diagnostics.append(self.allocator, .{
             .loc = self.currentLoc(),
             .message = message,
