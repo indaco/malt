@@ -1,6 +1,5 @@
-//! malt — install command
-//! Install formulas, casks, or tap formulas.
-//! Implements the 9-step atomic install protocol.
+//! malt — install command.
+//! 9-step atomic install protocol for formulas, casks, and tap formulas.
 
 const std = @import("std");
 
@@ -128,19 +127,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // allowing programmatic callers to pass `--dry-run` directly in `args`.
     var dry_run = output.isDryRun();
     var force = false;
-    // `--use-system-ruby` scope: the audit flagged a session-wide flag
-    // as an auto-fallback trust widener. We keep the flag ergonomic
-    // when a single formula is installed (bare flag implies that
-    // formula) but require an explicit `--use-system-ruby=name[,name]`
-    // list when multiple formulas are queued, so a DSL parse failure
-    // on one never enables Ruby for the rest.
+    // Scoped `--use-system-ruby` — a bare flag with multiple formulas would
+    // let a DSL parse failure on one silently widen Ruby trust across the rest.
     var use_system_ruby_bare = false;
     var use_system_ruby_scope: std.ArrayList([]const u8) = .empty;
     defer use_system_ruby_scope.deinit(allocator);
-    // `--local` forces every positional argument to be interpreted as a
-    // path to a `.rb` file. The flag is the explicit opt-in that
-    // captures the "I trust this file" decision in argv, rather than
-    // leaving it to shape-based autodetection.
+    // `--local` forces .rb-path interpretation — explicit trust opt-in in
+    // argv instead of shape-based autodetection.
     var local_only = false;
 
     // StaticStringMap + exhaustive switch: the compiler checks every flag
@@ -169,18 +162,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     if (local_only and packages.items.len == 0) {
-        // User-facing argv error — emit the one-liner and exit clean.
-        // Returning `error.Aborted` (per the main.zig contract) avoids
-        // the "error: LocalFormulaMissingPath" stack trace that raw
-        // InstallError variants trigger.
+        // `error.Aborted` per the main.zig contract — avoids a raw stack trace.
         output.err("--local requires a path to a .rb file", .{});
         return error.Aborted;
     }
 
-    // `--local` conflicts with other mode flags. Rather than silently
-    // letting path-shape detection win, refuse ambiguous argv up front
-    // so "install --local --cask ./foo.rb" cannot quietly drop the
-    // cask pathway or vice versa.
+    // Refuse ambiguous argv so `--local` cannot silently drop another mode.
     if (local_only) {
         if (force_cask) {
             output.err("--local cannot be combined with --cask (a .rb file is never a cask)", .{});
@@ -201,9 +188,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return InstallError.NoPackages;
     }
 
-    // Disambiguate bare `--use-system-ruby`: accept it as shorthand
-    // when exactly one formula was listed; otherwise the user must
-    // name which formulas should get the wider path.
+    // Bare `--use-system-ruby` only valid for a single formula; otherwise
+    // require an explicit scope.
     if (use_system_ruby_bare) {
         if (packages.items.len == 1) {
             try use_system_ruby_scope.append(allocator, packages.items[0]);
@@ -220,10 +206,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Initialize infrastructure
     const prefix = atomic.maltPrefix();
 
-    // Sanity cap: refuse absurdly long prefixes before any network
-    // activity. Realistic values sail through — install_name_tool grows
-    // overflowing load-command slots into the bottle's __LINKEDIT
-    // padding.
+    // Absurdly long prefixes overflow install_name_tool's load-command slots.
     checkPrefixSane(prefix) catch |err| switch (err) {
         error.PrefixAbsurd => {
             output.err(
@@ -264,17 +247,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer lk.release();
 
-    // Set up HTTP client (single-threaded main-thread use — formula
-    // lookups, cask probe, top-level `fetchFormula`). Worker threads
-    // borrow from the pool below instead of touching this instance.
+    // Main-thread HTTP client; workers borrow from `http_pool` instead.
     var http = client_mod.HttpClient.init(allocator);
     defer http.deinit();
 
-    // Shared HTTP client pool for worker threads. Each worker
-    // (download + parallel resolve) borrows an idle client for the
-    // duration of one request so TLS contexts are reused across
-    // calls. 4 slots is the same budget the P5 materialize pool uses
-    // and is enough to saturate cold installs on typical machines.
+    // 4-slot worker pool — same budget as the materialize pool; enough to
+    // saturate cold installs while reusing TLS contexts.
     var http_pool = client_mod.HttpClientPool.init(allocator, 4) catch {
         output.err("Failed to initialise HTTP client pool", .{});
         return InstallError.DownloadFailed;
@@ -312,19 +290,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         }
 
-        // Local .rb path (explicit via --local, or shape-detected — a
-        // leading `.`/`/`/`~` or embedded slash plus a `.rb` suffix).
-        // Path wins over tap-form when `.rb` is present so a typo like
-        // `user/repo/foo.rb` gets a clean local-file error instead of
-        // a confusing GitHub 404.
+        // Path wins over tap-form when `.rb` is present — a typo like
+        // `user/repo/foo.rb` hits local-file error, not a GitHub 404.
         if (local_only or isLocalFormulaPath(pkg_name)) {
             installLocalFormula(allocator, pkg_name, &db, &linker, prefix, dry_run, force) catch |e| {
-                // The inner function has already emitted a specific
-                // error line (missing file, insecure URL, parse
-                // failure, …). Only append the generic summary for
-                // errors whose internal message didn't cover the
-                // "what" — keeps single-package failures from printing
-                // two red lines for one problem.
+                // Skip the generic summary when the inner error line already
+                // told the user what went wrong.
                 if (!localErrorIsAnnounced(e)) {
                     output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                 }
@@ -420,16 +391,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.info("Downloading {d} bottles...", .{to_download});
         }
 
-        // GHCR token prefetch: fold every distinct repo in the batch
-        // into a single multi-scope `/token` round-trip so each
-        // download worker hits the cache instead of racing its own
-        // token fetch. On a 12-dep install this turns 12 sequential
-        // token round-trips into 1. `prefetchTokens` is best-effort;
-        // on any error we leave the cache empty and workers fall back
-        // to per-repo fetches (the old behaviour, one round-trip each).
-        // OOM during prefetch bookkeeping must not be swallowed: subsequent
-        // install phases depend on allocator integrity. Token prefetch itself
-        // stays best-effort — a cache miss falls back to per-worker fetches.
+        // Fold every repo into one multi-scope `/token` round-trip; workers
+        // hit the cache instead of racing. Bookkeeping OOM must propagate —
+        // only the token fetch itself is best-effort.
         var repo_set: std.StringHashMapUnmanaged(void) = .empty;
         defer repo_set.deinit(allocator);
         for (all_jobs.items) |*job| {
@@ -460,11 +424,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
         var multi = progress_mod.MultiProgress.init(download_index);
 
-        // Allocate all progress bars in the main thread so we can render an
-        // initial frame on every reserved line BEFORE spawning workers. This
-        // avoids a blank row when a later worker thread is scheduled before
-        // an earlier one. Bars live in a stable slice so the pointers we
-        // hand to worker threads remain valid.
+        // Main-thread bar allocation — draw an initial frame on every line
+        // before workers spawn, and keep pointers stable for them.
         var bars: []progress_mod.ProgressBar = &.{};
         if (allocator.alloc(progress_mod.ProgressBar, download_index)) |s| {
             bars = s;
@@ -518,27 +479,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // ── Parallel materialize phase ──────────────────────────────────
-    //
-    // Each materialize step (clonefile + Mach-O patch + codesign) is
-    // independent — workers never touch each other's keg paths. Shared
-    // state (linker conflict check, SQLite INSERTs, `failed_kegs`) is
-    // deferred to the serial link phase below.
-    //
-    // The old flow ran `materializeAndLink` serially per job, which on
-    // cold installs of large formulae like ffmpeg (11 deps) added up to
-    // ~3 s of back-to-back materialize work.
-    //
-    // **Bounded** pool — max 4 workers. Unbounded parallelism (one
-    // thread per job) turned into page-cache thrashing and codesign
-    // subprocess contention on warm ffmpeg, regressing that workload
-    // ~160 ms. Four workers preserves the cold-install speedup (I/O
-    // and subprocess wait overlap) while keeping cache pressure low.
+    // Materialize steps are per-keg independent; shared state is deferred
+    // to the serial link phase. 4-worker cap — unbounded spawn regressed
+    // warm ffmpeg via page-cache + codesign contention.
     const mats = allocator.alloc(MaterializeResult, all_jobs.items.len) catch
         return InstallError.CellarFailed;
-    // Two defers (LIFO): the keg-path loop needs `mats` alive, so free the
-    // outer slice last. Splits the two allocator contracts into distinct
-    // statements so the reader doesn't have to track which slice came from
-    // which allocator.
+    // LIFO defers: keg paths freed first (c_allocator), outer slice last.
     defer allocator.free(mats);
     defer for (mats) |m| {
         if (m.keg_path.len > 0) std.heap.c_allocator.free(m.keg_path);
@@ -575,11 +521,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // ── Serial link + record phase ──────────────────────────────────
-    //
-    // Runs in dep order (the jobs list came out of `collectFormulaJobs`
-    // dep-sorted) so `findFailedDep` correctly propagates failures down
-    // the graph. Linker conflict checks and SQLite writes are not
-    // thread-safe, so this phase cannot be parallelised.
+    // Runs in dep order so `findFailedDep` propagates failures down the
+    // graph; linker + SQLite writes cannot be parallelised.
     var failed_kegs = std.StringHashMap(void).init(allocator);
     defer failed_kegs.deinit();
     var failed_count: usize = 0;
@@ -611,10 +554,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             continue;
         }
 
-        // Skip if any runtime dep has already failed — installing on top of a
-        // broken dep graph produces a keg that dyld cannot resolve at runtime.
-        // The keg has already been materialised into the Cellar by a worker;
-        // remove it before continuing so we do not leave orphans behind.
+        // Failed-dep → skip: installing on a broken graph yields a dyld-unresolvable
+        // keg. Remove the already-materialised keg so orphans don't linger.
         if (findFailedDep(&failed_kegs, job.formula_json)) |failed_dep| {
             output.warn(
                 "Skipping {s}: dependency {s} failed to install",
@@ -650,13 +591,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 }
 
-/// Main-thread link + record phase for a single job that already had
-/// its bottle materialised into the Cellar by a worker. Parses the
-/// formula JSON, checks symlink conflicts, creates symlinks, and
-/// writes the keg + dependency rows into the DB.
-///
-/// Must run serially — linker conflict checking reads the current
-/// symlink state and SQLite writes are not safe from multiple writers.
+/// Link + record a materialised keg. Must run serially: linker conflict
+/// checks read live symlink state and SQLite is single-writer.
 fn linkAndRecord(
     allocator: std.mem.Allocator,
     job: *DownloadJob,
@@ -724,10 +660,7 @@ fn linkAndRecord(
 }
 
 /// Register a launchd service when the formula carries a `service:` block.
-/// Best-effort: failures only emit a warning so they don't fail the install.
-/// Path validation (interpreter bait, path escape, argv caps) is run
-/// inside `supervisor.register` against the formula's cellar + the
-/// install prefix.
+/// Best-effort: failures warn but don't fail the install.
 fn maybeRegisterService(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,

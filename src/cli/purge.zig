@@ -1,34 +1,5 @@
-//! malt — purge command
-//! Unified housekeeping + nuclear-wipe command.  A scope flag selects
-//! what to remove; without one, the command refuses to run.
-//!
-//! Scopes (one or more required):
-//!   --store-orphans  Refcount-0 blobs in {prefix}/store
-//!   --unused-deps    Indirect-install kegs no other package needs
-//!   --cache[=DAYS]   Cache files older than DAYS (default 30)
-//!   --downloads      Wipe {cache}/downloads entirely
-//!   --stale-casks    Cask cache + Caskroom entries for uninstalled casks
-//!   --old-versions   Non-latest versions in {prefix}/Cellar
-//!   --housekeeping   = --store-orphans --unused-deps --cache --stale-casks
-//!   --wipe           Nuclear: remove every malt artefact from disk
-//!
-//! Shared flags:
-//!   --dry-run, -n        Preview only (also recognised as the global flag)
-//!   --yes, -y            Skip every typed confirmation prompt
-//!   --quiet, -q          Suppress per-item output
-//!   --backup, -b PATH    Write a `mt restore`-compatible manifest first
-//!
-//! --wipe-only flags:
-//!   --keep-cache         Do not remove the cache directory
-//!   --remove-binary      Also unlink /usr/local/bin/{mt,malt}
-//!
-//! Confirmation gates (skippable with --yes):
-//!   --wipe          → type "purge"
-//!   --downloads     → type "downloads"
-//!   --old-versions  → type "old-versions"
-//!
-//! Non-goals:
-//!   * Per-package removal — use `mt uninstall <name>`.
+//! malt — purge command: housekeeping and nuclear-wipe scopes.
+//! Refuses to run without a scope flag; full flag reference in `mt purge --help`.
 
 const std = @import("std");
 const atomic = @import("../fs/atomic.zig");
