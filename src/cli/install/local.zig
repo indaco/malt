@@ -42,6 +42,11 @@ const ResolvedRubyFormula = struct {
     /// Archive URL post `#{version}` interpolation.
     url: []const u8,
     sha256: []const u8,
+    /// Cask DSL `binary "<x>"` override. Set when the archive's
+    /// top-level executable does not match `name` (e.g. the
+    /// `longbridge-terminal` cask ships a `longbridge` binary). Null
+    /// for formulas and for casks that omit the directive.
+    binary_name: ?[]const u8 = null,
     /// When set, the tap is registered in the DB (mirrors the original
     /// tap install behaviour). Local installs leave this null so they
     /// never pollute the tap list.
@@ -82,8 +87,8 @@ pub fn installTapFormula(
         if ((tap_mod.getCommitSha(allocator, db, tap_slug) catch null)) |cached| {
             break :blk cached;
         }
-        break :blk tap_mod.resolveHeadCommit(allocator, parts.user, parts.repo) catch {
-            output.err("Could not resolve {s}'s HEAD commit — refusing to install from a floating HEAD.", .{tap_slug});
+        break :blk tap_mod.resolveHeadCommit(allocator, parts.user, parts.repo) catch |e| {
+            output.err("Could not resolve {s}'s HEAD commit: {s}", .{ tap_slug, tap_mod.describeResolveError(e) });
             return InstallError.FormulaNotFound;
         };
     };
@@ -152,6 +157,7 @@ pub fn installTapFormula(
         .version = rb.version,
         .url = final_url,
         .sha256 = rb.sha256,
+        .binary_name = parseCaskBinary(resp.body),
         .tap_registration = .{ .url = tap_url, .commit_sha = commit_sha },
     };
     try materializeRubyFormula(allocator, resolved, &http, db, linker, prefix, dry_run, force);
@@ -443,7 +449,12 @@ fn materializeRubyFormula(
     }
 
     // Promote the binary to bin/ (GoReleaser may extract directly or
-    // into a subdirectory — walk to handle both).
+    // into a subdirectory — walk to handle both). For casks that
+    // declare `binary "<x>"`, the archive file is named `<x>` while
+    // the keg is named by the cask token; match on the declared
+    // binary so a tap cask like `longbridge-terminal` lands its
+    // `longbridge` executable.
+    const target_binary = resolved.binary_name orelse resolved.name;
     {
         var cellar_dir = fs_compat.openDirAbsolute(cellar_path, .{ .iterate = true }) catch return InstallError.CellarFailed;
         defer cellar_dir.close();
@@ -454,7 +465,7 @@ fn materializeRubyFormula(
         while (walker.next() catch null) |entry| {
             if (entry.kind != .file) continue;
             const basename = std.fs.path.basename(entry.path);
-            if (std.mem.eql(u8, basename, resolved.name)) {
+            if (std.mem.eql(u8, basename, target_binary)) {
                 const dest_name = std.fmt.bufPrint(&tmp_buf, "bin/{s}", .{basename}) catch continue;
                 cellar_dir.copyFile(entry.path, cellar_dir, dest_name, .{}) catch continue;
                 const bin_file = cellar_dir.openFile(dest_name, .{ .mode = .read_write }) catch continue;
@@ -610,4 +621,24 @@ pub fn extractQuoted(line: []const u8, prefix: []const u8) ?[]const u8 {
     _, const after = std.mem.cut(u8, line, prefix) orelse return null;
     const body, _ = std.mem.cut(u8, after, "\"") orelse return null;
     return body;
+}
+
+/// Pull the first argument of a cask `binary "<name>"` directive.
+/// Homebrew's cask DSL promotes that file to `$PREFIX/bin/<name>`, so
+/// tap casks whose archive binary does not match the cask token
+/// (e.g. `longbridge-terminal` ships a `longbridge` binary) need this
+/// override to land a working symlink. Returns null for formulas or
+/// casks that omit the directive. Anchored to the trimmed line start
+/// so a stray mention in a comment or `desc` string does not match.
+pub fn parseCaskBinary(rb_content: []const u8) ?[]const u8 {
+    var line_start: usize = 0;
+    for (rb_content, 0..) |ch, idx| {
+        if (ch != '\n' and idx != rb_content.len - 1) continue;
+        const line_end = if (ch == '\n') idx else idx + 1;
+        const line = std.mem.trim(u8, rb_content[line_start..line_end], " \t\r");
+        line_start = idx + 1;
+        if (!std.mem.startsWith(u8, line, "binary \"")) continue;
+        if (extractQuoted(line, "binary \"")) |b| return b;
+    }
+    return null;
 }

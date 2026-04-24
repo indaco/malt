@@ -752,6 +752,7 @@ Every install follows a strict 9-step protocol. Failure at any step triggers cle
 | `MALT_NO_EMOJI`                | Disable emoji in output                                                           | unset            |
 | `MALT_THEME`                   | Force the output palette: `light`, `dark`, or `auto` (detects via OSC 11)         | `auto`           |
 | `HOMEBREW_GITHUB_API_TOKEN`    | GitHub token for higher API rate limits                                           | unset            |
+| `MALT_GITHUB_TOKEN`            | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only    | unset            |
 | `MALT_ALLOW_UNVERIFIED`        | Skip cosign signature check in `install.sh` (use only when cosign is unavailable) | unset            |
 | `MALT_ALLOW_UNVERIFIED_SOURCE` | Allow `install.sh` to clone `main` when no release tag resolves                   | unset            |
 | `MALT_ALLOW_RAW_POST_INSTALL`  | Disable terminal escape filter on ruby `post_install` output                      | unset            |
@@ -788,33 +789,39 @@ zig build universal                      # universal binary (arm64 + x86_64 via 
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size   |
+| -------- | ------ |
 | **malt** | 3.1 MB |
 | nanobrew | 1.7 MB |
 | zerobrew | 8.6 MB |
+
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install (median ±σ)
 
-| Package | malt | nanobrew | zerobrew | Homebrew |
-| ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.630±0.237s | 0.644±0.029s | 1.232±0.071s | 3.323±0.287s |
-| **wget** (6 deps) | 3.408±0.263s | 5.753±1.347s | 8.484±1.862s | 5.109±1.243s |
+| Package              | malt         | nanobrew     | zerobrew     | Homebrew      |
+| -------------------- | ------------ | ------------ | ------------ | ------------- |
+| **tree** (0 deps)    | 0.630±0.237s | 0.644±0.029s | 1.232±0.071s | 3.323±0.287s  |
+| **wget** (6 deps)    | 3.408±0.263s | 5.753±1.347s | 8.484±1.862s | 5.109±1.243s  |
 | **ffmpeg** (11 deps) | 3.055±0.468s | 3.779±0.191s | 7.375±0.456s | 17.314±0.814s |
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew |
-| ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.007s | 0.014s | 0.226s |
-| **wget** (6 deps) | 0.092s | 2.976s | 1.013s |
-| **ffmpeg** (11 deps) | 0.297s | 1.547s | 3.026s |
+| Package              | malt   | nanobrew | zerobrew |
+| -------------------- | ------ | -------- | -------- |
+| **tree** (0 deps)    | 0.007s | 0.014s   | 0.226s   |
+| **wget** (6 deps)    | 0.092s | 2.976s   | 1.013s   |
+| **ffmpeg** (11 deps) | 0.297s | 1.547s   | 3.026s   |
+
 <!-- BENCH:WARM:END -->
 
 > [!IMPORTANT]

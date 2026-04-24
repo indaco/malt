@@ -53,6 +53,7 @@ pub const LocalPermissionRisk = local_mod.LocalPermissionRisk;
 pub const describeLocalPermissionRisk = local_mod.describeLocalPermissionRisk;
 pub const RubyFormulaInfo = local_mod.RubyFormulaInfo;
 pub const parseRubyFormula = local_mod.parseRubyFormula;
+pub const parseCaskBinary = local_mod.parseCaskBinary;
 pub const extractQuoted = local_mod.extractQuoted;
 const installTapFormula = local_mod.installTapFormula;
 const installLocalFormula = local_mod.installLocalFormula;
