@@ -145,7 +145,7 @@ fn openDb() !sqlite.Database {
         return ServicesError.DatabaseError;
     fs_compat.cwd().makePath(db_dir) catch {};
     var path_buf: [512]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/malt.db", .{db_dir}) catch
+    const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return ServicesError.DatabaseError;
     return sqlite.Database.open(path);
 }

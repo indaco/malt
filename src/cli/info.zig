@@ -390,7 +390,7 @@ fn writeLine(w: *std.Io.Writer, scratch: []u8, comptime fmt: []const u8, args: a
 /// caller can degrade to a stateless response instead of bailing.
 pub fn openDb(prefix: []const u8) ?sqlite.Database {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch return null;
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
     return sqlite.Database.open(db_path) catch null;
 }
 

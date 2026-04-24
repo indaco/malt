@@ -124,7 +124,7 @@ fn checkMaltPrefix(ctx: CheckCtx, name: []const u8) CheckResult {
 
 fn checkSqliteIntegrity(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}) catch {
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
         printCheck(name, .err_status, "Prefix path too long");
         return .err_status;
     };
@@ -290,7 +290,7 @@ fn checkApiReachable(ctx: CheckCtx, name: []const u8) CheckResult {
 
 fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}) catch {
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -345,7 +345,7 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
 
 fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}) catch {
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
@@ -499,7 +499,7 @@ fn checkDiskSpace(ctx: CheckCtx, name: []const u8) CheckResult {
 
 fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}) catch {
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
         printCheck(name, .ok, null);
         return .ok;
     };
