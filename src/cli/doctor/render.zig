@@ -80,7 +80,7 @@ pub fn printCheck(name: []const u8, status: CheckStatus, detail: ?[]const u8) vo
     // prior rows when stderr is a regular file; stream via `stderrWriteAll`.
     var buf: [1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    // Truncation of an oversized row is acceptable — `buffered()` still emits what fit.
+    // Truncation of an oversized row is acceptable - `buffered()` still emits what fit.
     renderCheckRow(&w, status, name, detail, .{
         .color = color.isColorEnabled(),
         .emoji = color.isEmojiEnabled(),

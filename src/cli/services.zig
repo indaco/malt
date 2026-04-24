@@ -43,6 +43,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     var db = try openDb();
     defer db.close();
+    // Schema is idempotent; subcommand queries surface the real error if the DB is broken.
     schema.initSchema(&db) catch {};
 
     if (std.mem.eql(u8, sub, "list") or std.mem.eql(u8, sub, "ls")) {
@@ -143,6 +144,7 @@ fn openDb() !sqlite.Database {
     var db_dir_buf: [512]u8 = undefined;
     const db_dir = std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix}) catch
         return ServicesError.DatabaseError;
+    // db/ may already exist; sqlite.open below surfaces real path errors.
     fs_compat.cwd().makePath(db_dir) catch {};
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch

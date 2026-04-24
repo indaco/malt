@@ -114,11 +114,13 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
         }
 
         for (taps) |t| {
+            // stdout may be a closed pipe (head, grep -q, etc.); dropping the
+            // listing line is the correct behaviour, not an aborted command.
             const f = fs_compat.stdoutFile();
             f.writeAll(t.name) catch {};
             if (t.commit_sha) |sha| {
                 f.writeAll(" @ ") catch {};
-                // Print just the 7-char short SHA to keep the listing compact.
+                // 7-char short SHA to keep the listing compact.
                 const short_len = @min(sha.len, 7);
                 f.writeAll(sha[0..short_len]) catch {};
             } else {

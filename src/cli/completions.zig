@@ -41,6 +41,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             "malt: unknown shell '{s}'. Supported shells: bash, zsh, fish\n",
             .{args[0]},
         ) catch "malt: unknown shell. Supported shells: bash, zsh, fish\n";
+        // exit(2) below is the real signal; a closed stderr shouldn't block that.
         stderr.writeAll(msg) catch {};
         std.process.exit(2);
     };
@@ -61,6 +62,7 @@ fn printUsage() void {
         \\  fish    source with: malt completions fish | source
         \\
     ;
+    // Usage is diagnostic; caller always follows with exit(2).
     fs_compat.stderrFile().writeAll(usage) catch {};
 }
 

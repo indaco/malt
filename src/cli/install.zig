@@ -561,6 +561,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 "Skipping {s}: dependency {s} failed to install",
                 .{ job.name, failed_dep },
             );
+            // orphan keg cleanup; user already sees the skip warning above.
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             try failed_kegs.put(job.name, {});
             failed_count += 1;
@@ -606,6 +607,7 @@ fn linkAndRecord(
     // Parse formula for DB recording
     var formula = formula_mod.parseFormula(allocator, job.formula_json) catch |err| {
         output.err("Failed to parse formula for {s}: {s}", .{ job.name, @errorName(err) });
+        // rollback materialised keg; user-visible error already emitted.
         cellar_mod.remove(prefix, job.name, job.version_str) catch {};
         return InstallError.CellarFailed;
     };
@@ -620,6 +622,7 @@ fn linkAndRecord(
                 output.err("  {s} already linked by {s}", .{ conflict.link_path, conflict.existing_keg });
             }
             output.err("Use --force to overwrite, or uninstall the conflicting package first.", .{});
+            // rollback materialised keg on conflict.
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return InstallError.LinkFailed;
         }
@@ -629,6 +632,7 @@ fn linkAndRecord(
     if (!job.keg_only) {
         const keg_id = recordKeg(db, &formula, job.store_sha256, keg_path, reason) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
+            // rollback materialised keg when DB record fails.
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
         };
@@ -636,19 +640,23 @@ fn linkAndRecord(
         linker.link(keg_path, job.name, keg_id) catch |err| {
             output.err("Failed to link {s}: {s}", .{ job.name, @errorName(err) });
             // Rollback: unlink what was partially created + remove DB record + cellar
+            // partial-link cleanup in a rollback; original error is authoritative.
             linker.unlink(keg_id) catch {};
             deleteKeg(db, keg_id);
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return InstallError.LinkFailed;
         };
+        // opt symlink is convenience; install already functional via versioned link.
         linker.linkOpt(job.name, job.version_str) catch {};
         recordDeps(db, keg_id, &formula);
     } else {
         const keg_id = recordKeg(db, &formula, job.store_sha256, keg_path, reason) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
+            // rollback materialised keg when DB record fails.
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
         };
+        // opt symlink is convenience; install already functional via versioned link.
         linker.linkOpt(job.name, job.version_str) catch {};
         recordDeps(db, keg_id, &formula);
     }
@@ -683,6 +691,7 @@ fn maybeRegisterService(
     // Ensure the log directory exists.
     var log_dir_buf: [512]u8 = undefined;
     if (std.fmt.bufPrint(&log_dir_buf, "{s}/var/log", .{prefix})) |dir| {
+        // launchd creates the file on first run; missing dir surfaces there.
         fs_compat.cwd().makePath(dir) catch {};
     } else |_| {}
 

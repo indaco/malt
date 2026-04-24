@@ -140,6 +140,7 @@ pub fn writeManifest(allocator: std.mem.Allocator, path: []const u8) Error!void 
 fn writeBytesToPath(path: []const u8, bytes: []const u8) Error!void {
     if (std.fs.path.dirname(path)) |dir| {
         if (dir.len > 0) {
+            // Parent may already exist; the subsequent createFile reports real errors.
             if (std.fs.path.isAbsolute(dir)) {
                 fs_compat.makeDirAbsolute(dir) catch {};
             } else {
