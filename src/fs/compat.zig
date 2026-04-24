@@ -1,13 +1,5 @@
-//! 0.15-style `std.fs` / `std.posix.getenv` shim backed by the 0.16
-//! `std.Io` APIs. Lets us carry the existing filesystem call-shape
-//! through the migration without threading an `Io` context into every
-//! caller. Long-term callers should accept `std.process.Init` and
-//! route a real `Io` through, at which point this shim can retire.
-//!
-//! Every helper pulls its `Io` from `io_mod.ctx()` (the default
-//! `std.Options.debug_io`). Behaviour matches the 0.15 APIs: absolute
-//! path operations, `cwd` rooted operations, and env-var lookup via
-//! the libc `environ` array.
+//! 0.15-style `std.fs` / `std.posix.getenv` shim over the 0.16 `std.Io` APIs.
+//! Helpers pull `Io` from `io_mod.ctx()`; retires once callers thread `Io`.
 
 const std = @import("std");
 const io_mod = @import("../ui/io.zig");
@@ -16,15 +8,8 @@ pub const path = std.fs.path;
 pub const max_path_bytes = std.Io.Dir.max_path_bytes;
 pub const max_name_bytes = std.Io.Dir.max_name_bytes;
 
-/// Look up an environment variable via the libc `environ` array. Matches
-/// the 0.15 `std.posix.getenv` contract: returns a sentinel-terminated
-/// slice that points into the global environment block, or `null` when
-/// the variable is unset.
-/// 0.15-style `File.readToEndAlloc` for callers that still receive a raw
-/// `std.Io.File` (e.g. from `child.stdout.?`). Streams the whole file
-/// through a per-call `Threaded` io into an `ArrayList`. The default
-/// `debug_io` won't work here because reading a child pipe blocks and
-/// needs the threaded io's wait/poll machinery.
+/// Read a raw `std.Io.File` to end on a per-call `Threaded` io — the default
+/// `debug_io` can't wait on blocking child pipes.
 pub fn readFileToEndAlloc(file: std.Io.File, allocator: std.mem.Allocator, max_bytes: usize) ![]u8 {
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
@@ -75,23 +60,17 @@ pub fn milliTimestamp() i64 {
     return std.Io.Clock.real.now(io_mod.ctx()).toMilliseconds();
 }
 
-/// Closed error set surfaced by `StreamCallback.func`. Keeps callers
-/// exhaustive: a new callback failure mode must land here or it cannot
-/// be plumbed through the vtable.
+/// Closed error set for `StreamCallback.func`; forces exhaustive handling.
 pub const StreamError = error{ OutOfMemory, CallbackAborted };
 
-/// Context + function pair for `streamFile`. The func receives every
-/// chunk exactly once, in order — any non-void error aborts the walk
-/// and propagates out to the caller.
+/// Context + func for `streamFile`; a non-void error aborts the walk.
 pub const StreamCallback = struct {
     context: *anyopaque,
     func: *const fn (context: *anyopaque, chunk: []const u8) StreamError!void,
 };
 
-/// Walk `file` from start to EOF in `buf`-sized chunks, invoking `cb`
-/// on each chunk. Advancing-offset positional reads — the obvious way
-/// to stream a file without tripping on `readAll`'s offset-0
-/// behaviour. Fails fast on a zero-length buffer (would loop).
+/// Stream `file` to EOF in `buf`-sized chunks via advancing positional reads.
+/// Fails fast on a zero-length buffer (would loop).
 pub fn streamFile(file: File, buf: []u8, cb: StreamCallback) !void {
     if (buf.len == 0) return error.InvalidArgument;
     var offset: u64 = 0;
@@ -153,9 +132,7 @@ pub fn renameAbsolute(old_path: []const u8, new_path: []const u8) !void {
     return std.Io.Dir.renameAbsolute(old_path, new_path, io_mod.ctx());
 }
 
-/// 0.15-style `readFileAlloc` convenience for absolute paths. Opens,
-/// reads up to `max_bytes`, closes - composes the existing primitives
-/// so callers don't reinvent the open/defer/read dance.
+/// 0.15-style `readFileAlloc` convenience for absolute paths.
 pub fn readFileAbsoluteAlloc(allocator: std.mem.Allocator, absolute_path: []const u8, max_bytes: usize) ![]u8 {
     const f = try openFileAbsolute(absolute_path, .{});
     defer f.close();
@@ -166,9 +143,7 @@ pub fn cwd() Dir {
     return .{ .inner = std.Io.Dir.cwd() };
 }
 
-/// 0.15-style `fs_compat.stderrFile()` / `stdout()` / `stdin()` — return the
-/// shim wrapper so `.writeAll` / `.supportsAnsiEscapeCodes` etc. work
-/// without threading `io` through callers.
+/// 0.15-style std stream accessors returning the shim `File`.
 pub fn stderrFile() File {
     return .{ .inner = io_mod.stderrFile() };
 }
@@ -181,17 +156,9 @@ pub fn stdinFile() File {
     return .{ .inner = std.Io.File.stdin() };
 }
 
-/// View of the parent process's `environ` as a `std.process.Environ`.
-/// `std.Io.Threaded.init(.., .{})` defaults to an empty environ, which makes
-/// child spawns inherit nothing and forces PATH lookup onto a hard-coded
-/// `/usr/local/bin:/bin/:/usr/bin` (see
-/// `std.Io.Threaded.default_PATH`) — that fallback misses `/opt/homebrew/bin`
-/// on Apple Silicon, so `cosign` installed by Homebrew can't be found.
-///
-/// `std.c.environ` is the POSIX stable ABI for the process's environ block;
-/// there is no `std.posix`/`std.Io` equivalent that does not ultimately read
-/// this same pointer. Threading `std.process.Init.Minimal.environ` through
-/// every caller would retire this helper - tracked separately.
+/// Parent `environ` as `std.process.Environ`. `std.Io.Threaded`'s default is
+/// empty, which falls back to a PATH that misses `/opt/homebrew/bin` on Apple
+/// Silicon and hides `cosign`.
 pub fn processEnviron() std.process.Environ {
     var n: usize = 0;
     while (std.c.environ[n] != null) : (n += 1) {}
@@ -199,11 +166,7 @@ pub fn processEnviron() std.process.Environ {
     return .{ .block = .{ .slice = slice } };
 }
 
-/// 0.15-style `std.process.Child` shim. The 0.16 API moved spawn/wait into
-/// free functions on `std.process` that take an `Io`; this wrapper preserves
-/// the two-step `init` → `spawn` → `wait` call shape so existing callers
-/// don't have to be rewritten yet. `stdin_behavior` / `stdout_behavior` /
-/// `stderr_behavior` mirror the 0.15 field names.
+/// 0.15-style `std.process.Child` shim over the 0.16 `std.process` free fns.
 pub const Child = struct {
     argv: []const []const u8,
     allocator: std.mem.Allocator,
@@ -224,12 +187,8 @@ pub const Child = struct {
     }
 
     pub fn spawn(self: *Child) !void {
-        // `std.Options.debug_io` (used elsewhere) is backed by a `.failing`
-        // allocator, which is fine for write-only stderr but blows up the
-        // moment `std.process.spawn` tries to dup argv / env into its
-        // arena. Build a per-call `Threaded` io rooted at the caller's
-        // allocator — and seeded with the real environ so PATH resolution
-        // and the child's env match the parent (see `processEnviron`).
+        // `debug_io`'s failing allocator can't back argv/env dups; build a
+        // per-call `Threaded` io with the real environ so PATH matches parent.
         var threaded: std.Io.Threaded = .init(self.allocator, .{ .environ = processEnviron() });
         defer threaded.deinit();
         const spawned = try std.process.spawn(threaded.io(), .{
@@ -286,18 +245,12 @@ pub const File = struct {
         });
     }
 
-    /// Positional read from offset 0. Safe for single-shot reads of a
-    /// whole file into a stat-sized buffer. **Never call this inside a
-    /// loop** — every iteration re-reads the first bytes. For
-    /// streaming use `readAllAt` with an advancing offset or (better)
-    /// the `streamFile` helper which handles the offset bookkeeping.
+    /// Positional read from offset 0 — single-shot only; loops re-read bytes.
     pub fn readAll(self: File, buffer: []u8) !usize {
         return self.inner.readPositionalAll(io_mod.ctx(), buffer, 0);
     }
 
-    /// Positional read from `offset`. The streaming primitive — the
-    /// caller advances `offset` by the returned byte count. Prefer
-    /// `streamFile` when the loop body would otherwise be boilerplate.
+    /// Positional read; caller advances `offset`. Prefer `streamFile`.
     pub fn readAllAt(self: File, buffer: []u8, offset: u64) !usize {
         return self.inner.readPositionalAll(io_mod.ctx(), buffer, offset);
     }
@@ -306,8 +259,7 @@ pub const File = struct {
         return self.inner.stat(io_mod.ctx());
     }
 
-    /// Positional write of all bytes starting at `offset`. Replaces the 0.15
-    /// `file.seekTo(offset); file.writeAll(bytes);` idiom.
+    /// Positional write of all bytes starting at `offset`.
     pub fn writeAllAt(self: File, bytes: []const u8, offset: u64) !void {
         return self.inner.writePositionalAll(io_mod.ctx(), bytes, offset);
     }
@@ -328,8 +280,8 @@ pub const File = struct {
         return self.inner.setPermissions(io_mod.ctx(), std.Io.File.Permissions.fromMode(@intCast(mode)));
     }
 
-    /// Block until pending contents and metadata are on disk. Callers that
-    /// rename-for-atomicity must sync first — POSIX rename is not durable.
+    /// fsync; callers that rename-for-atomicity must sync first (POSIX
+    /// rename is not durable).
     pub fn sync(self: File) !void {
         return self.inner.sync(io_mod.ctx());
     }
@@ -342,8 +294,8 @@ pub const File = struct {
         errdefer allocator.free(buf);
         const n = try self.inner.readPositionalAll(io, buf, 0);
         if (n == buf.len) return buf;
-        // Short read: shrink in place so caller-side `free` matches what
-        // we hand back — GPA traps on length mismatch, others leak the tail.
+        // Short read: shrink so caller-side free matches — GPA traps on
+        // length mismatch, others leak the tail.
         if (allocator.resize(buf, n)) return buf[0..n];
         const shrunk = try allocator.alloc(u8, n);
         @memcpy(shrunk, buf[0..n]);
@@ -400,8 +352,7 @@ pub const Dir = struct {
         return self.inner.deleteTree(io_mod.ctx(), sub_path);
     }
 
-    /// Resolve symlinks in `pathname` against `self`, writing the absolute
-    /// result into `out_buffer`. Mirrors the 0.15 `Dir.realpath` contract.
+    /// 0.15-style `Dir.realpath` into `out_buffer`.
     pub fn realpath(self: Dir, pathname: []const u8, out_buffer: []u8) ![]u8 {
         const n = try self.inner.realPathFile(io_mod.ctx(), pathname, out_buffer);
         return out_buffer[0..n];
@@ -420,9 +371,7 @@ pub const Dir = struct {
         return self.inner.rename(old_sub_path, self.inner, new_sub_path, io_mod.ctx());
     }
 
-    /// Flush directory metadata. `std.Io.Dir` has no sync vtable entry,
-    /// so wrap the dir fd as a File and go through the File sync path -
-    /// fsync(2) on a dir fd is what POSIX defines for metadata flush.
+    /// Flush directory metadata via fsync(2) on the dir fd (POSIX contract).
     pub fn sync(self: Dir) !void {
         const file: std.Io.File = .{ .handle = self.inner.handle, .flags = .{ .nonblocking = false } };
         try file.sync(io_mod.ctx());

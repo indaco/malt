@@ -95,10 +95,7 @@ pub const Parser = struct {
         return self.maybeWrapPostfix(expr);
     }
 
-    /// Wrap `body` in a postfix_if/postfix_unless if the current token is
-    /// `if`/`unless`, otherwise return it unchanged. Used for both regular
-    /// expression statements and `return` — Ruby lets either form appear
-    /// with a trailing guard.
+    /// Optional `if`/`unless` postfix-guard wrap; used for exprs and `return`.
     fn maybeWrapPostfix(self: *Parser, body: *const Node) DslError!*const Node {
         if (self.current.kind == .kw_if) {
             self.advanceToken();
@@ -120,11 +117,8 @@ pub const Parser = struct {
     }
 
     fn parseExpression(self: *Parser) DslError!*const Node {
-        // `if` / `unless` on the RHS of an assignment is Ruby's
-        // expression-form. The statement-level parse already handles the
-        // standalone form; accepting them here lets
-        // `sysroot = if cond then "a" else "b" end` round-trip through
-        // parseExpression without special-casing at the call site.
+        // Expression-form `if`/`unless` on RHS of assignment — lets
+        // `x = if cond then a else b end` round-trip without call-site hacks.
         if (self.current.kind == .kw_if) return self.parseIf();
         if (self.current.kind == .kw_unless) return self.parseUnless();
 
@@ -133,11 +127,9 @@ pub const Parser = struct {
             const name = self.current.lexeme;
             const loc = self.currentLoc();
 
-            // Peek ahead to see if next non-newline token is =. All
-            // lexer state that `next()` may mutate must be saved here,
-            // including the heredoc fields — otherwise a peek that
-            // straddles a heredoc boundary would clobber the lexer's
-            // mid-collection state.
+            // Peek past newlines for `=`. All mutable lexer state — including
+            // heredoc fields — must be saved, or a peek across a heredoc
+            // boundary corrupts mid-collection state.
             const saved_pos = self.lexer.pos;
             const saved_line = self.lexer.line;
             const saved_col = self.lexer.col;
@@ -354,10 +346,7 @@ pub const Parser = struct {
         return self.finishCallWithBlock(loc, receiver, method, &args, block_pass);
     }
 
-    /// Shared bare-argument guard: the current token could start an
-    /// expression AND is not one of the keywords that signal statement
-    /// boundaries (if/unless/end/do/dot/newline). Used by every call
-    /// form that accepts paren-less arguments.
+    /// True when the current token could open a paren-less argument list.
     fn currentLooksLikeBareArg(self: *const Parser) bool {
         const k = self.current.kind;
         return isExprStart(k) and k != .newline and k != .kw_if and
@@ -1024,11 +1013,8 @@ pub const Parser = struct {
         });
     }
 
-    /// Collect a comma-separated identifier list for `def` params. Shared
-    /// between paren and bare forms; the caller consumes the paren (or
-    /// newline) that terminates the list. Unknown tokens (default args,
-    /// `*rest`, `&blk`) stop the loop — formulas using those degrade to
-    /// `--use-system-ruby` via the sibling parse-check.
+    /// Collect a comma-separated ident list for `def` params; unknown tokens
+    /// stop the loop and degrade the formula to `--use-system-ruby`.
     fn parseDefParams(
         self: *Parser,
         params: *std.ArrayList([]const u8),
@@ -1119,10 +1105,8 @@ pub const Parser = struct {
         return parts_list.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
     }
 
-    /// Parse a single arg inside a method-call arg list. Returns either a
-    /// positional expression node or a block-pass payload (`&<primary>`).
-    /// Block-pass is always the last arg per Ruby grammar; callers break
-    /// out of their arg loop when they see one.
+    /// Parse one arg; `&<primary>` yields a block-pass (always last per
+    /// Ruby grammar, callers break on it).
     const ArgOutcome = union(enum) {
         arg: *const Node,
         block_pass: *const Node,

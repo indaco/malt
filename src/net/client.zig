@@ -46,8 +46,7 @@ pub fn isTransientError(err: DownloadError) bool {
     };
 }
 
-/// Compute read-timeout in nanoseconds scaled by Content-Length.
-/// Floor: 30 s. Scale: content_length / min_bandwidth (64 KiB/s).
+/// Read-timeout in ns scaled by Content-Length; floor 30 s at 64 KiB/s.
 pub fn scaledTimeoutNs(content_length: ?u64) u64 {
     const floor_ns: u64 = 30 * std.time.ns_per_s;
     const cl = content_length orelse return floor_ns;
@@ -56,9 +55,7 @@ pub fn scaledTimeoutNs(content_length: ?u64) u64 {
     return @max(floor_ns, transfer_ns);
 }
 
-/// Optional progress reporting for long downloads.
-/// `bytes_so_far`: total bytes received so far (after decompression).
-/// `content_length`: total expected bytes from HTTP header, or null if unknown.
+/// Optional progress callback for long downloads (post-decompression bytes).
 pub const ProgressCallback = struct {
     context: *anyopaque,
     func: *const fn (context: *anyopaque, bytes_so_far: u64, content_length: ?u64) void,
@@ -79,7 +76,6 @@ pub const Response = struct {
 };
 
 /// True if the URI scheme is exactly "https" (ascii case-insensitive).
-/// Exposed for the downgrade-guard tests; inlined at the only call site.
 pub fn schemeIsHttps(scheme: []const u8) bool {
     return std.ascii.eqlIgnoreCase(scheme, "https");
 }
@@ -91,12 +87,8 @@ pub const HttpClient = struct {
     /// Per-request timeout in nanoseconds. Default: 30 seconds.
     timeout_ns: u64 = default_timeout_ns,
 
-    /// Lazily-allocated decompression windows, reused across requests. These
-    /// are sized for the worst case per encoding (zstd ~128 KiB, flate
-    /// 32 KiB); previously every request allocated a fresh buffer and freed
-    /// it on return, which cost ~160 KiB of allocator churn per API call.
-    /// A single HttpClient is borrowed from a pool per thread, so the buffer
-    /// is never accessed concurrently.
+    /// Reused across requests; each HttpClient is borrowed single-threaded
+    /// from a pool, so no concurrent access.
     zstd_window: ?[]u8 = null,
     flate_window: ?[]u8 = null,
 
@@ -131,10 +123,8 @@ pub const HttpClient = struct {
         return w;
     }
 
-    /// Perform a GET request and return the response status and body.
-    /// Automatically injects HOMEBREW_GITHUB_API_TOKEN as Authorization
-    /// header for GitHub/Homebrew API requests when the env var is set.
-    /// The caller owns the returned `Response` and must call `deinit` on it.
+    /// GET request; auto-injects HOMEBREW_GITHUB_API_TOKEN as Authorization
+    /// for GitHub/Homebrew hosts. Caller owns the returned `Response`.
     pub fn get(self: *HttpClient, url: []const u8) !Response {
         if (fs_compat.getenv("HOMEBREW_GITHUB_API_TOKEN")) |token| {
             // Apply token to GitHub and Homebrew API requests
@@ -154,9 +144,7 @@ pub const HttpClient = struct {
         return self.doGet(url, &.{});
     }
 
-    /// Perform a GET request with extra headers (e.g. Authorization for blob downloads).
-    /// Uses the larger max_blob_bytes limit since this is typically used for bottle downloads.
-    /// The caller owns the returned `Response` and must call `deinit` on it.
+    /// GET with extra headers under `max_blob_bytes`. Caller owns `Response`.
     pub fn getWithHeaders(
         self: *HttpClient,
         url: []const u8,
@@ -177,10 +165,8 @@ pub const HttpClient = struct {
 
         try req.sendBodiless();
 
-        // 32 KiB header buffer — GHCR's `/token` and blob redirects can
-        // exceed 8 KiB once cookies, signed-URL params, and multi-scope
-        // token responses stack up. 0.15 capped at 8 KiB and occasionally
-        // tripped `HeaderBufferTooSmall` on cold installs.
+        // 32 KiB — GHCR's multi-scope token + signed-URL redirects exceed
+        // the 8 KiB default and tripped `HeaderBufferTooSmall`.
         var redirect_buf: [32 * 1024]u8 = undefined;
         const response = try req.receiveHead(&redirect_buf);
 
@@ -209,9 +195,7 @@ pub const HttpClient = struct {
 
     const max_head_redirects = 5;
 
-    /// HEAD request that manually follows redirects, returning the
-    /// final URL and Content-Disposition. The stdlib skips redirect
-    /// handling for HEAD, so we follow Location headers ourselves.
+    /// HEAD with manual redirect follow — stdlib skips redirects on HEAD.
     pub fn headResolved(self: *HttpClient, url: []const u8) !HeadResolved {
         // Build the result eagerly so a single errdefer covers every dupe
         // inside the redirect loop; on success the caller takes ownership.
@@ -254,9 +238,7 @@ pub const HttpClient = struct {
         return resolved;
     }
 
-    /// Default maximum response body size for metadata (API JSON, tokens, etc.).
-    /// The full Homebrew formula.json index is ~25 MB; 50 MB gives headroom.
-    /// Bottle downloads bypass this via getWithHeaders (which sets no limit).
+    /// Metadata cap (formula.json is ~25 MB; 50 MB gives headroom).
     const max_metadata_bytes: usize = 50 * 1024 * 1024;
 
     /// Bottle responses can be 500+ MB. We cap at 2 GB to prevent true OOM.
@@ -267,14 +249,9 @@ pub const HttpClient = struct {
     const max_retries = 3;
     const retry_delays_ms = [_]u64{ 1000, 2000, 4000 };
 
-    /// Writer wrapper that counts bytes written, enforces an upper bound, and
-    /// optionally fires a progress callback. The bound is checked on every
-    /// write so oversized responses are rejected mid-stream instead of after
-    /// the full body has been buffered.
-    ///
-    /// When the limit would be exceeded, `drain`/`sendFile` return
-    /// `error.WriteFailed`; callers (`streamRemaining`) can then inspect
-    /// `bytes_written` to distinguish "too large" from a real write error.
+    /// Counts written bytes, enforces an upper bound mid-stream, and reports
+    /// progress. On overflow `drain`/`sendFile` return `error.WriteFailed`
+    /// and callers distinguish via `bytes_written` vs `limit_exceeded`.
     const CountingWriter = struct {
         inner: *std.Io.Writer.Allocating,
         bytes_written: u64,
@@ -388,18 +365,12 @@ pub const HttpClient = struct {
 
         try req.sendBodiless();
 
-        // 32 KiB header buffer — see comment in `head()`. Blob
-        // redirects from GHCR (Azure CDN signed URLs) routinely push
-        // past the old 8 KiB budget.
+        // 32 KiB header buffer — see `head()`.
         var redirect_buf: [32 * 1024]u8 = undefined;
         var response = try req.receiveHead(&redirect_buf);
 
-        // Refuse an https → http downgrade across a 3xx chain. The
-        // stdlib already strips privileged headers on scheme change,
-        // but letting the body itself come back over plaintext with
-        // no CA validation is still a metadata-substitution vector
-        // for every endpoint whose integrity check depends on what
-        // the response says.
+        // Refuse https → http downgrade across 3xx — plaintext bodies are
+        // a metadata-substitution vector even with stdlib header stripping.
         if (https_origin and !schemeIsHttps(req.uri.scheme))
             return error.TlsDowngradeRefused;
 
@@ -426,15 +397,9 @@ pub const HttpClient = struct {
         var decompress: std.http.Decompress = undefined;
         var body_reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
 
-        // Timeout watchdog: closes the underlying connection if the read
-        // stalls beyond the deadline. This is the only reliable way to
-        // abort a blocking read call.
-        //
-        // `request_done` is a one-shot event so the main thread can wake
-        // the watchdog immediately on completion. The previous polling
-        // implementation slept in 1 s ticks and could stall `join()` by
-        // up to a full second per request — that was the entire warm
-        // install floor (see docs/perf/results.md).
+        // Watchdog closes the socket on stall; one-shot `request_done`
+        // wakes it immediately on success (previous 1 s polling stalled
+        // `join()` and dominated the warm-install floor).
         const effective_timeout = if (max_bytes > max_metadata_bytes)
             @max(blob_timeout_ns, scaledTimeoutNs(content_length))
         else
@@ -450,11 +415,8 @@ pub const HttpClient = struct {
             if (watchdog) |w| w.join();
         }
 
-        // Read the full response body through a CountingWriter that enforces
-        // `max_bytes` per-write. This rejects oversized responses mid-stream
-        // instead of after the whole body is already buffered (and the old
-        // code's only check was post-hoc, which defeats the purpose on a
-        // 2 GB/500 MB body).
+        // `CountingWriter` enforces `max_bytes` per-write so oversized bodies
+        // are rejected mid-stream, not after buffering.
         var counting = CountingWriter{
             .inner = &body_writer,
             .bytes_written = 0,
@@ -487,23 +449,9 @@ pub const HttpClient = struct {
         };
     }
 
-    /// Watchdog thread: waits until either the main thread signals
-    /// `request_done` (request finished normally) or the timeout elapses.
-    /// On timeout, marks the connection dead AND hard-shuts-down the
-    /// underlying TCP socket so any in-flight `readv` / `writev` on
-    /// the main thread returns immediately.
-    ///
-    /// **Important:** setting `conn.closing = true` alone is not
-    /// enough to interrupt a blocked read. That flag only influences
-    /// the *next* read — a `readv` already parked in the kernel
-    /// waiting on TLS bytes stays parked indefinitely. This used to
-    /// hang malt for minutes if a dep formula fetch hit a stalled
-    /// TLS connection (observed once during cold-ffmpeg bench runs).
-    /// `posix.shutdown(fd, .both)` forces the kernel to wake the
-    /// blocked syscall with an error, unblocking the main thread.
-    ///
-    /// Uses `ResetEvent.timedWait` so the main thread can wake us
-    /// immediately on successful completion — no polling overhead.
+    /// On timeout, both flag the connection and `shutdown(.both)` the fd —
+    /// setting `conn.closing` alone does not wake a `readv` already parked
+    /// in the kernel, which hung malt for minutes on stalled TLS reads.
     fn watchdogFn(
         request_done: *std.Io.Event,
         timeout_ns: u64,
@@ -558,20 +506,10 @@ fn formatUri(allocator: std.mem.Allocator, uri: std.Uri) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}://{s}{s}", .{ scheme, host, path });
 }
 
-/// Thread-safe pool of `HttpClient` instances with borrow/return
-/// semantics. Workers call `acquire()` to get exclusive access to an
-/// idle client, use it synchronously, then call `release()` so another
-/// worker can take it.
-///
-/// Why a pool: `std.http.Client` is *not* thread-safe across
-/// concurrent calls, but creating a fresh one per request pays the
-/// TLS context + cert store + connection setup cost every time. On a
-/// cold `ffmpeg` install that was ~15 HttpClient creations back to
-/// back (formula fetches + GHCR token + 12 blob downloads), each
-/// paying its own handshake. A 4-slot pool keeps per-connection
-/// reuse for the hot phase while preserving the no-sharing invariant.
-///
-/// All methods are safe to call from multiple threads.
+/// Thread-safe borrow/return pool of `HttpClient`s. `std.http.Client` is
+/// not thread-safe, but per-request construction pays the full TLS
+/// handshake every time; pooling preserves no-sharing while reusing
+/// connections across the hot phase of an install.
 pub const HttpClientPool = struct {
     allocator: std.mem.Allocator,
     clients: []HttpClient,
@@ -601,8 +539,7 @@ pub const HttpClientPool = struct {
         self.allocator.free(self.busy);
     }
 
-    /// Block until an idle client is available, mark it busy, return
-    /// a pointer the caller can use exclusively until `release`.
+    /// Block until idle, mark busy, return exclusive pointer until `release`.
     pub fn acquire(self: *HttpClientPool) *HttpClient {
         const io = io_mod.ctx();
         self.mutex.lockUncancelable(io);
@@ -618,9 +555,7 @@ pub const HttpClientPool = struct {
         }
     }
 
-    /// Return a previously-acquired client to the pool. The pointer
-    /// must have come from `acquire` on the same pool; calling with
-    /// a foreign pointer is a programmer error.
+    /// Return an acquired client; foreign pointers are a programmer error.
     pub fn release(self: *HttpClientPool, client: *HttpClient) void {
         const io = io_mod.ctx();
         self.mutex.lockUncancelable(io);

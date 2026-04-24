@@ -1,5 +1,4 @@
-//! malt — dependency resolution
-//! BFS dependency resolution with cycle detection and orphan finding.
+//! malt — BFS dep resolution with cycle detection and orphan finding.
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
@@ -17,17 +16,9 @@ pub const ResolvedDep = struct {
     already_installed: bool,
 };
 
-/// Resolve all dependencies for a formula using BFS.
-/// Returns dependencies in topological order (deps before dependents).
-/// Skips already-installed packages.
-///
-/// Ownership: each returned `ResolvedDep.name` is heap-allocated with
-/// `allocator` and the caller must free both every `name` and the outer
-/// slice. `getDeps` already hands us duped strings, so every string we
-/// receive from it is either (a) moved into `result`, (b) moved into
-/// `queue` for later processing, or (c) freed on the spot. Nothing is
-/// allowed to escape silently — earlier versions leaked duped dep
-/// strings any time BFS skipped a name via the `visited` set.
+/// BFS resolve returning deps in topological order; skips already-installed.
+/// Caller frees each `ResolvedDep.name` and the outer slice. Every string
+/// from `getDeps` is either moved into `result`/`queue` or freed on the spot.
 pub fn resolve(
     allocator: std.mem.Allocator,
     root_name: []const u8,
@@ -72,11 +63,8 @@ pub fn resolve(
             continue;
         }
 
-        // Transfer ownership of `dep_name` into `result` BEFORE marking it
-        // in `visited`. That way `visited`'s key borrows from `result`'s
-        // stable storage — if we did it the other way round and the
-        // append failed, we'd either leak the string or leave `visited`
-        // with a dangling key.
+        // Append to `result` before marking `visited` — `visited` borrows from
+        // `result`'s stable storage, and reversing risks leak or dangle on OOM.
         const installed = isInstalled(db, dep_name);
         result.append(allocator, .{
             .name = dep_name,

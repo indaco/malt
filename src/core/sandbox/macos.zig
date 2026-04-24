@@ -1,21 +1,5 @@
-//! malt — macOS sandbox-exec profile + spawn wrapper for the Ruby
-//! post_install subprocess.
-//!
-//! This module is the OS-level containment layer for the explicit
-//! `--use-system-ruby` path. Ruby code from a hostile formula running
-//! under the user's UID is the threat; the containment goal is:
-//!
-//!   - confine writes to the formula's own cellar and a small set of
-//!     shared directories under MALT_PREFIX (etc, var, share, opt),
-//!   - block network entirely,
-//!   - strip environment vars that alter dynamic-loader or Ruby
-//!     behaviour (DYLD_*, RUBYOPT, etc.),
-//!   - clamp CPU / memory / file-size budgets so a runaway script
-//!     fails fast instead of exhausting the user's machine.
-//!
-//! The sandbox profile is rendered per formula at spawn time. Paths are
-//! validated against a conservative charset before interpolation to
-//! keep the profile string free of SCL metacharacters.
+//! malt — macOS sandbox-exec wrapper for `--use-system-ruby` post_install.
+//! Confines writes, blocks network, scrubs env, and clamps resource limits.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -35,23 +19,17 @@ pub const SandboxError = error{
     ChildExited,
 };
 
-/// Resource caps applied to the sandboxed child before `execve`.
-/// Conservative defaults — a well-behaved post_install hook never hits
-/// any of these. Operators can widen via formula-level config later if
-/// a real regression shows up.
+/// Resource caps applied before `execve`. Conservative defaults.
 pub const Limits = struct {
-    /// Wall-clock CPU seconds. macOS counts user+system.
+    /// Wall-clock CPU seconds (user+system).
     cpu_seconds: u64 = 300,
-    /// Virtual address space ceiling (RLIMIT_AS). 2 GiB is generous
-    /// for any post_install that isn't mining.
+    /// RLIMIT_AS ceiling.
     address_space_bytes: u64 = 2 * 1024 * 1024 * 1024,
-    /// Largest single file the child may create (RLIMIT_FSIZE).
+    /// RLIMIT_FSIZE per-file cap.
     file_size_bytes: u64 = 512 * 1024 * 1024,
 };
 
-/// Environment slots propagated to the sandboxed child. Everything not
-/// in this list is dropped at `execve` time — in particular the
-/// dynamic-loader knobs and Ruby's global preload hooks.
+/// Allowlist propagated to the child; DYLD_* and RUBYOPT/RUBYLIB are dropped.
 pub const ScrubbedEnv = struct {
     home: []const u8,
     path: []const u8,
@@ -59,19 +37,10 @@ pub const ScrubbedEnv = struct {
     tmpdir: []const u8,
 };
 
-/// Minimal PATH passed through to the sandboxed child. Anything more
-/// ambitious lets a hostile formula exploit whatever random binary
-/// happens to live in the user's homebrew/cargo/npm prefixes.
+/// Minimal PATH — keeps a hostile formula off user-owned bin prefixes.
 pub const SANDBOX_PATH: []const u8 = "/usr/bin:/bin:/usr/sbin:/sbin";
 
-/// Validate that a path is safe to splice into a sandbox-exec profile
-/// string. Rejects quote, backslash, parenthesis, newline, and NUL —
-/// any of which could break out of the `(subpath "...")` token.
-///
-/// malt's cellar paths are built from [a-z0-9@._+-/] formula names and
-/// version strings concatenated with a known prefix, so well-formed
-/// input passes; this guards against a malformed MALT_PREFIX or an
-/// unusual formula version slipping through.
+/// Reject any byte that could break out of a `(subpath "...")` token.
 pub fn validatePathForProfile(p: []const u8) SandboxError!void {
     if (p.len == 0 or p[0] != '/') return SandboxError.UnsafePath;
     for (p) |c| switch (c) {
@@ -80,11 +49,8 @@ pub fn validatePathForProfile(p: []const u8) SandboxError!void {
     };
 }
 
-/// Render a sandbox-exec profile SCL string for a Ruby post_install
-/// run. Deny-by-default; file-read broadly; file-write only under
-/// `cellar_path` and the four shared subtrees of `malt_prefix`.
-///
-/// Caller owns the returned slice.
+/// Render the deny-by-default SCL profile; writes limited to `cellar_path`
+/// and four subtrees of `malt_prefix`. Caller owns the slice.
 pub fn renderRubyProfile(
     allocator: std.mem.Allocator,
     cellar_path: []const u8,
@@ -145,10 +111,7 @@ fn applyRlimits(limits: Limits) SandboxError!void {
         return SandboxError.RlimitFailed;
 }
 
-/// Build a null-terminated envp array from an allowlist. Everything
-/// outside the allowlist is dropped — in particular DYLD_*, RUBYOPT,
-/// RUBYLIB, GEM_* and friends. Public so tests can feed a scrubbed env
-/// into `spawnFilteredWithHooks`.
+/// Build a null-terminated envp from the allowlist; everything else dropped.
 pub fn buildEnvp(
     allocator: std.mem.Allocator,
     env: ScrubbedEnv,
@@ -181,9 +144,7 @@ pub fn freeEnvp(allocator: std.mem.Allocator, envp: [:null]?[*:0]u8) void {
     allocator.free(envp[0 .. i + 1]);
 }
 
-/// Build a null-terminated argv array. Caller owns; free with
-/// `freeArgv`. Public so test binaries can drive `spawnFilteredWithHooks`
-/// without duplicating the sentinel-array plumbing.
+/// Build a null-terminated argv; free with `freeArgv`. Caller owns.
 pub fn buildArgv(
     allocator: std.mem.Allocator,
     argv: []const []const u8,
@@ -209,19 +170,9 @@ pub fn freeArgv(allocator: std.mem.Allocator, argv: [:null]?[*:0]u8) void {
     allocator.free(argv[0 .. i + 1]);
 }
 
-/// Spawn `ruby tmp_script` under `sandbox-exec -p <profile>`, a
-/// scrubbed env, and the resource limits. Streams stdout/stderr from
-/// the child directly to the current process's stdout/stderr.
-///
-/// Returns the child's exit code on normal exit, or a SandboxError
-/// if the child was killed by a signal / the sandbox couldn't be
-/// applied / the fork-exec itself failed.
-///
-/// The child's stdout/stderr are filtered through a terminal escape-
-/// sequence sanitizer (`term_sanitize`) before being forwarded to the
-/// parent's fds, so a hostile formula cannot emit OSC/DCS/cursor
-/// commands that rewrite scrollback or exfiltrate via terminal
-/// extensions. Set `MALT_ALLOW_RAW_POST_INSTALL=1` to bypass.
+/// Spawn `ruby tmp_script` under `sandbox-exec` with scrubbed env and limits.
+/// Child stdout/stderr are run through `term_sanitize` to strip OSC/DCS/cursor
+/// escapes before forwarding; `MALT_ALLOW_RAW_POST_INSTALL=1` bypasses.
 pub fn runRubySandboxed(
     allocator: std.mem.Allocator,
     ruby_path: []const u8,
@@ -276,9 +227,8 @@ fn spawnInherit(
     return @intCast(wexitstatus(status));
 }
 
-/// Sentinel-backed fd wrapper. `closeOnce` is idempotent and zeroes the
-/// value after close, so an errdefer registered on the same fd cannot
-/// double-close an fd that another code path already dropped explicitly.
+/// Idempotent fd wrapper — `closeOnce` zeroes the value so `errdefer`
+/// can't double-close an fd another path already dropped.
 const Fd = struct {
     value: c_int = -1,
 
@@ -297,18 +247,11 @@ fn openPipe(reader: *Fd, writer: *Fd) SandboxError!void {
     writer.value = buf[1];
 }
 
-/// Test-only hooks to drive rare error paths in `spawnFilteredWithHooks`.
-/// Production callers pass the zero-value default; only the in-module
-/// tests populate these fields, so the seam has no runtime cost in
-/// shipped builds.
+/// Test-only hooks; zero-value in production.
 pub const SpawnHooks = struct {
-    /// Force the Nth (0-indexed) `std.Thread.spawn` call to fail with
-    /// `error.SystemResources`. Exercises the thread-spawn-failure path
-    /// without inducing real OS pressure.
+    /// Force the Nth thread spawn to return `error.SystemResources`.
     fail_thread_spawn_on: ?u32 = null,
-    /// Invoked with the child's pid right after the parent `waitpid`s
-    /// it on an error path. Lets tests observe that the child was
-    /// reaped before the error propagates to the caller.
+    /// Invoked after the parent waitpid's the child on an error path.
     on_child_reaped: ?*const fn (pid: std.c.pid_t, ctx: ?*anyopaque) void = null,
     ctx: ?*anyopaque = null,
 };
@@ -331,9 +274,7 @@ fn maybeSpawnFilter(
     return std.Thread.spawn(.{}, filterLoop, .{ pipe_fd, out_fd });
 }
 
-/// Kill a running child and block until it is reaped. Safe to call when
-/// the child is already gone — SIGKILL on a missing pid is ignored, and
-/// `waitpid` tolerates the zombie/reaped states we could land in.
+/// Kill and reap; safe on already-dead pids (ESRCH/zombie are tolerated).
 fn reapChild(pid: std.c.pid_t, hooks: SpawnHooks) void {
     std.posix.kill(pid, std.posix.SIG.KILL) catch {}; // ESRCH means already dead
     var status: c_int = 0;
