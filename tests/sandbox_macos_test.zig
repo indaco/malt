@@ -79,6 +79,16 @@ test "SANDBOX_PATH restricts to system directories only" {
     try testing.expectEqualStrings("/usr/bin:/bin:/usr/sbin:/sbin", sandbox.SANDBOX_PATH);
 }
 
+test "std.posix.rlimit_resource tags resolve on macOS for CPU/FSIZE/AS" {
+    // Pin: the three rlimit tags applyRlimits relies on must round-trip
+    // through the kernel on macOS. If a stdlib rename ever loses one of
+    // these, this test fails before fork/exec tests do.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = try std.posix.getrlimit(.CPU);
+    _ = try std.posix.getrlimit(.FSIZE);
+    _ = try std.posix.getrlimit(.AS);
+}
+
 // Reap-on-error tests: drive the thread-spawn-failure path via the
 // `SpawnHooks` injector and assert the parent reaped the child before
 // returning. /usr/bin/true is a stable short-lived child on macOS — the
