@@ -71,7 +71,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // ── Open the database ────────────────────────────────────────────────
     const prefix = atomic.maltPrefix();
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/db/malt.db", .{prefix}) catch
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return Error.DatabaseError;
 
     var db = sqlite.Database.open(db_path) catch {

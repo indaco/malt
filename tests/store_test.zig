@@ -17,7 +17,7 @@ fn setupTestStore(allocator: std.mem.Allocator) !struct { db: sqlite.Database, s
     defer allocator.free(store_dir);
     malt.fs_compat.makeDirAbsolute(store_dir) catch {};
 
-    const db_path = try std.fmt.allocPrint(allocator, "{s}/test.db", .{prefix});
+    const db_path = try std.fmt.allocPrintSentinel(allocator, "{s}/test.db", .{prefix}, 0);
     defer allocator.free(db_path);
     var db = try sqlite.Database.open(db_path);
     try schema.initSchema(&db);

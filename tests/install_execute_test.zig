@@ -135,7 +135,7 @@ test "execute --dry-run with an already-installed package short-circuits" {
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix_z});
     defer testing.allocator.free(db_dir);
     try malt.fs_compat.cwd().makePath(db_dir);
-    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt.db", .{db_dir});
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
 
     var db = try malt.sqlite.Database.open(db_path);

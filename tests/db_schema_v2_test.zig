@@ -15,7 +15,7 @@ const TempDb = struct {
         malt.fs_compat.deleteTreeAbsolute(dir) catch {};
         try malt.fs_compat.makeDirAbsolute(dir);
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrint(&db_path_buf, "{s}/test.db", .{dir});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         return .{ .dir = dir, .db = db };
@@ -108,22 +108,6 @@ test "services table accepts inserts and enforces PK" {
     try testing.expectError(sqlite.SqliteError.ConstraintViolation, dup_result);
 }
 
-test "Database.open accepts a 1 KB path" {
-    // Synthetic 1 KB path: we don't need sqlite to actually open it,
-    // just to confirm the internal cap no longer rejects ~1 KB inputs.
-    var buf: [1024]u8 = undefined;
-    @memset(&buf, 'a');
-    buf[0] = '/';
-    const path: []const u8 = buf[0..1024];
-
-    if (sqlite.Database.open(path)) |db_val| {
-        var db = db_val;
-        db.close();
-    } else |err| {
-        try testing.expect(err != sqlite.SqliteError.PathTooLong);
-    }
-}
-
 test "Database.exec accepts 12 KB SQL" {
     var tdb = try TempDb.init("exec_12kb");
     defer tdb.deinit();
@@ -140,7 +124,9 @@ test "Database.exec accepts 12 KB SQL" {
     list.items[list.items.len - 1] = ';';
     try testing.expect(list.items.len >= 12 * 1024);
 
-    try tdb.db.exec(list.items);
+    try list.append(testing.allocator, 0);
+    const sql: [:0]const u8 = list.items[0 .. list.items.len - 1 :0];
+    try tdb.db.exec(sql);
 }
 
 test "bundle_members cascade-deletes with bundle" {

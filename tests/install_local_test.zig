@@ -465,7 +465,7 @@ const sqlite = malt.sqlite;
 const schema = malt.schema;
 
 fn seedLocalKeg(
-    db_path: []const u8,
+    db_path: [:0]const u8,
     prefix: []const u8,
     name: []const u8,
     version: []const u8,

@@ -10,7 +10,6 @@ pub const SqliteError = error{
     ConstraintViolation,
     Busy,
     Corrupt,
-    PathTooLong,
 };
 
 /// Map a raw SQLite result code to the appropriate SqliteError.
@@ -32,14 +31,6 @@ fn mapError(rc: c_int, comptime default: SqliteError) SqliteError {
 /// Use SQLITE_STATIC (null destructor) for text bindings.
 /// This is safe because all bound text outlives the statement step.
 const SQLITE_STATIC: c.sqlite3_destructor_type = null;
-
-/// Maximum DB path length accepted by `Database.open`. Stack-buffered null
-/// copy; deeply nested test prefixes and custom MALT_PREFIX values fit.
-pub const MAX_PATH_LEN: usize = 2048;
-
-/// Maximum SQL length accepted by `Database.exec`. Migration bundles with
-/// many inline statements fit without forcing callers to split.
-pub const MAX_SQL_LEN: usize = 16384;
 
 pub const Statement = struct {
     /// Raw sqlite handle; touch only via the methods below.
@@ -113,18 +104,10 @@ pub const Database = struct {
 
     /// Open (or create) a database file at `path`.
     /// Configures pragmas: journal_mode=WAL, foreign_keys=ON, busy_timeout=5000.
-    pub fn open(path: []const u8) SqliteError!Database {
-        // SQLite requires a null-terminated path. Copy into a stack buffer
-        // and add the sentinel, since callers may pass bufPrint output.
-        var path_buf: [MAX_PATH_LEN]u8 = undefined;
-        if (path.len >= path_buf.len) return SqliteError.PathTooLong;
-        @memcpy(path_buf[0..path.len], path);
-        path_buf[path.len] = 0;
-        const c_path: [*:0]const u8 = path_buf[0..path.len :0];
-
+    pub fn open(path: [:0]const u8) SqliteError!Database {
         var db: ?*c.sqlite3 = null;
         const rc = c.sqlite3_open_v2(
-            c_path,
+            path.ptr,
             &db,
             c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
             null,
@@ -151,17 +134,10 @@ pub const Database = struct {
     }
 
     /// Execute one or more SQL statements that return no result rows.
-    /// Accepts a slice so callers can pass `bufPrint` output without needing
-    /// to hand-manage a null terminator; compile-time literals still coerce
-    /// through unchanged. `sqlite3_exec` itself is C-string-only, so we copy
-    /// into a stack buffer and append the sentinel.
-    pub fn exec(self: *Database, sql: []const u8) SqliteError!void {
-        var buf: [MAX_SQL_LEN]u8 = undefined;
-        if (sql.len >= buf.len) return SqliteError.ExecFailed;
-        @memcpy(buf[0..sql.len], sql);
-        buf[sql.len] = 0;
-        const c_sql: [*:0]const u8 = buf[0..sql.len :0];
-        const rc = c.sqlite3_exec(self._handle, c_sql, null, null, null);
+    /// String literals and `bufPrintZ` output coerce to `[:0]const u8`; dynamic
+    /// SQL should be built with `bufPrintZ` or an ArrayList plus a trailing 0.
+    pub fn exec(self: *Database, sql: [:0]const u8) SqliteError!void {
+        const rc = c.sqlite3_exec(self._handle, sql.ptr, null, null, null);
         if (rc != c.SQLITE_OK) return mapError(rc, SqliteError.ExecFailed);
     }
 

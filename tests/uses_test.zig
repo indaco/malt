@@ -14,7 +14,7 @@ const schema = malt.schema;
 
 fn makeDb(tag: []const u8) !sqlite.Database {
     var path_buf: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/malt_uses_test_{s}.db", .{tag});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt_uses_test_{s}.db", .{tag}, 0);
     malt.fs_compat.deleteFileAbsolute(path) catch {};
     var db = try sqlite.Database.open(path);
     try schema.initSchema(&db);
