@@ -179,8 +179,8 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
             const repo = name[slash + 1 ..];
             // Resolve HEAD so the tap is pinned from day one. Failing
             // here beats silently registering an unpinned tap.
-            const sha = tap_mod.resolveHeadCommit(allocator, user, repo) catch {
-                output.err("Could not resolve {s}'s HEAD commit. Network down?", .{name});
+            const sha = tap_mod.resolveHeadCommit(allocator, user, repo) catch |e| {
+                output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
                 return error.Aborted;
             };
             defer allocator.free(sha);
@@ -210,8 +210,8 @@ fn refreshTap(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const 
     const slash = std.mem.findScalar(u8, name, '/').?;
     const user = name[0..slash];
     const repo = name[slash + 1 ..];
-    const sha = tap_mod.resolveHeadCommit(allocator, user, repo) catch {
-        output.err("Could not resolve {s}'s HEAD commit. Network down?", .{name});
+    const sha = tap_mod.resolveHeadCommit(allocator, user, repo) catch |e| {
+        output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
         return error.Aborted;
     };
     defer allocator.free(sha);

@@ -176,6 +176,57 @@ test "constantTimeEql handles empty slices" {
     try testing.expect(install.constantTimeEql(u8, "", ""));
 }
 
+// ─── parseCaskBinary ─────────────────────────────────────────────────
+
+test "parseCaskBinary: extracts the basic binary directive" {
+    const rb =
+        \\cask "longbridge-terminal" do
+        \\  version "0.17.4"
+        \\  binary "longbridge"
+        \\end
+    ;
+    try testing.expectEqualStrings("longbridge", install.parseCaskBinary(rb).?);
+}
+
+test "parseCaskBinary: tolerates extra arguments on the directive" {
+    // Homebrew cask DSL permits `binary "src", target: "alias"`. The
+    // first quoted value is the archive-side basename — that's what we
+    // care about for bin/ promotion.
+    const rb =
+        \\cask "foo" do
+        \\  binary "longbridge", target: "lb"
+        \\end
+    ;
+    try testing.expectEqualStrings("longbridge", install.parseCaskBinary(rb).?);
+}
+
+test "parseCaskBinary: returns null on formulas with no binary directive" {
+    const rb =
+        \\class Wget < Formula
+        \\  version "1.0"
+        \\  url "https://x"
+        \\  sha256 "deadbeef"
+        \\end
+    ;
+    try testing.expect(install.parseCaskBinary(rb) == null);
+}
+
+test "parseCaskBinary: ignores mid-line 'binary' substrings" {
+    // Must anchor at the trimmed line start so a stray mention in a
+    // comment or a variable name does not resolve to a bogus binary.
+    const rb =
+        \\cask "foo" do
+        \\  desc "binary \"fake\" is just a comment"
+        \\end
+    ;
+    try testing.expect(install.parseCaskBinary(rb) == null);
+}
+
+test "parseCaskBinary: indented directive still matches" {
+    const rb = "  binary \"sley\"\n";
+    try testing.expectEqualStrings("sley", install.parseCaskBinary(rb).?);
+}
+
 // ─── interpolateVersion ──────────────────────────────────────────────
 
 test "interpolateVersion substitutes #{version} once in the URL" {

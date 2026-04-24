@@ -1,6 +1,7 @@
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
+const fs_compat = @import("../fs/compat.zig");
 
 pub const TapInfo = struct {
     name: []const u8,
@@ -12,11 +13,58 @@ pub const TapInfo = struct {
 };
 
 pub const TapError = error{
+    /// Catch-all for causes we could not classify (5xx, unknown status, etc.).
     ResolveFailed,
     InvalidSha,
+    /// GitHub answered 404 — the tap repo is not at `homebrew-<repo>`.
     NotFound,
+    /// GitHub answered 403 — public cap is 60/hr per IP.
+    RateLimited,
+    /// `/commits/HEAD` returned 200 but the body did not contain a valid SHA.
+    MalformedJson,
+    /// Network layer failure before a status could be read.
+    NetworkError,
     OutOfMemory,
 };
+
+/// Map a non-200 GitHub response status onto the narrowest `TapError` tag
+/// we can name. Callers use the tag to pick the user-facing message —
+/// see `src/cli/install/local.zig` and `src/cli/tap.zig`.
+pub fn classifyResolveStatus(status: u16) TapError {
+    return switch (status) {
+        403 => TapError.RateLimited,
+        404 => TapError.NotFound,
+        else => TapError.ResolveFailed,
+    };
+}
+
+/// Build a `Authorization: Bearer <token>` header into `buf` from
+/// `MALT_GITHUB_TOKEN`, or return null when the env var is unset or
+/// empty. Exclusive to `resolveHeadCommit` — no other codepath picks up
+/// this env var, so users who set it only affect tap-resolution calls.
+pub fn githubAuthHeader(buf: []u8) ?std.http.Header {
+    const raw = fs_compat.getenv("MALT_GITHUB_TOKEN") orelse return null;
+    const token = std.mem.sliceTo(raw, 0);
+    if (token.len == 0) return null;
+    const value = std.fmt.bufPrint(buf, "Bearer {s}", .{token}) catch return null;
+    return .{ .name = "Authorization", .value = value };
+}
+
+/// Short remediation hint for each `TapError` variant. Keeping the
+/// strings here (not at the call site) means `cli/install/local.zig`
+/// and `cli/tap.zig` cannot drift out of sync, and unit tests can pin
+/// every tag without touching the network or the UI layer.
+pub fn describeResolveError(err: TapError) []const u8 {
+    return switch (err) {
+        error.RateLimited => "GitHub API rate limit reached. Set MALT_GITHUB_TOKEN to an authorized GitHub token to lift the 60/hr anonymous cap.",
+        error.NotFound => "GitHub returned 404 for the tap repo. Third-party taps must live at github.com/<user>/homebrew-<repo>; taps that drop the 'homebrew-' prefix are not yet supported.",
+        error.NetworkError => "Network failure while reaching api.github.com — check connectivity and retry.",
+        error.MalformedJson => "Unexpected response shape from GitHub — rerun with --debug and attach the log when filing an issue.",
+        error.InvalidSha => "GitHub returned a commit SHA that failed validation (not 40-char lowercase hex).",
+        error.ResolveFailed => "GitHub returned an unexpected status while resolving HEAD — retry, or set MALT_GITHUB_TOKEN if this persists.",
+        error.OutOfMemory => "Out of memory while resolving HEAD commit.",
+    };
+}
 
 pub fn add(
     db: *sqlite.Database,
@@ -157,8 +205,9 @@ pub fn parseCommitShaFromJson(body: []const u8) ?[]const u8 {
 }
 
 /// Ask GitHub for the current HEAD commit of a tap's repo. Returns
-/// the 40-char lowercase hex SHA or an error on network / malformed
-/// response. Caller owns the returned slice.
+/// the 40-char lowercase hex SHA or a classified `TapError` so callers
+/// can surface the actual cause (rate limit, 404, network, JSON). Caller
+/// owns the returned slice.
 pub fn resolveHeadCommit(
     allocator: std.mem.Allocator,
     user: []const u8,
@@ -174,10 +223,17 @@ pub fn resolveHeadCommit(
     var http = client_mod.HttpClient.init(allocator);
     defer http.deinit();
 
-    var resp = http.get(url) catch return TapError.ResolveFailed;
+    // MALT_GITHUB_TOKEN takes precedence; otherwise `http.get` falls
+    // back to the HOMEBREW_GITHUB_API_TOKEN auto-inject in net/client.
+    var auth_buf: [256]u8 = undefined;
+    var resp = if (githubAuthHeader(&auth_buf)) |header| blk: {
+        const headers = [_]std.http.Header{header};
+        break :blk http.getWithHeaders(url, &headers, null) catch return TapError.NetworkError;
+    } else http.get(url) catch return TapError.NetworkError;
     defer resp.deinit();
-    if (resp.status != 200) return TapError.ResolveFailed;
 
-    const sha = parseCommitShaFromJson(resp.body) orelse return TapError.ResolveFailed;
+    if (resp.status != 200) return classifyResolveStatus(resp.status);
+
+    const sha = parseCommitShaFromJson(resp.body) orelse return TapError.MalformedJson;
     return allocator.dupe(u8, sha) catch TapError.OutOfMemory;
 }

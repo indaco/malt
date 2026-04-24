@@ -336,3 +336,99 @@ test "parseCommitShaFromJson: uppercase hex in value is rejected" {
     ;
     try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(body));
 }
+
+// ────────────────────────────────────────────────────────────────────
+// classifyResolveStatus — callers rely on distinct tags to map each
+// GitHub failure mode to a user-facing message. A blanket
+// `ResolveFailed` would re-introduce the opaque "floating HEAD" error.
+// ────────────────────────────────────────────────────────────────────
+
+test "classifyResolveStatus: 403 is the rate-limit signal" {
+    // Unauthenticated `/commits/HEAD` caps at 60/hr per IP. Past the
+    // cap, the API answers 403 with a rate-limit body.
+    try testing.expectEqual(tap.TapError.RateLimited, tap.classifyResolveStatus(403));
+}
+
+test "classifyResolveStatus: 404 maps to NotFound" {
+    try testing.expectEqual(tap.TapError.NotFound, tap.classifyResolveStatus(404));
+}
+
+test "classifyResolveStatus: unexpected 5xx falls back to ResolveFailed" {
+    try testing.expectEqual(tap.TapError.ResolveFailed, tap.classifyResolveStatus(500));
+    try testing.expectEqual(tap.TapError.ResolveFailed, tap.classifyResolveStatus(502));
+}
+
+test "classifyResolveStatus: 401 (bad auth) is distinct from rate limit" {
+    try testing.expectEqual(tap.TapError.ResolveFailed, tap.classifyResolveStatus(401));
+}
+
+// ────────────────────────────────────────────────────────────────────
+// githubAuthHeader — only the `/commits/HEAD` call picks up
+// MALT_GITHUB_TOKEN; everything else keeps the existing HOMEBREW token
+// plumbing. Bearer header format must match GitHub's contract.
+// ────────────────────────────────────────────────────────────────────
+
+const c_env = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+};
+
+test "githubAuthHeader: returns null when MALT_GITHUB_TOKEN unset" {
+    _ = c_env.unsetenv("MALT_GITHUB_TOKEN");
+    var buf: [256]u8 = undefined;
+    try testing.expect(tap.githubAuthHeader(&buf) == null);
+}
+
+test "githubAuthHeader: returns Bearer header when MALT_GITHUB_TOKEN set" {
+    _ = c_env.setenv("MALT_GITHUB_TOKEN", "ghp_testtoken", 1);
+    defer _ = c_env.unsetenv("MALT_GITHUB_TOKEN");
+
+    var buf: [256]u8 = undefined;
+    const h = tap.githubAuthHeader(&buf) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("Authorization", h.name);
+    try testing.expectEqualStrings("Bearer ghp_testtoken", h.value);
+}
+
+test "githubAuthHeader: empty-string token behaves as unset" {
+    _ = c_env.setenv("MALT_GITHUB_TOKEN", "", 1);
+    defer _ = c_env.unsetenv("MALT_GITHUB_TOKEN");
+    var buf: [256]u8 = undefined;
+    try testing.expect(tap.githubAuthHeader(&buf) == null);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// describeResolveError — load-bearing user-facing change: each tap
+// failure mode gets a distinct remediation hint instead of the old
+// blanket "floating HEAD" message.
+// ────────────────────────────────────────────────────────────────────
+
+test "describeResolveError: RateLimited names MALT_GITHUB_TOKEN" {
+    const msg = tap.describeResolveError(tap.TapError.RateLimited);
+    try testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "rate limit") != null);
+}
+
+test "describeResolveError: NotFound explains the homebrew- prefix rule" {
+    const msg = tap.describeResolveError(tap.TapError.NotFound);
+    try testing.expect(std.mem.indexOf(u8, msg, "homebrew-") != null);
+}
+
+test "describeResolveError: NetworkError mentions connectivity" {
+    const msg = tap.describeResolveError(tap.TapError.NetworkError);
+    try testing.expect(std.mem.indexOf(u8, msg, "etwork") != null or
+        std.mem.indexOf(u8, msg, "onnect") != null);
+}
+
+test "describeResolveError: MalformedJson is distinct from ResolveFailed" {
+    const malformed = tap.describeResolveError(tap.TapError.MalformedJson);
+    const generic = tap.describeResolveError(tap.TapError.ResolveFailed);
+    try testing.expect(!std.mem.eql(u8, malformed, generic));
+}
+
+test "describeResolveError: every TapError variant gets a non-empty hint" {
+    inline for (@typeInfo(tap.TapError).error_set.?) |e| {
+        const err = @field(tap.TapError, e.name);
+        const msg = tap.describeResolveError(err);
+        try testing.expect(msg.len > 0);
+    }
+}
