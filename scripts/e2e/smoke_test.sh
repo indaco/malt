@@ -225,6 +225,11 @@ else
   # exercise it via a full smoke run before shipping.
   run_ok t3.version.update.check -- "$MT_BIN" version update --check
 
+  # Third-party tap install — guards against the blanket "floating
+  # HEAD" regression. Uses a small GoReleaser-packaged tap formula.
+  run_ok t3.install.tap -- "$MT_BIN" install indaco/tap/sley
+  run_ok t3.uninstall.tap -- "$MT_BIN" uninstall sley
+
   # Issue #85 regression: zig pulls llvm@21 whose post_install uses Ruby's
   # `&:sym` block-pass shorthand. If the DSL parser or fatal-classification
   # ever regresses, the install prints "post_install DSL failed for llvm@21"
