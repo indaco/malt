@@ -39,13 +39,12 @@ pub fn resolve(
     var visited = std.StringHashMap(void).init(allocator);
     defer visited.deinit();
 
-    // Queue of owned dep names. `head` marks the pop cursor; items
-    // below it have already been handed off (to `result` or freed).
-    // Scope-exit cleanup frees only the un-popped tail.
-    var queue: std.ArrayList([]const u8) = .empty;
-    var head: usize = 0;
+    // std.Deque owns the head-tail ring; on scope exit we free any
+    // strings still queued (early-return or OOM paths).
+    var queue: std.Deque([]const u8) = .empty;
     defer {
-        for (queue.items[head..]) |s| allocator.free(s);
+        var it = queue.iterator();
+        while (it.next()) |s| allocator.free(s);
         queue.deinit(allocator);
     }
 
@@ -58,7 +57,7 @@ pub fn resolve(
     defer allocator.free(root_deps);
 
     for (root_deps) |dep| {
-        queue.append(allocator, dep) catch {
+        queue.pushBack(allocator, dep) catch {
             allocator.free(dep);
             continue;
         };
@@ -66,17 +65,7 @@ pub fn resolve(
 
     visited.put(root_name, {}) catch {};
 
-    while (head < queue.items.len) {
-        // Peak ~2× max-in-flight: compact live tail to front once half-consumed.
-        if (head > 0 and head * 2 >= queue.items.len) {
-            const live = queue.items[head..];
-            std.mem.copyForwards([]const u8, queue.items[0..live.len], live);
-            queue.items.len = live.len;
-            head = 0;
-        }
-        const dep_name = queue.items[head];
-        head += 1;
-
+    while (queue.popFront()) |dep_name| {
         // Dedup: already processed → free the duplicate.
         if (visited.get(dep_name) != null) {
             allocator.free(dep_name);
@@ -113,7 +102,7 @@ pub fn resolve(
                     allocator.free(sub_dep);
                     continue;
                 }
-                queue.append(allocator, sub_dep) catch {
+                queue.pushBack(allocator, sub_dep) catch {
                     allocator.free(sub_dep);
                     continue;
                 };
