@@ -435,3 +435,36 @@ pub const Walker = struct {
         self.inner.deinit();
     }
 };
+
+test "File.sync flushes a freshly written file without error" {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&path_buf, "/tmp/malt_sync_file_{d}", .{nanoTimestamp()});
+    deleteTreeAbsolute(dir_path) catch {};
+    try makeDirAbsolute(dir_path);
+    defer deleteTreeAbsolute(dir_path) catch {};
+
+    var file_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const file_path = try std.fmt.bufPrint(&file_path_buf, "{s}/data", .{dir_path});
+
+    const f = try createFileAbsolute(file_path, .{});
+    defer f.close();
+    try f.writeAll("durable-bytes");
+    try f.sync();
+}
+
+test "Dir.sync flushes directory metadata without error" {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = try std.fmt.bufPrint(&path_buf, "/tmp/malt_sync_dir_{d}", .{nanoTimestamp()});
+    deleteTreeAbsolute(dir_path) catch {};
+    try makeDirAbsolute(dir_path);
+    defer deleteTreeAbsolute(dir_path) catch {};
+
+    var child_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const child_path = try std.fmt.bufPrint(&child_buf, "{s}/child", .{dir_path});
+    const child = try createFileAbsolute(child_path, .{});
+    child.close();
+
+    var dir = try openDirAbsolute(dir_path, .{});
+    defer dir.close();
+    try dir.sync();
+}
