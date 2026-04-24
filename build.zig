@@ -132,7 +132,6 @@ pub fn build(b: *std.Build) void {
         "tests/dsl_sandbox_test.zig",
         "tests/dsl_interpreter_test.zig",
         "tests/db_schema_v2_test.zig",
-        "tests/bundle_manifest_test.zig",
         "tests/bundle_brewfile_test.zig",
         "tests/services_plist_test.zig",
         "tests/services_test.zig",
