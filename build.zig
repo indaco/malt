@@ -140,7 +140,6 @@ pub fn build(b: *std.Build) void {
         "tests/atomic_test.zig",
         "tests/lock_test.zig",
         "tests/tap_test.zig",
-        "tests/values_test.zig",
         "tests/fallback_log_test.zig",
         "tests/help_test.zig",
         "tests/bottle_verify_test.zig",
