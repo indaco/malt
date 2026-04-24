@@ -34,11 +34,7 @@ pub fn readFileToEndAlloc(file: std.Io.File, allocator: std.mem.Allocator, max_b
 }
 
 pub fn sleepNanos(ns: u64) void {
-    const ts: std.c.timespec = .{
-        .sec = @intCast(ns / std.time.ns_per_s),
-        .nsec = @intCast(ns % std.time.ns_per_s),
-    };
-    _ = std.c.nanosleep(&ts, null);
+    std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(ns)), .awake) catch {};
 }
 
 pub fn randomBytes(buf: []u8) void {
@@ -68,21 +64,15 @@ pub fn readLinkAbsolute(absolute_path: []const u8, buffer: []u8) ![]u8 {
 }
 
 pub fn timestamp() i64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return ts.sec;
+    return std.Io.Clock.real.now(io_mod.ctx()).toSeconds();
 }
 
 pub fn nanoTimestamp() i128 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+    return std.Io.Clock.real.now(io_mod.ctx()).toNanoseconds();
 }
 
 pub fn milliTimestamp() i64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &ts);
-    return @as(i64, ts.sec) * std.time.ms_per_s + @divTrunc(ts.nsec, std.time.ns_per_ms);
+    return std.Io.Clock.real.now(io_mod.ctx()).toMilliseconds();
 }
 
 /// Closed error set surfaced by `StreamCallback.func`. Keeps callers
@@ -116,20 +106,12 @@ pub fn streamFile(file: File, buf: []u8, cb: StreamCallback) !void {
 }
 
 pub fn isatty(fd: std.posix.fd_t) bool {
-    return std.c.isatty(fd) != 0;
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    return file.isTty(io_mod.ctx()) catch false;
 }
 
 pub fn getenv(name: []const u8) ?[:0]const u8 {
-    var i: usize = 0;
-    while (std.c.environ[i]) |entry| : (i += 1) {
-        const entry_slice = std.mem.sliceTo(entry, 0);
-        if (entry_slice.len <= name.len) continue;
-        if (entry_slice[name.len] != '=') continue;
-        if (!std.mem.eql(u8, entry_slice[0..name.len], name)) continue;
-        const val_ptr: [*:0]const u8 = @ptrCast(entry + name.len + 1);
-        return std.mem.sliceTo(val_ptr, 0);
-    }
-    return null;
+    return std.process.Environ.getPosix(processEnviron(), name);
 }
 
 pub fn makeDirAbsolute(absolute_path: []const u8) !void {
@@ -205,6 +187,11 @@ pub fn stdinFile() File {
 /// `/usr/local/bin:/bin/:/usr/bin` (see
 /// `std.Io.Threaded.default_PATH`) — that fallback misses `/opt/homebrew/bin`
 /// on Apple Silicon, so `cosign` installed by Homebrew can't be found.
+///
+/// `std.c.environ` is the POSIX stable ABI for the process's environ block;
+/// there is no `std.posix`/`std.Io` equivalent that does not ultimately read
+/// this same pointer. Threading `std.process.Init.Minimal.environ` through
+/// every caller would retire this helper - tracked separately.
 pub fn processEnviron() std.process.Environ {
     var n: usize = 0;
     while (std.c.environ[n] != null) : (n += 1) {}
@@ -287,9 +274,7 @@ pub const File = struct {
 
     /// Partial write (at most one syscall). Returns bytes written.
     pub fn write(self: File, bytes: []const u8) !usize {
-        const rc = std.c.write(self.inner.handle, bytes.ptr, bytes.len);
-        if (rc < 0) return error.WriteFailed;
-        return @intCast(rc);
+        return self.inner.writeStreaming(io_mod.ctx(), &.{}, &.{bytes}, 1);
     }
 
     pub fn updateTimes(self: File, atime_ns: i128, mtime_ns: i128) !void {
@@ -418,13 +403,8 @@ pub const Dir = struct {
     /// Resolve symlinks in `pathname` against `self`, writing the absolute
     /// result into `out_buffer`. Mirrors the 0.15 `Dir.realpath` contract.
     pub fn realpath(self: Dir, pathname: []const u8, out_buffer: []u8) ![]u8 {
-        _ = self;
-        const fd = std.c.open(&(try std.posix.toPosixPath(pathname)), .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-        if (fd < 0) return error.FileNotFound;
-        defer _ = std.c.close(fd);
-        if (std.c.fcntl(fd, std.c.F.GETPATH, out_buffer.ptr) == -1) return error.NameTooLong;
-        const resolved = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(out_buffer.ptr)), 0);
-        return out_buffer[0..resolved.len];
+        const n = try self.inner.realPathFile(io_mod.ctx(), pathname, out_buffer);
+        return out_buffer[0..n];
     }
 
     pub fn readLink(self: Dir, sub_path: []const u8, buffer: []u8) ![]u8 {
@@ -440,11 +420,12 @@ pub const Dir = struct {
         return self.inner.rename(old_sub_path, self.inner, new_sub_path, io_mod.ctx());
     }
 
-    /// Flush directory metadata. `std.Io.Dir` has no sync vtable entry, so
-    /// drop to POSIX `fsync(2)` on the underlying fd — same primitive the
-    /// lock release path uses.
+    /// Flush directory metadata. `std.Io.Dir` has no sync vtable entry,
+    /// so wrap the dir fd as a File and go through the File sync path -
+    /// fsync(2) on a dir fd is what POSIX defines for metadata flush.
     pub fn sync(self: Dir) !void {
-        if (std.c.fsync(self.inner.handle) != 0) return error.SyncFailed;
+        const file: std.Io.File = .{ .handle = self.inner.handle, .flags = .{ .nonblocking = false } };
+        try file.sync(io_mod.ctx());
     }
 
     pub fn openDir(self: Dir, sub_path: []const u8, options: OpenOptions) !Dir {
