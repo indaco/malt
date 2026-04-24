@@ -20,3 +20,7 @@ pub const FallbackLog = fallback_log.FallbackLog;
 pub const FallbackEntry = fallback_log.FallbackEntry;
 pub const FallbackReason = fallback_log.FallbackReason;
 pub const Value = values.Value;
+
+test {
+    @import("std").testing.refAllDecls(@This());
+}
