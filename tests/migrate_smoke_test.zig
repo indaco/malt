@@ -318,7 +318,7 @@ test "already-installed kegs are skipped without touching the network" {
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
     try malt.fs_compat.cwd().makePath(db_dir);
-    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt.db", .{db_dir});
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
 
     var db = try malt.sqlite.Database.open(db_path);
@@ -540,7 +540,7 @@ test "--json on an already-installed keg records it under skipped_installed" {
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
     try malt.fs_compat.cwd().makePath(db_dir);
-    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt.db", .{db_dir});
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
 
     var db = try malt.sqlite.Database.open(db_path);
@@ -746,7 +746,7 @@ test "mixed outcomes: installed keg is skipped and unknown keg fails at API (404
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
     try malt.fs_compat.cwd().makePath(db_dir);
-    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt.db", .{db_dir});
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
     var db = try malt.sqlite.Database.open(db_path);
     try malt.schema.initSchema(&db);
@@ -867,7 +867,7 @@ test "already-installed stderr pins the 'Migration complete' + 'Skipped (install
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
     try malt.fs_compat.cwd().makePath(db_dir);
-    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt.db", .{db_dir});
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
 
     var db = try malt.sqlite.Database.open(db_path);

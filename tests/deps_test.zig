@@ -53,7 +53,7 @@ const TempDb = struct {
         const dir = "/tmp/malt_deps_test_" ++ tag;
         malt.fs_compat.makeDirAbsolute(dir) catch {};
         var buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrint(&buf, "{s}/test.db", .{dir});
+        const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(path);
         errdefer db.close();
         try schema.initSchema(&db);
@@ -351,7 +351,7 @@ const TempPrefix = struct {
         errdefer malt.fs_compat.deleteTreeAbsolute(root) catch {};
 
         var db_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrint(&db_buf, "{s}/malt.db", .{root});
+        const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/malt.db", .{root}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);

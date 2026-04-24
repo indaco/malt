@@ -48,7 +48,7 @@ const TempDb = struct {
         const dir = "/tmp/malt_install_test_" ++ tag;
         malt.fs_compat.makeDirAbsolute(dir) catch {};
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrint(&db_path_buf, "{s}/test.db", .{dir});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);

@@ -20,7 +20,7 @@ const TempDb = struct {
         malt.fs_compat.deleteTreeAbsolute(dir) catch {};
         try malt.fs_compat.makeDirAbsolute(dir);
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrint(&db_path_buf, "{s}/test.db", .{dir});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);

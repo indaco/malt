@@ -20,7 +20,7 @@ const TempDb = struct {
         malt.fs_compat.deleteTreeAbsolute(dir) catch {};
         try malt.fs_compat.makeDirAbsolute(dir);
         var db_path_buf: [256]u8 = undefined;
-        const db_path = try std.fmt.bufPrint(&db_path_buf, "{s}/test.db", .{dir});
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
         errdefer db.close();
         try schema.initSchema(&db);
@@ -316,7 +316,7 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
 
     try malt.cli_bundle.execute(testing.allocator, &.{ "install", bf_path });
 
-    const db_path = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{dir_z});
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{dir_z}, 0);
     defer testing.allocator.free(db_path);
     var db = try sqlite.Database.open(db_path);
     defer db.close();
