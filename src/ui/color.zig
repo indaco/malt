@@ -105,20 +105,6 @@ pub fn setTruecolorForTest(v: ?bool) void {
     truecolor_cached = v;
 }
 
-/// Write styled text to stderr. If colors disabled, writes text only.
-/// Every write is best-effort: stderr may be a closed pipe, and a failed
-/// draw must not abort whatever the caller was reporting on.
-pub fn styled(style: Style, text: []const u8) void {
-    const f = fs_compat.stderrFile();
-    if (isColorEnabled()) {
-        f.writeAll(style.code()) catch {};
-        f.writeAll(text) catch {};
-        f.writeAll(Style.reset.code()) catch {};
-    } else {
-        f.writeAll(text) catch {};
-    }
-}
-
 /// Cached background accessor. Detection runs at most once per process.
 pub fn background() Background {
     if (background_cached) |v| return v;

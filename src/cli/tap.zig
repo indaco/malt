@@ -38,6 +38,45 @@ fn validateComponent(part: []const u8) TapNameError!void {
     }
 }
 
+/// Render one listing row: `name @ {7-char sha}` when pinned, or
+/// `name (unpinned — run \`mt tap --refresh name\`)` when not. Caller owns
+/// the returned slice. Kept in one place so the refresh hint stays in
+/// sync with `mt tap --refresh` and the exact byte layout is testable.
+fn formatTapLine(allocator: std.mem.Allocator, t: tap_mod.TapInfo) ![]u8 {
+    if (t.commit_sha) |sha| {
+        const short_len = @min(sha.len, 7);
+        return std.fmt.allocPrint(allocator, "{s} @ {s}\n", .{ t.name, sha[0..short_len] });
+    }
+    return std.fmt.allocPrint(
+        allocator,
+        "{s} (unpinned — run `mt tap --refresh {s}`)\n",
+        .{ t.name, t.name },
+    );
+}
+
+test "formatTapLine renders short SHA for a pinned tap" {
+    const line = try formatTapLine(std.testing.allocator, .{
+        .name = "user/repo",
+        .url = "https://x",
+        .commit_sha = "0123456789abcdef0123456789abcdef01234567",
+    });
+    defer std.testing.allocator.free(line);
+    try std.testing.expectEqualStrings("user/repo @ 0123456\n", line);
+}
+
+test "formatTapLine renders refresh hint for an unpinned tap" {
+    const line = try formatTapLine(std.testing.allocator, .{
+        .name = "user/repo",
+        .url = "https://x",
+        .commit_sha = null,
+    });
+    defer std.testing.allocator.free(line);
+    try std.testing.expectEqualStrings(
+        "user/repo (unpinned — run `mt tap --refresh user/repo`)\n",
+        line,
+    );
+}
+
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     return run(allocator, args, .add);
 }
@@ -114,21 +153,12 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
         }
 
         for (taps) |t| {
-            // stdout may be a closed pipe (head, grep -q, etc.); dropping the
-            // listing line is the correct behaviour, not an aborted command.
-            const f = fs_compat.stdoutFile();
-            f.writeAll(t.name) catch {};
-            if (t.commit_sha) |sha| {
-                f.writeAll(" @ ") catch {};
-                // 7-char short SHA to keep the listing compact.
-                const short_len = @min(sha.len, 7);
-                f.writeAll(sha[0..short_len]) catch {};
-            } else {
-                f.writeAll(" (unpinned — run `mt tap --refresh ") catch {};
-                f.writeAll(t.name) catch {};
-                f.writeAll("`)") catch {};
-            }
-            f.writeAll("\n") catch {};
+            // Assemble the line once so stdout sees a single writeAll — a closed
+            // pipe (head, grep -q, etc.) drops the full line rather than leaving
+            // it half-written. Empty on OOM keeps the listing best-effort.
+            const line = formatTapLine(allocator, t) catch "";
+            defer if (line.len != 0) allocator.free(line);
+            fs_compat.stdoutFile().writeAll(line) catch {};
             allocator.free(t.name);
             allocator.free(t.url);
             if (t.commit_sha) |sha| allocator.free(sha);
