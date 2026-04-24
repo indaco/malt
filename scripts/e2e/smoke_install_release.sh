@@ -92,13 +92,19 @@ if [ "${MALT_SMOKE_SKIP_PROPAGATION_WAIT:-0}" != "1" ]; then
 fi
 
 step "Running install.sh from README against the live release"
+# env -i wipes GITHUB_TOKEN — forward it as MALT_INSTALLER_API_TOKEN so
+# install.sh's /releases/latest probe is authenticated (5000/hr vs the
+# 60/hr unauthenticated ceiling that shared runner IPs routinely hit).
+INSTALLER_TOKEN="${MALT_SMOKE_API_TOKEN:-${GITHUB_TOKEN:-}}"
 if [ "${MALT_SKIP_COSIGN:-0}" = "1" ]; then
   env -i HOME="$HOME" USER="$USER" PATH="$SAFE_PATH" \
     MALT_ALLOW_UNVERIFIED=1 PREFIX="$PREFIX" INSTALL_DIR="$INSTALL_DIR" \
+    MALT_INSTALLER_API_TOKEN="$INSTALLER_TOKEN" \
     bash -c "curl -fsSL \"$INSTALLER_URL\" | bash"
 else
   env -i HOME="$HOME" USER="$USER" PATH="$SAFE_PATH" \
     PREFIX="$PREFIX" INSTALL_DIR="$INSTALL_DIR" \
+    MALT_INSTALLER_API_TOKEN="$INSTALLER_TOKEN" \
     bash -c "curl -fsSL \"$INSTALLER_URL\" | bash"
 fi
 [ -x "$INSTALL_DIR/malt" ] || fail "malt binary missing at $INSTALL_DIR/malt"

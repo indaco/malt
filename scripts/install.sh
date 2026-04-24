@@ -101,11 +101,19 @@ else
   # --retry (no --retry-all-errors) needs 7.71+, so we do it in bash
   # for portability across macOS and older Linux.
   API_RESPONSE=""
+  # Optional auth header — empty in normal user installs. The release
+  # smoke sets this so polls survive the unauthenticated 60/hr-per-IP
+  # ceiling on shared CI runners.
+  api_auth_args=()
+  if [ -n "${MALT_INSTALLER_API_TOKEN:-}" ]; then
+    api_auth_args=(-H "Authorization: Bearer ${MALT_INSTALLER_API_TOKEN}")
+  fi
   backoffs="3 6 12 24"
   attempt=0
   for delay in $backoffs end; do
     attempt=$((attempt + 1))
     if API_RESPONSE=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+      ${api_auth_args[@]+"${api_auth_args[@]}"} \
       "$API_LATEST_URL" 2>/dev/null); then
       break
     fi

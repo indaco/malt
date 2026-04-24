@@ -125,4 +125,10 @@ jobs:
         uses: sigstore/cosign-installer@v4.1.1
 
       - name: Run release-install smoke
+        env:
+          # Authenticated API calls raise the ceiling from 60/hr per
+          # runner IP (shared across the macos-14 pool) to 5000/hr,
+          # which both the propagation wait and install.sh probe rely
+          # on. Contents-read is the only scope consulted.
+          MALT_SMOKE_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./scripts/e2e/smoke_install_release.sh
