@@ -522,12 +522,14 @@ pub fn runPostInstall(
     }) catch return RubyError.ScriptWriteFailed;
     tmp_file.writeAll(script) catch {
         tmp_file.close();
+        // Cleanup of the partial tmp script; ScriptWriteFailed is the real error.
         fs_compat.deleteFileAbsolute(tmp_path) catch {};
         return RubyError.ScriptWriteFailed;
     };
     tmp_file.close();
 
-    // Ensure cleanup
+    // Ensure cleanup — tmp path is PID+random, so a late-running delete
+    // only ever targets this process's own script.
     defer fs_compat.deleteFileAbsolute(tmp_path) catch {};
 
     // 7. Spawn Ruby under sandbox-exec with a per-formula profile,

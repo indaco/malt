@@ -423,6 +423,7 @@ fn materializeRubyFormula(
         return InstallError.DownloadFailed;
     };
     tmp_file.close();
+    // Temp archive cleanup; leaks to tmp/ are reaped by the next install.
     defer fs_compat.cwd().deleteFile(tmp_archive) catch {};
 
     const archive_mod = @import("../../fs/archive.zig");
@@ -458,6 +459,7 @@ fn materializeRubyFormula(
                 cellar_dir.copyFile(entry.path, cellar_dir, dest_name, .{}) catch continue;
                 const bin_file = cellar_dir.openFile(dest_name, .{ .mode = .read_write }) catch continue;
                 defer bin_file.close();
+                // chmod may fail on FUSE/NFS; linker still resolves the path.
                 bin_file.chmod(0o755) catch {};
                 break;
             }
@@ -491,7 +493,8 @@ fn materializeRubyFormula(
 
         if (resolved.tap_registration) |t| {
             // `COALESCE` in tap_mod.add pins the commit on first install
-            // and leaves later pins untouched.
+            // and leaves later pins untouched. Tap row is advisory — keg
+            // is already recorded; a missing tap row self-heals next sync.
             tap_mod.add(db, resolved.tap_label, t.url, t.commit_sha) catch {};
         }
     }

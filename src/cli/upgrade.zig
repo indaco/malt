@@ -244,6 +244,7 @@ fn upgradeFormula(
         };
         allocator.free(tmp_dir);
 
+        // refcount is advisory; commit succeeded, store now owns the bytes.
         store.incrementRef(bottle.sha256) catch {};
     }
 
@@ -271,6 +272,7 @@ fn upgradeFormula(
         output.err("Failed to record new version of {s} in database", .{name});
         // Rollback: re-link old version
         restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
+        // rollback cellar cleanup; a leftover keg is tolerable if the rollback is already failing.
         cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
         return;
     };
@@ -278,13 +280,16 @@ fn upgradeFormula(
     linker.link(new_keg.path, formula.name, new_keg_id) catch {
         output.err("Failed to link new version of {s}", .{name});
         // Rollback: remove partial new links, restore old
+        // partial link cleanup in a rollback path.
         linker.unlink(new_keg_id) catch {};
         deleteKeg(db, new_keg_id);
         restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
+        // rollback cellar cleanup.
         cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
         return;
     };
 
+    // opt symlink is convenience; install is already functional via versioned link.
     linker.linkOpt(formula.name, formula.pkg_version) catch {};
 
     // Step 8: Remove old DB record + Cellar entry (success path only)
@@ -297,12 +302,13 @@ fn upgradeFormula(
         var parent_buf: [512]u8 = undefined;
         const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
         if (parent_path.len > 0) {
+            // rmdir fails if other versions still live here — that is the intended guard.
             fs_compat.cwd().deleteDir(parent_path) catch {};
         }
     }
 
-    // Decrement store refcount for old bottle
     if (old_sha256.len > 0) {
+        // refcount is advisory; upgrade is already complete on disk.
         store.decrementRef(old_sha256) catch {};
     }
 
@@ -356,16 +362,16 @@ fn recordKeg(
     return keg_id;
 }
 
-/// Delete a keg record from the database (rollback helper).
+/// Delete a keg record from the database (rollback helper). The whole
+/// function is best-effort: a rollback failure is logged upstream via the
+/// caller's `output.err`, and a stale row cleans itself up on next doctor.
 fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
-    // Also clean up dependencies
     {
         var dep_stmt = db.prepare("DELETE FROM dependencies WHERE keg_id = ?1;") catch return;
         defer dep_stmt.finalize();
         dep_stmt.bindInt(1, keg_id) catch return;
         _ = dep_stmt.step() catch {};
     }
-    // Also clean up links
     {
         var link_stmt = db.prepare("DELETE FROM links WHERE keg_id = ?1;") catch return;
         defer link_stmt.finalize();
@@ -439,6 +445,7 @@ fn upgradeAllFormulas(
     for (names.items) |name| {
         upgradeFormula(allocator, name, db, api, http, prefix, dry_run) catch {
             failed_count += 1;
+            // failed_count is the authoritative counter; list is for UX only.
             failed_names.append(allocator, name) catch {};
         };
     }
@@ -542,6 +549,7 @@ fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api
     for (tokens.items) |token| {
         upgradeCask(allocator, token, db, api, prefix, dry_run) catch {
             failed_count += 1;
+            // failed_count is authoritative; list is for UX only.
             failed_tokens.append(allocator, token) catch {};
         };
     }

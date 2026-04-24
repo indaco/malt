@@ -79,6 +79,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return Error.DatabaseError;
     };
     defer db.close();
+    // Schema is idempotent; backup's SELECTs surface a real DB error if one exists.
     schema.initSchema(&db) catch {};
 
     // ── Serialize into an in-memory buffer ───────────────────────────────
@@ -150,6 +151,7 @@ fn writeToPath(path: []const u8, bytes: []const u8) Error!void {
                     else => {},
                 };
             } else {
+                // Parent may already exist; the subsequent createFile reports real errors.
                 fs_compat.cwd().makePath(dir) catch {};
             }
         }

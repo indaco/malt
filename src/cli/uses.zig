@@ -40,6 +40,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_fw = io_mod.stdoutFile().writer(io_mod.ctx(), &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
+    // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};
 
     // Without a local DB nothing is installed, so nothing can "use"
@@ -50,6 +51,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer freeDependents(allocator, dependents);
 
     if (db_opt) |*db| {
+        // Schema is idempotent; read-only uses queries degrade to empty on a broken DB.
         schema.initSchema(db) catch {};
         dependents = collectDependents(allocator, db, name, recursive) catch &.{};
     }

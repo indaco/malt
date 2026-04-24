@@ -142,11 +142,13 @@ fn ephemeralRun(
     {
         const f = fs_compat.openFileAbsolute(bin_path, .{ .mode = .read_write }) catch return;
         defer f.close();
+        // Bottles ship with +x; chmod is belt-and-suspenders. exec below surfaces EACCES.
         f.chmod(0o755) catch {};
     }
 
     output.info("Running {s} {s} (ephemeral)...", .{ pkg_name, formula.version });
     const stderr = fs_compat.stderrFile();
+    // Separator is purely cosmetic; a closed stderr shouldn't kill the run.
     stderr.writeAll("---\n") catch {};
 
     try execBinary(allocator, bin_path, cmd_args);
@@ -166,5 +168,6 @@ fn execBinary(allocator: std.mem.Allocator, path: []const u8, cmd_args: []const 
         output.err("Failed to execute binary", .{});
         return error.Aborted;
     };
+    // Ephemeral run is fire-and-forget; child exit code isn't surfaced to the shell.
     _ = child.wait() catch {};
 }

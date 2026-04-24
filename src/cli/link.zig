@@ -34,6 +34,7 @@ pub fn executeLink(allocator: std.mem.Allocator, args: []const []const u8) !void
         return error.Aborted;
     };
     defer db.close();
+    // Schema is idempotent; existing DB with current shape is the common case.
     schema.initSchema(&db) catch {};
 
     // Look up the keg
@@ -82,6 +83,7 @@ pub fn executeLink(allocator: std.mem.Allocator, args: []const []const u8) !void
     ver_stmt.bindInt(1, keg_id) catch return;
     if (ver_stmt.step() catch false) {
         if (ver_stmt.columnText(0)) |v| {
+            // opt/ link is a convenience pointer; primary link.link already succeeded.
             linker.linkOpt(name, std.mem.sliceTo(v, 0)) catch {};
         }
     }
@@ -109,6 +111,7 @@ pub fn executeUnlink(allocator: std.mem.Allocator, args: []const []const u8) !vo
         return error.Aborted;
     };
     defer db.close();
+    // Schema is idempotent; existing DB with current shape is the common case.
     schema.initSchema(&db) catch {};
 
     // Look up the keg
@@ -136,7 +139,7 @@ pub fn executeUnlink(allocator: std.mem.Allocator, args: []const []const u8) !vo
     // Also remove opt/ symlink
     var opt_buf: [512]u8 = undefined;
     const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch return;
-    fs_compat.cwd().deleteFile(opt_path) catch {}; // intentional: may not exist
+    fs_compat.cwd().deleteFile(opt_path) catch {}; // opt/ link absent on never-linked kegs
 
     output.success("{s} unlinked (keg remains installed)", .{name});
 }

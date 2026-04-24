@@ -148,7 +148,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         var del = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return error.Aborted;
         defer del.finalize();
         del.bindInt(1, current_id) catch return error.Aborted;
-        _ = del.step() catch {};
+        // Step failure inside the txn must trigger rollback, not a silent commit.
+        _ = del.step() catch return error.Aborted;
     }
 
     {
@@ -161,7 +162,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         ins.bindText(2, target.version) catch return error.Aborted;
         ins.bindText(3, target.sha256) catch return error.Aborted;
         ins.bindText(4, keg.path) catch return error.Aborted;
-        _ = ins.step() catch {};
+        // Step failure inside the txn must trigger rollback, not a silent commit.
+        _ = ins.step() catch return error.Aborted;
     }
 
     // Get new keg_id for linking

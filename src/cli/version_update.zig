@@ -138,11 +138,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     //     don't collide and `rm -rf` of a stale dir never hits /tmp root. ---
     var scratch_buf: [std.fs.max_path_bytes]u8 = undefined;
     const scratch = try buildScratchDir(&scratch_buf);
+    // Pre-clean any leftover scratch from an aborted prior run; makeDirAbsolute below surfaces real errors.
     fs_compat.deleteTreeAbsolute(scratch) catch {};
     fs_compat.makeDirAbsolute(scratch) catch {
         output.err("Cannot create scratch dir at {s}", .{scratch});
         return error.Aborted;
     };
+    // Teardown: scratch is pid-tagged, so a leftover tree is only our own dead run's.
     defer fs_compat.deleteTreeAbsolute(scratch) catch {};
 
     // --- download tarball + checksums (always needed for SHA verify) ---

@@ -119,10 +119,11 @@ pub const Linker = struct {
             // This avoids a window where the link is absent after deleteFile.
             var tmp_name_buf: [280]u8 = undefined;
             const tmp_name = std.fmt.bufPrint(&tmp_name_buf, ".malt_tmp_{s}", .{entry.name}) catch continue;
+            // Stale tmp from a prior aborted link; symLink would otherwise EEXIST.
             parent_dir.deleteFile(tmp_name) catch {};
             parent_dir.symLink(target, tmp_name, .{}) catch continue;
             parent_dir.rename(tmp_name, entry.name) catch {
-                // Rename failed — fall back to direct replacement
+                // Rename failed — fall back to direct replacement (non-atomic).
                 parent_dir.deleteFile(tmp_name) catch {};
                 parent_dir.deleteFile(entry.name) catch {};
                 parent_dir.symLink(target, entry.name, .{}) catch continue;
@@ -159,10 +160,10 @@ pub const Linker = struct {
         var cellar_buf: [512]u8 = undefined;
         const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ self.prefix, name, version }) catch return;
 
-        // Remove existing symlink if present
+        // Stale opt link from a prior version; symLink would otherwise EEXIST.
         opt_dir.deleteFile(name) catch {};
 
-        // Create symlink
+        // Opt is convenience; install remains functional via the versioned link.
         opt_dir.symLink(cellar_path, name, .{}) catch {};
     }
 

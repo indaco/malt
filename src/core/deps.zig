@@ -54,6 +54,7 @@ pub fn resolve(
         };
     }
 
+    // OOM on visited.put is non-fatal: duplicates are caught by the dedup check below.
     visited.put(root_name, {}) catch {};
 
     while (queue.popFront()) |dep_name| {
@@ -177,7 +178,9 @@ pub fn ensureOptLink(db: *sqlite.Database, prefix: []const u8, name: []const u8)
     };
     var parent_dir = fs_compat.openDirAbsolute(opt_parent, .{}) catch return;
     defer parent_dir.close();
+    // Stale opt/<name> may not exist on first link; symLink would EEXIST otherwise.
     parent_dir.deleteFile(name) catch {};
+    // Best-effort opt refresh: a failure here leaves the DB correct; `mt link` recovers.
     parent_dir.symLink(cellar_path, name, .{}) catch {};
 }
 

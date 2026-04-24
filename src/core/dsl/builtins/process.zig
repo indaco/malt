@@ -36,7 +36,8 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
 
 /// quiet_system — execute a command, suppress output
 pub fn quietSystem(ctx: ExecCtx, recv: ?Value, args: []const Value) BuiltinError!Value {
-    // Same as system but we ignore the exit code (quiet)
+    // Ruby's `quiet_system` returns true/false and never raises; we drop the
+    // bool too because the DSL sites that use it ignore the result.
     _ = system(ctx, recv, args) catch {};
     return Value{ .nil = {} };
 }
@@ -116,6 +117,7 @@ pub fn macosVersion(ctx: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Valu
     child.spawn() catch return Value{ .string = "15.0" };
     const stdout = child.stdout orelse return Value{ .string = "15.0" };
     const ver = fs_compat.readFileToEndAlloc(stdout, ctx.allocator, 256) catch return Value{ .string = "15.0" };
+    // Already captured stdout; wait is just for reaping the zombie.
     _ = child.wait() catch {};
     const trimmed = std.mem.trimEnd(u8, ver, "\n\r ");
     return Value{ .string = trimmed };
@@ -198,6 +200,7 @@ pub fn safePopenRead(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!
 
     const stdout = child.stdout orelse return Value{ .string = "" };
     const content = fs_compat.readFileToEndAlloc(stdout, ctx.allocator, 1024 * 1024) catch return Value{ .string = "" };
+    // Already captured stdout; wait is just for reaping the zombie.
     _ = child.wait() catch {};
 
     // Chomp trailing newline

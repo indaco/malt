@@ -134,6 +134,7 @@ fn checkSqliteIntegrity(ctx: CheckCtx, name: []const u8) CheckResult {
     };
     defer db.close();
 
+    // Schema is idempotent; the `PRAGMA integrity_check` below is the real probe.
     schema.initSchema(&db) catch {};
 
     var stmt = db.prepare("PRAGMA integrity_check;") catch {

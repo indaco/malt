@@ -258,6 +258,7 @@ pub const BrewApi = struct {
 
         const f = fs_compat.cwd().createFile(p, .{}) catch return;
         defer f.close();
+        // Partial index is discarded on next miss; next fetch re-populates from network.
         f.writeAll(data) catch {};
     }
 
@@ -265,6 +266,7 @@ pub const BrewApi = struct {
     pub fn invalidateCache(self: *BrewApi) void {
         var api_path_buf: [512]u8 = undefined;
         const api_path = std.fmt.bufPrint(&api_path_buf, "{s}/api", .{self.cache_dir}) catch return;
+        // Cache dir absent on first-ever run; wipe is purely opportunistic.
         fs_compat.deleteTreeAbsolute(api_path) catch {};
     }
 
@@ -338,6 +340,9 @@ pub const BrewApi = struct {
         // Atomic write so a crash mid-`writeAll` can't leave a
         // truncated JSON file that breaks the next install until the
         // cache is manually wiped.
+        //
+        // Cache is a latency optimization; a write failure (disk full,
+        // permissions) just means the next call re-fetches over the network.
         atomic.atomicWriteFile(cache_path, data) catch {};
     }
 

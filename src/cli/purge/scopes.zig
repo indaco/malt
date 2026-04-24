@@ -103,6 +103,10 @@ pub fn runUnusedDeps(allocator: std.mem.Allocator, prefix: []const u8, dry_run: 
     var linker = linker_mod.Linker.init(allocator, &db, prefix);
     var store = store_mod.Store.init(allocator, &db, prefix);
 
+    // Per-orphan removal is best-effort across all steps: a partially-linked
+    // or partially-materialized keg must still be cleanable. Callers rely on
+    // the DB `DELETE` as the authoritative removal signal; filesystem and
+    // refcount side-effects converge on subsequent runs.
     for (orphans) |name| {
         var stmt = db.prepare("SELECT id, version, store_sha256 FROM kegs WHERE name = ?1;") catch continue;
         defer stmt.finalize();
@@ -120,6 +124,7 @@ pub fn runUnusedDeps(allocator: std.mem.Allocator, prefix: []const u8, dry_run: 
             {
                 var parent_buf: [512]u8 = undefined;
                 const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
+                // Parent dir may be non-empty (sibling versions still installed).
                 if (parent_path.len > 0) fs_compat.deleteDirAbsolute(parent_path) catch {};
             }
             if (sha_ptr) |s| {

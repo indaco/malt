@@ -366,25 +366,29 @@ fn migrateKeg(
     if (!formula.keg_only) {
         const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
             output.err("    {s}: failed to record in database", .{keg_name});
+            // Rollback: remove materialised keg when DB record fails.
             cellar_mod.remove(deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
 
         deps.linker.link(keg.path, formula.name, keg_id) catch {
             output.warn("    {s}: some links could not be created", .{keg_name});
-            // Best-effort cleanup after a link failure; the user already sees the failure above.
+            // Rollback: unlink partial links and delete keg row; user already warned above.
             deps.linker.unlink(keg_id) catch {};
             deleteKeg(deps.db, keg_id) catch {};
             cellar_mod.remove(deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
+        // Opt symlink is convenience; install is already functional via versioned link.
         deps.linker.linkOpt(formula.name, formula.pkg_version) catch {};
         recordDeps(deps.db, keg_id, &formula);
     } else {
         const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
+            // Rollback: remove materialised keg when DB record fails.
             cellar_mod.remove(deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
+        // Opt symlink is convenience; install is already functional via versioned link.
         deps.linker.linkOpt(formula.name, formula.pkg_version) catch {};
         recordDeps(deps.db, keg_id, &formula);
     }
@@ -500,6 +504,8 @@ fn deleteKeg(db: *sqlite.Database, keg_id: i64) sqlite.SqliteError!void {
     _ = try stmt.step();
 }
 
+/// Each row is independent; skip on per-row failure so a partial dep
+/// table is preferred to aborting a migration wholesale.
 fn recordDeps(db: *sqlite.Database, keg_id: i64, formula: *const formula_mod.Formula) void {
     for (formula.dependencies) |dep_name| {
         var stmt = db.prepare(

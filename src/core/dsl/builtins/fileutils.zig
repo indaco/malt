@@ -1,6 +1,13 @@
 //! malt — DSL builtin: FileUtils operations
 //! Maps Ruby FileUtils module calls to std.fs operations.
 //! All mutating operations go through sandbox.validatePath first.
+//!
+//! Every fs mutation below swallows its error. The contract is:
+//! formulae run as a sequence of mutations and a final check (linker,
+//! cellar layout, bottle verify); a silent mid-step failure surfaces at
+//! the downstream step that expects the side effect to have happened.
+//! Matches Ruby FileUtils' force variants — closer to `rm_f`/`cp` with
+//! `force: true` than their strict counterparts.
 
 const std = @import("std");
 const fs_compat = @import("../../../fs/compat.zig");

@@ -260,6 +260,7 @@ pub fn jsonStr(w: *std.Io.Writer, s: []const u8) !void {
         } else if (byte < 0x20) {
             if (i > start) try w.writeAll(s[start..i]);
             var hex_buf: [6]u8 = undefined;
+            // `\u` + 4 hex digits = 6 bytes exactly; bufPrint cannot overflow a 6-byte buffer.
             const hex = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{byte}) catch unreachable;
             try w.writeAll(hex);
             start = i + 1;

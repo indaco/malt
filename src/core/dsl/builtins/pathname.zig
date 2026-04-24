@@ -1,5 +1,9 @@
 //! malt — DSL builtin: Pathname operations
 //! Maps Ruby Pathname methods to std.fs calls.
+//!
+//! Same contract as fileutils.zig: fs mutations swallow their errors and
+//! surface at the downstream step (linker, cellar layout, bottle verify).
+//! Matches Ruby's non-raising Pathname helpers used by Homebrew formulae.
 
 const std = @import("std");
 const fs_compat = @import("../../../fs/compat.zig");

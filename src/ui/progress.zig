@@ -1,5 +1,9 @@
 //! malt — progress module
 //! Terminal progress bar rendering with multi-line support.
+//!
+//! Every stderr write in this file is best-effort: a draw failure must not
+//! abort the work the bar is reporting on (download, install, migration).
+//! That is why each `writeAll` below ends in `catch {}`.
 
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");

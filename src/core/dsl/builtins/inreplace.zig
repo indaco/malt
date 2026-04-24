@@ -49,6 +49,7 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
         const stderr = fs_compat.stderrFile();
         var buf: [512]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "malt: inreplace atomic write failed ({s}); falling back to direct overwrite\n", .{@errorName(e)}) catch return Value{ .nil = {} };
+        // Warning is advisory; fallback write is the load-bearing step.
         stderr.writeAll(msg) catch {};
         writeDirectly(path, new_content);
     };
@@ -112,6 +113,7 @@ fn writeAtomic(path: []const u8, content: []const u8) !void {
     const tmp_file = dir.createFile(tmp_name, .{}) catch return error.AccessDenied;
     tmp_file.writeAll(content) catch {
         tmp_file.close();
+        // Cleanup of the partial tmp file; the write error is what we return.
         dir.deleteFile(tmp_name) catch {};
         return error.AccessDenied;
     };
@@ -119,6 +121,7 @@ fn writeAtomic(path: []const u8, content: []const u8) !void {
 
     // Rename over original
     dir.rename(tmp_name, basename) catch {
+        // Cleanup of the orphaned tmp file; the rename error is what we return.
         dir.deleteFile(tmp_name) catch {};
         return error.AccessDenied;
     };
@@ -128,5 +131,6 @@ fn writeAtomic(path: []const u8, content: []const u8) !void {
 fn writeDirectly(path: []const u8, content: []const u8) void {
     const out = fs_compat.createFileAbsolute(path, .{ .truncate = true }) catch return;
     defer out.close();
+    // Fallback path already logged a warning; no error channel left to surface.
     out.writeAll(content) catch {};
 }

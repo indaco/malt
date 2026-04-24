@@ -115,7 +115,8 @@ pub fn recordKeg(
     return keg_id;
 }
 
-/// Delete a keg record from the database (rollback helper).
+/// Delete a keg record. Rollback helper — the caller is already in an
+/// error path, so a failed delete leaves a stale row that `doctor` cleans.
 pub fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
     var stmt = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return;
     defer stmt.finalize();
@@ -123,7 +124,9 @@ pub fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
     _ = stmt.step() catch {};
 }
 
-/// Record dependencies for a keg.
+/// Record dependencies for a keg. Each row is independent; on per-row
+/// failure we skip and continue so a partial dep table is preferred to
+/// the install being rolled back wholesale.
 pub fn recordDeps(db: *sqlite.Database, keg_id: i64, formula: *const formula_mod.Formula) void {
     for (formula.dependencies) |dep_name| {
         var stmt = db.prepare(
