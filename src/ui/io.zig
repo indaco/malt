@@ -82,6 +82,7 @@ pub fn endStdoutCapture() void {
 pub fn stderrWriteAll(bytes: []const u8) void {
     if (builtin.is_test) {
         if (capture_list) |list| {
+            // Test-only capture; OOM inside a test is a bug the test will surface elsewhere.
             list.appendSlice(capture_allocator, bytes) catch {};
             return;
         }
@@ -92,6 +93,7 @@ pub fn stderrWriteAll(bytes: []const u8) void {
 pub fn stdoutWriteAll(bytes: []const u8) void {
     if (builtin.is_test) {
         if (stdout_capture_list) |list| {
+            // Test-only capture; OOM inside a test is a bug the test will surface elsewhere.
             list.appendSlice(stdout_capture_allocator, bytes) catch {};
             return;
         }

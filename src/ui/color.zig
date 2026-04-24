@@ -106,6 +106,8 @@ pub fn setTruecolorForTest(v: ?bool) void {
 }
 
 /// Write styled text to stderr. If colors disabled, writes text only.
+/// Every write is best-effort: stderr may be a closed pipe, and a failed
+/// draw must not abort whatever the caller was reporting on.
 pub fn styled(style: Style, text: []const u8) void {
     const f = fs_compat.stderrFile();
     if (isColorEnabled()) {
@@ -235,6 +237,8 @@ fn queryOsc11Background() ?Background {
     raw.cc[@intFromEnum(std.posix.V.MIN)] = 0;
     raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
     std.posix.tcsetattr(stdin_fd, .FLUSH, raw) catch return null;
+    // Restore cooked mode; if this fails the TTY is already broken and
+    // there is no recovery we can sensibly do from inside defer.
     defer std.posix.tcsetattr(stdin_fd, .FLUSH, saved) catch {};
 
     const query = "\x1b]11;?\x1b\\";
