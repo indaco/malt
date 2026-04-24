@@ -141,7 +141,6 @@ pub fn build(b: *std.Build) void {
         "tests/tap_test.zig",
         "tests/fallback_log_test.zig",
         "tests/help_test.zig",
-        "tests/bottle_verify_test.zig",
         "tests/archive_test.zig",
         "tests/ghcr_test.zig",
         "tests/linker_core_test.zig",

@@ -126,3 +126,52 @@ pub fn verify(allocator: std.mem.Allocator, file_path: []const u8, expected_sha2
 
     return std.mem.eql(u8, &hex_buf, expected_sha256);
 }
+
+test "verify returns true when sha256 matches on-disk content" {
+    const testing = std.testing;
+    const base = "/tmp/malt_bottle_verify_ok";
+    fs_compat.deleteTreeAbsolute(base) catch {};
+    fs_compat.makeDirAbsolute(base) catch {};
+    defer fs_compat.deleteTreeAbsolute(base) catch {};
+
+    const path = base ++ "/payload.bin";
+    const f = try fs_compat.createFileAbsolute(path, .{});
+    try f.writeAll("hello");
+    f.close();
+
+    // SHA256("hello")
+    const expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    try testing.expect(try verify(testing.allocator, path, expected));
+}
+
+test "verify returns false for a mismatching sha256" {
+    const testing = std.testing;
+    const base = "/tmp/malt_bottle_verify_mismatch";
+    fs_compat.deleteTreeAbsolute(base) catch {};
+    fs_compat.makeDirAbsolute(base) catch {};
+    defer fs_compat.deleteTreeAbsolute(base) catch {};
+
+    const path = base ++ "/payload.bin";
+    const f = try fs_compat.createFileAbsolute(path, .{});
+    try f.writeAll("hello");
+    f.close();
+
+    try testing.expect(!try verify(testing.allocator, path, "00" ** 32));
+}
+
+test "verify returns false when the file does not exist" {
+    const testing = std.testing;
+    try testing.expect(!try verify(testing.allocator, "/tmp/malt_bottle_verify_missing_xyz", "00" ** 32));
+}
+
+test "buildTmpArchivePath returns PathTooLong for an oversized dest_dir" {
+    var buf: [512]u8 = undefined;
+    const long_dest = "/" ++ ("a" ** 499);
+    try std.testing.expectError(BottleError.PathTooLong, buildTmpArchivePath(&buf, long_dest));
+}
+
+test "buildTmpArchivePath joins a normal dest_dir with the archive name" {
+    var buf: [512]u8 = undefined;
+    const path = try buildTmpArchivePath(&buf, "/tmp/malt_bottle_buildpath_ok");
+    try std.testing.expectEqualStrings("/tmp/malt_bottle_buildpath_ok/bottle.tar.gz", path);
+}
