@@ -289,6 +289,7 @@ pub const CaskInstaller = struct {
         const cache_path = self.downloadToCache(cask, cache_dir, self.progress) catch
             return CaskError.DownloadFailed;
         errdefer {
+            // cache already leaked to disk; nothing to do on cleanup failure.
             fs_compat.cwd().deleteFile(cache_path) catch {};
             self.allocator.free(cache_path);
         }
@@ -310,7 +311,7 @@ pub const CaskInstaller = struct {
             .unknown => return CaskError.InstallFailed,
         };
 
-        // Record in Caskroom
+        // Caskroom dir is bookkeeping; app is already in place.
         self.recordCaskroom(cask) catch {};
 
         // Clean up cache file (keep for uninstall/upgrade reference if desired)
@@ -345,23 +346,23 @@ pub const CaskInstaller = struct {
             // Check if the app is running (best-effort)
             if (isAppRunning(self.allocator, app_path)) return CaskError.UninstallFailed;
 
-            // Remove the app bundle
+            // app may already be gone (manual delete); continue to DB cleanup.
             fs_compat.deleteTreeAbsolute(app_path) catch {};
         }
 
-        // Remove Caskroom entry
+        // Caskroom bookkeeping; continue so later removals still run.
         var caskroom_buf: [512]u8 = undefined;
         const caskroom_path = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch "";
         if (caskroom_path.len > 0) fs_compat.deleteTreeAbsolute(caskroom_path) catch {};
 
-        // Remove cache entry
         var cache_buf: [512]u8 = undefined;
         for ([_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz" }) |ext| {
             const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask/{s}{s}", .{ self.prefix, token, ext }) catch continue;
+            // cache file may not exist for this extension.
             fs_compat.cwd().deleteFile(cache_file) catch {};
         }
 
-        // Remove DB record
+        // DB row cleanup; uninstall already did the user-visible work.
         removeRecord(self.db, token) catch {};
     }
 
@@ -435,7 +436,7 @@ pub const CaskInstaller = struct {
         };
         child_mod.runOrFail(self.allocator, &mount_argv) catch return error.InstallFailed;
 
-        // Ensure we unmount on any exit — best-effort, swallow detach errors.
+        // Unmount on any exit; kernel reaps stuck mounts on reboot if both fail.
         defer {
             const detach_argv = [_][]const u8{ "hdiutil", "detach", mount_point, "-quiet" };
             child_mod.runOrFail(self.allocator, &detach_argv) catch {};
@@ -457,7 +458,7 @@ pub const CaskInstaller = struct {
         const dst_app = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ app_dir, app_name });
         errdefer self.allocator.free(dst_app);
 
-        // Remove existing app if present (reinstall/upgrade)
+        // existing app may not be present (fresh install).
         fs_compat.deleteTreeAbsolute(dst_app) catch {};
 
         // Copy .app bundle using ditto (preserves resource forks, xattrs)
@@ -476,6 +477,7 @@ pub const CaskInstaller = struct {
             error.PathAlreadyExists => {},
             else => return error.InstallFailed,
         };
+        // temp extract dir; leftover tolerated if teardown races.
         defer fs_compat.deleteTreeAbsolute(extract_dir) catch {};
 
         // Extract with ditto -xk (handles macOS-specific ZIP features)
@@ -495,7 +497,7 @@ pub const CaskInstaller = struct {
         const dst_app = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ app_dir, app_name });
         errdefer self.allocator.free(dst_app);
 
-        // Remove existing
+        // existing app may not be present.
         fs_compat.deleteTreeAbsolute(dst_app) catch {};
 
         // Move .app to /Applications
@@ -550,6 +552,7 @@ pub const CaskInstaller = struct {
         const dst_app = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ app_dir, app_name });
         errdefer self.allocator.free(dst_app);
 
+        // existing app may not be present.
         fs_compat.deleteTreeAbsolute(dst_app) catch {};
         const mv_argv = [_][]const u8{ "ditto", src_app, dst_app };
         child_mod.runOrFail(self.allocator, &mv_argv) catch return error.InstallFailed;
@@ -598,6 +601,7 @@ pub const CaskInstaller = struct {
         // Archives sometimes land without the x-bit when built on CI.
         const exec_file = fs_compat.openFileAbsolute(abs_bin, .{ .mode = .read_write }) catch
             return error.InstallFailed;
+        // chmod may fail on FUSE/NFS mounts; symlink still works if bit was set.
         exec_file.chmod(0o755) catch {};
         exec_file.close();
 
@@ -609,7 +613,7 @@ pub const CaskInstaller = struct {
         const link_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ bin_parent, link_name });
         errdefer self.allocator.free(link_path);
 
-        // Replace any stale symlink/file so reinstalls are idempotent.
+        // stale link may not exist (fresh install); symLink below is authoritative.
         fs_compat.cwd().deleteFile(link_path) catch {};
         fs_compat.symLinkAbsolute(abs_bin, link_path, .{}) catch return error.InstallFailed;
         return link_path;
@@ -634,6 +638,7 @@ pub const CaskInstaller = struct {
         const caskroom_ver = std.fmt.bufPrint(&buf, "{s}/Caskroom/{s}/{s}", .{
             self.prefix, cask.token, cask.version,
         }) catch return;
+        // Caskroom dir is cosmetic bookkeeping; install already recorded in DB.
         fs_compat.cwd().makePath(caskroom_ver) catch {};
     }
 };
@@ -769,6 +774,7 @@ fn applicationsDir(prefix: []const u8, out: []u8) []const u8 {
     const probe = fs_compat.createFileAbsolute(test_path, .{});
     const system_writable = if (probe) |f| blk: {
         f.close();
+        // probe file cleanup; leaving it behind would still be benign.
         fs_compat.cwd().deleteFile(test_path) catch {};
         break :blk true;
     } else |_| false;

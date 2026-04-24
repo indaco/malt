@@ -230,12 +230,14 @@ fn validateSubprocessListing(argv: []const []const u8) !void {
     child.stderr_behavior = .ignore;
     child.spawn() catch return error.ExtractionFailed;
     const stdout = child.stdout orelse {
+        // Reap the child we just spawned; ExtractionFailed is the real signal.
         _ = child.wait() catch {};
         return error.ExtractionFailed;
     };
     // 4 MiB cap: bottle/tap listings are orders of magnitude smaller;
     // the bound just prevents a pathological archive from ballooning RAM.
     const listing = fs_compat.readFileToEndAlloc(stdout, child_allocator, 4 * 1024 * 1024) catch {
+        // Reap the child we just spawned; ExtractionFailed is the real signal.
         _ = child.wait() catch {};
         return error.ExtractionFailed;
     };

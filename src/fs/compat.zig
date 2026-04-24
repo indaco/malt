@@ -19,6 +19,7 @@ pub fn readFileToEndAlloc(file: std.Io.File, allocator: std.mem.Allocator, max_b
 }
 
 pub fn sleepNanos(ns: u64) void {
+    // `sleep` returns !void for cancellation; an early wake just shortens the delay.
     std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(ns)), .awake) catch {};
 }
 

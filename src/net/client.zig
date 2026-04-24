@@ -331,6 +331,7 @@ pub const HttpClient = struct {
                 if (classifyStatus(resp.status)) |dl_err| {
                     if (isTransientError(dl_err) and attempt < max_retries) {
                         resp.allocator.free(resp.body);
+                        // Sleep is backoff jitter; interruption just retries sooner.
                         std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch {};
                         attempt += 1;
                         continue;
@@ -339,6 +340,7 @@ pub const HttpClient = struct {
                 return resp;
             } else |err| {
                 if (attempt < max_retries) {
+                    // Sleep is backoff jitter; interruption just retries sooner.
                     std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch {};
                     attempt += 1;
                     continue;

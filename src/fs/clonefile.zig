@@ -66,6 +66,8 @@ pub fn copyTreeFallback(allocator: std.mem.Allocator, src_path: []const u8, dst_
     var walker = src_dir.walk(allocator) catch return error.OutOfMemory;
     defer walker.deinit();
 
+    // Per-entry clone is opportunistic: any single-entry failure skips that
+    // path and continues the walk. Callers verify the final tree shape.
     while (walker.next() catch return error.AccessDenied) |entry| {
         switch (entry.kind) {
             .directory => {

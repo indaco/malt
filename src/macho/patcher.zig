@@ -382,7 +382,8 @@ pub fn patchTextFiles(
             defer if (current.ptr != content.ptr) allocator.free(current);
             // Write back
             file.writeAllAt(current, 0) catch continue;
-            // Truncate if new content is shorter
+            // Truncate if new content is shorter; trailing bytes are harmless if truncate fails
+            // (Mach-O loader stops at size recorded in header, not file size).
             file.setEndPos(current.len) catch {};
             count += 1;
         }

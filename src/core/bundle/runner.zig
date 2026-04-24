@@ -126,6 +126,7 @@ pub fn run(
     const bundles_dir = std.fmt.allocPrint(allocator, "{s}/var/malt/bundles", .{prefix}) catch
         return RunnerError.OutOfMemory;
     defer allocator.free(bundles_dir);
+    // bundles/ may already exist; the lock file create below surfaces real errors.
     fs_compat.cwd().makePath(bundles_dir) catch {};
 
     const lock_path = std.fmt.allocPrint(allocator, "{s}/{s}.lock", .{ bundles_dir, bundle_name }) catch

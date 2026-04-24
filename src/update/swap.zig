@@ -44,6 +44,7 @@ pub fn atomicReplace(target_path: []const u8, new_path: []const u8) SwapError!vo
     // from a killed earlier run first so copy never EEXISTs.
     fs_compat.deleteFileAbsolute(staged_path) catch {};
     fs_compat.copyFileAbsolute(new_path, staged_path, .{}) catch return error.StagingFailed;
+    // Errdefer cleanup: stage leaks get reaped by the next update's pre-copy delete above.
     errdefer fs_compat.deleteFileAbsolute(staged_path) catch {};
 
     // Set mode on the staged file so we never leave a non-executable
@@ -63,6 +64,7 @@ pub fn atomicReplace(target_path: []const u8, new_path: []const u8) SwapError!vo
 
     // Atomic rename #1: target -> target.old.
     fs_compat.renameAbsolute(target_path, old_path) catch return error.SwapFailed;
+    // Rollback rename; if this also fails the caller already has RollbackFailed surfaced.
     errdefer fs_compat.renameAbsolute(old_path, target_path) catch {};
 
     // Atomic rename #2: staged -> target. If this fails the errdefers

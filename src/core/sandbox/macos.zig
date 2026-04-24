@@ -384,6 +384,7 @@ fn filterLoop(pipe_fd: c_int, out_fd: c_int) void {
         if (n <= 0) break;
         sanitizer.feed(buf[0..@intCast(n)], sink) catch break;
     }
+    // Flush after EOF; parent fd may already be gone on shutdown races.
     sanitizer.flush(sink) catch {};
 }
 

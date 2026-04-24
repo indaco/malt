@@ -254,6 +254,7 @@ pub fn start(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
     defer allocator.free(domain);
 
     try runLaunchctl(allocator, &.{ "launchctl", "bootstrap", domain, plist_path });
+    // Status is a UI hint; launchctl is the source of truth for liveness.
     setStatus(ctx.db, name, "running") catch {};
 }
 
@@ -266,19 +267,23 @@ pub fn stop(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
     defer allocator.free(domain);
 
     try runLaunchctl(allocator, &.{ "launchctl", "bootout", domain, plist_path });
+    // Status is a UI hint; launchctl is the source of truth for liveness.
     setStatus(ctx.db, name, "stopped") catch {};
 }
 
 pub fn restart(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
+    // Stop may fail if already stopped; start is the required half.
     stop(ctx, name) catch {};
     try start(ctx, name);
 }
 
 pub fn stopAndUnregister(ctx: SupervisorCtx, name: []const u8) void {
+    // Unregister must remove the DB row even if the service is already down.
     stop(ctx, name) catch {};
     var stmt = ctx.db.prepare("DELETE FROM services WHERE name = ?;") catch return;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return;
+    // Row may not exist; DELETE is idempotent either way.
     _ = stmt.step() catch {};
 }
 

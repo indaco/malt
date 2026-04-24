@@ -114,6 +114,8 @@ pub fn atomicRename(allocator: std.mem.Allocator, src_path: []const u8, dst_path
     fs_compat.renameAbsolute(src_path, dst_path) catch |e| switch (e) {
         error.CrossDevice => {
             try clonefile.cloneTree(allocator, src_path, dst_path);
+            // Source cleanup after a successful cross-device clone; a leftover
+            // src is tolerable and gets reaped by the next housekeeping sweep.
             fs_compat.deleteTreeAbsolute(src_path) catch {};
         },
         else => return e,
@@ -143,12 +145,14 @@ pub fn atomicWriteFile(dst_path: []const u8, data: []const u8) !void {
         const f = try fs_compat.createFileAbsolute(tmp_path, .{ .truncate = true });
         defer f.close();
         f.writeAll(data) catch |e| {
+            // Tempfile cleanup on write failure; write error `e` is authoritative.
             fs_compat.deleteFileAbsolute(tmp_path) catch {};
             return e;
         };
     }
 
     fs_compat.renameAbsolute(tmp_path, dst_path) catch |e| {
+        // Tempfile cleanup on rename failure; rename error `e` is authoritative.
         fs_compat.deleteFileAbsolute(tmp_path) catch {};
         return e;
     };
@@ -160,7 +164,8 @@ pub fn atomicWriteFile(dst_path: []const u8, data: []const u8) !void {
 pub fn createTempDir(allocator: std.mem.Allocator, label: []const u8) ![]const u8 {
     const prefix = maltPrefix();
 
-    // Ensure the tmp base directory exists.
+    // Ensure the tmp base directory exists. If makePath fails, makeDirAbsolute
+    // below surfaces the real error on the final dir.
     const tmp_base = try std.fmt.allocPrint(allocator, "{s}/tmp", .{prefix});
     defer allocator.free(tmp_base);
     fs_compat.cwd().makePath(tmp_base) catch {};

@@ -69,7 +69,7 @@ pub fn download(
     // Constant-time SHA compare — same reasoning as install.zig: deny a
     // byte-by-byte timing oracle against the expected hash.
     if (!install_cmd.constantTimeEql(u8, &computed_hex, expected_sha256)) {
-        // Clean up dest_dir on mismatch
+        // Clean up dest_dir on mismatch; Sha256Mismatch is the real error.
         fs_compat.deleteTreeAbsolute(dest_dir) catch {};
         return BottleError.Sha256Mismatch;
     }
@@ -94,7 +94,7 @@ pub fn download(
     // Extract
     archive.extractTarGz(tmp_path, dest_dir) catch return BottleError.ExtractionFailed;
 
-    // Remove the temp archive file
+    // Remove the temp archive file; a leftover tmp is harmless, overwritten on retry.
     fs_compat.deleteFileAbsolute(tmp_path) catch {};
 
     return .{

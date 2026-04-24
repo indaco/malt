@@ -404,6 +404,8 @@ pub fn writeInstallReceiptFull(
     // Also include name in a comment-style field (not standard but useful)
     _ = name;
 
+    // INSTALL_RECEIPT.json is consumed by Homebrew-compat tools only; a
+    // partial write leaves the keg usable, and the DB is the source of truth.
     file.writeAll(json) catch {};
 }
 
