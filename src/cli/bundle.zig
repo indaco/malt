@@ -114,7 +114,6 @@ fn cmdInstall(allocator: std.mem.Allocator, rest: []const []const u8) !void {
 
     var db = try openDb();
     defer db.close();
-    schema.initSchema(&db) catch {};
 
     var report = runner_mod.run(allocator, &db, manifest, .{
         .dry_run = dry_run,
@@ -161,7 +160,6 @@ fn cmdList(allocator: std.mem.Allocator) !void {
     _ = allocator;
     var db = try openDb();
     defer db.close();
-    schema.initSchema(&db) catch {};
 
     var stmt = db.prepare("SELECT name, created_at FROM bundles ORDER BY name;") catch
         return BundleError.DatabaseError;
@@ -186,7 +184,6 @@ fn cmdRemove(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     const name = rest[0];
     var db = try openDb();
     defer db.close();
-    schema.initSchema(&db) catch {};
 
     var stmt = db.prepare("DELETE FROM bundles WHERE name = ?;") catch
         return BundleError.DatabaseError;
@@ -213,7 +210,6 @@ fn cmdCreate(allocator: std.mem.Allocator, rest: []const []const u8) !void {
 
     var db = try openDb();
     defer db.close();
-    schema.initSchema(&db) catch {};
 
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
@@ -238,7 +234,6 @@ fn cmdExport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
 
     var db = try openDb();
     defer db.close();
-    schema.initSchema(&db) catch {};
 
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
@@ -273,7 +268,6 @@ fn cmdImport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
 
     var db = try openDb();
     defer db.close();
-    schema.initSchema(&db) catch {};
 
     // Record metadata only; no install.
     var stmt = db.prepare(
@@ -440,11 +434,17 @@ fn openDb() !sqlite.Database {
     var db_dir_buf: [512]u8 = undefined;
     const db_dir = std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix}) catch
         return BundleError.DatabaseError;
+    // makePath is the idempotent "ensure" variant; a real permission/ENOSPC
+    // failure surfaces at sqlite.Database.open below with a narrower error.
     fs_compat.cwd().makePath(db_dir) catch {};
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return BundleError.DatabaseError;
-    return sqlite.Database.open(path);
+    var db = try sqlite.Database.open(path);
+    // Schema init is idempotent; a real failure surfaces at the next
+    // prepare/step call in the caller with a narrower error.
+    schema.initSchema(&db) catch {};
+    return db;
 }
 
 fn printHelp() !void {
