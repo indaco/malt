@@ -41,6 +41,7 @@ pub fn helpFor(command: []const u8) []const u8 {
         .{ "restore", restore_help },
         .{ "purge", purge_help },
         .{ "uses", uses_help },
+        .{ "which", which_help },
         .{ "pin", pin_help },
         .{ "unpin", unpin_help },
     });
@@ -386,5 +387,23 @@ const uses_help =
     \\  malt uses openssl@3
     \\  malt uses --recursive icu4c@78
     \\  malt --json uses node@20
+    \\
+;
+
+const which_help =
+    \\Usage: malt which <name|path>
+    \\
+    \\Resolve a prefix binary to the keg that owns it. Accepts a bare
+    \\name (resolved through `{prefix}/bin/<name>`) or an absolute path
+    \\to a malt-managed symlink. Pairs with `mt uses` as the
+    \\forward/reverse lookup pair.
+    \\
+    \\Flags:
+    \\  --json   Emit `{"name", "version", "keg"}` as JSON
+    \\
+    \\Examples:
+    \\  malt which jq
+    \\  malt which /opt/malt/bin/jq
+    \\  malt --json which jq
     \\
 ;

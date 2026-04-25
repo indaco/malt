@@ -53,6 +53,7 @@ const purge = @import("cli/purge.zig");
 const services = @import("cli/services.zig");
 const bundle = @import("cli/bundle.zig");
 const uses = @import("cli/uses.zig");
+const which_cmd = @import("cli/which.zig");
 
 const version_mod = @import("version.zig");
 const version = version_mod.value;
@@ -85,6 +86,7 @@ const Command = enum {
     services,
     bundle,
     uses,
+    which,
     help,
     version,
 };
@@ -122,6 +124,7 @@ const command_names = [_]struct {
     .{ .tag = .services, .names = &.{"services"} },
     .{ .tag = .bundle, .names = &.{"bundle"} },
     .{ .tag = .uses, .names = &.{"uses"} },
+    .{ .tag = .which, .names = &.{"which"} },
     .{ .tag = .help, .names = &.{ "help", "--help", "-h" } },
     .{ .tag = .version, .names = &.{"--version"} },
 };
@@ -275,6 +278,7 @@ fn dispatch(allocator: std.mem.Allocator, cmd: Command, cmd_args: []const []cons
         .services => try services.execute(allocator, cmd_args),
         .bundle => try bundle.execute(allocator, cmd_args),
         .uses => try uses.execute(allocator, cmd_args),
+        .which => try which_cmd.execute(allocator, cmd_args),
         .version_cmd => {
             // "mt version" — check for "mt version update" subcommand
             if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
@@ -305,6 +309,7 @@ fn printUsage() void {
         \\  info          Show detailed package information
         \\  search        Search formulas and casks
         \\  uses          Show installed packages that depend on a formula
+        \\  which         Resolve a prefix binary (or path) to its keg
         \\  doctor        System health check
         \\  tap/untap     Manage taps
         \\  migrate       Import existing Homebrew installation
