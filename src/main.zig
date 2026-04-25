@@ -46,6 +46,7 @@ const pin_cmd = @import("cli/pin.zig");
 const run_cmd = @import("cli/run.zig");
 const version_update = @import("cli/version_update.zig");
 const completions = @import("cli/completions.zig");
+const shellenv = @import("cli/shellenv.zig");
 const backup = @import("cli/backup.zig");
 const restore = @import("cli/restore.zig");
 const purge = @import("cli/purge.zig");
@@ -77,6 +78,7 @@ const Command = enum {
     run,
     version_cmd,
     completions,
+    shellenv,
     backup,
     restore,
     purge,
@@ -113,6 +115,7 @@ const command_names = [_]struct {
     .{ .tag = .run, .names = &.{"run"} },
     .{ .tag = .version_cmd, .names = &.{"version"} },
     .{ .tag = .completions, .names = &.{"completions"} },
+    .{ .tag = .shellenv, .names = &.{"shellenv"} },
     .{ .tag = .backup, .names = &.{"backup"} },
     .{ .tag = .restore, .names = &.{"restore"} },
     .{ .tag = .purge, .names = &.{"purge"} },
@@ -265,6 +268,7 @@ fn dispatch(allocator: std.mem.Allocator, cmd: Command, cmd_args: []const []cons
         .unpin => try pin_cmd.executeUnpin(allocator, cmd_args),
         .run => try run_cmd.execute(allocator, cmd_args),
         .completions => try completions.execute(allocator, cmd_args),
+        .shellenv => try shellenv.execute(allocator, cmd_args),
         .backup => try backup.execute(allocator, cmd_args),
         .restore => try restore.execute(allocator, cmd_args),
         .purge => try purge.execute(allocator, cmd_args),
@@ -311,6 +315,7 @@ fn printUsage() void {
         \\  unpin         Lift the pin so `upgrade` resumes touching it
         \\  run           Run a package binary without installing
         \\  completions   Generate shell completion scripts (bash, zsh, fish)
+        \\  shellenv      Print PATH/MANPATH/HOMEBREW_PREFIX exports for shell init
         \\  backup        Dump installed packages to a restorable text file
         \\  restore       Reinstall every package listed in a backup file
         \\  purge         Housekeeping or full wipe (--store-orphans, --unused-deps,

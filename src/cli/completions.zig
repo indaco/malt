@@ -87,7 +87,7 @@ pub const bash_script =
     \\    words=("${COMP_WORDS[@]}")
     \\    cword=$COMP_CWORD
     \\
-    \\    local commands="install uninstall remove upgrade update outdated list ls info search uses doctor tap untap migrate rollback link unlink pin unpin run version completions backup restore purge services bundle help"
+    \\    local commands="install uninstall remove upgrade update outdated list ls info search uses doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge services bundle help"
     \\    local global_flags="--verbose -v --quiet -q --json --dry-run --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
@@ -109,7 +109,7 @@ pub const bash_script =
     \\    fi
     \\
     \\    case "$cmd" in
-    \\        completions)
+    \\        completions|shellenv)
     \\            if [[ "$cur" != -* ]]; then
     \\                COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") )
     \\                return 0
@@ -210,6 +210,7 @@ pub const zsh_script =
     \\        'run:Run a package binary without installing'
     \\        'version:Show version or self-update'
     \\        'completions:Generate shell completion scripts'
+    \\        'shellenv:Print PATH/MANPATH/HOMEBREW_PREFIX exports for shell init'
     \\        'backup:Dump installed packages to a restorable text file'
     \\        'restore:Reinstall every package listed in a backup file'
     \\        'purge:Housekeeping or full wipe (requires a scope flag)'
@@ -303,7 +304,7 @@ pub const zsh_script =
     \\                        '(--force -f)'{--force,-f}'[Same as --overwrite]' \
     \\                        '*::formula:'
     \\                    ;;
-    \\                completions)
+    \\                completions|shellenv)
     \\                    _values 'shell' bash zsh fish
     \\                    ;;
     \\                backup)
@@ -444,6 +445,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a run         -d 'Run package binary without installing'
     \\    complete -c $__malt_bin -n __malt_needs_command -a version     -d 'Show version or self-update'
     \\    complete -c $__malt_bin -n __malt_needs_command -a completions -d 'Generate shell completion scripts'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a shellenv    -d 'Print shell init exports (PATH, MANPATH, HOMEBREW_PREFIX)'
     \\    complete -c $__malt_bin -n __malt_needs_command -a backup      -d 'Dump installed packages to a text file'
     \\    complete -c $__malt_bin -n __malt_needs_command -a restore     -d 'Reinstall every package in a backup file'
     \\    complete -c $__malt_bin -n __malt_needs_command -a purge       -d 'Housekeeping or full wipe (requires a scope)'
@@ -516,6 +518,9 @@ pub const fish_script =
     \\
     \\    # completions — shell name as positional
     \\    complete -c $__malt_bin -n '__malt_using_command completions' -f -a 'bash zsh fish'
+    \\
+    \\    # shellenv — shell name as positional
+    \\    complete -c $__malt_bin -n '__malt_using_command shellenv' -f -a 'bash zsh fish'
     \\
     \\    # backup
     \\    complete -c $__malt_bin -n '__malt_using_command backup' -s o -l output   -r -d 'Output file (use - for stdout)'

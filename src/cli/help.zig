@@ -36,6 +36,7 @@ pub fn helpFor(command: []const u8) []const u8 {
         .{ "link", link_help },
         .{ "unlink", unlink_help2 },
         .{ "completions", completions_help },
+        .{ "shellenv", shellenv_help },
         .{ "backup", backup_help },
         .{ "restore", restore_help },
         .{ "purge", purge_help },
@@ -259,6 +260,19 @@ const completions_help =
     \\  bash    malt completions bash > /usr/local/etc/bash_completion.d/malt
     \\  zsh     malt completions zsh  > "${fpath[1]}/_malt"
     \\  fish    malt completions fish > ~/.config/fish/completions/malt.fish
+    \\
+;
+
+const shellenv_help =
+    \\Usage: malt shellenv [bash|zsh|fish]
+    \\
+    \\Print shell-init lines that export HOMEBREW_PREFIX and prepend
+    \\malt's bin/sbin/man/info dirs onto PATH/MANPATH/INFOPATH. With no
+    \\argument the shell is detected from $SHELL.
+    \\
+    \\Source from your rc file:
+    \\  bash/zsh   eval "$(malt shellenv)"
+    \\  fish       malt shellenv fish | source
     \\
 ;
 
