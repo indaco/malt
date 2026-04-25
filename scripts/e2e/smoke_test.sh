@@ -125,10 +125,38 @@ else
   FAILURES+=("t1.completions.bad")
 fi
 
+run_grep t1.shellenv.bash 'export HOMEBREW_PREFIX=' -- "$MT_BIN" shellenv bash
+run_grep t1.shellenv.zsh 'export HOMEBREW_PREFIX=' -- "$MT_BIN" shellenv zsh
+run_grep t1.shellenv.fish 'set -gx HOMEBREW_PREFIX' -- "$MT_BIN" shellenv fish
+
+# Eval-safety: bash must accept the output as a sequence of statements.
+eval "$("$MT_BIN" shellenv bash)" >/dev/null 2>&1
+rc=$?
+if [[ "$rc" == 0 ]]; then
+  printf '  PASS  [t1.shellenv.eval-bash] exit=0\n'
+  PASS=$((PASS + 1))
+else
+  printf '  FAIL  [t1.shellenv.eval-bash] eval rc=%s\n' "$rc"
+  FAIL=$((FAIL + 1))
+  FAILURES+=("t1.shellenv.eval-bash")
+fi
+
+# Unknown shell must exit non-zero, mirroring `completions tcsh`.
+"$MT_BIN" shellenv tcsh >/dev/null 2>&1
+rc=$?
+if [[ "$rc" != 0 ]]; then
+  printf '  PASS  [t1.shellenv.bad] exit=%s (non-zero)\n' "$rc"
+  PASS=$((PASS + 1))
+else
+  printf '  FAIL  [t1.shellenv.bad] expected non-zero, got %s\n' "$rc"
+  FAIL=$((FAIL + 1))
+  FAILURES+=("t1.shellenv.bad")
+fi
+
 # Per-command --help on everything documented.
 for cmd in install uninstall upgrade update outdated list info search uses \
   doctor purge tap untap migrate backup restore services bundle \
-  rollback run link unlink pin unpin version completions; do
+  rollback run link unlink pin unpin version completions shellenv; do
   run_ok "t1.help.$cmd" -- "$MT_BIN" "$cmd" --help
 done
 
