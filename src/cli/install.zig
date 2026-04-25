@@ -38,6 +38,7 @@ pub const collectFetchWorkerCount = download_mod.collectFetchWorkerCount;
 pub const collectFormulaJobs = download_mod.collectFormulaJobs;
 pub const InstallJobDeps = download_mod.InstallJobDeps;
 pub const findFailedDep = download_mod.findFailedDep;
+pub const dropTopLevelJobs = download_mod.dropTopLevelJobs;
 const progressBridge = download_mod.progressBridge;
 const downloadWorker = download_mod.downloadWorker;
 const MaterializeResult = download_mod.MaterializeResult;
@@ -102,6 +103,7 @@ const InstallFlag = enum {
     use_system_ruby,
     quiet,
     json,
+    only_dependencies,
 };
 
 const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
@@ -114,6 +116,7 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "--quiet", .quiet },
     .{ "-q", .quiet },
     .{ "--json", .json },
+    .{ "--only-dependencies", .only_dependencies },
 });
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -136,6 +139,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // `--local` forces .rb-path interpretation — explicit trust opt-in in
     // argv instead of shape-based autodetection.
     var local_only = false;
+    // brew parity: resolve the dep graph, bail before the requested package's
+    // materialise+link. Deps stay marked `dependency` for `mt purge --unused-deps`.
+    var only_dependencies = false;
 
     // StaticStringMap + exhaustive switch: the compiler checks every flag
     // has a handler, so adding a new variant without wiring it fails to build.
@@ -157,6 +163,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             .use_system_ruby => use_system_ruby_bare = true,
             .quiet => output.setQuiet(true),
             .json => output.setMode(.json),
+            .only_dependencies => only_dependencies = true,
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             packages.append(allocator, arg) catch return error.OutOfMemory;
         }
@@ -351,6 +358,11 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             };
         }
     }
+
+    // top-level skipped; deps still recorded for GC. Surviving jobs keep
+    // `is_dep=true`, so `linkAndRecord` writes `install_reason='dependency'`
+    // and `mt purge --unused-deps` reclaims them once nothing direct retains them.
+    if (only_dependencies) dropTopLevelJobs(allocator, &all_jobs);
 
     if (all_jobs.items.len == 0) return;
 

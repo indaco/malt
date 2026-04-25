@@ -127,6 +127,9 @@ malt install --local ./wget.rb
 # Install multiple packages (downloads in parallel)
 malt install jq wget ripgrep
 
+# Install only the transitive deps of a package (e.g. before building from source)
+malt install --only-dependencies wget
+
 # List installed packages
 malt list --versions
 
@@ -164,6 +167,7 @@ mt install <package> [<package> ...]     # multiple packages
 | `--local`                      | Install from a local `.rb` path (code-exec surface — trust required) |
 | `--dry-run`                    | Show what would be installed without installing                      |
 | `--force`                      | Overwrite existing installations                                     |
+| `--only-dependencies`          | Install transitive deps but skip the requested package               |
 | `--use-system-ruby[=<name>,…]` | Run `post_install` via system Ruby (sandboxed, per-formula)          |
 | `--quiet`, `-q`                | Suppress all output except errors                                    |
 | `--json`                       | Output result as JSON                                                |
