@@ -128,7 +128,7 @@ fi
 # Per-command --help on everything documented.
 for cmd in install uninstall upgrade update outdated list info search uses \
   doctor purge tap untap migrate backup restore services bundle \
-  rollback run link unlink version completions; do
+  rollback run link unlink pin unpin version completions; do
   run_ok "t1.help.$cmd" -- "$MT_BIN" "$cmd" --help
 done
 
@@ -193,6 +193,13 @@ else
   run_ok t3.unlink -- "$MT_BIN" unlink tree
   run_ok t3.link -- "$MT_BIN" link tree
   run_ok t3.link.overwrite -- "$MT_BIN" link tree --overwrite
+
+  # pin / unpin / upgrade-skip round-trip: pin tree, verify upgrade is a no-op,
+  # then unpin so the rest of the smoke run is unaffected.
+  run_ok t3.pin -- "$MT_BIN" pin tree
+  run_grep t3.list.pinned-tree "tree" -- "$MT_BIN" list --pinned
+  run_ok t3.upgrade.pinned -- "$MT_BIN" upgrade tree
+  run_ok t3.unpin -- "$MT_BIN" unpin tree
 
   # backup / restore round-trip.
   run_ok t3.backup -- "$MT_BIN" backup --output "$LOGDIR/backup.txt"

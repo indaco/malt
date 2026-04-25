@@ -40,6 +40,8 @@ pub fn helpFor(command: []const u8) []const u8 {
         .{ "restore", restore_help },
         .{ "purge", purge_help },
         .{ "uses", uses_help },
+        .{ "pin", pin_help },
+        .{ "unpin", unpin_help },
     });
     return map.get(command) orelse "No help available.\n";
 }
@@ -86,13 +88,15 @@ const uninstall_help =
 const upgrade_help =
     \\Usage: malt upgrade [<package>] [flags]
     \\
-    \\Upgrade installed packages to latest versions.
+    \\Upgrade installed packages to latest versions. Pinned kegs are
+    \\skipped with a "pinned, skipped" line; pass --force to override.
     \\
     \\Flags:
     \\  --all          Upgrade everything (formulas + casks)
     \\  --cask         Upgrade casks only
     \\  --formula      Upgrade formulas only
     \\  --dry-run      Show what would be upgraded
+    \\  --force, -f    Bypass pin protection (dangerous; user-initiated)
     \\
 ;
 
@@ -331,6 +335,24 @@ const restore_help =
     \\
     \\Example:
     \\  malt restore malt-backup-2026-04-10T14-32-05.txt
+    \\
+;
+
+const pin_help =
+    \\Usage: malt pin <name>
+    \\
+    \\Mark an installed keg as pinned so `malt upgrade` skips it. The pin
+    \\survives across upgrades and is visible in `mt list --pinned`.
+    \\Use `mt unpin <name>` to lift the pin, or `mt upgrade --force <name>`
+    \\to override it once.
+    \\
+;
+
+const unpin_help =
+    \\Usage: malt unpin <name>
+    \\
+    \\Lift the pin on an installed keg so subsequent `malt upgrade` runs
+    \\touch it again.
     \\
 ;
 

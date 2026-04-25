@@ -18,8 +18,9 @@ const cellar_mod = @import("../core/cellar.zig");
 const linker_mod = @import("../core/linker.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
 const help = @import("help.zig");
+const pin_mod = @import("pin.zig");
 
-const UpgradeFlag = enum { quiet, cask, formula, dry_run };
+const UpgradeFlag = enum { quiet, cask, formula, dry_run, force };
 
 const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     .{ "-q", .quiet },
@@ -27,7 +28,16 @@ const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     .{ "--cask", .cask },
     .{ "--formula", .formula },
     .{ "--dry-run", .dry_run },
+    .{ "--force", .force },
+    .{ "-f", .force },
 });
+
+/// True when this name should be skipped due to a user pin. Pure gate so
+/// the `--force` semantics are testable without dragging in the API.
+pub fn pinSkip(db: *sqlite.Database, name: []const u8, force: bool) bool {
+    if (force) return false;
+    return pin_mod.isPinned(db, name);
+}
 
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "upgrade")) return;
@@ -35,6 +45,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var cask_only = false;
     var formula_only = false;
     var dry_run = output.isDryRun();
+    var force = false;
     var pkg_name: ?[]const u8 = null;
 
     // StaticStringMap + exhaustive switch: every flag routes to a handler.
@@ -44,6 +55,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             .cask => cask_only = true,
             .formula => formula_only = true,
             .dry_run => dry_run = true,
+            .force => force = true,
         } else if (arg.len > 0 and arg[0] != '-') {
             if (pkg_name == null) pkg_name = arg;
         }
@@ -90,7 +102,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Upgrade a specific package — try formula first, then cask
         if (!cask_only) {
             if (isFormulaInstalled(&db, name)) {
-                upgradeFormula(allocator, name, &db, &api, &http, prefix, dry_run) catch {
+                upgradeFormula(allocator, name, &db, &api, &http, prefix, dry_run, force) catch {
                     any_failed = true;
                 };
                 if (any_failed) return error.Aborted;
@@ -98,18 +110,18 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
         }
         // Not a formula (or --cask): try cask
-        upgradeCask(allocator, name, &db, &api, prefix, dry_run) catch {
+        upgradeCask(allocator, name, &db, &api, prefix, dry_run, force) catch {
             any_failed = true;
         };
     } else {
         // Upgrade all
         if (!cask_only) {
-            upgradeAllFormulas(allocator, &db, &api, &http, prefix, dry_run) catch {
+            upgradeAllFormulas(allocator, &db, &api, &http, prefix, dry_run, force) catch {
                 any_failed = true;
             };
         }
         if (!formula_only) {
-            upgradeAllCasks(allocator, &db, &api, prefix, dry_run) catch {
+            upgradeAllCasks(allocator, &db, &api, prefix, dry_run, force) catch {
                 any_failed = true;
             };
         }
@@ -139,7 +151,15 @@ fn upgradeFormula(
     http: *client_mod.HttpClient,
     prefix: [:0]const u8,
     dry_run: bool,
+    force: bool,
 ) !void {
+    // Honor pins before any network or filesystem work — the whole
+    // point is that a pinned keg never gets touched.
+    if (pinSkip(db, name, force)) {
+        output.dim("{s} is pinned, skipped", .{name});
+        return;
+    }
+
     // Step 1: Look up installed version from DB
     var find_stmt = db.prepare(
         "SELECT id, version, revision, store_sha256, cellar_path FROM kegs WHERE name = ?1 LIMIT 1;",
@@ -410,6 +430,7 @@ fn upgradeAllFormulas(
     http: *client_mod.HttpClient,
     prefix: [:0]const u8,
     dry_run: bool,
+    force: bool,
 ) !void {
     var stmt = db.prepare("SELECT name, version FROM kegs ORDER BY name;") catch return;
     defer stmt.finalize();
@@ -443,7 +464,7 @@ fn upgradeAllFormulas(
     defer failed_names.deinit(allocator);
 
     for (names.items) |name| {
-        upgradeFormula(allocator, name, db, api, http, prefix, dry_run) catch {
+        upgradeFormula(allocator, name, db, api, http, prefix, dry_run, force) catch {
             failed_count += 1;
             // failed_count is the authoritative counter; list is for UX only.
             failed_names.append(allocator, name) catch {};
@@ -462,7 +483,12 @@ fn upgradeAllFormulas(
 // Cask upgrade
 // ---------------------------------------------------------------------------
 
-fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool) !void {
+fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool) !void {
+    if (pinSkip(db, token, force)) {
+        output.dim("{s} is pinned, skipped", .{token});
+        return;
+    }
+
     const installed = cask_mod.lookupInstalled(db, token) orelse {
         output.err("{s} is not installed as a cask", .{token});
         return error.Aborted;
@@ -515,7 +541,7 @@ fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Data
     output.success("{s} upgraded to {s}", .{ token, parsed_cask.version });
 }
 
-fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool) !void {
+fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool) !void {
     var stmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch return;
     defer stmt.finalize();
 
@@ -547,7 +573,7 @@ fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api
     defer failed_tokens.deinit(allocator);
 
     for (tokens.items) |token| {
-        upgradeCask(allocator, token, db, api, prefix, dry_run) catch {
+        upgradeCask(allocator, token, db, api, prefix, dry_run, force) catch {
             failed_count += 1;
             // failed_count is authoritative; list is for UX only.
             failed_tokens.append(allocator, token) catch {};

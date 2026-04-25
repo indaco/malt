@@ -42,6 +42,7 @@ const tap = @import("cli/tap.zig");
 const migrate = @import("cli/migrate.zig");
 const rollback = @import("cli/rollback.zig");
 const link_cmd = @import("cli/link.zig");
+const pin_cmd = @import("cli/pin.zig");
 const run_cmd = @import("cli/run.zig");
 const version_update = @import("cli/version_update.zig");
 const completions = @import("cli/completions.zig");
@@ -71,6 +72,8 @@ const Command = enum {
     rollback,
     link,
     unlink,
+    pin,
+    unpin,
     run,
     version_cmd,
     completions,
@@ -105,6 +108,8 @@ const command_names = [_]struct {
     .{ .tag = .rollback, .names = &.{"rollback"} },
     .{ .tag = .link, .names = &.{"link"} },
     .{ .tag = .unlink, .names = &.{"unlink"} },
+    .{ .tag = .pin, .names = &.{"pin"} },
+    .{ .tag = .unpin, .names = &.{"unpin"} },
     .{ .tag = .run, .names = &.{"run"} },
     .{ .tag = .version_cmd, .names = &.{"version"} },
     .{ .tag = .completions, .names = &.{"completions"} },
@@ -256,6 +261,8 @@ fn dispatch(allocator: std.mem.Allocator, cmd: Command, cmd_args: []const []cons
         .rollback => try rollback.execute(allocator, cmd_args),
         .link => try link_cmd.executeLink(allocator, cmd_args),
         .unlink => try link_cmd.executeUnlink(allocator, cmd_args),
+        .pin => try pin_cmd.execute(allocator, cmd_args),
+        .unpin => try pin_cmd.executeUnpin(allocator, cmd_args),
         .run => try run_cmd.execute(allocator, cmd_args),
         .completions => try completions.execute(allocator, cmd_args),
         .backup => try backup.execute(allocator, cmd_args),
@@ -300,6 +307,8 @@ fn printUsage() void {
         \\  rollback      Revert a package to its previous version
         \\  link          Create symlinks for an installed keg
         \\  unlink        Remove symlinks (keg stays installed)
+        \\  pin           Protect an installed keg from `upgrade`
+        \\  unpin         Lift the pin so `upgrade` resumes touching it
         \\  run           Run a package binary without installing
         \\  completions   Generate shell completion scripts (bash, zsh, fish)
         \\  backup        Dump installed packages to a restorable text file
