@@ -231,15 +231,28 @@ mt upgrade <package>                     # upgrade a specific formula or cask
 mt upgrade --cask                        # upgrade all outdated casks
 mt upgrade --formula                     # upgrade all outdated formulas
 mt upgrade --dry-run                     # show what would be upgraded
+mt upgrade --force <package>             # bypass pin protection
 ```
 
-| Flag        | Description               |
-| ----------- | ------------------------- |
-| `--cask`    | Upgrade casks only        |
-| `--formula` | Upgrade formulas only     |
-| `--dry-run` | Preview without upgrading |
+| Flag            | Description                       |
+| --------------- | --------------------------------- |
+| `--cask`        | Upgrade casks only                |
+| `--formula`     | Upgrade formulas only             |
+| `--dry-run`     | Preview without upgrading         |
+| `--force`, `-f` | Bypass pin protection (dangerous) |
 
-Formula upgrades install the new version, verify it, switch symlinks atomically, and only remove the old version after success. On failure, the old version is restored automatically.
+Pinned kegs (`mt pin <name>`) are skipped with a dim "pinned, skipped" line; pass `--force` to override the pin for a single run. Formula upgrades install the new version, verify it, switch symlinks atomically, and only remove the old version after success. On failure, the old version is restored automatically.
+
+### `mt pin` / `mt unpin`
+
+Protect an installed keg from `mt upgrade` (or lift the protection).
+
+```bash
+mt pin <name>                            # mark as pinned
+mt unpin <name>                          # lift the pin
+```
+
+A pinned keg is held at its current version: `mt upgrade <name>` skips it with a dim "pinned, skipped" line, and bulk `mt upgrade` does the same per-keg. Use `mt list --pinned` to inspect; pass `mt upgrade --force` to override once without removing the pin.
 
 ### `mt update`
 
