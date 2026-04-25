@@ -619,6 +619,21 @@ malt completions fish > ~/.config/fish/completions/malt.fish
 
 Completes subcommands (for both `malt` and `mt`), per-command flags, global flags, and the positional shell name for `completions` itself. Unknown shell names exit non-zero with an error.
 
+### `mt shellenv`
+
+Drop-in for `eval "$(brew shellenv)"`. Prints `bash`/`zsh`/`fish` init lines that export `HOMEBREW_PREFIX`, `HOMEBREW_CELLAR`, `HOMEBREW_REPOSITORY` (so brew-aware scripts keep sniffing) and prepend malt's `bin`, `sbin`, `share/man`, `share/info` onto `PATH`, `MANPATH`, `INFOPATH`. With no argument the shell is detected from `$SHELL`.
+
+```bash
+# Bash / zsh — POSIX export form, safe to eval from rc files
+eval "$(mt shellenv)"          # auto-detect from $SHELL
+eval "$(mt shellenv bash)"
+
+# Fish — uses set -gx, since `export` is a syntax error in fish
+mt shellenv fish | source
+```
+
+Add the `eval`/`source` line to `~/.zshrc`, `~/.bashrc`, or `~/.config/fish/config.fish` to make malt's binaries discoverable in every new shell. Unknown shell names exit non-zero with an error; an unrecognised `$SHELL` fails closed and asks for an explicit argument.
+
 ### Global Flags
 
 | Flag              | Description                                                                     |
