@@ -74,6 +74,63 @@ fn trimTimeSuffix(out: []const u8) []const u8 {
     return out;
 }
 
+/// Emit `writeHumanOutput` into a freshly allocated buffer with `quiet`
+/// honoured around the call so the global state mutation never leaks
+/// to neighbouring tests.
+fn runHuman(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    show_formula: bool,
+    show_cask: bool,
+    show_versions: bool,
+    show_pinned: bool,
+    quiet: bool,
+) ![]u8 {
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(quiet);
+    defer malt.output.setQuiet(prior_quiet);
+    // `writeHumanOutput` reads colour state via the global; pin to no-color
+    // so assertions below stay independent of the host terminal.
+    malt.color.setForTest(false, false);
+    defer malt.color.setForTest(null, null);
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try cli_list.writeHumanOutput(db, show_formula, show_cask, show_versions, show_pinned, &aw.writer);
+    return aw.toOwnedSlice();
+}
+
+test "writeHumanOutput honours --quiet: names only, no bullet, no decorations" {
+    // The help text advertises `--quiet, -q  Names only, one per line`,
+    // which makes the output script-parseable. Decorations (bullet, version
+    // suffix, [pinned] tag) must all be suppressed under quiet mode.
+    var t = try TempDb.init("human_quiet");
+    defer t.deinit();
+    try insertKeg(&t.db, "alpha", "1.0", false);
+    try insertKeg(&t.db, "bravo", "2.1", true);
+    try insertCask(&t.db, "charlie", "3.0");
+
+    const out = try runHuman(testing.allocator, &t.db, true, true, true, false, true);
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("alpha\nbravo\ncharlie\n", out);
+}
+
+test "writeHumanOutput non-quiet keeps the bullet prefix and decorations" {
+    // Regression guard: the quiet fix must not strip decorations from the
+    // default human output that interactive users expect.
+    var t = try TempDb.init("human_decorated");
+    defer t.deinit();
+    try insertKeg(&t.db, "alpha", "1.0", true);
+
+    const out = try runHuman(testing.allocator, &t.db, true, false, true, false, false);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "  ▸ alpha") != null);
+    try testing.expect(std.mem.indexOf(u8, out, " (1.0)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "[pinned]") != null);
+}
+
 test "buildListJson: empty DB, both flags" {
     var t = try TempDb.init("empty");
     defer t.deinit();

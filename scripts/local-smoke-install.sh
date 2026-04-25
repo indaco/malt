@@ -231,7 +231,8 @@ install_only_deps_wget() {
       printf '  PASS  [%s.purge] purge --unused-deps reclaimed every dep\n' "$tag"
       PASS=$((PASS + 1))
     else
-      printf '  FAIL  [%s.purge] kegs survived purge: %s\n' "$tag" "$("$MT_BIN" list -q 2>/dev/null | tr '\n' ' ')"
+      printf '  FAIL  [%s.purge] kegs survived purge:\n' "$tag"
+      "$MT_BIN" list -q 2>/dev/null | sed 's|^|        | |'
       FAIL=$((FAIL + 1))
       FAILURES+=("$tag.purge")
     fi
