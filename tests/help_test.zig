@@ -25,11 +25,12 @@ test "showIfRequested returns true for long --help" {
 
 test "showIfRequested covers every documented command (exercises every branch of the static map)" {
     const commands = [_][]const u8{
-        "install",  "uninstall", "upgrade", "update",
-        "outdated", "list",      "info",    "search",
-        "doctor",   "tap",       "migrate", "rollback",
-        "run",      "link",      "unlink",  "completions",
-        "backup",   "restore",   "purge",   "not-a-real-command",
+        "install",  "uninstall",          "upgrade", "update",
+        "outdated", "list",               "info",    "search",
+        "doctor",   "tap",                "migrate", "rollback",
+        "run",      "link",               "unlink",  "pin",
+        "unpin",    "completions",        "backup",  "restore",
+        "purge",    "not-a-real-command",
     };
     const args = [_][]const u8{"--help"};
     for (commands) |cmd| {

@@ -35,13 +35,13 @@ test "scriptFor routes each shell to a non-empty script" {
 }
 
 const all_commands = [_][]const u8{
-    "install", "uninstall", "remove",   "upgrade",
-    "update",  "outdated",  "list",     "ls",
-    "info",    "search",    "doctor",   "tap",
-    "untap",   "migrate",   "rollback", "link",
-    "unlink",  "run",       "version",  "completions",
-    "backup",  "restore",   "purge",    "services",
-    "bundle",
+    "install", "uninstall",   "remove",   "upgrade",
+    "update",  "outdated",    "list",     "ls",
+    "info",    "search",      "doctor",   "tap",
+    "untap",   "migrate",     "rollback", "link",
+    "unlink",  "pin",         "unpin",    "run",
+    "version", "completions", "backup",   "restore",
+    "purge",   "services",    "bundle",
 };
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
