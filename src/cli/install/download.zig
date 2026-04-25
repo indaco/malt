@@ -502,6 +502,26 @@ pub fn collectFormulaJobs(
     output.info("Resolved {s} {s} ({d} {s})", .{ formula.name, formula.version, jobs.items.len, pkg_word });
 }
 
+/// Drop top-level (`is_dep == false`) jobs from `jobs` so `--only-dependencies`
+/// can bail before the requested package is materialised. Frees the same five
+/// strings `dupeJobStrings` allocated; `formula_json` on top-level jobs is
+/// borrowed from `api.fetchFormula`, so freeing it here would double-free.
+pub fn dropTopLevelJobs(allocator: std.mem.Allocator, jobs: *std.ArrayList(DownloadJob)) void {
+    var i: usize = 0;
+    while (i < jobs.items.len) {
+        if (jobs.items[i].is_dep) {
+            i += 1;
+            continue;
+        }
+        const removed = jobs.orderedRemove(i);
+        allocator.free(removed.name);
+        allocator.free(removed.version_str);
+        allocator.free(removed.sha256);
+        allocator.free(removed.bottle_url);
+        allocator.free(removed.cellar_type);
+    }
+}
+
 /// Return the first dep name of `formula_json` that appears in `failed_kegs`,
 /// or null if none did. Used to short-circuit jobs whose dependency graph is
 /// already broken so we do not leave half-installed kegs behind.

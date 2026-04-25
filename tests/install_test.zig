@@ -799,3 +799,119 @@ test "collectFetchWorkerCount clamps to MAX_COLLECT_FETCH_WORKERS" {
     try testing.expectEqual(cap, install.collectFetchWorkerCount(40));
     try testing.expectEqual(cap, install.collectFetchWorkerCount(128));
 }
+
+// --- dropTopLevelJobs (--only-dependencies seam) ---
+
+/// Append a `DownloadJob` whose owned strings are duped into `alloc`.
+/// `formula_json` follows the production split: dep jobs own their JSON
+/// bytes (`is_dep=true`), top-level jobs borrow the caller's input
+/// (`is_dep=false`).
+fn appendOwnedJob(
+    alloc: std.mem.Allocator,
+    jobs: *std.ArrayList(install.DownloadJob),
+    name: []const u8,
+    is_dep: bool,
+    borrowed_json: []const u8,
+) !void {
+    const formula_json: []const u8 = if (is_dep) try alloc.dupe(u8, borrowed_json) else borrowed_json;
+    try jobs.append(alloc, .{
+        .name = try alloc.dupe(u8, name),
+        .version_str = try alloc.dupe(u8, "1.0"),
+        .sha256 = try alloc.dupe(u8, "aa"),
+        .bottle_url = try alloc.dupe(u8, "https://x"),
+        .is_dep = is_dep,
+        .keg_only = false,
+        .post_install_defined = false,
+        .formula_json = formula_json,
+        .cellar_type = try alloc.dupe(u8, ":any"),
+        .label_width = 0,
+        .line_index = 0,
+        .multi = null,
+        .bar = null,
+        .store_sha256 = "",
+        .succeeded = false,
+    });
+}
+
+test "dropTopLevelJobs removes the top-level job and frees its owned strings" {
+    // Under testing.allocator the helper must free the dropped job's name,
+    // version, sha, url, and cellar_type; otherwise the runner reports a leak.
+    const alloc = testing.allocator;
+    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    defer {
+        for (jobs.items) |j| {
+            alloc.free(j.name);
+            alloc.free(j.version_str);
+            alloc.free(j.sha256);
+            alloc.free(j.bottle_url);
+            alloc.free(j.cellar_type);
+            if (j.is_dep) alloc.free(j.formula_json);
+        }
+        jobs.deinit(alloc);
+    }
+
+    try appendOwnedJob(alloc, &jobs, "beta", true, "{}");
+    try appendOwnedJob(alloc, &jobs, "alpha", false, "{}");
+
+    install.dropTopLevelJobs(alloc, &jobs);
+
+    try testing.expectEqual(@as(usize, 1), jobs.items.len);
+    try testing.expectEqualStrings("beta", jobs.items[0].name);
+    try testing.expect(jobs.items[0].is_dep);
+}
+
+test "dropTopLevelJobs is a no-op when every job is a dep" {
+    const alloc = testing.allocator;
+    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    defer {
+        for (jobs.items) |j| {
+            alloc.free(j.name);
+            alloc.free(j.version_str);
+            alloc.free(j.sha256);
+            alloc.free(j.bottle_url);
+            alloc.free(j.cellar_type);
+            if (j.is_dep) alloc.free(j.formula_json);
+        }
+        jobs.deinit(alloc);
+    }
+
+    try appendOwnedJob(alloc, &jobs, "beta", true, "{}");
+    try appendOwnedJob(alloc, &jobs, "gamma", true, "{}");
+
+    install.dropTopLevelJobs(alloc, &jobs);
+
+    try testing.expectEqual(@as(usize, 2), jobs.items.len);
+    try testing.expectEqualStrings("beta", jobs.items[0].name);
+    try testing.expectEqualStrings("gamma", jobs.items[1].name);
+}
+
+test "dropTopLevelJobs preserves dep order across mixed lists" {
+    // Top-level jobs are appended *after* deps in collectFormulaJobs, but
+    // a multi-package install can interleave (alpha-deps, alpha, beta-deps,
+    // beta). Order matters because the link phase walks deps before
+    // dependents — anything out of order regresses findFailedDep.
+    const alloc = testing.allocator;
+    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    defer {
+        for (jobs.items) |j| {
+            alloc.free(j.name);
+            alloc.free(j.version_str);
+            alloc.free(j.sha256);
+            alloc.free(j.bottle_url);
+            alloc.free(j.cellar_type);
+            if (j.is_dep) alloc.free(j.formula_json);
+        }
+        jobs.deinit(alloc);
+    }
+
+    try appendOwnedJob(alloc, &jobs, "dep_a", true, "{}");
+    try appendOwnedJob(alloc, &jobs, "alpha", false, "{}");
+    try appendOwnedJob(alloc, &jobs, "dep_b", true, "{}");
+    try appendOwnedJob(alloc, &jobs, "beta", false, "{}");
+
+    install.dropTopLevelJobs(alloc, &jobs);
+
+    try testing.expectEqual(@as(usize, 2), jobs.items.len);
+    try testing.expectEqualStrings("dep_a", jobs.items[0].name);
+    try testing.expectEqualStrings("dep_b", jobs.items[1].name);
+}

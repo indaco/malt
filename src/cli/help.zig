@@ -67,6 +67,9 @@ const install_help =
     \\                     only pass files you trust)
     \\  --dry-run          Show what would be installed
     \\  --force            Overwrite existing installations
+    \\  --only-dependencies  Install transitive deps but skip the requested package
+    \\                     (deps are recorded as `dependency` so `mt purge --unused-deps`
+    \\                     can later GC them)
     \\  --use-system-ruby[=<name>,...]  Run post_install via the system Ruby interpreter
     \\                     (experimental, sandboxed). A bare flag requires a single
     \\                     package; use =<name>,... to scope when installing multiple.

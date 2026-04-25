@@ -30,6 +30,10 @@
 #                                 The case verifies otool sees the long
 #                                 path AND python3.14 actually loads at
 #                                 runtime under the long prefix.
+#   • mt install --only-dependencies wget — brew-parity flag. Asserts the
+#                                 top-level is skipped, deps land marked
+#                                 `dependency`, and `mt purge --unused-deps`
+#                                 reclaims them with no direct retention.
 #
 # Time/bandwidth: ~20-30 min, ~3.5 GB downloaded fresh.
 #
@@ -185,6 +189,56 @@ install_python_overflow_fallback() {
   rm -rf "$long_prefix" "$long_cache"
 }
 
+# Pin the --only-dependencies contract end-to-end against a live formula.
+# wget is the canonical "warm the store before building from source" target:
+# half a dozen recognizable deps (libidn2, openssl@3, ...) and no
+# post_install drama. We also exercise `mt purge --unused-deps`, since the
+# whole point of recording deps as `dependency` is that purge can reclaim
+# them once nothing direct retains them.
+install_only_deps_wget() {
+  local tag="smoke.install.only_deps.wget"
+  local target="wget"
+  # libidn2 is wget's most stable transitive dep across recent bottles;
+  # if homebrew/core ever drops it the assertion below is the early signal.
+  local sentinel_dep="libidn2"
+
+  if ! run "$tag" "$MT_BIN" install --only-dependencies "$target"; then
+    return
+  fi
+
+  if "$MT_BIN" list -q 2>/dev/null | grep -qx "$target"; then
+    printf '  FAIL  [%s.absent] %s leaked into mt list\n' "$tag" "$target"
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$tag.absent")
+  else
+    printf '  PASS  [%s.absent] top-level %s correctly skipped\n' "$tag" "$target"
+    PASS=$((PASS + 1))
+  fi
+
+  if "$MT_BIN" list -q 2>/dev/null | grep -qx "$sentinel_dep"; then
+    printf '  PASS  [%s.dep] %s installed as indirect dep\n' "$tag" "$sentinel_dep"
+    PASS=$((PASS + 1))
+  else
+    printf '  FAIL  [%s.dep] expected dep %s not installed\n' "$tag" "$sentinel_dep"
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$tag.dep")
+  fi
+
+  # `purge --unused-deps` must reclaim every dep, since nothing direct
+  # retains them in this fresh sandbox.
+  if run "$tag.purge" "$MT_BIN" purge --unused-deps --yes; then
+    if [[ -z "$("$MT_BIN" list -q 2>/dev/null)" ]]; then
+      printf '  PASS  [%s.purge] purge --unused-deps reclaimed every dep\n' "$tag"
+      PASS=$((PASS + 1))
+    else
+      printf '  FAIL  [%s.purge] kegs survived purge:\n' "$tag"
+      "$MT_BIN" list -q 2>/dev/null | sed 's|^|        | |'
+      FAIL=$((FAIL + 1))
+      FAILURES+=("$tag.purge")
+    fi
+  fi
+}
+
 # Reverse what we installed. Casks first because they touch /Applications;
 # formulas second (they live entirely under MALT_PREFIX, but uninstalling
 # also exercises the uninstall path). Best-effort: a stuck uninstall must
@@ -217,6 +271,7 @@ install_formula smoke.install.go go
 install_cask smoke.install.cask.raycast raycast Raycast.app
 install_binary_cask smoke.install.cask.copilot-cli copilot-cli
 install_python_overflow_fallback
+install_only_deps_wget
 
 printf '\n── Summary ───────────────────────────────────────\n'
 printf '  passed: %d\n' "$PASS"

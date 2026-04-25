@@ -66,7 +66,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 }
 
-fn writeHumanOutput(
+/// Pub for tests: assert the exact bytes for the human path without
+/// staging a real DB-on-prefix + stdout-capture rig.
+///
+/// Honours `output.isQuiet()`: under `--quiet` the help text promises
+/// "Names only, one per line", so decorations (bullet, version suffix,
+/// `[pinned]` tag) are suppressed and each row is a bare name + `\n`.
+pub fn writeHumanOutput(
     db: *sqlite.Database,
     show_formula: bool,
     show_cask: bool,
@@ -74,6 +80,8 @@ fn writeHumanOutput(
     show_pinned: bool,
     stdout: *std.Io.Writer,
 ) !void {
+    const quiet = output.isQuiet();
+
     if (show_formula) {
         const sql = if (show_pinned)
             "SELECT name, version, pinned FROM kegs WHERE pinned = 1 ORDER BY name;"
@@ -88,6 +96,12 @@ fn writeHumanOutput(
             const ver = stmt.columnText(1);
             const pinned = stmt.columnBool(2);
             const name_slice = std.mem.sliceTo(name, 0);
+
+            if (quiet) {
+                stdout.writeAll(name_slice) catch return;
+                stdout.writeAll("\n") catch return;
+                continue;
+            }
 
             writeBulletPrefix(stdout);
             stdout.writeAll(name_slice) catch return;
@@ -111,6 +125,12 @@ fn writeHumanOutput(
             const token = stmt.columnText(0) orelse continue;
             const ver = stmt.columnText(1);
             const token_slice = std.mem.sliceTo(token, 0);
+
+            if (quiet) {
+                stdout.writeAll(token_slice) catch return;
+                stdout.writeAll("\n") catch return;
+                continue;
+            }
 
             writeBulletPrefix(stdout);
             stdout.writeAll(token_slice) catch return;

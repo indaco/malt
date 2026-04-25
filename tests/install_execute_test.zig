@@ -186,6 +186,124 @@ test "execute refuses to run when MALT_PREFIX is absurdly long (> 256 bytes)" {
 // `Cellar/<name>/<version>` install produces "dyld: Library not
 // loaded" at runtime (see issue #77 with pcre2 10.47_1).
 
+test "execute --only-dependencies on a leaf formula plans nothing" {
+    // Leaf formula → after dropping top-level the queue is empty, so the
+    // "Dry run: would install ..." line never fires. Pins the early-return
+    // branch so a future refactor cannot accidentally print a 0-package plan.
+    const prefix_z: [:0]const u8 = "/tmp/mol";
+    malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    try malt.fs_compat.cwd().makePath(prefix_z);
+    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const json =
+        \\{"name":"leaf","full_name":"leaf","tap":"homebrew/core","desc":"","homepage":"",
+        \\ "versions":{"stable":"1.0"},"revision":0,"dependencies":[],"oldnames":[],
+        \\ "keg_only":false,"post_install_defined":false,
+        \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/leaf/blobs",
+        \\   "files":{
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"}
+        \\   }}}}
+    ;
+    try seedFormulaCache(prefix_z, "leaf", json);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.io_mod.beginStderrCapture(testing.allocator, &captured);
+    defer malt.io_mod.endStderrCapture();
+
+    try install.execute(arena.allocator(), &.{ "--dry-run", "--only-dependencies", "leaf" });
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would install") == null);
+}
+
+test "execute --only-dependencies --dry-run plans deps but skips the requested formula" {
+    // Brew parity: --only-dependencies installs the transitive deps but
+    // never materialises or links the requested package. Captured stderr
+    // is the cheapest way to assert the plan's contents from the outside.
+    const prefix_z: [:0]const u8 = "/tmp/mod";
+    malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    try malt.fs_compat.cwd().makePath(prefix_z);
+    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const dep_json =
+        \\{"name":"beta","full_name":"beta","tap":"homebrew/core","desc":"","homepage":"",
+        \\ "versions":{"stable":"1.0"},"revision":0,"dependencies":[],"oldnames":[],
+        \\ "keg_only":false,"post_install_defined":false,
+        \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/beta/blobs",
+        \\   "files":{
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"bb"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"bx"}
+        \\   }}}}
+    ;
+    try seedFormulaCache(prefix_z, "beta", dep_json);
+
+    const root_json =
+        \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"",
+        \\ "versions":{"stable":"1.0"},"revision":0,"dependencies":["beta"],"oldnames":[],
+        \\ "keg_only":false,"post_install_defined":false,
+        \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
+        \\   "files":{
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"ax"}
+        \\   }}}}
+    ;
+    try seedFormulaCache(prefix_z, "alpha", root_json);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // `output.quiet` is process-global; earlier tests in this file pass
+    // `--quiet` and leave it set. Reset so the dry-run plan reaches our capture.
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.io_mod.beginStderrCapture(testing.allocator, &captured);
+    defer malt.io_mod.endStderrCapture();
+
+    try install.execute(arena.allocator(), &.{ "--dry-run", "--only-dependencies", "alpha" });
+
+    // The dry-run plan header is the load-bearing observation: with the
+    // top-level filtered, only the single dep should land in the plan.
+    // (`alpha` still appears upstream in the "Resolved alpha …" log line
+    // emitted before the filter, so we anchor on the plan header instead.)
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would install 1 package") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "beta 1.0 (dependency)") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "would install 2 packages") == null);
+}
+
 test "execute --dry-run routes a revisioned formula through the install pipeline" {
     // The dry-run path flows: ensureDirs → DB open → lock → cache hit
     // → collectFormulaJobs → print plan → return. A revisioned formula
