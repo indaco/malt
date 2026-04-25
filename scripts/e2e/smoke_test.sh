@@ -154,7 +154,7 @@ else
 fi
 
 # Per-command --help on everything documented.
-for cmd in install uninstall upgrade update outdated list info search uses \
+for cmd in install uninstall upgrade update outdated list info search uses which \
   doctor purge tap untap migrate backup restore services bundle \
   rollback run link unlink pin unpin version completions shellenv; do
   run_ok "t1.help.$cmd" -- "$MT_BIN" "$cmd" --help
@@ -216,6 +216,8 @@ else
   run_grep t3.info.tree "tree" -- "$MT_BIN" info tree
   run_ok t3.uses.tree -- "$MT_BIN" uses tree
   run_ok t3.uses.recursive -- "$MT_BIN" uses --recursive tree
+  run_ok t3.which.tree -- "$MT_BIN" which tree
+  run_ok t3.which.json -- "$MT_BIN" --json which tree
 
   # link is already done by install; unlink + re-link exercises the code path.
   run_ok t3.unlink -- "$MT_BIN" unlink tree

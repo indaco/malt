@@ -42,6 +42,7 @@ const all_commands = [_][]const u8{
     "unlink",  "pin",         "unpin",    "run",
     "version", "completions", "shellenv", "backup",
     "restore", "purge",       "services", "bundle",
+    "which",
 };
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {

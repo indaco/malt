@@ -342,6 +342,18 @@ mt uses --recursive <formula>
 mt uses <formula> --json
 ```
 
+### `mt which`
+
+Resolve a prefix binary to the keg that owns it - the reverse lookup pairs with `mt uses`. Accepts a bare name (resolved through `{prefix}/bin/<name>`) or an absolute path to a malt-managed symlink.
+
+```bash
+mt which jq
+mt which /opt/malt/bin/jq
+mt --json which jq
+```
+
+Human output: `<name> <version> <keg-path>`. JSON output: `{"name", "version", "keg"}`. Read-only and offline; exits non-zero with a clear message when the binary is not owned by malt.
+
 ### `mt doctor`
 
 System health check.
