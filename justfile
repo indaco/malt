@@ -172,6 +172,13 @@ hooks-uninstall:
 bench *args:
     ./scripts/bench.sh {{ args }}
 
+# Microbench for the outdated-snapshot read path. Asserts a hard
+# per-phase budget so a regression on render/parse/intersect breaks
+# the bench rather than silently slipping through CI.
+[group('bench')]
+bench-snapshot:
+    zig build bench-snapshot
+
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
