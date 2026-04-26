@@ -271,6 +271,44 @@ test "err wraps the red prefix and uses the cross glyph" {
     try testing.expectEqualStrings("\x1b[31m  ✗ \x1b[0mnope\n", buf.items);
 }
 
+// `question` prints a confirmation-style prompt: cyan `?` icon, bold msg,
+// no trailing newline so the user types directly after the colon.
+test "question wraps the cyan prefix and bold msg without a newline" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, true, true, false);
+    defer cap.deinit();
+
+    output.question("Replace {s}? ", .{"foo"});
+    try testing.expectEqualStrings(
+        "\x1b[36m  ? \x1b[0m\x1b[1mReplace foo? \x1b[0m",
+        buf.items,
+    );
+}
+
+test "question falls back to ASCII prefix without color or emoji" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, false, false, false);
+    defer cap.deinit();
+
+    output.question("Continue? ", .{});
+    try testing.expectEqualStrings("  ? Continue? ", buf.items);
+}
+
+// Prompts must always render; --quiet only silences informational chatter.
+// If `quiet` ever swallowed `question`, confirmTyped would block on a
+// hidden prompt and the user would think malt hung.
+test "question is NOT suppressed by --quiet" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, false, false, true);
+    defer cap.deinit();
+
+    output.question("Confirm? ", .{});
+    try testing.expectEqualStrings("  ? Confirm? ", buf.items);
+}
+
 // Contract: errors always print, even under `--quiet`. If this ever flips,
 // users will stop seeing failure reasons when they pass `-q` to scripts.
 test "err is NOT suppressed by --quiet" {

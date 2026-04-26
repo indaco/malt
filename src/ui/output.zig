@@ -100,6 +100,26 @@ pub fn err(comptime fmt: []const u8, args: anytype) void {
     writePrefixedLine(msg, .err, "  ✗ ", "  x ");
 }
 
+/// Print a confirmation prompt: info-coloured `?` icon, bold message,
+/// no trailing newline so the user's typed answer continues the line.
+/// Bypasses `--quiet` — a silent prompt would deadlock interactive flows.
+pub fn question(comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ? " else "  ? ";
+    if (color.isColorEnabled()) {
+        io_mod.stderrWriteAll(color.SemanticStyle.info.code());
+        io_mod.stderrWriteAll(prefix);
+        io_mod.stderrWriteAll(color.Style.reset.code());
+        io_mod.stderrWriteAll(color.Style.bold.code());
+        io_mod.stderrWriteAll(msg);
+        io_mod.stderrWriteAll(color.Style.reset.code());
+    } else {
+        io_mod.stderrWriteAll(prefix);
+        io_mod.stderrWriteAll(msg);
+    }
+}
+
 /// Write a single styled line (no icon prefix). Pass null `style_code`
 /// for plain text. Respects `--quiet`.
 fn lineStyled(style_code: ?[]const u8, comptime fmt: []const u8, args: anytype) void {
@@ -178,20 +198,14 @@ pub fn skip(comptime fmt: []const u8, args: anytype) void {
 }
 
 /// Read a single line from stdin and return true iff the trimmed input
-/// matches `expected` exactly.  Prints `prompt` to stderr first.
+/// matches `expected` exactly. Prints `prompt` via `question` first.
 ///
 /// Returns false when stdin is not a TTY so that destructive commands
 /// refuse to run unattended without an explicit `--yes` opt-in.
 pub fn confirmTyped(expected: []const u8, prompt: []const u8) bool {
     if (!fs_compat.isatty(std.posix.STDIN_FILENO)) return false;
 
-    if (color.isColorEnabled()) {
-        io_mod.stderrWriteAll(color.Style.bold.code());
-        io_mod.stderrWriteAll(prompt);
-        io_mod.stderrWriteAll(color.Style.reset.code());
-    } else {
-        io_mod.stderrWriteAll(prompt);
-    }
+    question("{s}", .{prompt});
 
     var buf: [128]u8 = undefined;
     const n = std.posix.read(std.posix.STDIN_FILENO, &buf) catch return false;
