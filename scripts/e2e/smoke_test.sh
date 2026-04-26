@@ -231,12 +231,15 @@ else
   # pin / unpin / upgrade-skip round-trip: pin tree, verify upgrade is a no-op,
   # exercise the audit flags (`outdated --pinned-only`, `upgrade --pinned
   # --dry-run`) — both walk pinned formulas + casks symmetrically — then
-  # unpin so the rest of the smoke run is unaffected.
+  # confirm a force-reinstall keeps the pin alive (INSERT OR REPLACE
+  # inherits the prior `pinned` via COALESCE-MAX), and finally unpin.
   run_ok t3.pin -- "$MT_BIN" pin tree
   run_grep t3.list.pinned-tree "tree" -- "$MT_BIN" list --pinned
   run_ok t3.upgrade.pinned -- "$MT_BIN" upgrade tree
   run_ok t3.outdated.pinned-only -- "$MT_BIN" outdated --pinned-only
   run_ok t3.upgrade.pinned-dry -- "$MT_BIN" upgrade --pinned --dry-run
+  run_ok t3.install.force.reinstall -- "$MT_BIN" install --force tree
+  run_grep t3.list.pinned.after-reinstall "tree" -- "$MT_BIN" list --pinned
   run_ok t3.unpin -- "$MT_BIN" unpin tree
 
   # backup / restore round-trip.

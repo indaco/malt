@@ -292,6 +292,49 @@ test "isInstalled is false before recordKeg, true after" {
     try testing.expect(install.isInstalled(&db, "foo"));
 }
 
+test "pruneCellarForReinstall wipes an existing Cellar dir so --force can re-materialize" {
+    const prefix = try std.fmt.allocPrint(
+        testing.allocator,
+        "/tmp/malt_prune_cellar_{d}",
+        .{malt.fs_compat.nanoTimestamp()},
+    );
+    defer testing.allocator.free(prefix);
+    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0/bin", .{prefix});
+    defer testing.allocator.free(keg_dir);
+    try malt.fs_compat.cwd().makePath(keg_dir);
+
+    const file = try std.fmt.allocPrint(testing.allocator, "{s}/foo", .{keg_dir});
+    defer testing.allocator.free(file);
+    {
+        const f = try malt.fs_compat.cwd().createFile(file, .{});
+        defer f.close();
+        try f.writeAll("payload");
+    }
+
+    install.pruneCellarForReinstall(prefix, "foo", "1.0");
+
+    const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix});
+    defer testing.allocator.free(cellar_dir);
+    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(cellar_dir, .{}));
+}
+
+test "pruneCellarForReinstall is a no-op when the destination is missing" {
+    const prefix = try std.fmt.allocPrint(
+        testing.allocator,
+        "/tmp/malt_prune_cellar_missing_{d}",
+        .{malt.fs_compat.nanoTimestamp()},
+    );
+    defer testing.allocator.free(prefix);
+    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+
+    // Never created — pruning must not fault, panic, or leak.
+    install.pruneCellarForReinstall(prefix, "ghost", "1.0");
+}
+
 test "install.recordKeg preserves a prior pinned flag on REPLACE (force-reinstall keeps the hold)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

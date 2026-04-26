@@ -66,6 +66,16 @@ pub const executeDslPostInstall = post_install_mod.executeDslPostInstall;
 pub const drive = post_install_mod.drive;
 const record_mod = @import("install/record.zig");
 pub const InstallError = record_mod.InstallError;
+
+/// Wipe `<prefix>/Cellar/<name>/<version>` so a `--force` reinstall can
+/// re-materialize on top of it. No-op when the dir is missing or the
+/// path overflows the buffer; failures are best-effort because the
+/// follow-up materialize step surfaces real errors with full context.
+pub fn pruneCellarForReinstall(prefix: []const u8, name: []const u8, version: []const u8) void {
+    var cellar_buf: [512]u8 = undefined;
+    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch return;
+    fs_compat.deleteTreeAbsolute(cellar_path) catch {};
+}
 pub const localErrorIsAnnounced = record_mod.localErrorIsAnnounced;
 pub const recordKeg = record_mod.recordKeg;
 pub const deleteKeg = record_mod.deleteKeg;
@@ -489,6 +499,17 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (main_mod.isInterrupted()) {
         output.warn("Interrupted. Cleaning up...", .{});
         return;
+    }
+
+    // `--force` semantics: re-materialize on top of an existing keg.
+    // The cellar's clonefile/copy refuses to overwrite a populated dir,
+    // so wipe each target Cellar dir up front. Pin survives because the
+    // DB row is rewritten via INSERT OR REPLACE with COALESCE-MAX
+    // inheritance on `pinned`.
+    if (force) {
+        for (all_jobs.items) |job| {
+            pruneCellarForReinstall(prefix, job.name, job.version_str);
+        }
     }
 
     // ── Parallel materialize phase ──────────────────────────────────
