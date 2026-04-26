@@ -103,7 +103,39 @@ test "mt upgrade (no args) skips pinned kegs without aggregating failures" {
     try upgrade.execute(testing.allocator, &.{});
 }
 
-test "pinSkip honours --force: pinned + force = false (no skip)" {
+test "mt upgrade --pinned --dry-run with no pinned kegs is a quiet no-op" {
+    const path = try setupPrefix("pinned_audit_empty");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openSeededDb(path);
+        defer db.close();
+        // Unpinned keg — the --pinned filter excludes it, no API call.
+        try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('loose', 'loose', '1.0', 'sha', '/cellar/loose/1.0');");
+    }
+
+    try upgrade.execute(testing.allocator, &.{ "--pinned", "--dry-run" });
+}
+
+test "mt upgrade --pinned without --dry-run or --force errors with usage" {
+    const path = try setupPrefix("pinned_requires_audit");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
+    defer testing.allocator.free(db_dir);
+    try malt.fs_compat.cwd().makePath(db_dir);
+
+    try testing.expectError(
+        error.Aborted,
+        upgrade.execute(testing.allocator, &.{"--pinned"}),
+    );
+}
+
+test "pinSkip honours --force and audit_mode: pinned + override = no skip" {
     const path = try setupPrefix("pinskip_helper");
     defer testing.allocator.free(path);
     defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
@@ -114,13 +146,15 @@ test "pinSkip honours --force: pinned + force = false (no skip)" {
     try insertPinnedKeg(&db, "forced");
     try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('loose', 'loose', '1.0', 'sha', '/cellar/loose/1.0');");
 
-    // pinned + !force = skip
-    try testing.expect(upgrade.pinSkip(&db, "forced", false));
+    // pinned + neither override = skip
+    try testing.expect(upgrade.pinSkip(&db, "forced", false, false));
     // pinned + force = no skip (the whole point of --force)
-    try testing.expect(!upgrade.pinSkip(&db, "forced", true));
-    // unpinned: never skipped, force or not
-    try testing.expect(!upgrade.pinSkip(&db, "loose", false));
-    try testing.expect(!upgrade.pinSkip(&db, "loose", true));
+    try testing.expect(!upgrade.pinSkip(&db, "forced", true, false));
+    // pinned + audit = no skip (so `--pinned --dry-run` walks the row)
+    try testing.expect(!upgrade.pinSkip(&db, "forced", false, true));
+    // unpinned: never skipped, force/audit or not
+    try testing.expect(!upgrade.pinSkip(&db, "loose", false, false));
+    try testing.expect(!upgrade.pinSkip(&db, "loose", true, false));
     // unknown name: not pinned, not skipped
-    try testing.expect(!upgrade.pinSkip(&db, "ghost", false));
+    try testing.expect(!upgrade.pinSkip(&db, "ghost", false, false));
 }

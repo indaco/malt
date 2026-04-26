@@ -10,6 +10,13 @@ const malt = @import("malt");
 const outdated_mod = malt.cli_outdated;
 const api_mod = malt.api;
 const client_mod = malt.client;
+const sqlite = malt.sqlite;
+const schema = malt.schema;
+
+const c = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+};
 
 // --- Integration: collectOutdatedFormulas / collectOutdatedCasks ---
 
@@ -211,4 +218,113 @@ test "collectOutdatedCasks (large-N, pool path) preserves sorted order" {
         try testing.expectEqualStrings("1.0", entry.installed);
         try testing.expectEqualStrings("2.0", entry.latest);
     }
+}
+
+// --- --pinned-only filter ---
+
+fn setupPinnedPrefix(suffix: []const u8) ![:0]u8 {
+    const path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "/tmp/malt_outdated_pinned_{d}_{s}",
+        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        0,
+    );
+    malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    try malt.fs_compat.cwd().makePath(path);
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
+    defer testing.allocator.free(db_dir);
+    try malt.fs_compat.cwd().makePath(db_dir);
+    _ = c.setenv("MALT_PREFIX", path.ptr, 1);
+    return path;
+}
+
+fn openSeededDb(prefix: [:0]const u8) !sqlite.Database {
+    var buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    errdefer db.close();
+    try schema.initSchema(&db);
+    return db;
+}
+
+fn insertKeg(db: *sqlite.Database, name: []const u8, pinned: bool) !void {
+    var buf: [512]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &buf,
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '1.0', 'deadbeef', '/cellar/{s}/1.0', {d});",
+        .{ name, name, name, @intFromBool(pinned) },
+    );
+    try db.exec(sql);
+}
+
+test "loadFormulaRows .pinned_only returns only pinned rows" {
+    const path = try setupPinnedPrefix("filter_pinned");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertKeg(&db, "alpha", false);
+    try insertKeg(&db, "bravo", true);
+    try insertKeg(&db, "charlie", true);
+
+    const rows = try outdated_mod.loadFormulaRows(testing.allocator, &db, .pinned_only);
+    defer outdated_mod.freeKegRows(testing.allocator, rows);
+
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqualStrings("bravo", rows[0].name);
+    try testing.expectEqualStrings("charlie", rows[1].name);
+}
+
+test "loadFormulaRows .all returns every installed row" {
+    const path = try setupPinnedPrefix("filter_all");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertKeg(&db, "alpha", false);
+    try insertKeg(&db, "bravo", true);
+
+    const rows = try outdated_mod.loadFormulaRows(testing.allocator, &db, .all);
+    defer outdated_mod.freeKegRows(testing.allocator, rows);
+
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqualStrings("alpha", rows[0].name);
+    try testing.expectEqualStrings("bravo", rows[1].name);
+}
+
+test "loadFormulaRows .pinned_only on an empty DB is a no-op" {
+    const path = try setupPinnedPrefix("filter_empty");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertKeg(&db, "alpha", false);
+    try insertKeg(&db, "bravo", false);
+
+    const rows = try outdated_mod.loadFormulaRows(testing.allocator, &db, .pinned_only);
+    defer outdated_mod.freeKegRows(testing.allocator, rows);
+
+    try testing.expectEqual(@as(usize, 0), rows.len);
+}
+
+test "outdated execute --pinned-only is a quiet no-op when no kegs are pinned" {
+    const path = try setupPinnedPrefix("exec_no_pins");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openSeededDb(path);
+        defer db.close();
+        try insertKeg(&db, "alpha", false);
+    }
+
+    // No pinned kegs => no API calls => quiet success even with no cache.
+    try outdated_mod.execute(testing.allocator, &.{"--pinned-only"});
 }
