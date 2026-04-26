@@ -20,7 +20,11 @@
 #                                 + DMG mount/install.
 #   • mt install --cask copilot-cli — cask `binary` artifact (symlinks a CLI
 #                                 into $PREFIX/bin). Exercises the
-#                                 non-/Applications cask codepath.
+#                                 non-/Applications cask codepath. The
+#                                 same cask also drives the cask-side
+#                                 pin/unpin round-trip (mt pin / unpin /
+#                                 list --pinned / upgrade --pinned --dry-run /
+#                                 upgrade <pinned-cask> no-op).
 #   • mt install python@3.14 (long prefix) — install_name_tool overflow
 #                                 fallback. python@3.14 has the tightest
 #                                 @@HOMEBREW_CELLAR@@ slots in homebrew/core;
@@ -154,6 +158,46 @@ install_binary_cask() {
 # the patched-binary shape (otool sees the long path) and the runtime
 # (python3.14 imports ssl, proving the rewritten LC_LOAD_DYLIBs resolve
 # under dyld). Self-contained: own prefix/cache, own cleanup.
+# Cask pin/unpin round-trip end-to-end against an installed cask. Pins
+# the cask, asserts `mt list --pinned` surfaces it, asserts a follow-up
+# `mt upgrade <token>` is a quiet no-op (pinned skip), exercises the
+# audit flag pair, then unpins so the cleanup pass can uninstall cleanly.
+pin_cask_round_trip() {
+  local tag="smoke.install.cask.pin"
+  local cask="$1"
+
+  if ! "$MT_BIN" list --cask -q 2>/dev/null | grep -qx "$cask"; then
+    printf '  SKIP  [%s] %s not installed; pin round-trip needs a live cask\n' "$tag" "$cask"
+    SKIP=$((SKIP + 1))
+    SKIPS+=("$tag")
+    return
+  fi
+
+  if ! run "$tag.pin" "$MT_BIN" pin "$cask"; then return; fi
+
+  if "$MT_BIN" list --pinned -q 2>/dev/null | grep -qx "$cask"; then
+    printf '  PASS  [%s.list] %s visible in mt list --pinned\n' "$tag" "$cask"
+    PASS=$((PASS + 1))
+  else
+    printf '  FAIL  [%s.list] %s missing from mt list --pinned\n' "$tag" "$cask"
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$tag.list")
+  fi
+
+  # `mt upgrade <pinned-cask>` must short-circuit before fetchCask — exit 0,
+  # no error. The dim "pinned, skipped" line lives on stderr/stdout; we only
+  # assert the exit code here so terminal styling never flakes the test.
+  run "$tag.upgrade.skipped" "$MT_BIN" upgrade "$cask"
+
+  # The audit flag pair must reach the cask path now (T-062a). Both run
+  # against the live API; a network blip is tolerated as long as the
+  # binary itself doesn't crash.
+  run "$tag.outdated.pinned-only" "$MT_BIN" outdated --pinned-only
+  run "$tag.upgrade.pinned-dry" "$MT_BIN" upgrade --pinned --dry-run
+
+  run "$tag.unpin" "$MT_BIN" unpin "$cask"
+}
+
 install_python_overflow_fallback() {
   local tag="smoke.install.python_overflow_fallback"
   # Fixed paths so the global EXIT trap below can reach them by literal
@@ -270,6 +314,7 @@ install_formula smoke.install.rust rust
 install_formula smoke.install.go go
 install_cask smoke.install.cask.raycast raycast Raycast.app
 install_binary_cask smoke.install.cask.copilot-cli copilot-cli
+pin_cask_round_trip copilot-cli
 install_python_overflow_fallback
 install_only_deps_wget
 

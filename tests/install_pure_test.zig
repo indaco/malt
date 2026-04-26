@@ -292,6 +292,49 @@ test "isInstalled is false before recordKeg, true after" {
     try testing.expect(install.isInstalled(&db, "foo"));
 }
 
+test "install.recordKeg preserves a prior pinned flag on REPLACE (force-reinstall keeps the hold)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // Seed a pinned keg row at version 1.0 so the upcoming INSERT OR REPLACE
+    // for the same (name, version) hits the conflict path.
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned)
+        \\VALUES ('foo', 'foo', '1.0', 'deadbeef', '/opt/malt/Cellar/foo/1.0', 1);
+    );
+
+    var f = try parseFake(arena.allocator());
+    defer f.deinit();
+    const keg_id = try install.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct");
+
+    var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, keg_id);
+    _ = try stmt.step();
+    try testing.expectEqual(true, stmt.columnBool(0));
+}
+
+test "install.recordKeg defaults pinned=0 when no prior keg of that name exists" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var f = try parseFake(arena.allocator());
+    defer f.deinit();
+    const keg_id = try install.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct");
+
+    var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, keg_id);
+    _ = try stmt.step();
+    try testing.expectEqual(false, stmt.columnBool(0));
+}
+
 test "recordDeps inserts one row per dependency in the dependencies table" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

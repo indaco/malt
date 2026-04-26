@@ -10,6 +10,7 @@ const testing = std.testing;
 const upgrade = malt.upgrade;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
+const formula_mod = malt.formula;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -132,6 +133,174 @@ test "mt upgrade --pinned without --dry-run or --force errors with usage" {
     try testing.expectError(
         error.Aborted,
         upgrade.execute(testing.allocator, &.{"--pinned"}),
+    );
+}
+
+fn insertPinnedCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &buf,
+        "INSERT INTO casks (token, name, version, url, pinned) VALUES ('{s}', '{s}', '{s}', 'https://example.invalid', 1);",
+        .{ token, token, version },
+    );
+    try db.exec(sql);
+}
+
+test "mt upgrade <pinned-cask> is a quiet no-op (no API call)" {
+    const path = try setupPrefix("pinned_skip_named_cask");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openSeededDb(path);
+        defer db.close();
+        try insertPinnedCask(&db, "firefox", "120.0");
+    }
+
+    // Pinned cask short-circuits in upgradeCask before fetchCask — must NOT error.
+    try upgrade.execute(testing.allocator, &.{"firefox"});
+}
+
+test "recordKeg inherits pinned=1 from an existing keg of the same name" {
+    const path = try setupPrefix("recordkeg_inherit_pin");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertPinnedKeg(&db, "alpha");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const formula_json =
+        \\{
+        \\  "name": "alpha",
+        \\  "full_name": "alpha",
+        \\  "tap": "homebrew/core",
+        \\  "versions": {"stable": "2.0"}
+        \\}
+    ;
+    var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
+    defer formula.deinit();
+
+    const new_keg_id = try upgrade.recordKeg(&db, &formula, "deadbeef2", "/cellar/alpha/2.0");
+
+    var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, new_keg_id);
+    _ = try stmt.step();
+    try testing.expectEqual(true, stmt.columnBool(0));
+}
+
+test "force-upgrade-cask orchestration: pin survives removeRecord + recordInstall" {
+    // Simulates the DB side of upgradeCask under --force: the existing
+    // pinned cask row is removed (uninstall.removeRecord), a new row is
+    // inserted (recordInstall), and the orchestration must reapply the
+    // pin so the user's hold survives.
+    const path = try setupPrefix("force_upgrade_cask_pin");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertPinnedCask(&db, "firefox", "1.0");
+
+    const was_pinned = malt.cli_pin.isPinned(&db, "firefox");
+    try testing.expect(was_pinned);
+
+    // Step 1: uninstall side — DB row removed by removeRecord.
+    try malt.cask.removeRecord(&db, "firefox");
+
+    // Step 2: install side — recordInstall on a fresh row defaults pinned=0.
+    var c2 = try malt.cask.parseCask(testing.allocator,
+        \\{
+        \\  "token": "firefox",
+        \\  "name": ["Firefox"],
+        \\  "version": "200.0",
+        \\  "url": "https://example.invalid/firefox.dmg",
+        \\  "auto_updates": true,
+        \\  "artifacts": [{"app": ["Firefox.app"]}]
+        \\}
+    );
+    defer c2.deinit();
+    try malt.cask.recordInstall(&db, &c2, "/Applications/Firefox.app");
+
+    // Step 3: orchestration must reapply the pin.
+    if (was_pinned) {
+        _ = try malt.cli_pin.setPinned(&db, "firefox", true);
+    }
+
+    try testing.expect(malt.cli_pin.isPinned(&db, "firefox"));
+}
+
+test "recordKeg defaults pinned=0 when no prior keg of that name exists" {
+    const path = try setupPrefix("recordkeg_fresh_pin");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const formula_json =
+        \\{
+        \\  "name": "fresh",
+        \\  "full_name": "fresh",
+        \\  "tap": "homebrew/core",
+        \\  "versions": {"stable": "1.0"}
+        \\}
+    ;
+    var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
+    defer formula.deinit();
+
+    const new_keg_id = try upgrade.recordKeg(&db, &formula, "deadbeef0", "/cellar/fresh/1.0");
+
+    var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, new_keg_id);
+    _ = try stmt.step();
+    try testing.expectEqual(false, stmt.columnBool(0));
+}
+
+test "pinSkip honours --force and audit_mode for casks too" {
+    const path = try setupPrefix("pinskip_cask");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertPinnedCask(&db, "held-cask", "1.0");
+
+    try testing.expect(upgrade.pinSkip(&db, "held-cask", false, false));
+    try testing.expect(!upgrade.pinSkip(&db, "held-cask", true, false));
+    try testing.expect(!upgrade.pinSkip(&db, "held-cask", false, true));
+}
+
+test "mt upgrade --pinned --dry-run reaches the cask path (no formula-only override)" {
+    const path = try setupPrefix("pinned_audit_cask");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openSeededDb(path);
+        defer db.close();
+        try insertPinnedCask(&db, "pinned-cask", "1.0");
+    }
+
+    // No cache seeded: if the walker reaches the cask, fetchCask fails and
+    // aborts; if the formula-only override is still in place, the cask
+    // path is silently skipped and execute() returns OK. The audit must
+    // walk the row, so this run aborts.
+    try testing.expectError(
+        error.Aborted,
+        upgrade.execute(testing.allocator, &.{ "--pinned", "--dry-run" }),
     );
 }
 

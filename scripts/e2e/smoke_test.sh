@@ -229,10 +229,14 @@ else
   run_ok t3.link.overwrite -- "$MT_BIN" link tree --overwrite
 
   # pin / unpin / upgrade-skip round-trip: pin tree, verify upgrade is a no-op,
-  # then unpin so the rest of the smoke run is unaffected.
+  # exercise the audit flags (`outdated --pinned-only`, `upgrade --pinned
+  # --dry-run`) — both walk pinned formulas + casks symmetrically — then
+  # unpin so the rest of the smoke run is unaffected.
   run_ok t3.pin -- "$MT_BIN" pin tree
   run_grep t3.list.pinned-tree "tree" -- "$MT_BIN" list --pinned
   run_ok t3.upgrade.pinned -- "$MT_BIN" upgrade tree
+  run_ok t3.outdated.pinned-only -- "$MT_BIN" outdated --pinned-only
+  run_ok t3.upgrade.pinned-dry -- "$MT_BIN" upgrade --pinned --dry-run
   run_ok t3.unpin -- "$MT_BIN" unpin tree
 
   # backup / restore round-trip.

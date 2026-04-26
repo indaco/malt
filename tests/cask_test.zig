@@ -99,6 +99,79 @@ test "parseCask rejects missing token" {
     try std.testing.expectError(cask.CaskError.ParseFailed, result);
 }
 
+// --- recordInstall pin preservation ---
+
+const test_cask_json_v2 =
+    \\{
+    \\  "token": "firefox",
+    \\  "name": ["Firefox"],
+    \\  "version": "200.0",
+    \\  "desc": "Web browser",
+    \\  "homepage": "https://www.mozilla.org/firefox/",
+    \\  "url": "https://download.mozilla.org/firefox-200.0.dmg",
+    \\  "sha256": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+    \\  "auto_updates": true,
+    \\  "artifacts": [{"app": ["Firefox.app"]}]
+    \\}
+;
+
+fn openTempCaskDb(comptime tag: []const u8) !struct { dir: []const u8, db: sqlite.Database } {
+    const dir = "/tmp/malt_cask_recordinstall_" ++ tag;
+    malt.fs_compat.deleteTreeAbsolute(dir) catch {};
+    try malt.fs_compat.makeDirAbsolute(dir);
+    var buf: [256]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
+    var db = try sqlite.Database.open(path);
+    errdefer db.close();
+    try schema.initSchema(&db);
+    return .{ .dir = dir, .db = db };
+}
+
+fn readCaskPinned(db: *sqlite.Database, token: []const u8) !bool {
+    var stmt = try db.prepare("SELECT pinned FROM casks WHERE token = ?1 LIMIT 1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    const has = try stmt.step();
+    if (!has) return error.NotFound;
+    return stmt.columnBool(0);
+}
+
+test "recordInstall preserves an existing pinned flag (force-upgrade keeps the hold)" {
+    var t = try openTempCaskDb("preserve_pin");
+    defer {
+        t.db.close();
+        malt.fs_compat.deleteTreeAbsolute(t.dir) catch {};
+    }
+
+    // Seed firefox at version 1 with pinned = 1.
+    try t.db.exec(
+        \\INSERT INTO casks (token, name, version, url, pinned)
+        \\VALUES ('firefox', 'Firefox', '123.0', 'https://example.invalid', 1);
+    );
+    try std.testing.expectEqual(true, try readCaskPinned(&t.db, "firefox"));
+
+    // Simulate a force-upgrade rewriting the row at version 200.
+    var c2 = try cask.parseCask(std.testing.allocator, test_cask_json_v2);
+    defer c2.deinit();
+    try cask.recordInstall(&t.db, &c2, "/Applications/Firefox.app");
+
+    try std.testing.expectEqual(true, try readCaskPinned(&t.db, "firefox"));
+}
+
+test "recordInstall on a fresh cask defaults pinned to 0" {
+    var t = try openTempCaskDb("fresh_pin");
+    defer {
+        t.db.close();
+        malt.fs_compat.deleteTreeAbsolute(t.dir) catch {};
+    }
+
+    var c2 = try cask.parseCask(std.testing.allocator, test_cask_json_v2);
+    defer c2.deinit();
+    try cask.recordInstall(&t.db, &c2, "/Applications/Firefox.app");
+
+    try std.testing.expectEqual(false, try readCaskPinned(&t.db, "firefox"));
+}
+
 // --- parseAppName ---
 
 test "parseAppName extracts app from artifacts" {

@@ -103,6 +103,7 @@ pub fn migrate(db: *sqlite.Database) sqlite.SqliteError!void {
     const ver = try currentVersion(db);
     if (ver < 2) try migrateV1toV2(db);
     if (ver < 3) try migrateV2toV3(db);
+    if (ver < 4) try migrateV3toV4(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -170,6 +171,36 @@ fn migrateV2toV3(db: *sqlite.Database) sqlite.SqliteError!void {
     }
 
     try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (3);");
+
+    try db.commit();
+}
+
+/// v4 — extend `pinned` to casks so `mt pin <cask>` and the
+/// `--pinned-only` / `--pinned` audit surface are symmetric across
+/// formulas and casks.
+fn migrateV3toV4(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    // PRAGMA-guarded ALTER so the migration is idempotent on a DB that
+    // already carries the column (re-runs against fresh fixtures).
+    var have_column = false;
+    {
+        var stmt = try db.prepare("PRAGMA table_info(casks);");
+        defer stmt.finalize();
+        while (try stmt.step()) {
+            const name = stmt.columnText(1) orelse continue;
+            if (std.mem.eql(u8, std.mem.sliceTo(name, 0), "pinned")) {
+                have_column = true;
+                break;
+            }
+        }
+    }
+    if (!have_column) {
+        try db.exec("ALTER TABLE casks ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;");
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (4);");
 
     try db.commit();
 }

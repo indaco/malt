@@ -165,6 +165,97 @@ test "isPinned reflects DB column" {
     try testing.expect(!cli_pin.isPinned(&db, "missing"));
 }
 
+fn insertCask(db: *sqlite.Database, token: []const u8, pinned: bool) !void {
+    var buf: [512]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &buf,
+        "INSERT INTO casks (token, name, version, url, pinned) VALUES ('{s}', '{s}', '120.0', 'https://example.invalid', {d});",
+        .{ token, token, @intFromBool(pinned) },
+    );
+    try db.exec(sql);
+}
+
+fn readCaskPinned(db: *sqlite.Database, token: []const u8) !bool {
+    var stmt = try db.prepare("SELECT pinned FROM casks WHERE token = ?1 LIMIT 1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    const has = try stmt.step();
+    if (!has) return error.NotFound;
+    return stmt.columnBool(0);
+}
+
+test "mt pin <cask-token> falls through kegs and sets casks.pinned" {
+    const path = try setupPrefix("pin_cask_set");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openDb(path);
+        defer db.close();
+        try insertCask(&db, "firefox", false);
+    }
+
+    try cli_pin.execute(testing.allocator, &.{"firefox"});
+
+    var db = try openDb(path);
+    defer db.close();
+    try testing.expectEqual(true, try readCaskPinned(&db, "firefox"));
+}
+
+test "mt unpin <cask-token> clears casks.pinned" {
+    const path = try setupPrefix("unpin_cask_clear");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openDb(path);
+        defer db.close();
+        try insertCask(&db, "slack", true);
+    }
+
+    try cli_pin.executeUnpin(testing.allocator, &.{"slack"});
+
+    var db = try openDb(path);
+    defer db.close();
+    try testing.expectEqual(false, try readCaskPinned(&db, "slack"));
+}
+
+test "mt pin <cask> is idempotent — re-pinning a cask still succeeds" {
+    const path = try setupPrefix("pin_cask_idempotent");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openDb(path);
+        defer db.close();
+        try insertCask(&db, "obsidian", true);
+    }
+
+    try cli_pin.execute(testing.allocator, &.{"obsidian"});
+
+    var db = try openDb(path);
+    defer db.close();
+    try testing.expectEqual(true, try readCaskPinned(&db, "obsidian"));
+}
+
+test "isPinned reflects casks.pinned via fall-through" {
+    const path = try setupPrefix("ispinned_cask");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openDb(path);
+    defer db.close();
+    try insertCask(&db, "loose-cask", false);
+    try insertCask(&db, "held-cask", true);
+
+    try testing.expect(!cli_pin.isPinned(&db, "loose-cask"));
+    try testing.expect(cli_pin.isPinned(&db, "held-cask"));
+}
+
 test "mt pin is idempotent — re-pinning is a no-op success" {
     const path = try setupPrefix("pin_idempotent");
     defer testing.allocator.free(path);

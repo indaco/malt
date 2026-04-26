@@ -154,12 +154,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             pinned_only = true;
         }
     }
-    // `--pinned-only` is formula-scoped: the casks table has no `pinned`
-    // column, so any cask scan would be vacuous. Force the formula scope.
-    if (pinned_only) {
-        cask_only = false;
-        formula_only = true;
-    }
+    // `--pinned-only` covers both formulas and casks now that the casks
+    // table has its own `pinned` column. The flag narrows the rows each
+    // section loads, but does not narrow the scope.
     // `--json` and `--quiet` are stripped by the global parser in main.zig.
     const json_mode = output.isJson();
 
@@ -199,7 +196,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         formula_count = try emitOutdatedFormulas(allocator, &db, &api, cache_dir, workers_override, stdout, json_mode, filter);
     }
     if (!formula_only) {
-        cask_count = try emitOutdatedCasks(allocator, &db, &api, cache_dir, workers_override, stdout, json_mode);
+        const filter: KegFilter = if (pinned_only) .pinned_only else .all;
+        cask_count = try emitOutdatedCasks(allocator, &db, &api, cache_dir, workers_override, stdout, json_mode, filter);
     }
 
     // Single end-of-run summary so we never print "All casks are up to
@@ -227,8 +225,23 @@ pub fn loadFormulaRows(
     return loadKegRows(allocator, db, sql);
 }
 
-/// Caller-side free for any rows returned by `loadFormulaRows` (or the
-/// internal cask query). Pairs with the allocator passed in.
+/// Cask sibling of `loadFormulaRows`. Same lifetime contract; pinned
+/// filter swaps in `WHERE pinned = 1` so `--pinned-only` walks the
+/// pinned-cask audit path symmetrically with formulas.
+pub fn loadCaskRows(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    filter: KegFilter,
+) ![]KegRow {
+    const sql: [:0]const u8 = switch (filter) {
+        .all => "SELECT token, version FROM casks ORDER BY token;",
+        .pinned_only => "SELECT token, version FROM casks WHERE pinned = 1 ORDER BY token;",
+    };
+    return loadKegRows(allocator, db, sql);
+}
+
+/// Caller-side free for any rows returned by `loadFormulaRows` /
+/// `loadCaskRows`. Pairs with the allocator passed in.
 pub fn freeKegRows(allocator: std.mem.Allocator, rows: []KegRow) void {
     for (rows) |r| {
         allocator.free(r.name);
@@ -294,8 +307,9 @@ fn emitOutdatedCasks(
     workers_override: ?usize,
     stdout: *std.Io.Writer,
     json_mode: bool,
+    filter: KegFilter,
 ) !usize {
-    const rows = try loadKegRows(allocator, db, "SELECT token, version FROM casks ORDER BY token;");
+    const rows = try loadCaskRows(allocator, db, filter);
     defer freeKegRows(allocator, rows);
 
     const entries = try collectOutdatedCasks(allocator, api, cache_dir, rows, workers_override);

@@ -140,7 +140,11 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return error.Aborted;
     };
 
-    // Update DB: delete old record, insert new one
+    // Update DB: delete old record, insert new one. Capture the old
+    // pin BEFORE the delete so the new row can inherit it — rolling
+    // back a held formula must not silently clear the user's hold.
+    const old_pinned = capturePinnedById(&db, current_id);
+
     db.beginTransaction() catch return error.Aborted;
     errdefer db.rollback();
 
@@ -154,14 +158,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     {
         var ins = db.prepare(
-            "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason)" ++
-                " VALUES (?1, ?1, ?2, ?3, ?4, 'direct');",
+            "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason, pinned)" ++
+                " VALUES (?1, ?1, ?2, ?3, ?4, 'direct', ?5);",
         ) catch return error.Aborted;
         defer ins.finalize();
         ins.bindText(1, name) catch return error.Aborted;
         ins.bindText(2, target.version) catch return error.Aborted;
         ins.bindText(3, target.sha256) catch return error.Aborted;
         ins.bindText(4, keg.path) catch return error.Aborted;
+        ins.bindInt(5, @intFromBool(old_pinned)) catch return error.Aborted;
         // Step failure inside the txn must trigger rollback, not a silent commit.
         _ = ins.step() catch return error.Aborted;
     }
@@ -182,4 +187,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     db.commit() catch return error.Aborted;
 
     output.info("{s} rolled back to {s}", .{ name, target.version });
+}
+
+/// Returns the `pinned` flag of the keg row identified by `keg_id`, or
+/// false if the row is missing or the read fails. Pub for tests; used
+/// inside `execute` to snapshot the hold across a DELETE/INSERT swap.
+pub fn capturePinnedById(db: *sqlite.Database, keg_id: i64) bool {
+    var stmt = db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;") catch return false;
+    defer stmt.finalize();
+    stmt.bindInt(1, keg_id) catch return false;
+    if (!(stmt.step() catch false)) return false;
+    return stmt.columnBool(0);
 }

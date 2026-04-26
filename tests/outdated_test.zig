@@ -257,6 +257,76 @@ fn insertKeg(db: *sqlite.Database, name: []const u8, pinned: bool) !void {
     try db.exec(sql);
 }
 
+fn insertCask(db: *sqlite.Database, token: []const u8, pinned: bool) !void {
+    var buf: [512]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &buf,
+        "INSERT INTO casks (token, name, version, url, pinned) VALUES ('{s}', '{s}', '120.0', 'https://example.invalid', {d});",
+        .{ token, token, @intFromBool(pinned) },
+    );
+    try db.exec(sql);
+}
+
+test "loadCaskRows .pinned_only returns only pinned casks" {
+    const path = try setupPinnedPrefix("filter_pinned_casks");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertCask(&db, "loose-cask", false);
+    try insertCask(&db, "held-one", true);
+    try insertCask(&db, "held-two", true);
+
+    const rows = try outdated_mod.loadCaskRows(testing.allocator, &db, .pinned_only);
+    defer outdated_mod.freeKegRows(testing.allocator, rows);
+
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqualStrings("held-one", rows[0].name);
+    try testing.expectEqualStrings("held-two", rows[1].name);
+}
+
+test "loadCaskRows .all returns every installed cask" {
+    const path = try setupPinnedPrefix("filter_all_casks");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertCask(&db, "loose-cask", false);
+    try insertCask(&db, "held-cask", true);
+
+    const rows = try outdated_mod.loadCaskRows(testing.allocator, &db, .all);
+    defer outdated_mod.freeKegRows(testing.allocator, rows);
+
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqualStrings("held-cask", rows[0].name);
+    try testing.expectEqualStrings("loose-cask", rows[1].name);
+}
+
+test "outdated execute --pinned-only walks pinned casks alongside formulas" {
+    const path = try setupPinnedPrefix("exec_pinned_mixed");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openSeededDb(path);
+        defer db.close();
+        try insertKeg(&db, "loose", false);
+        try insertCask(&db, "free-cask", false);
+        try insertCask(&db, "held-cask", true);
+    }
+
+    // Cask-side row exists and is pinned: the audit must visit it instead of
+    // short-circuiting to formula-only scope. With no API cache the row drops
+    // out of the result silently — the success contract is "no error, no
+    // formula-only override".
+    try outdated_mod.execute(testing.allocator, &.{"--pinned-only"});
+}
+
 test "loadFormulaRows .pinned_only returns only pinned rows" {
     const path = try setupPinnedPrefix("filter_pinned");
     defer testing.allocator.free(path);

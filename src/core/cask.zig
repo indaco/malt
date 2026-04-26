@@ -68,9 +68,13 @@ pub fn parseCask(allocator: std.mem.Allocator, json_bytes: []const u8) !Cask {
 }
 
 /// Record cask installation in database.
+/// The COALESCE subquery on `pinned` carries any existing user pin
+/// across INSERT OR REPLACE so a force-upgrade doesn't silently clear
+/// the hold; first-time installs default to 0.
 pub fn recordInstall(db: *sqlite.Database, cask: *const Cask, app_path: ?[]const u8) sqlite.SqliteError!void {
     var stmt = try db.prepare(
-        "INSERT OR REPLACE INTO casks (token, name, version, url, sha256, app_path, auto_updates) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+        "INSERT OR REPLACE INTO casks (token, name, version, url, sha256, app_path, auto_updates, pinned)" ++
+            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE((SELECT pinned FROM casks WHERE token = ?1), 0));",
     );
     defer stmt.finalize();
 
