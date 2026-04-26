@@ -119,6 +119,7 @@ fn cmdLogs(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     const name = rest[0];
     var tail_n: usize = 50;
     var stream: enum { stdout, stderr } = .stdout;
+    var follow = false;
     var i: usize = 1;
     while (i < rest.len) : (i += 1) {
         const a = rest[i];
@@ -127,6 +128,8 @@ fn cmdLogs(allocator: std.mem.Allocator, rest: []const []const u8) !void {
             tail_n = std.fmt.parseInt(usize, rest[i], 10) catch 50;
         } else if (std.mem.eql(u8, a, "--stderr")) {
             stream = .stderr;
+        } else if (std.mem.eql(u8, a, "--follow") or std.mem.eql(u8, a, "-f")) {
+            follow = true;
         }
     }
     const path = try supervisor.logPath(allocator, name, if (stream == .stdout) .stdout else .stderr);
@@ -135,7 +138,12 @@ fn cmdLogs(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     var write_buf: [4096]u8 = undefined;
     var stdout_writer = stdout.writer(&write_buf);
     const w = &stdout_writer.interface;
-    try supervisor.tailLog(allocator, path, tail_n, w);
+    if (follow) {
+        const main_mod = @import("../main.zig");
+        try supervisor.followLog(allocator, path, tail_n, w, main_mod.isInterrupted);
+    } else {
+        try supervisor.tailLog(allocator, path, tail_n, w);
+    }
     try w.flush();
 }
 
@@ -162,8 +170,9 @@ fn printHelp() !void {
         \\  stop <name>       Boot the service out of launchd.
         \\  restart <name>    stop then start.
         \\  status [name]     Show registered state (falls back to list).
-        \\  logs <name> [--tail N] [--stderr]
+        \\  logs <name> [--tail N] [--stderr] [--follow|-f]
         \\                    Print the last N lines of the service log.
+        \\                    --follow / -f tails appended bytes until SIGINT.
         \\
     ;
     const f = fs_compat.stderrFile();

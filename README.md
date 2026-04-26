@@ -503,6 +503,7 @@ mt services restart postgresql@16
 mt services status postgresql@16         # combined DB + launchctl state
 mt services logs postgresql@16 --tail 50 # last 50 lines of stdout
 mt services logs postgresql@16 --stderr  # read stderr instead
+mt services logs postgresql@16 -f        # tail and follow until SIGINT
 ```
 
 | Subcommand | Description                                                                |
@@ -512,7 +513,7 @@ mt services logs postgresql@16 --stderr  # read stderr instead
 | `stop`     | `launchctl bootout` the service                                            |
 | `restart`  | `stop` then `start`                                                        |
 | `status`   | Combined DB record + live `launchctl list` state                           |
-| `logs`     | Tail `stdout.log` (or `stderr.log` with `--stderr`); `--tail N` sets count |
+| `logs`     | Tail `stdout.log` (or `stderr.log` with `--stderr`); `--tail N` sets count, `--follow`/`-f` streams appended bytes until SIGINT |
 
 Services are registered automatically when an installed formula carries a `service` block (e.g. `postgresql@16`, `redis`). State lives at `{prefix}/var/malt/services/<name>/` (plist + log files) and in the SQLite `services` table. Currently macOS-only — Linux/Windows return `OsNotSupported`.
 

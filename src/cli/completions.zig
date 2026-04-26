@@ -151,7 +151,7 @@ pub const bash_script =
     \\        which)            cmd_flags="--json" ;;
     \\        migrate|rollback) cmd_flags="--dry-run" ;;
     \\        link)             cmd_flags="--overwrite --force -f" ;;
-    \\        services)         cmd_flags="--tail --stderr --system --json" ;;
+    \\        services)         cmd_flags="--tail --stderr --follow -f --system --json" ;;
     \\        bundle)           cmd_flags="--dry-run --format --from-installed --purge" ;;
     \\    esac
     \\
@@ -570,6 +570,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command services' -f -a 'logs'    -d 'Tail a service log'
     \\    complete -c $__malt_bin -n '__malt_using_command services' -l tail   -d 'Number of trailing log lines'
     \\    complete -c $__malt_bin -n '__malt_using_command services' -l stderr -d 'Read stderr instead of stdout'
+    \\    complete -c $__malt_bin -n '__malt_using_command services' -l follow -s f -d 'Tail appended bytes until SIGINT'
     \\
     \\    # bundle — sub-subcommands
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'install' -d 'Install Brewfile/Maltfile.json members'
