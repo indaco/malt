@@ -48,6 +48,7 @@ pub const cli_migrate = @import("cli/migrate.zig");
 pub const cli_info = @import("cli/info.zig");
 pub const cli_uses = @import("cli/uses.zig");
 pub const cli_which = @import("cli/which.zig");
+pub const cli_outdated = @import("cli/outdated.zig");
 pub const cli_version_update = @import("cli/version_update.zig");
 pub const update_cleanup = @import("update/cleanup.zig");
 pub const update_origin = @import("update/origin.zig");

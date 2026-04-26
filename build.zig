@@ -180,6 +180,7 @@ pub fn build(b: *std.Build) void {
         "tests/patcher_test.zig",
         "tests/pin_test.zig",
         "tests/shellenv_test.zig",
+        "tests/outdated_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");
