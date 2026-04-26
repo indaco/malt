@@ -235,17 +235,19 @@ mt upgrade <package>                     # upgrade a specific formula or cask
 mt upgrade --cask                        # upgrade all outdated casks
 mt upgrade --formula                     # upgrade all outdated formulas
 mt upgrade --dry-run                     # show what would be upgraded
+mt upgrade --pinned --dry-run            # audit pinned kegs for drift (no mutation)
 mt upgrade --force <package>             # bypass pin protection
 ```
 
-| Flag            | Description                       |
-| --------------- | --------------------------------- |
-| `--cask`        | Upgrade casks only                |
-| `--formula`     | Upgrade formulas only             |
-| `--dry-run`     | Preview without upgrading         |
-| `--force`, `-f` | Bypass pin protection (dangerous) |
+| Flag            | Description                                          |
+| --------------- | ---------------------------------------------------- |
+| `--cask`        | Upgrade casks only                                   |
+| `--formula`     | Upgrade formulas only                                |
+| `--dry-run`     | Preview without upgrading                            |
+| `--pinned`      | Audit pinned kegs only (needs `--dry-run`/`--force`) |
+| `--force`, `-f` | Bypass pin protection (dangerous)                    |
 
-Pinned kegs (`mt pin <name>`) are skipped with a dim "pinned, skipped" line; pass `--force` to override the pin for a single run. Formula upgrades install the new version, verify it, switch symlinks atomically, and only remove the old version after success. On failure, the old version is restored automatically.
+Pinned kegs (`mt pin <name>`) are skipped with a dim "pinned, skipped" line; pass `--force` to override the pin for a single run. `--pinned --dry-run` walks pinned kegs end-to-end so you can see the upstream drift without mutating anything — useful for CVE watch on held-back versions. Formula upgrades install the new version, verify it, switch symlinks atomically, and only remove the old version after success. On failure, the old version is restored automatically.
 
 ### `mt pin` / `mt unpin`
 
@@ -277,16 +279,18 @@ mt outdated
 mt outdated --json
 mt outdated --cask
 mt outdated --formula
+mt outdated --pinned-only                # CVE watch on held-back versions
 ```
 
-| Flag            | Description                 |
-| --------------- | --------------------------- |
-| `--json`        | Output as JSON              |
-| `--formula`     | Show outdated formulas only |
-| `--cask`        | Show outdated casks only    |
-| `--quiet`, `-q` | Suppress status messages    |
+| Flag            | Description                             |
+| --------------- | --------------------------------------- |
+| `--json`        | Output as JSON                          |
+| `--formula`     | Show outdated formulas only             |
+| `--cask`        | Show outdated casks only                |
+| `--pinned-only` | Audit pinned kegs only (formula-scoped) |
+| `--quiet`, `-q` | Suppress status messages                |
 
-Compares installed versions against the latest from the Homebrew API. Checks both formulas and casks by default.
+Compares installed versions against the latest from the Homebrew API. Checks both formulas and casks by default. `--pinned-only` narrows the scan to pinned kegs so you can see when an upstream release supersedes the version you've held back — pair with `mt upgrade --pinned --dry-run` for the full audit/preview pair.
 
 ```text
 wget (1.24.5) < 1.25.0

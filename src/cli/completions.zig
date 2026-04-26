@@ -142,8 +142,8 @@ pub const bash_script =
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
     \\        uninstall|remove) cmd_flags="--force --zap --dry-run" ;;
-    \\        upgrade)          cmd_flags="--all --cask --formula --dry-run --force -f" ;;
-    \\        outdated)         cmd_flags="--json --formula --cask --quiet -q" ;;
+    \\        upgrade)          cmd_flags="--all --cask --formula --dry-run --pinned --force -f" ;;
+    \\        outdated)         cmd_flags="--json --formula --cask --pinned-only --quiet -q" ;;
     \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --json --quiet -q" ;;
     \\        info)             cmd_flags="--formula --cask --json" ;;
     \\        search)           cmd_flags="--formula --cask --json" ;;
@@ -262,6 +262,7 @@ pub const zsh_script =
     \\                        '--cask[Upgrade casks only]' \
     \\                        '--formula[Upgrade formulas only]' \
     \\                        '--dry-run[Show what would be upgraded]' \
+    \\                        '--pinned[Audit pinned kegs (requires --dry-run or --force)]' \
     \\                        '(--force -f)'{--force,-f}'[Bypass pin protection]' \
     \\                        '*::package:'
     \\                    ;;
@@ -283,6 +284,7 @@ pub const zsh_script =
     \\                        '--json[Output as JSON]' \
     \\                        '--formula[Show outdated formulas only]' \
     \\                        '--cask[Show outdated casks only]' \
+    \\                        '--pinned-only[Audit pinned kegs only]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress status messages]'
     \\                    ;;
     \\                list|ls)
@@ -488,12 +490,14 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l cask    -d 'Casks only'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l formula -d 'Formulas only'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l dry-run -d 'Preview'
+    \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l pinned  -d 'Audit pinned kegs (needs --dry-run or --force)'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -s f -l force -d 'Bypass pin protection'
     \\
     \\    # outdated
-    \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l json    -d 'JSON output'
-    \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l formula -d 'Formulas only'
-    \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l cask    -d 'Casks only'
+    \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l json        -d 'JSON output'
+    \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l formula     -d 'Formulas only'
+    \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l cask        -d 'Casks only'
+    \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l pinned-only -d 'Pinned kegs only'
     \\
     \\    # list / ls
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l versions -d 'Show version numbers'
