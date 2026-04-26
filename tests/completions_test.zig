@@ -101,3 +101,15 @@ test "all install completions expose --local" {
     try expectContains(completions.zsh_script, "--local");
     try expectContains(completions.fish_script, "-l local");
 }
+
+test "all outdated completions expose --refresh" {
+    try expectContains(completions.bash_script, "--refresh");
+    try expectContains(completions.zsh_script, "--refresh");
+    try expectContains(completions.fish_script, "-l refresh");
+}
+
+test "all update completions expose --check" {
+    try expectContains(completions.bash_script, "--check");
+    try expectContains(completions.zsh_script, "--check");
+    try expectContains(completions.fish_script, "-l check");
+}

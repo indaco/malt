@@ -143,7 +143,8 @@ pub const bash_script =
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
     \\        uninstall|remove) cmd_flags="--force --zap --dry-run" ;;
     \\        upgrade)          cmd_flags="--all --cask --formula --dry-run --pinned --force -f" ;;
-    \\        outdated)         cmd_flags="--json --formula --cask --pinned-only --quiet -q" ;;
+    \\        outdated)         cmd_flags="--json --formula --cask --pinned-only --refresh --quiet -q" ;;
+    \\        update)           cmd_flags="--check --quiet -q" ;;
     \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --json --quiet -q" ;;
     \\        info)             cmd_flags="--formula --cask --json" ;;
     \\        search)           cmd_flags="--formula --cask --json" ;;
@@ -285,6 +286,12 @@ pub const zsh_script =
     \\                        '--formula[Show outdated formulas only]' \
     \\                        '--cask[Show outdated casks only]' \
     \\                        '--pinned-only[Audit pinned formulas + casks only]' \
+    \\                        '--refresh[Force live recompute, bypass the cached snapshot]' \
+    \\                        '(--quiet -q)'{--quiet,-q}'[Suppress status messages]'
+    \\                    ;;
+    \\                update)
+    \\                    _arguments \
+    \\                        '--check[Refresh only the outdated snapshot, skip API cache wipe]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress status messages]'
     \\                    ;;
     \\                list|ls)
@@ -498,6 +505,10 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l formula     -d 'Formulas only'
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l cask        -d 'Casks only'
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l pinned-only -d 'Pinned formulas + casks only'
+    \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l refresh     -d 'Force live recompute, bypass the cached snapshot'
+    \\
+    \\    # update
+    \\    complete -c $__malt_bin -n '__malt_using_command update' -l check -d 'Refresh only the outdated snapshot, skip API cache wipe'
     \\
     \\    # list / ls
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l versions -d 'Show version numbers'
