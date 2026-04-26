@@ -20,7 +20,7 @@ const ghcr_mod = @import("../net/ghcr.zig");
 const help = @import("help.zig");
 const pin_mod = @import("pin.zig");
 
-const UpgradeFlag = enum { quiet, cask, formula, dry_run, force };
+const UpgradeFlag = enum { quiet, cask, formula, dry_run, force, pinned };
 
 const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     .{ "-q", .quiet },
@@ -30,12 +30,16 @@ const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     .{ "--dry-run", .dry_run },
     .{ "--force", .force },
     .{ "-f", .force },
+    .{ "--pinned", .pinned },
 });
 
 /// True when this name should be skipped due to a user pin. Pure gate so
 /// the `--force` semantics are testable without dragging in the API.
-pub fn pinSkip(db: *sqlite.Database, name: []const u8, force: bool) bool {
-    if (force) return false;
+/// `audit_mode` lets `--pinned --dry-run` walk pinned kegs end-to-end so
+/// the user can see the drift; without that escape, every row would
+/// short-circuit before the API check.
+pub fn pinSkip(db: *sqlite.Database, name: []const u8, force: bool, audit_mode: bool) bool {
+    if (force or audit_mode) return false;
     return pin_mod.isPinned(db, name);
 }
 
@@ -46,6 +50,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var formula_only = false;
     var dry_run = output.isDryRun();
     var force = false;
+    var pinned_only = false;
     var pkg_name: ?[]const u8 = null;
 
     // StaticStringMap + exhaustive switch: every flag routes to a handler.
@@ -56,8 +61,21 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             .formula => formula_only = true,
             .dry_run => dry_run = true,
             .force => force = true,
+            .pinned => pinned_only = true,
         } else if (arg.len > 0 and arg[0] != '-') {
             if (pkg_name == null) pkg_name = arg;
+        }
+    }
+
+    if (pinned_only) {
+        // Casks lack a `pinned` column; the audit is formula-scoped.
+        cask_only = false;
+        formula_only = true;
+        // Without --dry-run or --force the audit would just print
+        // "pinned, skipped" for every row - refuse rather than waste cycles.
+        if (!dry_run and !force) {
+            output.err("--pinned requires --dry-run (audit) or --force (override)", .{});
+            return error.Aborted;
         }
     }
 
@@ -102,7 +120,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Upgrade a specific package — try formula first, then cask
         if (!cask_only) {
             if (isFormulaInstalled(&db, name)) {
-                upgradeFormula(allocator, name, &db, &api, &http, prefix, dry_run, force) catch {
+                upgradeFormula(allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only) catch {
                     any_failed = true;
                 };
                 if (any_failed) return error.Aborted;
@@ -110,13 +128,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
         }
         // Not a formula (or --cask): try cask
-        upgradeCask(allocator, name, &db, &api, prefix, dry_run, force) catch {
+        upgradeCask(allocator, name, &db, &api, prefix, dry_run, force, pinned_only) catch {
             any_failed = true;
         };
     } else {
         // Upgrade all
         if (!cask_only) {
-            upgradeAllFormulas(allocator, &db, &api, &http, prefix, dry_run, force) catch {
+            upgradeAllFormulas(allocator, &db, &api, &http, prefix, dry_run, force, pinned_only) catch {
                 any_failed = true;
             };
         }
@@ -152,10 +170,13 @@ fn upgradeFormula(
     prefix: [:0]const u8,
     dry_run: bool,
     force: bool,
+    audit_mode: bool,
 ) !void {
     // Honor pins before any network or filesystem work — the whole
-    // point is that a pinned keg never gets touched.
-    if (pinSkip(db, name, force)) {
+    // point is that a pinned keg never gets touched. Audit mode
+    // (`--pinned --dry-run`) walks pinned kegs end-to-end so the user
+    // sees the drift, but the dry-run gate still blocks any mutation.
+    if (pinSkip(db, name, force, audit_mode)) {
         output.dim("{s} is pinned, skipped", .{name});
         return;
     }
@@ -431,8 +452,13 @@ fn upgradeAllFormulas(
     prefix: [:0]const u8,
     dry_run: bool,
     force: bool,
+    pinned_only: bool,
 ) !void {
-    var stmt = db.prepare("SELECT name, version FROM kegs ORDER BY name;") catch return;
+    const sql: [:0]const u8 = if (pinned_only)
+        "SELECT name, version FROM kegs WHERE pinned = 1 ORDER BY name;"
+    else
+        "SELECT name, version FROM kegs ORDER BY name;";
+    var stmt = db.prepare(sql) catch return;
     defer stmt.finalize();
 
     // Collect names first to avoid holding the statement open during upgrade
@@ -453,7 +479,8 @@ fn upgradeAllFormulas(
     }
 
     if (names.items.len == 0) {
-        output.info("No formulas installed.", .{});
+        // Quiet on the audit path: "no pinned kegs" is the normal idle state.
+        if (!pinned_only) output.info("No formulas installed.", .{});
         return;
     }
 
@@ -464,7 +491,7 @@ fn upgradeAllFormulas(
     defer failed_names.deinit(allocator);
 
     for (names.items) |name| {
-        upgradeFormula(allocator, name, db, api, http, prefix, dry_run, force) catch {
+        upgradeFormula(allocator, name, db, api, http, prefix, dry_run, force, pinned_only) catch {
             failed_count += 1;
             // failed_count is the authoritative counter; list is for UX only.
             failed_names.append(allocator, name) catch {};
@@ -483,8 +510,8 @@ fn upgradeAllFormulas(
 // Cask upgrade
 // ---------------------------------------------------------------------------
 
-fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool) !void {
-    if (pinSkip(db, token, force)) {
+fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, audit_mode: bool) !void {
+    if (pinSkip(db, token, force, audit_mode)) {
         output.dim("{s} is pinned, skipped", .{token});
         return;
     }
@@ -573,7 +600,8 @@ fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api
     defer failed_tokens.deinit(allocator);
 
     for (tokens.items) |token| {
-        upgradeCask(allocator, token, db, api, prefix, dry_run, force) catch {
+        // Cask scope never enters audit mode (no `pinned` column).
+        upgradeCask(allocator, token, db, api, prefix, dry_run, force, false) catch {
             failed_count += 1;
             // failed_count is authoritative; list is for UX only.
             failed_tokens.append(allocator, token) catch {};

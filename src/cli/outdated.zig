@@ -30,6 +30,11 @@ pub const KegRow = struct {
     version: []const u8,
 };
 
+/// Scope filter for `loadFormulaRows`. `--pinned-only` swaps in a
+/// pinned-row SQL so the audit path never round-trips the API for kegs
+/// that aren't being protected from upgrade.
+pub const KegFilter = enum { all, pinned_only };
+
 /// Result row for a single outdated package. All slices are owned by
 /// the caller's allocator.
 pub const OutdatedEntry = struct {
@@ -138,13 +143,22 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     var cask_only = false;
     var formula_only = false;
+    var pinned_only = false;
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--cask")) {
             cask_only = true;
         } else if (std.mem.eql(u8, arg, "--formula") or std.mem.eql(u8, arg, "--formulae")) {
             formula_only = true;
+        } else if (std.mem.eql(u8, arg, "--pinned-only")) {
+            pinned_only = true;
         }
+    }
+    // `--pinned-only` is formula-scoped: the casks table has no `pinned`
+    // column, so any cask scan would be vacuous. Force the formula scope.
+    if (pinned_only) {
+        cask_only = false;
+        formula_only = true;
     }
     // `--json` and `--quiet` are stripped by the global parser in main.zig.
     const json_mode = output.isJson();
@@ -181,7 +195,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var formula_count: usize = 0;
     var cask_count: usize = 0;
     if (!cask_only) {
-        formula_count = try emitOutdatedFormulas(allocator, &db, &api, cache_dir, workers_override, stdout, json_mode);
+        const filter: KegFilter = if (pinned_only) .pinned_only else .all;
+        formula_count = try emitOutdatedFormulas(allocator, &db, &api, cache_dir, workers_override, stdout, json_mode, filter);
     }
     if (!formula_only) {
         cask_count = try emitOutdatedCasks(allocator, &db, &api, cache_dir, workers_override, stdout, json_mode);
@@ -195,6 +210,31 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.info("{s}", .{msg});
         }
     }
+}
+
+/// Load installed formula rows, optionally narrowed to pinned-only.
+/// Caller frees with `freeKegRows`. Exposed for tests + the audit path
+/// in `cli/upgrade`; both want the same SQL choice.
+pub fn loadFormulaRows(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    filter: KegFilter,
+) ![]KegRow {
+    const sql: [:0]const u8 = switch (filter) {
+        .all => "SELECT name, version FROM kegs ORDER BY name;",
+        .pinned_only => "SELECT name, version FROM kegs WHERE pinned = 1 ORDER BY name;",
+    };
+    return loadKegRows(allocator, db, sql);
+}
+
+/// Caller-side free for any rows returned by `loadFormulaRows` (or the
+/// internal cask query). Pairs with the allocator passed in.
+pub fn freeKegRows(allocator: std.mem.Allocator, rows: []KegRow) void {
+    for (rows) |r| {
+        allocator.free(r.name);
+        allocator.free(r.version);
+    }
+    allocator.free(rows);
 }
 
 fn loadKegRows(
@@ -226,14 +266,6 @@ fn loadKegRows(
     return rows.toOwnedSlice(allocator);
 }
 
-fn freeKegRows(allocator: std.mem.Allocator, rows: []KegRow) void {
-    for (rows) |r| {
-        allocator.free(r.name);
-        allocator.free(r.version);
-    }
-    allocator.free(rows);
-}
-
 fn emitOutdatedFormulas(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
@@ -242,8 +274,9 @@ fn emitOutdatedFormulas(
     workers_override: ?usize,
     stdout: *std.Io.Writer,
     json_mode: bool,
+    filter: KegFilter,
 ) !usize {
-    const rows = try loadKegRows(allocator, db, "SELECT name, version FROM kegs ORDER BY name;");
+    const rows = try loadFormulaRows(allocator, db, filter);
     defer freeKegRows(allocator, rows);
 
     const entries = try collectOutdatedFormulas(allocator, api, cache_dir, rows, workers_override);
