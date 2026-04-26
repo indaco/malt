@@ -162,6 +162,10 @@ done
 
 # Alias dispatch (`mt` and `malt` both installed in zig-out/bin).
 run_ok t1.alias.mt -- "$(dirname "$MT_BIN")/mt" version
+
+# Help surfaces every documented flag — fast guard against a flag silently
+# disappearing from the help text when its impl gets refactored.
+run_grep t1.help.run.keep '\-\-keep' -- "$MT_BIN" run --help
 # --cleanup is a local-only operation; no network, safe in tier 1.
 run_ok t1.version.update.cleanup -- "$MT_BIN" version update --cleanup
 
@@ -244,11 +248,22 @@ else
 
   # run: already-installed path (no re-download).
   run_ok t3.run.tree -- "$MT_BIN" run tree -- --version
+  # --keep flag must parse on the installed path even though caching
+  # only kicks in for the ephemeral download branch.
+  run_ok t3.run.keep.tree -- "$MT_BIN" run --keep tree -- --version
 
   # purge dry-runs only — never destructive here.
   run_ok t3.purge.store.dry -- "$MT_BIN" purge --store-orphans --dry-run
   run_ok t3.purge.house.dry -- "$MT_BIN" purge --housekeeping --dry-run
   run_ok t3.purge.cache.dry -- "$MT_BIN" purge --cache=7 --dry-run
+
+  # T-060 AC: --keep populates {cache}/run/<sha>/ and a sibling .lock file;
+  # `mt purge --cache` must reach both. Pre-populate a stale slot so the
+  # mtime-based pruner picks it up, then assert the dry-run sees it.
+  mkdir -p "$CACHE/run/maltsmokeslot/jq/1.0/bin"
+  touch -t 202001010000 "$CACHE/run/maltsmokeslot/jq/1.0/bin/jq"
+  touch -t 202001010000 "$CACHE/run/maltsmokeslot.lock"
+  run_grep t3.purge.cache.run-slot 'maltsmokeslot' -- "$MT_BIN" purge --cache=1 --dry-run
 
   # uninstall — removes from sandbox.
   run_ok t3.uninstall -- "$MT_BIN" uninstall tree

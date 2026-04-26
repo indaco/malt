@@ -153,6 +153,7 @@ pub const bash_script =
     \\        link)             cmd_flags="--overwrite --force -f" ;;
     \\        services)         cmd_flags="--tail --stderr --follow -f --system --json" ;;
     \\        bundle)           cmd_flags="--dry-run --format --from-installed --purge" ;;
+    \\        run)              cmd_flags="--keep" ;;
     \\    esac
     \\
     \\    if [[ "$cur" == -* ]]; then
@@ -266,6 +267,11 @@ pub const zsh_script =
     \\                    ;;
     \\                pin|unpin)
     \\                    _arguments '*::keg:'
+    \\                    ;;
+    \\                run)
+    \\                    _arguments \
+    \\                        '--keep[Cache extracted bottle under {cache}/run/<sha256>/]' \
+    \\                        '*::package:'
     \\                    ;;
     \\                which)
     \\                    _arguments \
@@ -526,6 +532,9 @@ pub const fish_script =
     \\    # link
     \\    complete -c $__malt_bin -n '__malt_using_command link' -l overwrite -d 'Replace existing symlinks'
     \\    complete -c $__malt_bin -n '__malt_using_command link' -s f -l force -d 'Same as --overwrite'
+    \\
+    \\    # run
+    \\    complete -c $__malt_bin -n '__malt_using_command run' -l keep -d 'Cache extracted bottle under {cache}/run/<sha256>/'
     \\
     \\    # completions — shell name as positional
     \\    complete -c $__malt_bin -n '__malt_using_command completions' -f -a 'bash zsh fish'

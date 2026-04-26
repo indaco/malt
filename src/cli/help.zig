@@ -219,14 +219,20 @@ const rollback_help =
 ;
 
 const run_help =
-    \\Usage: malt run <package> [-- <args...>]
+    \\Usage: malt run [--keep] <package> [-- <args...>]
     \\
     \\Run a package binary without installing it. Downloads to a
     \\temp directory, executes, and cleans up. If the package is
     \\already installed, runs the installed binary directly.
     \\
+    \\Flags:
+    \\  --keep    Cache the extracted bottle under {cache}/run/<sha256>/
+    \\            so subsequent runs skip download. Wipe with
+    \\            `mt purge --cache`.
+    \\
     \\Example:
     \\  malt run jq -- --version
+    \\  malt run --keep jq -- --version
     \\
 ;
 

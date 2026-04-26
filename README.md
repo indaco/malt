@@ -506,13 +506,13 @@ mt services logs postgresql@16 --stderr  # read stderr instead
 mt services logs postgresql@16 -f        # tail and follow until SIGINT
 ```
 
-| Subcommand | Description                                                                |
-| ---------- | -------------------------------------------------------------------------- |
-| `list`     | Show every registered service with `running` / `loaded` / `stopped`        |
-| `start`    | Generate and `launchctl bootstrap` the service into `gui/<uid>`            |
-| `stop`     | `launchctl bootout` the service                                            |
-| `restart`  | `stop` then `start`                                                        |
-| `status`   | Combined DB record + live `launchctl list` state                           |
+| Subcommand | Description                                                                                                                     |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `list`     | Show every registered service with `running` / `loaded` / `stopped`                                                             |
+| `start`    | Generate and `launchctl bootstrap` the service into `gui/<uid>`                                                                 |
+| `stop`     | `launchctl bootout` the service                                                                                                 |
+| `restart`  | `stop` then `start`                                                                                                             |
+| `status`   | Combined DB record + live `launchctl list` state                                                                                |
 | `logs`     | Tail `stdout.log` (or `stderr.log` with `--stderr`); `--tail N` sets count, `--follow`/`-f` streams appended bytes until SIGINT |
 
 Services are registered automatically when an installed formula carries a `service` block (e.g. `postgresql@16`, `redis`). State lives at `{prefix}/var/malt/services/<name>/` (plist + log files) and in the SQLite `services` table. Currently macOS-only — Linux/Windows return `OsNotSupported`.
@@ -573,9 +573,12 @@ Run a package binary without installing it.
 mt run <package> -- <args...>
 mt run jq -- --version
 mt run ripgrep -- --help
+mt run --keep jq -- --version          # cache the bottle for next run
 ```
 
 Downloads the bottle to a temp directory, extracts the binary, executes it with the provided arguments, and cleans up. If the package is already installed, runs the installed binary directly.
+
+Pass `--keep` to extract under `{cache}/run/<sha256>/` instead of the temp dir; subsequent `mt run` calls for the same bottle skip the download and start instantly. The cache is wiped by `mt purge --cache`.
 
 ### `mt link` / `mt unlink`
 
