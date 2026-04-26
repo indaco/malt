@@ -198,3 +198,30 @@ test "atomicReplace returns SwapFailed when target does not exist" {
 
     try testing.expectError(error.SwapFailed, swap.atomicReplace(p.target, p.new));
 }
+
+test "atomicReplace returns PermissionDenied when target dir is read-only" {
+    // root bypasses POSIX mode bits, so the EACCES path under test cannot
+    // fire — skip rather than mis-pass.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    var p = try Paths.init(testing.allocator, "readonly_dir");
+    defer p.deinit(testing.allocator);
+    try writeFile(p.target, "old");
+    try writeFile(p.new, "new");
+
+    // Drop write access on the parent directory; staging the new binary
+    // next to the target must fail with EACCES, which the swap surfaces
+    // as PermissionDenied for the updater's sudo-fallback path.
+    const dir_z = try testing.allocator.dupeZ(u8, p.dir);
+    defer testing.allocator.free(dir_z);
+    if (std.c.chmod(dir_z.ptr, 0o555) != 0) return error.SkipZigTest;
+    defer _ = std.c.chmod(dir_z.ptr, 0o755);
+
+    try testing.expectError(error.PermissionDenied, swap.atomicReplace(p.target, p.new));
+
+    // Target must still be intact after a permission-denied staging.
+    _ = std.c.chmod(dir_z.ptr, 0o755);
+    const target_contents = try readFile(testing.allocator, p.target);
+    defer testing.allocator.free(target_contents);
+    try testing.expectEqualStrings("old", target_contents);
+}

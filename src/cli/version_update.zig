@@ -213,10 +213,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     output.info("Replacing {s}...", .{self_exe});
-    swap.atomicReplace(self_exe, new_binary) catch |e| switch (e) {
+    const mode_after_self = replaceBinary(allocator, new_binary, self_exe, .user) catch |e| switch (e) {
+        error.SudoSpawnFailed, error.SudoFailed => {
+            output.err("sudo elevation failed for {s}.", .{self_exe});
+            output.info("Manual update: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, self_exe });
+            return error.Aborted;
+        },
         error.StagingFailed, error.SwapFailed => {
-            output.err("Failed to replace {s}. You may need sudo.", .{self_exe});
-            output.info("Manual update: sudo cp {s} {s}", .{ new_binary, self_exe });
+            output.err("Failed to replace {s}.", .{self_exe});
+            output.info("Manual update: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, self_exe });
             return;
         },
         error.RollbackFailed => {
@@ -228,17 +233,20 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.info("  sudo mv {s}.old {s}", .{ self_exe, self_exe });
             return error.Aborted;
         },
+        else => return e,
     };
 
     if (twin_path) |tp| {
         output.info("Replacing {s}...", .{tp});
-        swap.atomicReplace(tp, new_binary) catch |e| {
+        // Pass the post-self mode so the twin re-uses the elevation
+        // decision instead of paying a second sudo prompt.
+        _ = replaceBinary(allocator, new_binary, tp, mode_after_self) catch |e| {
             // Don't roll back self: one updated binary beats a forced
             // downgrade on the one the user just invoked. Surface the
             // manual fix so they can close the gap.
             output.err("Failed to replace {s}: {s}", .{ tp, @errorName(e) });
             output.warn("{s} is now {s} but {s} is still the previous version.", .{ self_exe, latest, tp });
-            output.info("Finish manually: sudo cp {s} {s}", .{ new_binary, tp });
+            output.info("Finish manually: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, tp });
             output.info("Updated to {s} (previous {s} kept at {s}.old)", .{ latest, std.fs.path.basename(self_exe), self_exe });
             return;
         };
@@ -247,6 +255,56 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     output.info("Updated to {s} (previous kept at {s}.old)", .{ latest, self_exe });
+}
+
+/// How the previous swap was carried out. Threaded through twin handling
+/// so a single sudo prompt covers both binaries.
+pub const ReplaceMode = enum { user, sudo };
+
+/// Replace `target` with `new_binary`. In `.user` mode, attempt an
+/// unprivileged atomic swap; on EACCES, escalate via `sudo install`.
+/// In `.sudo` mode, skip the unprivileged attempt entirely so callers
+/// can short-circuit a known-unwritable directory after the first prompt.
+fn replaceBinary(
+    allocator: std.mem.Allocator,
+    new_binary: []const u8,
+    target: []const u8,
+    mode: ReplaceMode,
+) !ReplaceMode {
+    if (mode == .sudo) {
+        try installBinaryViaSudo(allocator, new_binary, target);
+        return .sudo;
+    }
+    swap.atomicReplace(target, new_binary) catch |e| switch (e) {
+        error.PermissionDenied => {
+            output.warn("Cannot write to {s}; escalating with sudo.", .{std.fs.path.dirname(target) orelse target});
+            try installBinaryViaSudo(allocator, new_binary, target);
+            return .sudo;
+        },
+        else => return e,
+    };
+    return .user;
+}
+
+/// Build the argv passed to `sudo install` for the elevation fallback.
+/// `-b -B .old` keeps the same `.old` rollback shape `atomicReplace`
+/// emits, so cleanup paths see one layout regardless of how the swap
+/// happened. macOS BSD-install spelling: GNU's `-S .old` is wrong here.
+pub fn buildSudoInstallArgv(new_binary: []const u8, target: []const u8) [9][]const u8 {
+    return .{ "sudo", "install", "-m", "0755", "-b", "-B", ".old", new_binary, target };
+}
+
+/// Spawn `sudo install` with the user's TTY inherited. Sudo prompts for
+/// the password on its own; we just propagate the exit status.
+fn installBinaryViaSudo(allocator: std.mem.Allocator, new_binary: []const u8, target: []const u8) !void {
+    const argv = buildSudoInstallArgv(new_binary, target);
+    var child = fs_compat.Child.init(&argv, allocator);
+    child.spawn() catch return error.SudoSpawnFailed;
+    const term = child.wait() catch return error.SudoSpawnFailed;
+    switch (term) {
+        .exited => |code| if (code != 0) return error.SudoFailed,
+        else => return error.SudoFailed,
+    }
 }
 
 /// Return the sibling binary path (`malt` ↔ `mt`) next to `self_exe`, but
