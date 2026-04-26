@@ -188,7 +188,27 @@ run_grep t2.info.jq "jq" -- "$MT_BIN" info jq
 run_ok t2.info.json -- "$MT_BIN" info jq --json
 run_ok t2.outdated -- "$MT_BIN" outdated
 run_ok t2.outdated.json -- "$MT_BIN" outdated --json
+run_ok t2.outdated.refresh -- "$MT_BIN" outdated --refresh
 run_ok t2.update -- "$MT_BIN" update
+# Default mt update must not leave a snapshot behind.
+if [[ -e "$CACHE/outdated.json" ]]; then
+  printf '  FAIL  [t2.update.no-snapshot] cache/outdated.json should be absent after mt update\n'
+  FAIL=$((FAIL + 1))
+  FAILURES+=("t2.update.no-snapshot")
+else
+  printf '  PASS  [t2.update.no-snapshot] cache/outdated.json absent\n'
+  PASS=$((PASS + 1))
+fi
+run_ok t2.update.check -- "$MT_BIN" update --check
+# mt update --check must write a parseable snapshot at the documented path.
+if [[ -s "$CACHE/outdated.json" ]] && grep -q '"version":1' "$CACHE/outdated.json"; then
+  printf '  PASS  [t2.update.check.writes-snapshot] cache/outdated.json present\n'
+  PASS=$((PASS + 1))
+else
+  printf '  FAIL  [t2.update.check.writes-snapshot] cache/outdated.json missing or malformed\n'
+  FAIL=$((FAIL + 1))
+  FAILURES+=("t2.update.check.writes-snapshot")
+fi
 run_ok t2.tap.list -- "$MT_BIN" tap
 
 # doctor: README documents exit 0/1/2 as valid semantics — accept all three on a

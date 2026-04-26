@@ -265,10 +265,16 @@ A pinned package is held at its current version: `mt upgrade <name>` skips it wi
 Refresh the local formula/cask metadata cache.
 
 ```bash
-mt update
+mt update                                # wipe API cache + drop snapshot (fast)
+mt update --check                        # write a fresh outdated snapshot only
 ```
 
-Invalidates all entries in the API cache. The next `install`, `search`, or `info` command fetches fresh data from the Homebrew API.
+| Flag            | Description                                                      |
+| --------------- | ---------------------------------------------------------------- |
+| `--check`       | Write a fresh `cache/outdated.json` snapshot; skip API cache wipe |
+| `--quiet`, `-q` | Suppress status messages                                         |
+
+Default `mt update` invalidates the API cache so the next `install`, `search`, or `info` fetches fresh data, and drops any cached `outdated.json` so the next `mt outdated` recomputes against the new world. `--check` is the explicit "warm the snapshot" path for shell-prompt integrations.
 
 ### `mt outdated`
 
@@ -280,17 +286,21 @@ mt outdated --json
 mt outdated --cask
 mt outdated --formula
 mt outdated --pinned-only                # CVE watch on held-back versions
+mt outdated --refresh                    # bypass the cached snapshot
 ```
 
-| Flag            | Description                        |
-| --------------- | ---------------------------------- |
-| `--json`        | Output as JSON                     |
-| `--formula`     | Show outdated formulas only        |
-| `--cask`        | Show outdated casks only           |
-| `--pinned-only` | Audit pinned formulas + casks only |
-| `--quiet`, `-q` | Suppress status messages           |
+| Flag            | Description                                                       |
+| --------------- | ----------------------------------------------------------------- |
+| `--json`        | Output as JSON                                                    |
+| `--formula`     | Show outdated formulas only                                       |
+| `--cask`        | Show outdated casks only                                          |
+| `--pinned-only` | Audit pinned formulas + casks only                                |
+| `--refresh`     | Force live recompute, bypassing the cached snapshot               |
+| `--quiet`, `-q` | Suppress status messages                                          |
 
 Compares installed versions against the latest from the Homebrew API. Checks both formulas and casks by default. `--pinned-only` narrows the scan to pinned packages (formulas + casks) so you can see when an upstream release supersedes the version you've held back — pair with `mt upgrade --pinned --dry-run` for the full audit/preview pair.
+
+**Snapshot cache.** When a fresh `cache/outdated.json` is present, `mt outdated` reads it instead of round-tripping the Homebrew API — making it usable in shell prompts and instant-feedback integrations. The snapshot is filtered through the live DB at read time so an uninstalled or manually-upgraded keg can never appear. The threshold is 24 h by default; override with `MALT_OUTDATED_MAX_AGE=<hours>` (set to `0` to mark every snapshot stale). A stale read warns and recommends `mt update --check`. Snapshots are auto-refreshed after any full live recompute.
 
 ```text
 wget (1.24.5) < 1.25.0

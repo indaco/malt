@@ -209,6 +209,24 @@ pub fn build(b: *std.Build) void {
     malt_lib.addImport("c_clonefile", host_c_mods.c_clonefile);
     malt_lib.addImport("c_mount", host_c_mods.c_mount);
 
+    // --- Snapshot microbench ---
+    // Standalone ReleaseSafe executable that imports the malt lib so it
+    // measures the snapshot helpers without process-spawn overhead.
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("bench/snapshot_bench.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+    });
+    bench_mod.addImport("malt", malt_lib);
+    const bench_exe = b.addExecutable(.{
+        .name = "snapshot_bench",
+        .root_module = bench_mod,
+    });
+    const run_bench = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench-snapshot", "Run the outdated-snapshot microbench");
+    bench_step.dependOn(&run_bench.step);
+
     // Inline `test` blocks inside src/*.zig only run when their file is in
     // the same module as the test root — crossing `addImport("malt", ...)`
     // drops them. This target uses src/lib.zig as the test root so every

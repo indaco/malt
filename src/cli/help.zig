@@ -108,9 +108,13 @@ const upgrade_help =
 ;
 
 const update_help =
-    \\Usage: malt update
+    \\Usage: malt update [flags]
     \\
-    \\Refresh the local formula/cask metadata cache.
+    \\Refresh the local formula/cask metadata cache and the outdated snapshot.
+    \\
+    \\Flags:
+    \\  --check     Refresh only the outdated snapshot (skip API cache wipe)
+    \\  --quiet, -q Suppress status messages
     \\
 ;
 
@@ -124,7 +128,12 @@ const outdated_help =
     \\  --formula      Show outdated formulas only
     \\  --cask         Show outdated casks only
     \\  --pinned-only  Audit pinned formulas + casks only (CVE watch)
+    \\  --refresh      Force live recompute, bypassing the cached snapshot
     \\  --quiet, -q    Suppress status messages
+    \\
+    \\Reads the cached snapshot at {cache}/outdated.json when fresh
+    \\(<= MALT_OUTDATED_MAX_AGE hours, default 24); falls back to a live
+    \\recompute on miss or --refresh.
     \\
 ;
 
