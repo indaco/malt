@@ -52,7 +52,7 @@ test "initSchema runs v1 then migrates to v3" {
     try testing.expect(try tableExists(&tdb.db, "bundle_members"));
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 3), ver);
+    try testing.expectEqual(@as(i64, 4), ver);
 }
 
 test "migrate is idempotent on re-run" {
@@ -64,7 +64,37 @@ test "migrate is idempotent on re-run" {
     try schema.migrate(&tdb.db);
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 3), ver);
+    try testing.expectEqual(@as(i64, 4), ver);
+}
+
+test "v4 migration adds pinned column to casks" {
+    var tdb = try TempDb.init("v4_casks_pinned");
+    defer tdb.deinit();
+
+    try schema.initSchema(&tdb.db);
+
+    // INSERT exercising the new column proves the ALTER landed.
+    try tdb.db.exec(
+        \\INSERT INTO casks(token, name, version, url, pinned)
+        \\VALUES ('firefox', 'firefox', '120.0', 'https://example.invalid', 1);
+    );
+
+    var stmt = try tdb.db.prepare("SELECT pinned FROM casks WHERE token='firefox';");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+}
+
+test "v4 migration is idempotent on re-run" {
+    var tdb = try TempDb.init("v4_idempotent");
+    defer tdb.deinit();
+
+    try schema.initSchema(&tdb.db);
+    try schema.migrate(&tdb.db);
+    try schema.migrate(&tdb.db);
+
+    const ver = try schema.currentVersion(&tdb.db);
+    try testing.expectEqual(@as(i64, 4), ver);
 }
 
 test "v3 migration adds commit_sha column to taps" {

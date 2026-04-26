@@ -208,8 +208,8 @@ pub const zsh_script =
     \\        'rollback:Revert a package to its previous version'
     \\        'link:Create symlinks for an installed keg'
     \\        'unlink:Remove symlinks (keg stays installed)'
-    \\        'pin:Protect an installed keg from upgrade'
-    \\        'unpin:Lift the pin on an installed keg'
+    \\        'pin:Protect an installed formula or cask from upgrade'
+    \\        'unpin:Lift the pin on an installed formula or cask'
     \\        'run:Run a package binary without installing'
     \\        'version:Show version or self-update'
     \\        'completions:Generate shell completion scripts'
@@ -262,7 +262,7 @@ pub const zsh_script =
     \\                        '--cask[Upgrade casks only]' \
     \\                        '--formula[Upgrade formulas only]' \
     \\                        '--dry-run[Show what would be upgraded]' \
-    \\                        '--pinned[Audit pinned kegs (requires --dry-run or --force)]' \
+    \\                        '--pinned[Audit pinned formulas + casks (requires --dry-run or --force)]' \
     \\                        '(--force -f)'{--force,-f}'[Bypass pin protection]' \
     \\                        '*::package:'
     \\                    ;;
@@ -284,7 +284,7 @@ pub const zsh_script =
     \\                        '--json[Output as JSON]' \
     \\                        '--formula[Show outdated formulas only]' \
     \\                        '--cask[Show outdated casks only]' \
-    \\                        '--pinned-only[Audit pinned kegs only]' \
+    \\                        '--pinned-only[Audit pinned formulas + casks only]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress status messages]'
     \\                    ;;
     \\                list|ls)
@@ -456,8 +456,8 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a rollback    -d 'Revert package to previous version'
     \\    complete -c $__malt_bin -n __malt_needs_command -a link        -d 'Create symlinks for a keg'
     \\    complete -c $__malt_bin -n __malt_needs_command -a unlink      -d 'Remove symlinks (keg stays)'
-    \\    complete -c $__malt_bin -n __malt_needs_command -a pin         -d 'Protect an installed keg from upgrade'
-    \\    complete -c $__malt_bin -n __malt_needs_command -a unpin       -d 'Lift the pin on an installed keg'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a pin         -d 'Protect an installed formula or cask from upgrade'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a unpin       -d 'Lift the pin on an installed formula or cask'
     \\    complete -c $__malt_bin -n __malt_needs_command -a run         -d 'Run package binary without installing'
     \\    complete -c $__malt_bin -n __malt_needs_command -a version     -d 'Show version or self-update'
     \\    complete -c $__malt_bin -n __malt_needs_command -a completions -d 'Generate shell completion scripts'
@@ -490,14 +490,14 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l cask    -d 'Casks only'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l formula -d 'Formulas only'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l dry-run -d 'Preview'
-    \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l pinned  -d 'Audit pinned kegs (needs --dry-run or --force)'
+    \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l pinned  -d 'Audit pinned formulas + casks (needs --dry-run or --force)'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -s f -l force -d 'Bypass pin protection'
     \\
     \\    # outdated
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l json        -d 'JSON output'
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l formula     -d 'Formulas only'
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l cask        -d 'Casks only'
-    \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l pinned-only -d 'Pinned kegs only'
+    \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l pinned-only -d 'Pinned formulas + casks only'
     \\
     \\    # list / ls
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l versions -d 'Show version numbers'

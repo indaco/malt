@@ -100,6 +100,41 @@ test "rollback returns error.Aborted when no previous version exists in store" {
     try testing.expectError(error.Aborted, err);
 }
 
+test "capturePinnedById reads the pinned column for a given keg id" {
+    const prefix = "/tmp/malt_rb_capture_pin";
+    malt.fs_compat.makeDirAbsolute(prefix) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+
+    var db = try sqlite.Database.open("/tmp/malt_rb_capture_pin/db.db");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned)
+        \\VALUES ('held', 'held', '1.0', 'sha', '/cellar/held/1.0', 1),
+        \\       ('loose', 'loose', '1.0', 'sha2', '/cellar/loose/1.0', 0);
+    );
+
+    const held_id = blk: {
+        var s = try db.prepare("SELECT id FROM kegs WHERE name = 'held';");
+        defer s.finalize();
+        _ = try s.step();
+        break :blk s.columnInt(0);
+    };
+    const loose_id = blk: {
+        var s = try db.prepare("SELECT id FROM kegs WHERE name = 'loose';");
+        defer s.finalize();
+        _ = try s.step();
+        break :blk s.columnInt(0);
+    };
+
+    try testing.expect(rollback.capturePinnedById(&db, held_id));
+    try testing.expect(!rollback.capturePinnedById(&db, loose_id));
+    // Unknown id collapses to false rather than erroring — matches the
+    // "best-effort, never lose data" stance the rollback flow needs.
+    try testing.expect(!rollback.capturePinnedById(&db, 999_999));
+}
+
 test "schema version table exists" {
     const prefix = "/tmp/malt_sv_test";
     malt.fs_compat.makeDirAbsolute(prefix) catch {};

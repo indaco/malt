@@ -236,6 +236,141 @@ test "buildListJson: --pinned filters formulae to pinned only" {
     );
 }
 
+test "buildListJson: --pinned UNIONs pinned formulas and casks sorted by name" {
+    var t = try TempDb.init("pinned_mixed");
+    defer t.deinit();
+
+    // 'zsh' is the only pinned formula; 'firefox' is the only pinned cask.
+    // 'loose' (formula) and 'slack' (cask) must be excluded by the pinned filter.
+    try insertKeg(&t.db, "loose", "1.0", false);
+    try insertKeg(&t.db, "zsh", "5.9", true);
+    try insertCask(&t.db, "slack", "4.0");
+    try t.db.exec(
+        \\INSERT INTO casks (token, name, version, url, pinned)
+        \\VALUES ('firefox', 'firefox', '120.0', 'https://example.invalid', 1);
+    );
+
+    const out = try runBuild(testing.allocator, &t.db, true, true, true);
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[" ++
+            "{\"name\":\"firefox\",\"version\":\"120.0\",\"type\":\"cask\",\"pinned\":true}," ++
+            "{\"name\":\"zsh\",\"version\":\"5.9\",\"type\":\"formula\",\"pinned\":true}" ++
+            "],\"formulae\":[" ++
+            "{\"name\":\"zsh\",\"version\":\"5.9\",\"pinned\":true}" ++
+            "],\"casks\":[" ++
+            "{\"token\":\"firefox\",\"version\":\"120.0\"}" ++
+            "]",
+        body,
+    );
+}
+
+test "buildListJson: --pinned installed array interleaves formulas and casks by name" {
+    var t = try TempDb.init("pinned_interleave");
+    defer t.deinit();
+
+    // Names chosen so any en-bloc emit (formulas-then-casks or vice versa)
+    // would visibly mis-sort against the cross-kind name order.
+    try insertKeg(&t.db, "alpha", "1.0", true);
+    try insertKeg(&t.db, "charlie", "3.0", true);
+    try t.db.exec(
+        \\INSERT INTO casks (token, name, version, url, pinned)
+        \\VALUES ('bravo', 'bravo', '2.0', 'https://example.invalid', 1),
+        \\       ('delta', 'delta', '4.0', 'https://example.invalid', 1);
+    );
+
+    const out = try runBuild(testing.allocator, &t.db, true, true, true);
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[" ++
+            "{\"name\":\"alpha\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":true}," ++
+            "{\"name\":\"bravo\",\"version\":\"2.0\",\"type\":\"cask\",\"pinned\":true}," ++
+            "{\"name\":\"charlie\",\"version\":\"3.0\",\"type\":\"formula\",\"pinned\":true}," ++
+            "{\"name\":\"delta\",\"version\":\"4.0\",\"type\":\"cask\",\"pinned\":true}" ++
+            "],\"formulae\":[" ++
+            "{\"name\":\"alpha\",\"version\":\"1.0\",\"pinned\":true}," ++
+            "{\"name\":\"charlie\",\"version\":\"3.0\",\"pinned\":true}" ++
+            "],\"casks\":[" ++
+            "{\"token\":\"bravo\",\"version\":\"2.0\"}," ++
+            "{\"token\":\"delta\",\"version\":\"4.0\"}" ++
+            "]",
+        body,
+    );
+}
+
+test "buildListJson: --pinned legacy casks array excludes unpinned casks" {
+    var t = try TempDb.init("pinned_casks_legacy");
+    defer t.deinit();
+
+    try insertCask(&t.db, "loose-cask", "1.0"); // unpinned: must NOT appear
+    try t.db.exec(
+        \\INSERT INTO casks (token, name, version, url, pinned)
+        \\VALUES ('held-cask', 'held-cask', '2.0', 'https://example.invalid', 1);
+    );
+
+    const out = try runBuild(testing.allocator, &t.db, false, true, true);
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[" ++
+            "{\"name\":\"held-cask\",\"version\":\"2.0\",\"type\":\"cask\",\"pinned\":true}" ++
+            "],\"casks\":[" ++
+            "{\"token\":\"held-cask\",\"version\":\"2.0\"}" ++
+            "]",
+        body,
+    );
+}
+
+test "writeHumanOutput --pinned drops the [pinned] tag (every row is pinned by definition)" {
+    var t = try TempDb.init("human_pinned_no_tag");
+    defer t.deinit();
+    try insertKeg(&t.db, "alpha", "1.0", true);
+    try t.db.exec(
+        \\INSERT INTO casks (token, name, version, url, pinned)
+        \\VALUES ('bravo', 'bravo', '2.0', 'https://example.invalid', 1);
+    );
+
+    const out = try runHuman(testing.allocator, &t.db, true, true, false, true, false);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "[pinned]") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "alpha") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "bravo") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "[cask]") != null);
+}
+
+test "writeHumanOutput --pinned merges pinned formulas + casks in one sorted list" {
+    var t = try TempDb.init("human_pinned_mixed");
+    defer t.deinit();
+
+    try insertKeg(&t.db, "loose", "1.0", false);
+    try insertKeg(&t.db, "zsh", "5.9", true);
+    try t.db.exec(
+        \\INSERT INTO casks (token, name, version, url, pinned)
+        \\VALUES ('firefox', 'firefox', '120.0', 'https://example.invalid', 1);
+    );
+    try insertCask(&t.db, "slack", "4.0"); // unpinned, must not appear
+
+    const out = try runHuman(testing.allocator, &t.db, true, true, false, true, false);
+    defer testing.allocator.free(out);
+
+    // Single sorted output: firefox (cask) then zsh (formula). 'loose' and
+    // 'slack' excluded by the pinned filter.
+    try testing.expect(std.mem.indexOf(u8, out, "  ▸ firefox") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "  ▸ zsh") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "loose") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "slack") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "[cask]") != null);
+    const firefox_pos = std.mem.indexOf(u8, out, "firefox").?;
+    const zsh_pos = std.mem.indexOf(u8, out, "zsh").?;
+    try testing.expect(firefox_pos < zsh_pos);
+}
+
 test "buildListJson: output parses as valid JSON" {
     var t = try TempDb.init("valid_json");
     defer t.deinit();

@@ -487,9 +487,11 @@ fn materializeRubyFormula(
 
     var keg_id: i64 = 0;
     {
+        // The COALESCE on `pinned` carries any existing user pin across
+        // INSERT OR REPLACE so a force-reinstall preserves the hold.
         var stmt = db.prepare(
-            "INSERT OR REPLACE INTO kegs (name, full_name, version, tap, store_sha256, cellar_path, install_reason)" ++
-                " VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'direct');",
+            "INSERT OR REPLACE INTO kegs (name, full_name, version, tap, store_sha256, cellar_path, install_reason, pinned)" ++
+                " VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'direct', COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));",
         ) catch return InstallError.RecordFailed;
         defer stmt.finalize();
         stmt.bindText(1, resolved.name) catch return InstallError.RecordFailed;

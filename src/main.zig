@@ -316,7 +316,7 @@ fn printUsage() void {
         \\  rollback      Revert a package to its previous version
         \\  link          Create symlinks for an installed keg
         \\  unlink        Remove symlinks (keg stays installed)
-        \\  pin           Protect an installed keg from `upgrade`
+        \\  pin           Protect an installed formula or cask from `upgrade`
         \\  unpin         Lift the pin so `upgrade` resumes touching it
         \\  run           Run a package binary without installing
         \\  completions   Generate shell completion scripts (bash, zsh, fish)

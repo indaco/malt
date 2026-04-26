@@ -82,13 +82,13 @@ pub fn writeHumanOutput(
 ) !void {
     const quiet = output.isQuiet();
 
-    if (show_formula) {
-        const sql = if (show_pinned)
-            "SELECT name, version, pinned FROM kegs WHERE pinned = 1 ORDER BY name;"
-        else
-            "SELECT name, version, pinned FROM kegs ORDER BY name;";
+    if (show_pinned) {
+        try writePinnedHuman(db, show_formula, show_cask, show_versions, quiet, stdout);
+        return;
+    }
 
-        var stmt = db.prepare(sql) catch return;
+    if (show_formula) {
+        var stmt = db.prepare("SELECT name, version, pinned FROM kegs ORDER BY name;") catch return;
         defer stmt.finalize();
 
         while (stmt.step() catch false) {
@@ -141,6 +141,63 @@ pub fn writeHumanOutput(
             stdout.writeAll("\n") catch return;
         }
     }
+}
+
+/// `--pinned` walks formulas + casks together so the output is a single
+/// sorted list across both kinds, with a `[cask]` tag distinguishing
+/// cask rows. The `[pinned]` tag is dropped — every row is pinned by
+/// definition, so repeating it is noise.
+fn writePinnedHuman(
+    db: *sqlite.Database,
+    show_formula: bool,
+    show_cask: bool,
+    show_versions: bool,
+    quiet: bool,
+    stdout: *std.Io.Writer,
+) !void {
+    const sql = pinnedUnionSql(show_formula, show_cask) orelse return;
+    var stmt = db.prepare(sql) catch return;
+    defer stmt.finalize();
+
+    while (stmt.step() catch false) {
+        const name = stmt.columnText(0) orelse continue;
+        const ver = stmt.columnText(1);
+        const kind = stmt.columnText(2);
+        const name_slice = std.mem.sliceTo(name, 0);
+        const is_cask = if (kind) |k| std.mem.eql(u8, std.mem.sliceTo(k, 0), "cask") else false;
+
+        if (quiet) {
+            stdout.writeAll(name_slice) catch return;
+            stdout.writeAll("\n") catch return;
+            continue;
+        }
+
+        writeBulletPrefix(stdout);
+        stdout.writeAll(name_slice) catch return;
+        if (show_versions) {
+            const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "?";
+            writeStyledSpan(stdout, color.SemanticStyle.detail.code(), " (", ver_slice, ")");
+        }
+        if (is_cask) {
+            writeStyledSpan(stdout, color.SemanticStyle.detail.code(), " [", "cask", "]");
+        }
+        stdout.writeAll("\n") catch return;
+    }
+}
+
+/// Build the SQL that drives the `--pinned` view. The 'formula' / 'cask'
+/// literal column tags each row so the caller can render the right marker.
+fn pinnedUnionSql(show_formula: bool, show_cask: bool) ?[:0]const u8 {
+    if (show_formula and show_cask)
+        return "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 " ++
+            "UNION ALL " ++
+            "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 " ++
+            "ORDER BY name;";
+    if (show_formula)
+        return "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 ORDER BY name;";
+    if (show_cask)
+        return "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 ORDER BY name;";
+    return null;
 }
 
 /// Emit the leading cyan bullet + space, honouring `NO_COLOR`.
@@ -198,8 +255,12 @@ pub fn buildListJson(
 ) !void {
     try w.writeAll("{\"installed\":[");
     var first = true;
-    if (show_formula) try writeFormulaRows(db, w, show_pinned, .installed, &first);
-    if (show_cask) try writeCaskRows(db, w, .installed, &first);
+    if (show_pinned) {
+        try writePinnedInstalled(db, w, show_formula, show_cask, &first);
+    } else {
+        if (show_formula) try writeFormulaRows(db, w, false, .installed, &first);
+        if (show_cask) try writeCaskRows(db, w, false, .installed, &first);
+    }
     try w.writeAll("]");
 
     if (show_formula) {
@@ -212,12 +273,46 @@ pub fn buildListJson(
     if (show_cask) {
         try w.writeAll(",\"casks\":[");
         var legacy_first = true;
-        try writeCaskRows(db, w, .legacy, &legacy_first);
+        try writeCaskRows(db, w, show_pinned, .legacy, &legacy_first);
         try w.writeAll("]");
     }
 
     try output.jsonTimeSuffix(w, start_ts);
     try w.writeAll("}\n");
+}
+
+/// `installed` array under `--pinned`: one sorted run across formulas
+/// and casks, each row carrying the `pinned: true` flag for parity with
+/// the formula-only shape callers already consume.
+fn writePinnedInstalled(
+    db: *sqlite.Database,
+    w: *std.Io.Writer,
+    show_formula: bool,
+    show_cask: bool,
+    first: *bool,
+) !void {
+    const sql = pinnedUnionSql(show_formula, show_cask) orelse return;
+    var stmt = db.prepare(sql) catch return;
+    defer stmt.finalize();
+
+    while (stmt.step() catch false) {
+        const name = stmt.columnText(0) orelse continue;
+        const ver = stmt.columnText(1);
+        const kind = stmt.columnText(2);
+        const is_cask = if (kind) |k| std.mem.eql(u8, std.mem.sliceTo(k, 0), "cask") else false;
+
+        if (!first.*) try w.writeAll(",");
+        first.* = false;
+        try w.writeAll("{\"name\":");
+        try output.jsonStr(w, std.mem.sliceTo(name, 0));
+        try w.writeAll(",\"version\":");
+        try output.jsonStr(w, if (ver) |v| std.mem.sliceTo(v, 0) else "");
+        if (is_cask) {
+            try w.writeAll(",\"type\":\"cask\",\"pinned\":true}");
+        } else {
+            try w.writeAll(",\"type\":\"formula\",\"pinned\":true}");
+        }
+    }
 }
 
 const RowShape = enum { installed, legacy };
@@ -265,10 +360,15 @@ fn writeFormulaRows(
 fn writeCaskRows(
     db: *sqlite.Database,
     w: *std.Io.Writer,
+    show_pinned: bool,
     shape: RowShape,
     first: *bool,
 ) !void {
-    var stmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch return;
+    const sql: [:0]const u8 = if (show_pinned)
+        "SELECT token, version FROM casks WHERE pinned = 1 ORDER BY token;"
+    else
+        "SELECT token, version FROM casks ORDER BY token;";
+    var stmt = db.prepare(sql) catch return;
     defer stmt.finalize();
 
     while (stmt.step() catch false) {

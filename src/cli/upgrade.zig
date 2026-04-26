@@ -68,9 +68,6 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     if (pinned_only) {
-        // Casks lack a `pinned` column; the audit is formula-scoped.
-        cask_only = false;
-        formula_only = true;
         // Without --dry-run or --force the audit would just print
         // "pinned, skipped" for every row - refuse rather than waste cycles.
         if (!dry_run and !force) {
@@ -139,7 +136,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             };
         }
         if (!formula_only) {
-            upgradeAllCasks(allocator, &db, &api, prefix, dry_run, force) catch {
+            upgradeAllCasks(allocator, &db, &api, prefix, dry_run, force, pinned_only) catch {
                 any_failed = true;
             };
         }
@@ -371,7 +368,10 @@ fn restoreOldLinks(
 }
 
 /// Record a keg in the database for upgrade. Returns the keg_id.
-fn recordKeg(
+/// The COALESCE on `pinned` inherits any existing user pin from the
+/// row(s) being replaced so a force-upgrade preserves the hold rather
+/// than silently clearing it. Fresh installs (no prior row) default to 0.
+pub fn recordKeg(
     db: *sqlite.Database,
     formula: *const formula_mod.Formula,
     store_sha256: []const u8,
@@ -381,8 +381,8 @@ fn recordKeg(
     errdefer db.rollback();
 
     var stmt = db.prepare(
-        "INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'direct');",
+        "INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, pinned)" ++
+            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'direct', COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));",
     ) catch return error.RecordFailed;
     defer stmt.finalize();
 
@@ -547,6 +547,10 @@ fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Data
 
     output.info("Upgrading {s} {s} -> {s}...", .{ token, installed_version, parsed_cask.version });
 
+    // Snapshot the pin BEFORE uninstall removes the cask row; re-apply
+    // after recordInstall so a `--force` upgrade preserves the user's hold.
+    const was_pinned = pin_mod.isPinned(db, token);
+
     // Uninstall old version
     var installer = cask_mod.CaskInstaller.init(allocator, db, prefix);
     installer.uninstall(token) catch {
@@ -565,11 +569,21 @@ fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Data
     };
     allocator.free(app_path);
 
+    if (was_pinned) {
+        // Best-effort: a missing pin restore is a UX regression, not data
+        // loss — the cask itself is upgraded and recorded.
+        _ = pin_mod.setPinned(db, token, true) catch {};
+    }
+
     output.success("{s} upgraded to {s}", .{ token, parsed_cask.version });
 }
 
-fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool) !void {
-    var stmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch return;
+fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, pinned_only: bool) !void {
+    const sql: [:0]const u8 = if (pinned_only)
+        "SELECT token, version FROM casks WHERE pinned = 1 ORDER BY token;"
+    else
+        "SELECT token, version FROM casks ORDER BY token;";
+    var stmt = db.prepare(sql) catch return;
     defer stmt.finalize();
 
     // Collect tokens first so we can free the statement before driving
@@ -591,7 +605,8 @@ fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api
     }
 
     if (tokens.items.len == 0) {
-        output.info("All casks are up to date.", .{});
+        // Quiet on the audit path: "no pinned casks" is the normal idle state.
+        if (!pinned_only) output.info("All casks are up to date.", .{});
         return;
     }
 
@@ -600,8 +615,7 @@ fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api
     defer failed_tokens.deinit(allocator);
 
     for (tokens.items) |token| {
-        // Cask scope never enters audit mode (no `pinned` column).
-        upgradeCask(allocator, token, db, api, prefix, dry_run, force, false) catch {
+        upgradeCask(allocator, token, db, api, prefix, dry_run, force, pinned_only) catch {
             failed_count += 1;
             // failed_count is authoritative; list is for UX only.
             failed_tokens.append(allocator, token) catch {};

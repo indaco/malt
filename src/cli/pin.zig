@@ -71,9 +71,20 @@ fn run(args: []const []const u8, action: Action) !void {
 
 /// Set the `pinned` column on `name`. Returns true when a row was matched
 /// (idempotent re-pins still report true). False means no installed keg
-/// of that name exists, which the caller should surface as a usage error.
+/// or cask of that name exists, which the caller surfaces as a usage error.
 pub fn setPinned(db: *sqlite.Database, name: []const u8, value: bool) sqlite.SqliteError!bool {
-    var stmt = try db.prepare("UPDATE kegs SET pinned = ?1 WHERE name = ?2;");
+    if (try setPinnedOn(db, "UPDATE kegs SET pinned = ?1 WHERE name = ?2;", name, value)) return true;
+    // Fall through to casks so `mt pin firefox` works on an installed cask.
+    return setPinnedOn(db, "UPDATE casks SET pinned = ?1 WHERE token = ?2;", name, value);
+}
+
+fn setPinnedOn(
+    db: *sqlite.Database,
+    sql: [:0]const u8,
+    name: []const u8,
+    value: bool,
+) sqlite.SqliteError!bool {
+    var stmt = try db.prepare(sql);
     defer stmt.finalize();
     try stmt.bindInt(1, @intFromBool(value));
     try stmt.bindText(2, name);
@@ -81,15 +92,20 @@ pub fn setPinned(db: *sqlite.Database, name: []const u8, value: bool) sqlite.Sql
     return changes(db) > 0;
 }
 
-/// Returns true iff an installed keg named `name` has `pinned=1`.
+/// Returns true iff an installed keg or cask named `name` has `pinned=1`.
 /// Missing rows are reported as not pinned — callers treat the absence
 /// of a row as "nothing to skip".
 pub fn isPinned(db: *sqlite.Database, name: []const u8) bool {
-    var stmt = db.prepare("SELECT pinned FROM kegs WHERE name = ?1 LIMIT 1;") catch return false;
+    if (lookupPinned(db, "SELECT pinned FROM kegs WHERE name = ?1 LIMIT 1;", name)) |p| return p;
+    return lookupPinned(db, "SELECT pinned FROM casks WHERE token = ?1 LIMIT 1;", name) orelse false;
+}
+
+fn lookupPinned(db: *sqlite.Database, sql: [:0]const u8, name: []const u8) ?bool {
+    var stmt = db.prepare(sql) catch return null;
     defer stmt.finalize();
-    stmt.bindText(1, name) catch return false;
-    const has = stmt.step() catch return false;
-    if (!has) return false;
+    stmt.bindText(1, name) catch return null;
+    const has = stmt.step() catch return null;
+    if (!has) return null;
     return stmt.columnBool(0);
 }
 

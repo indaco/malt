@@ -90,9 +90,12 @@ pub fn recordKeg(
     db.beginTransaction() catch return InstallError.RecordFailed;
     errdefer db.rollback();
 
+    // The COALESCE on `pinned` carries any existing user pin across
+    // INSERT OR REPLACE so a force-reinstall preserves the hold; fresh
+    // installs default to 0.
     var stmt = db.prepare(
-        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);",
+        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, pinned)" ++
+            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));",
     ) catch return InstallError.RecordFailed;
     defer stmt.finalize();
 

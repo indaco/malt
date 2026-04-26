@@ -93,15 +93,16 @@ const uninstall_help =
 const upgrade_help =
     \\Usage: malt upgrade [<package>] [flags]
     \\
-    \\Upgrade installed packages to latest versions. Pinned kegs are
-    \\skipped with a "pinned, skipped" line; pass --force to override.
+    \\Upgrade installed packages to latest versions. Pinned kegs and
+    \\casks are skipped with a "pinned, skipped" line; pass --force to
+    \\override.
     \\
     \\Flags:
     \\  --all          Upgrade everything (formulas + casks)
     \\  --cask         Upgrade casks only
     \\  --formula      Upgrade formulas only
     \\  --dry-run      Show what would be upgraded
-    \\  --pinned       Audit pinned kegs (requires --dry-run or --force)
+    \\  --pinned       Audit pinned formulas + casks (requires --dry-run or --force)
     \\  --force, -f    Bypass pin protection (dangerous; user-initiated)
     \\
 ;
@@ -122,7 +123,7 @@ const outdated_help =
     \\  --json         Output as JSON
     \\  --formula      Show outdated formulas only
     \\  --cask         Show outdated casks only
-    \\  --pinned-only  Audit pinned kegs only (formulas; CVE watch)
+    \\  --pinned-only  Audit pinned formulas + casks only (CVE watch)
     \\  --quiet, -q    Suppress status messages
     \\
 ;
@@ -367,18 +368,18 @@ const restore_help =
 const pin_help =
     \\Usage: malt pin <name>
     \\
-    \\Mark an installed keg as pinned so `malt upgrade` skips it. The pin
-    \\survives across upgrades and is visible in `mt list --pinned`.
-    \\Use `mt unpin <name>` to lift the pin, or `mt upgrade --force <name>`
-    \\to override it once.
+    \\Mark an installed formula or cask as pinned so `malt upgrade` skips
+    \\it. The pin survives across upgrades and is visible in
+    \\`mt list --pinned`. Use `mt unpin <name>` to lift it, or
+    \\`mt upgrade --force <name>` to override the pin once.
     \\
 ;
 
 const unpin_help =
     \\Usage: malt unpin <name>
     \\
-    \\Lift the pin on an installed keg so subsequent `malt upgrade` runs
-    \\touch it again.
+    \\Lift the pin on an installed formula or cask so subsequent
+    \\`malt upgrade` runs touch it again.
     \\
 ;
 
