@@ -8,6 +8,7 @@ const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
 const outdated_mod = malt.cli_outdated;
+const update_mod = malt.cli_update;
 const api_mod = malt.api;
 const client_mod = malt.client;
 const sqlite = malt.sqlite;
@@ -381,6 +382,376 @@ test "loadFormulaRows .pinned_only on an empty DB is a no-op" {
     defer outdated_mod.freeKegRows(testing.allocator, rows);
 
     try testing.expectEqual(@as(usize, 0), rows.len);
+}
+
+// --- Cached snapshot (write/read round-trip) ---
+
+// --- update + --check integration ---
+
+const UpdateEnv = struct {
+    prefix_path: [:0]u8,
+    cache_path: [:0]u8,
+
+    fn init(suffix: []const u8) !UpdateEnv {
+        const prefix = try std.fmt.allocPrintSentinel(
+            testing.allocator,
+            "/tmp/malt_update_test_{d}_{s}",
+            .{ malt.fs_compat.nanoTimestamp(), suffix },
+            0,
+        );
+        const cache = try std.fmt.allocPrintSentinel(
+            testing.allocator,
+            "{s}/cache",
+            .{prefix},
+            0,
+        );
+        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        try malt.fs_compat.cwd().makePath(prefix);
+        try malt.fs_compat.cwd().makePath(cache);
+        const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
+        defer testing.allocator.free(db_dir);
+        try malt.fs_compat.cwd().makePath(db_dir);
+
+        _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
+        _ = c.setenv("MALT_CACHE", cache.ptr, 1);
+        return .{ .prefix_path = prefix, .cache_path = cache };
+    }
+
+    fn deinit(self: *UpdateEnv) void {
+        _ = c.unsetenv("MALT_PREFIX");
+        _ = c.unsetenv("MALT_CACHE");
+        malt.fs_compat.deleteTreeAbsolute(self.prefix_path) catch {};
+        testing.allocator.free(self.prefix_path);
+        testing.allocator.free(self.cache_path);
+    }
+
+    fn writeApiFile(self: UpdateEnv, rel: []const u8, body: []const u8) !void {
+        var dir_buf: [512]u8 = undefined;
+        const api_dir = try std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_path});
+        try malt.fs_compat.cwd().makePath(api_dir);
+        var path_buf: [512]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ api_dir, rel });
+        const f = try malt.fs_compat.cwd().createFile(path, .{});
+        defer f.close();
+        try f.writeAll(body);
+    }
+
+    fn apiFileExists(self: UpdateEnv, rel: []const u8) bool {
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ self.cache_path, rel }) catch return false;
+        malt.fs_compat.accessAbsolute(path, .{}) catch return false;
+        return true;
+    }
+};
+
+fn openUpdateDb(prefix: [:0]const u8) !sqlite.Database {
+    var buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    errdefer db.close();
+    try schema.initSchema(&db);
+    return db;
+}
+
+fn insertKegV1(db: *sqlite.Database, name: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &buf,
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, pinned) VALUES ('{s}', '{s}', '1.0', 'deadbeef', '/cellar/{s}/1.0', 0);",
+        .{ name, name, name },
+    );
+    try db.exec(sql);
+}
+
+test "update --check writes the snapshot and leaves the API cache intact" {
+    var env = try UpdateEnv.init("check_keeps_cache");
+    defer env.deinit();
+
+    try env.writeApiFile(
+        "formula_alpha.json",
+        "{\"name\":\"alpha\",\"versions\":{\"stable\":\"2.0\"}}",
+    );
+    {
+        var db = try openUpdateDb(env.prefix_path);
+        defer db.close();
+        try insertKegV1(&db, "alpha");
+    }
+
+    try update_mod.execute(testing.allocator, &.{"--check"});
+
+    // Snapshot was written.
+    const snap_opt = outdated_mod.readSnapshot(testing.allocator, env.cache_path);
+    try testing.expect(snap_opt != null);
+    const snap = snap_opt.?;
+    defer outdated_mod.freeSnapshot(testing.allocator, snap);
+    try testing.expectEqual(@as(usize, 1), snap.formulas.len);
+    try testing.expectEqualStrings("alpha", snap.formulas[0].name);
+    try testing.expectEqualStrings("1.0", snap.formulas[0].installed);
+    try testing.expectEqualStrings("2.0", snap.formulas[0].latest);
+
+    // API cache survives.
+    try testing.expect(env.apiFileExists("formula_alpha.json"));
+}
+
+test "update without --check wipes the API cache and skips the slow snapshot write" {
+    var env = try UpdateEnv.init("default_wipes_cache");
+    defer env.deinit();
+
+    try env.writeApiFile("formula_alpha.json", "{\"name\":\"alpha\"}");
+
+    try update_mod.execute(testing.allocator, &.{});
+
+    // Cache wipe still happens.
+    try testing.expect(!env.apiFileExists("formula_alpha.json"));
+    // No snapshot is written: keeping `mt update` cheap is the contract.
+    try testing.expectEqual(
+        @as(?outdated_mod.OwnedSnapshot, null),
+        outdated_mod.readSnapshot(testing.allocator, env.cache_path),
+    );
+}
+
+test "update without --check deletes a stale snapshot to force fresh recompute next run" {
+    var env = try UpdateEnv.init("default_deletes_snapshot");
+    defer env.deinit();
+
+    // Pre-existing snapshot from a prior run: the cache wipe just
+    // dropped its data source, so the snapshot has no business surviving.
+    try outdated_mod.writeSnapshot(testing.allocator, env.cache_path, .{
+        .generated_at_ms = malt.fs_compat.milliTimestamp(),
+        .formulas = &[_]outdated_mod.OutdatedEntry{},
+        .casks = &[_]outdated_mod.OutdatedEntry{},
+    });
+    try testing.expect(outdated_mod.readSnapshot(testing.allocator, env.cache_path) != null);
+
+    try update_mod.execute(testing.allocator, &.{});
+
+    try testing.expectEqual(
+        @as(?outdated_mod.OwnedSnapshot, null),
+        outdated_mod.readSnapshot(testing.allocator, env.cache_path),
+    );
+}
+
+test "outdated execute reads a fresh snapshot and never overwrites it" {
+    var env = try UpdateEnv.init("outdated_uses_snapshot");
+    defer env.deinit();
+
+    {
+        var db = try openUpdateDb(env.prefix_path);
+        defer db.close();
+        try insertKegV1(&db, "alpha");
+    }
+
+    // Use a fixed marker timestamp on a fresh snapshot. The snapshot
+    // path must NOT rewrite the file (recompute would update the
+    // timestamp), so the marker survives across execute().
+    const marker_ts: i64 = malt.fs_compat.milliTimestamp() - 1000;
+    const formulas = [_]outdated_mod.OutdatedEntry{
+        .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("9.9") },
+    };
+    try outdated_mod.writeSnapshot(testing.allocator, env.cache_path, .{
+        .generated_at_ms = marker_ts,
+        .formulas = &formulas,
+        .casks = &[_]outdated_mod.OutdatedEntry{},
+    });
+
+    try outdated_mod.execute(testing.allocator, &.{});
+
+    // The marker timestamp survives — proof the snapshot was read and
+    // not regenerated by the recompute path.
+    const after_opt = outdated_mod.readSnapshot(testing.allocator, env.cache_path);
+    try testing.expect(after_opt != null);
+    const after = after_opt.?;
+    defer outdated_mod.freeSnapshot(testing.allocator, after);
+    try testing.expectEqual(marker_ts, after.generated_at_ms);
+    try testing.expectEqual(@as(usize, 1), after.formulas.len);
+    try testing.expectEqualStrings("alpha", after.formulas[0].name);
+    try testing.expectEqualStrings("9.9", after.formulas[0].latest);
+}
+
+test "outdated execute drops snapshot entries whose keg was uninstalled" {
+    var env = try UpdateEnv.init("outdated_filters_uninstalled");
+    defer env.deinit();
+
+    {
+        var db = try openUpdateDb(env.prefix_path);
+        defer db.close();
+        // alpha is installed; ghost was uninstalled since the snapshot.
+        try insertKegV1(&db, "alpha");
+    }
+
+    const marker_ts: i64 = malt.fs_compat.milliTimestamp() - 1000;
+    const formulas = [_]outdated_mod.OutdatedEntry{
+        .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+        .{ .name = @constCast("ghost"), .installed = @constCast("0.5"), .latest = @constCast("1.0") },
+    };
+    try outdated_mod.writeSnapshot(testing.allocator, env.cache_path, .{
+        .generated_at_ms = marker_ts,
+        .formulas = &formulas,
+        .casks = &[_]outdated_mod.OutdatedEntry{},
+    });
+
+    try outdated_mod.execute(testing.allocator, &.{});
+
+    // Marker timestamp survives -> execute() took the snapshot path
+    // (recompute would have rewritten it with a fresh timestamp).
+    const after_opt = outdated_mod.readSnapshot(testing.allocator, env.cache_path);
+    try testing.expect(after_opt != null);
+    const after = after_opt.?;
+    defer outdated_mod.freeSnapshot(testing.allocator, after);
+    try testing.expectEqual(marker_ts, after.generated_at_ms);
+
+    // Filter correctness: same DB + snapshot inputs that execute() saw,
+    // run through the same helper, must yield only `alpha`.
+    var db = try openUpdateDb(env.prefix_path);
+    defer db.close();
+    const rows = try outdated_mod.loadFormulaRows(testing.allocator, &db, .all);
+    defer outdated_mod.freeKegRows(testing.allocator, rows);
+    const filtered = try outdated_mod.intersectWithDb(testing.allocator, rows, &formulas);
+    defer {
+        for (filtered) |e| {
+            testing.allocator.free(e.name);
+            testing.allocator.free(e.installed);
+            testing.allocator.free(e.latest);
+        }
+        testing.allocator.free(filtered);
+    }
+    try testing.expectEqual(@as(usize, 1), filtered.len);
+    try testing.expectEqualStrings("alpha", filtered[0].name);
+}
+
+test "outdated execute on a stale snapshot emits the cached entries (used as proof of read)" {
+    var env = try UpdateEnv.init("outdated_stale_uses_cache");
+    defer env.deinit();
+
+    {
+        var db = try openUpdateDb(env.prefix_path);
+        defer db.close();
+        try insertKegV1(&db, "alpha");
+    }
+
+    // 30-day-old snapshot — well past the 24h default threshold.
+    const month_ms: i64 = 30 * 24 * 60 * 60 * 1000;
+    const formulas = [_]outdated_mod.OutdatedEntry{
+        .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("3.0") },
+    };
+    try outdated_mod.writeSnapshot(testing.allocator, env.cache_path, .{
+        .generated_at_ms = malt.fs_compat.milliTimestamp() - month_ms,
+        .formulas = &formulas,
+        .casks = &[_]outdated_mod.OutdatedEntry{},
+    });
+
+    // Stale snapshot: emits entries (so shell prompts stay instant), warning
+    // on stderr — but should NOT overwrite the snapshot. We verify the
+    // post-execute snapshot still contains "alpha->3.0" rather than a fresh
+    // empty recompute.
+    try outdated_mod.execute(testing.allocator, &.{});
+
+    const after_opt = outdated_mod.readSnapshot(testing.allocator, env.cache_path);
+    try testing.expect(after_opt != null);
+    const after = after_opt.?;
+    defer outdated_mod.freeSnapshot(testing.allocator, after);
+    try testing.expectEqual(@as(usize, 1), after.formulas.len);
+    try testing.expectEqualStrings("alpha", after.formulas[0].name);
+    try testing.expectEqualStrings("3.0", after.formulas[0].latest);
+}
+
+test "outdated execute --refresh skips the snapshot and recomputes" {
+    var env = try UpdateEnv.init("outdated_refresh_recomputes");
+    defer env.deinit();
+
+    {
+        var db = try openUpdateDb(env.prefix_path);
+        defer db.close();
+        // No kegs => no API calls => --refresh path stays offline.
+    }
+
+    // Stamp a snapshot with a bogus latest; --refresh must not surface it.
+    const formulas = [_]outdated_mod.OutdatedEntry{
+        .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("bogus") },
+    };
+    try outdated_mod.writeSnapshot(testing.allocator, env.cache_path, .{
+        .generated_at_ms = malt.fs_compat.milliTimestamp(),
+        .formulas = &formulas,
+        .casks = &[_]outdated_mod.OutdatedEntry{},
+    });
+
+    try outdated_mod.execute(testing.allocator, &.{"--refresh"});
+
+    // After --refresh, the snapshot is regenerated to reflect actual state.
+    const fresh_opt = outdated_mod.readSnapshot(testing.allocator, env.cache_path);
+    try testing.expect(fresh_opt != null);
+    const fresh = fresh_opt.?;
+    defer outdated_mod.freeSnapshot(testing.allocator, fresh);
+    try testing.expectEqual(@as(usize, 0), fresh.formulas.len);
+    try testing.expectEqual(@as(usize, 0), fresh.casks.len);
+}
+
+test "writeSnapshot then readSnapshot round-trips entries through the cache file" {
+    var dir = try TempCacheDir.init("snapshot_round_trip");
+    defer dir.deinit();
+
+    const formulas = [_]outdated_mod.OutdatedEntry{
+        .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+    };
+    const casks = [_]outdated_mod.OutdatedEntry{
+        .{ .name = @constCast("beta"), .installed = @constCast("3.0"), .latest = @constCast("3.5") },
+    };
+    const snap: outdated_mod.Snapshot = .{
+        .generated_at_ms = 1_700_000_000_000,
+        .formulas = &formulas,
+        .casks = &casks,
+    };
+    try outdated_mod.writeSnapshot(testing.allocator, dir.path, snap);
+
+    const read_opt = outdated_mod.readSnapshot(testing.allocator, dir.path);
+    try testing.expect(read_opt != null);
+    const read = read_opt.?;
+    defer outdated_mod.freeSnapshot(testing.allocator, read);
+
+    try testing.expectEqual(@as(i64, 1_700_000_000_000), read.generated_at_ms);
+    try testing.expectEqual(@as(usize, 1), read.formulas.len);
+    try testing.expectEqualStrings("alpha", read.formulas[0].name);
+    try testing.expectEqualStrings("2.0", read.formulas[0].latest);
+    try testing.expectEqual(@as(usize, 1), read.casks.len);
+    try testing.expectEqualStrings("beta", read.casks[0].name);
+}
+
+test "readSnapshot returns null when the file is missing" {
+    var dir = try TempCacheDir.init("snapshot_missing");
+    defer dir.deinit();
+    try testing.expectEqual(@as(?outdated_mod.OwnedSnapshot, null), outdated_mod.readSnapshot(testing.allocator, dir.path));
+}
+
+test "readSnapshot returns null on garbage contents" {
+    var dir = try TempCacheDir.init("snapshot_garbage");
+    defer dir.deinit();
+    const path = try outdated_mod.snapshotPath(testing.allocator, dir.path);
+    defer testing.allocator.free(path);
+    const f = try malt.fs_compat.cwd().createFile(path, .{});
+    defer f.close();
+    try f.writeAll("not-json-at-all");
+    try testing.expectEqual(@as(?outdated_mod.OwnedSnapshot, null), outdated_mod.readSnapshot(testing.allocator, dir.path));
+}
+
+test "writeSnapshot creates the cache directory if missing" {
+    const tag = "snapshot_mkdir";
+    const path = "/tmp/malt_outdated_test_" ++ tag;
+    malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+
+    const snap: outdated_mod.Snapshot = .{
+        .generated_at_ms = 0,
+        .formulas = &[_]outdated_mod.OutdatedEntry{},
+        .casks = &[_]outdated_mod.OutdatedEntry{},
+    };
+    try outdated_mod.writeSnapshot(testing.allocator, path, snap);
+
+    const read_opt = outdated_mod.readSnapshot(testing.allocator, path);
+    try testing.expect(read_opt != null);
+    const read = read_opt.?;
+    defer outdated_mod.freeSnapshot(testing.allocator, read);
+    try testing.expectEqual(@as(usize, 0), read.formulas.len);
+    try testing.expectEqual(@as(usize, 0), read.casks.len);
 }
 
 test "outdated execute --pinned-only is a quiet no-op when no kegs are pinned" {
