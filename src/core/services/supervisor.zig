@@ -384,3 +384,118 @@ pub fn tailLog(allocator: std.mem.Allocator, path: []const u8, n: usize, writer:
     }
     writer.writeAll(slice[start_at..]) catch return SupervisorError.IoFailed;
 }
+
+/// Tail `path` and stream appended bytes until `interrupted()` returns true.
+/// `interrupted` is the caller's seam onto SIGINT (or any other stop signal);
+/// keeping it as a callback keeps this module free of CLI/main coupling.
+pub fn followLog(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    tail_n: usize,
+    writer: *std.Io.Writer,
+    interrupted: *const fn () bool,
+) SupervisorError!void {
+    try tailLog(allocator, path, tail_n, writer);
+    writer.flush() catch return SupervisorError.IoFailed;
+
+    const f = fs_compat.openFileAbsolute(path, .{}) catch return SupervisorError.IoFailed;
+    defer f.close();
+    var offset: u64 = (f.stat() catch return SupervisorError.IoFailed).size;
+
+    var buf: [4096]u8 = undefined;
+    // 200 ms cadence is plenty for human-scale tails.
+    const poll_ns: u64 = 200 * std.time.ns_per_ms;
+    while (!interrupted()) {
+        const n = f.readAllAt(&buf, offset) catch return SupervisorError.IoFailed;
+        if (n == 0) {
+            fs_compat.sleepNanos(poll_ns);
+            continue;
+        }
+        writer.writeAll(buf[0..n]) catch return SupervisorError.IoFailed;
+        writer.flush() catch return SupervisorError.IoFailed;
+        offset += n;
+    }
+}
+
+const testing = std.testing;
+
+// Static state lets the interrupt callback drive a deterministic follow-loop
+// scenario in tests without spawning a real thread or signal.
+const FollowProbe = struct {
+    var calls: usize = 0;
+    var stop_at: usize = 1;
+    var append_at: usize = 0;
+    var append_path: []const u8 = "";
+    var append_bytes: []const u8 = "";
+
+    fn reset() void {
+        calls = 0;
+        stop_at = 1;
+        append_at = 0;
+        append_path = "";
+        append_bytes = "";
+    }
+
+    fn cb() bool {
+        calls += 1;
+        if (append_at != 0 and calls == append_at) {
+            const f = fs_compat.openFileAbsolute(append_path, .{ .mode = .read_write }) catch return true;
+            defer f.close();
+            const st = f.stat() catch return true;
+            f.writeAllAt(append_bytes, st.size) catch {};
+        }
+        return calls >= stop_at;
+    }
+};
+
+test "followLog prints initial tail and exits when interrupt is set before first poll" {
+    const dir = "/tmp/malt_supervisor_follow_interrupt";
+    fs_compat.deleteTreeAbsolute(dir) catch {};
+    try fs_compat.makeDirAbsolute(dir);
+    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+
+    const log_path = dir ++ "/sample.log";
+    {
+        const f = try fs_compat.createFileAbsolute(log_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("first\nsecond\n");
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    FollowProbe.reset();
+    FollowProbe.stop_at = 1;
+    try followLog(testing.allocator, log_path, 2, &aw.writer, FollowProbe.cb);
+
+    try testing.expectEqualStrings("first\nsecond\n", aw.written());
+    try testing.expectEqual(@as(usize, 1), FollowProbe.calls);
+}
+
+test "followLog flushes appended bytes between polls" {
+    const dir = "/tmp/malt_supervisor_follow_poll";
+    fs_compat.deleteTreeAbsolute(dir) catch {};
+    try fs_compat.makeDirAbsolute(dir);
+    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+
+    const log_path = dir ++ "/sample.log";
+    {
+        const f = try fs_compat.createFileAbsolute(log_path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("seed\n");
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    FollowProbe.reset();
+    FollowProbe.append_path = log_path;
+    FollowProbe.append_bytes = "appended\n";
+    FollowProbe.append_at = 1;
+    FollowProbe.stop_at = 3;
+
+    try followLog(testing.allocator, log_path, 0, &aw.writer, FollowProbe.cb);
+
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "appended\n") != null);
+    try testing.expectEqual(@as(usize, 3), FollowProbe.calls);
+}
