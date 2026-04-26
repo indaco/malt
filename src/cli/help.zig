@@ -101,6 +101,7 @@ const upgrade_help =
     \\  --cask         Upgrade casks only
     \\  --formula      Upgrade formulas only
     \\  --dry-run      Show what would be upgraded
+    \\  --pinned       Audit pinned kegs (requires --dry-run or --force)
     \\  --force, -f    Bypass pin protection (dangerous; user-initiated)
     \\
 ;
@@ -121,6 +122,7 @@ const outdated_help =
     \\  --json         Output as JSON
     \\  --formula      Show outdated formulas only
     \\  --cask         Show outdated casks only
+    \\  --pinned-only  Audit pinned kegs only (formulas; CVE watch)
     \\  --quiet, -q    Suppress status messages
     \\
 ;
