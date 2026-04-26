@@ -11,7 +11,7 @@ const fs_compat = @import("../fs/compat.zig");
 
 pub const SwapError = error{
     /// Could not stage the new binary next to the target (disk full,
-    /// permission, parent-dir unwritable). No file has moved yet.
+    /// non-permission failure). No file has moved yet.
     StagingFailed,
     /// The target→.old rename failed. Target is untouched.
     SwapFailed,
@@ -19,6 +19,10 @@ pub const SwapError = error{
     /// also failed). `<target>.old` may be the live binary; the real
     /// target path may not exist. Caller surfaces the situation loudly.
     RollbackFailed,
+    /// EACCES/EPERM on the staging copy or the target rename. Distinct
+    /// from `StagingFailed`/`SwapFailed` so the updater can elevate via
+    /// sudo instead of dumping a manual recovery hint.
+    PermissionDenied,
 };
 
 /// Replace `target_path` with the contents of `new_path`. On success,
@@ -41,9 +45,14 @@ pub fn atomicReplace(target_path: []const u8, new_path: []const u8) SwapError!vo
         return error.StagingFailed;
 
     // Stage the new binary next to the target. Cleans any stale file
-    // from a killed earlier run first so copy never EEXISTs.
+    // from a killed earlier run first so copy never EEXISTs. EACCES on
+    // the staging copy means the target dir is unwritable — the updater
+    // catches `PermissionDenied` and re-runs the swap under sudo.
     fs_compat.deleteFileAbsolute(staged_path) catch {};
-    fs_compat.copyFileAbsolute(new_path, staged_path, .{}) catch return error.StagingFailed;
+    fs_compat.copyFileAbsolute(new_path, staged_path, .{}) catch |e| switch (e) {
+        error.AccessDenied => return error.PermissionDenied,
+        else => return error.StagingFailed,
+    };
     // Errdefer cleanup: stage leaks get reaped by the next update's pre-copy delete above.
     errdefer fs_compat.deleteFileAbsolute(staged_path) catch {};
 
@@ -52,8 +61,10 @@ pub fn atomicReplace(target_path: []const u8, new_path: []const u8) SwapError!vo
     // close: a rename is not durable without a prior fsync, so a power
     // loss after rename could otherwise expose a partial binary.
     {
-        const f = fs_compat.openFileAbsolute(staged_path, .{ .mode = .read_write }) catch
-            return error.StagingFailed;
+        const f = fs_compat.openFileAbsolute(staged_path, .{ .mode = .read_write }) catch |e| switch (e) {
+            error.AccessDenied => return error.PermissionDenied,
+            else => return error.StagingFailed,
+        };
         defer f.close();
         f.chmod(0o755) catch return error.StagingFailed;
         f.sync() catch return error.StagingFailed;
@@ -62,8 +73,12 @@ pub fn atomicReplace(target_path: []const u8, new_path: []const u8) SwapError!vo
     // Clear any .old left by a crashed prior run before we overwrite it.
     fs_compat.deleteFileAbsolute(old_path) catch {};
 
-    // Atomic rename #1: target -> target.old.
-    fs_compat.renameAbsolute(target_path, old_path) catch return error.SwapFailed;
+    // Atomic rename #1: target -> target.old. EACCES/EPERM here means
+    // the dir is unwritable — same sudo-fallback path as the staging copy.
+    fs_compat.renameAbsolute(target_path, old_path) catch |e| switch (e) {
+        error.AccessDenied, error.PermissionDenied => return error.PermissionDenied,
+        else => return error.SwapFailed,
+    };
     // Rollback rename; if this also fails the caller already has RollbackFailed surfaced.
     errdefer fs_compat.renameAbsolute(old_path, target_path) catch {};
 

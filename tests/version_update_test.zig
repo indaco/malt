@@ -212,3 +212,24 @@ test "resolveTwinRegularFile: returns null for unrelated basenames" {
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
     try testing.expect(updater.resolveTwinRegularFile(other_path, &buf) == null);
 }
+
+// --- buildSudoInstallArgv ------------------------------------------------
+//
+// `install -m 0755 -b -B .old` is the sudo fallback when the user lacks
+// write access to the install directory (e.g. /usr/local/bin without
+// admin group). One BSD-install invocation gives us atomic copy +
+// `.old` backup + executable bit in a single sudo prompt — the same
+// rollback contract `atomicReplace` provides for the unprivileged path.
+test "buildSudoInstallArgv: shape matches BSD install with .old backup suffix" {
+    const argv = updater.buildSudoInstallArgv("/tmp/new-malt", "/usr/local/bin/malt");
+    try testing.expectEqual(@as(usize, 9), argv.len);
+    try testing.expectEqualStrings("sudo", argv[0]);
+    try testing.expectEqualStrings("install", argv[1]);
+    try testing.expectEqualStrings("-m", argv[2]);
+    try testing.expectEqualStrings("0755", argv[3]);
+    try testing.expectEqualStrings("-b", argv[4]);
+    try testing.expectEqualStrings("-B", argv[5]);
+    try testing.expectEqualStrings(".old", argv[6]);
+    try testing.expectEqualStrings("/tmp/new-malt", argv[7]);
+    try testing.expectEqualStrings("/usr/local/bin/malt", argv[8]);
+}
