@@ -163,6 +163,7 @@ pub fn build(b: *std.Build) void {
         "tests/cli_tap_test.zig",
         "tests/cli_services_test.zig",
         "tests/install_execute_test.zig",
+        "tests/install_ambiguity_test.zig",
         "tests/fs_compat_stream_test.zig",
         "tests/fs_compat_lint_test.zig",
         "tests/fs_compat_primitives_test.zig",
