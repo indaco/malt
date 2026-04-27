@@ -271,6 +271,61 @@ test "exists rejects invalid names before any cache lookup" {
     try testing.expectError(api_mod.ApiError.InvalidName, api.exists("..", .formula));
 }
 
+test "cachedExists returns true when a cask cache file is present" {
+    var http = client_mod.HttpClient.init(testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("cached_exists_hit");
+    defer dir.deinit();
+
+    try dir.writeCacheFile("cask_firefox.json", "{\"token\":\"firefox\"}");
+
+    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    try testing.expect(api.cachedExists("firefox", .cask));
+}
+
+test "cachedExists returns false when no cache file is present" {
+    var http = client_mod.HttpClient.init(testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("cached_exists_miss");
+    defer dir.deinit();
+
+    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    try testing.expect(!api.cachedExists("ghost", .cask));
+}
+
+test "cachedExists ignores stale mtime — existence is the only check" {
+    // Skipping the parse runs once the file is gone; for a present file
+    // we hand off to fetchCask, which owns freshness. cachedExists must
+    // not duplicate the TTL gate.
+    var http = client_mod.HttpClient.init(testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("cached_exists_stale");
+    defer dir.deinit();
+
+    try dir.writeCacheFile("cask_old.json", "{}");
+    var path_buf: [512]u8 = undefined;
+    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/cask_old.json", .{dir.path});
+    const file = try malt.fs_compat.cwd().openFile(full, .{ .mode = .write_only });
+    defer file.close();
+    try file.updateTimes(0, 0);
+
+    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    try testing.expect(api.cachedExists("old", .cask));
+}
+
+test "cachedExists discriminates formula vs cask cache files" {
+    var http = client_mod.HttpClient.init(testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("cached_exists_kind");
+    defer dir.deinit();
+
+    try dir.writeCacheFile("formula_node.json", "{\"name\":\"node\"}");
+
+    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    try testing.expect(api.cachedExists("node", .formula));
+    try testing.expect(!api.cachedExists("node", .cask));
+}
+
 test "readNotFoundCache returns false for stale marker" {
     var http = client_mod.HttpClient.init(testing.allocator);
     defer http.deinit();

@@ -350,8 +350,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 continue;
             };
 
-            // Check if name also exists as a cask — warn about ambiguity
-            if (!force_formula) {
+            // Skip the cask read+parse when no cask is cached — single stat.
+            if (!force_formula and api.cachedExists(pkg_name, .cask)) {
                 if (api.fetchCask(pkg_name)) |cask_json| {
                     allocator.free(cask_json);
                     output.info("{s} exists as both a formula and a cask. Installing formula. Use --cask to install the cask instead.", .{pkg_name});
