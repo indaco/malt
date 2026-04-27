@@ -18,6 +18,13 @@ const mount_c = @import("c_mount");
 
 const render = @import("doctor/render.zig");
 const post_install = @import("doctor/post_install.zig");
+const fix_mod = @import("doctor/fix.zig");
+
+pub const FixKind = fix_mod.FixKind;
+pub const ManualKind = fix_mod.ManualKind;
+pub const FixConditions = fix_mod.Conditions;
+pub const FixPlan = fix_mod.Plan;
+pub const planFixes = fix_mod.planFixes;
 
 pub const CheckStatus = render.CheckStatus;
 pub const CheckStyle = render.CheckStyle;
@@ -91,8 +98,44 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
+    const fix_requested = fix_mod.wantsFix(args);
+
     output.info("Running health checks...", .{});
     const tally = runChecks(.{ .allocator = allocator, .prefix = prefix }, &checks);
+
+    if (fix_requested) {
+        output.plain("", .{});
+        const dry_run = output.isDryRun();
+        if (dry_run) {
+            output.info("Doctor fix plan (dry-run):", .{});
+        } else {
+            output.info("Applying safe-class fixes:", .{});
+        }
+
+        const outcome = fix_mod.executeFix(.{ .prefix = prefix }, dry_run);
+
+        if (outcome.plan.safe.count() == 0) {
+            output.dim("no safe-class fixes to apply", .{});
+        } else if (dry_run) {
+            var it = outcome.plan.safe.iterator();
+            while (it.next()) |kind| {
+                output.dim("would {s}", .{fix_mod.safeLabel(kind)});
+            }
+        } else {
+            if (outcome.stale_lock_removed) output.success("removed stale lock file", .{});
+            if (outcome.broken_symlinks_removed > 0) {
+                output.success("unlinked {d} broken symlink(s)", .{outcome.broken_symlinks_removed});
+            }
+            if (outcome.orphans_removed > 0) {
+                output.success("swept {d} orphaned store entry(s)", .{outcome.orphans_removed});
+            }
+        }
+
+        var mit = outcome.plan.manual.iterator();
+        while (mit.next()) |kind| {
+            output.warn("manual: {s}", .{fix_mod.manualHint(kind)});
+        }
+    }
 
     output.plain("", .{});
     if (tally.errors > 0) {

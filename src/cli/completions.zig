@@ -155,6 +155,7 @@ pub const bash_script =
     \\        services)         cmd_flags="--tail --stderr --follow -f --system --json" ;;
     \\        bundle)           cmd_flags="--dry-run -n --format --from-installed --purge --yes -y" ;;
     \\        run)              cmd_flags="--keep" ;;
+    \\        doctor)           cmd_flags="--fix --dry-run" ;;
     \\    esac
     \\
     \\    if [[ "$cur" == -* ]]; then
