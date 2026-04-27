@@ -99,10 +99,10 @@ test "resolve frees duped dep strings on the BFS visited-dedup path" {
     var dir = try TempCacheDir.init("dedup");
     defer dir.deinit();
 
-    try dir.writeFormula("a", "{\"dependencies\":[\"b\",\"c\"]}");
-    try dir.writeFormula("b", "{\"dependencies\":[\"d\"]}");
-    try dir.writeFormula("c", "{\"dependencies\":[\"d\"]}");
-    try dir.writeFormula("d", "{\"dependencies\":[\"b\"]}");
+    try dir.writeFormula("a", "{\"name\":\"a\",\"dependencies\":[\"b\",\"c\"]}");
+    try dir.writeFormula("b", "{\"name\":\"b\",\"dependencies\":[\"d\"]}");
+    try dir.writeFormula("c", "{\"name\":\"c\",\"dependencies\":[\"d\"]}");
+    try dir.writeFormula("d", "{\"name\":\"d\",\"dependencies\":[\"b\"]}");
 
     var http = client_mod.HttpClient.init(alloc);
     defer http.deinit();
@@ -111,7 +111,10 @@ test "resolve frees duped dep strings on the BFS visited-dedup path" {
     var tdb = try TempDb.init("dedup");
     defer tdb.deinit();
 
-    const result = try deps_mod.resolve(alloc, "a", &api, &tdb.db);
+    var cache = deps_mod.FormulaCache.init(alloc);
+    defer cache.deinit();
+
+    const result = try deps_mod.resolve(alloc, "a", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     // Each distinct dep appears exactly once.
@@ -138,7 +141,7 @@ test "resolve empty dep graph still returns a freeable slice" {
     var dir = try TempCacheDir.init("empty");
     defer dir.deinit();
 
-    try dir.writeFormula("solo", "{\"dependencies\":[]}");
+    try dir.writeFormula("solo", "{\"name\":\"solo\",\"dependencies\":[]}");
 
     var http = client_mod.HttpClient.init(alloc);
     defer http.deinit();
@@ -147,7 +150,10 @@ test "resolve empty dep graph still returns a freeable slice" {
     var tdb = try TempDb.init("empty");
     defer tdb.deinit();
 
-    const result = try deps_mod.resolve(alloc, "solo", &api, &tdb.db);
+    var cache = deps_mod.FormulaCache.init(alloc);
+    defer cache.deinit();
+
+    const result = try deps_mod.resolve(alloc, "solo", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 0), result.len);
