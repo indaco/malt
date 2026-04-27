@@ -109,19 +109,32 @@ pub fn resolve(
     };
 }
 
-/// Find orphaned dependencies (install_reason='dependency' but not needed by any direct install).
+/// Find orphaned dependencies (install_reason='dependency' and not in the
+/// transitive closure of any direct install's dependency graph).
+///
+/// The recursive CTE seeds with kegs directly listed by any `install_reason
+/// = 'direct'` keg, then walks `dependencies` rows transitively so a dep
+/// reached only through another dep (e.g. `node` → `openssl@3` →
+/// `ca-certificates`) is still classed as retained. A flat one-level
+/// query would mis-purge those grandchild deps.
 pub fn findOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) ![]const []const u8 {
     var orphans: std.ArrayList([]const u8) = .empty;
 
-    // Get all dependency-installed kegs
     var stmt = db.prepare(
+        \\WITH RECURSIVE retained(name) AS (
+        \\    SELECT DISTINCT d.dep_name
+        \\    FROM dependencies d
+        \\    JOIN kegs k ON k.id = d.keg_id
+        \\    WHERE k.install_reason = 'direct'
+        \\    UNION
+        \\    SELECT d.dep_name
+        \\    FROM dependencies d
+        \\    JOIN kegs k2 ON k2.id = d.keg_id
+        \\    JOIN retained r ON r.name = k2.name
+        \\)
         \\SELECT k.name FROM kegs k
         \\WHERE k.install_reason = 'dependency'
-        \\AND k.name NOT IN (
-        \\    SELECT DISTINCT d.dep_name FROM dependencies d
-        \\    JOIN kegs k2 ON k2.id = d.keg_id
-        \\    WHERE k2.install_reason = 'direct'
-        \\);
+        \\AND k.name NOT IN (SELECT name FROM retained);
     ) catch return orphans.toOwnedSlice(allocator) catch &.{};
     defer stmt.finalize();
 
