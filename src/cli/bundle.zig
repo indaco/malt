@@ -11,7 +11,9 @@ const manifest_mod = @import("../core/bundle/manifest.zig");
 const brewfile_mod = @import("../core/bundle/brewfile.zig");
 const brewfile_emit = @import("../core/bundle/brewfile_emit.zig");
 const runner_mod = @import("../core/bundle/runner.zig");
+const cleanup_mod = @import("../core/bundle/cleanup.zig");
 const install_cmd = @import("install.zig");
+const uninstall_cmd = @import("uninstall.zig");
 const tap_cmd = @import("tap.zig");
 const services_cmd = @import("services.zig");
 
@@ -43,6 +45,21 @@ const default_dispatcher = runner_mod.Dispatcher{
     .installCask = cliInstallCask,
     .tapAdd = cliTapAdd,
     .serviceStart = cliServiceStart,
+};
+
+fn cliUninstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+    _ = ctx;
+    return uninstall_cmd.execute(allocator, &.{name});
+}
+
+fn cliUninstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+    _ = ctx;
+    return uninstall_cmd.execute(allocator, &.{ "--cask", name });
+}
+
+const default_cleanup_dispatcher = cleanup_mod.Dispatcher{
+    .uninstallFormula = cliUninstallFormula,
+    .uninstallCask = cliUninstallCask,
 };
 
 pub const BundleError = error{
@@ -78,6 +95,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const rest = args[1..];
 
     if (std.mem.eql(u8, sub, "install")) return cmdInstall(allocator, rest);
+    if (std.mem.eql(u8, sub, "cleanup")) return cmdCleanup(allocator, rest);
     if (std.mem.eql(u8, sub, "create")) return cmdCreate(allocator, rest);
     if (std.mem.eql(u8, sub, "list")) return cmdList(allocator);
     if (std.mem.eql(u8, sub, "remove")) return cmdRemove(allocator, rest);
@@ -154,6 +172,93 @@ fn cmdInstall(allocator: std.mem.Allocator, rest: []const []const u8) !void {
 
     if (any_hard) return BundleError.RunnerFailed;
     output.success("bundle install complete", .{});
+}
+
+fn cmdCleanup(allocator: std.mem.Allocator, rest: []const []const u8) !void {
+    // main.zig strips the global `--dry-run` from argv; reading the
+    // module-global keeps cleanup aligned with `bundle install`.
+    var dry_run = output.isDryRun();
+    var yes = false;
+    var explicit_path: ?[]const u8 = null;
+    for (rest) |a| {
+        if (std.mem.eql(u8, a, "--dry-run") or std.mem.eql(u8, a, "-n")) {
+            dry_run = true;
+        } else if (std.mem.eql(u8, a, "--yes") or std.mem.eql(u8, a, "-y")) {
+            yes = true;
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            output.warn("ignored flag: {s}", .{a});
+        } else {
+            explicit_path = a;
+        }
+    }
+
+    const path = try resolveBundlefile(allocator, explicit_path);
+    defer allocator.free(path);
+    output.info("using bundle file: {s}", .{path});
+
+    var diag = brewfile_mod.Diagnostics.init(allocator);
+    defer diag.deinit();
+    var manifest = try readManifest(allocator, path, &diag);
+    defer manifest.deinit();
+    for (diag.warnings.items) |w| output.warn("{s}", .{w});
+
+    // Tight DB scope: the connection's only job is the read-then-plan
+    // phase, so the per-member uninstalls below run against a freshly
+    // opened handle each.
+    var plan: cleanup_mod.Plan = blk: {
+        var db = try openDb();
+        defer db.close();
+        var installed = cleanup_mod.collectInstalled(allocator, &db) catch
+            return BundleError.DatabaseError;
+        defer installed.deinit();
+        var p = cleanup_mod.diff(
+            allocator,
+            manifest,
+            installed.formulas,
+            installed.casks,
+        ) catch return BundleError.RunnerFailed;
+        errdefer p.deinit();
+        cleanup_mod.orderForRemoval(allocator, &db, &p) catch
+            return BundleError.DatabaseError;
+        break :blk p;
+    };
+    defer plan.deinit();
+
+    if (plan.isEmpty()) {
+        output.success("nothing to clean up", .{});
+        return;
+    }
+
+    output.info("cleanup plan:", .{});
+    for (plan.formulas) |n| output.plain("  - {s}", .{n});
+    for (plan.casks) |n| output.plain("  - {s} (cask)", .{n});
+
+    if (dry_run) {
+        output.info("dry-run: skipping uninstall", .{});
+        return;
+    }
+
+    if (!yes and !output.confirmTyped("yes", "Type 'yes' to remove these packages: ")) {
+        output.warn("aborted", .{});
+        return;
+    }
+
+    var report = cleanup_mod.run(allocator, plan, .{
+        .dry_run = false,
+        .dispatcher = &default_cleanup_dispatcher,
+    }) catch |e| {
+        output.err("bundle cleanup failed: {s}", .{@errorName(e)});
+        return BundleError.RunnerFailed;
+    };
+    defer report.deinit();
+
+    // The uninstall pipeline already prints rich per-member diagnostics;
+    // surface only the count here so users see a single summary line.
+    if (report.hasFailure()) {
+        output.err("bundle cleanup completed with {d} failure(s)", .{report.failures.len});
+        return BundleError.RunnerFailed;
+    }
+    output.success("bundle cleanup complete", .{});
 }
 
 fn cmdList(allocator: std.mem.Allocator) !void {
@@ -453,6 +558,8 @@ fn printHelp() !void {
         \\
         \\Subcommands:
         \\  install [file]              Install formulae/casks/taps/services from a Brewfile or Maltfile.json.
+        \\  cleanup [--yes] [--dry-run] [file]
+        \\                              Uninstall packages present on disk but absent from the Brewfile.
         \\  create  [--format brewfile|json] [path]
         \\                              Write currently-installed set to a bundle file.
         \\  list                        List bundles registered in the database.

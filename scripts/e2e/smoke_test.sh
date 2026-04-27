@@ -272,6 +272,9 @@ else
   run_ok t3.bundle.create -- "$MT_BIN" bundle create --format json "$LOGDIR/Maltfile.json"
   run_ok t3.bundle.list -- "$MT_BIN" bundle list
   run_ok t3.bundle.install.dry -- "$MT_BIN" bundle install --dry-run "$LOGDIR/Maltfile.json"
+  # cleanup against a manifest covering everything installed: the plan must
+  # be empty and the command must short-circuit cleanly without prompting.
+  run_ok t3.bundle.cleanup.dry -- "$MT_BIN" bundle cleanup --dry-run "$LOGDIR/Maltfile.json"
 
   # run: already-installed path (no re-download).
   run_ok t3.run.tree -- "$MT_BIN" run tree -- --version

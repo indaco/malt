@@ -41,6 +41,7 @@ pub const bundle_brewfile_emit = @import("core/bundle/brewfile_emit.zig");
 pub const services_plist = @import("core/services/plist.zig");
 pub const services_supervisor = @import("core/services/supervisor.zig");
 pub const bundle_runner = @import("core/bundle/runner.zig");
+pub const bundle_cleanup = @import("core/bundle/cleanup.zig");
 pub const cli_services = @import("cli/services.zig");
 pub const cli_bundle = @import("cli/bundle.zig");
 pub const cli_help = @import("cli/help.zig");

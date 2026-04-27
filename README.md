@@ -269,10 +269,10 @@ mt update                                # wipe API cache + drop snapshot (fast)
 mt update --check                        # write a fresh outdated snapshot only
 ```
 
-| Flag            | Description                                                      |
-| --------------- | ---------------------------------------------------------------- |
+| Flag            | Description                                                       |
+| --------------- | ----------------------------------------------------------------- |
 | `--check`       | Write a fresh `cache/outdated.json` snapshot; skip API cache wipe |
-| `--quiet`, `-q` | Suppress status messages                                         |
+| `--quiet`, `-q` | Suppress status messages                                          |
 
 Default `mt update` invalidates the API cache so the next `install`, `search`, or `info` fetches fresh data, and drops any cached `outdated.json` so the next `mt outdated` recomputes against the new world. `--check` is the explicit "warm the snapshot" path for shell-prompt integrations.
 
@@ -289,14 +289,14 @@ mt outdated --pinned-only                # CVE watch on held-back versions
 mt outdated --refresh                    # bypass the cached snapshot
 ```
 
-| Flag            | Description                                                       |
-| --------------- | ----------------------------------------------------------------- |
-| `--json`        | Output as JSON                                                    |
-| `--formula`     | Show outdated formulas only                                       |
-| `--cask`        | Show outdated casks only                                          |
-| `--pinned-only` | Audit pinned formulas + casks only                                |
-| `--refresh`     | Force live recompute, bypassing the cached snapshot               |
-| `--quiet`, `-q` | Suppress status messages                                          |
+| Flag            | Description                                         |
+| --------------- | --------------------------------------------------- |
+| `--json`        | Output as JSON                                      |
+| `--formula`     | Show outdated formulas only                         |
+| `--cask`        | Show outdated casks only                            |
+| `--pinned-only` | Audit pinned formulas + casks only                  |
+| `--refresh`     | Force live recompute, bypassing the cached snapshot |
+| `--quiet`, `-q` | Suppress status messages                            |
 
 Compares installed versions against the latest from the Homebrew API. Checks both formulas and casks by default. `--pinned-only` narrows the scan to pinned packages (formulas + casks) so you can see when an upstream release supersedes the version you've held back — pair with `mt upgrade --pinned --dry-run` for the full audit/preview pair.
 
@@ -539,6 +539,9 @@ Group-install and export sets of packages. Drop-in for `brew bundle`: reads exis
 mt bundle install                            # ./Brewfile or ./Maltfile.json
 mt bundle install path/to/Brewfile           # explicit file
 mt bundle install --dry-run                  # print what would happen
+mt bundle cleanup                            # uninstall packages absent from Brewfile (prompt)
+mt bundle cleanup --dry-run                  # print the removal plan, no changes
+mt bundle cleanup --yes                      # skip the typed confirmation
 mt bundle create                             # snapshot installed -> ./Brewfile
 mt bundle create --format json my.json       # JSON output
 mt bundle export                             # print current install to stdout
@@ -548,18 +551,20 @@ mt bundle remove devtools                    # unregister (does not uninstall)
 mt bundle import path/to/Brewfile            # register without installing
 ```
 
-| Subcommand | Description                                                                |
-| ---------- | -------------------------------------------------------------------------- |
-| `install`  | Install every member; idempotent — already-installed members are skipped   |
-| `create`   | Write the currently-installed set to a bundle file                         |
-| `list`     | List bundles registered in the database                                    |
-| `remove`   | Unregister a bundle (use `--purge` to also uninstall its members)          |
-| `export`   | Print bundle (or current install) to stdout in `brewfile` or `json` format |
-| `import`   | Register a bundle definition without installing                            |
+| Subcommand | Description                                                                                                                       |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `install`  | Install every member; idempotent — already-installed members are skipped                                                          |
+| `cleanup`  | Uninstall direct formulas/casks present on disk but absent from the Brewfile; indirect deps stay managed by `purge --unused-deps` |
+| `create`   | Write the currently-installed set to a bundle file                                                                                |
+| `list`     | List bundles registered in the database                                                                                           |
+| `remove`   | Unregister a bundle (use `--purge` to also uninstall its members)                                                                 |
+| `export`   | Print bundle (or current install) to stdout in `brewfile` or `json` format                                                        |
+| `import`   | Register a bundle definition without installing                                                                                   |
 
 | Flag               | Description                                           |
 | ------------------ | ----------------------------------------------------- |
-| `--dry-run`        | Print every member action without forking             |
+| `--dry-run`, `-n`  | Print every member action without forking             |
+| `--yes`, `-y`      | (`cleanup`) skip the typed removal confirmation       |
 | `--format <fmt>`   | `brewfile` (default) or `json`                        |
 | `--from-installed` | (`create`) populate from currently-installed packages |
 | `--purge`          | (`remove`) also uninstall each member                 |

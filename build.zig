@@ -136,6 +136,7 @@ pub fn build(b: *std.Build) void {
         "tests/services_plist_test.zig",
         "tests/services_test.zig",
         "tests/bundle_test.zig",
+        "tests/bundle_cleanup_test.zig",
         "tests/atomic_test.zig",
         "tests/lock_test.zig",
         "tests/tap_test.zig",
