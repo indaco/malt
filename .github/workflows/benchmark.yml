@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   benchmark:
@@ -167,17 +168,60 @@ jobs:
           # Update date
           sed -i '' "s/> Benchmarks on Apple Silicon.*/> Benchmarks on Apple Silicon (GitHub Actions macos-14), $DATE. Auto-updated weekly via [benchmark workflow](.github\/workflows\/benchmark.yml)./" README.md
 
-      - name: Commit results
+      - name: Open PR with benchmark results
         # Only publish the README refresh when the workflow runs against
         # the canonical branch. A manual `workflow_dispatch` against any
         # PR or feature branch should still produce numbers in the job
-        # log, but must not overwrite README.md or push — which would
-        # otherwise create the format-vs-numbers conflict we saw on
-        # `refactor/zig-hardening`.
+        # log, but must not push to the bench branch or open a PR.
+        #
+        # Direct pushes to `main` are blocked by branch protection, so
+        # the README refresh lands as a PR from `chore/benchmark-YYYY-MM-DD`
+        # and is merged by a maintainer (or auto-merge if enabled). Same-day
+        # re-runs force-push the branch so the open PR picks up fresh numbers.
         if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          DATE=$(date -u +"%Y-%m-%d")
+          BRANCH="chore/benchmark-${DATE}"
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet README.md; then
+            echo "No README changes to publish."
+            exit 0
+          fi
+
+          git checkout -B "$BRANCH"
           git add README.md
-          git diff --cached --quiet || git commit -m "bench: update benchmark results $(date -u +%Y-%m-%d)"
-          git push
+          git commit -m "bench: update benchmark results ${DATE}"
+          git push --force-with-lease -u origin "$BRANCH"
+
+          cat > /tmp/pr_body.md << 'BODY'
+          ## Description
+
+          Weekly benchmark refresh produced by the [benchmark workflow](.github/workflows/benchmark.yml).
+          Updates the binary size, cold install, and warm install tables in the README with fresh numbers from a true cold install on macos-14 (BENCH_TRUE_COLD=1, BENCH_FAIL_FAST=1).
+
+          ## Related Issue
+
+          N/A - scheduled run.
+
+          ## Notes for Reviewers
+
+          Numbers come from `scripts/bench.sh`. The ffmpeg x20 stress step runs before this PR opens, so a race in the parallel install pipeline would fail the workflow rather than publish misleading timings.
+          BODY
+
+          # Strip the YAML heredoc indent so the PR body renders flush-left.
+          sed -i '' 's/^          //' /tmp/pr_body.md
+
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "bench: update benchmark results ${DATE}" \
+              --body-file /tmp/pr_body.md
+          else
+            echo "PR for $BRANCH already open; refreshed via push."
+          fi
