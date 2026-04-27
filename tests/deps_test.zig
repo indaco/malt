@@ -145,6 +145,55 @@ test "findOrphans returns empty when every dep keg is still referenced" {
     try testing.expectEqual(@as(usize, 0), orphans.len);
 }
 
+test "findOrphans walks the transitive closure of direct kegs" {
+    // Real-world shape: `node` (direct) → `openssl@3` → `ca-certificates`.
+    // The dependencies table only carries direct edges, so a one-level
+    // query would have classed `ca-certificates` as orphan even though
+    // `openssl@3` (retained by node) still pulls it in. Plus a stranded
+    // dep nobody references — the only thing that should actually purge.
+    var tdb = try TempDb.init("orphans_transitive");
+    defer tdb.deinit();
+
+    const node_id = try insertKeg(&tdb.db, "node", "direct");
+    try insertDep(&tdb.db, node_id, "openssl@3");
+
+    const openssl_id = try insertKeg(&tdb.db, "openssl@3", "dependency");
+    try insertDep(&tdb.db, openssl_id, "ca-certificates");
+
+    _ = try insertKeg(&tdb.db, "ca-certificates", "dependency");
+    _ = try insertKeg(&tdb.db, "stranded-lib", "dependency");
+
+    const orphans = try deps_mod.findOrphans(testing.allocator, &tdb.db);
+    defer {
+        for (orphans) |o| testing.allocator.free(o);
+        testing.allocator.free(orphans);
+    }
+
+    try testing.expectEqual(@as(usize, 1), orphans.len);
+    try testing.expectEqualStrings("stranded-lib", orphans[0]);
+}
+
+test "findOrphans tolerates dependency cycles without looping forever" {
+    // Defensive: a malformed graph where two dep kegs reference each
+    // other (a → b, b → a) under no direct retainer should still
+    // classify both as orphans. The recursive CTE's UNION (not UNION
+    // ALL) collapses repeats so the walk terminates.
+    var tdb = try TempDb.init("orphans_cycle");
+    defer tdb.deinit();
+
+    const a_id = try insertKeg(&tdb.db, "a-lib", "dependency");
+    const b_id = try insertKeg(&tdb.db, "b-lib", "dependency");
+    try insertDep(&tdb.db, a_id, "b-lib");
+    try insertDep(&tdb.db, b_id, "a-lib");
+
+    const orphans = try deps_mod.findOrphans(testing.allocator, &tdb.db);
+    defer {
+        for (orphans) |o| testing.allocator.free(o);
+        testing.allocator.free(orphans);
+    }
+    try testing.expectEqual(@as(usize, 2), orphans.len);
+}
+
 test "ResolvedDep carries name and already_installed flag" {
     const d = deps_mod.ResolvedDep{ .name = "foo", .already_installed = true };
     try testing.expectEqualStrings("foo", d.name);
