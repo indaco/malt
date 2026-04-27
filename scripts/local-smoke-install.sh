@@ -268,17 +268,18 @@ install_only_deps_wget() {
     FAILURES+=("$tag.dep")
   fi
 
-  # `purge --unused-deps` must reclaim every dep, since nothing direct
-  # retains them in this fresh sandbox.
+  # `purge --unused-deps` must reclaim wget's exclusive deps. Earlier
+  # smoke steps (node, zig, rust, go) are still direct so their deps
+  # are retained — assert the sentinel goes away rather than expecting
+  # an empty list.
   if run "$tag.purge" "$MT_BIN" purge --unused-deps --yes; then
-    if [[ -z "$("$MT_BIN" list -q 2>/dev/null)" ]]; then
-      printf '  PASS  [%s.purge] purge --unused-deps reclaimed every dep\n' "$tag"
-      PASS=$((PASS + 1))
-    else
-      printf '  FAIL  [%s.purge] kegs survived purge:\n' "$tag"
-      "$MT_BIN" list -q 2>/dev/null | sed 's|^|        | |'
+    if "$MT_BIN" list -q 2>/dev/null | grep -qx "$sentinel_dep"; then
+      printf '  FAIL  [%s.purge] %s survived purge --unused-deps\n' "$tag" "$sentinel_dep"
       FAIL=$((FAIL + 1))
       FAILURES+=("$tag.purge")
+    else
+      printf '  PASS  [%s.purge] purge --unused-deps reclaimed %s\n' "$tag" "$sentinel_dep"
+      PASS=$((PASS + 1))
     fi
   fi
 }
