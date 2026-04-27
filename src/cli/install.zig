@@ -79,6 +79,17 @@ pub fn pruneCellarForReinstall(prefix: []const u8, name: []const u8, version: []
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch return;
     fs_compat.deleteTreeAbsolute(cellar_path) catch {};
 }
+
+/// Single-`stat` probe of `<prefix>/Cellar/<name>`. uninstall tears
+/// down the parent when the last version goes; an orphan empty dir is
+/// `mt doctor --fix` territory rather than something to paper over.
+fn kegPresent(prefix: []const u8, name: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return false;
+    fs_compat.accessAbsolute(cellar_path, .{}) catch return false;
+    return true;
+}
+
 pub const localErrorIsAnnounced = record_mod.localErrorIsAnnounced;
 pub const recordKeg = record_mod.recordKeg;
 pub const deleteKeg = record_mod.deleteKeg;
@@ -238,6 +249,22 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return InstallError.PrefixAbsurd;
         },
     };
+
+    // Idempotent fast path — skip DB / lock / HTTP setup when every named
+    // arg already has a Cellar entry. Flags that change semantics
+    // (--force / --cask / --local / --dry-run / --only-dependencies) and
+    // tap-form / .rb-path args route to the regular flow. All-or-nothing
+    // on multi-arg keeps the gate state-free.
+    const fastpath_eligible = !force and !force_cask and !local_only and
+        !dry_run and !only_dependencies;
+    if (fastpath_eligible) fast: {
+        for (packages.items) |pkg| {
+            if (isTapFormula(pkg) or isLocalFormulaPath(pkg)) break :fast;
+            if (!kegPresent(prefix, pkg)) break :fast;
+        }
+        for (packages.items) |pkg| output.info("{s} is already installed", .{pkg});
+        return;
+    }
 
     // Ensure required directories exist (Step 0)
     ensureDirs(prefix) catch return error.Aborted;
@@ -850,4 +877,27 @@ fn installCask(
     allocator.free(app_path);
 
     output.success("{s} {s} installed", .{ cask.token, cask.version });
+}
+
+test "kegPresent returns true only when <prefix>/Cellar/<name> exists" {
+    const testing = std.testing;
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(
+        &path_buf,
+        "/tmp/malt_kegpresent_{d}",
+        .{fs_compat.nanoTimestamp()},
+    );
+    fs_compat.deleteTreeAbsolute(prefix) catch {};
+    try fs_compat.cwd().makePath(prefix);
+    defer fs_compat.deleteTreeAbsolute(prefix) catch {};
+
+    try testing.expect(!kegPresent(prefix, "ghost"));
+
+    var keg_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const keg = try std.fmt.bufPrint(&keg_buf, "{s}/Cellar/ghost", .{prefix});
+    try fs_compat.cwd().makePath(keg);
+
+    try testing.expect(kegPresent(prefix, "ghost"));
+    try testing.expect(!kegPresent(prefix, "other"));
 }
