@@ -378,6 +378,8 @@ System health check.
 
 ```bash
 mt doctor
+mt doctor --fix                   # repair the safe-class warnings inline
+mt doctor --fix --dry-run         # preview the repair plan, no writes
 mt doctor --post-install-status   # check DSL support per installed formula
 ```
 
@@ -395,6 +397,14 @@ mt doctor --post-install-status   # check DSL support per installed formula
 | Post-install DSL    | All installed post_install formulae parseable | Warn: unsupported construct              |
 
 Exits with code 0 (all OK), 1 (warnings found), or 2 (errors found).
+
+`--fix` repairs the **safe** subset only — actions that are reversible and never touch user data:
+
+- Stale lock: unlinks `db/malt.lock` when its recorded PID is dead.
+- Broken symlinks: unlinks dangling links under `bin/`, `lib/`, `include/`, `share/`, `sbin/`.
+- Orphaned store entries: sweeps refcount-0 blobs (same as `mt purge --store-orphans`).
+
+Dangerous classes (corrupt DB, missing kegs, missing prefix directories, weak permissions, unpatched Mach-O placeholders) are **never auto-run**; `--fix` leaves their inline manual remediation hint in place.
 
 ### `mt purge`
 

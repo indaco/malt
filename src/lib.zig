@@ -34,6 +34,7 @@ pub const purge = @import("cli/purge.zig");
 pub const install = @import("cli/install.zig");
 pub const upgrade = @import("cli/upgrade.zig");
 pub const doctor = @import("cli/doctor.zig");
+pub const doctor_fix = @import("cli/doctor/fix.zig");
 pub const dsl = @import("core/dsl/root.zig");
 pub const bundle_manifest = @import("core/bundle/manifest.zig");
 pub const bundle_brewfile = @import("core/bundle/brewfile.zig");

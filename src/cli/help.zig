@@ -177,10 +177,17 @@ const search_help =
 ;
 
 const doctor_help =
-    \\Usage: malt doctor
+    \\Usage: malt doctor [--fix]
     \\
     \\Run system health checks: database integrity, orphaned store
     \\entries, broken symlinks, disk space, API reachability, and more.
+    \\
+    \\Options:
+    \\  --fix          Apply the safe-class fixers (stale lock,
+    \\                 orphaned store entries, broken symlinks).
+    \\                 Pair with --dry-run to preview the plan.
+    \\                 Dangerous classes (corrupt DB, missing kegs)
+    \\                 still print a manual remediation command.
     \\
 ;
 

@@ -157,6 +157,7 @@ pub fn build(b: *std.Build) void {
         "tests/term_sanitize_test.zig",
         "tests/perms_test.zig",
         "tests/doctor_render_test.zig",
+        "tests/doctor_fix_test.zig",
         "tests/cli_tap_test.zig",
         "tests/cli_services_test.zig",
         "tests/install_execute_test.zig",
