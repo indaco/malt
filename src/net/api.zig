@@ -152,6 +152,15 @@ pub const BrewApi = struct {
 
     pub const Kind = enum { formula, cask };
 
+    /// Cache filename prefix for each `Kind`. Centralised so probe and
+    /// fetch helpers can't drift out of sync over which name they stat.
+    fn prefixForKind(kind: Kind) []const u8 {
+        return switch (kind) {
+            .formula => "formula_",
+            .cask => "cask_",
+        };
+    }
+
     /// Existence probe that reuses the same cache layout as `fetchFormula` /
     /// `fetchCask` without ever reading the cached body. On a warm 5-minute
     /// cache this is a single `statFile` call; on a miss it falls through to
@@ -160,10 +169,7 @@ pub const BrewApi = struct {
     /// `ApiUnreachable` are propagated.
     pub fn exists(self: *BrewApi, name: []const u8, kind: Kind) ApiError!bool {
         try validateName(name);
-        const prefix: []const u8 = switch (kind) {
-            .formula => "formula_",
-            .cask => "cask_",
-        };
+        const prefix = prefixForKind(kind);
 
         if (self.readNotFoundCache(name, prefix)) return false;
         if (self.cachedFresh(name, prefix)) return true;
@@ -178,6 +184,17 @@ pub const BrewApi = struct {
             else => return e,
         };
         self.allocator.free(body);
+        return true;
+    }
+
+    /// Single-stat presence probe — no body read, no parse, no TTL gate
+    /// (freshness is `fetchCached`'s problem). Used to skip the cask-
+    /// ambiguity warning when no cask of that name has ever been cached.
+    pub fn cachedExists(self: *BrewApi, name: []const u8, kind: Kind) bool {
+        const prefix = prefixForKind(kind);
+        var path_buf: [512]u8 = undefined;
+        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, name }) catch return false;
+        _ = fs_compat.cwd().statFile(cache_path) catch return false;
         return true;
     }
 
