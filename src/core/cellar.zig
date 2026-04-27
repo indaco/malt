@@ -14,6 +14,7 @@ const patch = @import("patch.zig");
 const text_patcher = @import("../macho/patcher.zig");
 const codesign = @import("../macho/codesign.zig");
 const atomic = @import("../fs/atomic.zig");
+const relocated_store = @import("relocated_store.zig");
 
 pub const CellarError = error{
     CloneFailed,
@@ -94,6 +95,21 @@ pub fn materializeWithCellar(
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
         return CellarError.OutOfMemory;
+
+    // Warm-reinstall fast path: a prior successful materialize for this
+    // bottle sha is already on disk, fully relocated. Clonefile-restore
+    // it and skip the expensive extract → patch → codesign pipeline.
+    // Falls through on any cache miss/error so a flaky cache never breaks
+    // the install.
+    if (relocated_store.has(prefix, store_sha256)) cache_hit: {
+        relocated_store.materialize(allocator, prefix, store_sha256, name, version) catch |e| {
+            std.log.debug("relocated cache miss for {s}: {s}", .{ store_sha256, @errorName(e) });
+            break :cache_hit;
+        };
+        writeInstallReceipt(cellar_path, name, version, store_sha256);
+        const owned = allocator.dupe(u8, cellar_path) catch return CellarError.OutOfMemory;
+        return .{ .name = name, .version = version, .path = owned };
+    }
 
     // Find the actual keg subdirectory inside the store entry.
     // Bottles extract as: store/{sha256}/{name}/{version}/ but the version
@@ -237,6 +253,14 @@ pub fn materializeWithCellar(
 
     // Write INSTALL_RECEIPT.json for brew compatibility
     writeInstallReceipt(cellar_path, name, version, store_sha256);
+
+    // Snapshot the post-relocation keg so the next install of the same
+    // bottle sha takes the cache short-circuit at the top of this
+    // function. Snapshot failure is non-fatal — the user-visible install
+    // already succeeded.
+    relocated_store.save(allocator, prefix, store_sha256, name, version) catch |e| {
+        std.log.debug("relocated cache save failed for {s}: {s}", .{ store_sha256, @errorName(e) });
+    };
 
     // Allocate the path so it survives beyond this function's stack
     const owned_path = allocator.dupe(u8, cellar_path) catch return CellarError.OutOfMemory;

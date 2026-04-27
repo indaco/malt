@@ -354,6 +354,92 @@ test "checkPrefixSane rejects absurd prefixes at the 256-byte cap" {
 // CellarError.describeError covers every tag
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Relocated-store cache integration
+// ---------------------------------------------------------------------------
+
+const relocated_mod = @import("malt").relocated_store;
+
+const valid_test_sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+test "materializeWithCellar short-circuits when the relocated cache has the sha" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    // Pre-stage the relocated cache: write a fixture keg directly under
+    // store-relocated/<sha>/ via a temp Cellar entry + relocated.save.
+    try createBottleFixture(testing.allocator, prefix, "stub-store", "cached", "1.0");
+    const keg_pre = try cellar_mod.materializeWithCellar(
+        testing.allocator,
+        prefix,
+        "stub-store",
+        "cached",
+        "1.0",
+        ":any",
+    );
+    testing.allocator.free(keg_pre.path);
+    try relocated_mod.save(testing.allocator, prefix, valid_test_sha, "cached", "1.0");
+    // Wipe the just-built Cellar entry — the cache must rebuild it.
+    const cellar_keg_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/cached/1.0", .{prefix});
+    defer testing.allocator.free(cellar_keg_path);
+    try malt.fs_compat.deleteTreeAbsolute(cellar_keg_path);
+
+    // No `store/<sha>/` exists for `valid_test_sha` — the only way this
+    // call can succeed is via the cache short-circuit.
+    const keg = try cellar_mod.materializeWithCellar(
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "cached",
+        "1.0",
+        ":any",
+    );
+    defer testing.allocator.free(keg.path);
+
+    var buf: [512]u8 = undefined;
+    const bin_path = try std.fmt.bufPrint(&buf, "{s}/bin/hello", .{keg.path});
+    const content = try readFile(testing.allocator, bin_path);
+    defer testing.allocator.free(content);
+    // Cache-hit short-circuit skips placeholder substitution, so the
+    // cached file content is preserved verbatim. The cache was populated
+    // from a successful pipeline run, so placeholders are already gone.
+    try testing.expect(std.mem.indexOf(u8, content, "@@HOMEBREW_PREFIX@@") == null);
+}
+
+test "materializeWithCellar populates the relocated cache after a cold install" {
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, valid_test_sha, "snap", "0.1");
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    try testing.expect(!relocated_mod.has(prefix, valid_test_sha));
+    const keg = try cellar_mod.materializeWithCellar(
+        testing.allocator,
+        prefix,
+        valid_test_sha,
+        "snap",
+        "0.1",
+        ":any",
+    );
+    defer testing.allocator.free(keg.path);
+
+    // Snapshot must run on the success path so warm reinstalls hit it.
+    try testing.expect(relocated_mod.has(prefix, valid_test_sha));
+}
+
 test "describeError returns a non-empty, distinct message for every CellarError" {
     const cases = [_]cellar_mod.CellarError{
         cellar_mod.CellarError.CloneFailed,

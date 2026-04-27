@@ -9,6 +9,7 @@ pub const deps = @import("core/deps.zig");
 pub const formula = @import("core/formula.zig");
 pub const linker = @import("core/linker.zig");
 pub const store = @import("core/store.zig");
+pub const relocated_store = @import("core/relocated_store.zig");
 pub const lock = @import("db/lock.zig");
 pub const schema = @import("db/schema.zig");
 pub const sqlite = @import("db/sqlite.zig");
