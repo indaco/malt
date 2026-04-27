@@ -236,15 +236,24 @@ install_python_overflow_fallback() {
 # Pin the --only-dependencies contract end-to-end against a live formula.
 # wget is the canonical "warm the store before building from source" target:
 # half a dozen recognizable deps (libidn2, openssl@3, ...) and no
-# post_install drama. We also exercise `mt purge --unused-deps`, since the
-# whole point of recording deps as `dependency` is that purge can reclaim
-# them once nothing direct retains them.
+# post_install drama. The same case also exercises `mt purge --unused-deps`
+# from both sides:
+#
+#   * libidn2 is wget-exclusive in this sandbox (no direct keg pulls it
+#     in), so it MUST purge.
+#   * ca-certificates sits two levels deep from `node` (node → openssl@3 →
+#     ca-certificates) — the recursive orphan walk must classify it as
+#     retained, so it MUST survive. A flat one-level walk would mis-purge
+#     it; this assertion is the early signal if that regression returns.
 install_only_deps_wget() {
   local tag="smoke.install.only_deps.wget"
   local target="wget"
   # libidn2 is wget's most stable transitive dep across recent bottles;
   # if homebrew/core ever drops it the assertion below is the early signal.
   local sentinel_dep="libidn2"
+  # ca-certificates is the canonical transitive-retention witness: every
+  # bottled SSL stack pulls it in, so it lives under node/rust/go too.
+  local retained_dep="ca-certificates"
 
   if ! run "$tag" "$MT_BIN" install --only-dependencies "$target"; then
     return
@@ -268,10 +277,10 @@ install_only_deps_wget() {
     FAILURES+=("$tag.dep")
   fi
 
-  # `purge --unused-deps` must reclaim wget's exclusive deps. Earlier
-  # smoke steps (node, zig, rust, go) are still direct so their deps
-  # are retained — assert the sentinel goes away rather than expecting
-  # an empty list.
+  # Two-sided purge contract:
+  #   - reclaim items with no direct retainer (libidn2)
+  #   - retain items reachable through any direct keg's transitive graph
+  #     (ca-certificates, retained via node → openssl@3)
   if run "$tag.purge" "$MT_BIN" purge --unused-deps --yes; then
     if "$MT_BIN" list -q 2>/dev/null | grep -qx "$sentinel_dep"; then
       printf '  FAIL  [%s.purge] %s survived purge --unused-deps\n' "$tag" "$sentinel_dep"
@@ -280,6 +289,15 @@ install_only_deps_wget() {
     else
       printf '  PASS  [%s.purge] purge --unused-deps reclaimed %s\n' "$tag" "$sentinel_dep"
       PASS=$((PASS + 1))
+    fi
+
+    if "$MT_BIN" list -q 2>/dev/null | grep -qx "$retained_dep"; then
+      printf '  PASS  [%s.purge.retained] %s retained via transitive closure\n' "$tag" "$retained_dep"
+      PASS=$((PASS + 1))
+    else
+      printf '  FAIL  [%s.purge.retained] %s wrongly purged — orphan walk regressed?\n' "$tag" "$retained_dep"
+      FAIL=$((FAIL + 1))
+      FAILURES+=("$tag.purge.retained")
     fi
   fi
 }
