@@ -6,6 +6,8 @@
 const std = @import("std");
 const fs_compat = @import("../../fs/compat.zig");
 const sqlite = @import("../../db/sqlite.zig");
+const atomic = @import("../../fs/atomic.zig");
+const cask_mod = @import("../../core/cask.zig");
 const linker_mod = @import("../../core/linker.zig");
 const tap_mod = @import("../../core/tap.zig");
 const client_mod = @import("../../net/client.zig");
@@ -47,6 +49,10 @@ const ResolvedRubyFormula = struct {
     /// `longbridge-terminal` cask ships a `longbridge` binary). Null
     /// for formulas and for casks that omit the directive.
     binary_name: ?[]const u8 = null,
+    /// Cask DSL `app "<x>.app"` directive. Disambiguates `.zip` casks
+    /// (which ship a bundle) from formula bottles (which ship a binary
+    /// tree). Null for formulas and for casks that omit the directive.
+    app_name: ?[]const u8 = null,
     /// When set, the tap is registered in the DB (mirrors the original
     /// tap install behaviour). Local installs leave this null so they
     /// never pollute the tap list.
@@ -158,6 +164,7 @@ pub fn installTapFormula(
         .url = final_url,
         .sha256 = rb.sha256,
         .binary_name = parseCaskBinary(resp.body),
+        .app_name = parseCaskApp(resp.body),
         .tap_registration = .{ .url = tap_url, .commit_sha = commit_sha },
     };
     try materializeRubyFormula(allocator, resolved, &http, db, linker, prefix, dry_run, force);
@@ -318,6 +325,22 @@ fn materializeRubyFormula(
 ) InstallError!void {
     output.info("Found {s} {s}", .{ resolved.name, resolved.version });
 
+    // Refuse any scheme other than `https://`. A `.rb` that smuggled
+    // `http://` (downgrade), `file:///etc/passwd`, `ftp://`, or a data
+    // URI would otherwise be trusted by the HTTP client. Enforced for
+    // every caller of this helper — tap and local share the check.
+    if (!args.isAllowedArchiveUrl(resolved.url)) {
+        output.err("Refusing to fetch non-HTTPS archive URL for {s}: {s}", .{ resolved.name, resolved.url });
+        return InstallError.InsecureArchiveUrl;
+    }
+
+    // .dmg/.pkg/.zip-with-app casks route through the cask installer —
+    // mounting, ditto, and `installer` live there. Tar.gz/tar.xz/zip
+    // formula archives keep the simple-extract path below.
+    if (tapCaskArtifactKind(resolved.url, resolved.app_name != null)) |kind| {
+        return materializeTapCask(allocator, resolved, db, kind, dry_run, force);
+    }
+
     if (dry_run) {
         output.info("Dry run: would install {s} {s} from {s}", .{ resolved.name, resolved.version, resolved.url });
         return;
@@ -327,15 +350,6 @@ fn materializeRubyFormula(
     if (!force and record.isInstalled(db, resolved.name)) {
         output.info("{s} is already installed", .{resolved.name});
         return;
-    }
-
-    // Refuse any scheme other than `https://`. A `.rb` that smuggled
-    // `http://` (downgrade), `file:///etc/passwd`, `ftp://`, or a data
-    // URI would otherwise be trusted by the HTTP client. Enforced for
-    // every caller of this helper — tap and local share the check.
-    if (!args.isAllowedArchiveUrl(resolved.url)) {
-        output.err("Refusing to fetch non-HTTPS archive URL for {s}: {s}", .{ resolved.name, resolved.url });
-        return InstallError.InsecureArchiveUrl;
     }
 
     // Stream with a progress bar, matching formula/cask downloads.
@@ -643,4 +657,165 @@ pub fn parseCaskBinary(rb_content: []const u8) ?[]const u8 {
         if (extractQuoted(line, "binary \"")) |b| return b;
     }
     return null;
+}
+
+/// Pull the first argument of a cask `app "<X>.app"` directive. The
+/// cask installer promotes that bundle into the chosen Applications
+/// directory; absence flips a `.zip` URL away from the cask path so a
+/// formula bottle is still extracted into the Cellar.
+pub fn parseCaskApp(rb_content: []const u8) ?[]const u8 {
+    var line_start: usize = 0;
+    for (rb_content, 0..) |ch, idx| {
+        if (ch != '\n' and idx != rb_content.len - 1) continue;
+        const line_end = if (ch == '\n') idx else idx + 1;
+        const line = std.mem.trim(u8, rb_content[line_start..line_end], " \t\r");
+        line_start = idx + 1;
+        if (!std.mem.startsWith(u8, line, "app \"")) continue;
+        if (extractQuoted(line, "app \"")) |a| return a;
+    }
+    return null;
+}
+
+/// Decide whether a tap-DSL URL should route through the cask installer.
+/// `.dmg` and `.pkg` are always cask formats. `.zip` is ambiguous so it
+/// only flips when the DSL ships an `app "<X>.app"` directive — otherwise
+/// the archive flows down the keg-extract path as before. Reusing
+/// `cask.artifactTypeFromUrl` keeps suffix/query parsing in one place
+/// and turns this into an exhaustive switch — adding a new ArtifactType
+/// variant later is a compile error here until the policy is decided.
+pub fn tapCaskArtifactKind(url: []const u8, has_app: bool) ?cask_mod.ArtifactType {
+    return switch (cask_mod.artifactTypeFromUrl(url)) {
+        .dmg => .dmg,
+        .pkg => .pkg,
+        .zip => if (has_app) .zip else null,
+        .tar_gz, .unknown => null,
+    };
+}
+
+/// Hand a tap cask off to the shared `core/cask.zig` installer by
+/// minting a Homebrew-API-shaped JSON document from the parsed Ruby
+/// directives. Reuses every download/SHA/extract path the brew-API
+/// cask flow already exercises — the only thing the tap path adds is
+/// the JSON adapter.
+fn materializeTapCask(
+    allocator: std.mem.Allocator,
+    resolved: ResolvedRubyFormula,
+    db: *sqlite.Database,
+    kind: cask_mod.ArtifactType,
+    dry_run: bool,
+    force: bool,
+) InstallError!void {
+    if (!force and cask_mod.isInstalled(db, resolved.name)) {
+        output.info("{s} is already installed", .{resolved.name});
+        return;
+    }
+
+    if (dry_run) {
+        output.info("Dry run: would install cask {s} {s} from {s}", .{ resolved.name, resolved.version, resolved.url });
+        return;
+    }
+
+    // Sentinel-terminated copy of the active prefix; the cask installer
+    // expects [:0]const u8 because it threads the value into bufPrint
+    // formats that share the buffer with C-string consumers.
+    const prefix_z = atomic.maltPrefix();
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(allocator);
+    buildSyntheticCaskJson(allocator, &json_buf, resolved) catch return InstallError.RecordFailed;
+
+    var cask = cask_mod.parseCask(allocator, json_buf.items) catch {
+        output.err("Failed to materialise cask {s} from tap DSL", .{resolved.name});
+        return InstallError.CaskNotFound;
+    };
+    defer cask.deinit();
+
+    var installer = cask_mod.CaskInstaller.init(allocator, db, prefix_z);
+    installer.artifact_type_override = kind;
+
+    var bar = progress_mod.ProgressBar.init(cask.token, 0);
+    installer.progress = .{
+        .context = @ptrCast(&bar),
+        .func = &download.progressBridge,
+    };
+
+    if (kind == .pkg) {
+        output.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
+    }
+
+    const app_path = installer.install(&cask) catch |e| {
+        bar.finish();
+        output.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
+        return switch (e) {
+            error.DownloadFailed, error.Sha256Mismatch => InstallError.DownloadFailed,
+            error.OutOfMemory => InstallError.RecordFailed,
+            else => InstallError.CaskNotFound,
+        };
+    };
+    bar.finish();
+    defer allocator.free(app_path);
+
+    cask_mod.recordInstall(db, &cask, app_path) catch {
+        output.warn("Failed to record cask {s} in database", .{cask.token});
+    };
+
+    if (resolved.tap_registration) |t| {
+        // Tap row is advisory — the install already succeeded; a missing
+        // tap row self-heals on the next sync so swallowing is safe here.
+        tap_mod.add(db, resolved.tap_label, t.url, t.commit_sha) catch {};
+    }
+
+    output.success("{s} {s} installed", .{ cask.token, cask.version });
+}
+
+/// Serialize a Homebrew-cask-API-shaped JSON document so the existing
+/// `parseCask` + `CaskInstaller` pipeline can consume a tap-DSL cask.
+/// `app` wins over `binary` when both directives appear because the
+/// `.app` bundle is what `installDmg`/`installZip` look up first.
+fn buildSyntheticCaskJson(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    resolved: ResolvedRubyFormula,
+) !void {
+    try out.appendSlice(allocator, "{\"token\":");
+    try writeJsonString(allocator, out, resolved.name);
+    try out.appendSlice(allocator, ",\"name\":[");
+    try writeJsonString(allocator, out, resolved.name);
+    try out.appendSlice(allocator, "],\"version\":");
+    try writeJsonString(allocator, out, resolved.version);
+    try out.appendSlice(allocator, ",\"url\":");
+    try writeJsonString(allocator, out, resolved.url);
+    try out.appendSlice(allocator, ",\"sha256\":");
+    try writeJsonString(allocator, out, resolved.sha256);
+    try out.appendSlice(allocator, ",\"desc\":\"\",\"homepage\":\"\",\"auto_updates\":false,\"artifacts\":[");
+    if (resolved.app_name) |app| {
+        try out.appendSlice(allocator, "{\"app\":[");
+        try writeJsonString(allocator, out, app);
+        try out.appendSlice(allocator, "]}");
+    } else if (resolved.binary_name) |bin| {
+        try out.appendSlice(allocator, "{\"binary\":[");
+        try writeJsonString(allocator, out, bin);
+        try out.appendSlice(allocator, "]}");
+    }
+    try out.appendSlice(allocator, "]}");
+}
+
+fn writeJsonString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    try out.append(allocator, '"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try out.appendSlice(allocator, "\\\""),
+            '\\' => try out.appendSlice(allocator, "\\\\"),
+            '\n' => try out.appendSlice(allocator, "\\n"),
+            '\r' => try out.appendSlice(allocator, "\\r"),
+            '\t' => try out.appendSlice(allocator, "\\t"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
+                var hex_buf: [6]u8 = undefined;
+                const seq = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{c}) catch unreachable;
+                try out.appendSlice(allocator, seq);
+            },
+            else => try out.append(allocator, c),
+        }
+    }
+    try out.append(allocator, '"');
 }

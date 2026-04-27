@@ -227,6 +227,75 @@ test "parseCaskBinary: indented directive still matches" {
     try testing.expectEqualStrings("sley", install.parseCaskBinary(rb).?);
 }
 
+// ─── parseCaskApp ────────────────────────────────────────────────────
+
+test "parseCaskApp: extracts the bundle from a DMG-shipping cask" {
+    const rb =
+        \\cask "deckclip" do
+        \\  version "1.4.3"
+        \\  url "https://example.com/Deck.dmg"
+        \\  app "Deck.app"
+        \\end
+    ;
+    try testing.expectEqualStrings("Deck.app", install.parseCaskApp(rb).?);
+}
+
+test "parseCaskApp: returns null for formulas and binary-only casks" {
+    // The directive is cask-only — formulas use `bin.install` and
+    // binary casks use `binary "<x>"`. Neither must be confused for an app.
+    const formula =
+        \\class Wget < Formula
+        \\  bin.install "wget"
+        \\end
+    ;
+    try testing.expect(install.parseCaskApp(formula) == null);
+
+    const bin_cask =
+        \\cask "tool" do
+        \\  binary "tool"
+        \\end
+    ;
+    try testing.expect(install.parseCaskApp(bin_cask) == null);
+}
+
+test "parseCaskApp: ignores mid-line 'app' substrings" {
+    // Anchor-at-line-start prevents a desc/comment from masquerading as
+    // the directive — same guard as parseCaskBinary.
+    const rb =
+        \\cask "foo" do
+        \\  desc "the app \"Bogus.app\" is just text here"
+        \\end
+    ;
+    try testing.expect(install.parseCaskApp(rb) == null);
+}
+
+// ─── tapCaskArtifactKind ─────────────────────────────────────────────
+
+const cask_mod = malt.cask;
+
+test "tapCaskArtifactKind: .dmg URLs always route to the cask installer" {
+    try testing.expectEqual(cask_mod.ArtifactType.dmg, install.tapCaskArtifactKind("https://example.com/Tool.dmg", false).?);
+    try testing.expectEqual(cask_mod.ArtifactType.dmg, install.tapCaskArtifactKind("https://cdn.example.com/Tool.dmg?token=abc", false).?);
+}
+
+test "tapCaskArtifactKind: .pkg URLs always route to the cask installer" {
+    try testing.expectEqual(cask_mod.ArtifactType.pkg, install.tapCaskArtifactKind("https://example.com/Tool.pkg", false).?);
+}
+
+test "tapCaskArtifactKind: .zip routes only when an app directive is set" {
+    // Without `app`, the URL likely points at a formula bottle — leave
+    // it on the existing extract-to-Cellar path.
+    try testing.expect(install.tapCaskArtifactKind("https://example.com/tool.zip", false) == null);
+    // With `app`, the zip wraps an `.app` bundle, so dispatch to cask.
+    try testing.expectEqual(cask_mod.ArtifactType.zip, install.tapCaskArtifactKind("https://example.com/Tool.zip", true).?);
+}
+
+test "tapCaskArtifactKind: tar.gz formula archives stay on the keg path" {
+    try testing.expect(install.tapCaskArtifactKind("https://example.com/tool.tar.gz", false) == null);
+    try testing.expect(install.tapCaskArtifactKind("https://example.com/tool.tgz", true) == null);
+    try testing.expect(install.tapCaskArtifactKind("https://example.com/tool.tar.xz", false) == null);
+}
+
 // ─── interpolateVersion ──────────────────────────────────────────────
 
 test "interpolateVersion substitutes #{version} once in the URL" {
