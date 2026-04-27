@@ -247,9 +247,9 @@ test "resolve walks a small BFS dep graph and dedups via visited" {
     // alpha → [beta, gamma]
     // beta  → []
     // gamma → [beta]   (tests BFS visited dedup)
-    try dir.writeFormula("alpha", "{\"dependencies\":[\"beta\",\"gamma\"]}");
-    try dir.writeFormula("beta", "{\"dependencies\":[]}");
-    try dir.writeFormula("gamma", "{\"dependencies\":[\"beta\"]}");
+    try dir.writeFormula("alpha", "{\"name\":\"alpha\",\"dependencies\":[\"beta\",\"gamma\"]}");
+    try dir.writeFormula("beta", "{\"name\":\"beta\",\"dependencies\":[]}");
+    try dir.writeFormula("gamma", "{\"name\":\"gamma\",\"dependencies\":[\"beta\"]}");
 
     var http = client_mod.HttpClient.init(alloc);
     defer http.deinit();
@@ -258,7 +258,10 @@ test "resolve walks a small BFS dep graph and dedups via visited" {
     var tdb = try TempDb.init("resolve_bfs");
     defer tdb.deinit();
 
-    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db);
+    var cache = deps_mod.FormulaCache.init(alloc);
+    defer cache.deinit();
+
+    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     // Expect both beta and gamma to appear, in BFS order.
@@ -277,9 +280,9 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
 
     // alpha → [beta], beta → [gamma]. beta is already installed → we should
     // NOT recurse into gamma.
-    try dir.writeFormula("alpha", "{\"dependencies\":[\"beta\"]}");
-    try dir.writeFormula("beta", "{\"dependencies\":[\"gamma\"]}");
-    try dir.writeFormula("gamma", "{\"dependencies\":[]}");
+    try dir.writeFormula("alpha", "{\"name\":\"alpha\",\"dependencies\":[\"beta\"]}");
+    try dir.writeFormula("beta", "{\"name\":\"beta\",\"dependencies\":[\"gamma\"]}");
+    try dir.writeFormula("gamma", "{\"name\":\"gamma\",\"dependencies\":[]}");
 
     var http = client_mod.HttpClient.init(alloc);
     defer http.deinit();
@@ -289,7 +292,10 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
     defer tdb.deinit();
     _ = try insertKeg(&tdb.db, "beta", "dependency");
 
-    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db);
+    var cache = deps_mod.FormulaCache.init(alloc);
+    defer cache.deinit();
+
+    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -322,7 +328,10 @@ test "resolve returns empty when root formula JSON is missing from cache" {
 
     // resolve's getDeps catches errors and returns &.{}, so resolve returns
     // an empty list (no deps to walk).
-    const result = try deps_mod.resolve(alloc, "nope", &api, &tdb.db);
+    var cache = deps_mod.FormulaCache.init(alloc);
+    defer cache.deinit();
+
+    const result = try deps_mod.resolve(alloc, "nope", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
     try testing.expectEqual(@as(usize, 0), result.len);
 }
@@ -336,7 +345,7 @@ test "resolve handles a dep whose sub-fetch fails by falling through" {
     // alpha → [missing]. missing has no cache file AND we mark it 404 so the
     // sub-getDeps fails. The BFS loop should still append `missing` as a
     // dep before trying to recurse.
-    try dir.writeFormula("alpha", "{\"dependencies\":[\"missing\"]}");
+    try dir.writeFormula("alpha", "{\"name\":\"alpha\",\"dependencies\":[\"missing\"]}");
     var marker_buf: [512]u8 = undefined;
     const marker = try std.fmt.bufPrint(&marker_buf, "{s}/api/formula_missing.404", .{dir.path});
     const f = try malt.fs_compat.cwd().createFile(marker, .{});
@@ -349,7 +358,10 @@ test "resolve handles a dep whose sub-fetch fails by falling through" {
     var tdb = try TempDb.init("resolve_dep_missing");
     defer tdb.deinit();
 
-    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db);
+    var cache = deps_mod.FormulaCache.init(alloc);
+    defer cache.deinit();
+
+    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -368,8 +380,8 @@ test "resolve treats a DB keg with a vanished cellar_path as not-installed" {
     var dir = try TempCacheDir.init("resolve_missing_cellar");
     defer dir.deinit();
 
-    try dir.writeFormula("alpha", "{\"dependencies\":[\"beta\"]}");
-    try dir.writeFormula("beta", "{\"dependencies\":[]}");
+    try dir.writeFormula("alpha", "{\"name\":\"alpha\",\"dependencies\":[\"beta\"]}");
+    try dir.writeFormula("beta", "{\"name\":\"beta\",\"dependencies\":[]}");
 
     var http = client_mod.HttpClient.init(alloc);
     defer http.deinit();
@@ -380,7 +392,10 @@ test "resolve treats a DB keg with a vanished cellar_path as not-installed" {
     // Point beta's cellar_path at a directory that definitely doesn't exist.
     _ = try insertKegWithCellar(&tdb.db, "beta", "dependency", "/tmp/malt_missing_xyz_9273");
 
-    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db);
+    var cache = deps_mod.FormulaCache.init(alloc);
+    defer cache.deinit();
+
+    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 1), result.len);

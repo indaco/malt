@@ -5,6 +5,7 @@ const std = @import("std");
 
 const cask_mod = @import("../core/cask.zig");
 const cellar_mod = @import("../core/cellar.zig");
+const deps_mod = @import("../core/deps.zig");
 const formula_mod = @import("../core/formula.zig");
 const linker_mod = @import("../core/linker.zig");
 const plist_mod = @import("../core/services/plist.zig");
@@ -292,6 +293,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var store = store_mod.Store.init(allocator, &db, prefix);
     var linker = linker_mod.Linker.init(allocator, &db, prefix);
 
+    // One parsed-formula cache for the whole run; single free site.
+    var formula_cache = deps_mod.FormulaCache.init(allocator);
+    defer formula_cache.deinit();
+
     // ── Collect all download jobs across all packages ────────────────
     var all_jobs: std.ArrayList(DownloadJob) = .empty;
     defer all_jobs.deinit(allocator);
@@ -360,6 +365,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 .http_pool = &http_pool,
                 .db = &db,
                 .store = &store,
+                .cache = &formula_cache,
             }, pkg_name, formula_json, force, &all_jobs) catch |e| {
                 output.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
                 continue;
@@ -592,7 +598,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         // Failed-dep → skip: installing on a broken graph yields a dyld-unresolvable
         // keg. Remove the already-materialised keg so orphans don't linger.
-        if (findFailedDep(&failed_kegs, job.formula_json)) |failed_dep| {
+        if (findFailedDep(&formula_cache, &failed_kegs, job.name, job.formula_json)) |failed_dep| {
             output.warn(
                 "Skipping {s}: dependency {s} failed to install",
                 .{ job.name, failed_dep },
@@ -604,7 +610,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             continue;
         }
 
-        linkAndRecord(allocator, job, mats[i].keg_path, &db, &linker, prefix) catch {
+        linkAndRecord(allocator, job, mats[i].keg_path, &db, &linker, prefix, &formula_cache) catch {
             // The underlying error was already logged with a tag by
             // linkAndRecord — just record that this job failed so its
             // dependents in the rest of the loop get skipped above.
@@ -637,17 +643,19 @@ fn linkAndRecord(
     db: *sqlite.Database,
     linker: *linker_mod.Linker,
     prefix: []const u8,
+    cache: *deps_mod.FormulaCache,
 ) !void {
     const reason: []const u8 = if (job.is_dep) "dependency" else "direct";
 
-    // Parse formula for DB recording
-    var formula = formula_mod.parseFormula(allocator, job.formula_json) catch |err| {
-        output.err("Failed to parse formula for {s}: {s}", .{ job.name, @errorName(err) });
-        // rollback materialised keg; user-visible error already emitted.
-        cellar_mod.remove(prefix, job.name, job.version_str) catch {};
-        return InstallError.CellarFailed;
+    // Cache hit on the warm path; miss only happens for jobs whose JSON
+    // never reached collectFormulaJobs (none today).
+    const formula = cache.get(job.name) orelse blk: {
+        break :blk cache.getOrParse(job.name, job.formula_json) catch |err| {
+            output.err("Failed to parse formula for {s}: {s}", .{ job.name, @errorName(err) });
+            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
+            return InstallError.CellarFailed;
+        };
     };
-    defer formula.deinit();
 
     // Check for symlink conflicts before linking
     if (!job.keg_only) {
@@ -658,7 +666,6 @@ fn linkAndRecord(
                 output.err("  {s} already linked by {s}", .{ conflict.link_path, conflict.existing_keg });
             }
             output.err("Use --force to overwrite, or uninstall the conflicting package first.", .{});
-            // rollback materialised keg on conflict.
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return InstallError.LinkFailed;
         }
@@ -666,37 +673,32 @@ fn linkAndRecord(
 
     // Link + record
     if (!job.keg_only) {
-        const keg_id = recordKeg(db, &formula, job.store_sha256, keg_path, reason) catch |err| {
+        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
-            // rollback materialised keg when DB record fails.
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
         };
 
         linker.link(keg_path, job.name, keg_id) catch |err| {
             output.err("Failed to link {s}: {s}", .{ job.name, @errorName(err) });
-            // Rollback: unlink what was partially created + remove DB record + cellar
-            // partial-link cleanup in a rollback; original error is authoritative.
+            // Rollback: unlink what was partially created + remove DB record + cellar.
             linker.unlink(keg_id) catch {};
             deleteKeg(db, keg_id);
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return InstallError.LinkFailed;
         };
-        // opt symlink is convenience; install already functional via versioned link.
         linker.linkOpt(job.name, job.version_str) catch {};
-        recordDeps(db, keg_id, &formula);
+        recordDeps(db, keg_id, formula);
     } else {
-        const keg_id = recordKeg(db, &formula, job.store_sha256, keg_path, reason) catch |err| {
+        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
-            // rollback materialised keg when DB record fails.
             cellar_mod.remove(prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
         };
-        // opt symlink is convenience; install already functional via versioned link.
         linker.linkOpt(job.name, job.version_str) catch {};
-        recordDeps(db, keg_id, &formula);
+        recordDeps(db, keg_id, formula);
     }
-    maybeRegisterService(allocator, db, &formula, prefix);
+    maybeRegisterService(allocator, db, formula, prefix);
     // Annotate keg-only packages inline so the single line reads as success,
     // not as a "not linking" warning paired with a separate ✓.
     const keg_only_suffix: []const u8 = if (job.keg_only) " (keg-only — dependency only)" else "";

@@ -241,7 +241,9 @@ test "findFailedDep flags the first dep name that appears in failed_kegs" {
     const json =
         \\{"name":"bar","full_name":"bar","versions":{"stable":"1.0"},"bottle":{"stable":{"files":{}}},"dependencies":["libfoo","other"]}
     ;
-    const name = install.findFailedDep(&failed, json);
+    var cache = @import("malt").deps.FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+    const name = install.findFailedDep(&cache, &failed, "bar", json);
     try testing.expect(name != null);
     try testing.expectEqualStrings("libfoo", name.?);
 }
@@ -440,7 +442,9 @@ test "findFailedDep returns null when no dep is in the failed set" {
     const json =
         \\{"name":"bar","full_name":"bar","versions":{"stable":"1.0"},"bottle":{"stable":{"files":{}}},"dependencies":["libfoo"]}
     ;
-    try testing.expect(install.findFailedDep(&failed, json) == null);
+    var cache = @import("malt").deps.FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+    try testing.expect(install.findFailedDep(&cache, &failed, "bar", json) == null);
 }
 
 // ---------------------------------------------------------------------------

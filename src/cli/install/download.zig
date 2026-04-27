@@ -31,6 +31,8 @@ pub const InstallJobDeps = struct {
     http_pool: *client_mod.HttpClientPool,
     db: *sqlite.Database,
     store: *store_mod.Store,
+    /// Shared parsed-formula cache for the whole install run.
+    cache: *deps_mod.FormulaCache,
 };
 
 /// A bottle download job for parallel processing.
@@ -302,17 +304,10 @@ pub fn collectFormulaJobs(
     const api = ctx.api;
     const http_pool = ctx.http_pool;
     const db = ctx.db;
+    const cache = ctx.cache;
 
-    // Single arena for every parsed formula — root + each dep — so the
-    // std.json.Parsed trees and all the supplementary allocations made
-    // by `parseFormula` (dependencies/oldnames/service.run/pkg_version)
-    // are released at function exit. BUG-009 used to pin every parsed
-    // tree for the whole install run (~500 KB on ffmpeg).
-    var parse_arena = std.heap.ArenaAllocator.init(allocator);
-    defer parse_arena.deinit();
-    const parse_alloc = parse_arena.allocator();
-
-    var formula = formula_mod.parseFormula(parse_alloc, formula_json) catch |e| {
+    // Single seam for every parse — cached entries outlive this function.
+    const formula = cache.getOrParse(pkg_name, formula_json) catch |e| {
         output.err("Failed to parse formula JSON for '{s}': {s}", .{ pkg_name, @errorName(e) });
         return InstallError.FormulaNotFound;
     };
@@ -326,9 +321,9 @@ pub fn collectFormulaJobs(
     // Resolve dependencies. `deps_mod.resolve` forwards the allocator
     // into `api.fetchFormula`, whose bytes come from `api.allocator`
     // (the same caller allocator) — so the allocator here must match
-    // `allocator`, not `parse_arena.allocator()`, otherwise free on
-    // the API-allocated bytes is a no-op on the arena.
-    const deps = deps_mod.resolve(allocator, formula.name, api, db) catch &.{};
+    // `allocator`, otherwise free on the API-allocated bytes is a no-op
+    // on the wrong allocator.
+    const deps = deps_mod.resolve(allocator, formula.name, api, db, cache) catch &.{};
     defer {
         for (deps) |d| allocator.free(d.name);
         // `catch &.{}` yields a static empty slice with no backing
@@ -416,8 +411,8 @@ pub fn collectFormulaJobs(
         }
     }
 
-    // Add deps as jobs — serial post-processing (parse + dedup + append)
-    // using the JSONs we fetched above.
+    // Serial post-processing: cache hits on the warm path, parses-then-
+    // caches on miss so findFailedDep later sees a hit.
     for (deps, 0..) |dep, i| {
         if (dep.already_installed) continue;
         const dep_json = dep_jsons[i] orelse continue;
@@ -427,8 +422,8 @@ pub fn collectFormulaJobs(
         var dep_json_consumed = false;
         defer if (!dep_json_consumed) allocator.free(dep_json);
 
-        var dep_formula = formula_mod.parseFormula(parse_alloc, dep_json) catch continue;
-        const dep_bottle = formula_mod.resolveBottle(parse_alloc, &dep_formula) catch continue;
+        const dep_formula = cache.getOrParse(dep.name, dep_json) catch continue;
+        const dep_bottle = formula_mod.resolveBottle(allocator, dep_formula) catch continue;
 
         // Check for duplicate (another top-level pkg may share a dep)
         var is_dup = false;
@@ -440,9 +435,8 @@ pub fn collectFormulaJobs(
         }
         if (is_dup) continue;
 
-        // Dupe the five borrowed slices out of the parsed tree into
-        // the caller allocator so parse_arena can release the tree.
-        const strs = dupeJobStrings(allocator, &dep_formula, dep_bottle) catch continue;
+        // Dupe the five slices so the job stays self-contained.
+        const strs = dupeJobStrings(allocator, dep_formula, dep_bottle) catch continue;
 
         jobs.append(allocator, .{
             .name = strs.name,
@@ -470,12 +464,12 @@ pub fn collectFormulaJobs(
     }
 
     // Add main formula
-    const bottle = formula_mod.resolveBottle(parse_alloc, &formula) catch {
+    const bottle = formula_mod.resolveBottle(allocator, formula) catch {
         output.err("No bottle available for {s} on this platform", .{formula.name});
         return InstallError.NoBottle;
     };
 
-    const main_strs = dupeJobStrings(allocator, &formula, bottle) catch return InstallError.DownloadFailed;
+    const main_strs = dupeJobStrings(allocator, formula, bottle) catch return InstallError.DownloadFailed;
     errdefer main_strs.freeAll(allocator);
 
     jobs.append(allocator, .{
@@ -522,30 +516,24 @@ pub fn dropTopLevelJobs(allocator: std.mem.Allocator, jobs: *std.ArrayList(Downl
     }
 }
 
-/// Return the first dep name of `formula_json` that appears in `failed_kegs`,
-/// or null if none did. Used to short-circuit jobs whose dependency graph is
-/// already broken so we do not leave half-installed kegs behind.
-///
-/// Errors during parse are treated as "no known failed dep" — we would rather
-/// attempt the install and let materialize surface the real problem than
-/// silently skip over a parser hiccup.
+/// First dep of `name` that appears in `failed_kegs`, or null. Routes
+/// through the cache so every link-phase lookup is parse-free on the
+/// warm path. Parse errors → null: attempt the install rather than
+/// silently skip on a parser hiccup.
 pub fn findFailedDep(
+    cache: *deps_mod.FormulaCache,
     failed_kegs: *std.StringHashMap(void),
+    name: []const u8,
     formula_json: []const u8,
 ) ?[]const u8 {
-    var tmp_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer tmp_arena.deinit();
-    const a = tmp_arena.allocator();
+    const formula = cache.get(name) orelse blk: {
+        break :blk cache.getOrParse(name, formula_json) catch return null;
+    };
 
-    var parsed = formula_mod.parseFormula(a, formula_json) catch return null;
-    defer parsed.deinit();
-
-    for (parsed.dependencies) |dep_name| {
+    for (formula.dependencies) |dep_name| {
         if (failed_kegs.contains(dep_name)) {
-            // The slice `dep_name` lives inside the temp arena which is about
-            // to be freed. Look up the same key inside the map's storage to
-            // return a slice with a stable lifetime (the map owns its keys
-            // indirectly via the job.name slices stored at insert time).
+            // Return the map's stable copy; cache strings outlive their
+            // entry only until cache.deinit().
             if (failed_kegs.getKey(dep_name)) |stable| return stable;
             return dep_name;
         }
