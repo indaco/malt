@@ -129,7 +129,7 @@ pub const bash_script =
     \\            ;;
     \\        bundle)
     \\            if [[ "$cur" != -* ]]; then
-    \\                COMPREPLY=( $(compgen -W "install create list remove export import" -- "$cur") )
+    \\                COMPREPLY=( $(compgen -W "install cleanup create list remove export import" -- "$cur") )
     \\                return 0
     \\            fi
     \\            ;;
@@ -153,7 +153,7 @@ pub const bash_script =
     \\        migrate|rollback) cmd_flags="--dry-run" ;;
     \\        link)             cmd_flags="--overwrite --force -f" ;;
     \\        services)         cmd_flags="--tail --stderr --follow -f --system --json" ;;
-    \\        bundle)           cmd_flags="--dry-run --format --from-installed --purge" ;;
+    \\        bundle)           cmd_flags="--dry-run -n --format --from-installed --purge --yes -y" ;;
     \\        run)              cmd_flags="--keep" ;;
     \\    esac
     \\
@@ -374,6 +374,7 @@ pub const zsh_script =
     \\                bundle)
     \\                    _values 'subcommand' \
     \\                        'install[Install members of a Brewfile/Maltfile.json]' \
+    \\                        'cleanup[Uninstall packages absent from the Brewfile]' \
     \\                        'create[Write currently-installed set to a bundle file]' \
     \\                        'list[List bundles registered in the database]' \
     \\                        'remove[Unregister a bundle]' \
@@ -598,12 +599,14 @@ pub const fish_script =
     \\
     \\    # bundle — sub-subcommands
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'install' -d 'Install Brewfile/Maltfile.json members'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'cleanup' -d 'Uninstall packages absent from the Brewfile'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'create'  -d 'Write installed set to a bundle file'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'list'    -d 'List registered bundles'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'remove'  -d 'Unregister a bundle'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'export'  -d 'Print bundle to stdout'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -f -a 'import'  -d 'Register a bundle without installing'
-    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l dry-run        -d 'Preview without installing'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l dry-run -s n  -d 'Preview without installing/uninstalling'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l yes     -s y  -d 'Skip the cleanup confirmation prompt'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l format -r -a 'brewfile json' -d 'Output format'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l from-installed -d 'Populate from installed packages'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l purge          -d 'Also uninstall members on remove'

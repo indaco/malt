@@ -113,3 +113,15 @@ test "all update completions expose --check" {
     try expectContains(completions.zsh_script, "--check");
     try expectContains(completions.fish_script, "-l check");
 }
+
+test "all bundle completions expose the cleanup subcommand and its flags" {
+    for ([_][]const u8{
+        completions.bash_script,
+        completions.zsh_script,
+        completions.fish_script,
+    }) |script| try expectContains(script, "cleanup");
+    // --yes belongs to cleanup; --dry-run is shared with install.
+    try expectContains(completions.bash_script, "--yes");
+    try expectContains(completions.zsh_script, "cleanup[");
+    try expectContains(completions.fish_script, "-l yes");
+}
