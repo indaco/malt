@@ -85,6 +85,7 @@ lint: fmt-check build test
 # them, and shellcheck the staged shell set so unfixable lint blocks the
 # commit. Note: if you `git add -p` partial hunks of a file, this will
 # pick up the unstaged hunks too — a known limitation of format-on-commit
+
 # hooks.
 [group('hooks')]
 pre-commit:
@@ -174,6 +175,7 @@ bench *args:
 
 # Microbench for the outdated-snapshot read path. Asserts a hard
 # per-phase budget so a regression on render/parse/intersect breaks
+
 # the bench rather than silently slipping through CI.
 [group('bench')]
 bench-snapshot:
@@ -192,11 +194,61 @@ bench-snapshot:
 # The tag push triggers .github/workflows/release.yml exactly like a
 # minor release - goreleaser builds + signs, the Homebrew tap formula
 # bumps, install.sh starts serving the patch on next run.
+# Cut release/X.Y from the latest semver tag. Run from main, after a
+# vX.Y.0 has been tagged + pushed. The tag is read from `git tag` (not
+# .version) so a freshly-bumped-but-not-yet-tagged release can't point
+# the recipe at a non-existent tag. Refuses if the target branch
+
+# already exists locally or on origin.
+[group('release')]
+release-branch:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    branch="$(git rev-parse --abbrev-ref HEAD)"
+    if [ "$branch" != "main" ]; then
+        echo "error: must run from main (current: $branch)" >&2
+        exit 1
+    fi
+
+    if ! git diff-index --quiet HEAD --; then
+        echo "error: working tree dirty - commit or stash first" >&2
+        exit 1
+    fi
+
+    git pull --ff-only
+    git fetch --tags --quiet
+
+    tag="$(git tag --sort=-v:refname | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ {print; exit}')"
+    if [ -z "$tag" ]; then
+        echo "error: no semver v* tags found in this repository" >&2
+        exit 1
+    fi
+
+    minor="$(echo "${tag#v}" | cut -d. -f1,2)"
+    target="release/$minor"
+
+    if git rev-parse --verify "refs/heads/$target" >/dev/null 2>&1; then
+        echo "error: $target already exists locally" >&2
+        exit 1
+    fi
+    if git ls-remote --exit-code --heads origin "$target" >/dev/null 2>&1; then
+        echo "error: $target already exists on origin" >&2
+        exit 1
+    fi
+
+    echo "▸ Cutting $target from $tag"
+    git checkout "$tag"
+    git checkout -b "$target"
+    git push -u origin "$target"
+    git checkout main
+    echo "▸ $target is live - patch line ready for cherry-picks."
 
 # Cherry-pick a commit (or range) from main onto the current release
 # branch and run the test gate before you push.
 #   just backport <sha>            single squashed PR commit
-#   just backport <sha1>..<sha2>   range
+
+# just backport <sha1>..<sha2>   range
 [group('release')]
 backport ref:
     #!/usr/bin/env bash
@@ -215,6 +267,7 @@ backport ref:
 # Prepare a patch on the current release branch: gate -> sley bump ->
 # sley changelog merge. Refuses to run from main or a dirty tree. The
 # push + tag steps are intentionally manual; the recipe prints the
+
 # exact commands to run after you've inspected the result.
 [group('release')]
 patch:
