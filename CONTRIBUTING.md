@@ -12,6 +12,8 @@ For anything beyond a typo or a one-line fix, **open an issue first**. A short c
 
 **Pull requests.** PRs are squash-merged into `main`, so the squash subject is what shows up in `git log` - write the PR title with that in mind (Conventional Commits header, under 70 chars). The PR description should focus on the user-visible behaviour change or the safety property added; avoid file-by-file changelogs (the diff already shows that).
 
+**Where PRs go.** Open every PR against `main`, including bug fixes against the latest release. malt maintains a `release/X.Y` branch as the patch line for the current minor; the maintainer cherry-picks user-visible fixes from `main` onto it. Don't target `release/*` branches directly - it makes the next minor a regression risk and bypasses the gate.
+
 > [!NOTE]
 > **AI-assisted contributions are welcome.** malt itself is human-directed AI implementation, so PRs written with Claude, Copilot, or similar tools are fine - provided you've read the diff, understand what the patch does, and stand behind it as your own work. Treat the AI as a collaborator, not a release valve.
 

@@ -180,6 +180,70 @@ bench-snapshot:
     zig build bench-snapshot
 
 # ---------------------------------------------------------------------------
+# Release / patch
+# ---------------------------------------------------------------------------
+# Patch releases are cut from a `release/0.X` branch, never from main.
+# Workflow:
+#   1. `git checkout release/0.X && git pull`
+#   2. `just backport <sha>`   - cherry-pick the squashed fix from main
+#                                  (repeat per fix; resolve conflicts inline)
+#   3. `just patch`            - bumps .version, regenerates changelog,
+#                                  pushes branch, creates + pushes the tag
+# The tag push triggers .github/workflows/release.yml exactly like a
+# minor release - goreleaser builds + signs, the Homebrew tap formula
+# bumps, install.sh starts serving the patch on next run.
+
+# Cherry-pick a commit (or range) from main onto the current release
+# branch and run the test gate before you push.
+#   just backport <sha>            single squashed PR commit
+#   just backport <sha1>..<sha2>   range
+[group('release')]
+backport ref:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    branch="$(git rev-parse --abbrev-ref HEAD)"
+    case "$branch" in
+        release/*) ;;
+        *) echo "error: not on a release branch (current: $branch)" >&2; exit 1 ;;
+    esac
+
+    git cherry-pick -x {{ ref }}
+    just fmt-check test
+    echo "▸ Cherry-picked {{ ref }} onto $branch — review, then 'just patch'."
+
+# Prepare a patch on the current release branch: gate -> sley bump ->
+# sley changelog merge. Refuses to run from main or a dirty tree. The
+# push + tag steps are intentionally manual; the recipe prints the
+# exact commands to run after you've inspected the result.
+[group('release')]
+patch:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    branch="$(git rev-parse --abbrev-ref HEAD)"
+    case "$branch" in
+        release/*) ;;
+        *) echo "error: refuse to patch from '$branch' — checkout release/0.X first" >&2; exit 1 ;;
+    esac
+
+    if ! git diff-index --quiet HEAD --; then
+        echo "error: working tree dirty — commit or stash first" >&2
+        exit 1
+    fi
+
+    just fmt-check test
+    sley bump patch
+    sley changelog merge
+
+    # Push + tag are kept manual until the workflow is battle-tested.
+    # Review `git log` and `.changes/v*.md` first, then run:
+    #   git push origin "$branch"
+    #   sley tag create --push
+    echo "▸ Bump + changelog ready on $branch."
+    echo "▸ Review, then run: git push origin $branch && sley tag create --push"
+
+# ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
 # Remove Zig build artifacts (.zig-cache, zig-out, coverage) and test
