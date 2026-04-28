@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "release/**"
     paths:
       - "**/*.zig"
       - "**/*.zon"
@@ -10,7 +12,9 @@ on:
       - "src/core/pins_manifest.txt"
       - ".github/workflows/ci.yml"
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - "release/**"
     paths:
       - "**/*.zig"
       - "**/*.zon"
