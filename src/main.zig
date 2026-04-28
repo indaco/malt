@@ -144,6 +144,101 @@ const command_map = blk: {
     break :blk std.StaticStringMap(Command).initComptime(pairs);
 };
 
+/// Set of process-wide flags consumed before subcommand dispatch.
+/// StaticStringMap + exhaustive switch matches the install/upgrade
+/// flag parsers and gives the compiler ownership of "every flag has a
+/// handler" so adding a tag without wiring it fails to build.
+const GlobalFlag = enum {
+    verbose,
+    debug,
+    quiet,
+    json,
+    ndjson,
+    dry_run,
+};
+
+const global_flag_map = std.StaticStringMap(GlobalFlag).initComptime(.{
+    .{ "--verbose", .verbose },
+    .{ "-v", .verbose },
+    .{ "--debug", .debug },
+    .{ "--quiet", .quiet },
+    .{ "-q", .quiet },
+    .{ "--json", .json },
+    .{ "--output-format=ndjson", .ndjson },
+    .{ "--dry-run", .dry_run },
+});
+
+/// Apply a global flag to the process-wide `output.*` state and report
+/// whether it was consumed. Pulled out of `main` so the dispatch loop
+/// stays a one-liner and the flag set is testable without spawning a
+/// child process. Returns `false` for anything that should reach the
+/// subcommand's argv.
+pub fn applyGlobalFlag(arg: []const u8) bool {
+    const output = @import("ui/output.zig");
+    const flag = global_flag_map.get(arg) orelse return false;
+    switch (flag) {
+        .verbose => output.setVerbose(true),
+        .debug => output.setDebug(true),
+        .quiet => output.setQuiet(true),
+        .json => output.setMode(.json),
+        .ndjson => output.setNdjson(true),
+        .dry_run => output.setDryRun(true),
+    }
+    return true;
+}
+
+test "applyGlobalFlag --output-format=ndjson toggles ndjson mode" {
+    const output = @import("ui/output.zig");
+    const prior = output.isNdjson();
+    defer output.setNdjson(prior);
+    output.setNdjson(false);
+
+    try std.testing.expect(applyGlobalFlag("--output-format=ndjson"));
+    try std.testing.expect(output.isNdjson());
+}
+
+test "applyGlobalFlag is orthogonal to --json" {
+    const output = @import("ui/output.zig");
+    const prior_ndjson = output.isNdjson();
+    const prior_mode = output.isJson();
+    defer {
+        output.setNdjson(prior_ndjson);
+        output.setMode(if (prior_mode) .json else .human);
+    }
+    output.setNdjson(false);
+    output.setMode(.human);
+
+    _ = applyGlobalFlag("--json");
+    _ = applyGlobalFlag("--output-format=ndjson");
+    try std.testing.expect(output.isJson());
+    try std.testing.expect(output.isNdjson());
+}
+
+test "applyGlobalFlag returns false for unrecognised flags" {
+    try std.testing.expect(!applyGlobalFlag("--cask"));
+    try std.testing.expect(!applyGlobalFlag("--output-format=junk"));
+    try std.testing.expect(!applyGlobalFlag("wget"));
+}
+
+test "applyGlobalFlag --output-format=ndjson does not flip --quiet" {
+    // Compose with --quiet explicitly when needed; the streams are
+    // already split (ndjson on stdout, human on stderr), so users
+    // pipeline-redirect rather than have malt couple two concerns.
+    const output = @import("ui/output.zig");
+    const prior_ndjson = output.isNdjson();
+    const prior_quiet = output.isQuiet();
+    defer {
+        output.setNdjson(prior_ndjson);
+        output.setQuiet(prior_quiet);
+    }
+    output.setNdjson(false);
+    output.setQuiet(false);
+
+    _ = applyGlobalFlag("--output-format=ndjson");
+    try std.testing.expect(output.isNdjson());
+    try std.testing.expect(!output.isQuiet());
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     // In debug builds, use GeneralPurposeAllocator as the backing
     // allocator for leak detection and use-after-free checks.
@@ -194,7 +289,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Parse global flags before dispatch — strip them from the args
     // passed to subcommands so they don't need to parse them individually.
-    const output = @import("ui/output.zig");
     var filtered: std.ArrayList([]const u8) = .empty;
     defer filtered.deinit(allocator);
     var cmd_str: []const u8 = "";
@@ -214,19 +308,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             found_cmd = true;
             continue;
         }
-        if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
-            output.setVerbose(true);
-        } else if (std.mem.eql(u8, arg, "--debug")) {
-            output.setDebug(true);
-        } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
-            output.setQuiet(true);
-        } else if (std.mem.eql(u8, arg, "--json")) {
-            output.setMode(.json);
-        } else if (std.mem.eql(u8, arg, "--dry-run")) {
-            output.setDryRun(true);
-        } else {
-            try filtered.append(allocator, arg);
-        }
+        if (!applyGlobalFlag(arg)) try filtered.append(allocator, arg);
     }
 
     if (!found_cmd) {
@@ -337,6 +419,9 @@ fn printUsage() void {
         \\                  pair with issue reports for full context
         \\  --quiet, -q     Suppress non-error output
         \\  --json          JSON output (read commands)
+        \\  --output-format=ndjson
+        \\                  Stream one JSON event per state transition for
+        \\                  install/upgrade/migrate (orthogonal to --json)
         \\  --dry-run       Preview without executing
         \\  --help, -h      Show help
         \\  --version       Show version

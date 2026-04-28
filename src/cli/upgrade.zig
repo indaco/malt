@@ -90,6 +90,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return error.Aborted;
     };
     defer lk.release();
+    // LIFO: install_complete fires before lk.release. Inline gate keeps
+    // the deferred call out of the default paths.
+    defer if (output.isNdjson()) output.emitNdjsonEvent(allocator, .install_complete, "", null);
+    output.emitNdjsonEvent(allocator, .lock_acquired, "", null);
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
@@ -175,6 +179,8 @@ fn upgradeFormula(
     // sees the drift, but the dry-run gate still blocks any mutation.
     if (pinSkip(db, name, force, audit_mode)) {
         output.dim("{s} is pinned, skipped", .{name});
+        // Distinguishes "skipped by policy" from "command never ran".
+        output.emitNdjsonEvent(allocator, .pinned, name, null);
         return;
     }
 
@@ -221,15 +227,19 @@ fn upgradeFormula(
     // Compare versions
     if (std.mem.eql(u8, old_pkg_version, formula.pkg_version)) {
         output.skip("{s} is already at latest version {s}", .{ name, formula.pkg_version });
+        output.emitNdjsonEvent(allocator, .up_to_date, name, null);
         return;
     }
 
     if (dry_run) {
         output.info("Dry run: would upgrade {s} {s} -> {s}", .{ name, old_version, formula.pkg_version });
+        // Same vocabulary across install/upgrade/migrate — one parser fits all.
+        output.emitNdjsonEvent(allocator, .would_install, name, null);
         return;
     }
 
     output.info("Upgrading {s} {s} -> {s}...", .{ name, old_version, formula.pkg_version });
+    output.emitNdjsonEvent(allocator, .resolved, name, null);
 
     // Step 3: Resolve bottle for new version
     const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
@@ -285,6 +295,12 @@ fn upgradeFormula(
         // refcount is advisory; commit succeeded, store now owns the bytes.
         store.incrementRef(bottle.sha256) catch {};
     }
+    // Emit even on warm-cache so the cold/warm event sequence matches.
+    if (output.isNdjson()) {
+        output.emitNdjsonEvent(allocator, .downloaded, name, "ok");
+        output.emitNdjsonEvent(allocator, .extracted, name, "ok");
+        output.emitNdjsonEvent(allocator, .stored, name, "ok");
+    }
 
     // Step 5: Materialize new version to Cellar
     output.dim("Materializing {s} to cellar...", .{name});
@@ -296,8 +312,10 @@ fn upgradeFormula(
         formula.pkg_version,
     ) catch {
         output.err("Failed to materialize {s}", .{name});
+        output.emitNdjsonEvent(allocator, .materialized, name, "failed");
         return error.Aborted;
     };
+    output.emitNdjsonEvent(allocator, .materialized, name, "ok");
 
     // Step 6: Unlink old symlinks
     var linker = linker_mod.Linker.init(allocator, db, prefix);
@@ -317,6 +335,7 @@ fn upgradeFormula(
 
     linker.link(new_keg.path, formula.name, new_keg_id) catch {
         output.err("Failed to link new version of {s}", .{name});
+        output.emitNdjsonEvent(allocator, .linked, name, "failed");
         // Rollback: remove partial new links, restore old
         // partial link cleanup in a rollback path.
         linker.unlink(new_keg_id) catch {};
@@ -326,6 +345,10 @@ fn upgradeFormula(
         cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
         return;
     };
+    // `recorded` after both succeed — link rollback above undoes the
+    // keg row, so an early emit would lie if `linked:failed` follows.
+    output.emitNdjsonEvent(allocator, .linked, name, "ok");
+    output.emitNdjsonEvent(allocator, .recorded, name, "ok");
 
     // opt symlink is convenience; install is already functional via versioned link.
     linker.linkOpt(formula.name, formula.pkg_version) catch {};
@@ -513,6 +536,7 @@ fn upgradeAllFormulas(
 fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, audit_mode: bool) !void {
     if (pinSkip(db, token, force, audit_mode)) {
         output.dim("{s} is pinned, skipped", .{token});
+        output.emitNdjsonEvent(allocator, .pinned, token, null);
         return;
     }
 
@@ -537,11 +561,13 @@ fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Data
     const installed_version = installed.version();
     if (std.mem.eql(u8, installed_version, parsed_cask.version)) {
         output.skip("{s} is already at latest version {s}", .{ token, parsed_cask.version });
+        output.emitNdjsonEvent(allocator, .up_to_date, token, null);
         return;
     }
 
     if (dry_run) {
         output.info("Dry run: would upgrade cask {s} {s} -> {s}", .{ token, installed_version, parsed_cask.version });
+        output.emitNdjsonEvent(allocator, .would_install, token, null);
         return;
     }
 

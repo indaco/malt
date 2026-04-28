@@ -398,3 +398,120 @@ test "jsonStr output round-trips through std.json parser" {
         try testing.expectEqualStrings(s, parsed.value.string);
     }
 }
+
+// ── ndjson streaming for mutating commands ─────────────────────────────
+// `--output-format=ndjson` is orthogonal to `--json`: it gates per-state
+// transition events on stdout while leaving the existing summary output
+// untouched. Tests pin the silent-by-default behaviour and the
+// parser-clean line shape consumers will jq-pipe.
+
+/// Capture stdout for an ndjson event emit. Pairs scope-style with `defer`
+/// so each test stays free of capture/teardown boilerplate.
+const NdjsonCapture = struct {
+    buf: *std.ArrayList(u8),
+    prior_ndjson: bool,
+
+    fn init(buf: *std.ArrayList(u8), enabled: bool) NdjsonCapture {
+        const prior = output.isNdjson();
+        output.setNdjson(enabled);
+        io_mod.beginStdoutCapture(testing.allocator, buf);
+        return .{ .buf = buf, .prior_ndjson = prior };
+    }
+
+    fn deinit(self: NdjsonCapture) void {
+        io_mod.endStdoutCapture();
+        output.setNdjson(self.prior_ndjson);
+    }
+};
+
+test "emitNdjsonEvent writes nothing when ndjson is off" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = NdjsonCapture.init(&buf, false);
+    defer cap.deinit();
+
+    output.emitNdjsonEvent(testing.allocator, .downloaded, "wget", null);
+    try testing.expectEqualStrings("", buf.items);
+}
+
+test "emitNdjsonEvent writes one parser-clean line when ndjson is on" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = NdjsonCapture.init(&buf, true);
+    defer cap.deinit();
+
+    output.emitNdjsonEvent(testing.allocator, .downloaded, "wget", "ok");
+    try testing.expect(std.mem.endsWith(u8, buf.items, "\n"));
+    // Single line, no embedded newlines except the trailing one.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, buf.items, "\n"));
+
+    const trimmed = std.mem.trimEnd(u8, buf.items, "\n");
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, trimmed, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("downloaded", parsed.value.object.get("event").?.string);
+    try testing.expectEqualStrings("wget", parsed.value.object.get("name").?.string);
+    try testing.expectEqualStrings("ok", parsed.value.object.get("status").?.string);
+}
+
+test "emitNdjsonEvent omits status field when null" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = NdjsonCapture.init(&buf, true);
+    defer cap.deinit();
+
+    output.emitNdjsonEvent(testing.allocator, .lock_acquired, "", null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"status\"") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"event\":\"lock_acquired\"") != null);
+}
+
+test "emitNdjsonEvent escapes adversarial name and status fields" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = NdjsonCapture.init(&buf, true);
+    defer cap.deinit();
+
+    output.emitNdjsonEvent(testing.allocator, .linked, "needs\"quote", "fa\nil");
+
+    const trimmed = std.mem.trimEnd(u8, buf.items, "\n");
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, trimmed, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("needs\"quote", parsed.value.object.get("name").?.string);
+    try testing.expectEqualStrings("fa\nil", parsed.value.object.get("status").?.string);
+}
+
+test "emitNdjsonEvent silently drops events that overflow the stack buffer" {
+    // The stack buffer is 1 KiB. A pathologically long name should drop
+    // the event rather than write a partial / unparseable line — that's
+    // the contract real consumers depend on (every line is well-formed
+    // JSON or absent).
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = NdjsonCapture.init(&buf, true);
+    defer cap.deinit();
+
+    var huge: [4096]u8 = undefined;
+    @memset(&huge, 'x');
+    output.emitNdjsonEvent(testing.allocator, .downloaded, &huge, "ok");
+
+    // No partial bytes; either the full line landed or nothing did.
+    if (buf.items.len > 0) {
+        try testing.expect(std.mem.endsWith(u8, buf.items, "\n"));
+    }
+    // Specifically: this size must overflow, so we expect *no* output.
+    try testing.expectEqualStrings("", buf.items);
+}
+
+test "emitNdjsonEvent fires under ndjson regardless of --json mode" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+
+    const prior_mode = output.isJson();
+    defer output.setMode(if (prior_mode) .json else .human);
+    output.setMode(.human);
+
+    const cap = NdjsonCapture.init(&buf, true);
+    defer cap.deinit();
+
+    output.emitNdjsonEvent(testing.allocator, .resolved, "tree", null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"event\":\"resolved\"") != null);
+}
