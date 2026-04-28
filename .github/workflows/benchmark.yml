@@ -2,7 +2,7 @@ name: Benchmark
 
 on:
   schedule:
-    - cron: "0 6 * * 1" # Every Monday at 06:00 UTC
+    - cron: '0 6 * * 1' # Every Monday at 06:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -18,8 +18,8 @@ jobs:
       # reflect a real network download, not a store-cache hit. Fail loud
       # if any install returns non-zero so a broken install path can never
       # silently publish fake timings.
-      BENCH_TRUE_COLD: "1"
-      BENCH_FAIL_FAST: "1"
+      BENCH_TRUE_COLD: '1'
+      BENCH_FAIL_FAST: '1'
     steps:
       - uses: actions/checkout@v6
 
@@ -195,7 +195,7 @@ jobs:
 
           git checkout -B "$BRANCH"
           git add README.md
-          git commit -m "bench: update benchmark results ${DATE}"
+          git commit -m "docs(benchmark): update results ${DATE}"
           git push --force-with-lease -u origin "$BRANCH"
 
           cat > /tmp/pr_body.md << 'BODY'
@@ -206,7 +206,7 @@ jobs:
 
           ## Related Issue
 
-          N/A - scheduled run.
+          - None
 
           ## Notes for Reviewers
 
