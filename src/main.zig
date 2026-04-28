@@ -294,7 +294,8 @@ fn dispatch(allocator: std.mem.Allocator, cmd: Command, cmd_args: []const []cons
 
 fn printUsage() void {
     const usage =
-        \\malt — a fast macOS package manager (Homebrew-compatible)
+        \\malt — a fast, drop-in Homebrew alternative for macOS.
+        \\Warm installs in milliseconds. post_install scripts that actually run.
         \\
         \\Usage: malt <command> [options] [arguments]
         \\       mt <command> [options] [arguments]    (alias)
