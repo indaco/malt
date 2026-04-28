@@ -27,6 +27,30 @@ fn seedCellarKeg(prefix: []const u8, name: []const u8, version: []const u8) !voi
     try malt.fs_compat.cwd().makePath(dir);
 }
 
+/// Redirect fd 2 to /dev/null and return a saved dup. Subprocess stderr
+/// (e.g. `ditto` complaining about a deliberately-broken cask path)
+/// bypasses `io_mod.beginStderrCapture` since that only catches Zig
+/// writes — silencing fd 2 itself is the only way to keep `just coverage`
+/// output tidy.
+fn silenceStderr() std.c.fd_t {
+    const saved = std.c.dup(2);
+    if (saved < 0) return -1;
+    const dn = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+    if (dn < 0) {
+        _ = std.c.close(saved);
+        return -1;
+    }
+    _ = std.c.dup2(dn, 2);
+    _ = std.c.close(dn);
+    return saved;
+}
+
+fn restoreStderr(saved: std.c.fd_t) void {
+    if (saved < 0) return;
+    _ = std.c.dup2(saved, 2);
+    _ = std.c.close(saved);
+}
+
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const path = try std.fmt.allocPrintSentinel(
         testing.allocator,
@@ -112,6 +136,10 @@ test "execute falls through when one of several args is missing from the Cellar"
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    // The fall-through pipeline reaches a deliberately-broken cask
+    // extract; ditto writes its complaint straight to fd 2 — gate it.
+    const saved_stderr = silenceStderr();
+    defer restoreStderr(saved_stderr);
     install.execute(arena.allocator(), &.{ "--quiet", "alpha", "missing" }) catch {};
 
     try testing.expect(pathExists(db_file));
