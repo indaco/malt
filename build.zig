@@ -182,6 +182,7 @@ pub fn build(b: *std.Build) void {
         "tests/ndjson_test.zig",
         "tests/worker_arena_test.zig",
         "tests/migrate_smoke_test.zig",
+        "tests/migrate_manifest_test.zig",
         "tests/upgrade_test.zig",
         "tests/hash_test.zig",
         "tests/patcher_test.zig",

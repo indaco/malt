@@ -20,6 +20,7 @@ const io_mod = @import("../ui/io.zig");
 const codesign = @import("../macho/codesign.zig");
 const help = @import("help.zig");
 const keg_mod = @import("migrate/keg.zig");
+const manifest_mod = @import("migrate/manifest.zig");
 
 const KegResult = keg_mod.KegResult;
 const MigrateDeps = keg_mod.MigrateDeps;
@@ -198,6 +199,20 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var store = store_mod.Store.init(allocator, &db, prefix);
     var linker = linker_mod.Linker.init(allocator, &db, prefix);
 
+    // Resume manifest: a crashed/^C run resumes from where it stopped
+    // instead of redoing every keg.
+    var manifest_path_buf: [512]u8 = undefined;
+    const manifest_path = std.fmt.bufPrint(
+        &manifest_path_buf,
+        "{s}/cache/migrate.progress.json",
+        .{prefix},
+    ) catch return;
+    var manifest = manifest_mod.loadFromPath(allocator, manifest_path) catch |e| blk: {
+        output.warn("Could not read resume manifest ({s}); starting fresh", .{@errorName(e)});
+        break :blk manifest_mod.Manifest.init(allocator);
+    };
+    defer manifest.deinit();
+
     // ── Step 4: Migrate each keg ────────────────────────────────────
     // Per-category name lists: counts are derived lengths; JSON emits arrays verbatim.
     var migrated_names: std.ArrayList([]const u8) = .empty;
@@ -224,6 +239,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.warn("Interrupted — skipping remaining kegs.", .{});
             break;
         }
+        // Resume short-circuit before any API/network work — bounds
+        // re-runs by the remaining kegs, not the full set. The DB
+        // cross-check guards against a stale manifest after `mt
+        // uninstall`: manifest=yes / DB=no falls through to a real
+        // re-migrate instead of silently skipping a missing keg.
+        if (manifest.contains(keg_name) and keg_mod.isInstalled(&db, keg_name)) {
+            try skipped_installed_names.append(allocator, keg_name);
+            continue;
+        }
         const result = migrateKeg(allocator, keg_name, .{
             .api = &api,
             .ghcr = &ghcr,
@@ -239,12 +263,39 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // counts and JSON arrays come from these lists, and a silent drop
         // reports fewer failures than actually occurred.
         switch (result) {
-            .migrated => try migrated_names.append(allocator, keg_name),
+            .migrated => {
+                try migrated_names.append(allocator, keg_name);
+                // Persist after each success so a crash leaves the next
+                // run with the smallest possible to-do list.
+                manifest.add(keg_name) catch |e| {
+                    output.warn("Resume manifest update failed for {s}: {s}", .{ keg_name, @errorName(e) });
+                };
+                manifest.writeAtomic(allocator, manifest_path) catch |e| {
+                    output.warn("Resume manifest write failed: {s}", .{@errorName(e)});
+                };
+            },
             .skipped_installed => try skipped_installed_names.append(allocator, keg_name),
             .skipped_post_install => try skipped_post_install_names.append(allocator, keg_name),
             .skipped_no_bottle => try skipped_no_bottle_names.append(allocator, keg_name),
             .failed_api, .failed_download, .failed_install => try failed_names.append(allocator, keg_name),
         }
+    }
+
+    // Self-heal the resume manifest: any DB-confirmed skip that wasn't
+    // already recorded gets added now, so a SIGKILL between "DB
+    // committed" and "manifest writeAtomic flushed" converges on the
+    // next run instead of paying the DB-lookup penalty forever.
+    var manifest_dirty = false;
+    for (skipped_installed_names.items) |name| {
+        if (!manifest.contains(name)) {
+            manifest.add(name) catch continue;
+            manifest_dirty = true;
+        }
+    }
+    if (manifest_dirty) {
+        manifest.writeAtomic(allocator, manifest_path) catch |e| {
+            output.warn("Resume manifest self-heal write failed: {s}", .{@errorName(e)});
+        };
     }
 
     // ── Step 5: Report ──────────────────────────────────────────────

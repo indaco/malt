@@ -267,7 +267,7 @@ fn getLastInsertId(db: *sqlite.Database) !i64 {
     return stmt.columnInt(0);
 }
 
-fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
+pub fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
     var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return false;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return false;
