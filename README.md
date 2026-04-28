@@ -258,7 +258,7 @@ mt run --keep ripgrep -- --help          # cache the bottle for next run
 
 `mt uninstall` removes a package, refusing if dependents exist or, for casks, if the application is running. `--force` (`-f`) bypasses both checks. `--cask` forces cask uninstall. Store entries are preserved for `mt purge --store-orphans`.
 
-`mt migrate` imports an existing Homebrew installation by scanning the Cellar and reinstalling each package through malt. It never modifies the Homebrew install. Packages with `post_install` are executed via the native interpreter; unsupported scripts fall back to `--use-system-ruby` or are skipped with a report. `--dry-run` previews.
+`mt migrate` imports an existing Homebrew installation by scanning the Cellar and reinstalling each package through malt. It never modifies the Homebrew install. Packages with `post_install` are executed via the native interpreter; unsupported scripts fall back to `--use-system-ruby` or are skipped with a report. `--dry-run` previews. `--parallel` runs the per-keg work concurrently (4 workers by default; tune with `MALT_MIGRATE_PARALLEL_WORKERS=N`) and records each success in `{prefix}/cache/migrate.progress.json`, so a re-run after a crash or `^C` resumes where it stopped.
 
 ### Stay current
 
@@ -482,6 +482,7 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 | `HOMEBREW_GITHUB_API_TOKEN`    | GitHub token for higher API rate limits                                           | unset            |
 | `MALT_GITHUB_TOKEN`            | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only    | unset            |
 | `MALT_OUTDATED_MAX_AGE`        | TTL in hours for the `outdated.json` snapshot                                     | `24`             |
+| `MALT_MIGRATE_PARALLEL_WORKERS` | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                  | `4`              |
 | `MALT_ALLOW_UNVERIFIED`        | Skip cosign signature check in `install.sh` (use only when cosign is unavailable) | unset            |
 | `MALT_ALLOW_UNVERIFIED_SOURCE` | Allow `install.sh` to clone `main` when no release tag resolves                   | unset            |
 | `MALT_ALLOW_RAW_POST_INSTALL`  | Disable terminal escape filter on ruby `post_install` output                      | unset            |
