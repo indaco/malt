@@ -114,6 +114,15 @@ test "all update completions expose --check" {
     try expectContains(completions.fish_script, "-l check");
 }
 
+test "all global-flag completions expose --output-format=ndjson" {
+    // Regression guard: ndjson is a global flag, so every shell's
+    // top-level flag list must include it. Tab-completion on the
+    // mutating commands is a primary user surface.
+    try expectContains(completions.bash_script, "--output-format=ndjson");
+    try expectContains(completions.zsh_script, "--output-format=ndjson");
+    try expectContains(completions.fish_script, "output-format=ndjson");
+}
+
 test "all bundle completions expose the cleanup subcommand and its flags" {
     for ([_][]const u8{
         completions.bash_script,

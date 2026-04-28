@@ -16,6 +16,9 @@ var verbose: bool = false;
 var debug: bool = false;
 var dry_run: bool = false;
 var mode: OutputMode = .human;
+/// Orthogonal to `mode`/`--json` so CI can stream per-step events
+/// without losing the final summary.
+var ndjson: bool = false;
 
 pub fn setQuiet(q: bool) void {
     quiet = q;
@@ -50,6 +53,12 @@ pub fn isDryRun() bool {
 }
 pub fn isJson() bool {
     return mode == .json;
+}
+pub fn setNdjson(b: bool) void {
+    ndjson = b;
+}
+pub fn isNdjson() bool {
+    return ndjson;
 }
 
 /// Shared implementation for info/warn/success/err. One concrete
@@ -309,4 +318,69 @@ pub fn jsonOutput(allocator: std.mem.Allocator, value: anytype) !void {
     try std.json.Stringify.value(value, .{}, &aw.writer);
     try aw.writer.writeByte('\n');
     io_mod.stdoutWriteAll(aw.written());
+}
+
+/// Closed vocabulary so call-site typos fail to compile. `@tagName` is
+/// the wire-format string; `snake_case` matches the existing post_install
+/// line so consumers can reuse one parser.
+pub const NdjsonEvent = enum {
+    // 9-step protocol on the bottle install path.
+    lock_acquired,
+    resolved,
+    downloaded,
+    extracted,
+    stored,
+    materialized,
+    linked,
+    recorded,
+    install_complete,
+    // Shared with --json's existing post_install summary line.
+    post_install,
+    // No-transition outcomes.
+    would_install,
+    already_installed,
+    up_to_date,
+    pinned,
+};
+
+/// Write one `{"event":...}\n` per state transition. No-op when ndjson
+/// is off so the default and `--json` paths pay nothing.
+///
+/// `name` is omitted when empty (lock_acquired et al. are command-level);
+/// `status` is omitted when null so consumers skip a `null` vs `missing`
+/// branch. Overflowing events drop silently rather than fail the install.
+/// `allocator` is unused — kept for parity with the other JSON helpers.
+pub fn emitNdjsonEvent(
+    allocator: std.mem.Allocator,
+    event: NdjsonEvent,
+    name: []const u8,
+    status: ?[]const u8,
+) void {
+    _ = allocator;
+    if (!ndjson) return;
+    // Worst-case adversarial-escape name still fits in 1 KiB.
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(buf[0..]);
+    w.writeAll("{\"event\":") catch return;
+    jsonStr(&w, @tagName(event)) catch return;
+    if (name.len > 0) {
+        w.writeAll(",\"name\":") catch return;
+        jsonStr(&w, name) catch return;
+    }
+    if (status) |s| {
+        w.writeAll(",\"status\":") catch return;
+        jsonStr(&w, s) catch return;
+    }
+    w.writeAll("}\n") catch return;
+    io_mod.stdoutWriteAll(w.buffered());
+}
+
+test "isNdjson defaults to false and setNdjson toggles it" {
+    const prior = isNdjson();
+    defer setNdjson(prior);
+
+    setNdjson(false);
+    try std.testing.expect(!isNdjson());
+    setNdjson(true);
+    try std.testing.expect(isNdjson());
 }

@@ -85,7 +85,9 @@ pub fn routePostInstallOutcome(
         break :blk .partially_skipped;
     };
 
-    if (output.isJson()) emitPostInstallJson(allocator, name, status, flog);
+    // post_install belongs to the 9-step protocol stream, so ndjson
+    // consumers need it even without `--json`.
+    if (output.isJson() or output.isNdjson()) emitPostInstallJson(allocator, name, status, flog);
 }
 
 /// Write one JSON line per post_install routing decision to stdout. One
@@ -99,7 +101,10 @@ fn emitPostInstallJson(
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     const w = &aw.writer;
-    w.writeAll("{\"event\":\"post_install\",\"name\":") catch return;
+    // Sourced from NdjsonEvent so renames propagate, no stale literal.
+    w.writeAll("{\"event\":\"") catch return;
+    w.writeAll(@tagName(output.NdjsonEvent.post_install)) catch return;
+    w.writeAll("\",\"name\":") catch return;
     output.jsonStr(w, name) catch return;
     w.writeAll(",\"status\":\"") catch return;
     w.writeAll(@tagName(status)) catch return;

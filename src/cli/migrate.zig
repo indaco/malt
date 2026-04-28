@@ -166,6 +166,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.info("Would migrate {d} packages from Homebrew", .{keg_names.items.len});
             output.warn("Run without --dry-run to perform migration", .{});
         }
+        // Per-keg plan event — consumers don't need to parse the
+        // human/--json blob to pre-flight a migration.
+        if (output.isNdjson()) {
+            for (keg_names.items) |kn| {
+                output.emitNdjsonEvent(allocator, .would_install, kn, null);
+            }
+        }
         return;
     }
 
@@ -195,6 +202,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return error.Aborted;
     };
     defer lk.release();
+    // LIFO: install_complete fires before lk.release. Inline gate keeps
+    // the deferred call out of the default paths.
+    defer if (output.isNdjson()) output.emitNdjsonEvent(allocator, .install_complete, "", null);
+    output.emitNdjsonEvent(allocator, .lock_acquired, "", null);
 
     // Set up HTTP + API + GHCR + store + linker
     var http = client_mod.HttpClient.init(allocator);
@@ -333,6 +344,7 @@ fn migrateKeg(
         output.warn("  {s}: no bottle available for this platform", .{keg_name});
         return .skipped_no_bottle;
     };
+    output.emitNdjsonEvent(allocator, .resolved, keg_name, null);
 
     output.info("  Migrating {s} {s}...", .{ formula.name, formula.version });
 
@@ -343,6 +355,11 @@ fn migrateKeg(
         }
     } else {
         output.info("    {s} (cached in store)", .{keg_name});
+    }
+    if (output.isNdjson()) {
+        output.emitNdjsonEvent(allocator, .downloaded, keg_name, "ok");
+        output.emitNdjsonEvent(allocator, .extracted, keg_name, "ok");
+        output.emitNdjsonEvent(allocator, .stored, keg_name, "ok");
     }
 
     // Increment store refcount
@@ -359,8 +376,10 @@ fn migrateKeg(
         formula.pkg_version,
     ) catch {
         output.err("    {s}: failed to materialize", .{keg_name});
+        output.emitNdjsonEvent(allocator, .materialized, keg_name, "failed");
         return .failed_install;
     };
+    output.emitNdjsonEvent(allocator, .materialized, keg_name, "ok");
 
     // 7. Record in DB + link
     if (!formula.keg_only) {
@@ -373,12 +392,17 @@ fn migrateKeg(
 
         deps.linker.link(keg.path, formula.name, keg_id) catch {
             output.warn("    {s}: some links could not be created", .{keg_name});
+            output.emitNdjsonEvent(allocator, .linked, keg_name, "failed");
             // Rollback: unlink partial links and delete keg row; user already warned above.
             deps.linker.unlink(keg_id) catch {};
             deleteKeg(deps.db, keg_id) catch {};
             cellar_mod.remove(deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
+        // `recorded` after both succeed — link rollback above undoes
+        // the keg row, so an early emit would lie if link fails.
+        output.emitNdjsonEvent(allocator, .linked, keg_name, "ok");
+        output.emitNdjsonEvent(allocator, .recorded, keg_name, "ok");
         // Opt symlink is convenience; install is already functional via versioned link.
         deps.linker.linkOpt(formula.name, formula.pkg_version) catch {};
         recordDeps(deps.db, keg_id, &formula);
@@ -388,6 +412,7 @@ fn migrateKeg(
             cellar_mod.remove(deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
+        output.emitNdjsonEvent(allocator, .recorded, keg_name, "ok");
         // Opt symlink is convenience; install is already functional via versioned link.
         deps.linker.linkOpt(formula.name, formula.pkg_version) catch {};
         recordDeps(deps.db, keg_id, &formula);

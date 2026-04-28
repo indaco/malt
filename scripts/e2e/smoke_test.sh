@@ -236,6 +236,18 @@ else
 
   run_ok t3.install.dry -- "$MT_BIN" install --dry-run tree
   run_ok t3.install.tree -- "$MT_BIN" install tree
+
+  # ndjson stream contract — fast-path emits `already_installed` once
+  # tree is on disk; upgrade brackets every run with lock_acquired +
+  # install_complete; --json + --output-format=ndjson must be orthogonal
+  # (per-step ndjson events, existing --json blob still works).
+  run_grep t3.install.ndjson.fastpath '"event":"already_installed".*"name":"tree"' -- \
+    "$MT_BIN" --output-format=ndjson --quiet install tree
+  run_grep t3.upgrade.ndjson.up_to_date '"event":"up_to_date".*"name":"tree"' -- \
+    "$MT_BIN" --output-format=ndjson --quiet upgrade tree
+  run_grep t3.upgrade.ndjson.bracket '"event":"install_complete"' -- \
+    "$MT_BIN" --json --output-format=ndjson --quiet upgrade tree
+
   run_grep t3.list.has-tree "tree" -- "$MT_BIN" list
   run_grep t3.info.tree "tree" -- "$MT_BIN" info tree
   run_ok t3.uses.tree -- "$MT_BIN" uses tree
