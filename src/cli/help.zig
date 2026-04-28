@@ -215,6 +215,11 @@ const migrate_help =
     \\
     \\Flags:
     \\  --dry-run          Show what would be migrated
+    \\  --parallel         Migrate kegs concurrently with a bounded worker pool
+    \\                     (default 4 workers; override with
+    \\                     MALT_MIGRATE_PARALLEL_WORKERS=N). Successful kegs are
+    \\                     recorded in {prefix}/cache/migrate.progress.json so a
+    \\                     re-run after a crash or ^C resumes where it stopped.
     \\  --json             Emit a machine-readable summary on stdout (pairs with
     \\                     --dry-run to list kegs, or with a real run to report
     \\                     per-category names + counts for migrated / skipped /

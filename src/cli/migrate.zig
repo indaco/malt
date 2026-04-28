@@ -21,10 +21,15 @@ const codesign = @import("../macho/codesign.zig");
 const help = @import("help.zig");
 const keg_mod = @import("migrate/keg.zig");
 const manifest_mod = @import("migrate/manifest.zig");
+const parallel_mod = @import("migrate/parallel.zig");
 
 const KegResult = keg_mod.KegResult;
 const MigrateDeps = keg_mod.MigrateDeps;
 const migrateKeg = keg_mod.migrateKeg;
+
+/// Test seam — pins dispatch decisions without relying on observable
+/// side-effects. Reset on every `execute` entry.
+pub var last_run_parallel: bool = false;
 
 /// Resolve the Homebrew install prefix. Respects `HOMEBREW_PREFIX` (set
 /// by `brew shellenv` and by users with a non-standard install), falls
@@ -66,6 +71,8 @@ pub fn scanCellarKegs(
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "migrate")) return;
 
+    last_run_parallel = false;
+
     const start_ts = fs_compat.milliTimestamp();
     const json_mode = output.isJson();
     var dry_run = output.isDryRun();
@@ -73,10 +80,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // whole `migrate` would widen the trust boundary to every
     // Homebrew-Cellar entry at once; refuse it and require names.
     var use_system_ruby_bare = false;
+    var parallel_flag = false;
     var use_system_ruby_scope: std.ArrayList([]const u8) = .empty;
     defer use_system_ruby_scope.deinit(allocator);
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--dry-run")) dry_run = true;
+        if (std.mem.eql(u8, arg, "--parallel")) parallel_flag = true;
         if (std.mem.eql(u8, arg, "--use-system-ruby")) use_system_ruby_bare = true;
         if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
             const list = arg["--use-system-ruby=".len..];
@@ -233,7 +242,64 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    for (keg_names.items) |keg_name| {
+    if (parallel_flag) {
+        last_run_parallel = true;
+
+        const worker_count = parallel_mod.boundWorkerCount(
+            parallel_mod.workerCountFromLiveEnv(),
+            keg_names.items.len,
+        );
+
+        // Borrowed clients keep TLS contexts warm across kegs without
+        // paying a fresh handshake per worker.
+        var http_pool = client_mod.HttpClientPool.init(allocator, @intCast(@max(worker_count, 1))) catch {
+            output.err("Failed to initialise HTTP client pool", .{});
+            return error.Aborted;
+        };
+        defer http_pool.deinit();
+
+        var db_mu: std.Io.Mutex = .init;
+        var manifest_mu: std.Io.Mutex = .init;
+
+        const outcomes = try allocator.alloc(parallel_mod.KegOutcome, keg_names.items.len);
+        defer allocator.free(outcomes);
+        // Pre-populated so an interrupted/short-circuited slot still has a defined outcome.
+        for (outcomes, 0..) |*o, i| o.* = .{ .name = keg_names.items[i], .result = .skipped_installed };
+
+        var pool: parallel_mod.Pool = .{
+            .next_idx = std.atomic.Value(usize).init(0),
+            .keg_names = keg_names.items,
+            .outcomes = outcomes,
+            .cache_dir = cache_dir,
+            .prefix = prefix,
+            .use_system_ruby_scope = use_system_ruby_scope.items,
+            .http_pool = &http_pool,
+            .store = &store,
+            .linker = &linker,
+            .db = &db,
+            .db_mu = &db_mu,
+            .manifest = &manifest,
+            .manifest_mu = &manifest_mu,
+            .manifest_path = manifest_path,
+            .manifest_allocator = allocator,
+        };
+        try parallel_mod.run(allocator, &pool, worker_count);
+        // Mirror the serial loop's interrupt UX so users running with
+        // --parallel still see "Interrupted" instead of silent skips.
+        if (main_mod.isInterrupted()) {
+            output.warn("Interrupted — skipping remaining kegs.", .{});
+        }
+
+        for (outcomes) |o| {
+            switch (o.result) {
+                .migrated => try migrated_names.append(allocator, o.name),
+                .skipped_installed => try skipped_installed_names.append(allocator, o.name),
+                .skipped_post_install => try skipped_post_install_names.append(allocator, o.name),
+                .skipped_no_bottle => try skipped_no_bottle_names.append(allocator, o.name),
+                .failed_api, .failed_download, .failed_install => try failed_names.append(allocator, o.name),
+            }
+        }
+    } else for (keg_names.items) |keg_name| {
         // Stop at the next keg boundary when the user hits Ctrl-C.
         if (main_mod.isInterrupted()) {
             output.warn("Interrupted — skipping remaining kegs.", .{});

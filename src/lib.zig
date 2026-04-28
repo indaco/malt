@@ -49,6 +49,7 @@ pub const cli_bundle = @import("cli/bundle.zig");
 pub const cli_help = @import("cli/help.zig");
 pub const cli_migrate = @import("cli/migrate.zig");
 pub const cli_migrate_manifest = @import("cli/migrate/manifest.zig");
+pub const cli_migrate_parallel = @import("cli/migrate/parallel.zig");
 pub const cli_info = @import("cli/info.zig");
 pub const cli_uses = @import("cli/uses.zig");
 pub const cli_which = @import("cli/which.zig");

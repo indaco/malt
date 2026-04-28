@@ -16,6 +16,7 @@ const api_mod = @import("../../net/api.zig");
 const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
 const post_install_mod = @import("../install/post_install.zig");
+const io_mod = @import("../../ui/io.zig");
 
 /// Result of migrating a single keg.
 pub const KegResult = enum {
@@ -39,6 +40,9 @@ pub const MigrateDeps = struct {
     db: *sqlite.Database,
     prefix: []const u8,
     use_system_ruby_scope: []const []const u8,
+    /// Set by the parallel runner; null on the serial path so the
+    /// default flow pays no lock cost.
+    db_mu: ?*std.Io.Mutex = null,
 };
 
 /// Migrate a single keg from Homebrew into malt.
@@ -102,6 +106,12 @@ pub fn migrateKeg(
         return .failed_install;
     };
     output.emitNdjsonEvent(allocator, .materialized, keg_name, "ok");
+
+    // Workers serialise on `db_mu` so transactions can't interleave;
+    // serial callers leave `db_mu` null and pay no lock cost.
+    const io_ctx = io_mod.ctx();
+    if (deps.db_mu) |m| m.lockUncancelable(io_ctx);
+    defer if (deps.db_mu) |m| m.unlock(io_ctx);
 
     if (!formula.keg_only) {
         const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
