@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
+const io_mod = @import("../ui/io.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
@@ -318,7 +319,7 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
 }
 
 fn checkApiReachable(ctx: CheckCtx, name: []const u8) CheckResult {
-    var http = client_mod.HttpClient.init(ctx.allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), ctx.allocator);
     defer http.deinit();
     const status = http.head("https://formulae.brew.sh") catch {
         printCheck(name, .warn_status, "Cannot reach formulae.brew.sh");

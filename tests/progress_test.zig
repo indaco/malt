@@ -393,7 +393,7 @@ test "output verbose/dryrun/mode setters and getters round-trip" {
 // so we can exercise init/acquire/release/deinit without HTTP traffic.
 
 test "HttpClientPool acquire and release cycle a single client" {
-    var pool = try client_mod.HttpClientPool.init(testing.allocator, 2);
+    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 2);
     defer pool.deinit();
 
     const c1 = pool.acquire();
@@ -406,12 +406,12 @@ test "HttpClientPool acquire and release cycle a single client" {
 }
 
 test "HttpClientPool deinit cleans up a zero-use pool" {
-    var pool = try client_mod.HttpClientPool.init(testing.allocator, 1);
+    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     pool.deinit();
 }
 
 test "HttpClientPool blocks acquire when all clients are busy" {
-    var pool = try client_mod.HttpClientPool.init(testing.allocator, 1);
+    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
 
     // Hold the only client, then spawn a thread that tries to acquire.
@@ -470,7 +470,7 @@ test "HttpClientPool.init propagates allocator failure on the second allocation"
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
     try testing.expectError(
         error.OutOfMemory,
-        client_mod.HttpClientPool.init(failing.allocator(), 2),
+        client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, failing.allocator(), 2),
     );
 }
 
@@ -480,7 +480,7 @@ test "HttpClient.get retries on a 503 response status" {
     // final result — we just need kcov to see the retry branch execute.
     //
     // Network-dependent: if the DNS lookup or TCP connect fails we skip.
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
 
     const result = http.get("https://httpbin.org/status/503");
@@ -499,7 +499,7 @@ test "HttpClient.get retries on connection failure before giving up" {
     // the only deterministic way to cover those lines without a mocking
     // layer. We swallow the final error; kcov only needs the lines to
     // execute once.
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
 
     const result = http.get("http://127.0.0.1:1/nothing-listens-here");
@@ -516,7 +516,7 @@ test "HttpClient.get injects auth header when HOMEBREW_GITHUB_API_TOKEN is set" 
     _ = setenv("HOMEBREW_GITHUB_API_TOKEN", "fake-testing-token", 1);
     defer _ = unsetenv("HOMEBREW_GITHUB_API_TOKEN");
 
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, malt.fs_compat.processEnviron(), testing.allocator);
     defer http.deinit();
 
     // The URL matches the formulae.brew.sh guard so the header path runs.

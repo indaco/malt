@@ -6,6 +6,7 @@ const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
+const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
 const lock_mod = @import("../db/lock.zig");
 const client_mod = @import("../net/client.zig");
@@ -105,12 +106,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer db.close();
     schema.initSchema(&db) catch return;
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
 
     var cache_dir_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
 
     // Per-package errors must not be swallowed: a batch that fails every
     // item used to exit 0, hiding the failure from CI. We aggregate here
@@ -248,7 +249,7 @@ fn upgradeFormula(
     };
 
     // Step 4: Download bottle
-    var ghcr = ghcr_mod.GhcrClient.init(allocator, http);
+    var ghcr = ghcr_mod.GhcrClient.init(io_mod.ctx(), allocator, http);
     defer ghcr.deinit();
 
     var store = store_mod.Store.init(allocator, db, prefix);

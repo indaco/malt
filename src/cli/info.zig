@@ -5,6 +5,7 @@ const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
+const fs_compat = @import("../fs/compat.zig");
 const output = @import("../ui/output.zig");
 const io_mod = @import("../ui/io.zig");
 const color = @import("../ui/color.zig");
@@ -159,9 +160,9 @@ fn emitApiMetadata(
     const cache_dir = atomic.maltCacheDir(allocator) catch return false;
     defer allocator.free(cache_dir);
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
 
     if (!force_cask) {
         if (try emitApiFormula(allocator, &api, name, stdout, json_mode, colorize)) return true;

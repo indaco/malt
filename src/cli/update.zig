@@ -9,6 +9,7 @@ const schema = @import("../db/schema.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const outdated_mod = @import("outdated.zig");
+const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
@@ -77,9 +78,9 @@ fn refreshSnapshot(allocator: std.mem.Allocator, cache_dir: []const u8) !void {
     defer db.close();
     schema.initSchema(&db) catch return;
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
 
     try outdated_mod.refreshSnapshot(allocator, &db, &api, cache_dir, null);
 }

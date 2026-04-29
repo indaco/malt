@@ -104,9 +104,9 @@ test "resolve frees duped dep strings on the BFS visited-dedup path" {
     try dir.writeFormula("c", "{\"name\":\"c\",\"dependencies\":[\"d\"]}");
     try dir.writeFormula("d", "{\"name\":\"d\",\"dependencies\":[\"b\"]}");
 
-    var http = client_mod.HttpClient.init(alloc);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
 
     var tdb = try TempDb.init("dedup");
     defer tdb.deinit();
@@ -143,9 +143,9 @@ test "resolve empty dep graph still returns a freeable slice" {
 
     try dir.writeFormula("solo", "{\"name\":\"solo\",\"dependencies\":[]}");
 
-    var http = client_mod.HttpClient.init(alloc);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
 
     var tdb = try TempDb.init("empty");
     defer tdb.deinit();

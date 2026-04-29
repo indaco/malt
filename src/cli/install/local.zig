@@ -11,6 +11,7 @@ const cask_mod = @import("../../core/cask.zig");
 const linker_mod = @import("../../core/linker.zig");
 const tap_mod = @import("../../core/tap.zig");
 const client_mod = @import("../../net/client.zig");
+const io_mod = @import("../../ui/io.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
 
@@ -100,7 +101,7 @@ pub fn installTapFormula(
     };
     defer allocator.free(commit_sha);
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
 
     // Try Formula/ first, then Casks/
@@ -276,7 +277,7 @@ pub fn installLocalFormula(
         // No tap_registration — never pollute `mt tap` with a local path.
     };
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
     try materializeRubyFormula(allocator, resolved, &http, db, linker, prefix, dry_run, force);
 }

@@ -86,11 +86,11 @@ test "collectFormulaJobs queues a formula with a post_install hook" {
     malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
     defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
 
-    var http = try malt.client.HttpClientPool.init(alloc, 1);
+    var http = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
-    var real_http = malt.client.HttpClient.init(alloc);
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
-    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
 
@@ -327,13 +327,13 @@ test "collectFormulaJobs queues the main formula when nothing is installed" {
     malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
     defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
 
-    var http = try malt.client.HttpClientPool.init(alloc, 1);
+    var http = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
     // A real single-client HttpClient is safe because it's never touched
     // when deps.len == 0.
-    var real_http = malt.client.HttpClient.init(alloc);
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
-    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
     var jobs: std.ArrayList(install.DownloadJob) = .empty;
@@ -456,11 +456,11 @@ test "collectFormulaJobs queues a dep and its parent from a seeded cache" {
     const root_json = formulaJsonWithDep("alpha", "beta");
     try seedCache(cache_dir, "alpha", root_json);
 
-    var http_pool = try malt.client.HttpClientPool.init(alloc, 2);
+    var http_pool = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();
-    var real_http = malt.client.HttpClient.init(alloc);
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
-    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
     var jobs: std.ArrayList(install.DownloadJob) = .empty;
@@ -506,11 +506,11 @@ test "collectFormulaJobs deduplicates deps already queued by a prior call" {
     try seedCache(cache_dir, "alpha", root_a);
     try seedCache(cache_dir, "omega", root_b);
 
-    var http_pool = try malt.client.HttpClientPool.init(alloc, 2);
+    var http_pool = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();
-    var real_http = malt.client.HttpClient.init(alloc);
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
-    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
     var jobs: std.ArrayList(install.DownloadJob) = .empty;
@@ -575,11 +575,11 @@ test "collectFormulaJobs with post_install leaves the DB untouched" {
     malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
     defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
 
-    var http = try malt.client.HttpClientPool.init(alloc, 1);
+    var http = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
-    var real_http = malt.client.HttpClient.init(alloc);
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
-    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
 
@@ -639,11 +639,11 @@ test "collectFormulaJobs carries the _<revision> suffix in version_str" {
     malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
     defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
 
-    var http = try malt.client.HttpClientPool.init(alloc, 1);
+    var http = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
-    var real_http = malt.client.HttpClient.init(alloc);
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
-    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
     var jobs: std.ArrayList(install.DownloadJob) = .empty;
@@ -679,11 +679,11 @@ test "collectFormulaJobs leaves plain-version formulas unchanged" {
     malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
     defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
 
-    var http = try malt.client.HttpClientPool.init(alloc, 1);
+    var http = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
-    var real_http = malt.client.HttpClient.init(alloc);
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
-    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
     var jobs: std.ArrayList(install.DownloadJob) = .empty;
@@ -780,11 +780,11 @@ test "collectFormulaJobs leaves no parsed-tree leaks under testing.allocator (>=
     const root_json = formulaJsonWithThreeDeps("root", "dep_a", "dep_b", "dep_c");
     try seedCache(cache_dir, "root", root_json);
 
-    var http_pool = try malt.client.HttpClientPool.init(alloc, 2);
+    var http_pool = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();
-    var real_http = malt.client.HttpClient.init(alloc);
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
-    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
     var jobs: std.ArrayList(install.DownloadJob) = .empty;

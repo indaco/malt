@@ -113,11 +113,11 @@ test "collectFormulaJobs parses each formula exactly once via shared cache" {
     try seedCache(cache_dir, "d_d", bottleJsonUniqueSha("d_d", "dd"));
     try seedCache(cache_dir, "d_e", bottleJsonUniqueSha("d_e", "ee"));
 
-    var http_pool = try malt.client.HttpClientPool.init(alloc, 2);
+    var http_pool = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();
-    var real_http = malt.client.HttpClient.init(alloc);
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
-    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
     var jobs: std.ArrayList(install.DownloadJob) = .empty;
@@ -188,11 +188,11 @@ test "FormulaCache holds at most one entry per unique dep across the run" {
     try seedCache(cache_dir, "d_d", bottleJsonUniqueSha("d_d", "dd"));
     try seedCache(cache_dir, "d_e", bottleJsonUniqueSha("d_e", "ee"));
 
-    var http_pool = try malt.client.HttpClientPool.init(alloc, 2);
+    var http_pool = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();
-    var real_http = malt.client.HttpClient.init(alloc);
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
-    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
     var jobs: std.ArrayList(install.DownloadJob) = .empty;
@@ -263,9 +263,9 @@ test "resolve walks deps for JSON missing the name field" {
         try f.writeAll("{\"dependencies\":[]}");
     }
 
-    var http = malt.client.HttpClient.init(alloc);
+    var http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = malt.api.BrewApi.init(alloc, &http, cache_dir);
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &http, cache_dir);
 
     var tdb = try TempDb.init("no_name");
     defer tdb.deinit();
@@ -362,11 +362,11 @@ test "shared deps across multi-package install collapse to one parse" {
     try seedCache(cache_dir, "omega", omega_json);
     try seedCache(cache_dir, "shared_lib", bottleJsonUniqueSha("shared_lib", "ss"));
 
-    var http_pool = try malt.client.HttpClientPool.init(alloc, 2);
+    var http_pool = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();
-    var real_http = malt.client.HttpClient.init(alloc);
+    var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
-    var api = malt.api.BrewApi.init(alloc, &real_http, cache_dir);
+    var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
     var jobs: std.ArrayList(install.DownloadJob) = .empty;

@@ -11,6 +11,7 @@ const ghcr_mod = @import("../net/ghcr.zig");
 const api_mod = @import("../net/api.zig");
 const atomic = @import("../fs/atomic.zig");
 const lock_mod = @import("../db/lock.zig");
+const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
@@ -121,12 +122,12 @@ fn ephemeralRun(
 ) !void {
     output.info("Fetching {s} for ephemeral run...", .{pkg_name});
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
 
     var cache_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch return;
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
 
     const formula_json = api.fetchFormula(pkg_name) catch {
         output.err("Formula '{s}' not found", .{pkg_name});
@@ -190,7 +191,7 @@ fn ephemeralRun(
         }
     }
 
-    var ghcr = ghcr_mod.GhcrClient.init(allocator, &http);
+    var ghcr = ghcr_mod.GhcrClient.init(io_mod.ctx(), allocator, &http);
     defer ghcr.deinit();
 
     // Cache slot under {cache} so `mt purge --cache` wipes it; a tmp dir otherwise.

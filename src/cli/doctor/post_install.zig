@@ -12,6 +12,8 @@ const dsl = @import("../../core/dsl/root.zig");
 const formula_mod = @import("../../core/formula.zig");
 const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
+const fs_compat = @import("../../fs/compat.zig");
+const io_mod = @import("../../ui/io.zig");
 
 /// Check post_install DSL support status for installed formulae.
 /// Called when `malt doctor --post-install-status` is passed.
@@ -31,12 +33,12 @@ pub fn checkPostInstallStatus(allocator: std.mem.Allocator, prefix: []const u8) 
     var no_pi_count: u32 = 0;
     var total: u32 = 0;
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
 
     var cache_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch return;
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
 
     while (stmt.step() catch false) {
         const name_raw = stmt.columnText(0) orelse continue;

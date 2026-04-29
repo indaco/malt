@@ -251,9 +251,9 @@ test "resolve walks a small BFS dep graph and dedups via visited" {
     try dir.writeFormula("beta", "{\"name\":\"beta\",\"dependencies\":[]}");
     try dir.writeFormula("gamma", "{\"name\":\"gamma\",\"dependencies\":[\"beta\"]}");
 
-    var http = client_mod.HttpClient.init(alloc);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
 
     var tdb = try TempDb.init("resolve_bfs");
     defer tdb.deinit();
@@ -284,9 +284,9 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
     try dir.writeFormula("beta", "{\"name\":\"beta\",\"dependencies\":[\"gamma\"]}");
     try dir.writeFormula("gamma", "{\"name\":\"gamma\",\"dependencies\":[]}");
 
-    var http = client_mod.HttpClient.init(alloc);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
 
     var tdb = try TempDb.init("resolve_installed");
     defer tdb.deinit();
@@ -319,9 +319,9 @@ test "resolve returns empty when root formula JSON is missing from cache" {
     const f = try malt.fs_compat.cwd().createFile(marker, .{});
     f.close();
 
-    var http = client_mod.HttpClient.init(alloc);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
 
     var tdb = try TempDb.init("resolve_missing_root");
     defer tdb.deinit();
@@ -351,9 +351,9 @@ test "resolve handles a dep whose sub-fetch fails by falling through" {
     const f = try malt.fs_compat.cwd().createFile(marker, .{});
     f.close();
 
-    var http = client_mod.HttpClient.init(alloc);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
 
     var tdb = try TempDb.init("resolve_dep_missing");
     defer tdb.deinit();
@@ -383,9 +383,9 @@ test "resolve treats a DB keg with a vanished cellar_path as not-installed" {
     try dir.writeFormula("alpha", "{\"name\":\"alpha\",\"dependencies\":[\"beta\"]}");
     try dir.writeFormula("beta", "{\"name\":\"beta\",\"dependencies\":[]}");
 
-    var http = client_mod.HttpClient.init(alloc);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
 
     var tdb = try TempDb.init("resolve_missing_cellar");
     defer tdb.deinit();

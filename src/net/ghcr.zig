@@ -2,10 +2,8 @@
 //! Token management and blob fetching for GitHub Container Registry.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
 
 const client_mod = @import("client.zig");
-const io_mod = @import("../ui/io.zig");
 
 pub const GhcrError = error{
     TokenFetchFailed,
@@ -21,6 +19,7 @@ pub const GhcrError = error{
 };
 
 pub const GhcrClient = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     http: *client_mod.HttpClient,
     cached_token: ?[]const u8,
@@ -34,8 +33,9 @@ pub const GhcrClient = struct {
     token_expiry: i64,
     mutex: std.Io.Mutex,
 
-    pub fn init(allocator: std.mem.Allocator, http: *client_mod.HttpClient) GhcrClient {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, http: *client_mod.HttpClient) GhcrClient {
         return .{
+            .io = io,
             .allocator = allocator,
             .http = http,
             .cached_token = null,
@@ -67,7 +67,7 @@ pub const GhcrClient = struct {
     /// unexpired cached token. Used by tests and by `fetchToken` to
     /// short-circuit before building a URL.
     pub fn hasTokenFor(self: *GhcrClient, repo: []const u8) bool {
-        const now = fs_compat.timestamp();
+        const now = std.Io.Clock.real.now(self.io).toSeconds();
         if (self.cached_token == null) return false;
         if (now >= self.token_expiry) return false;
         return self.cached_scopes.contains(repo);
@@ -104,9 +104,8 @@ pub const GhcrClient = struct {
     ) GhcrError!void {
         if (repos.len == 0) return;
 
-        const io = io_mod.ctx();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         self.clearCache();
 
@@ -139,7 +138,7 @@ pub const GhcrClient = struct {
         }
 
         self.cached_token = token;
-        self.token_expiry = fs_compat.timestamp() + 270; // 4.5 min of the 5 min TTL
+        self.token_expiry = std.Io.Clock.real.now(self.io).toSeconds() + 270; // 4.5 min of the 5 min TTL
     }
 
     /// Fetch an anonymous GHCR token for a single repository. Hits the
@@ -162,11 +161,10 @@ pub const GhcrClient = struct {
         http: *client_mod.HttpClient,
         repo: []const u8,
     ) GhcrError![]const u8 {
-        const io = io_mod.ctx();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
-        const now = fs_compat.timestamp();
+        const now = std.Io.Clock.real.now(self.io).toSeconds();
         if (self.cached_token) |t| {
             if (now < self.token_expiry and self.cached_scopes.contains(repo)) {
                 return self.allocator.dupe(u8, t) catch GhcrError.OutOfMemory;

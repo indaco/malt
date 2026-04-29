@@ -869,9 +869,9 @@ fn recomputeAndEmit(
     json_mode: bool,
     scope: ScopeFlags,
 ) !void {
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
 
     const workers_override = parseWorkersEnv(fs_compat.getenv(OUTDATED_WORKERS_ENV));
 
@@ -1302,7 +1302,7 @@ fn runOne(out_alloc: std.mem.Allocator, ctx: *WorkerCtx) void {
     defer ctx.pool.release(http);
 
     const arena_alloc = ctx.arena.allocator();
-    var local_api = api_mod.BrewApi.init(arena_alloc, http, ctx.cache_dir);
+    var local_api = api_mod.BrewApi.init(io_mod.ctx(), arena_alloc, http, ctx.cache_dir);
     const latest = upstreamLatest(arena_alloc, &local_api, ctx.kind, ctx.row.name) orelse return;
     if (std.mem.eql(u8, ctx.row.version, latest)) return;
 
@@ -1324,7 +1324,7 @@ fn runPool(
     const worker_count = outdatedWorkerCount(kegs.len, workers_override);
     std.debug.assert(worker_count > 0);
 
-    var http_pool = try client_mod.HttpClientPool.init(allocator, worker_count);
+    var http_pool = try client_mod.HttpClientPool.init(io_mod.ctx(), fs_compat.processEnviron(), allocator, worker_count);
     defer http_pool.deinit();
 
     const ctxs = try allocator.alloc(WorkerCtx, kegs.len);

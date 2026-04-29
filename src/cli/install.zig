@@ -19,6 +19,7 @@ const fs_compat = @import("../fs/compat.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
+const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
 const help = @import("help.zig");
@@ -305,12 +306,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     output.emitNdjsonEvent(allocator, .lock_acquired, "", null);
 
     // Main-thread HTTP client; workers borrow from `http_pool` instead.
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
 
     // 4-slot worker pool — same budget as the materialize pool; enough to
     // saturate cold installs while reusing TLS contexts.
-    var http_pool = client_mod.HttpClientPool.init(allocator, 4) catch {
+    var http_pool = client_mod.HttpClientPool.init(io_mod.ctx(), fs_compat.processEnviron(), allocator, 4) catch {
         output.err("Failed to initialise HTTP client pool", .{});
         return InstallError.DownloadFailed;
     };
@@ -319,10 +320,10 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Set up API client
     var cache_dir_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
 
     // Set up GHCR client
-    var ghcr = ghcr_mod.GhcrClient.init(allocator, &http);
+    var ghcr = ghcr_mod.GhcrClient.init(io_mod.ctx(), allocator, &http);
     defer ghcr.deinit();
 
     // Set up store + linker
@@ -817,7 +818,7 @@ fn maybeRegisterService(
 /// HEAD-based fallback for extensionless cask URLs.
 /// Follows redirects to discover the real file extension.
 fn resolveCaskArtifactViaHead(allocator: std.mem.Allocator, url: []const u8) cask_mod.ArtifactType {
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
 
     var resolved = http.headResolved(url) catch return .unknown;

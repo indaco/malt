@@ -2,6 +2,7 @@ const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
 const fs_compat = @import("../fs/compat.zig");
+const io_mod = @import("../ui/io.zig");
 
 pub const TapInfo = struct {
     name: []const u8,
@@ -220,7 +221,7 @@ pub fn resolveHeadCommit(
         .{ user, repo_bare },
     ) catch return TapError.ResolveFailed;
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
 
     // MALT_GITHUB_TOKEN takes precedence; otherwise `http.get` falls

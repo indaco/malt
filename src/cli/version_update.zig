@@ -64,7 +64,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     output.info("Current version: {s}", .{current_version});
     output.info("Checking for updates...", .{});
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
 
     var resp = http.get(release.releases_latest_url) catch {

@@ -81,7 +81,7 @@ fn seedCask(dir: *TempCacheDir, token: []const u8, latest: []const u8) !void {
 }
 
 test "collectOutdatedFormulas (small-N, single-client path) returns sorted outdated rows only" {
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
     var dir = try TempCacheDir.init("formulas_small");
     defer dir.deinit();
@@ -90,7 +90,7 @@ test "collectOutdatedFormulas (small-N, single-client path) returns sorted outda
     try seedFormula(&dir, "bravo", "1.0");
     try seedFormula(&dir, "charlie", "3.5");
 
-    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
 
     const kegs = [_]outdated_mod.KegRow{
         .{ .name = "alpha", .version = "1.0" }, // outdated
@@ -111,7 +111,7 @@ test "collectOutdatedFormulas (small-N, single-client path) returns sorted outda
 }
 
 test "collectOutdatedFormulas (large-N, pool path) preserves sorted order" {
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
     var dir = try TempCacheDir.init("formulas_large");
     defer dir.deinit();
@@ -127,7 +127,7 @@ test "collectOutdatedFormulas (large-N, pool path) preserves sorted order" {
     var rows_buf: [names.len]outdated_mod.KegRow = undefined;
     for (names, 0..) |n, i| rows_buf[i] = .{ .name = n, .version = "1.0" };
 
-    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
     const out = try outdated_mod.collectOutdatedFormulas(testing.allocator, &api, dir.path, &rows_buf, null);
     defer freeEntries(testing.allocator, out);
 
@@ -143,7 +143,7 @@ test "collectOutdatedFormulas tolerates a missing/404 entry without aborting" {
     // One name has no cache entry — the worker treats it as "no remote
     // info" and the row drops out of the result rather than failing the
     // whole command.
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
     var dir = try TempCacheDir.init("formulas_partial");
     defer dir.deinit();
@@ -152,7 +152,7 @@ test "collectOutdatedFormulas tolerates a missing/404 entry without aborting" {
     // 'ghost' is intentionally not seeded; with no network it yields null.
     try seedFormula(&dir, "zulu", "9.9");
 
-    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
 
     const kegs = [_]outdated_mod.KegRow{
         .{ .name = "alpha", .version = "1.0" },
@@ -169,7 +169,7 @@ test "collectOutdatedFormulas tolerates a missing/404 entry without aborting" {
 }
 
 test "collectOutdatedCasks (small-N) returns sorted outdated rows only" {
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
     var dir = try TempCacheDir.init("casks_small");
     defer dir.deinit();
@@ -178,7 +178,7 @@ test "collectOutdatedCasks (small-N) returns sorted outdated rows only" {
     try seedCask(&dir, "appthree", "1.1");
     try seedCask(&dir, "apptwo", "2.0");
 
-    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
 
     const kegs = [_]outdated_mod.KegRow{
         .{ .name = "appone", .version = "5.0" }, // up-to-date
@@ -195,7 +195,7 @@ test "collectOutdatedCasks (small-N) returns sorted outdated rows only" {
 }
 
 test "collectOutdatedCasks (large-N, pool path) preserves sorted order" {
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
     var dir = try TempCacheDir.init("casks_large");
     defer dir.deinit();
@@ -209,7 +209,7 @@ test "collectOutdatedCasks (large-N, pool path) preserves sorted order" {
     var rows_buf: [tokens.len]outdated_mod.KegRow = undefined;
     for (tokens, 0..) |t, i| rows_buf[i] = .{ .name = t, .version = "1.0" };
 
-    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
     const out = try outdated_mod.collectOutdatedCasks(testing.allocator, &api, dir.path, &rows_buf, null);
     defer freeEntries(testing.allocator, out);
 

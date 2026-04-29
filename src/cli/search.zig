@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const atomic = @import("../fs/atomic.zig");
+const fs_compat = @import("../fs/compat.zig");
 const output = @import("../ui/output.zig");
 const io_mod = @import("../ui/io.zig");
 const color = @import("../ui/color.zig");
@@ -128,9 +129,9 @@ fn runKindIsolated(
     kind: api_mod.BrewApi.Kind,
     query: []const u8,
 ) KindResults {
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
     var r: KindResults = .{};
     r.exact = api.exists(query, kind) catch false;
     if (api.fetchNamesIndex(kind)) |idx| {

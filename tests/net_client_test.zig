@@ -101,7 +101,7 @@ test "HeadResolved.replaceFinalUrl: dupe failure with content_disposition set le
 
 test "HttpClient.headResolved: returns OOM with no leak when initial url dupe fails" {
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    var http = client.HttpClient.init(failing.allocator());
+    var http = client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, failing.allocator());
     defer http.deinit();
 
     try testing.expectError(error.OutOfMemory, http.headResolved("https://example.com/"));

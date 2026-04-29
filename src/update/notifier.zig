@@ -196,7 +196,7 @@ pub fn writeCache(path: []const u8, state: State) !void {
 }
 
 fn fetchLatestTag(allocator: std.mem.Allocator) ![]u8 {
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     http.timeout_ns = network_timeout_ns;
     defer http.deinit();
     var resp = try http.get(release.releases_latest_url);

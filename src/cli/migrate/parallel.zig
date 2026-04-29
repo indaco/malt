@@ -106,8 +106,8 @@ fn worker(pool: *Pool) void {
 
         const http = pool.http_pool.acquire();
         defer pool.http_pool.release(http);
-        var api = api_mod.BrewApi.init(a, http, pool.cache_dir);
-        var ghcr = ghcr_mod.GhcrClient.init(a, http);
+        var api = api_mod.BrewApi.init(io_mod.ctx(), a, http, pool.cache_dir);
+        var ghcr = ghcr_mod.GhcrClient.init(io_mod.ctx(), a, http);
         defer ghcr.deinit();
 
         const result = keg_mod.migrateKeg(a, keg_name, .{

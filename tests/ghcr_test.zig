@@ -29,13 +29,13 @@ test "extractTokenField returns InvalidResponse when token field is not a string
 }
 
 test "GhcrClient.init/deinit does not leak and starts without cached token" {
-    var pool = try client_mod.HttpClientPool.init(testing.allocator, 1);
+    var pool = try client_mod.HttpClientPool.init(io_mod.ctx(), std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
 
     const http = pool.acquire();
     defer pool.release(http);
 
-    var g = ghcr.GhcrClient.init(testing.allocator, http);
+    var g = ghcr.GhcrClient.init(io_mod.ctx(), testing.allocator, http);
     defer g.deinit();
 
     try testing.expect(g.cached_token == null);
@@ -91,12 +91,12 @@ test "hasTokenFor is false before any fetch and true after a direct cache seed" 
     // Black-box probe: without hitting the network we can still verify
     // the scope-set cache behaves the way fetchToken / prefetchTokens
     // promise. Seed the cache by hand, then probe.
-    var pool = try client_mod.HttpClientPool.init(testing.allocator, 1);
+    var pool = try client_mod.HttpClientPool.init(io_mod.ctx(), std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
     const http = pool.acquire();
     defer pool.release(http);
 
-    var g = ghcr.GhcrClient.init(testing.allocator, http);
+    var g = ghcr.GhcrClient.init(io_mod.ctx(), testing.allocator, http);
     defer g.deinit();
 
     try testing.expect(!g.hasTokenFor("homebrew/core/wget"));
@@ -134,12 +134,12 @@ test "classifyGhcrStatus: 503 maps to DownloadHttpServerError" {
 }
 
 test "hasTokenFor treats expired tokens as cache-miss" {
-    var pool = try client_mod.HttpClientPool.init(testing.allocator, 1);
+    var pool = try client_mod.HttpClientPool.init(io_mod.ctx(), std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
     const http = pool.acquire();
     defer pool.release(http);
 
-    var g = ghcr.GhcrClient.init(testing.allocator, http);
+    var g = ghcr.GhcrClient.init(io_mod.ctx(), testing.allocator, http);
     defer g.deinit();
 
     const fake_token = try testing.allocator.dupe(u8, "fake-token");
@@ -156,12 +156,12 @@ test "fetchToken on cache hit returns an owned dupe the caller must free" {
     // allocation, distinct from `cached_token`. If fetchToken ever
     // reverts to a borrow, this test double-frees the cached buffer
     // and the testing allocator aborts the run.
-    var pool = try client_mod.HttpClientPool.init(testing.allocator, 1);
+    var pool = try client_mod.HttpClientPool.init(io_mod.ctx(), std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
     const http = pool.acquire();
     defer pool.release(http);
 
-    var g = ghcr.GhcrClient.init(testing.allocator, http);
+    var g = ghcr.GhcrClient.init(io_mod.ctx(), testing.allocator, http);
     defer g.deinit();
 
     const seeded_token = try testing.allocator.dupe(u8, "fake-token");
@@ -187,12 +187,12 @@ test "fetchToken is safe against concurrent cache churn" {
     const fetchers: usize = 4;
     const iterations: usize = 2000;
 
-    var pool = try client_mod.HttpClientPool.init(testing.allocator, 1);
+    var pool = try client_mod.HttpClientPool.init(io_mod.ctx(), std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
     const http = pool.acquire();
     defer pool.release(http);
 
-    var g = ghcr.GhcrClient.init(testing.allocator, http);
+    var g = ghcr.GhcrClient.init(io_mod.ctx(), testing.allocator, http);
     defer g.deinit();
 
     // Initial seed so fetchers never miss and reach the network path.

@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
+const io_mod = @import("../ui/io.zig");
 const builtin = @import("builtin");
 const codesign = @import("../macho/codesign.zig");
 const pins = @import("pins.zig");
@@ -158,7 +159,7 @@ pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8
         .{ &pins.homebrew_core_commit_sha, name[0], name },
     ) catch return null;
 
-    var http = http_client.HttpClient.init(allocator);
+    var http = http_client.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
     defer http.deinit();
 
     var resp = http.get(url) catch return null;

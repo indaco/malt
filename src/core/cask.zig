@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
+const io_mod = @import("../ui/io.zig");
 
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
@@ -401,7 +402,7 @@ pub const CaskInstaller = struct {
         errdefer self.allocator.free(dest);
 
         // Download via HTTP client
-        var http = client_mod.HttpClient.init(self.allocator);
+        var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), self.allocator);
         defer http.deinit();
 
         var resp = try http.getWithHeaders(cask.url, &.{}, progress);

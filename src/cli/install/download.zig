@@ -14,6 +14,7 @@ const client_mod = @import("../../net/client.zig");
 const ghcr_mod = @import("../../net/ghcr.zig");
 const api_mod = @import("../../net/api.zig");
 const atomic = @import("../../fs/atomic.zig");
+const io_mod = @import("../../ui/io.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
 
@@ -202,7 +203,7 @@ const FetchFormulaCtx = struct {
     fn run(self: *FetchFormulaCtx) void {
         const http = self.pool.acquire();
         defer self.pool.release(http);
-        var local_api = api_mod.BrewApi.init(self.arena.allocator(), http, self.cache_dir);
+        var local_api = api_mod.BrewApi.init(io_mod.ctx(), self.arena.allocator(), http, self.cache_dir);
         self.result = local_api.fetchFormula(self.dep_name) catch null;
     }
 };
