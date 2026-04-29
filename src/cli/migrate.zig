@@ -9,10 +9,7 @@ const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
-const formula_mod = @import("../core/formula.zig");
-const bottle_mod = @import("../core/bottle.zig");
 const store_mod = @import("../core/store.zig");
-const cellar_mod = @import("../core/cellar.zig");
 const linker_mod = @import("../core/linker.zig");
 const client_mod = @import("../net/client.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
@@ -21,8 +18,18 @@ const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const io_mod = @import("../ui/io.zig");
 const codesign = @import("../macho/codesign.zig");
-const post_install_mod = @import("install/post_install.zig");
 const help = @import("help.zig");
+const keg_mod = @import("migrate/keg.zig");
+const manifest_mod = @import("migrate/manifest.zig");
+const parallel_mod = @import("migrate/parallel.zig");
+
+const KegResult = keg_mod.KegResult;
+const MigrateDeps = keg_mod.MigrateDeps;
+const migrateKeg = keg_mod.migrateKeg;
+
+/// Test seam — pins dispatch decisions without relying on observable
+/// side-effects. Reset on every `execute` entry.
+pub var last_run_parallel: bool = false;
 
 /// Resolve the Homebrew install prefix. Respects `HOMEBREW_PREFIX` (set
 /// by `brew shellenv` and by users with a non-standard install), falls
@@ -61,32 +68,10 @@ pub fn scanCellarKegs(
     }
 }
 
-/// Result of migrating a single keg.
-const KegResult = enum {
-    migrated,
-    skipped_installed,
-    skipped_post_install,
-    skipped_no_bottle,
-    failed_api,
-    failed_download,
-    failed_install,
-};
-
-/// Named-field bundle for the shared state `migrateKeg` threads across
-/// every keg in the loop. Opens a DI seam for tests to swap in fakes.
-const MigrateDeps = struct {
-    api: *api_mod.BrewApi,
-    ghcr: *ghcr_mod.GhcrClient,
-    http: *client_mod.HttpClient,
-    store: *store_mod.Store,
-    linker: *linker_mod.Linker,
-    db: *sqlite.Database,
-    prefix: []const u8,
-    use_system_ruby_scope: []const []const u8,
-};
-
 pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "migrate")) return;
+
+    last_run_parallel = false;
 
     const start_ts = fs_compat.milliTimestamp();
     const json_mode = output.isJson();
@@ -95,10 +80,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // whole `migrate` would widen the trust boundary to every
     // Homebrew-Cellar entry at once; refuse it and require names.
     var use_system_ruby_bare = false;
+    var parallel_flag = false;
     var use_system_ruby_scope: std.ArrayList([]const u8) = .empty;
     defer use_system_ruby_scope.deinit(allocator);
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--dry-run")) dry_run = true;
+        if (std.mem.eql(u8, arg, "--parallel")) parallel_flag = true;
         if (std.mem.eql(u8, arg, "--use-system-ruby")) use_system_ruby_bare = true;
         if (std.mem.startsWith(u8, arg, "--use-system-ruby=")) {
             const list = arg["--use-system-ruby=".len..];
@@ -221,6 +208,20 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var store = store_mod.Store.init(allocator, &db, prefix);
     var linker = linker_mod.Linker.init(allocator, &db, prefix);
 
+    // Resume manifest: a crashed/^C run resumes from where it stopped
+    // instead of redoing every keg.
+    var manifest_path_buf: [512]u8 = undefined;
+    const manifest_path = std.fmt.bufPrint(
+        &manifest_path_buf,
+        "{s}/cache/migrate.progress.json",
+        .{prefix},
+    ) catch return;
+    var manifest = manifest_mod.loadFromPath(allocator, manifest_path) catch |e| blk: {
+        output.warn("Could not read resume manifest ({s}); starting fresh", .{@errorName(e)});
+        break :blk manifest_mod.Manifest.init(allocator);
+    };
+    defer manifest.deinit();
+
     // ── Step 4: Migrate each keg ────────────────────────────────────
     // Per-category name lists: counts are derived lengths; JSON emits arrays verbatim.
     var migrated_names: std.ArrayList([]const u8) = .empty;
@@ -241,11 +242,77 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    for (keg_names.items) |keg_name| {
+    if (parallel_flag) {
+        last_run_parallel = true;
+
+        const worker_count = parallel_mod.boundWorkerCount(
+            parallel_mod.workerCountFromLiveEnv(),
+            keg_names.items.len,
+        );
+
+        // Borrowed clients keep TLS contexts warm across kegs without
+        // paying a fresh handshake per worker.
+        var http_pool = client_mod.HttpClientPool.init(allocator, @intCast(@max(worker_count, 1))) catch {
+            output.err("Failed to initialise HTTP client pool", .{});
+            return error.Aborted;
+        };
+        defer http_pool.deinit();
+
+        var db_mu: std.Io.Mutex = .init;
+        var manifest_mu: std.Io.Mutex = .init;
+
+        const outcomes = try allocator.alloc(parallel_mod.KegOutcome, keg_names.items.len);
+        defer allocator.free(outcomes);
+        // Pre-populated so an interrupted/short-circuited slot still has a defined outcome.
+        for (outcomes, 0..) |*o, i| o.* = .{ .name = keg_names.items[i], .result = .skipped_installed };
+
+        var pool: parallel_mod.Pool = .{
+            .next_idx = std.atomic.Value(usize).init(0),
+            .keg_names = keg_names.items,
+            .outcomes = outcomes,
+            .cache_dir = cache_dir,
+            .prefix = prefix,
+            .use_system_ruby_scope = use_system_ruby_scope.items,
+            .http_pool = &http_pool,
+            .store = &store,
+            .linker = &linker,
+            .db = &db,
+            .db_mu = &db_mu,
+            .manifest = &manifest,
+            .manifest_mu = &manifest_mu,
+            .manifest_path = manifest_path,
+            .manifest_allocator = allocator,
+        };
+        try parallel_mod.run(allocator, &pool, worker_count);
+        // Mirror the serial loop's interrupt UX so users running with
+        // --parallel still see "Interrupted" instead of silent skips.
+        if (main_mod.isInterrupted()) {
+            output.warn("Interrupted — skipping remaining kegs.", .{});
+        }
+
+        for (outcomes) |o| {
+            switch (o.result) {
+                .migrated => try migrated_names.append(allocator, o.name),
+                .skipped_installed => try skipped_installed_names.append(allocator, o.name),
+                .skipped_post_install => try skipped_post_install_names.append(allocator, o.name),
+                .skipped_no_bottle => try skipped_no_bottle_names.append(allocator, o.name),
+                .failed_api, .failed_download, .failed_install => try failed_names.append(allocator, o.name),
+            }
+        }
+    } else for (keg_names.items) |keg_name| {
         // Stop at the next keg boundary when the user hits Ctrl-C.
         if (main_mod.isInterrupted()) {
             output.warn("Interrupted — skipping remaining kegs.", .{});
             break;
+        }
+        // Resume short-circuit before any API/network work — bounds
+        // re-runs by the remaining kegs, not the full set. The DB
+        // cross-check guards against a stale manifest after `mt
+        // uninstall`: manifest=yes / DB=no falls through to a real
+        // re-migrate instead of silently skipping a missing keg.
+        if (manifest.contains(keg_name) and keg_mod.isInstalled(&db, keg_name)) {
+            try skipped_installed_names.append(allocator, keg_name);
+            continue;
         }
         const result = migrateKeg(allocator, keg_name, .{
             .api = &api,
@@ -262,12 +329,39 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // counts and JSON arrays come from these lists, and a silent drop
         // reports fewer failures than actually occurred.
         switch (result) {
-            .migrated => try migrated_names.append(allocator, keg_name),
+            .migrated => {
+                try migrated_names.append(allocator, keg_name);
+                // Persist after each success so a crash leaves the next
+                // run with the smallest possible to-do list.
+                manifest.add(keg_name) catch |e| {
+                    output.warn("Resume manifest update failed for {s}: {s}", .{ keg_name, @errorName(e) });
+                };
+                manifest.writeAtomic(allocator, manifest_path) catch |e| {
+                    output.warn("Resume manifest write failed: {s}", .{@errorName(e)});
+                };
+            },
             .skipped_installed => try skipped_installed_names.append(allocator, keg_name),
             .skipped_post_install => try skipped_post_install_names.append(allocator, keg_name),
             .skipped_no_bottle => try skipped_no_bottle_names.append(allocator, keg_name),
             .failed_api, .failed_download, .failed_install => try failed_names.append(allocator, keg_name),
         }
+    }
+
+    // Self-heal the resume manifest: any DB-confirmed skip that wasn't
+    // already recorded gets added now, so a SIGKILL between "DB
+    // committed" and "manifest writeAtomic flushed" converges on the
+    // next run instead of paying the DB-lookup penalty forever.
+    var manifest_dirty = false;
+    for (skipped_installed_names.items) |name| {
+        if (!manifest.contains(name)) {
+            manifest.add(name) catch continue;
+            manifest_dirty = true;
+        }
+    }
+    if (manifest_dirty) {
+        manifest.writeAtomic(allocator, manifest_path) catch |e| {
+            output.warn("Resume manifest self-heal write failed: {s}", .{@errorName(e)});
+        };
     }
 
     // ── Step 5: Report ──────────────────────────────────────────────
@@ -312,253 +406,6 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.err("    - {s}", .{name});
         }
     }
-}
-
-/// Migrate a single keg from Homebrew into malt.
-fn migrateKeg(
-    allocator: std.mem.Allocator,
-    keg_name: []const u8,
-    deps: MigrateDeps,
-) KegResult {
-    // 1. Check if already installed in malt
-    if (isInstalled(deps.db, keg_name)) {
-        output.info("  {s}: already installed, skipping", .{keg_name});
-        return .skipped_installed;
-    }
-
-    // Two `defer`s below collapse six per-branch cleanups.
-    const formula_json = deps.api.fetchFormula(keg_name) catch {
-        output.err("  {s}: not found in Homebrew API", .{keg_name});
-        return .failed_api;
-    };
-    defer allocator.free(formula_json);
-
-    var formula = formula_mod.parseFormula(allocator, formula_json) catch {
-        output.err("  {s}: failed to parse formula JSON", .{keg_name});
-        return .failed_api;
-    };
-    defer formula.deinit();
-
-    // 3. Resolve bottle for this platform
-    const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
-        output.warn("  {s}: no bottle available for this platform", .{keg_name});
-        return .skipped_no_bottle;
-    };
-    output.emitNdjsonEvent(allocator, .resolved, keg_name, null);
-
-    output.info("  Migrating {s} {s}...", .{ formula.name, formula.version });
-
-    // 5. Download bottle via GHCR (skip if already in store)
-    if (!deps.store.exists(bottle.sha256)) {
-        if (!downloadBottle(allocator, deps.ghcr, deps.http, deps.store, bottle.url, bottle.sha256, keg_name)) {
-            return .failed_download;
-        }
-    } else {
-        output.info("    {s} (cached in store)", .{keg_name});
-    }
-    if (output.isNdjson()) {
-        output.emitNdjsonEvent(allocator, .downloaded, keg_name, "ok");
-        output.emitNdjsonEvent(allocator, .extracted, keg_name, "ok");
-        output.emitNdjsonEvent(allocator, .stored, keg_name, "ok");
-    }
-
-    // Increment store refcount
-    deps.store.incrementRef(bottle.sha256) catch |e| {
-        std.log.warn("refcount increment failed for {s}: {s}", .{ keg_name, @errorName(e) });
-    };
-
-    // 6. Materialize to cellar
-    const keg = cellar_mod.materialize(
-        allocator,
-        deps.prefix,
-        bottle.sha256,
-        formula.name,
-        formula.pkg_version,
-    ) catch {
-        output.err("    {s}: failed to materialize", .{keg_name});
-        output.emitNdjsonEvent(allocator, .materialized, keg_name, "failed");
-        return .failed_install;
-    };
-    output.emitNdjsonEvent(allocator, .materialized, keg_name, "ok");
-
-    // 7. Record in DB + link
-    if (!formula.keg_only) {
-        const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
-            output.err("    {s}: failed to record in database", .{keg_name});
-            // Rollback: remove materialised keg when DB record fails.
-            cellar_mod.remove(deps.prefix, formula.name, formula.pkg_version) catch {};
-            return .failed_install;
-        };
-
-        deps.linker.link(keg.path, formula.name, keg_id) catch {
-            output.warn("    {s}: some links could not be created", .{keg_name});
-            output.emitNdjsonEvent(allocator, .linked, keg_name, "failed");
-            // Rollback: unlink partial links and delete keg row; user already warned above.
-            deps.linker.unlink(keg_id) catch {};
-            deleteKeg(deps.db, keg_id) catch {};
-            cellar_mod.remove(deps.prefix, formula.name, formula.pkg_version) catch {};
-            return .failed_install;
-        };
-        // `recorded` after both succeed — link rollback above undoes
-        // the keg row, so an early emit would lie if link fails.
-        output.emitNdjsonEvent(allocator, .linked, keg_name, "ok");
-        output.emitNdjsonEvent(allocator, .recorded, keg_name, "ok");
-        // Opt symlink is convenience; install is already functional via versioned link.
-        deps.linker.linkOpt(formula.name, formula.pkg_version) catch {};
-        recordDeps(deps.db, keg_id, &formula);
-    } else {
-        const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
-            // Rollback: remove materialised keg when DB record fails.
-            cellar_mod.remove(deps.prefix, formula.name, formula.pkg_version) catch {};
-            return .failed_install;
-        };
-        output.emitNdjsonEvent(allocator, .recorded, keg_name, "ok");
-        // Opt symlink is convenience; install is already functional via versioned link.
-        deps.linker.linkOpt(formula.name, formula.pkg_version) catch {};
-        recordDeps(deps.db, keg_id, &formula);
-    }
-
-    if (formula.post_install_defined) {
-        post_install_mod.drive(
-            allocator,
-            formula.name,
-            formula.pkg_version,
-            formula_json,
-            deps.prefix,
-            deps.use_system_ruby_scope,
-        );
-    }
-
-    const keg_only_suffix: []const u8 = if (formula.keg_only) " (keg-only — dependency only)" else "";
-    output.success("  {s} {s} migrated{s}", .{ formula.name, formula.version, keg_only_suffix });
-    return .migrated;
-}
-
-/// Download a bottle from GHCR and commit to the store.
-fn downloadBottle(
-    allocator: std.mem.Allocator,
-    ghcr: *ghcr_mod.GhcrClient,
-    http: *client_mod.HttpClient,
-    store: *store_mod.Store,
-    bottle_url: []const u8,
-    sha256: []const u8,
-    name: []const u8,
-) bool {
-    // Extract repo + digest from bottle URL
-    const ghcr_prefix_str = "https://ghcr.io/v2/";
-    var repo_buf: [256]u8 = undefined;
-    var digest_buf: [128]u8 = undefined;
-
-    if (!std.mem.startsWith(u8, bottle_url, ghcr_prefix_str)) {
-        output.err("    {s}: unsupported bottle URL", .{name});
-        return false;
-    }
-
-    const path = bottle_url[ghcr_prefix_str.len..];
-    const blobs_pos = std.mem.indexOf(u8, path, "/blobs/") orelse {
-        output.err("    {s}: malformed bottle URL", .{name});
-        return false;
-    };
-
-    const repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return false;
-    const digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return false;
-
-    // Create temp dir
-    const tmp_dir = atomic.createTempDir(allocator, name) catch return false;
-
-    output.info("    Downloading {s}...", .{name});
-
-    // Download
-    _ = bottle_mod.download(allocator, ghcr, http, repo, digest, sha256, tmp_dir, null) catch {
-        output.err("    Download failed: {s}", .{name});
-        atomic.cleanupTempDir(tmp_dir);
-        allocator.free(tmp_dir);
-        return false;
-    };
-
-    // Commit to store
-    store.commitFrom(sha256, tmp_dir) catch {
-        output.err("    Store commit failed: {s}", .{name});
-        atomic.cleanupTempDir(tmp_dir);
-        allocator.free(tmp_dir);
-        return false;
-    };
-    allocator.free(tmp_dir);
-    return true;
-}
-
-// ── DB helpers (same pattern as install.zig) ────────────────────────
-
-fn recordKeg(
-    db: *sqlite.Database,
-    formula: *const formula_mod.Formula,
-    store_sha256: []const u8,
-    cellar_path: []const u8,
-    install_reason: []const u8,
-) !i64 {
-    db.beginTransaction() catch return error.RecordFailed;
-    errdefer db.rollback();
-
-    // The COALESCE on `pinned` carries any existing user pin across
-    // INSERT OR REPLACE so re-migrating doesn't silently drop holds.
-    var stmt = db.prepare(
-        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, pinned)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));",
-    ) catch return error.RecordFailed;
-    defer stmt.finalize();
-
-    stmt.bindText(1, formula.name) catch return error.RecordFailed;
-    stmt.bindText(2, formula.full_name) catch return error.RecordFailed;
-    stmt.bindText(3, formula.version) catch return error.RecordFailed;
-    stmt.bindInt(4, formula.revision) catch return error.RecordFailed;
-    stmt.bindText(5, formula.tap) catch return error.RecordFailed;
-    stmt.bindText(6, store_sha256) catch return error.RecordFailed;
-    stmt.bindText(7, cellar_path) catch return error.RecordFailed;
-    stmt.bindText(8, install_reason) catch return error.RecordFailed;
-
-    _ = stmt.step() catch return error.RecordFailed;
-
-    const keg_id = getLastInsertId(db) catch return error.RecordFailed;
-    db.commit() catch return error.RecordFailed;
-
-    return keg_id;
-}
-
-fn deleteKeg(db: *sqlite.Database, keg_id: i64) sqlite.SqliteError!void {
-    var stmt = try db.prepare("DELETE FROM kegs WHERE id = ?1;");
-    defer stmt.finalize();
-    try stmt.bindInt(1, keg_id);
-    _ = try stmt.step();
-}
-
-/// Each row is independent; skip on per-row failure so a partial dep
-/// table is preferred to aborting a migration wholesale.
-fn recordDeps(db: *sqlite.Database, keg_id: i64, formula: *const formula_mod.Formula) void {
-    for (formula.dependencies) |dep_name| {
-        var stmt = db.prepare(
-            "INSERT OR IGNORE INTO dependencies (keg_id, dep_name, dep_type) VALUES (?1, ?2, 'runtime');",
-        ) catch continue;
-        defer stmt.finalize();
-
-        stmt.bindInt(1, keg_id) catch continue;
-        stmt.bindText(2, dep_name) catch continue;
-        _ = stmt.step() catch {};
-    }
-}
-
-fn getLastInsertId(db: *sqlite.Database) !i64 {
-    var stmt = db.prepare("SELECT last_insert_rowid();") catch return error.RecordFailed;
-    defer stmt.finalize();
-    const has_row = stmt.step() catch return error.RecordFailed;
-    if (!has_row) return error.RecordFailed;
-    return stmt.columnInt(0);
-}
-
-fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
-    var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 LIMIT 1;") catch return false;
-    defer stmt.finalize();
-    stmt.bindText(1, name) catch return false;
-    return stmt.step() catch false;
 }
 
 // ── JSON output ─────────────────────────────────────────────────────

@@ -1024,6 +1024,600 @@ test "scanCellarKegs warns and preserves prior names when iterator errors" {
     try testing.expect(containsLine(buf.items, "AccessDenied"));
 }
 
+// ── Resume manifest ────────────────────────────────────────────────
+//
+// Pre-seed `{cache}/migrate.progress.json` with one keg name. Run migrate
+// over a fake Cellar that contains that same keg and one unknown keg. The
+// pre-seeded keg must be skipped *before* any API hit (no 404 marker, so
+// reaching the API would leak as a `failed_api` outcome) — this pins the
+// resume contract end-to-end.
+
+test "resume manifest: pre-seeded keg is skipped before any API call" {
+    resetOutput();
+
+    const brew = try scratchDir("brew_resume");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    const mt_z: [:0]const u8 = "/tmp/mt_rs";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    try seedFakeBrew(brew, &.{ "alreadydone", "unknownpkg" });
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Pre-seed a 404 marker for the *other* keg so it fails offline. If the
+    // manifest filter ever regresses, "alreadydone" would also try the API
+    // and fail differently (FormulaNotFound → failed_api), pinning the bug.
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try malt.fs_compat.cwd().makePath(cache_api);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_unknownpkg.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    const mf = try malt.fs_compat.cwd().createFile(marker, .{});
+    mf.close();
+
+    // Pre-seed a 404 for "alreadydone" too — if the manifest filter ever
+    // breaks, the test still terminates offline (failed_api) instead of
+    // hitting the network. The assertion still pins resume because we
+    // expect skipped_installed, not failed_api.
+    const marker2 = try std.fmt.allocPrint(testing.allocator, "{s}/formula_alreadydone.404", .{cache_api});
+    defer testing.allocator.free(marker2);
+    const mf2 = try malt.fs_compat.cwd().createFile(marker2, .{});
+    mf2.close();
+
+    // Pre-seed the resume manifest with "alreadydone" *and* a matching
+    // DB row — the resume short-circuit requires both to agree so a
+    // stale manifest after `mt uninstall` doesn't silently skip a keg.
+    const cache_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{mt_z});
+    defer testing.allocator.free(cache_dir);
+    try malt.fs_compat.cwd().makePath(cache_dir);
+    var manifest = malt.cli_migrate_manifest.Manifest.init(testing.allocator);
+    defer manifest.deinit();
+    try manifest.add("alreadydone");
+    const manifest_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/migrate.progress.json",
+        .{cache_dir},
+    );
+    defer testing.allocator.free(manifest_path);
+    try manifest.writeAtomic(testing.allocator, manifest_path);
+
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    defer testing.allocator.free(db_dir);
+    try malt.fs_compat.cwd().makePath(db_dir);
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    defer testing.allocator.free(db_path);
+    var db_seed = try malt.sqlite.Database.open(db_path);
+    try malt.schema.initSchema(&db_seed);
+    var seed_stmt = try db_seed.prepare(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES (?, ?, ?, ?, ?);
+    );
+    try seed_stmt.bindText(1, "alreadydone");
+    try seed_stmt.bindText(2, "alreadydone");
+    try seed_stmt.bindText(3, "1.0");
+    try seed_stmt.bindText(4, "0" ** 64);
+    try seed_stmt.bindText(5, "/tmp/mt_rs/Cellar/alreadydone/1.0");
+    _ = try seed_stmt.step();
+    seed_stmt.finalize();
+    db_seed.close();
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    // Pre-seeded keg is reported skipped (resume contract).
+    const skipped = root.get("skipped_installed").?.array;
+    var found_alreadydone = false;
+    for (skipped.items) |v| {
+        if (std.mem.eql(u8, v.string, "alreadydone")) found_alreadydone = true;
+    }
+    try testing.expect(found_alreadydone);
+    // The other keg still went through the API (and 404'd) — pinning that
+    // the manifest filter is *selective*, not a blanket short-circuit.
+    const failed = root.get("failed").?.array;
+    try testing.expectEqual(@as(usize, 1), failed.items.len);
+    try testing.expectEqualStrings("unknownpkg", failed.items[0].string);
+}
+
+// ── --parallel flag ────────────────────────────────────────────────
+//
+// `--parallel` activates the bounded worker pool. The flag must:
+//   * never fail to parse (smoke for the new flag plumbing),
+//   * not break dry-run (dry-run wins regardless of --parallel),
+//   * preserve the resume contract (manifest entries still skipped),
+//   * deliver the same outcomes as serial when no real network work
+//     is needed (already-installed + manifest-skipped paths).
+
+test "--parallel --dry-run lists kegs and never starts the pool" {
+    resetOutput();
+    const brew = try scratchDir("brew_par_dry");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt = try scratchDir("mt_par_dry");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(mt) catch {};
+        testing.allocator.free(mt);
+    }
+    try seedFakeBrew(brew, &.{ "tree", "wget" });
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{ "--parallel", "--dry-run" });
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expect(root.get("dry_run").?.bool);
+    try testing.expectEqual(@as(i64, 2), root.get("count").?.integer);
+}
+
+test "--parallel sets the dispatch flag before falling through to skip-only paths" {
+    resetOutput();
+    defer migrate.last_run_parallel = false;
+
+    const brew = try scratchDir("brew_par_dispatch");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt_z: [:0]const u8 = "/tmp/mt_pd";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    try seedFakeBrew(brew, &.{"k"});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Seed manifest so the only keg short-circuits, keeping the test offline.
+    const cache_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{mt_z});
+    defer testing.allocator.free(cache_dir);
+    try malt.fs_compat.cwd().makePath(cache_dir);
+    var manifest = malt.cli_migrate_manifest.Manifest.init(testing.allocator);
+    defer manifest.deinit();
+    try manifest.add("k");
+    const manifest_path = try std.fmt.allocPrint(testing.allocator, "{s}/migrate.progress.json", .{cache_dir});
+    defer testing.allocator.free(manifest_path);
+    try manifest.writeAtomic(testing.allocator, manifest_path);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{ "--parallel", "--quiet" });
+
+    try testing.expect(migrate.last_run_parallel);
+}
+
+test "without --parallel the dispatch flag stays false" {
+    resetOutput();
+    migrate.last_run_parallel = false;
+    defer migrate.last_run_parallel = false;
+
+    const brew = try scratchDir("brew_par_serial");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt = try scratchDir("mt_par_serial");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(mt) catch {};
+        testing.allocator.free(mt);
+    }
+    try seedFakeBrew(brew, &.{});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{"--quiet"});
+
+    try testing.expect(!migrate.last_run_parallel);
+}
+
+test "--parallel honours the resume manifest the same way serial does" {
+    resetOutput();
+
+    const brew = try scratchDir("brew_par_resume");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    const mt_z: [:0]const u8 = "/tmp/mt_pr";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    try seedFakeBrew(brew, &.{ "k1", "k2", "k3" });
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Seed 404 markers for every keg so any reach-the-API behaviour
+    // terminates offline as failed_api rather than hanging the test.
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try malt.fs_compat.cwd().makePath(cache_api);
+    inline for (.{ "k1", "k2", "k3" }) |name| {
+        const m = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.404", .{ cache_api, name });
+        defer testing.allocator.free(m);
+        const f = try malt.fs_compat.cwd().createFile(m, .{});
+        f.close();
+    }
+
+    // Pre-seed all three kegs as completed in the resume manifest *and*
+    // in the DB — the skip path requires both to agree (see
+    // `cli/migrate.zig` stale-manifest note).
+    const cache_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{mt_z});
+    defer testing.allocator.free(cache_dir);
+    try malt.fs_compat.cwd().makePath(cache_dir);
+    var manifest = malt.cli_migrate_manifest.Manifest.init(testing.allocator);
+    defer manifest.deinit();
+    try manifest.add("k1");
+    try manifest.add("k2");
+    try manifest.add("k3");
+    const manifest_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/migrate.progress.json",
+        .{cache_dir},
+    );
+    defer testing.allocator.free(manifest_path);
+    try manifest.writeAtomic(testing.allocator, manifest_path);
+
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    defer testing.allocator.free(db_dir);
+    try malt.fs_compat.cwd().makePath(db_dir);
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    defer testing.allocator.free(db_path);
+    var db_seed = try malt.sqlite.Database.open(db_path);
+    try malt.schema.initSchema(&db_seed);
+    inline for (.{ "k1", "k2", "k3" }) |name| {
+        var s = try db_seed.prepare(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+            \\VALUES (?, ?, ?, ?, ?);
+        );
+        try s.bindText(1, name);
+        try s.bindText(2, name);
+        try s.bindText(3, "1.0");
+        try s.bindText(4, "0" ** 64);
+        try s.bindText(5, "/tmp/mt_pr/Cellar/" ++ name ++ "/1.0");
+        _ = try s.step();
+        s.finalize();
+    }
+    db_seed.close();
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    // Cap workers low so a cold/empty pool still exercises the spawn path.
+    _ = c.setenv("MALT_MIGRATE_PARALLEL_WORKERS", "2", 1);
+    defer _ = c.unsetenv("MALT_MIGRATE_PARALLEL_WORKERS");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{"--parallel"});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    // All three kegs are recorded as already-completed via the manifest,
+    // so workers never reach the API — failed_names stays empty.
+    try testing.expectEqual(@as(usize, 3), root.get("skipped_installed").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), root.get("failed").?.array.items.len);
+}
+
+// ── Manifest contract on failure ───────────────────────────────────
+//
+// A failed keg must never end up in `migrate.progress.json`; otherwise
+// every future run would silently skip a keg the user actually wants
+// installed. Drive a 404-failing keg through the serial path and assert
+// the on-disk manifest stays empty.
+
+test "failed migrate does not write the keg into the resume manifest" {
+    resetOutput();
+
+    const brew = try scratchDir("brew_failnomanifest");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt_z: [:0]const u8 = "/tmp/mt_fn";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    try seedFakeBrew(brew, &.{"failkeg"});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try malt.fs_compat.cwd().makePath(cache_api);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_failkeg.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    const mf = try malt.fs_compat.cwd().createFile(marker, .{});
+    mf.close();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{"--quiet"});
+
+    // Manifest must either not exist or contain zero entries — the 404
+    // path returned `.failed_api`, never `.migrated`.
+    const manifest_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/cache/migrate.progress.json",
+        .{mt_z},
+    );
+    defer testing.allocator.free(manifest_path);
+    var loaded = try malt.cli_migrate_manifest.loadFromPath(testing.allocator, manifest_path);
+    defer loaded.deinit();
+    try testing.expect(!loaded.contains("failkeg"));
+    try testing.expectEqual(@as(usize, 0), loaded.entries.items.len);
+}
+
+// Pre-seeded successes must survive a later re-run that fails on
+// other kegs. `writeAtomic` rewrites the whole file each tick, so a
+// regression in the load-then-rewrite contract would silently drop
+// previously-completed entries.
+
+test "manifest preserves pre-existing entries across a run with new failures" {
+    resetOutput();
+
+    const brew = try scratchDir("brew_preserve");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt_z: [:0]const u8 = "/tmp/mt_pv";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    // The Cellar contains the pre-seeded keg + a new one that 404s.
+    try seedFakeBrew(brew, &.{ "old", "newfail" });
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try malt.fs_compat.cwd().makePath(cache_api);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_newfail.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    const mf = try malt.fs_compat.cwd().createFile(marker, .{});
+    mf.close();
+
+    const cache_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{mt_z});
+    defer testing.allocator.free(cache_dir);
+    try malt.fs_compat.cwd().makePath(cache_dir);
+    const manifest_path = try std.fmt.allocPrint(testing.allocator, "{s}/migrate.progress.json", .{cache_dir});
+    defer testing.allocator.free(manifest_path);
+
+    var seed = malt.cli_migrate_manifest.Manifest.init(testing.allocator);
+    defer seed.deinit();
+    try seed.add("old");
+    try seed.writeAtomic(testing.allocator, manifest_path);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{"--quiet"});
+
+    var loaded = try malt.cli_migrate_manifest.loadFromPath(testing.allocator, manifest_path);
+    defer loaded.deinit();
+    try testing.expect(loaded.contains("old"));
+    try testing.expect(!loaded.contains("newfail"));
+}
+
+// `MALT_MIGRATE_PARALLEL_WORKERS` parses correctly in unit tests, but
+// the live-env path goes through `workerCountFromLiveEnv` — wire it
+// up here so a future refactor that broke the env name would fail.
+
+// Stale manifest (post-uninstall) must not silently skip a keg the user
+// expects to be re-migrated. Pre-seed the manifest with "ghost" but
+// leave the DB empty + 404-mark the formula. Pre-PR semantics would
+// have skipped silently; the DB cross-check forces a real attempt
+// (which 404s offline → `failed`), proving we did NOT short-circuit.
+
+test "stale manifest after uninstall falls through to a real migrate" {
+    resetOutput();
+
+    const brew = try scratchDir("brew_stale");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt_z: [:0]const u8 = "/tmp/mt_st";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    try seedFakeBrew(brew, &.{"ghost"});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try malt.fs_compat.cwd().makePath(cache_api);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_ghost.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    const mf = try malt.fs_compat.cwd().createFile(marker, .{});
+    mf.close();
+
+    // Manifest claims "ghost" was migrated; DB is empty (simulating uninstall).
+    const cache_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache", .{mt_z});
+    defer testing.allocator.free(cache_dir);
+    try malt.fs_compat.cwd().makePath(cache_dir);
+    var stale = malt.cli_migrate_manifest.Manifest.init(testing.allocator);
+    defer stale.deinit();
+    try stale.add("ghost");
+    const manifest_path = try std.fmt.allocPrint(testing.allocator, "{s}/migrate.progress.json", .{cache_dir});
+    defer testing.allocator.free(manifest_path);
+    try stale.writeAtomic(testing.allocator, manifest_path);
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    // Real attempt happened — keg ended up in `failed` (API 404), not
+    // `skipped_installed`. A regression to manifest-only-skip would
+    // place it in `skipped_installed` with zero failures.
+    try testing.expectEqual(@as(usize, 0), root.get("skipped_installed").?.array.items.len);
+    try testing.expectEqual(@as(usize, 1), root.get("failed").?.array.items.len);
+    try testing.expectEqualStrings("ghost", root.get("failed").?.array.items[0].string);
+}
+
+// Self-heal contract: the SIGKILL window between "DB row committed"
+// and "manifest writeAtomic flushed" leaves DB ahead of manifest. The
+// recovery run must repopulate the manifest from the DB-confirmed skip
+// so subsequent runs don't keep paying the DB-lookup penalty for the
+// same keg forever.
+
+test "manifest self-heals from DB-confirmed skips after a crash recovery" {
+    resetOutput();
+
+    const brew = try scratchDir("brew_heal");
+    defer {
+        malt.fs_compat.deleteTreeAbsolute(brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt_z: [:0]const u8 = "/tmp/mt_hl";
+    malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+    try malt.fs_compat.cwd().makePath(mt_z);
+    defer malt.fs_compat.deleteTreeAbsolute(mt_z) catch {};
+
+    try seedFakeBrew(brew, &.{"recovered"});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Simulate the post-crash state: DB has the keg (previous run
+    // committed it) but the manifest file does not exist (previous
+    // run died before writeAtomic).
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
+    defer testing.allocator.free(db_dir);
+    try malt.fs_compat.cwd().makePath(db_dir);
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    try malt.schema.initSchema(&db);
+    var stmt = try db.prepare(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES (?, ?, ?, ?, ?);
+    );
+    try stmt.bindText(1, "recovered");
+    try stmt.bindText(2, "recovered");
+    try stmt.bindText(3, "1.0");
+    try stmt.bindText(4, "0" ** 64);
+    try stmt.bindText(5, "/tmp/mt_hl/Cellar/recovered/1.0");
+    _ = try stmt.step();
+    stmt.finalize();
+    db.close();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try migrate.execute(arena.allocator(), &.{"--quiet"});
+
+    // Manifest now exists on disk and contains the keg the DB had —
+    // future runs hit the cheap manifest short-circuit instead of the
+    // DB lookup. Pin both: file load works, and the entry is there.
+    const manifest_path = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/cache/migrate.progress.json",
+        .{mt_z},
+    );
+    defer testing.allocator.free(manifest_path);
+    var loaded = try malt.cli_migrate_manifest.loadFromPath(testing.allocator, manifest_path);
+    defer loaded.deinit();
+    try testing.expect(loaded.contains("recovered"));
+}
+
+test "MALT_MIGRATE_PARALLEL_WORKERS env wires through to the live helper" {
+    _ = c.setenv("MALT_MIGRATE_PARALLEL_WORKERS", "7", 1);
+    defer _ = c.unsetenv("MALT_MIGRATE_PARALLEL_WORKERS");
+    try testing.expectEqual(@as(u32, 7), malt.cli_migrate_parallel.workerCountFromLiveEnv());
+
+    _ = c.setenv("MALT_MIGRATE_PARALLEL_WORKERS", "9999", 1);
+    try testing.expectEqual(
+        malt.cli_migrate_parallel.max_workers,
+        malt.cli_migrate_parallel.workerCountFromLiveEnv(),
+    );
+
+    _ = c.unsetenv("MALT_MIGRATE_PARALLEL_WORKERS");
+    try testing.expectEqual(
+        malt.cli_migrate_parallel.default_workers,
+        malt.cli_migrate_parallel.workerCountFromLiveEnv(),
+    );
+}
+
 test "scanCellarKegs skips non-directory entries and survives fail-first iterator" {
     resetOutput();
     color.setForTest(false, false);
