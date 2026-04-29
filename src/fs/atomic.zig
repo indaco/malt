@@ -122,12 +122,29 @@ pub fn atomicRename(allocator: std.mem.Allocator, src_path: []const u8, dst_path
     };
 }
 
+/// Real fsync ops; inline tests pass a mock with the same shape so they can
+/// observe fsync was issued without a syscall tracer.
+const DefaultSyncOps = struct {
+    fn syncFile(_: @This(), f: fs_compat.File) !void {
+        return f.sync();
+    }
+    fn syncDir(_: @This(), d: fs_compat.Dir) !void {
+        return d.sync();
+    }
+};
+
+const default_sync_ops: DefaultSyncOps = .{};
+
 /// Write `data` to `dst_path` via a uniquely-named sibling tempfile
 /// and a single `rename(2)`. Readers see either the old contents or
 /// the new ones — never a partial write. A crash before the rename
 /// leaves the tempfile behind; the next call writes its own and
 /// overwrites atomically.
 pub fn atomicWriteFile(dst_path: []const u8, data: []const u8) !void {
+    return atomicWriteFileImpl(dst_path, data, default_sync_ops);
+}
+
+fn atomicWriteFileImpl(dst_path: []const u8, data: []const u8, sync_ops: anytype) !void {
     var rand_bytes: [4]u8 = undefined;
     std.c.arc4random_buf(&rand_bytes, rand_bytes.len);
     const hex_chars = "0123456789abcdef";
@@ -144,18 +161,24 @@ pub fn atomicWriteFile(dst_path: []const u8, data: []const u8) !void {
     {
         const f = try fs_compat.createFileAbsolute(tmp_path, .{ .truncate = true });
         defer f.close();
-        f.writeAll(data) catch |e| {
-            // Tempfile cleanup on write failure; write error `e` is authoritative.
-            fs_compat.deleteFileAbsolute(tmp_path) catch {};
-            return e;
-        };
+        // Drop the tempfile on any failure before rename publishes it.
+        errdefer fs_compat.deleteFileAbsolute(tmp_path) catch {};
+        try f.writeAll(data);
+        // fsync before close so the bytes are durable BEFORE rename publishes them.
+        try sync_ops.syncFile(f);
     }
 
-    fs_compat.renameAbsolute(tmp_path, dst_path) catch |e| {
-        // Tempfile cleanup on rename failure; rename error `e` is authoritative.
-        fs_compat.deleteFileAbsolute(tmp_path) catch {};
-        return e;
-    };
+    {
+        // rename failure leaves the tempfile at the original name; clean it up.
+        errdefer fs_compat.deleteFileAbsolute(tmp_path) catch {};
+        try fs_compat.renameAbsolute(tmp_path, dst_path);
+    }
+
+    // fsync the parent dir so the renamed dirent itself survives a kernel crash.
+    const parent = std.fs.path.dirname(dst_path) orelse "/";
+    var parent_dir = try fs_compat.openDirAbsolute(parent, .{});
+    defer parent_dir.close();
+    try sync_ops.syncDir(parent_dir);
 }
 
 /// Create a temporary directory under {prefix}/tmp/ with the given label and
@@ -216,4 +239,90 @@ pub fn maltCacheDir(allocator: std.mem.Allocator) ![]const u8 {
         return allocator.dupe(u8, std.mem.sliceTo(cache, 0));
     }
     return std.fmt.allocPrint(allocator, "{s}/cache", .{maltPrefix()});
+}
+
+// Inline tests for the atomicWriteFileImpl durability seam.
+// Observable-behaviour coverage lives in tests/atomic_test.zig.
+
+const SyncCounters = struct {
+    file: usize = 0,
+    dir: usize = 0,
+};
+
+var test_sync_counters: SyncCounters = .{};
+
+const TestSyncOps = struct {
+    fail_file: bool = false,
+    fail_dir: bool = false,
+
+    fn syncFile(self: @This(), _: fs_compat.File) !void {
+        if (self.fail_file) return error.AccessDenied;
+        test_sync_counters.file += 1;
+    }
+    fn syncDir(self: @This(), _: fs_compat.Dir) !void {
+        if (self.fail_dir) return error.AccessDenied;
+        test_sync_counters.dir += 1;
+    }
+};
+
+test "atomicWriteFileImpl fsyncs the tempfile via the injected sync ops" {
+    const base = "/tmp/malt_atomic_inline_sync_file";
+    fs_compat.deleteTreeAbsolute(base) catch {};
+    try fs_compat.makeDirAbsolute(base);
+    defer fs_compat.deleteTreeAbsolute(base) catch {};
+
+    test_sync_counters = .{};
+    try atomicWriteFileImpl(base ++ "/data.bin", "abc", TestSyncOps{});
+    try std.testing.expectEqual(@as(usize, 1), test_sync_counters.file);
+}
+
+test "atomicWriteFileImpl fsyncs the parent directory via the injected sync ops" {
+    const base = "/tmp/malt_atomic_inline_sync_dir";
+    fs_compat.deleteTreeAbsolute(base) catch {};
+    try fs_compat.makeDirAbsolute(base);
+    defer fs_compat.deleteTreeAbsolute(base) catch {};
+
+    test_sync_counters = .{};
+    try atomicWriteFileImpl(base ++ "/data.bin", "abc", TestSyncOps{});
+    try std.testing.expectEqual(@as(usize, 1), test_sync_counters.dir);
+}
+
+test "atomicWriteFileImpl propagates syncFile errors and removes the tempfile" {
+    const base = "/tmp/malt_atomic_inline_sync_file_err";
+    fs_compat.deleteTreeAbsolute(base) catch {};
+    try fs_compat.makeDirAbsolute(base);
+    defer fs_compat.deleteTreeAbsolute(base) catch {};
+
+    const dst = base ++ "/data.bin";
+    try std.testing.expectError(
+        error.AccessDenied,
+        atomicWriteFileImpl(dst, "abc", TestSyncOps{ .fail_file = true }),
+    );
+
+    // dst was never renamed in; tempfiles must not accumulate either.
+    try std.testing.expectError(error.FileNotFound, fs_compat.openFileAbsolute(dst, .{}));
+    var dir = try fs_compat.openDirAbsolute(base, .{ .iterate = true });
+    defer dir.close();
+    var iter = dir.iterate();
+    try std.testing.expectEqual(@as(?fs_compat.Iterator.Entry, null), try iter.next());
+}
+
+test "atomicWriteFileImpl propagates syncDir errors but leaves the renamed file in place" {
+    const base = "/tmp/malt_atomic_inline_sync_dir_err";
+    fs_compat.deleteTreeAbsolute(base) catch {};
+    try fs_compat.makeDirAbsolute(base);
+    defer fs_compat.deleteTreeAbsolute(base) catch {};
+
+    const dst = base ++ "/data.bin";
+    try std.testing.expectError(
+        error.AccessDenied,
+        atomicWriteFileImpl(dst, "abc", TestSyncOps{ .fail_dir = true }),
+    );
+
+    // syncDir runs after rename, so dst_path must hold the durable bytes.
+    const f = try fs_compat.openFileAbsolute(dst, .{});
+    defer f.close();
+    var buf: [8]u8 = undefined;
+    const n = try f.readAll(&buf);
+    try std.testing.expectEqualStrings("abc", buf[0..n]);
 }
