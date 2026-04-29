@@ -225,3 +225,12 @@ test "findReleaseBinary returns null when the prefix does not exist" {
         release.findReleaseBinary(testing.allocator, "/tmp/malt_findbin_absent_xyz_99", &out_buf) == null,
     );
 }
+
+test "stripVPrefix drops a leading 'v' but leaves bare versions and edges alone" {
+    try testing.expectEqualStrings("0.10.1", release.stripVPrefix("v0.10.1"));
+    try testing.expectEqualStrings("0.10.1", release.stripVPrefix("0.10.1"));
+    try testing.expectEqualStrings("", release.stripVPrefix(""));
+    try testing.expectEqualStrings("", release.stripVPrefix("v"));
+    // Single-letter input that is not 'v' must pass through.
+    try testing.expectEqualStrings("x", release.stripVPrefix("x"));
+}

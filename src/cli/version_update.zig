@@ -19,9 +19,9 @@ const origin = @import("../update/origin.zig");
 const release = @import("../update/release.zig");
 const verify = @import("../update/verify.zig");
 const swap = @import("../update/swap.zig");
+const notifier = @import("../update/notifier.zig");
 
 const current_version = @import("../version.zig").value;
-const releases_api = "https://api.github.com/repos/indaco/malt/releases/latest";
 const checksums_name = "checksums.txt";
 const sigstore_name = "checksums.txt.sigstore.json";
 // Pins the signature to the exact workflow that produced the release.
@@ -67,7 +67,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var http = client_mod.HttpClient.init(allocator);
     defer http.deinit();
 
-    var resp = http.get(releases_api) catch {
+    var resp = http.get(release.releases_latest_url) catch {
         output.err("Cannot reach GitHub API", .{});
         return error.Aborted;
     };
@@ -95,7 +95,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         output.err("No tag_name in release", .{});
         return error.Aborted;
     };
-    const latest = if (tag.len > 0 and tag[0] == 'v') tag[1..] else tag;
+    const latest = release.stripVPrefix(tag);
 
     if (std.mem.eql(u8, latest, current_version)) {
         output.info("Already up to date ({s})", .{current_version});
@@ -248,13 +248,17 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.warn("{s} is now {s} but {s} is still the previous version.", .{ self_exe, latest, tp });
             output.info("Finish manually: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, tp });
             output.info("Updated to {s} (previous {s} kept at {s}.old)", .{ latest, std.fs.path.basename(self_exe), self_exe });
+            // Self is on the new version even though twin lagged — dismiss the nag.
+            notifier.markUpdatedTo(tag, latest);
             return;
         };
         output.info("Updated {s} and {s} to {s} (previous kept at *.old)", .{ self_exe, tp, latest });
+        notifier.markUpdatedTo(tag, latest);
         return;
     }
 
     output.info("Updated to {s} (previous kept at {s}.old)", .{ latest, self_exe });
+    notifier.markUpdatedTo(tag, latest);
 }
 
 /// How the previous swap was carried out. Threaded through twin handling
