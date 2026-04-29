@@ -76,6 +76,7 @@ pub const pins = @import("core/pins.zig");
 pub const perms = @import("core/perms.zig");
 pub const sandbox_macos = @import("core/sandbox/macos.zig");
 pub const main_mod = @import("main.zig");
+pub const app_ctx = @import("app_ctx.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

@@ -5,6 +5,7 @@ const std = @import("std");
 const fs_compat = @import("fs/compat.zig");
 const io_mod = @import("ui/io.zig");
 const color_mod = @import("ui/color.zig");
+const AppCtx = @import("app_ctx.zig").AppCtx;
 
 // Release uses simple_panic so debug.Dwarf stays unreachable (~30 KB smaller).
 pub const panic = if (@import("builtin").mode == .Debug)
@@ -221,6 +222,11 @@ test "applyGlobalFlag returns false for unrecognised flags" {
     try std.testing.expect(!applyGlobalFlag("wget"));
 }
 
+test "dispatch accepts AppCtx and routes help without panic" {
+    const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
+    try dispatch(std.testing.allocator, &ctx, .help, &.{});
+}
+
 test "applyGlobalFlag --output-format=ndjson does not flip --quiet" {
     // Compose with --quiet explicitly when needed; the streams are
     // already split (ndjson on stdout, human on stderr), so users
@@ -274,6 +280,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // Single Threaded io for the whole process; outlives the ctx it backs.
+    var threaded: std.Io.Threaded = .init(backing, .{ .environ = init.environ });
+    defer threaded.deinit();
+    const ctx: AppCtx = .{ .io = threaded.io(), .environ = init.environ };
+
     var args_it = try init.args.iterateAllocator(allocator);
     defer args_it.deinit();
     _ = args_it.skip(); // skip argv0
@@ -323,7 +334,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // `error.Aborted`; the message has already been emitted via
         // `output.err`, so we just exit non-zero without a stack trace.
         // Every other error still propagates and surfaces normally.
-        dispatch(allocator, cmd, cmd_args) catch |e| switch (e) {
+        dispatch(allocator, &ctx, cmd, cmd_args) catch |e| switch (e) {
             error.Aborted => std.process.exit(1),
             else => return e,
         };
@@ -337,7 +348,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 }
 
-fn dispatch(allocator: std.mem.Allocator, cmd: Command, cmd_args: []const []const u8) !void {
+fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_args: []const []const u8) !void {
+    _ = ctx;
     switch (cmd) {
         .install => try install.execute(allocator, cmd_args),
         .uninstall => try uninstall.execute(allocator, cmd_args),
