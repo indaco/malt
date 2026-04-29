@@ -57,6 +57,7 @@ const which_cmd = @import("cli/which.zig");
 
 const version_mod = @import("version.zig");
 const version = version_mod.value;
+const notifier = @import("update/notifier.zig");
 
 const Command = enum {
     install,
@@ -326,6 +327,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             error.Aborted => std.process.exit(1),
             else => return e,
         };
+        // Best-effort passive notice on successful subcommands. Owns its
+        // own suppression list (CI, --quiet/--json/ndjson/--dry-run, env
+        // opt-out, non-TTY, brew origin, version/help meta-commands).
+        notifier.maybeNotify(allocator, version, cmd_str);
     } else {
         // Unknown command — try transparent brew fallback
         try brewFallback(allocator, args);
@@ -431,6 +436,8 @@ fn printUsage() void {
         \\  MALT_CACHE        Override cache directory
         \\  NO_COLOR          Disable colored output
         \\  MALT_NO_EMOJI     Disable emoji in output
+        \\  MALT_NO_VERSION_NOTIFIER=1
+        \\                    Suppress the "newer malt available" stderr notice
         \\
     ;
     io_mod.stdoutWriteAll(usage);

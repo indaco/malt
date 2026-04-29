@@ -8,6 +8,10 @@
 const std = @import("std");
 const fs_compat = @import("../fs/compat.zig");
 
+/// Single source of truth for the GitHub release endpoint. Shared with the
+/// passive notifier so it doesn't drift away from the authenticated updater.
+pub const releases_latest_url = "https://api.github.com/repos/indaco/malt/releases/latest";
+
 /// Exact-name asset lookup. For `checksums.txt` and
 /// `checksums.txt.sigstore.json`, which must match by name, not pattern.
 pub fn pickAssetUrlByName(assets: std.json.Array, name: []const u8) ?[]const u8 {
@@ -95,4 +99,11 @@ pub fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
         .string => |s| s,
         else => null,
     };
+}
+
+/// Drop a leading `v` from a release tag. Centralised so the updater,
+/// the notifier, and any future caller agree on what `v0.10.1` vs
+/// `0.10.1` mean.
+pub fn stripVPrefix(tag: []const u8) []const u8 {
+    return if (tag.len > 0 and tag[0] == 'v') tag[1..] else tag;
 }

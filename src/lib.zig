@@ -61,6 +61,7 @@ pub const update_origin = @import("update/origin.zig");
 pub const update_release = @import("update/release.zig");
 pub const update_verify = @import("update/verify.zig");
 pub const update_swap = @import("update/swap.zig");
+pub const update_notifier = @import("update/notifier.zig");
 pub const cli_list = @import("cli/list.zig");
 pub const cli_pin = @import("cli/pin.zig");
 pub const cli_run = @import("cli/run.zig");
