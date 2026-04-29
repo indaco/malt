@@ -472,20 +472,21 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 
 ### Environment variables
 
-| Variable                       | Description                                                                       | Default          |
-| ------------------------------ | --------------------------------------------------------------------------------- | ---------------- |
-| `MALT_PREFIX`                  | Override install prefix                                                           | `/opt/malt`      |
-| `MALT_CACHE`                   | Override cache directory                                                          | `{prefix}/cache` |
-| `NO_COLOR`                     | Disable colored output                                                            | unset            |
-| `MALT_NO_EMOJI`                | Disable emoji in output                                                           | unset            |
-| `MALT_THEME`                   | Force the output palette: `light`, `dark`, or `auto` (detects via OSC 11)         | `auto`           |
-| `HOMEBREW_GITHUB_API_TOKEN`    | GitHub token for higher API rate limits                                           | unset            |
-| `MALT_GITHUB_TOKEN`            | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only    | unset            |
-| `MALT_OUTDATED_MAX_AGE`        | TTL in hours for the `outdated.json` snapshot                                     | `24`             |
-| `MALT_MIGRATE_PARALLEL_WORKERS` | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                  | `4`              |
-| `MALT_ALLOW_UNVERIFIED`        | Skip cosign signature check in `install.sh` (use only when cosign is unavailable) | unset            |
-| `MALT_ALLOW_UNVERIFIED_SOURCE` | Allow `install.sh` to clone `main` when no release tag resolves                   | unset            |
-| `MALT_ALLOW_RAW_POST_INSTALL`  | Disable terminal escape filter on ruby `post_install` output                      | unset            |
+| Variable                        | Description                                                                       | Default          |
+| ------------------------------- | --------------------------------------------------------------------------------- | ---------------- |
+| `MALT_PREFIX`                   | Override install prefix                                                           | `/opt/malt`      |
+| `MALT_CACHE`                    | Override cache directory                                                          | `{prefix}/cache` |
+| `NO_COLOR`                      | Disable colored output                                                            | unset            |
+| `MALT_NO_EMOJI`                 | Disable emoji in output                                                           | unset            |
+| `MALT_NO_VERSION_NOTIFIER`      | Set to `1` to suppress the "newer malt available" notice                          | unset            |
+| `MALT_THEME`                    | Force the output palette: `light`, `dark`, or `auto` (detects via OSC 11)         | `auto`           |
+| `HOMEBREW_GITHUB_API_TOKEN`     | GitHub token for higher API rate limits                                           | unset            |
+| `MALT_GITHUB_TOKEN`             | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only    | unset            |
+| `MALT_MIGRATE_PARALLEL_WORKERS` | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                   | `4`              |
+| `MALT_OUTDATED_MAX_AGE`         | TTL in hours for the `outdated.json` snapshot                                     | `24`             |
+| `MALT_ALLOW_RAW_POST_INSTALL`   | Disable terminal escape filter on ruby `post_install` output                      | unset            |
+| `MALT_ALLOW_UNVERIFIED`         | Skip cosign signature check in `install.sh` (use only when cosign is unavailable) | unset            |
+| `MALT_ALLOW_UNVERIFIED_SOURCE`  | Allow `install.sh` to clone `main` when no release tag resolves                   | unset            |
 
 ## Architecture
 
