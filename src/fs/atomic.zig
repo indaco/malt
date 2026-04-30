@@ -1,5 +1,4 @@
 const std = @import("std");
-const fs_compat = @import("compat.zig");
 const clonefile = @import("clonefile.zig");
 
 /// 512 bytes: ~4× real Homebrew prefix length, still small enough that
@@ -76,10 +75,21 @@ pub fn describePrefixError(e: PrefixError) []const u8 {
     };
 }
 
+/// Direct getenv from `std.c.environ`; the prefix/cache helpers are read at
+/// process startup so tying them to the parent block keeps the API
+/// arg-free without re-introducing a `fs/compat` shim dep.
+fn getenvLocal(name: []const u8) ?[:0]const u8 {
+    var n: usize = 0;
+    while (std.c.environ[n] != null) : (n += 1) {}
+    const slice: [:null]const ?[*:0]const u8 = @ptrCast(std.c.environ[0..n :null]);
+    const env: std.process.Environ = .{ .block = .{ .slice = slice } };
+    return std.process.Environ.getPosix(env, name);
+}
+
 /// Validated form of `maltPrefix`, returns an error on bad env so tests
 /// can inspect the failure without the process exiting.
 pub fn maltPrefixChecked() PrefixError![:0]const u8 {
-    const raw = fs_compat.getenv("MALT_PREFIX") orelse return "/opt/malt";
+    const raw = getenvLocal("MALT_PREFIX") orelse return "/opt/malt";
     try validatePrefix(raw);
     return raw;
 }
@@ -89,7 +99,7 @@ pub fn maltPrefixChecked() PrefixError![:0]const u8 {
 /// than falling back silently.
 pub fn maltPrefix() [:0]const u8 {
     return maltPrefixChecked() catch |e| {
-        const raw = fs_compat.getenv("MALT_PREFIX") orelse "<unset>";
+        const raw = getenvLocal("MALT_PREFIX") orelse "<unset>";
         // Bypass the UI layer — atomic.zig sits below it in the dep graph.
         var buf: [1024]u8 = undefined;
         const msg = std.fmt.bufPrint(
@@ -110,13 +120,13 @@ pub fn maltPrefix() [:0]const u8 {
 /// from a crash standpoint, but the end state (dst present, src absent)
 /// matches `rename` semantics; a crash mid-way leaves the tmp source
 /// intact for the next housekeeping sweep to clean up.
-pub fn atomicRename(allocator: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) !void {
-    fs_compat.renameAbsolute(src_path, dst_path) catch |e| switch (e) {
+pub fn atomicRename(io: std.Io, allocator: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) !void {
+    std.Io.Dir.renameAbsolute(src_path, dst_path, io) catch |e| switch (e) {
         error.CrossDevice => {
-            try clonefile.cloneTree(allocator, src_path, dst_path);
+            try clonefile.cloneTree(io, allocator, src_path, dst_path);
             // Source cleanup after a successful cross-device clone; a leftover
             // src is tolerable and gets reaped by the next housekeeping sweep.
-            fs_compat.deleteTreeAbsolute(src_path) catch {};
+            std.Io.Dir.cwd().deleteTree(io, src_path) catch {};
         },
         else => return e,
     };
@@ -125,11 +135,12 @@ pub fn atomicRename(allocator: std.mem.Allocator, src_path: []const u8, dst_path
 /// Real fsync ops; inline tests pass a mock with the same shape so they can
 /// observe fsync was issued without a syscall tracer.
 const DefaultSyncOps = struct {
-    fn syncFile(_: @This(), f: fs_compat.File) !void {
-        return f.sync();
+    fn syncFile(_: @This(), io: std.Io, f: std.Io.File) !void {
+        return f.sync(io);
     }
-    fn syncDir(_: @This(), d: fs_compat.Dir) !void {
-        return d.sync();
+    fn syncDir(_: @This(), io: std.Io, d: std.Io.Dir) !void {
+        const file: std.Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
+        return file.sync(io);
     }
 };
 
@@ -140,11 +151,11 @@ const default_sync_ops: DefaultSyncOps = .{};
 /// the new ones — never a partial write. A crash before the rename
 /// leaves the tempfile behind; the next call writes its own and
 /// overwrites atomically.
-pub fn atomicWriteFile(dst_path: []const u8, data: []const u8) !void {
-    return atomicWriteFileImpl(dst_path, data, default_sync_ops);
+pub fn atomicWriteFile(io: std.Io, dst_path: []const u8, data: []const u8) !void {
+    return atomicWriteFileImpl(io, dst_path, data, default_sync_ops);
 }
 
-fn atomicWriteFileImpl(dst_path: []const u8, data: []const u8, sync_ops: anytype) !void {
+fn atomicWriteFileImpl(io: std.Io, dst_path: []const u8, data: []const u8, sync_ops: anytype) !void {
     var rand_bytes: [4]u8 = undefined;
     std.c.arc4random_buf(&rand_bytes, rand_bytes.len);
     const hex_chars = "0123456789abcdef";
@@ -159,39 +170,39 @@ fn atomicWriteFileImpl(dst_path: []const u8, data: []const u8, sync_ops: anytype
         return error.NameTooLong;
 
     {
-        const f = try fs_compat.createFileAbsolute(tmp_path, .{ .truncate = true });
-        defer f.close();
+        const f = try std.Io.Dir.createFileAbsolute(io, tmp_path, .{ .truncate = true });
+        defer f.close(io);
         // Drop the tempfile on any failure before rename publishes it.
-        errdefer fs_compat.deleteFileAbsolute(tmp_path) catch {};
-        try f.writeAll(data);
+        errdefer std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
+        try f.writeStreamingAll(io, data);
         // fsync before close so the bytes are durable BEFORE rename publishes them.
-        try sync_ops.syncFile(f);
+        try sync_ops.syncFile(io, f);
     }
 
     {
         // rename failure leaves the tempfile at the original name; clean it up.
-        errdefer fs_compat.deleteFileAbsolute(tmp_path) catch {};
-        try fs_compat.renameAbsolute(tmp_path, dst_path);
+        errdefer std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
+        try std.Io.Dir.renameAbsolute(tmp_path, dst_path, io);
     }
 
     // fsync the parent dir so the renamed dirent itself survives a kernel crash.
     const parent = std.fs.path.dirname(dst_path) orelse "/";
-    var parent_dir = try fs_compat.openDirAbsolute(parent, .{});
-    defer parent_dir.close();
-    try sync_ops.syncDir(parent_dir);
+    var parent_dir = try std.Io.Dir.openDirAbsolute(io, parent, .{});
+    defer parent_dir.close(io);
+    try sync_ops.syncDir(io, parent_dir);
 }
 
 /// Create a temporary directory under {prefix}/tmp/ with the given label and
 /// a random hex suffix.  The returned path is allocated via `allocator` and
 /// the caller owns the memory.
-pub fn createTempDir(allocator: std.mem.Allocator, label: []const u8) ![]const u8 {
+pub fn createTempDir(io: std.Io, allocator: std.mem.Allocator, label: []const u8) ![]const u8 {
     const prefix = maltPrefix();
 
     // Ensure the tmp base directory exists. If makePath fails, makeDirAbsolute
     // below surfaces the real error on the final dir.
     const tmp_base = try std.fmt.allocPrint(allocator, "{s}/tmp", .{prefix});
     defer allocator.free(tmp_base);
-    fs_compat.cwd().makePath(tmp_base) catch {};
+    std.Io.Dir.cwd().createDirPath(io, tmp_base) catch {};
 
     // Generate 8 random bytes -> 16 hex chars.
     var rand_bytes: [8]u8 = undefined;
@@ -206,7 +217,7 @@ pub fn createTempDir(allocator: std.mem.Allocator, label: []const u8) ![]const u
 
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/tmp/{s}_{s}", .{ prefix, label, &hex_buf });
 
-    fs_compat.makeDirAbsolute(dir_path) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(io, dir_path, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {}, // unlikely but harmless
         else => {
             allocator.free(dir_path);
@@ -218,8 +229,8 @@ pub fn createTempDir(allocator: std.mem.Allocator, label: []const u8) ![]const u
 }
 
 /// Remove a temporary directory recursively.  Best-effort: errors are ignored.
-pub fn cleanupTempDir(dir_path: []const u8) void {
-    fs_compat.deleteTreeAbsolute(dir_path) catch {};
+pub fn cleanupTempDir(io: std.Io, dir_path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(io, dir_path) catch {};
 }
 
 /// Return "{prefix}/tmp", allocated via `allocator`.
@@ -235,7 +246,7 @@ pub fn maltDbDir(allocator: std.mem.Allocator) ![]const u8 {
 /// Return the cache directory, honouring MALT_CACHE env var.
 /// Falls back to "{prefix}/cache".
 pub fn maltCacheDir(allocator: std.mem.Allocator) ![]const u8 {
-    if (fs_compat.getenv("MALT_CACHE")) |cache| {
+    if (getenvLocal("MALT_CACHE")) |cache| {
         return allocator.dupe(u8, std.mem.sliceTo(cache, 0));
     }
     return std.fmt.allocPrint(allocator, "{s}/cache", .{maltPrefix()});
@@ -255,74 +266,78 @@ const TestSyncOps = struct {
     fail_file: bool = false,
     fail_dir: bool = false,
 
-    fn syncFile(self: @This(), _: fs_compat.File) !void {
+    fn syncFile(self: @This(), _: std.Io, _: std.Io.File) !void {
         if (self.fail_file) return error.AccessDenied;
         test_sync_counters.file += 1;
     }
-    fn syncDir(self: @This(), _: fs_compat.Dir) !void {
+    fn syncDir(self: @This(), _: std.Io, _: std.Io.Dir) !void {
         if (self.fail_dir) return error.AccessDenied;
         test_sync_counters.dir += 1;
     }
 };
 
 test "atomicWriteFileImpl fsyncs the tempfile via the injected sync ops" {
+    const io = std.Options.debug_io;
     const base = "/tmp/malt_atomic_inline_sync_file";
-    fs_compat.deleteTreeAbsolute(base) catch {};
-    try fs_compat.makeDirAbsolute(base);
-    defer fs_compat.deleteTreeAbsolute(base) catch {};
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    try std.Io.Dir.createDirAbsolute(io, base, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
     test_sync_counters = .{};
-    try atomicWriteFileImpl(base ++ "/data.bin", "abc", TestSyncOps{});
+    try atomicWriteFileImpl(io, base ++ "/data.bin", "abc", TestSyncOps{});
     try std.testing.expectEqual(@as(usize, 1), test_sync_counters.file);
 }
 
 test "atomicWriteFileImpl fsyncs the parent directory via the injected sync ops" {
+    const io = std.Options.debug_io;
     const base = "/tmp/malt_atomic_inline_sync_dir";
-    fs_compat.deleteTreeAbsolute(base) catch {};
-    try fs_compat.makeDirAbsolute(base);
-    defer fs_compat.deleteTreeAbsolute(base) catch {};
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    try std.Io.Dir.createDirAbsolute(io, base, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
     test_sync_counters = .{};
-    try atomicWriteFileImpl(base ++ "/data.bin", "abc", TestSyncOps{});
+    try atomicWriteFileImpl(io, base ++ "/data.bin", "abc", TestSyncOps{});
     try std.testing.expectEqual(@as(usize, 1), test_sync_counters.dir);
 }
 
 test "atomicWriteFileImpl propagates syncFile errors and removes the tempfile" {
+    const io = std.Options.debug_io;
     const base = "/tmp/malt_atomic_inline_sync_file_err";
-    fs_compat.deleteTreeAbsolute(base) catch {};
-    try fs_compat.makeDirAbsolute(base);
-    defer fs_compat.deleteTreeAbsolute(base) catch {};
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    try std.Io.Dir.createDirAbsolute(io, base, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
     const dst = base ++ "/data.bin";
     try std.testing.expectError(
         error.AccessDenied,
-        atomicWriteFileImpl(dst, "abc", TestSyncOps{ .fail_file = true }),
+        atomicWriteFileImpl(io, dst, "abc", TestSyncOps{ .fail_file = true }),
     );
 
     // dst was never renamed in; tempfiles must not accumulate either.
-    try std.testing.expectError(error.FileNotFound, fs_compat.openFileAbsolute(dst, .{}));
-    var dir = try fs_compat.openDirAbsolute(base, .{ .iterate = true });
-    defer dir.close();
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFileAbsolute(io, dst, .{}));
+    var dir = try std.Io.Dir.openDirAbsolute(io, base, .{ .iterate = true });
+    defer dir.close(io);
     var iter = dir.iterate();
-    try std.testing.expectEqual(@as(?fs_compat.Iterator.Entry, null), try iter.next());
+    try std.testing.expectEqual(@as(?std.Io.Dir.Entry, null), try iter.next(io));
 }
 
 test "atomicWriteFileImpl propagates syncDir errors but leaves the renamed file in place" {
+    const io = std.Options.debug_io;
     const base = "/tmp/malt_atomic_inline_sync_dir_err";
-    fs_compat.deleteTreeAbsolute(base) catch {};
-    try fs_compat.makeDirAbsolute(base);
-    defer fs_compat.deleteTreeAbsolute(base) catch {};
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    try std.Io.Dir.createDirAbsolute(io, base, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
     const dst = base ++ "/data.bin";
     try std.testing.expectError(
         error.AccessDenied,
-        atomicWriteFileImpl(dst, "abc", TestSyncOps{ .fail_dir = true }),
+        atomicWriteFileImpl(io, dst, "abc", TestSyncOps{ .fail_dir = true }),
     );
 
     // syncDir runs after rename, so dst_path must hold the durable bytes.
-    const f = try fs_compat.openFileAbsolute(dst, .{});
-    defer f.close();
+    const f = try std.Io.Dir.openFileAbsolute(io, dst, .{});
+    defer f.close(io);
     var buf: [8]u8 = undefined;
-    const n = try f.readAll(&buf);
+    const n = try f.readPositionalAll(io, &buf, 0);
     try std.testing.expectEqualStrings("abc", buf[0..n]);
 }

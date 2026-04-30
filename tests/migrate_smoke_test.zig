@@ -1088,7 +1088,7 @@ test "resume manifest: pre-seeded keg is skipped before any API call" {
         .{cache_dir},
     );
     defer testing.allocator.free(manifest_path);
-    try manifest.writeAtomic(testing.allocator, manifest_path);
+    try manifest.writeAtomic(std.Options.debug_io, testing.allocator, manifest_path);
 
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
@@ -1216,7 +1216,7 @@ test "--parallel sets the dispatch flag before falling through to skip-only path
     try manifest.add("k");
     const manifest_path = try std.fmt.allocPrint(testing.allocator, "{s}/migrate.progress.json", .{cache_dir});
     defer testing.allocator.free(manifest_path);
-    try manifest.writeAtomic(testing.allocator, manifest_path);
+    try manifest.writeAtomic(std.Options.debug_io, testing.allocator, manifest_path);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1304,7 +1304,7 @@ test "--parallel honours the resume manifest the same way serial does" {
         .{cache_dir},
     );
     defer testing.allocator.free(manifest_path);
-    try manifest.writeAtomic(testing.allocator, manifest_path);
+    try manifest.writeAtomic(std.Options.debug_io, testing.allocator, manifest_path);
 
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt_z});
     defer testing.allocator.free(db_dir);
@@ -1449,7 +1449,7 @@ test "manifest preserves pre-existing entries across a run with new failures" {
     var seed = malt.cli_migrate_manifest.Manifest.init(testing.allocator);
     defer seed.deinit();
     try seed.add("old");
-    try seed.writeAtomic(testing.allocator, manifest_path);
+    try seed.writeAtomic(std.Options.debug_io, testing.allocator, manifest_path);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1508,7 +1508,7 @@ test "stale manifest after uninstall falls through to a real migrate" {
     try stale.add("ghost");
     const manifest_path = try std.fmt.allocPrint(testing.allocator, "{s}/migrate.progress.json", .{cache_dir});
     defer testing.allocator.free(manifest_path);
-    try stale.writeAtomic(testing.allocator, manifest_path);
+    try stale.writeAtomic(std.Options.debug_io, testing.allocator, manifest_path);
 
     output.setMode(.json);
     defer resetOutput();

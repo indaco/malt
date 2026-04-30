@@ -37,7 +37,7 @@ test "writeAtomic + loadFromPath round-trip the completed list" {
     defer m.deinit();
     try m.add("foo");
     try m.add("bar");
-    try m.writeAtomic(testing.allocator, path);
+    try m.writeAtomic(std.Options.debug_io, testing.allocator, path);
 
     var loaded = try manifest.loadFromPath(testing.allocator, path);
     defer loaded.deinit();
@@ -54,12 +54,12 @@ test "writeAtomic over an existing file replaces its contents" {
     var first = manifest.Manifest.init(testing.allocator);
     defer first.deinit();
     try first.add("only-first");
-    try first.writeAtomic(testing.allocator, path);
+    try first.writeAtomic(std.Options.debug_io, testing.allocator, path);
 
     var second = manifest.Manifest.init(testing.allocator);
     defer second.deinit();
     try second.add("only-second");
-    try second.writeAtomic(testing.allocator, path);
+    try second.writeAtomic(std.Options.debug_io, testing.allocator, path);
 
     var loaded = try manifest.loadFromPath(testing.allocator, path);
     defer loaded.deinit();

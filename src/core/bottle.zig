@@ -91,7 +91,7 @@ pub fn download(
     tmp_file.close(io);
 
     // Extract
-    archive.extractTarGz(tmp_path, dest_dir) catch return BottleError.ExtractionFailed;
+    archive.extractTarGz(io, tmp_path, dest_dir) catch return BottleError.ExtractionFailed;
 
     // Remove the temp archive file; a leftover tmp is harmless, overwritten on retry.
     std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};

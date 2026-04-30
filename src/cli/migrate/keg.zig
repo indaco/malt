@@ -197,24 +197,26 @@ fn downloadBottle(
     const repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return false;
     const digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return false;
 
-    const tmp_dir = atomic.createTempDir(allocator, name) catch return false;
-
-    output.info("    Downloading {s}...", .{name});
-
     // Per-keg Threaded for bottle download. Transitional shim until cli takes AppCtx directly.
     const fs_compat_local = @import("../../fs/compat.zig");
     var keg_threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat_local.processEnviron() });
     defer keg_threaded.deinit();
-    _ = bottle_mod.download(keg_threaded.io(), allocator, ghcr, http, repo, digest, sha256, tmp_dir, null) catch {
+    const keg_io = keg_threaded.io();
+
+    const tmp_dir = atomic.createTempDir(keg_io, allocator, name) catch return false;
+
+    output.info("    Downloading {s}...", .{name});
+
+    _ = bottle_mod.download(keg_io, allocator, ghcr, http, repo, digest, sha256, tmp_dir, null) catch {
         output.err("    Download failed: {s}", .{name});
-        atomic.cleanupTempDir(tmp_dir);
+        atomic.cleanupTempDir(keg_io, tmp_dir);
         allocator.free(tmp_dir);
         return false;
     };
 
     store.commitFrom(sha256, tmp_dir) catch {
         output.err("    Store commit failed: {s}", .{name});
-        atomic.cleanupTempDir(tmp_dir);
+        atomic.cleanupTempDir(keg_io, tmp_dir);
         allocator.free(tmp_dir);
         return false;
     };

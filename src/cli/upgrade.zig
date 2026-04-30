@@ -278,7 +278,7 @@ fn upgradeFormula(
         const repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return;
         const digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return;
 
-        const tmp_dir = atomic.createTempDir(allocator, name) catch {
+        const tmp_dir = atomic.createTempDir(io, allocator, name) catch {
             output.err("Failed to create temp dir for {s}", .{name});
             return error.Aborted;
         };
@@ -286,14 +286,14 @@ fn upgradeFormula(
         output.info("  Downloading {s}...", .{name});
         _ = bottle_mod.download(io, allocator, &ghcr, http, repo, digest, bottle.sha256, tmp_dir, null) catch {
             output.err("  Download failed: {s}", .{name});
-            atomic.cleanupTempDir(tmp_dir);
+            atomic.cleanupTempDir(io, tmp_dir);
             allocator.free(tmp_dir);
             return error.Aborted;
         };
 
         store.commitFrom(bottle.sha256, tmp_dir) catch {
             output.err("Failed to commit bottle to store for {s}", .{name});
-            atomic.cleanupTempDir(tmp_dir);
+            atomic.cleanupTempDir(io, tmp_dir);
             allocator.free(tmp_dir);
             return error.Aborted;
         };

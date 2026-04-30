@@ -241,6 +241,7 @@ pub fn snapshotPath(allocator: std.mem.Allocator, cache_dir: []const u8) ![]u8 {
 /// cache dir if missing — `mt update --check` may run before any other
 /// command has touched the cache.
 pub fn writeSnapshot(
+    io: std.Io,
     allocator: std.mem.Allocator,
     cache_dir: []const u8,
     snap: Snapshot,
@@ -252,7 +253,7 @@ pub fn writeSnapshot(
     defer allocator.free(path);
     const json = try renderSnapshot(allocator, snap);
     defer allocator.free(json);
-    try atomic.atomicWriteFile(path, json);
+    try atomic.atomicWriteFile(io, path, json);
 }
 
 /// Realistic snapshots are tens of KiB; 1 MiB refuses any inflated file
@@ -343,6 +344,7 @@ pub const EmitPlan = enum {
 /// folded into the caller's `catch {}` so a snapshot write never blocks
 /// the user-facing output that already succeeded.
 pub fn refreshSnapshot(
+    io: std.Io,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     api: *api_mod.BrewApi,
@@ -373,7 +375,7 @@ pub fn refreshSnapshot(
         allocator.free(casks);
     }
 
-    try writeSnapshot(allocator, cache_dir, .{
+    try writeSnapshot(io, allocator, cache_dir, .{
         .generated_at_ms = fs_compat.milliTimestamp(),
         .formulas = formulas,
         .casks = casks,
@@ -869,9 +871,14 @@ fn recomputeAndEmit(
     json_mode: bool,
     scope: ScopeFlags,
 ) !void {
-    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
+    const threaded_environ = fs_compat.processEnviron();
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = threaded_environ });
+    defer threaded.deinit();
+    const local_io = threaded.io();
+
+    var http = client_mod.HttpClient.init(local_io, threaded_environ, allocator);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(local_io, allocator, &http, cache_dir);
 
     const workers_override = parseWorkersEnv(fs_compat.getenv(OUTDATED_WORKERS_ENV));
 
@@ -889,7 +896,7 @@ fn recomputeAndEmit(
     // partial recompute would mislead the next reader. Best-effort:
     // a write failure shouldn't shadow the listing the user already saw.
     if (!scope.pinned_only and !scope.cask_only and !scope.formula_only) {
-        refreshSnapshot(allocator, db, &api, cache_dir, workers_override) catch {};
+        refreshSnapshot(local_io, allocator, db, &api, cache_dir, workers_override) catch {};
     }
 
     if (!json_mode) {

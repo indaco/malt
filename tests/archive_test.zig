@@ -24,6 +24,12 @@ fn runTar(argv: []const []const u8) !void {
     }
 }
 
+/// Real `Threaded` io for tests that drive a subprocess (tar/zip/unzip) —
+/// `std.Options.debug_io`'s failing allocator can't back a child spawn.
+fn spawnIo() std.Io.Threaded {
+    return std.Io.Threaded.init(std.heap.c_allocator, .{});
+}
+
 test "extractTarGz decompresses a real tar.gz produced by system tar" {
     const base = "/tmp/malt_archive_targz_ok";
     var dir = try resetDir(base);
@@ -44,7 +50,7 @@ test "extractTarGz decompresses a real tar.gz produced by system tar" {
     // Remove the src dir so we can observe extraction re-creating it.
     try malt.fs_compat.deleteTreeAbsolute(base ++ "/src");
 
-    try archive.extractTarGz(archive_path, base);
+    try archive.extractTarGz(std.Options.debug_io, archive_path, base);
 
     const f = try dir.openFile("src/hello.txt", .{});
     defer f.close();
@@ -79,7 +85,7 @@ test "extractTarGz extracts an archive living outside the destination dir" {
     const archive_path = src_dir ++ "/tap_download.tar.gz";
     try runTar(&.{ "tar", "czf", archive_path, "-C", src_dir, "payload" });
 
-    try archive.extractTarGz(archive_path, dest_dir);
+    try archive.extractTarGz(std.Options.debug_io, archive_path, dest_dir);
 
     // The payload landed in dest_dir, not next to the archive.
     const f = try malt.fs_compat.openFileAbsolute(dest_dir ++ "/payload/bin", .{});
@@ -134,7 +140,7 @@ test "extractTarGz preserves exec bits, symlinks, and deep paths" {
     // come from our extractor.
     try malt.fs_compat.deleteTreeAbsolute(src_root);
 
-    try archive.extractTarGz(archive_path, base);
+    try archive.extractTarGz(std.Options.debug_io, archive_path, base);
 
     // Exec bit preserved (tar.ExtractOptions.ModeMode.executable_bit_only
     // is the default — owner-x copied to group/other).
@@ -168,7 +174,7 @@ test "extractTarGz rejects a non-gzip archive" {
     try f.writeAll("NOPE, not gzip");
     f.close();
 
-    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(archive_path, base));
+    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(std.Options.debug_io, archive_path, base));
 }
 
 test "extractTarGz rejects a missing archive" {
@@ -177,7 +183,7 @@ test "extractTarGz rejects a missing archive" {
     defer dir.close();
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
-    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(base ++ "/nope.tar.gz", base));
+    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(std.Options.debug_io, base ++ "/nope.tar.gz", base));
 }
 
 fn runCmd(argv: []const []const u8) !void {
@@ -211,7 +217,9 @@ test "extractZip decompresses a real zip produced by system zip" {
     try runCmd(&.{ "zip", "-j", "-q", archive_path, base ++ "/terraform" });
     try malt.fs_compat.deleteFileAbsolute(base ++ "/terraform");
 
-    try archive.extractZip(archive_path, base);
+    var threaded = spawnIo();
+    defer threaded.deinit();
+    try archive.extractZip(threaded.io(), archive_path, base);
 
     const f = try dir.openFile("terraform", .{});
     defer f.close();
@@ -232,7 +240,7 @@ test "extractZip rejects a non-zip archive" {
     try f.writeAll("NOPE, not a zip");
     f.close();
 
-    try testing.expectError(error.ExtractionFailed, archive.extractZip(archive_path, base));
+    try testing.expectError(error.ExtractionFailed, archive.extractZip(std.Options.debug_io, archive_path, base));
 }
 
 test "extractZip rejects a missing archive" {
@@ -241,7 +249,7 @@ test "extractZip rejects a missing archive" {
     defer dir.close();
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
-    try testing.expectError(error.ExtractionFailed, archive.extractZip(base ++ "/nope.zip", base));
+    try testing.expectError(error.ExtractionFailed, archive.extractZip(std.Options.debug_io, base ++ "/nope.zip", base));
 }
 
 // tar-slip: pre-scan must reject the whole archive before any entry
@@ -273,7 +281,7 @@ test "extractTarGz rejects tar-slip and leaves dest untouched" {
     const archive_path = base ++ "/hostile.tar.gz";
     try runCmd(&.{ "tar", "czf", archive_path, "-C", src_dir, "-s", "|^bad.txt|../escape.txt|", "good.txt", "bad.txt" });
 
-    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(archive_path, dest));
+    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(std.Options.debug_io, archive_path, dest));
     try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(dest ++ "/good.txt", .{}));
     try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(base ++ "/escape.txt", .{}));
 }
@@ -295,7 +303,9 @@ test "extractZip rejects tar-slip and leaves dest untouched" {
         "    z.writestr('../escape.txt', b'hostile')\n";
     try runCmd(&.{ "python3", "-c", script });
 
-    try testing.expectError(error.ExtractionFailed, archive.extractZip(archive_path, dest));
+    var threaded = spawnIo();
+    defer threaded.deinit();
+    try testing.expectError(error.ExtractionFailed, archive.extractZip(threaded.io(), archive_path, dest));
     try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(dest ++ "/good.txt", .{}));
     try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(base ++ "/escape.txt", .{}));
 }
@@ -324,7 +334,9 @@ test "extractTarXzFile rejects tar-slip and leaves dest untouched" {
     const archive_path = base ++ "/hostile.tar.xz";
     try runCmd(&.{ "tar", "cJf", archive_path, "-C", src_dir, "-s", "|^bad.txt|../escape.txt|", "good.txt", "bad.txt" });
 
-    try testing.expectError(error.ExtractionFailed, archive.extractTarXzFile(archive_path, dest));
+    var threaded = spawnIo();
+    defer threaded.deinit();
+    try testing.expectError(error.ExtractionFailed, archive.extractTarXzFile(threaded.io(), archive_path, dest));
     try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(dest ++ "/good.txt", .{}));
     try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(base ++ "/escape.txt", .{}));
 }
@@ -344,7 +356,7 @@ test "extractTarGz rejects a symlink entry whose target escapes dest" {
     const archive_path = base ++ "/sym.tar.gz";
     try runCmd(&.{ "tar", "czf", archive_path, "-C", src_dir, "badlink" });
 
-    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(archive_path, dest));
+    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(std.Options.debug_io, archive_path, dest));
     try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(dest ++ "/badlink", .{}));
 }
 
@@ -448,7 +460,7 @@ test "extractTarGz accepts a symlink whose relative target stays inside dest" {
     try runTar(&.{ "tar", "czf", archive_path, "-C", base, "src" });
     try malt.fs_compat.deleteTreeAbsolute(src_root);
 
-    try archive.extractTarGz(archive_path, base);
+    try archive.extractTarGz(std.Options.debug_io, archive_path, base);
 
     var link_buf: [64]u8 = undefined;
     var dest_dir = try malt.fs_compat.openDirAbsolute(base, .{});

@@ -1,6 +1,4 @@
 const std = @import("std");
-const fs_compat = @import("compat.zig");
-const io_mod = @import("../ui/io.zig");
 const c = @import("c_clonefile");
 const statfs_c = @import("c_mount");
 
@@ -16,7 +14,7 @@ pub const CloneError = error{
 /// copy-on-write clones (ENOTSUP). `allocator` only participates in the
 /// fallback path (for the directory walker); APFS-native clones are a
 /// single syscall and do not allocate.
-pub fn cloneTree(allocator: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) CloneError!void {
+pub fn cloneTree(io: std.Io, allocator: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) CloneError!void {
     const src_z = std.posix.toPosixPath(src_path) catch return error.IoError;
     const dst_z = std.posix.toPosixPath(dst_path) catch return error.IoError;
 
@@ -28,7 +26,7 @@ pub fn cloneTree(allocator: std.mem.Allocator, src_path: []const u8, dst_path: [
     const e: std.c.E = @enumFromInt(std.c._errno().*);
     switch (e) {
         .OPNOTSUPP => {
-            copyTreeFallback(allocator, src_path, dst_path) catch return error.IoError;
+            copyTreeFallback(io, allocator, src_path, dst_path) catch return error.IoError;
         },
         .EXIST => return error.AlreadyExists,
         .ACCES, .PERM => return error.PermissionDenied,
@@ -48,43 +46,38 @@ pub fn isApfs(path: []const u8) bool {
     return std.mem.eql(u8, fs_name, "apfs");
 }
 
-pub fn copyTreeFallback(allocator: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) !void {
-    // Open source directory.
-    var src_dir = fs_compat.openDirAbsolute(src_path, .{ .iterate = true }) catch return error.FileNotFound;
-    defer src_dir.close();
+pub fn copyTreeFallback(io: std.Io, allocator: std.mem.Allocator, src_path: []const u8, dst_path: []const u8) !void {
+    var src_dir = std.Io.Dir.openDirAbsolute(io, src_path, .{ .iterate = true }) catch return error.FileNotFound;
+    defer src_dir.close(io);
 
-    // Create destination directory.
-    fs_compat.makeDirAbsolute(dst_path) catch |err| switch (err) {
+    std.Io.Dir.createDirAbsolute(io, dst_path, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    var dst_dir = fs_compat.openDirAbsolute(dst_path, .{}) catch return error.FileNotFound;
-    defer dst_dir.close();
+    var dst_dir = std.Io.Dir.openDirAbsolute(io, dst_path, .{}) catch return error.FileNotFound;
+    defer dst_dir.close(io);
 
-    // Walk the source tree.
     var walker = src_dir.walk(allocator) catch return error.OutOfMemory;
     defer walker.deinit();
 
     // Per-entry clone is opportunistic: any single-entry failure skips that
     // path and continues the walk. Callers verify the final tree shape.
-    while (walker.next() catch return error.AccessDenied) |entry| {
+    while (walker.next(io) catch return error.AccessDenied) |entry| {
         switch (entry.kind) {
             .directory => {
-                dst_dir.makePath(entry.path) catch {};
+                dst_dir.createDirPath(io, entry.path) catch {};
             },
             .file => {
-                // Ensure parent directory exists in destination.
                 if (std.fs.path.dirname(entry.path)) |parent| {
-                    dst_dir.makePath(parent) catch {};
+                    dst_dir.createDirPath(io, parent) catch {};
                 }
-                std.Io.Dir.copyFile(entry.dir, entry.basename, dst_dir.inner, entry.path, io_mod.ctx(), .{}) catch {};
+                std.Io.Dir.copyFile(entry.dir, entry.basename, dst_dir, entry.path, io, .{}) catch {};
             },
             .sym_link => {
-                // Read the symlink target and recreate it.
-                var link_buf: [fs_compat.max_path_bytes]u8 = undefined;
-                const n = std.Io.Dir.readLink(entry.dir, io_mod.ctx(), entry.basename, &link_buf) catch continue;
-                dst_dir.symLink(link_buf[0..n], entry.path, .{}) catch {};
+                var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                const n = std.Io.Dir.readLink(entry.dir, io, entry.basename, &link_buf) catch continue;
+                dst_dir.symLink(io, link_buf[0..n], entry.path, .{}) catch {};
             },
             else => {},
         }

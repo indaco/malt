@@ -535,7 +535,7 @@ pub const CaskInstaller = struct {
         }) catch return error.InstallFailed;
         std.Io.Dir.cwd().createDirPath(self.io, caskroom_ver) catch return error.InstallFailed;
 
-        archive_mod.extractTarGz(archive_path, caskroom_ver) catch return error.InstallFailed;
+        archive_mod.extractTarGz(self.io, archive_path, caskroom_ver) catch return error.InstallFailed;
 
         if (parseBinaryName(cask.parsed.value.object)) |src_name| {
             const link_name = parseBinaryTarget(cask.parsed.value.object) orelse

@@ -269,7 +269,7 @@ test "createTempDir creates a unique directory under the prefix and cleanup remo
     setPrefix("/tmp/malt_atomic_ctmp");
     defer unsetPrefix();
 
-    const dir = try atomic.createTempDir(testing.allocator, "label");
+    const dir = try atomic.createTempDir(std.Options.debug_io, testing.allocator, "label");
     defer testing.allocator.free(dir);
 
     // Must exist as an absolute dir under {prefix}/tmp/
@@ -277,7 +277,7 @@ test "createTempDir creates a unique directory under the prefix and cleanup remo
     var open_dir = try malt.fs_compat.openDirAbsolute(dir, .{});
     open_dir.close();
 
-    atomic.cleanupTempDir(dir);
+    atomic.cleanupTempDir(std.Options.debug_io, dir);
     try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(dir, .{}));
 }
 
@@ -293,7 +293,7 @@ test "atomicRename moves a file within the same filesystem" {
     try f.writeAll("payload");
     f.close();
 
-    try atomic.atomicRename(testing.allocator, src, dst);
+    try atomic.atomicRename(std.Options.debug_io, testing.allocator, src, dst);
     try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(src, .{}));
 
     const moved = try malt.fs_compat.openFileAbsolute(dst, .{});
@@ -304,7 +304,7 @@ test "atomicRename moves a file within the same filesystem" {
 }
 
 test "cleanupTempDir is a no-op on a non-existent path" {
-    atomic.cleanupTempDir("/tmp/malt_atomic_nonexistent_12345");
+    atomic.cleanupTempDir(std.Options.debug_io, "/tmp/malt_atomic_nonexistent_12345");
 }
 
 // atomicWriteFile: readers see either the old file or the full new
@@ -317,7 +317,7 @@ test "atomicWriteFile writes full payload to a fresh path" {
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     const dst = base ++ "/cache.json";
-    try atomic.atomicWriteFile(dst, "{\"formulae\":[]}");
+    try atomic.atomicWriteFile(std.Options.debug_io, dst, "{\"formulae\":[]}");
 
     const f = try malt.fs_compat.openFileAbsolute(dst, .{});
     defer f.close();
@@ -340,7 +340,7 @@ test "atomicWriteFile replaces an existing file's contents in one step" {
         try f.writeAll("OLD_PAYLOAD_THAT_SHOULD_VANISH");
     }
 
-    try atomic.atomicWriteFile(dst, "NEW");
+    try atomic.atomicWriteFile(std.Options.debug_io, dst, "NEW");
 
     const f = try malt.fs_compat.openFileAbsolute(dst, .{});
     defer f.close();
@@ -356,7 +356,7 @@ test "atomicWriteFile leaves no sibling .tmp files behind on success" {
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     const dst = base ++ "/cache.json";
-    try atomic.atomicWriteFile(dst, "payload");
+    try atomic.atomicWriteFile(std.Options.debug_io, dst, "payload");
 
     // Only `cache.json` must remain — a stale tempfile would accumulate
     // across calls and eventually blow up a user's cache dir.
@@ -375,6 +375,7 @@ test "atomicWriteFile surfaces FileNotFound when the parent dir is missing" {
     // Callers (`api.writeCache`) rely on this error to decide
     // whether their preceding makeDirAbsolute actually succeeded.
     const err = atomic.atomicWriteFile(
+        std.Options.debug_io,
         "/tmp/malt_atomic_write_nodir_xxxxxx/cache.json",
         "payload",
     );
@@ -401,7 +402,7 @@ test "atomicRename moves a directory tree within the same filesystem" {
         try f.writeAll("payload");
     }
 
-    try atomic.atomicRename(testing.allocator, src, dst);
+    try atomic.atomicRename(std.Options.debug_io, testing.allocator, src, dst);
     try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(src, .{}));
 
     var moved = try malt.fs_compat.openDirAbsolute(dst, .{});

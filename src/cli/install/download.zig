@@ -119,7 +119,7 @@ pub fn downloadWorker(
     const digest = ref.digest;
 
     // Create temp dir
-    const tmp_dir = atomic.createTempDir(allocator, job.name) catch return;
+    const tmp_dir = atomic.createTempDir(worker_io, allocator, job.name) catch return;
 
     // The progress bar was created and pre-rendered by the main thread so that
     // every reserved line has content even before this worker starts producing
@@ -147,7 +147,7 @@ pub fn downloadWorker(
             break;
         } else |dl_err| {
             last_err = dl_err;
-            atomic.cleanupTempDir(tmp_dir);
+            atomic.cleanupTempDir(worker_io, tmp_dir);
             if (dl_err == bottle_mod.BottleError.DownloadPermanent) {
                 output.err("  {s}: permanent HTTP error (404/410), not retrying", .{job.name});
                 break;
@@ -176,7 +176,7 @@ pub fn downloadWorker(
 
     // Commit to store
     store.commitFrom(job.sha256, tmp_dir) catch {
-        atomic.cleanupTempDir(tmp_dir);
+        atomic.cleanupTempDir(worker_io, tmp_dir);
         allocator.free(tmp_dir);
         return;
     };

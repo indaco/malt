@@ -173,7 +173,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.err("Cannot create extract dir", .{});
         return error.Aborted;
     };
-    archive.extractTarGz(tarball_path, extract_dir_buf) catch {
+    archive.extractTarGz(ctx.io, tarball_path, extract_dir_buf) catch {
         output.err("Failed to extract update", .{});
         return error.Aborted;
     };

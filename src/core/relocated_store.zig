@@ -126,7 +126,7 @@ fn saveFresh(
     // succeeded and the temp is invisible to the public cache layout.
     errdefer std.Io.Dir.cwd().deleteTree(io, tmp) catch {};
 
-    clonefile.cloneTree(allocator, src, tmp) catch return RelocatedStoreError.SaveFailed;
+    clonefile.cloneTree(io, allocator, src, tmp) catch return RelocatedStoreError.SaveFailed;
 
     // Race window: another worker may have published the same sha while we
     // were cloning. If `dst` exists now, drop our temp (errdefer) and report
@@ -163,7 +163,7 @@ pub fn materialize(
     // Missing dst is fine; permission errors will resurface on cloneTree.
     std.Io.Dir.cwd().deleteTree(io, dst) catch {};
 
-    clonefile.cloneTree(allocator, src, dst) catch return RelocatedStoreError.MaterializeFailed;
+    clonefile.cloneTree(io, allocator, src, dst) catch return RelocatedStoreError.MaterializeFailed;
 }
 
 /// Delete the cache entry for `sha`. Idempotent; a missing entry is a

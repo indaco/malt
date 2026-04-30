@@ -344,7 +344,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 manifest.add(keg_name) catch |e| {
                     output.warn("Resume manifest update failed for {s}: {s}", .{ keg_name, @errorName(e) });
                 };
-                manifest.writeAtomic(allocator, manifest_path) catch |e| {
+                manifest.writeAtomic(io, allocator, manifest_path) catch |e| {
                     output.warn("Resume manifest write failed: {s}", .{@errorName(e)});
                 };
             },
@@ -367,7 +367,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
     if (manifest_dirty) {
-        manifest.writeAtomic(allocator, manifest_path) catch |e| {
+        manifest.writeAtomic(io, allocator, manifest_path) catch |e| {
             output.warn("Resume manifest self-heal write failed: {s}", .{@errorName(e)});
         };
     }

@@ -128,7 +128,7 @@ fn worker(pool: *Pool) void {
             pool.manifest.add(keg_name) catch |e| {
                 output.warn("Resume manifest update failed for {s}: {s}", .{ keg_name, @errorName(e) });
             };
-            pool.manifest.writeAtomic(pool.manifest_allocator, pool.manifest_path) catch |e| {
+            pool.manifest.writeAtomic(io_ctx, pool.manifest_allocator, pool.manifest_path) catch |e| {
                 output.warn("Resume manifest write failed: {s}", .{@errorName(e)});
             };
             pool.manifest_mu.unlock(io_ctx);

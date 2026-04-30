@@ -361,7 +361,7 @@ pub const BrewApi = struct {
         //
         // Cache is a latency optimization; a write failure (disk full,
         // permissions) just means the next call re-fetches over the network.
-        atomic.atomicWriteFile(cache_path, data) catch {};
+        atomic.atomicWriteFile(self.io, cache_path, data) catch {};
     }
 
     /// Check for a cached 404 marker. Returns true if a fresh marker

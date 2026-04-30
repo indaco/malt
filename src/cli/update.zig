@@ -66,9 +66,15 @@ fn refreshSnapshot(allocator: std.mem.Allocator, cache_dir: []const u8) !void {
     const prefix = atomic.maltPrefix();
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return error.Aborted;
+
+    const threaded_environ = fs_compat.processEnviron();
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = threaded_environ });
+    defer threaded.deinit();
+    const local_io = threaded.io();
+
     var db = sqlite.Database.open(db_path) catch {
         // Fresh prefix: write an empty snapshot so readers get instant "all clear".
-        try outdated_mod.writeSnapshot(allocator, cache_dir, .{
+        try outdated_mod.writeSnapshot(local_io, allocator, cache_dir, .{
             .generated_at_ms = fs_compat.milliTimestamp(),
             .formulas = &.{},
             .casks = &.{},
@@ -78,9 +84,9 @@ fn refreshSnapshot(allocator: std.mem.Allocator, cache_dir: []const u8) !void {
     defer db.close();
     schema.initSchema(&db) catch return;
 
-    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
+    var http = client_mod.HttpClient.init(local_io, threaded_environ, allocator);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(local_io, allocator, &http, cache_dir);
 
-    try outdated_mod.refreshSnapshot(allocator, &db, &api, cache_dir, null);
+    try outdated_mod.refreshSnapshot(local_io, allocator, &db, &api, cache_dir, null);
 }

@@ -49,11 +49,11 @@ pub const Manifest = struct {
     }
 
     /// Crash-safe rewrite via tempfile + rename: readers see old or new, never partial.
-    pub fn writeAtomic(self: *const Manifest, allocator: std.mem.Allocator, path: []const u8) !void {
+    pub fn writeAtomic(self: *const Manifest, io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
         var aw: std.Io.Writer.Allocating = .init(allocator);
         defer aw.deinit();
         try writeJson(&aw.writer, self.names());
-        try atomic.atomicWriteFile(path, aw.written());
+        try atomic.atomicWriteFile(io, path, aw.written());
     }
 };
 

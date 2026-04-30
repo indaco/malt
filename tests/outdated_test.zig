@@ -516,7 +516,7 @@ test "update without --check deletes a stale snapshot to force fresh recompute n
 
     // Pre-existing snapshot from a prior run: the cache wipe just
     // dropped its data source, so the snapshot has no business surviving.
-    try outdated_mod.writeSnapshot(testing.allocator, env.cache_path, .{
+    try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, env.cache_path, .{
         .generated_at_ms = malt.fs_compat.milliTimestamp(),
         .formulas = &[_]outdated_mod.OutdatedEntry{},
         .casks = &[_]outdated_mod.OutdatedEntry{},
@@ -548,7 +548,7 @@ test "outdated execute reads a fresh snapshot and never overwrites it" {
     const formulas = [_]outdated_mod.OutdatedEntry{
         .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("9.9") },
     };
-    try outdated_mod.writeSnapshot(testing.allocator, env.cache_path, .{
+    try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, env.cache_path, .{
         .generated_at_ms = marker_ts,
         .formulas = &formulas,
         .casks = &[_]outdated_mod.OutdatedEntry{},
@@ -584,7 +584,7 @@ test "outdated execute drops snapshot entries whose keg was uninstalled" {
         .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
         .{ .name = @constCast("ghost"), .installed = @constCast("0.5"), .latest = @constCast("1.0") },
     };
-    try outdated_mod.writeSnapshot(testing.allocator, env.cache_path, .{
+    try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, env.cache_path, .{
         .generated_at_ms = marker_ts,
         .formulas = &formulas,
         .casks = &[_]outdated_mod.OutdatedEntry{},
@@ -634,7 +634,7 @@ test "outdated execute on a stale snapshot emits the cached entries (used as pro
     const formulas = [_]outdated_mod.OutdatedEntry{
         .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("3.0") },
     };
-    try outdated_mod.writeSnapshot(testing.allocator, env.cache_path, .{
+    try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, env.cache_path, .{
         .generated_at_ms = malt.fs_compat.milliTimestamp() - month_ms,
         .formulas = &formulas,
         .casks = &[_]outdated_mod.OutdatedEntry{},
@@ -669,7 +669,7 @@ test "outdated execute --refresh skips the snapshot and recomputes" {
     const formulas = [_]outdated_mod.OutdatedEntry{
         .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("bogus") },
     };
-    try outdated_mod.writeSnapshot(testing.allocator, env.cache_path, .{
+    try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, env.cache_path, .{
         .generated_at_ms = malt.fs_compat.milliTimestamp(),
         .formulas = &formulas,
         .casks = &[_]outdated_mod.OutdatedEntry{},
@@ -701,7 +701,7 @@ test "writeSnapshot then readSnapshot round-trips entries through the cache file
         .formulas = &formulas,
         .casks = &casks,
     };
-    try outdated_mod.writeSnapshot(testing.allocator, dir.path, snap);
+    try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, dir.path, snap);
 
     const read_opt = outdated_mod.readSnapshot(testing.allocator, dir.path);
     try testing.expect(read_opt != null);
@@ -744,7 +744,7 @@ test "writeSnapshot creates the cache directory if missing" {
         .formulas = &[_]outdated_mod.OutdatedEntry{},
         .casks = &[_]outdated_mod.OutdatedEntry{},
     };
-    try outdated_mod.writeSnapshot(testing.allocator, path, snap);
+    try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, path, snap);
 
     const read_opt = outdated_mod.readSnapshot(testing.allocator, path);
     try testing.expect(read_opt != null);

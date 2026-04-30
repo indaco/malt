@@ -175,7 +175,7 @@ pub fn installTapFormula(
         .app_name = parseCaskApp(resp.body),
         .tap_registration = .{ .url = tap_url, .commit_sha = commit_sha },
     };
-    try materializeRubyFormula(allocator, resolved, &http, db, linker, prefix, dry_run, force);
+    try materializeRubyFormula(local_io, allocator, resolved, &http, db, linker, prefix, dry_run, force);
 }
 
 /// Install a formula from a local `.rb` file on disk. Gated by the
@@ -284,9 +284,14 @@ pub fn installLocalFormula(
         // No tap_registration — never pollute `mt tap` with a local path.
     };
 
-    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
+    const threaded_environ = fs_compat.processEnviron();
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = threaded_environ });
+    defer threaded.deinit();
+    const local_io = threaded.io();
+
+    var http = client_mod.HttpClient.init(local_io, threaded_environ, allocator);
     defer http.deinit();
-    try materializeRubyFormula(allocator, resolved, &http, db, linker, prefix, dry_run, force);
+    try materializeRubyFormula(local_io, allocator, resolved, &http, db, linker, prefix, dry_run, force);
 }
 
 /// Ordered set of advisory risk labels that may fire on a `.rb` file
@@ -322,6 +327,7 @@ fn fstatRisk(f: fs_compat.File) ?LocalPermissionRisk {
 /// local installers. Does the network fetch for the archive, SHA256
 /// verification, cellar materialisation, and DB + linker commit.
 fn materializeRubyFormula(
+    io: std.Io,
     allocator: std.mem.Allocator,
     resolved: ResolvedRubyFormula,
     http: *client_mod.HttpClient,
@@ -456,15 +462,15 @@ fn materializeRubyFormula(
 
     const archive_mod = @import("../../fs/archive.zig");
     switch (archive_kind) {
-        .tar_gz => archive_mod.extractTarGz(tmp_archive, cellar_path) catch {
+        .tar_gz => archive_mod.extractTarGz(io, tmp_archive, cellar_path) catch {
             output.err("Failed to extract archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
-        .tar_xz => archive_mod.extractTarXzFile(tmp_archive, cellar_path) catch {
+        .tar_xz => archive_mod.extractTarXzFile(io, tmp_archive, cellar_path) catch {
             output.err("Failed to extract .tar.xz archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
-        .zip => archive_mod.extractZip(tmp_archive, cellar_path) catch {
+        .zip => archive_mod.extractZip(io, tmp_archive, cellar_path) catch {
             output.err("Failed to extract .zip archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },

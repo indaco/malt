@@ -122,12 +122,17 @@ fn ephemeralRun(
 ) !void {
     output.info("Fetching {s} for ephemeral run...", .{pkg_name});
 
-    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
+    const threaded_environ = fs_compat.processEnviron();
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = threaded_environ });
+    defer threaded.deinit();
+    const local_io = threaded.io();
+
+    var http = client_mod.HttpClient.init(local_io, threaded_environ, allocator);
     defer http.deinit();
 
     var cache_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch return;
-    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(local_io, allocator, &http, cache_dir);
 
     const formula_json = api.fetchFormula(pkg_name) catch {
         output.err("Formula '{s}' not found", .{pkg_name});
@@ -191,7 +196,7 @@ fn ephemeralRun(
         }
     }
 
-    var ghcr = ghcr_mod.GhcrClient.init(io_mod.ctx(), allocator, &http);
+    var ghcr = ghcr_mod.GhcrClient.init(local_io, allocator, &http);
     defer ghcr.deinit();
 
     // Cache slot under {cache} so `mt purge --cache` wipes it; a tmp dir otherwise.
@@ -199,7 +204,7 @@ fn ephemeralRun(
     var dest_dir: []const u8 = undefined;
     var owned_tmp: ?[]const u8 = null;
     defer if (owned_tmp) |p| {
-        atomic.cleanupTempDir(p);
+        atomic.cleanupTempDir(local_io, p);
         allocator.free(p);
     };
 
@@ -216,7 +221,7 @@ fn ephemeralRun(
             return error.Aborted;
         };
     } else {
-        owned_tmp = atomic.createTempDir(allocator, "run") catch {
+        owned_tmp = atomic.createTempDir(local_io, allocator, "run") catch {
             output.err("Failed to create temp directory", .{});
             return error.Aborted;
         };
@@ -240,10 +245,7 @@ fn ephemeralRun(
     } else return;
 
     output.info("Downloading {s} {s}...", .{ pkg_name, formula.version });
-    // Per-run Threaded for bottle download. Transitional shim until cli takes AppCtx directly.
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
-    defer threaded.deinit();
-    _ = bottle_mod.download(threaded.io(), allocator, &ghcr, &http, repo, digest, bottle.sha256, dest_dir, null) catch {
+    _ = bottle_mod.download(local_io, allocator, &ghcr, &http, repo, digest, bottle.sha256, dest_dir, null) catch {
         output.err("Failed to download {s}", .{pkg_name});
         return error.Aborted;
     };
