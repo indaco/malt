@@ -24,7 +24,7 @@ pub fn setInterruptedForTest(v: bool) void {
     interrupted.store(v, .release);
 }
 
-fn sigintHandler(_: std.c.SIG) callconv(.c) void {
+fn sigintHandler(_: std.posix.SIG) callconv(.c) void {
     interrupted.store(true, .release);
 }
 
