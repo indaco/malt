@@ -2,7 +2,6 @@
 //! db open, confirmation prompts) used by both `wipe` and `scopes`.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const output = @import("../../ui/output.zig");
 const io_mod = @import("../../ui/io.zig");
@@ -26,21 +25,21 @@ pub fn formatBytes(bytes: u64, buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ value, units[unit] }) catch "?";
 }
 
-pub fn pathSize(allocator: std.mem.Allocator, path: []const u8) u64 {
-    if (fs_compat.cwd().statFile(path)) |st| {
+pub fn pathSize(io: std.Io, allocator: std.mem.Allocator, path: []const u8) u64 {
+    if (std.Io.Dir.cwd().statFile(io, path, .{})) |st| {
         if (st.kind != .directory) return st.size;
     } else |_| {}
 
-    var dir = fs_compat.openDirAbsolute(path, .{ .iterate = true }) catch return 0;
-    defer dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch return 0;
+    defer dir.close(io);
 
     var walker = dir.walk(allocator) catch return 0;
     defer walker.deinit();
 
     var total: u64 = 0;
-    while (walker.next() catch null) |entry| {
+    while (walker.next(io) catch null) |entry| {
         if (entry.kind == .file) {
-            const s = std.Io.Dir.statFile(entry.dir, io_mod.ctx(), entry.basename, .{}) catch continue;
+            const s = std.Io.Dir.statFile(entry.dir, io, entry.basename, .{}) catch continue;
             total += s.size;
         }
     }

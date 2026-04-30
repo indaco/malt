@@ -2,7 +2,7 @@
 //! List installed packages.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -11,7 +11,7 @@ const color = @import("../ui/color.zig");
 const io_mod = @import("../ui/io.zig");
 const help = @import("help.zig");
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "list")) return;
 
     // Parse per-command flags. `--json`, `--quiet`/`-q`, `--verbose`/`-v`,
@@ -54,13 +54,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     schema.initSchema(&db) catch return;
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw = io_mod.stdoutFile().writer(io_mod.ctx(), &stdout_buf);
+    var stdout_fw = io_mod.stdoutFile().writer(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};
 
     if (json_mode) {
-        try writeJsonOutput(allocator, &db, show_formula, show_cask, show_pinned, stdout);
+        try writeJsonOutput(ctx, allocator, &db, show_formula, show_cask, show_pinned, stdout);
     } else {
         try writeHumanOutput(&db, show_formula, show_cask, show_versions, show_pinned, stdout);
     }
@@ -229,6 +229,7 @@ fn writeStyledSpan(
 }
 
 fn writeJsonOutput(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     show_formula: bool,
@@ -237,7 +238,7 @@ fn writeJsonOutput(
     stdout: *std.Io.Writer,
 ) !void {
     _ = allocator;
-    const start_ts = fs_compat.milliTimestamp();
+    const start_ts = std.Io.Clock.real.now(ctx.io).toMilliseconds();
     try buildListJson(db, stdout, show_formula, show_cask, show_pinned, start_ts);
 }
 

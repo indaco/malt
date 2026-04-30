@@ -167,11 +167,19 @@ test "doctor.externalToolAvailable returns true when the tool is on PATH" {
     // `install_name_tool` is part of Xcode Command Line Tools and is
     // always installed in the repo's dev environment — any bot that
     // can build malt can find it.
-    try testing.expect(malt.doctor.externalToolAvailable(patch.external_tool_name));
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const environ = malt.fs_compat.processEnviron();
+    try testing.expect(malt.doctor.externalToolAvailable(io, environ, patch.external_tool_name));
 }
 
 test "doctor.externalToolAvailable returns false for a clearly-missing binary" {
-    try testing.expect(!malt.doctor.externalToolAvailable("mt_no_such_binary_ever_xyz"));
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const environ = malt.fs_compat.processEnviron();
+    try testing.expect(!malt.doctor.externalToolAvailable(io, environ, "mt_no_such_binary_ever_xyz"));
 }
 
 fn seedKeg(db: *sqlite.Database, name: []const u8, tap: []const u8, full_name: []const u8) !void {
@@ -194,7 +202,11 @@ test "countMissingLocalSources ignores non-local kegs" {
     try seedKeg(&db, "foo", "homebrew/core", "foo");
     try seedKeg(&db, "bar", "user/tap", "bar");
 
-    const got = doctor.countMissingLocalSources(testing.allocator, &db);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const got = doctor.countMissingLocalSources(io, testing.allocator, &db);
     try testing.expectEqual(@as(u32, 0), got.total);
     try testing.expectEqual(@as(u32, 0), got.stale);
 }
@@ -206,7 +218,11 @@ test "countMissingLocalSources flags kegs whose .rb no longer exists" {
 
     try seedKeg(&db, "ghost", "local", "/tmp/mt_doctor_vanished_formula_xyz.rb");
 
-    const got = doctor.countMissingLocalSources(testing.allocator, &db);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const got = doctor.countMissingLocalSources(io, testing.allocator, &db);
     try testing.expectEqual(@as(u32, 1), got.total);
     try testing.expectEqual(@as(u32, 1), got.stale);
 }
@@ -226,7 +242,11 @@ test "countMissingLocalSources does not flag kegs whose .rb still exists" {
 
     try seedKeg(&db, "present", "local", self_path);
 
-    const got = doctor.countMissingLocalSources(testing.allocator, &db);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const got = doctor.countMissingLocalSources(io, testing.allocator, &db);
     try testing.expectEqual(@as(u32, 1), got.total);
     try testing.expectEqual(@as(u32, 0), got.stale);
 }
@@ -246,7 +266,11 @@ test "countMissingLocalSources mixes stale and present rows correctly" {
     try seedKeg(&db, "g1", "local", "/tmp/mt_doctor_mixed_missing_1.rb");
     try seedKeg(&db, "g2", "local", "/tmp/mt_doctor_mixed_missing_2.rb");
 
-    const got = doctor.countMissingLocalSources(testing.allocator, &db);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const got = doctor.countMissingLocalSources(io, testing.allocator, &db);
     try testing.expectEqual(@as(u32, 3), got.total);
     try testing.expectEqual(@as(u32, 2), got.stale);
 }
@@ -275,7 +299,12 @@ test "runChecks tallies ok/warn/err into the summary counters" {
     };
 
     const tally = doctor.runChecks(
-        .{ .allocator = testing.allocator, .prefix = "/tmp" },
+        .{
+            .allocator = testing.allocator,
+            .prefix = "/tmp",
+            .io = std.Options.debug_io,
+            .environ = .empty,
+        },
         &fake,
     );
     try testing.expectEqual(@as(u32, 2), tally.warnings);
@@ -285,7 +314,12 @@ test "runChecks tallies ok/warn/err into the summary counters" {
 test "runChecks on an empty table returns zero counters" {
     const empty = [_]doctor.Check{};
     const tally = doctor.runChecks(
-        .{ .allocator = testing.allocator, .prefix = "/tmp" },
+        .{
+            .allocator = testing.allocator,
+            .prefix = "/tmp",
+            .io = std.Options.debug_io,
+            .environ = .empty,
+        },
         &empty,
     );
     try testing.expectEqual(@as(u32, 0), tally.warnings);

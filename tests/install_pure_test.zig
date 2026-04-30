@@ -316,7 +316,7 @@ test "pruneCellarForReinstall wipes an existing Cellar dir so --force can re-mat
         try f.writeAll("payload");
     }
 
-    install.pruneCellarForReinstall(prefix, "foo", "1.0");
+    install.pruneCellarForReinstall(&malt.app_ctx.debug_ctx, prefix, "foo", "1.0");
 
     const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix});
     defer testing.allocator.free(cellar_dir);
@@ -334,7 +334,7 @@ test "pruneCellarForReinstall is a no-op when the destination is missing" {
     defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
 
     // Never created — pruning must not fault, panic, or leak.
-    install.pruneCellarForReinstall(prefix, "ghost", "1.0");
+    install.pruneCellarForReinstall(&malt.app_ctx.debug_ctx, prefix, "ghost", "1.0");
 }
 
 test "install.recordKeg preserves a prior pinned flag on REPLACE (force-reinstall keeps the hold)" {
@@ -424,7 +424,7 @@ test "ensureDirs creates every required subdirectory under a fresh prefix" {
     malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
 
-    try install.ensureDirs(prefix);
+    try install.ensureDirs(&malt.app_ctx.debug_ctx, prefix);
 
     const subs = [_][]const u8{ "store", "Cellar", "Caskroom", "opt", "bin", "lib", "include", "share", "sbin", "etc", "tmp", "cache", "db" };
     for (subs) |s| {
@@ -479,7 +479,7 @@ fn runRoute(
     io_mod.beginStderrCapture(testing.allocator, &buf);
     defer io_mod.endStderrCapture();
 
-    install.routePostInstallOutcome(testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
+    install.routePostInstallOutcome(&malt.app_ctx.debug_ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
 
     return buf.toOwnedSlice(testing.allocator);
 }
@@ -665,7 +665,7 @@ fn runRouteCaptureStdout(
     io_mod.beginStderrCapture(testing.allocator, &stderr_buf);
     defer io_mod.endStderrCapture();
 
-    install.routePostInstallOutcome(testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
+    install.routePostInstallOutcome(&malt.app_ctx.debug_ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
     return stdout_buf.toOwnedSlice(testing.allocator);
 }
 
@@ -726,6 +726,7 @@ test "executeDslPostInstall returns .parse_failed when formula JSON is unparseab
     defer output_mod.setQuiet(prior_quiet);
 
     const outcome = install.executeDslPostInstall(
+        &malt.app_ctx.debug_ctx,
         testing.allocator,
         "bad-json",
         "1.0",
@@ -750,6 +751,7 @@ test "executeDslPostInstall returns .handled when DSL executes against a valid f
         \\{"name":"hello","full_name":"hello","versions":{"stable":"1.0"},"dependencies":[],"oldnames":[]}
     ;
     const outcome = install.executeDslPostInstall(
+        &malt.app_ctx.debug_ctx,
         testing.allocator,
         "hello",
         "1.0",
@@ -784,6 +786,7 @@ test "drive: no DSL source and no scope match emits the unified skip hint" {
     // .rb on disk, no pin manifest entry → fetchPostInstallFromGitHub
     // returns null, so drive lands on the skip leaf.
     install.drive(
+        &malt.app_ctx.debug_ctx,
         testing.allocator,
         "__nonexistent_test_formula_xyz__",
         "1.0",

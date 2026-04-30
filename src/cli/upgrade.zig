@@ -2,11 +2,10 @@
 //! Upgrade installed packages and casks.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
-const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
 const lock_mod = @import("../db/lock.zig");
 const client_mod = @import("../net/client.zig");
@@ -44,7 +43,7 @@ pub fn pinSkip(db: *sqlite.Database, name: []const u8, force: bool, audit_mode: 
     return pin_mod.isPinned(db, name);
 }
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "upgrade")) return;
 
     var cask_only = false;
@@ -106,12 +105,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer db.close();
     schema.initSchema(&db) catch return;
 
-    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
     var cache_dir_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
-    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
 
     // Per-package errors must not be swallowed: a batch that fails every
     // item used to exit 0, hiding the failure from CI. We aggregate here
@@ -122,7 +121,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Upgrade a specific package — try formula first, then cask
         if (!cask_only) {
             if (isFormulaInstalled(&db, name)) {
-                upgradeFormula(allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only) catch {
+                upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only) catch {
                     any_failed = true;
                 };
                 if (any_failed) return error.Aborted;
@@ -130,18 +129,18 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
         }
         // Not a formula (or --cask): try cask
-        upgradeCask(allocator, name, &db, &api, prefix, dry_run, force, pinned_only) catch {
+        upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only) catch {
             any_failed = true;
         };
     } else {
         // Upgrade all
         if (!cask_only) {
-            upgradeAllFormulas(allocator, &db, &api, &http, prefix, dry_run, force, pinned_only) catch {
+            upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only) catch {
                 any_failed = true;
             };
         }
         if (!formula_only) {
-            upgradeAllCasks(allocator, &db, &api, prefix, dry_run, force, pinned_only) catch {
+            upgradeAllCasks(ctx, allocator, &db, &api, prefix, dry_run, force, pinned_only) catch {
                 any_failed = true;
             };
         }
@@ -164,6 +163,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 /// 5. On failure at ANY step after old symlinks are removed: restore old links.
 /// 6. Only remove old Cellar entry after the new version is fully switched.
 fn upgradeFormula(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     name: []const u8,
     db: *sqlite.Database,
@@ -249,16 +249,10 @@ fn upgradeFormula(
     };
 
     // Step 4: Download bottle
-    var ghcr = ghcr_mod.GhcrClient.init(io_mod.ctx(), allocator, http);
+    var ghcr = ghcr_mod.GhcrClient.init(ctx.io, allocator, http);
     defer ghcr.deinit();
 
-    // Per-formula Threaded carries the parent environ. Transitional shim
-    // until cli takes AppCtx directly.
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var store = store_mod.Store.init(io, allocator, db, prefix);
+    var store = store_mod.Store.init(ctx.io, allocator, db, prefix);
 
     if (!store.exists(bottle.sha256)) {
         // Parse GHCR URL to extract repo + digest
@@ -278,22 +272,22 @@ fn upgradeFormula(
         const repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return;
         const digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return;
 
-        const tmp_dir = atomic.createTempDir(io, allocator, name) catch {
+        const tmp_dir = atomic.createTempDir(ctx.io, allocator, name) catch {
             output.err("Failed to create temp dir for {s}", .{name});
             return error.Aborted;
         };
 
         output.info("  Downloading {s}...", .{name});
-        _ = bottle_mod.download(io, allocator, &ghcr, http, repo, digest, bottle.sha256, tmp_dir, null) catch {
+        _ = bottle_mod.download(ctx.io, allocator, &ghcr, http, repo, digest, bottle.sha256, tmp_dir, null) catch {
             output.err("  Download failed: {s}", .{name});
-            atomic.cleanupTempDir(io, tmp_dir);
+            atomic.cleanupTempDir(ctx.io, tmp_dir);
             allocator.free(tmp_dir);
             return error.Aborted;
         };
 
         store.commitFrom(bottle.sha256, tmp_dir) catch {
             output.err("Failed to commit bottle to store for {s}", .{name});
-            atomic.cleanupTempDir(io, tmp_dir);
+            atomic.cleanupTempDir(ctx.io, tmp_dir);
             allocator.free(tmp_dir);
             return error.Aborted;
         };
@@ -312,7 +306,7 @@ fn upgradeFormula(
     // Step 5: Materialize new version to Cellar
     output.dim("Materializing {s} to cellar...", .{name});
     const new_keg = cellar_mod.materialize(
-        io,
+        ctx.io,
         allocator,
         prefix,
         bottle.sha256,
@@ -326,7 +320,7 @@ fn upgradeFormula(
     output.emitNdjsonEvent(allocator, .materialized, name, "ok");
 
     // Step 6: Unlink old symlinks
-    var linker = linker_mod.Linker.init(io, allocator, db, prefix);
+    var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
     linker.unlink(old_keg_id) catch {
         output.warn("Could not remove old symlinks for {s}", .{name});
     };
@@ -337,7 +331,7 @@ fn upgradeFormula(
         // Rollback: re-link old version
         restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
         // rollback cellar cleanup; a leftover keg is tolerable if the rollback is already failing.
-        cellar_mod.remove(io, prefix, formula.name, formula.pkg_version) catch {};
+        cellar_mod.remove(ctx.io, prefix, formula.name, formula.pkg_version) catch {};
         return;
     };
 
@@ -350,7 +344,7 @@ fn upgradeFormula(
         deleteKeg(db, new_keg_id);
         restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
         // rollback cellar cleanup.
-        cellar_mod.remove(io, prefix, formula.name, formula.pkg_version) catch {};
+        cellar_mod.remove(ctx.io, prefix, formula.name, formula.pkg_version) catch {};
         return;
     };
     // `recorded` after both succeed — link rollback above undoes the
@@ -363,7 +357,7 @@ fn upgradeFormula(
 
     // Step 8: Remove old DB record + Cellar entry (success path only)
     deleteKeg(db, old_keg_id);
-    cellar_mod.remove(io, prefix, name, old_pkg_version) catch {
+    cellar_mod.remove(ctx.io, prefix, name, old_pkg_version) catch {
         output.warn("Could not remove old cellar entry for {s} {s}", .{ name, old_pkg_version });
     };
     // Also remove parent if empty
@@ -372,7 +366,7 @@ fn upgradeFormula(
         const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
         if (parent_path.len > 0) {
             // rmdir fails if other versions still live here — that is the intended guard.
-            fs_compat.cwd().deleteDir(parent_path) catch {};
+            std.Io.Dir.cwd().deleteDir(ctx.io, parent_path) catch {};
         }
     }
 
@@ -476,6 +470,7 @@ fn isFormulaInstalled(db: *sqlite.Database, name: []const u8) bool {
 /// Upgrade all outdated formulas. Returns error.Aborted if any individual
 /// upgrade failed so the caller can propagate a non-zero exit.
 fn upgradeAllFormulas(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     api: *api_mod.BrewApi,
@@ -522,7 +517,7 @@ fn upgradeAllFormulas(
     defer failed_names.deinit(allocator);
 
     for (names.items) |name| {
-        upgradeFormula(allocator, name, db, api, http, prefix, dry_run, force, pinned_only) catch {
+        upgradeFormula(ctx, allocator, name, db, api, http, prefix, dry_run, force, pinned_only) catch {
             failed_count += 1;
             // failed_count is the authoritative counter; list is for UX only.
             failed_names.append(allocator, name) catch {};
@@ -541,7 +536,7 @@ fn upgradeAllFormulas(
 // Cask upgrade
 // ---------------------------------------------------------------------------
 
-fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, audit_mode: bool) !void {
+fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, audit_mode: bool) !void {
     if (pinSkip(db, token, force, audit_mode)) {
         output.dim("{s} is pinned, skipped", .{token});
         output.emitNdjsonEvent(allocator, .pinned, token, null);
@@ -585,13 +580,8 @@ fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Data
     // after recordInstall so a `--force` upgrade preserves the user's hold.
     const was_pinned = pin_mod.isPinned(db, token);
 
-    // Per-cask Threaded carries the parent environ for HTTP + spawn.
-    // Transitional shim until cli takes AppCtx directly.
-    const cask_environ = fs_compat.processEnviron();
-    var cask_threaded: std.Io.Threaded = .init(allocator, .{ .environ = cask_environ });
-    defer cask_threaded.deinit();
     // Uninstall old version
-    var installer = cask_mod.CaskInstaller.init(cask_threaded.io(), cask_environ, allocator, db, prefix);
+    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
     installer.uninstall(token) catch {
         output.err("Failed to remove old version of {s}", .{token});
         return error.Aborted;
@@ -617,7 +607,7 @@ fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Data
     output.success("{s} upgraded to {s}", .{ token, parsed_cask.version });
 }
 
-fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, pinned_only: bool) !void {
+fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, pinned_only: bool) !void {
     const sql: [:0]const u8 = if (pinned_only)
         "SELECT token, version FROM casks WHERE pinned = 1 ORDER BY token;"
     else
@@ -654,7 +644,7 @@ fn upgradeAllCasks(allocator: std.mem.Allocator, db: *sqlite.Database, api: *api
     defer failed_tokens.deinit(allocator);
 
     for (tokens.items) |token| {
-        upgradeCask(allocator, token, db, api, prefix, dry_run, force, pinned_only) catch {
+        upgradeCask(ctx, allocator, token, db, api, prefix, dry_run, force, pinned_only) catch {
             failed_count += 1;
             // failed_count is authoritative; list is for UX only.
             failed_tokens.append(allocator, token) catch {};

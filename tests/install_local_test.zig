@@ -321,8 +321,9 @@ test "interpolateVersion falls back to the raw URL when the buffer is too small"
 // ─── expandTildePath ─────────────────────────────────────────────────
 
 test "expandTildePath passes non-tilde input through unchanged" {
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
     var buf: [256]u8 = undefined;
-    const got = install.expandTildePath(&buf, "./foo.rb") orelse return error.TestUnexpectedNull;
+    const got = install.expandTildePath(&ctx, &buf, "./foo.rb") orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("./foo.rb", got);
 }
 
@@ -331,21 +332,24 @@ test "expandTildePath rewrites ~/ into $HOME/" {
     _ = c.setenv("HOME", home_z, 1);
     defer _ = c.unsetenv("HOME");
 
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
     var buf: [256]u8 = undefined;
-    const got = install.expandTildePath(&buf, "~/formulas/wget.rb") orelse return error.TestUnexpectedNull;
+    const got = install.expandTildePath(&ctx, &buf, "~/formulas/wget.rb") orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("/tmp/fake_home_for_tilde_test/formulas/wget.rb", got);
 }
 
 test "expandTildePath leaves `~alice/foo` alone (no `/` after `~`)" {
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
     var buf: [256]u8 = undefined;
-    const got = install.expandTildePath(&buf, "~alice/foo.rb") orelse return error.TestUnexpectedNull;
+    const got = install.expandTildePath(&ctx, &buf, "~alice/foo.rb") orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("~alice/foo.rb", got);
 }
 
 test "expandTildePath returns null when HOME is unset and ~/ is used" {
     _ = c.unsetenv("HOME");
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
     var buf: [256]u8 = undefined;
-    try testing.expect(install.expandTildePath(&buf, "~/foo.rb") == null);
+    try testing.expect(install.expandTildePath(&ctx, &buf, "~/foo.rb") == null);
 }
 
 // ─── execute() --local dispatch tests ────────────────────────────────
@@ -392,7 +396,7 @@ test "execute --local rejects --cask combination (contradictory)" {
 
     try testing.expectError(
         error.Aborted,
-        install.execute(testing.allocator, &.{ "--local", "--cask", "./foo.rb" }),
+        install.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--local", "--cask", "./foo.rb" }),
     );
 }
 
@@ -406,7 +410,7 @@ test "execute --local rejects --formula combination (redundant)" {
 
     try testing.expectError(
         error.Aborted,
-        install.execute(testing.allocator, &.{ "--local", "--formula", "./foo.rb" }),
+        install.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--local", "--formula", "./foo.rb" }),
     );
 }
 
@@ -420,11 +424,11 @@ test "execute --local rejects --use-system-ruby combination (no effect)" {
 
     try testing.expectError(
         error.Aborted,
-        install.execute(testing.allocator, &.{ "--local", "--use-system-ruby", "./foo.rb" }),
+        install.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--local", "--use-system-ruby", "./foo.rb" }),
     );
     try testing.expectError(
         error.Aborted,
-        install.execute(testing.allocator, &.{ "--local", "--use-system-ruby=name", "./foo.rb" }),
+        install.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--local", "--use-system-ruby=name", "./foo.rb" }),
     );
 }
 
@@ -438,7 +442,7 @@ test "execute --local without a path operand exits cleanly (error.Aborted)" {
 
     try testing.expectError(
         error.Aborted,
-        install.execute(testing.allocator, &.{"--local"}),
+        install.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--local"}),
     );
 }
 
@@ -452,7 +456,10 @@ test "execute --local with a missing file reports gracefully and continues" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--local", "--quiet", "/tmp/mlb_missing.rb" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", "/tmp/mlb_missing.rb" });
 }
 
 test "execute --local with a non-.rb realpath is rejected before parse" {
@@ -468,7 +475,10 @@ test "execute --local with a non-.rb realpath is rejected before parse" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--local", "--quiet", rb_path });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", rb_path });
 }
 
 test "execute --local --dry-run with a valid .rb prints a plan" {
@@ -485,7 +495,10 @@ test "execute --local --dry-run with a valid .rb prints a plan" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--local", "--dry-run", "--quiet", rb_path });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", "--quiet", rb_path });
 }
 
 test "execute autodetects a .rb path even without --local (tilde-style hint)" {
@@ -502,7 +515,10 @@ test "execute autodetects a .rb path even without --local (tilde-style hint)" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", rb_path });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", rb_path });
 }
 
 test "execute --local tolerates a world-writable fixture (advisory only)" {
@@ -525,7 +541,10 @@ test "execute --local tolerates a world-writable fixture (advisory only)" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--local", "--dry-run", "--quiet", rb_path });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", "--quiet", rb_path });
 }
 
 test "execute --local rejects a .rb whose archive URL is not https" {
@@ -553,7 +572,10 @@ test "execute --local rejects a .rb whose archive URL is not https" {
     // InsecureArchiveUrl so execute() itself returns cleanly.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--local", "--quiet", rb_path });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", rb_path });
 }
 
 test "execute --local rejects a malformed .rb (missing version/url/sha256)" {
@@ -570,7 +592,10 @@ test "execute --local rejects a malformed .rb (missing version/url/sha256)" {
     // abort on one bad entry.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--local", "--dry-run", "--quiet", rb_path });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", "--quiet", rb_path });
 }
 
 // ─── Cross-command integration: uninstall/info/list on a local keg ──
@@ -667,5 +692,8 @@ test "execute --local rejects a directory path (not a regular file)" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--local", "--dry-run", "--quiet", dir_path });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", "--quiet", dir_path });
 }

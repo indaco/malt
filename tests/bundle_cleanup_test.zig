@@ -64,7 +64,10 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
         try f.writeAll("brew \"wget\"\ncask \"ghostty\"\n");
     }
 
-    try malt.cli_bundle.execute(testing.allocator, &.{ "cleanup", "--dry-run", bf_path });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try malt.cli_bundle.execute(&ctx, testing.allocator, &.{ "cleanup", "--dry-run", bf_path });
 
     var db = try sqlite.Database.open(db_path);
     defer db.close();

@@ -3,7 +3,7 @@
 //! handle, allocator plumbing, and dry-run branching.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const schema = @import("../../db/schema.zig");
 const output = @import("../../ui/output.zig");
 const store_mod = @import("../../core/store.zig");
@@ -16,7 +16,7 @@ const TierResult = util.TierResult;
 
 // ── Tier: --store-orphans (was `gc`) ────────────────────────────────────────
 
-pub fn runStoreOrphans(allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
+pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
 
     var db = util.openDb(prefix) orelse {
@@ -26,11 +26,7 @@ pub fn runStoreOrphans(allocator: std.mem.Allocator, prefix: []const u8, dry_run
     defer db.close();
     schema.initSchema(&db) catch return result;
 
-    // Per-tier Threaded carries the parent environ. Transitional shim
-    // until cli takes AppCtx directly.
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
-    defer threaded.deinit();
-    const io = threaded.io();
+    const io = ctx.io;
 
     var store = store_mod.Store.init(io, allocator, &db, prefix);
     var orphans_list = store.orphans() catch {
@@ -69,7 +65,7 @@ pub fn runStoreOrphans(allocator: std.mem.Allocator, prefix: []const u8, dry_run
 
 // ── Tier: --unused-deps (was `autoremove`) ──────────────────────────────────
 
-pub fn runUnusedDeps(allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
+pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
 
     var db = util.openDb(prefix) orelse {
@@ -106,11 +102,7 @@ pub fn runUnusedDeps(allocator: std.mem.Allocator, prefix: []const u8, dry_run: 
 
     output.info("unused-deps: removing {d} package(s):", .{orphans.len});
 
-    // Per-tier Threaded carries the parent environ. Transitional shim
-    // until cli takes AppCtx directly.
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
-    defer threaded.deinit();
-    const io = threaded.io();
+    const io = ctx.io;
 
     var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
     var store = store_mod.Store.init(io, allocator, &db, prefix);
@@ -137,7 +129,7 @@ pub fn runUnusedDeps(allocator: std.mem.Allocator, prefix: []const u8, dry_run: 
                 var parent_buf: [512]u8 = undefined;
                 const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
                 // Parent dir may be non-empty (sibling versions still installed).
-                if (parent_path.len > 0) fs_compat.deleteDirAbsolute(parent_path) catch {};
+                if (parent_path.len > 0) std.Io.Dir.deleteDirAbsolute(io, parent_path) catch {};
             }
             if (sha_ptr) |s| {
                 store.decrementRef(std.mem.sliceTo(s, 0)) catch {};
@@ -158,36 +150,36 @@ pub fn runUnusedDeps(allocator: std.mem.Allocator, prefix: []const u8, dry_run: 
 
 // ── Tier: --cache[=DAYS] (was `cleanup --prune=`) ───────────────────────────
 
-pub fn runCache(allocator: std.mem.Allocator, cache_dir: []const u8, max_age_days: i64, dry_run: bool) !TierResult {
+pub fn runCache(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8, max_age_days: i64, dry_run: bool) !TierResult {
     _ = allocator;
     var result: TierResult = .{};
     output.info("cache: pruning entries older than {d} day(s) under {s}", .{ max_age_days, cache_dir });
-    pruneCacheRecursive(cache_dir, max_age_days, dry_run, &result);
+    pruneCacheRecursive(ctx.io, cache_dir, max_age_days, dry_run, &result);
     return result;
 }
 
-fn pruneCacheRecursive(cache_dir: []const u8, max_age_days: i64, dry_run: bool, result: *TierResult) void {
-    var dir = fs_compat.openDirAbsolute(cache_dir, .{ .iterate = true }) catch return;
-    defer dir.close();
+fn pruneCacheRecursive(io: std.Io, cache_dir: []const u8, max_age_days: i64, dry_run: bool, result: *TierResult) void {
+    var dir = std.Io.Dir.openDirAbsolute(io, cache_dir, .{ .iterate = true }) catch return;
+    defer dir.close(io);
 
-    const now = fs_compat.timestamp();
+    const now = std.Io.Clock.real.now(io).toSeconds();
     const max_age_secs = max_age_days * 86400;
 
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(io) catch null) |entry| {
         if (entry.kind == .directory) {
             var sub_buf: [512]u8 = undefined;
             const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ cache_dir, entry.name }) catch continue;
-            pruneCacheRecursive(sub_path, max_age_days, dry_run, result);
+            pruneCacheRecursive(io, sub_path, max_age_days, dry_run, result);
             continue;
         }
-        const stat = dir.statFile(entry.name) catch continue;
+        const stat = dir.statFile(io, entry.name, .{}) catch continue;
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         if (now - mtime_secs > max_age_secs) {
             if (dry_run) {
                 output.info("  would prune: {s}/{s}", .{ cache_dir, entry.name });
             } else {
-                dir.deleteFile(entry.name) catch continue;
+                dir.deleteFile(io, entry.name) catch continue;
                 output.info("  pruned: {s}/{s}", .{ cache_dir, entry.name });
             }
             result.bytes += stat.size;
@@ -198,18 +190,19 @@ fn pruneCacheRecursive(cache_dir: []const u8, max_age_days: i64, dry_run: bool, 
 
 // ── Tier: --downloads (was `cleanup -s`) ────────────────────────────────────
 
-pub fn runDownloads(allocator: std.mem.Allocator, cache_dir: []const u8, dry_run: bool) !TierResult {
+pub fn runDownloads(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8, dry_run: bool) !TierResult {
     _ = allocator;
     var result: TierResult = .{};
+    const io = ctx.io;
 
     var path_buf: [512]u8 = undefined;
     const downloads_path = std.fmt.bufPrint(&path_buf, "{s}/downloads", .{cache_dir}) catch return result;
 
-    var dir = fs_compat.openDirAbsolute(downloads_path, .{ .iterate = true }) catch {
+    var dir = std.Io.Dir.openDirAbsolute(io, downloads_path, .{ .iterate = true }) catch {
         output.info("downloads: nothing to remove ({s} not present)", .{downloads_path});
         return result;
     };
-    defer dir.close();
+    defer dir.close(io);
 
     if (dry_run) {
         output.info("downloads: would wipe {s}", .{downloads_path});
@@ -218,13 +211,13 @@ pub fn runDownloads(allocator: std.mem.Allocator, cache_dir: []const u8, dry_run
     }
 
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(io) catch null) |entry| {
         if (entry.kind == .directory) continue;
-        const stat = dir.statFile(entry.name) catch continue;
+        const stat = dir.statFile(io, entry.name, .{}) catch continue;
         if (dry_run) {
             output.info("  would remove: {s}", .{entry.name});
         } else {
-            dir.deleteFile(entry.name) catch continue;
+            dir.deleteFile(io, entry.name) catch continue;
             output.info("  removed: {s}", .{entry.name});
         }
         result.bytes += stat.size;
@@ -235,8 +228,9 @@ pub fn runDownloads(allocator: std.mem.Allocator, cache_dir: []const u8, dry_run
 
 // ── Tier: --stale-casks ─────────────────────────────────────────────────────
 
-pub fn runStaleCasks(allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
+pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
+    const io = ctx.io;
 
     var db = util.openDb(prefix) orelse {
         output.info("stale-casks: no database — nothing to inspect", .{});
@@ -247,12 +241,12 @@ pub fn runStaleCasks(allocator: std.mem.Allocator, prefix: []const u8, dry_run: 
     // Cask download cache
     var cask_cache_buf: [512]u8 = undefined;
     const cask_cache_path = std.fmt.bufPrint(&cask_cache_buf, "{s}/cache/Cask", .{prefix}) catch return result;
-    if (fs_compat.openDirAbsolute(cask_cache_path, .{ .iterate = true })) |dir_const| {
+    if (std.Io.Dir.openDirAbsolute(io, cask_cache_path, .{ .iterate = true })) |dir_const| {
         var dir = dir_const;
-        defer dir.close();
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
+        while (iter.next(io) catch null) |entry| {
             if (entry.kind == .directory) continue;
             const name = entry.name;
             const token = blk: {
@@ -273,11 +267,11 @@ pub fn runStaleCasks(allocator: std.mem.Allocator, prefix: []const u8, dry_run: 
 
             if (stmt.step() catch false) continue; // still installed
 
-            const stat = dir.statFile(entry.name) catch continue;
+            const stat = dir.statFile(io, entry.name, .{}) catch continue;
             if (dry_run) {
                 output.info("  stale-casks: would remove cache {s}", .{entry.name});
             } else {
-                dir.deleteFile(entry.name) catch continue;
+                dir.deleteFile(io, entry.name) catch continue;
                 output.info("  stale-casks: removed cache {s}", .{entry.name});
             }
             result.bytes += stat.size;
@@ -288,12 +282,12 @@ pub fn runStaleCasks(allocator: std.mem.Allocator, prefix: []const u8, dry_run: 
     // Caskroom orphans
     var caskroom_buf: [512]u8 = undefined;
     const caskroom_path = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom", .{prefix}) catch return result;
-    if (fs_compat.openDirAbsolute(caskroom_path, .{ .iterate = true })) |dir_const| {
+    if (std.Io.Dir.openDirAbsolute(io, caskroom_path, .{ .iterate = true })) |dir_const| {
         var caskroom = dir_const;
-        defer caskroom.close();
+        defer caskroom.close(io);
 
         var cr_iter = caskroom.iterate();
-        while (cr_iter.next() catch null) |entry| {
+        while (cr_iter.next(io) catch null) |entry| {
             if (entry.kind != .directory) continue;
 
             const token_z = allocator.dupeZ(u8, entry.name) catch continue;
@@ -310,7 +304,7 @@ pub fn runStaleCasks(allocator: std.mem.Allocator, prefix: []const u8, dry_run: 
             if (dry_run) {
                 output.info("  stale-casks: would remove Caskroom/{s}", .{entry.name});
             } else {
-                fs_compat.deleteTreeAbsolute(full) catch continue;
+                std.Io.Dir.cwd().deleteTree(io, full) catch continue;
                 output.info("  stale-casks: removed Caskroom/{s}", .{entry.name});
             }
             result.removed += 1;
@@ -325,24 +319,25 @@ pub fn runStaleCasks(allocator: std.mem.Allocator, prefix: []const u8, dry_run: 
 
 // ── Tier: --old-versions ────────────────────────────────────────────────────
 
-pub fn runOldVersions(allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
+pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
+    const io = ctx.io;
 
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{prefix}) catch return result;
 
-    var cellar_dir = fs_compat.openDirAbsolute(cellar_path, .{ .iterate = true }) catch {
+    var cellar_dir = std.Io.Dir.openDirAbsolute(io, cellar_path, .{ .iterate = true }) catch {
         output.info("old-versions: no Cellar directory at {s}", .{cellar_path});
         return result;
     };
-    defer cellar_dir.close();
+    defer cellar_dir.close(io);
 
     var iter = cellar_dir.iterate();
-    while (iter.next() catch null) |formula_entry| {
+    while (iter.next(io) catch null) |formula_entry| {
         if (formula_entry.kind != .directory) continue;
 
-        var formula_dir = cellar_dir.openDir(formula_entry.name, .{ .iterate = true }) catch continue;
-        defer formula_dir.close();
+        var formula_dir = cellar_dir.openDir(io, formula_entry.name, .{ .iterate = true }) catch continue;
+        defer formula_dir.close(io);
 
         // Collect (name, mtime) for every version directory.
         const Version = struct { name: []u8, mtime: i128 };
@@ -353,9 +348,9 @@ pub fn runOldVersions(allocator: std.mem.Allocator, prefix: []const u8, dry_run:
         }
 
         var ver_iter = formula_dir.iterate();
-        while (ver_iter.next() catch null) |ver_entry| {
+        while (ver_iter.next(io) catch null) |ver_entry| {
             if (ver_entry.kind != .directory) continue;
-            const stat = formula_dir.statFile(ver_entry.name) catch continue;
+            const stat = formula_dir.statFile(io, ver_entry.name, .{}) catch continue;
             const dup = allocator.dupe(u8, ver_entry.name) catch continue;
             versions.append(allocator, .{ .name = dup, .mtime = stat.mtime.nanoseconds }) catch {
                 allocator.free(dup);
@@ -376,11 +371,11 @@ pub fn runOldVersions(allocator: std.mem.Allocator, prefix: []const u8, dry_run:
             if (idx == newest_idx) continue;
             var path_buf: [512]u8 = undefined;
             const full = std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, formula_entry.name, v.name }) catch continue;
-            const sz = util.pathSize(allocator, full);
+            const sz = util.pathSize(io, allocator, full);
             if (dry_run) {
                 output.info("  old-versions: would remove {s}/{s}", .{ formula_entry.name, v.name });
             } else {
-                fs_compat.deleteTreeAbsolute(full) catch continue;
+                std.Io.Dir.cwd().deleteTree(io, full) catch continue;
                 output.info("  old-versions: removed {s}/{s}", .{ formula_entry.name, v.name });
             }
             result.bytes += sz;

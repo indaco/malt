@@ -98,7 +98,7 @@ test "collectOutdatedFormulas (small-N, single-client path) returns sorted outda
         .{ .name = "charlie", .version = "3.0" }, // outdated
     };
 
-    const out = try outdated_mod.collectOutdatedFormulas(testing.allocator, &api, dir.path, &kegs, null);
+    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &api, dir.path, &kegs, null);
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, 2), out.len);
@@ -128,7 +128,7 @@ test "collectOutdatedFormulas (large-N, pool path) preserves sorted order" {
     for (names, 0..) |n, i| rows_buf[i] = .{ .name = n, .version = "1.0" };
 
     var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
-    const out = try outdated_mod.collectOutdatedFormulas(testing.allocator, &api, dir.path, &rows_buf, null);
+    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &api, dir.path, &rows_buf, null);
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, names.len), out.len);
@@ -160,7 +160,7 @@ test "collectOutdatedFormulas tolerates a missing/404 entry without aborting" {
         .{ .name = "zulu", .version = "1.0" },
     };
 
-    const out = try outdated_mod.collectOutdatedFormulas(testing.allocator, &api, dir.path, &kegs, null);
+    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &api, dir.path, &kegs, null);
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, 2), out.len);
@@ -186,7 +186,7 @@ test "collectOutdatedCasks (small-N) returns sorted outdated rows only" {
         .{ .name = "apptwo", .version = "1.0" }, // outdated
     };
 
-    const out = try outdated_mod.collectOutdatedCasks(testing.allocator, &api, dir.path, &kegs, null);
+    const out = try outdated_mod.collectOutdatedCasks(&malt.app_ctx.debug_ctx, testing.allocator, &api, dir.path, &kegs, null);
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, 2), out.len);
@@ -210,7 +210,7 @@ test "collectOutdatedCasks (large-N, pool path) preserves sorted order" {
     for (tokens, 0..) |t, i| rows_buf[i] = .{ .name = t, .version = "1.0" };
 
     var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
-    const out = try outdated_mod.collectOutdatedCasks(testing.allocator, &api, dir.path, &rows_buf, null);
+    const out = try outdated_mod.collectOutdatedCasks(&malt.app_ctx.debug_ctx, testing.allocator, &api, dir.path, &rows_buf, null);
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, tokens.len), out.len);
@@ -321,11 +321,14 @@ test "outdated execute --pinned-only walks pinned casks alongside formulas" {
         try insertCask(&db, "held-cask", true);
     }
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     // Cask-side row exists and is pinned: the audit must visit it instead of
     // short-circuiting to formula-only scope. With no API cache the row drops
     // out of the result silently — the success contract is "no error, no
     // formula-only override".
-    try outdated_mod.execute(testing.allocator, &.{"--pinned-only"});
+    try outdated_mod.execute(&ctx, testing.allocator, &.{"--pinned-only"});
 }
 
 test "loadFormulaRows .pinned_only returns only pinned rows" {
@@ -477,10 +480,13 @@ test "update --check writes the snapshot and leaves the API cache intact" {
         try insertKegV1(&db, "alpha");
     }
 
-    try update_mod.execute(testing.allocator, &.{"--check"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try update_mod.execute(&ctx, testing.allocator, &.{"--check"});
 
     // Snapshot was written.
-    const snap_opt = outdated_mod.readSnapshot(testing.allocator, env.cache_path);
+    const snap_opt = outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path);
     try testing.expect(snap_opt != null);
     const snap = snap_opt.?;
     defer outdated_mod.freeSnapshot(testing.allocator, snap);
@@ -499,14 +505,17 @@ test "update without --check wipes the API cache and skips the slow snapshot wri
 
     try env.writeApiFile("formula_alpha.json", "{\"name\":\"alpha\"}");
 
-    try update_mod.execute(testing.allocator, &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try update_mod.execute(&ctx, testing.allocator, &.{});
 
     // Cache wipe still happens.
     try testing.expect(!env.apiFileExists("formula_alpha.json"));
     // No snapshot is written: keeping `mt update` cheap is the contract.
     try testing.expectEqual(
         @as(?outdated_mod.OwnedSnapshot, null),
-        outdated_mod.readSnapshot(testing.allocator, env.cache_path),
+        outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path),
     );
 }
 
@@ -521,13 +530,16 @@ test "update without --check deletes a stale snapshot to force fresh recompute n
         .formulas = &[_]outdated_mod.OutdatedEntry{},
         .casks = &[_]outdated_mod.OutdatedEntry{},
     });
-    try testing.expect(outdated_mod.readSnapshot(testing.allocator, env.cache_path) != null);
+    try testing.expect(outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path) != null);
 
-    try update_mod.execute(testing.allocator, &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try update_mod.execute(&ctx, testing.allocator, &.{});
 
     try testing.expectEqual(
         @as(?outdated_mod.OwnedSnapshot, null),
-        outdated_mod.readSnapshot(testing.allocator, env.cache_path),
+        outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path),
     );
 }
 
@@ -554,11 +566,14 @@ test "outdated execute reads a fresh snapshot and never overwrites it" {
         .casks = &[_]outdated_mod.OutdatedEntry{},
     });
 
-    try outdated_mod.execute(testing.allocator, &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try outdated_mod.execute(&ctx, testing.allocator, &.{});
 
     // The marker timestamp survives — proof the snapshot was read and
     // not regenerated by the recompute path.
-    const after_opt = outdated_mod.readSnapshot(testing.allocator, env.cache_path);
+    const after_opt = outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path);
     try testing.expect(after_opt != null);
     const after = after_opt.?;
     defer outdated_mod.freeSnapshot(testing.allocator, after);
@@ -590,11 +605,14 @@ test "outdated execute drops snapshot entries whose keg was uninstalled" {
         .casks = &[_]outdated_mod.OutdatedEntry{},
     });
 
-    try outdated_mod.execute(testing.allocator, &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try outdated_mod.execute(&ctx, testing.allocator, &.{});
 
     // Marker timestamp survives -> execute() took the snapshot path
     // (recompute would have rewritten it with a fresh timestamp).
-    const after_opt = outdated_mod.readSnapshot(testing.allocator, env.cache_path);
+    const after_opt = outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path);
     try testing.expect(after_opt != null);
     const after = after_opt.?;
     defer outdated_mod.freeSnapshot(testing.allocator, after);
@@ -644,9 +662,12 @@ test "outdated execute on a stale snapshot emits the cached entries (used as pro
     // on stderr — but should NOT overwrite the snapshot. We verify the
     // post-execute snapshot still contains "alpha->3.0" rather than a fresh
     // empty recompute.
-    try outdated_mod.execute(testing.allocator, &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try outdated_mod.execute(&ctx, testing.allocator, &.{});
 
-    const after_opt = outdated_mod.readSnapshot(testing.allocator, env.cache_path);
+    const after_opt = outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path);
     try testing.expect(after_opt != null);
     const after = after_opt.?;
     defer outdated_mod.freeSnapshot(testing.allocator, after);
@@ -675,10 +696,13 @@ test "outdated execute --refresh skips the snapshot and recomputes" {
         .casks = &[_]outdated_mod.OutdatedEntry{},
     });
 
-    try outdated_mod.execute(testing.allocator, &.{"--refresh"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try outdated_mod.execute(&ctx, testing.allocator, &.{"--refresh"});
 
     // After --refresh, the snapshot is regenerated to reflect actual state.
-    const fresh_opt = outdated_mod.readSnapshot(testing.allocator, env.cache_path);
+    const fresh_opt = outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path);
     try testing.expect(fresh_opt != null);
     const fresh = fresh_opt.?;
     defer outdated_mod.freeSnapshot(testing.allocator, fresh);
@@ -703,7 +727,7 @@ test "writeSnapshot then readSnapshot round-trips entries through the cache file
     };
     try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, dir.path, snap);
 
-    const read_opt = outdated_mod.readSnapshot(testing.allocator, dir.path);
+    const read_opt = outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, dir.path);
     try testing.expect(read_opt != null);
     const read = read_opt.?;
     defer outdated_mod.freeSnapshot(testing.allocator, read);
@@ -719,7 +743,7 @@ test "writeSnapshot then readSnapshot round-trips entries through the cache file
 test "readSnapshot returns null when the file is missing" {
     var dir = try TempCacheDir.init("snapshot_missing");
     defer dir.deinit();
-    try testing.expectEqual(@as(?outdated_mod.OwnedSnapshot, null), outdated_mod.readSnapshot(testing.allocator, dir.path));
+    try testing.expectEqual(@as(?outdated_mod.OwnedSnapshot, null), outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, dir.path));
 }
 
 test "readSnapshot returns null on garbage contents" {
@@ -730,7 +754,7 @@ test "readSnapshot returns null on garbage contents" {
     const f = try malt.fs_compat.cwd().createFile(path, .{});
     defer f.close();
     try f.writeAll("not-json-at-all");
-    try testing.expectEqual(@as(?outdated_mod.OwnedSnapshot, null), outdated_mod.readSnapshot(testing.allocator, dir.path));
+    try testing.expectEqual(@as(?outdated_mod.OwnedSnapshot, null), outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, dir.path));
 }
 
 test "writeSnapshot creates the cache directory if missing" {
@@ -746,7 +770,7 @@ test "writeSnapshot creates the cache directory if missing" {
     };
     try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, path, snap);
 
-    const read_opt = outdated_mod.readSnapshot(testing.allocator, path);
+    const read_opt = outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, path);
     try testing.expect(read_opt != null);
     const read = read_opt.?;
     defer outdated_mod.freeSnapshot(testing.allocator, read);
@@ -766,6 +790,9 @@ test "outdated execute --pinned-only is a quiet no-op when no kegs are pinned" {
         try insertKeg(&db, "alpha", false);
     }
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     // No pinned kegs => no API calls => quiet success even with no cache.
-    try outdated_mod.execute(testing.allocator, &.{"--pinned-only"});
+    try outdated_mod.execute(&ctx, testing.allocator, &.{"--pinned-only"});
 }

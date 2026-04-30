@@ -212,7 +212,10 @@ test "upgrade emits bracketing lock_acquired + install_complete under ndjson" {
     io_mod.beginStdoutCapture(testing.allocator, &buf);
     defer io_mod.endStdoutCapture();
 
-    try upgrade.execute(testing.allocator, &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try upgrade.execute(&ctx, testing.allocator, &.{});
 
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"event\":\"lock_acquired\"") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"event\":\"install_complete\"") != null);

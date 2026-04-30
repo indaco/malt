@@ -42,9 +42,12 @@ test "mt upgrade <nonexistent> surfaces a non-zero exit" {
     defer testing.allocator.free(db_dir);
     try malt.fs_compat.cwd().makePath(db_dir);
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(
         error.Aborted,
-        upgrade.execute(testing.allocator, &.{"definitely-not-installed"}),
+        upgrade.execute(&ctx, testing.allocator, &.{"definitely-not-installed"}),
     );
 }
 
@@ -83,8 +86,11 @@ test "mt upgrade <pinned> is a quiet no-op (no API call)" {
         try insertPinnedKeg(&db, "alpha-pinned");
     }
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     // Pinned name short-circuits before fetchFormula — must NOT error.
-    try upgrade.execute(testing.allocator, &.{"alpha-pinned"});
+    try upgrade.execute(&ctx, testing.allocator, &.{"alpha-pinned"});
 }
 
 test "mt upgrade (no args) skips pinned kegs without aggregating failures" {
@@ -100,8 +106,11 @@ test "mt upgrade (no args) skips pinned kegs without aggregating failures" {
         try insertPinnedKeg(&db, "second-pinned");
     }
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     // All-pinned bulk run: every keg is skipped, no failures aggregate.
-    try upgrade.execute(testing.allocator, &.{});
+    try upgrade.execute(&ctx, testing.allocator, &.{});
 }
 
 test "mt upgrade --pinned --dry-run with no pinned kegs is a quiet no-op" {
@@ -117,7 +126,10 @@ test "mt upgrade --pinned --dry-run with no pinned kegs is a quiet no-op" {
         try db.exec("INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('loose', 'loose', '1.0', 'sha', '/cellar/loose/1.0');");
     }
 
-    try upgrade.execute(testing.allocator, &.{ "--pinned", "--dry-run" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try upgrade.execute(&ctx, testing.allocator, &.{ "--pinned", "--dry-run" });
 }
 
 test "mt upgrade --pinned without --dry-run or --force errors with usage" {
@@ -130,9 +142,12 @@ test "mt upgrade --pinned without --dry-run or --force errors with usage" {
     defer testing.allocator.free(db_dir);
     try malt.fs_compat.cwd().makePath(db_dir);
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(
         error.Aborted,
-        upgrade.execute(testing.allocator, &.{"--pinned"}),
+        upgrade.execute(&ctx, testing.allocator, &.{"--pinned"}),
     );
 }
 
@@ -158,8 +173,11 @@ test "mt upgrade <pinned-cask> is a quiet no-op (no API call)" {
         try insertPinnedCask(&db, "firefox", "120.0");
     }
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     // Pinned cask short-circuits in upgradeCask before fetchCask — must NOT error.
-    try upgrade.execute(testing.allocator, &.{"firefox"});
+    try upgrade.execute(&ctx, testing.allocator, &.{"firefox"});
 }
 
 test "recordKeg inherits pinned=1 from an existing keg of the same name" {
@@ -298,9 +316,12 @@ test "mt upgrade --pinned --dry-run reaches the cask path (no formula-only overr
     // aborts; if the formula-only override is still in place, the cask
     // path is silently skipped and execute() returns OK. The audit must
     // walk the row, so this run aborts.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(
         error.Aborted,
-        upgrade.execute(testing.allocator, &.{ "--pinned", "--dry-run" }),
+        upgrade.execute(&ctx, testing.allocator, &.{ "--pinned", "--dry-run" }),
     );
 }
 

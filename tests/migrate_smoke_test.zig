@@ -73,8 +73,8 @@ test "migrate --help short-circuits before touching the filesystem" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{"--help"});
-    try migrate.execute(arena.allocator(), &.{"-h"});
+    try migrate.execute(&malt.app_ctx.debug_ctx, arena.allocator(), &.{"--help"});
+    try migrate.execute(&malt.app_ctx.debug_ctx, arena.allocator(), &.{"-h"});
 }
 
 test "bare --use-system-ruby is refused (would widen trust boundary to every keg)" {
@@ -86,12 +86,12 @@ test "bare --use-system-ruby is refused (would widen trust boundary to every keg
     defer arena.deinit();
     try testing.expectError(
         error.Aborted,
-        migrate.execute(arena.allocator(), &.{"--use-system-ruby"}),
+        migrate.execute(&malt.app_ctx.debug_ctx, arena.allocator(), &.{"--use-system-ruby"}),
     );
     // The rejection fires before brew detection, so --dry-run can't rescue it.
     try testing.expectError(
         error.Aborted,
-        migrate.execute(arena.allocator(), &.{ "--dry-run", "--use-system-ruby" }),
+        migrate.execute(&malt.app_ctx.debug_ctx, arena.allocator(), &.{ "--dry-run", "--use-system-ruby" }),
     );
 }
 
@@ -100,12 +100,14 @@ test "bare --use-system-ruby is refused (would widen trust boundary to every keg
 test "detectBrewPrefix honors HOMEBREW_PREFIX when set" {
     _ = c.setenv("HOMEBREW_PREFIX", "/tmp/brew_fake_prefix", 1);
     defer _ = c.unsetenv("HOMEBREW_PREFIX");
-    try testing.expectEqualStrings("/tmp/brew_fake_prefix", migrate.detectBrewPrefix());
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
+    try testing.expectEqualStrings("/tmp/brew_fake_prefix", migrate.detectBrewPrefix(&ctx));
 }
 
 test "detectBrewPrefix falls back to arch default when unset" {
     _ = c.unsetenv("HOMEBREW_PREFIX");
-    const got = migrate.detectBrewPrefix();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
+    const got = migrate.detectBrewPrefix(&ctx);
     // Either /opt/homebrew (arm64) or /usr/local (x86) — never empty,
     // always absolute. Exact value depends on the host arch.
     try testing.expect(got.len > 0);
@@ -115,7 +117,8 @@ test "detectBrewPrefix falls back to arch default when unset" {
 test "empty HOMEBREW_PREFIX falls through to arch default" {
     _ = c.setenv("HOMEBREW_PREFIX", "", 1);
     defer _ = c.unsetenv("HOMEBREW_PREFIX");
-    const got = migrate.detectBrewPrefix();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
+    const got = migrate.detectBrewPrefix(&ctx);
     try testing.expect(got.len > 0);
     try testing.expectEqual(@as(u8, '/'), got[0]);
 }
@@ -131,9 +134,12 @@ test "missing Homebrew installation yields error.Aborted" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
     try testing.expectError(
         error.Aborted,
-        migrate.execute(arena.allocator(), &.{"--dry-run"}),
+        migrate.execute(&ctx, arena.allocator(), &.{"--dry-run"}),
     );
 }
 
@@ -158,7 +164,10 @@ test "empty Cellar exits cleanly with no malt state created" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
 
     // Empty-Cellar branch returns before ensureDirs runs, so the malt
     // prefix must not have been seeded with store/db/Cellar subtrees.
@@ -190,7 +199,10 @@ test "dry-run with kegs lists them and never initializes malt state" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{ "--dry-run", "--quiet" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet" });
 
     // Dry-run returns before ensureDirs — no DB, no lock, no Cellar
     // in the malt prefix.
@@ -220,8 +232,11 @@ test "dry-run is idempotent: back-to-back runs both succeed with no state change
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{ "--dry-run", "--quiet" });
-    try migrate.execute(arena.allocator(), &.{ "--dry-run", "--quiet" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet" });
+    try migrate.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet" });
 
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{mt});
     defer testing.allocator.free(db_dir);
@@ -249,9 +264,12 @@ test "dry-run with scoped --use-system-ruby=foo,bar is accepted (scope parsed, n
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
     // Scoped form is the *only* way to opt in for migrate; empty names in the
     // list (e.g. "foo,,bar") must be tolerated, and dry-run must still win.
-    try migrate.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "--use-system-ruby=foo,,bar" });
+    try migrate.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "--use-system-ruby=foo,,bar" });
 }
 
 // ── Quiet flag ──────────────────────────────────────────────────────────
@@ -277,7 +295,10 @@ test "--quiet alone (no dry-run) with empty Cellar still returns cleanly" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{"-q"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"-q"});
     // Reset so downstream tests don't inherit quiet=true from this one.
     resetOutput();
 }
@@ -338,7 +359,10 @@ test "already-installed kegs are skipped without touching the network" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{"--quiet"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"--quiet"});
     resetOutput();
 
     // Verify the skip branch did not insert a duplicate or clobber the seed.
@@ -470,7 +494,10 @@ test "dry-run with --json emits a parseable document on stdout" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{"--dry-run"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"--dry-run"});
 
     const parsed = try parseAndCheck(buf.items);
     defer parsed.deinit();
@@ -509,7 +536,10 @@ test "--json with empty Cellar emits an empty-kegs document (no human 'No kegs' 
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
 
     const parsed = try parseAndCheck(buf.items);
     defer parsed.deinit();
@@ -568,7 +598,10 @@ test "--json on an already-installed keg records it under skipped_installed" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
 
     const parsed = try parseAndCheck(buf.items);
     defer parsed.deinit();
@@ -614,7 +647,10 @@ test "dry-run stderr pins the 'Found N packages' and 'Would migrate N' lines" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{"--dry-run"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"--dry-run"});
 
     try testing.expect(containsLine(buf.items, "Found 3 package(s) in Homebrew Cellar"));
     try testing.expect(containsLine(buf.items, "Would migrate: tree"));
@@ -658,7 +694,10 @@ test "pre-set SIGINT flag short-circuits the per-keg loop before any API call" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
 
     try testing.expect(containsLine(buf.items, "Interrupted before migration"));
     // Early-return must skip both per-keg success and final summary block.
@@ -709,7 +748,10 @@ test "cellar scan ignores stray files and symlinks alongside keg directories" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{"--dry-run"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"--dry-run"});
 
     const parsed = try parseAndCheck(buf.items);
     defer parsed.deinit();
@@ -782,7 +824,10 @@ test "mixed outcomes: installed keg is skipped and unknown keg fails at API (404
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
 
     const parsed = try parseAndCheck(buf.items);
     defer parsed.deinit();
@@ -835,9 +880,12 @@ test "lock contention returns error.Aborted when db/malt.lock is already held" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
     try testing.expectError(
         error.Aborted,
-        migrate.execute(arena.allocator(), &.{}),
+        migrate.execute(&ctx, arena.allocator(), &.{}),
     );
 }
 
@@ -892,7 +940,10 @@ test "already-installed stderr pins the 'Migration complete' + 'Skipped (install
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
 
     try testing.expect(containsLine(buf.items, "Migration complete:"));
     try testing.expect(containsLine(buf.items, "Migrated:              0"));
@@ -952,7 +1003,10 @@ test "skipped_no_bottle: cached formula with no platform bottle is categorized c
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
 
     const parsed = try parseAndCheck(buf.items);
     defer parsed.deinit();
@@ -982,7 +1036,8 @@ const MockIter = struct {
     idx: usize = 0,
     fail_after: ?usize = null,
 
-    pub fn next(self: *MockIter) !?MockDirEntry {
+    pub fn next(self: *MockIter, io: std.Io) !?MockDirEntry {
+        _ = io;
         if (self.fail_after) |n| if (self.idx == n) {
             self.idx += 1;
             return error.AccessDenied;
@@ -1015,7 +1070,7 @@ test "scanCellarKegs warns and preserves prior names when iterator errors" {
     io_mod.beginStderrCapture(testing.allocator, &buf);
     defer io_mod.endStderrCapture();
 
-    try migrate.scanCellarKegs(arena.allocator(), &mock, &names);
+    try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, &names);
 
     try testing.expectEqual(@as(usize, 2), names.items.len);
     try testing.expectEqualStrings("tree", names.items[0]);
@@ -1120,7 +1175,10 @@ test "resume manifest: pre-seeded keg is skipped before any API call" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
 
     const parsed = try parseAndCheck(buf.items);
     defer parsed.deinit();
@@ -1177,7 +1235,10 @@ test "--parallel --dry-run lists kegs and never starts the pool" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{ "--parallel", "--dry-run" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{ "--parallel", "--dry-run" });
 
     const parsed = try parseAndCheck(buf.items);
     defer parsed.deinit();
@@ -1220,7 +1281,10 @@ test "--parallel sets the dispatch flag before falling through to skip-only path
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{ "--parallel", "--quiet" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{ "--parallel", "--quiet" });
 
     try testing.expect(migrate.last_run_parallel);
 }
@@ -1249,7 +1313,10 @@ test "without --parallel the dispatch flag stays false" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{"--quiet"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"--quiet"});
 
     try testing.expect(!migrate.last_run_parallel);
 }
@@ -1342,7 +1409,10 @@ test "--parallel honours the resume manifest the same way serial does" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{"--parallel"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"--parallel"});
 
     const parsed = try parseAndCheck(buf.items);
     defer parsed.deinit();
@@ -1390,7 +1460,10 @@ test "failed migrate does not write the keg into the resume manifest" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{"--quiet"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"--quiet"});
 
     // Manifest must either not exist or contain zero entries — the 404
     // path returned `.failed_api`, never `.migrated`.
@@ -1400,7 +1473,7 @@ test "failed migrate does not write the keg into the resume manifest" {
         .{mt_z},
     );
     defer testing.allocator.free(manifest_path);
-    var loaded = try malt.cli_migrate_manifest.loadFromPath(testing.allocator, manifest_path);
+    var loaded = try malt.cli_migrate_manifest.loadFromPath(&malt.app_ctx.debug_ctx, testing.allocator, manifest_path);
     defer loaded.deinit();
     try testing.expect(!loaded.contains("failkeg"));
     try testing.expectEqual(@as(usize, 0), loaded.entries.items.len);
@@ -1453,9 +1526,12 @@ test "manifest preserves pre-existing entries across a run with new failures" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{"--quiet"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"--quiet"});
 
-    var loaded = try malt.cli_migrate_manifest.loadFromPath(testing.allocator, manifest_path);
+    var loaded = try malt.cli_migrate_manifest.loadFromPath(&malt.app_ctx.debug_ctx, testing.allocator, manifest_path);
     defer loaded.deinit();
     try testing.expect(loaded.contains("old"));
     try testing.expect(!loaded.contains("newfail"));
@@ -1520,7 +1596,10 @@ test "stale manifest after uninstall falls through to a real migrate" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
 
     const parsed = try parseAndCheck(buf.items);
     defer parsed.deinit();
@@ -1584,7 +1663,10 @@ test "manifest self-heals from DB-confirmed skips after a crash recovery" {
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try migrate.execute(arena.allocator(), &.{"--quiet"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"--quiet"});
 
     // Manifest now exists on disk and contains the keg the DB had —
     // future runs hit the cheap manifest short-circuit instead of the
@@ -1595,27 +1677,39 @@ test "manifest self-heals from DB-confirmed skips after a crash recovery" {
         .{mt_z},
     );
     defer testing.allocator.free(manifest_path);
-    var loaded = try malt.cli_migrate_manifest.loadFromPath(testing.allocator, manifest_path);
+    var loaded = try malt.cli_migrate_manifest.loadFromPath(&malt.app_ctx.debug_ctx, testing.allocator, manifest_path);
     defer loaded.deinit();
     try testing.expect(loaded.contains("recovered"));
 }
 
 test "MALT_MIGRATE_PARALLEL_WORKERS env wires through to the live helper" {
+    // Rebuild the ctx after each setenv: `std.c.environ` may relocate on
+    // mutation, so a snapshot taken once at the top of the test would
+    // dereference freed slots.
     _ = c.setenv("MALT_MIGRATE_PARALLEL_WORKERS", "7", 1);
     defer _ = c.unsetenv("MALT_MIGRATE_PARALLEL_WORKERS");
-    try testing.expectEqual(@as(u32, 7), malt.cli_migrate_parallel.workerCountFromLiveEnv());
+    {
+        const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
+        try testing.expectEqual(@as(u32, 7), malt.cli_migrate_parallel.workerCountFromLiveEnv(&ctx));
+    }
 
     _ = c.setenv("MALT_MIGRATE_PARALLEL_WORKERS", "9999", 1);
-    try testing.expectEqual(
-        malt.cli_migrate_parallel.max_workers,
-        malt.cli_migrate_parallel.workerCountFromLiveEnv(),
-    );
+    {
+        const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
+        try testing.expectEqual(
+            malt.cli_migrate_parallel.max_workers,
+            malt.cli_migrate_parallel.workerCountFromLiveEnv(&ctx),
+        );
+    }
 
     _ = c.unsetenv("MALT_MIGRATE_PARALLEL_WORKERS");
-    try testing.expectEqual(
-        malt.cli_migrate_parallel.default_workers,
-        malt.cli_migrate_parallel.workerCountFromLiveEnv(),
-    );
+    {
+        const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
+        try testing.expectEqual(
+            malt.cli_migrate_parallel.default_workers,
+            malt.cli_migrate_parallel.workerCountFromLiveEnv(&ctx),
+        );
+    }
 }
 
 test "scanCellarKegs skips non-directory entries and survives fail-first iterator" {
@@ -1640,7 +1734,7 @@ test "scanCellarKegs skips non-directory entries and survives fail-first iterato
     io_mod.beginStderrCapture(testing.allocator, &buf);
     defer io_mod.endStderrCapture();
 
-    try migrate.scanCellarKegs(arena.allocator(), &mock, &names);
+    try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, &names);
     try testing.expectEqual(@as(usize, 0), names.items.len);
     try testing.expect(containsLine(buf.items, "Cellar scan error"));
 }
@@ -1671,5 +1765,8 @@ test "dry-run with 4 kegs under testing.allocator shows zero leaks" {
     _ = c.setenv("MALT_PREFIX", mt.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    try migrate.execute(testing.allocator, &.{ "--dry-run", "--quiet" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    try migrate.execute(&ctx, testing.allocator, &.{ "--dry-run", "--quiet" });
 }

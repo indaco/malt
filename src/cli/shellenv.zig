@@ -3,7 +3,7 @@
 //! of the brew form during onboarding.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const atomic = @import("../fs/atomic.zig");
 const io_mod = @import("../ui/io.zig");
 const help = @import("help.zig");
@@ -61,17 +61,17 @@ fn writeShellEnv(w: *std.Io.Writer, shell: Shell, prefix: []const u8) std.Io.Wri
     }
 }
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "shellenv")) return;
 
-    const shell = resolveShell(args) orelse std.process.exit(2);
+    const shell = resolveShell(ctx, args) orelse std.process.exit(2);
 
     const out = try render(allocator, shell, atomic.maltPrefix());
     defer allocator.free(out);
     io_mod.stdoutWriteAll(out);
 }
 
-fn resolveShell(args: []const []const u8) ?Shell {
+fn resolveShell(ctx: *const AppCtx, args: []const []const u8) ?Shell {
     if (args.len > 0) {
         if (parseShell(args[0])) |s| return s;
         var buf: [128]u8 = undefined;
@@ -83,7 +83,7 @@ fn resolveShell(args: []const []const u8) ?Shell {
         io_mod.stderrWriteAll(msg);
         return null;
     }
-    if (detectFromShellPath(fs_compat.getenv("SHELL"))) |s| return s;
+    if (detectFromShellPath(std.process.Environ.getPosix(ctx.environ, "SHELL"))) |s| return s;
     io_mod.stderrWriteAll(
         "malt: could not detect shell from $SHELL. Pass bash, zsh, or fish explicitly.\n",
     );

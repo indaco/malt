@@ -5,12 +5,12 @@
 //! human + JSON envelopes regardless of which command did the work.
 
 const std = @import("std");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const formula_mod = @import("../../core/formula.zig");
 const dsl = @import("../../core/dsl/root.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
 const output = @import("../../ui/output.zig");
 const io_mod = @import("../../ui/io.zig");
-const fs_compat = @import("../../fs/compat.zig");
 
 const download = @import("download.zig");
 
@@ -46,6 +46,7 @@ pub const PostInstallStatus = enum {
 /// Pub so the install-pure tests can drive it with a synthetic flog and
 /// pin the exact output for every branch.
 pub fn routePostInstallOutcome(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     name: []const u8,
     version_str: []const u8,
@@ -71,12 +72,7 @@ pub fn routePostInstallOutcome(
             output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{name});
             if (output.isVerbose()) flog.printUnknown(name);
             if (output.isDebug()) flog.printFatal(name);
-            // Per-call Threaded so ruby_subprocess can spawn / fetch.
-            // Transitional shim until cli/install threads `*const AppCtx`.
-            const environ = fs_compat.processEnviron();
-            var threaded_rb: std.Io.Threaded = .init(allocator, .{ .environ = environ });
-            defer threaded_rb.deinit();
-            ruby_sub.runPostInstall(threaded_rb.io(), environ, allocator, name, version_str, prefix) catch |e| {
+            ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix) catch |e| {
                 output.warn("post_install subprocess failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
                 break :blk .ruby_fallback_failed;
             };
@@ -137,6 +133,7 @@ pub const DslPostInstallOutcome = enum {
 /// Narrow inputs (name + version + json bytes) keep migrate decoupled
 /// from install's `DownloadJob` shape.
 pub fn executeDslPostInstall(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     name: []const u8,
     version_str: []const u8,
@@ -154,46 +151,31 @@ pub fn executeDslPostInstall(
     var flog = dsl.FallbackLog.init(allocator);
     defer flog.deinit();
 
-    // Build a Threaded with the parent environ so DSL `system`/`safe_popen`
-    // spawns reach PATH. Transitional shim until cli/install threads
-    // `*const AppCtx` here (T-070g).
-    const environ = fs_compat.processEnviron();
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = environ });
-    defer threaded.deinit();
-    const io = threaded.io();
-
     // DSL errors reflect in `flog`; the router reads the log as the source
     // of truth so silent skips downgrade the same as hard failures.
-    dsl.executePostInstall(io, environ, allocator, .{
+    dsl.executePostInstall(ctx.io, ctx.environ, allocator, .{
         .name = formula.name,
         .version = formula.version,
         .pkg_version = formula.pkg_version,
     }, post_install_src, prefix, &flog) catch {};
-    routePostInstallOutcome(allocator, name, version_str, prefix, &flog, use_system_ruby_list);
+    routePostInstallOutcome(ctx, allocator, name, version_str, prefix, &flog, use_system_ruby_list);
     return .handled;
 }
 
 /// Locate a DSL post_install body for `name`: prefer a locally cloned
 /// homebrew-core tap, fall back to the pinned GitHub fetch. Returned
 /// slice (when non-null) is owned by the caller.
-fn locateDslSource(allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
-    // Per-call Threaded carries the parent environ for the GitHub HTTP
-    // path. Transitional shim until cli/install threads `*const AppCtx`.
-    const environ = fs_compat.processEnviron();
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = environ });
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    const tap_path = ruby_sub.findHomebrewCoreTap(io);
+fn locateDslSource(ctx: *const AppCtx, allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
+    const tap_path = ruby_sub.findHomebrewCoreTap(ctx.io);
     var rb_buf: [1024]u8 = undefined;
     const rb_path = if (tap_path) |tp|
-        ruby_sub.resolveFormulaRbPath(io, &rb_buf, tp, name)
+        ruby_sub.resolveFormulaRbPath(ctx.io, &rb_buf, tp, name)
     else
         null;
     if (rb_path) |sp| {
-        if (ruby_sub.extractPostInstallBody(io, allocator, sp)) |s| return s;
+        if (ruby_sub.extractPostInstallBody(ctx.io, allocator, sp)) |s| return s;
     }
-    return ruby_sub.fetchPostInstallFromGitHub(io, environ, allocator, name);
+    return ruby_sub.fetchPostInstallFromGitHub(ctx.io, ctx.environ, allocator, name);
 }
 
 /// End-to-end post_install dispatch shared by `install` and `migrate`:
@@ -202,6 +184,7 @@ fn locateDslSource(allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
 /// is in `--use-system-ruby` scope) or the unified skip hint. Both
 /// commands route through here so human + JSON envelopes match exactly.
 pub fn drive(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     name: []const u8,
     version_str: []const u8,
@@ -209,9 +192,10 @@ pub fn drive(
     prefix: []const u8,
     use_system_ruby_list: []const []const u8,
 ) void {
-    if (locateDslSource(allocator, name)) |src| {
+    if (locateDslSource(ctx, allocator, name)) |src| {
         defer allocator.free(src);
         switch (executeDslPostInstall(
+            ctx,
             allocator,
             name,
             version_str,
@@ -229,12 +213,7 @@ pub fn drive(
 
     if (useSystemRubyForFormula(use_system_ruby_list, name)) {
         output.warn("Running post_install for {s} via system Ruby...", .{name});
-        // Per-call Threaded for ruby_subprocess spawn / HTTP. Transitional
-        // shim until cli/install threads `*const AppCtx`.
-        const environ = fs_compat.processEnviron();
-        var threaded_rb: std.Io.Threaded = .init(allocator, .{ .environ = environ });
-        defer threaded_rb.deinit();
-        ruby_sub.runPostInstall(threaded_rb.io(), environ, allocator, name, version_str, prefix) catch |e| {
+        ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix) catch |e| {
             output.warn("post_install failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
         };
     } else {

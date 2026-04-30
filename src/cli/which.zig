@@ -2,8 +2,8 @@
 //! Resolve a prefix binary (or absolute path) to the keg that owns it.
 
 const std = @import("std");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const atomic = @import("../fs/atomic.zig");
-const fs_compat = @import("../fs/compat.zig");
 const color = @import("../ui/color.zig");
 const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
@@ -77,7 +77,7 @@ pub fn encodeHuman(w: *std.Io.Writer, res: Resolution, colorize: bool) !void {
     try output.writeField(w, &scratch, colorize, col, "Keg", "{s}", .{res.keg});
 }
 
-pub fn execute(_: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, _: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "which")) return;
 
     var arg: ?[]const u8 = null;
@@ -97,7 +97,7 @@ pub fn execute(_: std.mem.Allocator, args: []const []const u8) !void {
     // Bare name -> {prefix}/bin/<name>; absolute path -> as-is. The
     // readlink result is the source of truth: the cellar path encodes
     // keg identity, so we resolve everything through it.
-    var link_buf: [fs_compat.max_path_bytes]u8 = undefined;
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const link_path = if (target_arg[0] == '/')
         target_arg
     else
@@ -107,12 +107,13 @@ pub fn execute(_: std.mem.Allocator, args: []const []const u8) !void {
             return error.Aborted;
         };
 
-    var target_buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const link_target = fs_compat.readLinkAbsolute(link_path, &target_buf) catch {
+    var target_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const link_n = std.Io.Dir.readLinkAbsolute(ctx.io, link_path, &target_buf) catch {
         // Missing entry, plain file, or unreadable — all surface the same way: not owned by malt.
         output.err("{s}: not owned by malt (no symlink under {s}/bin)", .{ target_arg, prefix });
         return error.Aborted;
     };
+    const link_target = target_buf[0..link_n];
 
     const res = resolveFromTarget(link_target) catch {
         // Symlink resolves but does not point into a Cellar keg — both NotACellarPath and MalformedCellarPath read the same to a user.
@@ -121,7 +122,7 @@ pub fn execute(_: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     var stdout_buf: [1024]u8 = undefined;
-    var stdout_fw = io_mod.stdoutFile().writer(io_mod.ctx(), &stdout_buf);
+    var stdout_fw = io_mod.stdoutFile().writer(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};

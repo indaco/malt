@@ -73,7 +73,10 @@ test "ambiguity warning fires when both formula and cask are cached" {
     malt.io_mod.beginStderrCapture(testing.allocator, &captured);
     defer malt.io_mod.endStderrCapture();
 
-    try install.execute(arena.allocator(), &.{ "--dry-run", "wget" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "wget" });
 
     try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) != null);
 }
@@ -100,7 +103,10 @@ test "ambiguity warning is silent when no cask cache is present" {
     malt.io_mod.beginStderrCapture(testing.allocator, &captured);
     defer malt.io_mod.endStderrCapture();
 
-    try install.execute(arena.allocator(), &.{ "--dry-run", "wget" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "wget" });
 
     try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) == null);
 }

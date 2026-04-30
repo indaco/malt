@@ -26,8 +26,12 @@ test "findCachedBinary returns the path when the cached binary exists" {
     const f = try malt.fs_compat.createFileAbsolute(expected_bin, .{});
     f.close();
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
     var probe_buf: [512]u8 = undefined;
-    const cached = try cli_run.findCachedBinary(&probe_buf, base, sha, pkg, ver);
+    const cached = try cli_run.findCachedBinary(&ctx, &probe_buf, base, sha, pkg, ver);
     try testing.expect(cached != null);
     try testing.expectEqualStrings(expected_bin, cached.?);
 }
@@ -37,8 +41,12 @@ test "findCachedBinary reports miss when the cache is empty" {
     malt.fs_compat.deleteTreeAbsolute(base) catch {};
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
     var probe_buf: [512]u8 = undefined;
-    const cached = try cli_run.findCachedBinary(&probe_buf, base, "abc", "jq", "1.0");
+    const cached = try cli_run.findCachedBinary(&ctx, &probe_buf, base, "abc", "jq", "1.0");
     try testing.expect(cached == null);
 }
 
@@ -63,11 +71,15 @@ test "findCachedBinary keys cache slot on sha256, not just pkg+version" {
     const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
     f.close();
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
     var probe_buf: [512]u8 = undefined;
-    const same_sha = try cli_run.findCachedBinary(&probe_buf, base, sha_a, pkg, ver);
+    const same_sha = try cli_run.findCachedBinary(&ctx, &probe_buf, base, sha_a, pkg, ver);
     try testing.expect(same_sha != null);
 
-    const other_sha = try cli_run.findCachedBinary(&probe_buf, base, sha_b, pkg, ver);
+    const other_sha = try cli_run.findCachedBinary(&ctx, &probe_buf, base, sha_b, pkg, ver);
     try testing.expect(other_sha == null);
 }
 
@@ -87,8 +99,12 @@ test "findCachedBinary requires the version directory to match" {
     const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
     f.close();
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
     var probe_buf: [512]u8 = undefined;
-    const wrong_ver = try cli_run.findCachedBinary(&probe_buf, base, sha, pkg, "2.0");
+    const wrong_ver = try cli_run.findCachedBinary(&ctx, &probe_buf, base, sha, pkg, "2.0");
     try testing.expect(wrong_ver == null);
 }
 

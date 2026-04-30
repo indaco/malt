@@ -3,7 +3,7 @@
 //! without fixtures.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 
 /// Upper bound on MALT_PREFIX byte length. This is a sanity cap, not a
 /// correctness gate: the Mach-O relocation pipeline (see
@@ -94,8 +94,8 @@ pub fn interpolateVersion(buf: []u8, url: []const u8, version: []const u8) []con
 /// Expand a leading `~/` to `$HOME/...`. Returns the input unchanged
 /// when no tilde prefix is present. Returns null when `$HOME` is
 /// needed but unset.
-pub fn expandTildePath(buf: []u8, arg: []const u8) ?[]const u8 {
+pub fn expandTildePath(ctx: *const AppCtx, buf: []u8, arg: []const u8) ?[]const u8 {
     if (arg.len < 2 or arg[0] != '~' or arg[1] != '/') return arg;
-    const home = fs_compat.getenv("HOME") orelse return null;
+    const home = std.process.Environ.getPosix(ctx.environ, "HOME") orelse return null;
     return std.fmt.bufPrint(buf, "{s}{s}", .{ home, arg[1..] }) catch null;
 }

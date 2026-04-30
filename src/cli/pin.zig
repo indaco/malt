@@ -4,17 +4,18 @@
 //! already surface it.
 
 const std = @import("std");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
-pub fn execute(_: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(_: *const AppCtx, _: std.mem.Allocator, args: []const []const u8) !void {
     return run(args, .pin);
 }
 
-pub fn executeUnpin(_: std.mem.Allocator, args: []const []const u8) !void {
+pub fn executeUnpin(_: *const AppCtx, _: std.mem.Allocator, args: []const []const u8) !void {
     return run(args, .unpin);
 }
 

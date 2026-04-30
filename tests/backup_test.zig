@@ -5,7 +5,8 @@
 
 const std = @import("std");
 const testing = std.testing;
-const backup = @import("malt").backup;
+const malt = @import("malt");
+const backup = malt.backup;
 
 // ── writeEntry / writeHeader ─────────────────────────────────────────────
 
@@ -215,7 +216,11 @@ test "writeEntry + parseBackup round-trip preserves every entry" {
 // ── defaultBackupPath ────────────────────────────────────────────────────
 
 test "defaultBackupPath has the expected shape" {
-    const path = try backup.defaultBackupPath(testing.allocator);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    const path = try backup.defaultBackupPath(&ctx, testing.allocator);
     defer testing.allocator.free(path);
 
     // Expected shape: "malt-backup-YYYY-MM-DDTHH-MM-SS.txt" (35 chars).

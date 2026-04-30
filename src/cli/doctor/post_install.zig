@@ -5,6 +5,7 @@
 //! per-function imports inside the walker.
 
 const std = @import("std");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const sqlite = @import("../../db/sqlite.zig");
 const output = @import("../../ui/output.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
@@ -12,11 +13,10 @@ const dsl = @import("../../core/dsl/root.zig");
 const formula_mod = @import("../../core/formula.zig");
 const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
-const fs_compat = @import("../../fs/compat.zig");
 
 /// Check post_install DSL support status for installed formulae.
 /// Called when `malt doctor --post-install-status` is passed.
-pub fn checkPostInstallStatus(allocator: std.mem.Allocator, prefix: []const u8) void {
+pub fn checkPostInstallStatus(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8) void {
     output.info("Post-install DSL status:", .{});
 
     var db_path_buf: [512]u8 = undefined;
@@ -32,13 +32,8 @@ pub fn checkPostInstallStatus(allocator: std.mem.Allocator, prefix: []const u8) 
     var no_pi_count: u32 = 0;
     var total: u32 = 0;
 
-    // Per-doctor Threaded carries the parent environ for HTTP and any
-    // ruby_subprocess probes. Transitional shim until cli takes AppCtx
-    // directly.
-    const environ = fs_compat.processEnviron();
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = environ });
-    defer threaded.deinit();
-    const io = threaded.io();
+    const io = ctx.io;
+    const environ = ctx.environ;
 
     var http = client_mod.HttpClient.init(io, environ, allocator);
     defer http.deinit();

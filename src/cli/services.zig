@@ -1,11 +1,12 @@
 //! malt — services command
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const io_mod = @import("../ui/io.zig");
 const supervisor = @import("../core/services/supervisor.zig");
 
 pub const ServicesError = error{
@@ -24,47 +25,40 @@ pub fn describeError(err: ServicesError) []const u8 {
 
 /// Primitive entry point for core/bundle's dispatcher: start a single
 /// service. Argv parsing stays in `execute`; this is the non-argv seam.
-pub fn servicesStart(allocator: std.mem.Allocator, name: []const u8) !void {
+pub fn servicesStart(ctx: *const AppCtx, allocator: std.mem.Allocator, name: []const u8) !void {
     const argv = [_][]const u8{ "start", name };
-    return execute(allocator, &argv);
+    return execute(ctx, allocator, &argv);
 }
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0 or
         std.mem.eql(u8, args[0], "-h") or
         std.mem.eql(u8, args[0], "--help"))
     {
-        try printHelp();
+        try printHelp(ctx);
         return;
     }
 
     const sub = args[0];
     const rest = args[1..];
 
-    var db = try openDb();
+    var db = try openDb(ctx);
     defer db.close();
     // Schema is idempotent; subcommand queries surface the real error if the DB is broken.
     schema.initSchema(&db) catch {};
 
-    // Per-command Threaded carries the parent environ so launchctl spawns
-    // resolve via PATH. Transitional shim until T-070g threads `*const AppCtx`
-    // into `services.execute`.
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
-    defer threaded.deinit();
-    const io = threaded.io();
-
     if (std.mem.eql(u8, sub, "list") or std.mem.eql(u8, sub, "ls")) {
-        return cmdList(io, allocator, &db);
+        return cmdList(ctx.io, allocator, &db);
     } else if (std.mem.eql(u8, sub, "start")) {
-        return cmdOne(io, allocator, &db, rest, .start);
+        return cmdOne(ctx.io, allocator, &db, rest, .start);
     } else if (std.mem.eql(u8, sub, "stop")) {
-        return cmdOne(io, allocator, &db, rest, .stop);
+        return cmdOne(ctx.io, allocator, &db, rest, .stop);
     } else if (std.mem.eql(u8, sub, "restart")) {
-        return cmdOne(io, allocator, &db, rest, .restart);
+        return cmdOne(ctx.io, allocator, &db, rest, .restart);
     } else if (std.mem.eql(u8, sub, "status")) {
-        return cmdStatus(io, allocator, &db, rest);
+        return cmdStatus(ctx.io, allocator, &db, rest);
     } else if (std.mem.eql(u8, sub, "logs")) {
-        return cmdLogs(io, allocator, rest);
+        return cmdLogs(ctx, allocator, rest);
     }
 
     output.err("Unknown services subcommand: {s}", .{sub});
@@ -118,7 +112,7 @@ fn cmdStatus(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, res
     output.info("service {s}: {s}", .{ name, supervisor.runtimeStateName(runtime) });
 }
 
-fn cmdLogs(io: std.Io, allocator: std.mem.Allocator, rest: []const []const u8) !void {
+fn cmdLogs(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     if (rest.len < 1) {
         output.err("services logs: expected service name", .{});
         return ServicesError.InvalidArgs;
@@ -141,33 +135,33 @@ fn cmdLogs(io: std.Io, allocator: std.mem.Allocator, rest: []const []const u8) !
     }
     const path = try supervisor.logPath(allocator, name, if (stream == .stdout) .stdout else .stderr);
     defer allocator.free(path);
-    const stdout = fs_compat.stdoutFile();
+    const stdout = io_mod.stdoutFile();
     var write_buf: [4096]u8 = undefined;
-    var stdout_writer = stdout.writer(&write_buf);
+    var stdout_writer = stdout.writer(ctx.io, &write_buf);
     const w = &stdout_writer.interface;
     if (follow) {
         const main_mod = @import("../main.zig");
-        try supervisor.followLog(io, allocator, path, tail_n, w, main_mod.isInterrupted);
+        try supervisor.followLog(ctx.io, allocator, path, tail_n, w, main_mod.isInterrupted);
     } else {
-        try supervisor.tailLog(io, allocator, path, tail_n, w);
+        try supervisor.tailLog(ctx.io, allocator, path, tail_n, w);
     }
     try w.flush();
 }
 
-fn openDb() !sqlite.Database {
+fn openDb(ctx: *const AppCtx) !sqlite.Database {
     const prefix = atomic.maltPrefix();
     var db_dir_buf: [512]u8 = undefined;
     const db_dir = std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix}) catch
         return ServicesError.DatabaseError;
     // db/ may already exist; sqlite.open below surfaces real path errors.
-    fs_compat.cwd().makePath(db_dir) catch {};
+    std.Io.Dir.cwd().createDirPath(ctx.io, db_dir) catch {};
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return ServicesError.DatabaseError;
     return sqlite.Database.open(path);
 }
 
-fn printHelp() !void {
+fn printHelp(ctx: *const AppCtx) !void {
     const msg =
         \\Usage: malt services <subcommand> [args]
         \\
@@ -182,6 +176,6 @@ fn printHelp() !void {
         \\                    --follow / -f tails appended bytes until SIGINT.
         \\
     ;
-    const f = fs_compat.stderrFile();
-    try f.writeAll(msg);
+    const f = io_mod.stderrFile();
+    try f.writeStreamingAll(ctx.io, msg);
 }

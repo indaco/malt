@@ -5,7 +5,6 @@
 //! filesystem primitives.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
 const lock_mod = @import("../../db/lock.zig");
 const sqlite = @import("../../db/sqlite.zig");
 
@@ -79,39 +78,40 @@ fn probeStaleLockState(prefix: []const u8) StaleLockState {
 }
 
 /// True when the lock file holds a PID that no longer exists.
-pub fn probeStaleLock(prefix: []const u8) bool {
+pub fn probeStaleLock(io: std.Io, prefix: []const u8) bool {
+    _ = io;
     return probeStaleLockState(prefix) == .stale;
 }
 
 /// Count broken symlinks under the prefix's link directories without
 /// modifying anything. Mirrors the doctor check's traversal.
-pub fn probeBrokenSymlinks(prefix: []const u8) u32 {
-    return walkBrokenSymlinks(prefix, false);
+pub fn probeBrokenSymlinks(io: std.Io, prefix: []const u8) u32 {
+    return walkBrokenSymlinks(io, prefix, false);
 }
 
 /// Walk the same directories the doctor check inspects and unlink each
 /// broken symlink. Returns the number actually removed.
-pub fn fixBrokenSymlinks(prefix: []const u8) u32 {
-    return walkBrokenSymlinks(prefix, true);
+pub fn fixBrokenSymlinks(io: std.Io, prefix: []const u8) u32 {
+    return walkBrokenSymlinks(io, prefix, true);
 }
 
 const link_dirs = [_][]const u8{ "bin", "lib", "include", "share", "sbin" };
 
-fn walkBrokenSymlinks(prefix: []const u8, do_remove: bool) u32 {
+fn walkBrokenSymlinks(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
     var count: u32 = 0;
     for (link_dirs) |subdir| {
         var dir_buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
-        var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch continue;
-        defer dir.close();
+        var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
+        while (iter.next(io) catch null) |entry| {
             if (entry.kind != .sym_link) continue;
             // statFile resolves the link; failure means the target is missing.
-            _ = dir.statFile(entry.name) catch {
+            _ = dir.statFile(io, entry.name, .{}) catch {
                 if (do_remove) {
-                    dir.deleteFile(entry.name) catch continue;
+                    dir.deleteFile(io, entry.name) catch continue;
                 }
                 count += 1;
                 continue;
@@ -123,29 +123,29 @@ fn walkBrokenSymlinks(prefix: []const u8, do_remove: bool) u32 {
 
 /// Best-effort removal of the prefix's lock file when its PID is dead.
 /// Idempotent: a missing or live lock file is a no-op (returns false).
-pub fn fixStaleLock(prefix: []const u8) bool {
+pub fn fixStaleLock(io: std.Io, prefix: []const u8) bool {
     if (probeStaleLockState(prefix) != .stale) return false;
     var lock_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return false;
-    fs_compat.deleteFileAbsolute(lock_path) catch return false;
+    std.Io.Dir.deleteFileAbsolute(io, lock_path) catch return false;
     return true;
 }
 
 /// Count orphaned store directories (entry on disk with refcount <= 0
 /// or no `store_refs` row). Mirrors the doctor walker so `--fix` and
 /// the inline check report the same number.
-pub fn probeOrphanedStoreCount(prefix: []const u8) u32 {
-    return countOrphans(prefix, false);
+pub fn probeOrphanedStoreCount(io: std.Io, prefix: []const u8) u32 {
+    return countOrphans(io, prefix, false);
 }
 
 /// Sweep orphan store directories and clear their `store_refs` rows so
 /// repeated `--fix` runs converge to zero. Silent on partial failure —
 /// the next run will pick up whatever is left.
-pub fn fixOrphanedStore(prefix: []const u8) u32 {
-    return countOrphans(prefix, true);
+pub fn fixOrphanedStore(io: std.Io, prefix: []const u8) u32 {
+    return countOrphans(io, prefix, true);
 }
 
-fn countOrphans(prefix: []const u8, do_remove: bool) u32 {
+fn countOrphans(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return 0;
     var db = sqlite.Database.open(db_path) catch return 0;
@@ -153,17 +153,17 @@ fn countOrphans(prefix: []const u8, do_remove: bool) u32 {
 
     var store_path_buf: [512]u8 = undefined;
     const store_path = std.fmt.bufPrint(&store_path_buf, "{s}/store", .{prefix}) catch return 0;
-    var store_dir = fs_compat.openDirAbsolute(store_path, .{ .iterate = true }) catch return 0;
-    defer store_dir.close();
+    var store_dir = std.Io.Dir.openDirAbsolute(io, store_path, .{ .iterate = true }) catch return 0;
+    defer store_dir.close(io);
 
     var count: u32 = 0;
     var iter = store_dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(io) catch null) |entry| {
         if (!isOrphanRow(&db, entry.name)) continue;
         if (do_remove) {
             var entry_buf: [768]u8 = undefined;
             const entry_path = std.fmt.bufPrint(&entry_buf, "{s}/store/{s}", .{ prefix, entry.name }) catch continue;
-            fs_compat.deleteTreeAbsolute(entry_path) catch continue;
+            std.Io.Dir.cwd().deleteTree(io, entry_path) catch continue;
             deleteRefRow(&db, entry.name);
         }
         count += 1;
@@ -252,6 +252,7 @@ pub fn renderPlan(writer: *std.Io.Writer, plan: Plan, dry_run: bool) !void {
 
 pub const FixCtx = struct {
     prefix: []const u8,
+    io: std.Io,
     /// Pre-computed conditions; when null, the executor probes the
     /// safe-class conditions itself. Tests inject explicit conditions
     /// (including dangerous classes) without requiring a real prefix.
@@ -278,9 +279,9 @@ pub const FixOutcome = struct {
 /// outcome. In `dry_run` mode no filesystem mutation happens.
 pub fn executeFix(ctx: FixCtx, dry_run: bool) FixOutcome {
     const conditions: Conditions = ctx.conditions orelse .{
-        .stale_lock = probeStaleLock(ctx.prefix),
-        .orphan_store_count = probeOrphanedStoreCount(ctx.prefix),
-        .broken_symlink_count = probeBrokenSymlinks(ctx.prefix),
+        .stale_lock = probeStaleLock(ctx.io, ctx.prefix),
+        .orphan_store_count = probeOrphanedStoreCount(ctx.io, ctx.prefix),
+        .broken_symlink_count = probeBrokenSymlinks(ctx.io, ctx.prefix),
     };
     const plan = planFixes(conditions);
 
@@ -288,13 +289,13 @@ pub fn executeFix(ctx: FixCtx, dry_run: bool) FixOutcome {
     if (dry_run) return outcome;
 
     if (plan.safe.contains(.stale_lock)) {
-        outcome.stale_lock_removed = fixStaleLock(ctx.prefix);
+        outcome.stale_lock_removed = fixStaleLock(ctx.io, ctx.prefix);
     }
     if (plan.safe.contains(.orphaned_store)) {
-        outcome.orphans_removed = fixOrphanedStore(ctx.prefix);
+        outcome.orphans_removed = fixOrphanedStore(ctx.io, ctx.prefix);
     }
     if (plan.safe.contains(.broken_symlinks)) {
-        outcome.broken_symlinks_removed = fixBrokenSymlinks(ctx.prefix);
+        outcome.broken_symlinks_removed = fixBrokenSymlinks(ctx.io, ctx.prefix);
     }
     return outcome;
 }
@@ -459,6 +460,7 @@ test "executeFix: dry run does not touch filesystem state" {
     const outcome = executeFix(
         .{
             .prefix = "/nonexistent/malt/prefix",
+            .io = std.Options.debug_io,
             .conditions = .{ .stale_lock = true, .broken_symlink_count = 1 },
         },
         true,
@@ -471,6 +473,7 @@ test "executeFix: empty conditions yield an empty plan" {
     const outcome = executeFix(
         .{
             .prefix = "/nonexistent",
+            .io = std.Options.debug_io,
             .conditions = .{},
         },
         false,
@@ -480,9 +483,9 @@ test "executeFix: empty conditions yield an empty plan" {
 }
 
 test "fixStaleLock: missing lock file is a no-op" {
-    try std.testing.expect(!fixStaleLock("/nonexistent/malt/prefix"));
+    try std.testing.expect(!fixStaleLock(std.Options.debug_io, "/nonexistent/malt/prefix"));
 }
 
 test "probeStaleLock: missing prefix returns false" {
-    try std.testing.expect(!probeStaleLock("/nonexistent/malt/prefix"));
+    try std.testing.expect(!probeStaleLock(std.Options.debug_io, "/nonexistent/malt/prefix"));
 }

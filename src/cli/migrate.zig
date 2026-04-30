@@ -5,7 +5,7 @@
 //! install protocol. Never modifies the Homebrew installation.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
@@ -35,16 +35,16 @@ pub var last_run_parallel: bool = false;
 /// by `brew shellenv` and by users with a non-standard install), falls
 /// back to the arch-based default. Exposed so smoke tests can point the
 /// command at a fake Cellar under a scratch path.
-pub fn detectBrewPrefix() []const u8 {
-    if (fs_compat.getenv("HOMEBREW_PREFIX")) |p| {
+pub fn detectBrewPrefix(ctx: *const AppCtx) []const u8 {
+    if (std.process.Environ.getPosix(ctx.environ, "HOMEBREW_PREFIX")) |p| {
         if (p.len > 0) return p;
     }
     return if (codesign.isArm64()) "/opt/homebrew" else "/usr/local";
 }
 
 /// Lock-acquire timeout. `MALT_LOCK_TIMEOUT_MS` overrides the 30 s default.
-fn lockTimeoutMs() u32 {
-    if (fs_compat.getenv("MALT_LOCK_TIMEOUT_MS")) |v| {
+fn lockTimeoutMs(ctx: *const AppCtx) u32 {
+    if (std.process.Environ.getPosix(ctx.environ, "MALT_LOCK_TIMEOUT_MS")) |v| {
         return std.fmt.parseInt(u32, v, 10) catch 30_000;
     }
     return 30_000;
@@ -54,12 +54,13 @@ fn lockTimeoutMs() u32 {
 /// truncating the scan — `iter.next() catch null` used to hide every
 /// later keg behind the first bad entry. `anytype` for mock iterators.
 pub fn scanCellarKegs(
+    io: std.Io,
     arena: std.mem.Allocator,
     iter: anytype,
     names: *std.ArrayList([]const u8),
 ) !void {
     while (true) {
-        const entry = iter.next() catch |err| {
+        const entry = iter.next(io) catch |err| {
             output.warn("Cellar scan error: {s}; keeping {d} entries already found", .{ @errorName(err), names.items.len });
             break;
         } orelse break;
@@ -68,12 +69,12 @@ pub fn scanCellarKegs(
     }
 }
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "migrate")) return;
 
     last_run_parallel = false;
 
-    const start_ts = fs_compat.milliTimestamp();
+    const start_ts = std.Io.Clock.real.now(ctx.io).toMilliseconds();
     const json_mode = output.isJson();
     var dry_run = output.isDryRun();
     // Ruby is opt-in per keg only. A bare --use-system-ruby across a
@@ -105,11 +106,11 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // ── Step 1: Detect Homebrew prefix ──────────────────────────────
-    const brew_prefix = detectBrewPrefix();
+    const brew_prefix = detectBrewPrefix(ctx);
     var cellar_buf: [256]u8 = undefined;
     const brew_cellar = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{brew_prefix}) catch return;
 
-    fs_compat.accessAbsolute(brew_cellar, .{}) catch {
+    std.Io.Dir.accessAbsolute(ctx.io, brew_cellar, .{}) catch {
         output.err("No Homebrew installation found at {s}", .{brew_prefix});
         return error.Aborted;
     };
@@ -117,11 +118,11 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     output.info("Found Homebrew installation at {s}", .{brew_prefix});
 
     // ── Step 2: Scan Cellar for installed kegs ──────────────────────
-    var dir = fs_compat.openDirAbsolute(brew_cellar, .{ .iterate = true }) catch {
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, brew_cellar, .{ .iterate = true }) catch {
         output.err("Cannot read Homebrew Cellar", .{});
         return error.Aborted;
     };
-    defer dir.close();
+    defer dir.close(ctx.io);
 
     // Uniform scan-lifetime dupes → one arena, no per-entry free plumbing.
     var scan_arena = std.heap.ArenaAllocator.init(allocator);
@@ -129,7 +130,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var keg_names: std.ArrayList([]const u8) = .empty;
 
     var iter = dir.iterate();
-    try scanCellarKegs(scan_arena.allocator(), &iter, &keg_names);
+    try scanCellarKegs(ctx.io, scan_arena.allocator(), &iter, &keg_names);
 
     if (keg_names.items.len == 0) {
         if (json_mode) {
@@ -165,7 +166,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // ── Step 3: Initialize malt infrastructure ──────────────────────
     const prefix = atomic.maltPrefix();
-    ensureDirs(prefix) catch return error.Aborted;
+    ensureDirs(ctx, prefix) catch return error.Aborted;
 
     // Open database
     var db_path_buf: [512]u8 = undefined;
@@ -184,7 +185,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Acquire lock; `MALT_LOCK_TIMEOUT_MS` tunes the 30 s default.
     var lock_path_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
-    var lk = lock_mod.LockFile.acquire(lock_path, lockTimeoutMs()) catch {
+    var lk = lock_mod.LockFile.acquire(lock_path, lockTimeoutMs(ctx)) catch {
         output.err("Another mt process is running. Wait or run mt doctor.", .{});
         return error.Aborted;
     };
@@ -195,26 +196,18 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     output.emitNdjsonEvent(allocator, .lock_acquired, "", null);
 
     // Set up HTTP + API + GHCR + store + linker
-    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
     var cache_dir_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
-    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
 
-    var ghcr = ghcr_mod.GhcrClient.init(io_mod.ctx(), allocator, &http);
+    var ghcr = ghcr_mod.GhcrClient.init(ctx.io, allocator, &http);
     defer ghcr.deinit();
 
-    // Threaded io built once for the whole migrate run — covers spawn
-    // (via core/cask/child_mod), HTTP (network code already takes io),
-    // and pure file I/O. Transitional shim until cli takes AppCtx
-    // directly.
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var store = store_mod.Store.init(io, allocator, &db, prefix);
-    var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
+    var store = store_mod.Store.init(ctx.io, allocator, &db, prefix);
+    var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
 
     // Resume manifest: a crashed/^C run resumes from where it stopped
     // instead of redoing every keg.
@@ -224,7 +217,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         "{s}/cache/migrate.progress.json",
         .{prefix},
     ) catch return;
-    var manifest = manifest_mod.loadFromPath(allocator, manifest_path) catch |e| blk: {
+    var manifest = manifest_mod.loadFromPath(ctx, allocator, manifest_path) catch |e| blk: {
         output.warn("Could not read resume manifest ({s}); starting fresh", .{@errorName(e)});
         break :blk manifest_mod.Manifest.init(allocator);
     };
@@ -254,13 +247,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         last_run_parallel = true;
 
         const worker_count = parallel_mod.boundWorkerCount(
-            parallel_mod.workerCountFromLiveEnv(),
+            parallel_mod.workerCountFromLiveEnv(ctx),
             keg_names.items.len,
         );
 
         // Borrowed clients keep TLS contexts warm across kegs without
         // paying a fresh handshake per worker.
-        var http_pool = client_mod.HttpClientPool.init(io_mod.ctx(), fs_compat.processEnviron(), allocator, @intCast(@max(worker_count, 1))) catch {
+        var http_pool = client_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, @intCast(@max(worker_count, 1))) catch {
             output.err("Failed to initialise HTTP client pool", .{});
             return error.Aborted;
         };
@@ -275,6 +268,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         for (outcomes, 0..) |*o, i| o.* = .{ .name = keg_names.items[i], .result = .skipped_installed };
 
         var pool: parallel_mod.Pool = .{
+            .app_ctx = ctx,
             .next_idx = std.atomic.Value(usize).init(0),
             .keg_names = keg_names.items,
             .outcomes = outcomes,
@@ -322,7 +316,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             try skipped_installed_names.append(allocator, keg_name);
             continue;
         }
-        const result = migrateKeg(allocator, keg_name, .{
+        const result = migrateKeg(ctx, allocator, keg_name, .{
             .api = &api,
             .ghcr = &ghcr,
             .http = &http,
@@ -344,7 +338,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 manifest.add(keg_name) catch |e| {
                     output.warn("Resume manifest update failed for {s}: {s}", .{ keg_name, @errorName(e) });
                 };
-                manifest.writeAtomic(io, allocator, manifest_path) catch |e| {
+                manifest.writeAtomic(ctx.io, allocator, manifest_path) catch |e| {
                     output.warn("Resume manifest write failed: {s}", .{@errorName(e)});
                 };
             },
@@ -367,7 +361,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
     if (manifest_dirty) {
-        manifest.writeAtomic(io, allocator, manifest_path) catch |e| {
+        manifest.writeAtomic(ctx.io, allocator, manifest_path) catch |e| {
             output.warn("Resume manifest self-heal write failed: {s}", .{@errorName(e)});
         };
     }
@@ -520,8 +514,8 @@ pub fn buildSummaryJson(
 }
 
 /// Ensure all required directories under prefix exist.
-fn ensureDirs(prefix: []const u8) !void {
-    fs_compat.makeDirAbsolute(prefix) catch |e| switch (e) {
+fn ensureDirs(ctx: *const AppCtx, prefix: []const u8) !void {
+    std.Io.Dir.createDirAbsolute(ctx.io, prefix, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => {
             output.err("Cannot create prefix directory {s}", .{prefix});
@@ -547,7 +541,7 @@ fn ensureDirs(prefix: []const u8) !void {
     for (subdirs) |subdir| {
         var buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
-        fs_compat.makeDirAbsolute(dir_path) catch |e| switch (e) {
+        std.Io.Dir.createDirAbsolute(ctx.io, dir_path, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => continue,
         };

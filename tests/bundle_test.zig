@@ -314,7 +314,10 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
     malt.output.setDryRun(true);
     defer malt.output.setDryRun(false);
 
-    try malt.cli_bundle.execute(testing.allocator, &.{ "install", bf_path });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try malt.cli_bundle.execute(&ctx, testing.allocator, &.{ "install", bf_path });
 
     const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{dir_z}, 0);
     defer testing.allocator.free(db_path);

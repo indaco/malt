@@ -63,8 +63,12 @@ test "fixStaleLock: dead PID lock file is removed" {
     const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
     try writeFile(lock_path, dead_pid_str);
 
-    try testing.expect(fix.probeStaleLock(prefix));
-    try testing.expect(fix.fixStaleLock(prefix));
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try testing.expect(fix.probeStaleLock(io, prefix));
+    try testing.expect(fix.fixStaleLock(io, prefix));
     try testing.expect(!pathExists(lock_path));
 }
 
@@ -84,8 +88,12 @@ test "fixStaleLock: live PID is left alone" {
     const pid_str = try std.fmt.bufPrint(&pid_buf, "{d}", .{std.c.getpid()});
     try writeFile(lock_path, pid_str);
 
-    try testing.expect(!fix.probeStaleLock(prefix));
-    try testing.expect(!fix.fixStaleLock(prefix));
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try testing.expect(!fix.probeStaleLock(io, prefix));
+    try testing.expect(!fix.fixStaleLock(io, prefix));
     try testing.expect(pathExists(lock_path));
 }
 
@@ -94,8 +102,12 @@ test "fixStaleLock: missing lock file is a no-op" {
     const prefix = try makePrefix(&prefix_buf, "nolock");
     defer fs_compat.deleteTreeAbsolute(prefix) catch {};
 
-    try testing.expect(!fix.probeStaleLock(prefix));
-    try testing.expect(!fix.fixStaleLock(prefix));
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try testing.expect(!fix.probeStaleLock(io, prefix));
+    try testing.expect(!fix.fixStaleLock(io, prefix));
 }
 
 // ── broken symlinks ─────────────────────────────────────────────────
@@ -119,8 +131,12 @@ test "fixBrokenSymlinks: dangling links are unlinked, valid links survive" {
     try bin.symLink(anchor, "alive", .{});
     try bin.symLink("/tmp/malt-doctor-fix-vanished-target", "dead", .{});
 
-    try testing.expectEqual(@as(u32, 1), fix.probeBrokenSymlinks(prefix));
-    try testing.expectEqual(@as(u32, 1), fix.fixBrokenSymlinks(prefix));
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try testing.expectEqual(@as(u32, 1), fix.probeBrokenSymlinks(io, prefix));
+    try testing.expectEqual(@as(u32, 1), fix.fixBrokenSymlinks(io, prefix));
 
     // Re-open to refresh the iterator after the unlink.
     var alive_path_buf: [256]u8 = undefined;
@@ -132,15 +148,20 @@ test "fixBrokenSymlinks: dangling links are unlinked, valid links survive" {
     try testing.expect(!pathExists(dead_path));
 
     // After fixing, the next probe must report zero.
-    try testing.expectEqual(@as(u32, 0), fix.probeBrokenSymlinks(prefix));
+    try testing.expectEqual(@as(u32, 0), fix.probeBrokenSymlinks(io, prefix));
 }
 
 test "fixBrokenSymlinks: prefix without link dirs reports zero" {
     var prefix_buf: [128]u8 = undefined;
     const prefix = try makePrefix(&prefix_buf, "emptylinks");
     defer fs_compat.deleteTreeAbsolute(prefix) catch {};
-    try testing.expectEqual(@as(u32, 0), fix.probeBrokenSymlinks(prefix));
-    try testing.expectEqual(@as(u32, 0), fix.fixBrokenSymlinks(prefix));
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try testing.expectEqual(@as(u32, 0), fix.probeBrokenSymlinks(io, prefix));
+    try testing.expectEqual(@as(u32, 0), fix.fixBrokenSymlinks(io, prefix));
 }
 
 // ── executor ────────────────────────────────────────────────────────
@@ -158,9 +179,14 @@ test "executeFix: dry run leaves filesystem untouched and surfaces the plan" {
     const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
     try writeFile(lock_path, dead_pid_str);
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     const outcome = fix.executeFix(
         .{
             .prefix = prefix,
+            .io = io,
             .conditions = .{ .stale_lock = true },
         },
         true,
@@ -190,9 +216,14 @@ test "executeFix: live run sweeps stale lock + broken symlinks together" {
     defer bin.close();
     try bin.symLink("/tmp/malt-doctor-fix-vanished-multi", "ghost", .{});
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     const outcome = fix.executeFix(
         .{
             .prefix = prefix,
+            .io = io,
             .conditions = .{ .stale_lock = true, .broken_symlink_count = 1 },
         },
         false,
@@ -233,13 +264,17 @@ test "fixOrphanedStore: sweeps refcount-zero entries against a real DB" {
     const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
     try fs_compat.makeDirAbsolute(entry_dir);
 
-    var store = store_mod.Store.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
     try store.incrementRef(sha);
     try store.decrementRef(sha);
 
-    try testing.expectEqual(@as(u32, 1), fix.probeOrphanedStoreCount(prefix));
-    try testing.expectEqual(@as(u32, 1), fix.fixOrphanedStore(prefix));
-    try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(prefix));
+    try testing.expectEqual(@as(u32, 1), fix.probeOrphanedStoreCount(io, prefix));
+    try testing.expectEqual(@as(u32, 1), fix.fixOrphanedStore(io, prefix));
+    try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(io, prefix));
     try testing.expect(!pathExists(entry_dir));
 }
 
@@ -247,8 +282,13 @@ test "fixOrphanedStore: missing DB is a no-op (returns 0)" {
     var prefix_buf: [128]u8 = undefined;
     const prefix = try makePrefix(&prefix_buf, "no-db");
     defer fs_compat.deleteTreeAbsolute(prefix) catch {};
-    try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(prefix));
-    try testing.expectEqual(@as(u32, 0), fix.fixOrphanedStore(prefix));
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(io, prefix));
+    try testing.expectEqual(@as(u32, 0), fix.fixOrphanedStore(io, prefix));
 }
 
 test "executeFix: idempotent — second run finds nothing left to do" {
@@ -263,10 +303,14 @@ test "executeFix: idempotent — second run finds nothing left to do" {
     const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
     try writeFile(lock_path, dead_pid_str);
 
-    const first = fix.executeFix(.{ .prefix = prefix }, false);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const first = fix.executeFix(.{ .prefix = prefix, .io = io }, false);
     try testing.expect(first.stale_lock_removed);
 
-    const second = fix.executeFix(.{ .prefix = prefix }, false);
+    const second = fix.executeFix(.{ .prefix = prefix, .io = io }, false);
     try testing.expectEqual(@as(u32, 0), second.fixesApplied());
     try testing.expect(second.plan.isEmpty());
 }
@@ -275,6 +319,7 @@ test "executeFix: dangerous classes carry into the plan, not the safe set" {
     const outcome = fix.executeFix(
         .{
             .prefix = "/nonexistent/malt/prefix",
+            .io = std.Options.debug_io,
             .conditions = .{ .db_corrupt = true, .missing_kegs = true },
         },
         false,

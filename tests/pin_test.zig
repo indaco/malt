@@ -71,7 +71,7 @@ test "mt pin <name> sets pinned=1 on installed keg" {
         try insertKeg(&db, "alpha", false);
     }
 
-    try cli_pin.execute(testing.allocator, &.{"alpha"});
+    try cli_pin.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"alpha"});
 
     var db = try openDb(path);
     defer db.close();
@@ -90,7 +90,7 @@ test "mt unpin <name> clears pinned" {
         try insertKeg(&db, "bravo", true);
     }
 
-    try cli_pin.executeUnpin(testing.allocator, &.{"bravo"});
+    try cli_pin.executeUnpin(&malt.app_ctx.debug_ctx, testing.allocator, &.{"bravo"});
 
     var db = try openDb(path);
     defer db.close();
@@ -103,7 +103,7 @@ test "mt pin with no args returns Aborted (usage)" {
     defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    try testing.expectError(error.Aborted, cli_pin.execute(testing.allocator, &.{}));
+    try testing.expectError(error.Aborted, cli_pin.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{}));
 }
 
 test "mt unpin with no args returns Aborted (usage)" {
@@ -112,7 +112,7 @@ test "mt unpin with no args returns Aborted (usage)" {
     defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    try testing.expectError(error.Aborted, cli_pin.executeUnpin(testing.allocator, &.{}));
+    try testing.expectError(error.Aborted, cli_pin.executeUnpin(&malt.app_ctx.debug_ctx, testing.allocator, &.{}));
 }
 
 test "mt pin <not-installed> returns Aborted" {
@@ -128,7 +128,7 @@ test "mt pin <not-installed> returns Aborted" {
 
     try testing.expectError(
         error.Aborted,
-        cli_pin.execute(testing.allocator, &.{"definitely-not-installed"}),
+        cli_pin.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"definitely-not-installed"}),
     );
 }
 
@@ -145,7 +145,7 @@ test "mt unpin <not-installed> returns Aborted" {
 
     try testing.expectError(
         error.Aborted,
-        cli_pin.executeUnpin(testing.allocator, &.{"definitely-not-installed"}),
+        cli_pin.executeUnpin(&malt.app_ctx.debug_ctx, testing.allocator, &.{"definitely-not-installed"}),
     );
 }
 
@@ -196,7 +196,7 @@ test "mt pin <cask-token> falls through kegs and sets casks.pinned" {
         try insertCask(&db, "firefox", false);
     }
 
-    try cli_pin.execute(testing.allocator, &.{"firefox"});
+    try cli_pin.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"firefox"});
 
     var db = try openDb(path);
     defer db.close();
@@ -215,7 +215,7 @@ test "mt unpin <cask-token> clears casks.pinned" {
         try insertCask(&db, "slack", true);
     }
 
-    try cli_pin.executeUnpin(testing.allocator, &.{"slack"});
+    try cli_pin.executeUnpin(&malt.app_ctx.debug_ctx, testing.allocator, &.{"slack"});
 
     var db = try openDb(path);
     defer db.close();
@@ -234,7 +234,7 @@ test "mt pin <cask> is idempotent — re-pinning a cask still succeeds" {
         try insertCask(&db, "obsidian", true);
     }
 
-    try cli_pin.execute(testing.allocator, &.{"obsidian"});
+    try cli_pin.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"obsidian"});
 
     var db = try openDb(path);
     defer db.close();
@@ -268,7 +268,7 @@ test "mt pin is idempotent — re-pinning is a no-op success" {
         try insertKeg(&db, "tre", true);
     }
 
-    try cli_pin.execute(testing.allocator, &.{"tre"});
+    try cli_pin.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"tre"});
 
     var db = try openDb(path);
     defer db.close();

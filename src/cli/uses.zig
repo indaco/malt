@@ -2,6 +2,7 @@
 //! Show installed packages that depend on a given formula.
 
 const std = @import("std");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -11,7 +12,7 @@ const color = @import("../ui/color.zig");
 const cli_info = @import("info.zig");
 const help = @import("help.zig");
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "uses")) return;
 
     // Parse flags. `--json` is consumed by the global parser and read
@@ -38,7 +39,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer if (db_opt) |*d| d.close();
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw = io_mod.stdoutFile().writer(io_mod.ctx(), &stdout_buf);
+    var stdout_fw = io_mod.stdoutFile().writer(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};

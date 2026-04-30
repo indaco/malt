@@ -91,7 +91,10 @@ test "execute short-circuits without opening the DB when the keg already exists"
     malt.io_mod.beginStderrCapture(testing.allocator, &captured);
     defer malt.io_mod.endStderrCapture();
 
-    try install.execute(arena.allocator(), &.{"seedpkg"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{"seedpkg"});
 
     // No SQLite open ⇒ no malt.db file. No lock acquire ⇒ no malt.lock.
     try testing.expect(!pathExists(db_file));
@@ -114,9 +117,12 @@ test "execute --force falls through to the existing path even when the keg exist
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
     // `--force` drives the full pipeline; we don't care about the eventual
     // outcome for an unresolvable name, only that the DB was opened.
-    install.execute(arena.allocator(), &.{ "--force", "--quiet", "seedpkg" }) catch {};
+    install.execute(&ctx, arena.allocator(), &.{ "--force", "--quiet", "seedpkg" }) catch {};
 
     try testing.expect(pathExists(db_file));
 }
@@ -140,7 +146,10 @@ test "execute falls through when one of several args is missing from the Cellar"
     // extract; ditto writes its complaint straight to fd 2 — gate it.
     const saved_stderr = silenceStderr();
     defer restoreStderr(saved_stderr);
-    install.execute(arena.allocator(), &.{ "--quiet", "alpha", "missing" }) catch {};
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    install.execute(&ctx, arena.allocator(), &.{ "--quiet", "alpha", "missing" }) catch {};
 
     try testing.expect(pathExists(db_file));
 }
@@ -160,7 +169,10 @@ test "execute --dry-run skips the fast path so the plan still reaches the user" 
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "seedpkg" }) catch {};
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "seedpkg" }) catch {};
 
     try testing.expect(pathExists(db_file));
 }

@@ -2,7 +2,6 @@
 //! CLI entry point and command dispatch for the `mt` binary.
 
 const std = @import("std");
-const fs_compat = @import("fs/compat.zig");
 const io_mod = @import("ui/io.zig");
 const color_mod = @import("ui/color.zig");
 const AppCtx = @import("app_ctx.zig").AppCtx;
@@ -352,39 +351,39 @@ pub fn main(init: std.process.Init.Minimal) !void {
         notifier.maybeNotify(&ctx, allocator, version, cmd_str);
     } else {
         // Unknown command — try transparent brew fallback
-        try brewFallback(allocator, args);
+        try brewFallback(&ctx, args);
     }
 }
 
 fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_args: []const []const u8) !void {
     switch (cmd) {
-        .install => try install.execute(allocator, cmd_args),
-        .uninstall => try uninstall.execute(allocator, cmd_args),
-        .upgrade => try upgrade.execute(allocator, cmd_args),
-        .update => try update.execute(allocator, cmd_args),
-        .outdated => try outdated.execute(allocator, cmd_args),
-        .list => try list.execute(allocator, cmd_args),
-        .info => try info.execute(allocator, cmd_args),
-        .search => try search.execute(allocator, cmd_args),
-        .doctor => try doctor.execute(allocator, cmd_args),
-        .tap => try tap.execute(allocator, cmd_args),
-        .untap => try tap.executeUntap(allocator, cmd_args),
-        .migrate => try migrate.execute(allocator, cmd_args),
-        .rollback => try rollback.execute(allocator, cmd_args),
-        .link => try link_cmd.executeLink(allocator, cmd_args),
-        .unlink => try link_cmd.executeUnlink(allocator, cmd_args),
-        .pin => try pin_cmd.execute(allocator, cmd_args),
-        .unpin => try pin_cmd.executeUnpin(allocator, cmd_args),
-        .run => try run_cmd.execute(allocator, cmd_args),
-        .completions => try completions.execute(allocator, cmd_args),
-        .shellenv => try shellenv.execute(allocator, cmd_args),
-        .backup => try backup.execute(allocator, cmd_args),
-        .restore => try restore.execute(allocator, cmd_args),
-        .purge => try purge.execute(allocator, cmd_args),
-        .services => try services.execute(allocator, cmd_args),
-        .bundle => try bundle.execute(allocator, cmd_args),
-        .uses => try uses.execute(allocator, cmd_args),
-        .which => try which_cmd.execute(allocator, cmd_args),
+        .install => try install.execute(ctx, allocator, cmd_args),
+        .uninstall => try uninstall.execute(ctx, allocator, cmd_args),
+        .upgrade => try upgrade.execute(ctx, allocator, cmd_args),
+        .update => try update.execute(ctx, allocator, cmd_args),
+        .outdated => try outdated.execute(ctx, allocator, cmd_args),
+        .list => try list.execute(ctx, allocator, cmd_args),
+        .info => try info.execute(ctx, allocator, cmd_args),
+        .search => try search.execute(ctx, allocator, cmd_args),
+        .doctor => try doctor.execute(ctx, allocator, cmd_args),
+        .tap => try tap.execute(ctx, allocator, cmd_args),
+        .untap => try tap.executeUntap(ctx, allocator, cmd_args),
+        .migrate => try migrate.execute(ctx, allocator, cmd_args),
+        .rollback => try rollback.execute(ctx, allocator, cmd_args),
+        .link => try link_cmd.executeLink(ctx, allocator, cmd_args),
+        .unlink => try link_cmd.executeUnlink(ctx, allocator, cmd_args),
+        .pin => try pin_cmd.execute(ctx, allocator, cmd_args),
+        .unpin => try pin_cmd.executeUnpin(ctx, allocator, cmd_args),
+        .run => try run_cmd.execute(ctx, allocator, cmd_args),
+        .completions => try completions.execute(ctx, allocator, cmd_args),
+        .shellenv => try shellenv.execute(ctx, allocator, cmd_args),
+        .backup => try backup.execute(ctx, allocator, cmd_args),
+        .restore => try restore.execute(ctx, allocator, cmd_args),
+        .purge => try purge.execute(ctx, allocator, cmd_args),
+        .services => try services.execute(ctx, allocator, cmd_args),
+        .bundle => try bundle.execute(ctx, allocator, cmd_args),
+        .uses => try uses.execute(ctx, allocator, cmd_args),
+        .which => try which_cmd.execute(ctx, allocator, cmd_args),
         .version_cmd => {
             // "mt version" — check for "mt version update" subcommand
             if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
@@ -466,7 +465,7 @@ fn printVersion() void {
     io_mod.stdoutWriteAll("malt " ++ version ++ "\n");
 }
 
-fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
+fn brewFallback(ctx: *const AppCtx, args: []const []const u8) !void {
     // Try to find and exec the real brew binary
     const brew_paths = [_][]const u8{
         "/opt/homebrew/bin/brew",
@@ -475,7 +474,7 @@ fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     for (brew_paths) |brew_path| {
-        fs_compat.accessAbsolute(brew_path, .{}) catch continue;
+        std.Io.Dir.accessAbsolute(ctx.io, brew_path, .{}) catch continue;
 
         // Build argv: [brew] ++ args
         var argv_buf: [128][]const u8 = undefined;
@@ -485,9 +484,9 @@ fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
             argv_buf[i] = arg;
         }
 
-        var child = fs_compat.Child.init(argv_buf[0 .. argc + 1], allocator);
-        child.spawn() catch continue;
-        const term = child.wait() catch continue;
+        const argv = argv_buf[0 .. argc + 1];
+        var spawned = std.process.spawn(ctx.io, .{ .argv = argv }) catch continue;
+        const term = spawned.wait(ctx.io) catch continue;
         switch (term) {
             .exited => |code| {
                 if (code != 0) return error.BrewFailed;

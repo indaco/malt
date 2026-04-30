@@ -60,7 +60,10 @@ test "execute resolves a bare binary name through the prefix bin symlink" {
     _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    try which.execute(testing.allocator, &.{"jq"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try which.execute(&ctx, testing.allocator, &.{"jq"});
 }
 
 test "execute accepts an absolute path under the prefix" {
@@ -73,7 +76,10 @@ test "execute accepts an absolute path under the prefix" {
     const abs = try std.fmt.allocPrint(testing.allocator, "{s}/bin/wget", .{prefix});
     defer testing.allocator.free(abs);
 
-    try which.execute(testing.allocator, &.{abs});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try which.execute(&ctx, testing.allocator, &.{abs});
 }
 
 test "execute on an unknown name returns Aborted" {
@@ -83,11 +89,14 @@ test "execute on an unknown name returns Aborted" {
     _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    try testing.expectError(error.Aborted, which.execute(testing.allocator, &.{"does-not-exist"}));
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(error.Aborted, which.execute(&ctx, testing.allocator, &.{"does-not-exist"}));
 }
 
 test "execute with no positional arg returns Aborted with usage" {
-    try testing.expectError(error.Aborted, which.execute(testing.allocator, &.{}));
+    try testing.expectError(error.Aborted, which.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{}));
 }
 
 test "execute on an absolute path that is not a symlink returns Aborted" {
@@ -103,5 +112,9 @@ test "execute on an absolute path that is not a symlink returns Aborted" {
         .{prefix},
     );
     defer testing.allocator.free(plain);
-    try testing.expectError(error.Aborted, which.execute(testing.allocator, &.{plain}));
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(error.Aborted, which.execute(&ctx, testing.allocator, &.{plain}));
 }

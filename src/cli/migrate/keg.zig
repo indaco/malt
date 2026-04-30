@@ -4,6 +4,7 @@
 //! shrinks to flag parsing, scan, and dispatch.
 
 const std = @import("std");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const sqlite = @import("../../db/sqlite.zig");
 const formula_mod = @import("../../core/formula.zig");
 const bottle_mod = @import("../../core/bottle.zig");
@@ -16,7 +17,6 @@ const api_mod = @import("../../net/api.zig");
 const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
 const post_install_mod = @import("../install/post_install.zig");
-const io_mod = @import("../../ui/io.zig");
 
 /// Result of migrating a single keg.
 pub const KegResult = enum {
@@ -47,6 +47,7 @@ pub const MigrateDeps = struct {
 
 /// Migrate a single keg from Homebrew into malt.
 pub fn migrateKeg(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     keg_name: []const u8,
     deps: MigrateDeps,
@@ -78,7 +79,7 @@ pub fn migrateKeg(
     output.info("  Migrating {s} {s}...", .{ formula.name, formula.version });
 
     if (!deps.store.exists(bottle.sha256)) {
-        if (!downloadBottle(allocator, deps.ghcr, deps.http, deps.store, bottle.url, bottle.sha256, keg_name)) {
+        if (!downloadBottle(ctx, allocator, deps.ghcr, deps.http, deps.store, bottle.url, bottle.sha256, keg_name)) {
             return .failed_download;
         }
     } else {
@@ -94,15 +95,8 @@ pub fn migrateKeg(
         std.log.warn("refcount increment failed for {s}: {s}", .{ keg_name, @errorName(e) });
     };
 
-    // Per-keg Threaded for cellar.materialize (file IO + relocated_store).
-    // Transitional shim until cli takes AppCtx directly.
-    const fs_compat_keg = @import("../../fs/compat.zig");
-    var mat_threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat_keg.processEnviron() });
-    defer mat_threaded.deinit();
-    const mat_io = mat_threaded.io();
-
     const keg = cellar_mod.materialize(
-        mat_io,
+        ctx.io,
         allocator,
         deps.prefix,
         bottle.sha256,
@@ -117,14 +111,13 @@ pub fn migrateKeg(
 
     // Workers serialise on `db_mu` so transactions can't interleave;
     // serial callers leave `db_mu` null and pay no lock cost.
-    const io_ctx = io_mod.ctx();
-    if (deps.db_mu) |m| m.lockUncancelable(io_ctx);
-    defer if (deps.db_mu) |m| m.unlock(io_ctx);
+    if (deps.db_mu) |m| m.lockUncancelable(ctx.io);
+    defer if (deps.db_mu) |m| m.unlock(ctx.io);
 
     if (!formula.keg_only) {
         const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
             output.err("    {s}: failed to record in database", .{keg_name});
-            cellar_mod.remove(mat_io, deps.prefix, formula.name, formula.pkg_version) catch {};
+            cellar_mod.remove(ctx.io, deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
 
@@ -134,7 +127,7 @@ pub fn migrateKeg(
             // Rollback: unlink partial links and delete keg row; user already warned above.
             deps.linker.unlink(keg_id) catch {};
             deleteKeg(deps.db, keg_id) catch {};
-            cellar_mod.remove(mat_io, deps.prefix, formula.name, formula.pkg_version) catch {};
+            cellar_mod.remove(ctx.io, deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
         // `recorded` after both succeed — link rollback above undoes
@@ -145,7 +138,7 @@ pub fn migrateKeg(
         recordDeps(deps.db, keg_id, &formula);
     } else {
         const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
-            cellar_mod.remove(mat_io, deps.prefix, formula.name, formula.pkg_version) catch {};
+            cellar_mod.remove(ctx.io, deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
         output.emitNdjsonEvent(allocator, .recorded, keg_name, "ok");
@@ -155,6 +148,7 @@ pub fn migrateKeg(
 
     if (formula.post_install_defined) {
         post_install_mod.drive(
+            ctx,
             allocator,
             formula.name,
             formula.pkg_version,
@@ -171,6 +165,7 @@ pub fn migrateKeg(
 
 /// Download a bottle from GHCR and commit to the store.
 fn downloadBottle(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     ghcr: *ghcr_mod.GhcrClient,
     http: *client_mod.HttpClient,
@@ -197,26 +192,20 @@ fn downloadBottle(
     const repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return false;
     const digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return false;
 
-    // Per-keg Threaded for bottle download. Transitional shim until cli takes AppCtx directly.
-    const fs_compat_local = @import("../../fs/compat.zig");
-    var keg_threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat_local.processEnviron() });
-    defer keg_threaded.deinit();
-    const keg_io = keg_threaded.io();
-
-    const tmp_dir = atomic.createTempDir(keg_io, allocator, name) catch return false;
+    const tmp_dir = atomic.createTempDir(ctx.io, allocator, name) catch return false;
 
     output.info("    Downloading {s}...", .{name});
 
-    _ = bottle_mod.download(keg_io, allocator, ghcr, http, repo, digest, sha256, tmp_dir, null) catch {
+    _ = bottle_mod.download(ctx.io, allocator, ghcr, http, repo, digest, sha256, tmp_dir, null) catch {
         output.err("    Download failed: {s}", .{name});
-        atomic.cleanupTempDir(keg_io, tmp_dir);
+        atomic.cleanupTempDir(ctx.io, tmp_dir);
         allocator.free(tmp_dir);
         return false;
     };
 
     store.commitFrom(sha256, tmp_dir) catch {
         output.err("    Store commit failed: {s}", .{name});
-        atomic.cleanupTempDir(keg_io, tmp_dir);
+        atomic.cleanupTempDir(ctx.io, tmp_dir);
         allocator.free(tmp_dir);
         return false;
     };

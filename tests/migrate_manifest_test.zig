@@ -23,7 +23,11 @@ test "loadFromPath returns an empty manifest when the file does not exist" {
     defer testing.allocator.free(path);
     fs_compat.deleteFileAbsolute(path) catch {};
 
-    var m = try manifest.loadFromPath(testing.allocator, path);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var m = try manifest.loadFromPath(&ctx, testing.allocator, path);
     defer m.deinit();
     try testing.expectEqual(@as(usize, 0), m.entries.items.len);
 }
@@ -33,13 +37,18 @@ test "writeAtomic + loadFromPath round-trip the completed list" {
     defer testing.allocator.free(path);
     defer fs_compat.deleteFileAbsolute(path) catch {};
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty };
+
     var m = manifest.Manifest.init(testing.allocator);
     defer m.deinit();
     try m.add("foo");
     try m.add("bar");
-    try m.writeAtomic(std.Options.debug_io, testing.allocator, path);
+    try m.writeAtomic(io, testing.allocator, path);
 
-    var loaded = try manifest.loadFromPath(testing.allocator, path);
+    var loaded = try manifest.loadFromPath(&ctx, testing.allocator, path);
     defer loaded.deinit();
     try testing.expect(loaded.contains("foo"));
     try testing.expect(loaded.contains("bar"));
@@ -51,17 +60,22 @@ test "writeAtomic over an existing file replaces its contents" {
     defer testing.allocator.free(path);
     defer fs_compat.deleteFileAbsolute(path) catch {};
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = io, .environ = .empty };
+
     var first = manifest.Manifest.init(testing.allocator);
     defer first.deinit();
     try first.add("only-first");
-    try first.writeAtomic(std.Options.debug_io, testing.allocator, path);
+    try first.writeAtomic(io, testing.allocator, path);
 
     var second = manifest.Manifest.init(testing.allocator);
     defer second.deinit();
     try second.add("only-second");
-    try second.writeAtomic(std.Options.debug_io, testing.allocator, path);
+    try second.writeAtomic(io, testing.allocator, path);
 
-    var loaded = try manifest.loadFromPath(testing.allocator, path);
+    var loaded = try manifest.loadFromPath(&ctx, testing.allocator, path);
     defer loaded.deinit();
     try testing.expect(!loaded.contains("only-first"));
     try testing.expect(loaded.contains("only-second"));

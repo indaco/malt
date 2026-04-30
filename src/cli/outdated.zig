@@ -5,7 +5,7 @@ const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const output = @import("../ui/output.zig");
 const io_mod = @import("../ui/io.zig");
 const api_mod = @import("../net/api.zig");
@@ -247,7 +247,7 @@ pub fn writeSnapshot(
     snap: Snapshot,
 ) !void {
     // Best-effort: a real error here gets surfaced by atomicWriteFile below.
-    fs_compat.cwd().makePath(cache_dir) catch {};
+    std.Io.Dir.cwd().createDirPath(io, cache_dir) catch {};
 
     const path = try snapshotPath(allocator, cache_dir);
     defer allocator.free(path);
@@ -263,10 +263,29 @@ const snapshot_read_cap: usize = 1 * 1024 * 1024;
 /// Read the snapshot at `{cache_dir}/outdated.json`. Snapshot trades
 /// freshness for instant startup; on any read or parse failure we
 /// return null so callers fall back to a live recompute.
-pub fn readSnapshot(allocator: std.mem.Allocator, cache_dir: []const u8) ?OwnedSnapshot {
+pub fn readSnapshot(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8) ?OwnedSnapshot {
     const path = snapshotPath(allocator, cache_dir) catch return null;
     defer allocator.free(path);
-    const bytes = fs_compat.readFileAbsoluteAlloc(allocator, path, snapshot_read_cap) catch return null;
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
+    defer file.close(io);
+    const st = file.stat(io) catch return null;
+    const size: usize = @intCast(@min(@as(u64, snapshot_read_cap), st.size));
+    const buf = allocator.alloc(u8, size) catch return null;
+    const n = file.readPositionalAll(io, buf, 0) catch {
+        allocator.free(buf);
+        return null;
+    };
+    // Short read: shrink so caller-side free length matches.
+    const bytes = if (n == buf.len) buf else blk: {
+        if (allocator.resize(buf, n)) break :blk buf[0..n];
+        const trimmed = allocator.alloc(u8, n) catch {
+            allocator.free(buf);
+            return null;
+        };
+        @memcpy(trimmed, buf[0..n]);
+        allocator.free(buf);
+        break :blk trimmed;
+    };
     defer allocator.free(bytes);
     return parseSnapshot(allocator, bytes) catch null;
 }
@@ -344,7 +363,7 @@ pub const EmitPlan = enum {
 /// folded into the caller's `catch {}` so a snapshot write never blocks
 /// the user-facing output that already succeeded.
 pub fn refreshSnapshot(
-    io: std.Io,
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     api: *api_mod.BrewApi,
@@ -356,7 +375,7 @@ pub fn refreshSnapshot(
     const cask_rows = try loadCaskRows(allocator, db, .all);
     defer freeKegRows(allocator, cask_rows);
 
-    const formulas = try collectOutdatedFormulas(allocator, api, cache_dir, formula_rows, workers_override);
+    const formulas = try collectOutdatedFormulas(ctx, allocator, api, cache_dir, formula_rows, workers_override);
     defer {
         for (formulas) |e| {
             allocator.free(e.name);
@@ -365,7 +384,7 @@ pub fn refreshSnapshot(
         }
         allocator.free(formulas);
     }
-    const casks = try collectOutdatedCasks(allocator, api, cache_dir, cask_rows, workers_override);
+    const casks = try collectOutdatedCasks(ctx, allocator, api, cache_dir, cask_rows, workers_override);
     defer {
         for (casks) |e| {
             allocator.free(e.name);
@@ -375,8 +394,8 @@ pub fn refreshSnapshot(
         allocator.free(casks);
     }
 
-    try writeSnapshot(io, allocator, cache_dir, .{
-        .generated_at_ms = fs_compat.milliTimestamp(),
+    try writeSnapshot(ctx.io, allocator, cache_dir, .{
+        .generated_at_ms = std.Io.Clock.real.now(ctx.io).toMilliseconds(),
         .formulas = formulas,
         .casks = casks,
     });
@@ -745,7 +764,7 @@ test "summaryMessage picks the message that matches the active scope" {
     );
 }
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "outdated")) return;
 
     var cask_only = false;
@@ -771,7 +790,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer allocator.free(cache_dir);
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw = io_mod.stdoutFile().writer(io_mod.ctx(), &stdout_buf);
+    var stdout_fw = io_mod.stdoutFile().writer(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};
@@ -786,16 +805,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer db.close();
     schema.initSchema(&db) catch return;
 
-    const max_age_hours = parseMaxAgeHoursEnv(fs_compat.getenv(SNAPSHOT_MAX_AGE_ENV)) orelse
+    const max_age_hours = parseMaxAgeHoursEnv(std.process.Environ.getPosix(ctx.environ, SNAPSHOT_MAX_AGE_ENV)) orelse
         SNAPSHOT_DEFAULT_MAX_AGE_HOURS;
-    const snap_opt = readSnapshot(allocator, cache_dir);
+    const snap_opt = readSnapshot(ctx.io, allocator, cache_dir);
     defer if (snap_opt) |s| freeSnapshot(allocator, s);
 
     const plan = planEmit(
         args,
         snap_opt != null,
         if (snap_opt) |s| s.generated_at_ms else 0,
-        fs_compat.milliTimestamp(),
+        std.Io.Clock.real.now(ctx.io).toMilliseconds(),
         max_age_hours,
     );
 
@@ -812,7 +831,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 .formula_only = formula_only,
             });
         },
-        .recompute => try recomputeAndEmit(allocator, &db, cache_dir, stdout, json_mode, .{
+        .recompute => try recomputeAndEmit(ctx, allocator, &db, cache_dir, stdout, json_mode, .{
             .cask_only = cask_only,
             .formula_only = formula_only,
             .pinned_only = pinned_only,
@@ -864,6 +883,7 @@ fn emitFromSnapshot(
 }
 
 fn recomputeAndEmit(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     cache_dir: []const u8,
@@ -871,32 +891,27 @@ fn recomputeAndEmit(
     json_mode: bool,
     scope: ScopeFlags,
 ) !void {
-    const threaded_environ = fs_compat.processEnviron();
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = threaded_environ });
-    defer threaded.deinit();
-    const local_io = threaded.io();
-
-    var http = client_mod.HttpClient.init(local_io, threaded_environ, allocator);
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(local_io, allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
 
-    const workers_override = parseWorkersEnv(fs_compat.getenv(OUTDATED_WORKERS_ENV));
+    const workers_override = parseWorkersEnv(std.process.Environ.getPosix(ctx.environ, OUTDATED_WORKERS_ENV));
 
     var formula_count: usize = 0;
     var cask_count: usize = 0;
     if (!scope.cask_only) {
         const filter: KegFilter = if (scope.pinned_only) .pinned_only else .all;
-        formula_count = try emitOutdatedFormulas(allocator, db, &api, cache_dir, workers_override, stdout, json_mode, filter);
+        formula_count = try emitOutdatedFormulas(ctx, allocator, db, &api, cache_dir, workers_override, stdout, json_mode, filter);
     }
     if (!scope.formula_only) {
         const filter: KegFilter = if (scope.pinned_only) .pinned_only else .all;
-        cask_count = try emitOutdatedCasks(allocator, db, &api, cache_dir, workers_override, stdout, json_mode, filter);
+        cask_count = try emitOutdatedCasks(ctx, allocator, db, &api, cache_dir, workers_override, stdout, json_mode, filter);
     }
     // Refresh the snapshot only when we walked the full keg set; a
     // partial recompute would mislead the next reader. Best-effort:
     // a write failure shouldn't shadow the listing the user already saw.
     if (!scope.pinned_only and !scope.cask_only and !scope.formula_only) {
-        refreshSnapshot(local_io, allocator, db, &api, cache_dir, workers_override) catch {};
+        refreshSnapshot(ctx, allocator, db, &api, cache_dir, workers_override) catch {};
     }
 
     if (!json_mode) {
@@ -976,6 +991,7 @@ fn loadKegRows(
 }
 
 fn emitOutdatedFormulas(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     api: *api_mod.BrewApi,
@@ -988,7 +1004,7 @@ fn emitOutdatedFormulas(
     const rows = try loadFormulaRows(allocator, db, filter);
     defer freeKegRows(allocator, rows);
 
-    const entries = try collectOutdatedFormulas(allocator, api, cache_dir, rows, workers_override);
+    const entries = try collectOutdatedFormulas(ctx, allocator, api, cache_dir, rows, workers_override);
     defer freeEntries(allocator, entries);
 
     try writeFormulaEntries(allocator, stdout, entries, json_mode);
@@ -996,6 +1012,7 @@ fn emitOutdatedFormulas(
 }
 
 fn emitOutdatedCasks(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     api: *api_mod.BrewApi,
@@ -1008,7 +1025,7 @@ fn emitOutdatedCasks(
     const rows = try loadCaskRows(allocator, db, filter);
     defer freeKegRows(allocator, rows);
 
-    const entries = try collectOutdatedCasks(allocator, api, cache_dir, rows, workers_override);
+    const entries = try collectOutdatedCasks(ctx, allocator, api, cache_dir, rows, workers_override);
     defer freeEntries(allocator, entries);
 
     try writeCaskEntries(stdout, entries, json_mode);
@@ -1122,29 +1139,32 @@ fn writeStyledSpan(
 /// callers query the DB with `ORDER BY name`. Per-row API failures or
 /// 404s drop silently (matches the old serial behaviour).
 pub fn collectOutdatedFormulas(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     api: *api_mod.BrewApi,
     cache_dir: []const u8,
     kegs: []const KegRow,
     workers_override: ?usize,
 ) std.mem.Allocator.Error![]OutdatedEntry {
-    return collectOutdated(allocator, api, cache_dir, kegs, workers_override, .formula);
+    return collectOutdated(ctx, allocator, api, cache_dir, kegs, workers_override, .formula);
 }
 
 /// Cask sibling of `collectOutdatedFormulas`. Same lifetime contract.
 pub fn collectOutdatedCasks(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     api: *api_mod.BrewApi,
     cache_dir: []const u8,
     kegs: []const KegRow,
     workers_override: ?usize,
 ) std.mem.Allocator.Error![]OutdatedEntry {
-    return collectOutdated(allocator, api, cache_dir, kegs, workers_override, .cask);
+    return collectOutdated(ctx, allocator, api, cache_dir, kegs, workers_override, .cask);
 }
 
 const Kind = enum { formula, cask };
 
 fn collectOutdated(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     api: *api_mod.BrewApi,
     cache_dir: []const u8,
@@ -1169,7 +1189,7 @@ fn collectOutdated(
             latest_versions[i] = try fetchLatest(allocator, api, kind, row);
         }
     } else {
-        try runPool(allocator, cache_dir, kegs, workers_override, kind, latest_versions);
+        try runPool(ctx, allocator, cache_dir, kegs, workers_override, kind, latest_versions);
     }
 
     return assembleEntries(allocator, kegs, latest_versions);
@@ -1276,6 +1296,7 @@ fn parseFormulaLatest(allocator: std.mem.Allocator, json_bytes: []const u8) ?[]u
 // --- Pool path ---
 
 const WorkerCtx = struct {
+    io: std.Io,
     arena: std.heap.ArenaAllocator,
     pool: *client_mod.HttpClientPool,
     cache_dir: []const u8,
@@ -1299,28 +1320,29 @@ fn poolWorker(state: *PoolState) void {
     while (true) {
         const idx = state.next_idx.fetchAdd(1, .acq_rel);
         if (idx >= state.ctxs.len) return;
-        const ctx = &state.ctxs[idx];
-        runOne(state.out_allocator, ctx);
+        const wctx = &state.ctxs[idx];
+        runOne(state.out_allocator, wctx);
     }
 }
 
-fn runOne(out_alloc: std.mem.Allocator, ctx: *WorkerCtx) void {
-    const http = ctx.pool.acquire();
-    defer ctx.pool.release(http);
+fn runOne(out_alloc: std.mem.Allocator, wctx: *WorkerCtx) void {
+    const http = wctx.pool.acquire();
+    defer wctx.pool.release(http);
 
-    const arena_alloc = ctx.arena.allocator();
-    var local_api = api_mod.BrewApi.init(io_mod.ctx(), arena_alloc, http, ctx.cache_dir);
-    const latest = upstreamLatest(arena_alloc, &local_api, ctx.kind, ctx.row.name) orelse return;
-    if (std.mem.eql(u8, ctx.row.version, latest)) return;
+    const arena_alloc = wctx.arena.allocator();
+    var local_api = api_mod.BrewApi.init(wctx.io, arena_alloc, http, wctx.cache_dir);
+    const latest = upstreamLatest(arena_alloc, &local_api, wctx.kind, wctx.row.name) orelse return;
+    if (std.mem.eql(u8, wctx.row.version, latest)) return;
 
     // Move into the caller's allocator so the result outlives `arena.deinit()`.
-    ctx.out = out_alloc.dupe(u8, latest) catch |e| blk: {
-        ctx.err = e;
+    wctx.out = out_alloc.dupe(u8, latest) catch |e| blk: {
+        wctx.err = e;
         break :blk null;
     };
 }
 
 fn runPool(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     cache_dir: []const u8,
     kegs: []const KegRow,
@@ -1331,7 +1353,7 @@ fn runPool(
     const worker_count = outdatedWorkerCount(kegs.len, workers_override);
     std.debug.assert(worker_count > 0);
 
-    var http_pool = try client_mod.HttpClientPool.init(io_mod.ctx(), fs_compat.processEnviron(), allocator, worker_count);
+    var http_pool = try client_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, worker_count);
     defer http_pool.deinit();
 
     const ctxs = try allocator.alloc(WorkerCtx, kegs.len);
@@ -1340,6 +1362,7 @@ fn runPool(
         allocator.free(ctxs);
     }
     for (ctxs, 0..) |*c, i| c.* = .{
+        .io = ctx.io,
         .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
         .pool = &http_pool,
         .cache_dir = cache_dir,

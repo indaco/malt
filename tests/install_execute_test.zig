@@ -31,8 +31,8 @@ test "execute with --help short-circuits before touching the filesystem" {
     _ = c.setenv("MALT_PREFIX", "/tmp/malt_install_exec_help_skipfs", 1);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{"--help"});
-    try install.execute(arena.allocator(), &.{"-h"});
+    try install.execute(&malt.app_ctx.debug_ctx, arena.allocator(), &.{"--help"});
+    try install.execute(&malt.app_ctx.debug_ctx, arena.allocator(), &.{"-h"});
 }
 
 test "execute with no positional args reports NoPackages" {
@@ -40,7 +40,7 @@ test "execute with no positional args reports NoPackages" {
     _ = c.setenv("MALT_PREFIX", "/tmp/malt_install_exec_nopkg", 1);
     try testing.expectError(
         install.InstallError.NoPackages,
-        install.execute(testing.allocator, &.{ "--force", "--dry-run" }),
+        install.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--force", "--dry-run" }),
     );
 }
 
@@ -87,7 +87,10 @@ test "execute --dry-run prints a plan for a cached formula" {
     // print "Dry run: would install ..." → return without downloading.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "alpha" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "alpha" });
 }
 
 test "execute with --formula forces formula-only and errors on an unresolvable name" {
@@ -105,7 +108,10 @@ test "execute with --formula forces formula-only and errors on an unresolvable n
     // return fires first).
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--formula", "--dry-run", "--quiet", "zz_nonexistent_formula_xyz" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--formula", "--dry-run", "--quiet", "zz_nonexistent_formula_xyz" });
 }
 
 test "execute with a tap-formula-shaped name routes through the tap path in dry-run" {
@@ -121,7 +127,10 @@ test "execute with a tap-formula-shaped name routes through the tap path in dry-
     // surfaces via output.err.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "zzuser/zzrepo/zzformula" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "zzuser/zzrepo/zzformula" });
 }
 
 test "execute --dry-run with an already-installed package short-circuits" {
@@ -162,7 +171,10 @@ test "execute --dry-run with an already-installed package short-circuits" {
     try seedFormulaCache(prefix_z, "seeded", json);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "seeded" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "seeded" });
 }
 
 test "execute refuses to run when MALT_PREFIX is absurdly long (> 256 bytes)" {
@@ -174,7 +186,7 @@ test "execute refuses to run when MALT_PREFIX is absurdly long (> 256 bytes)" {
     _ = c.setenv("MALT_PREFIX", too_long, 1);
     try testing.expectError(
         install.InstallError.PrefixAbsurd,
-        install.execute(testing.allocator, &.{"wget"}),
+        install.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"wget"}),
     );
 }
 
@@ -227,7 +239,10 @@ test "execute --only-dependencies on a leaf formula plans nothing" {
     malt.io_mod.beginStderrCapture(testing.allocator, &captured);
     defer malt.io_mod.endStderrCapture();
 
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--only-dependencies", "leaf" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--only-dependencies", "leaf" });
 
     try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would install") == null);
 }
@@ -293,7 +308,10 @@ test "execute --only-dependencies --dry-run plans deps but skips the requested f
     malt.io_mod.beginStderrCapture(testing.allocator, &captured);
     defer malt.io_mod.endStderrCapture();
 
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--only-dependencies", "alpha" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--only-dependencies", "alpha" });
 
     // The dry-run plan header is the load-bearing observation: with the
     // top-level filtered, only the single dep should land in the plan.
@@ -337,5 +355,8 @@ test "execute --dry-run routes a revisioned formula through the install pipeline
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "rev1" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "rev1" });
 }

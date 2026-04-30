@@ -62,7 +62,7 @@ test "schema creates kegs table with expected columns" {
 
 test "rollback returns error.Aborted when no package name given" {
     // Even without a prefix, the usage check fires first and must error.
-    const err = rollback.execute(testing.allocator, &.{});
+    const err = rollback.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
     try testing.expectError(error.Aborted, err);
 }
 
@@ -74,8 +74,12 @@ test "rollback returns error.Aborted for package not installed" {
     setPrefix(prefix);
     defer unsetPrefix();
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
     const args = [_][]const u8{"nonexistent-pkg"};
-    const err = rollback.execute(testing.allocator, &args);
+    const err = rollback.execute(&ctx, testing.allocator, &args);
     try testing.expectError(error.Aborted, err);
 }
 
@@ -95,8 +99,12 @@ test "rollback returns error.Aborted when no previous version exists in store" {
     setPrefix(prefix);
     defer unsetPrefix();
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
     const args = [_][]const u8{"wget"};
-    const err = rollback.execute(testing.allocator, &args);
+    const err = rollback.execute(&ctx, testing.allocator, &args);
     try testing.expectError(error.Aborted, err);
 }
 

@@ -3,6 +3,7 @@
 
 const std = @import("std");
 
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const cask_mod = @import("../core/cask.zig");
 const cellar_mod = @import("../core/cellar.zig");
 const deps_mod = @import("../core/deps.zig");
@@ -15,11 +16,9 @@ const lock_mod = @import("../db/lock.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
-const fs_compat = @import("../fs/compat.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
-const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
 const help = @import("help.zig");
@@ -75,19 +74,19 @@ pub const InstallError = record_mod.InstallError;
 /// re-materialize on top of it. No-op when the dir is missing or the
 /// path overflows the buffer; failures are best-effort because the
 /// follow-up materialize step surfaces real errors with full context.
-pub fn pruneCellarForReinstall(prefix: []const u8, name: []const u8, version: []const u8) void {
+pub fn pruneCellarForReinstall(ctx: *const AppCtx, prefix: []const u8, name: []const u8, version: []const u8) void {
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch return;
-    fs_compat.deleteTreeAbsolute(cellar_path) catch {};
+    std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};
 }
 
 /// Single-`stat` probe of `<prefix>/Cellar/<name>`. uninstall tears
 /// down the parent when the last version goes; an orphan empty dir is
 /// `mt doctor --fix` territory rather than something to paper over.
-fn kegPresent(prefix: []const u8, name: []const u8) bool {
+fn kegPresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) bool {
     var buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return false;
-    fs_compat.accessAbsolute(cellar_path, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(ctx.io, cellar_path, .{}) catch return false;
     return true;
 }
 
@@ -108,6 +107,7 @@ pub const InstallAllOpts = struct {
 /// `Dispatcher`. Argv parsing stays in `execute`; this seam is what lets
 /// core/bundle share orchestration without importing `cli/*`.
 pub fn installAll(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     packages: []const []const u8,
     opts: InstallAllOpts,
@@ -116,7 +116,7 @@ pub fn installAll(
     defer argv.deinit(allocator);
     if (opts.cask) try argv.append(allocator, "--cask");
     for (packages) |p| try argv.append(allocator, p);
-    return execute(allocator, argv.items);
+    return execute(ctx, allocator, argv.items);
 }
 
 const InstallFlag = enum {
@@ -144,7 +144,7 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "--only-dependencies", .only_dependencies },
 });
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(args, "install")) return;
 
     // Parse flags
@@ -261,7 +261,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (fastpath_eligible) fast: {
         for (packages.items) |pkg| {
             if (isTapFormula(pkg) or isLocalFormulaPath(pkg)) break :fast;
-            if (!kegPresent(prefix, pkg)) break :fast;
+            if (!kegPresent(ctx, prefix, pkg)) break :fast;
         }
         for (packages.items) |pkg| {
             output.info("{s} is already installed", .{pkg});
@@ -273,7 +273,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // Ensure required directories exist (Step 0)
-    ensureDirs(prefix) catch return error.Aborted;
+    ensureDirs(ctx, prefix) catch return error.Aborted;
 
     // Open database
     var db_path_buf: [512]u8 = undefined;
@@ -306,12 +306,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     output.emitNdjsonEvent(allocator, .lock_acquired, "", null);
 
     // Main-thread HTTP client; workers borrow from `http_pool` instead.
-    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
     // 4-slot worker pool — same budget as the materialize pool; enough to
     // saturate cold installs while reusing TLS contexts.
-    var http_pool = client_mod.HttpClientPool.init(io_mod.ctx(), fs_compat.processEnviron(), allocator, 4) catch {
+    var http_pool = client_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, 4) catch {
         output.err("Failed to initialise HTTP client pool", .{});
         return InstallError.DownloadFailed;
     };
@@ -320,21 +320,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Set up API client
     var cache_dir_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
-    var api = api_mod.BrewApi.init(io_mod.ctx(), allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
 
     // Set up GHCR client
-    var ghcr = ghcr_mod.GhcrClient.init(io_mod.ctx(), allocator, &http);
+    var ghcr = ghcr_mod.GhcrClient.init(ctx.io, allocator, &http);
     defer ghcr.deinit();
 
-    // Threaded io carries the parent environ for spawn / cosign / launchctl.
-    // Transitional shim until cli takes AppCtx directly.
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
-    defer threaded.deinit();
-    const io = threaded.io();
-
     // Set up store + linker
-    var store = store_mod.Store.init(io, allocator, &db, prefix);
-    var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
+    var store = store_mod.Store.init(ctx.io, allocator, &db, prefix);
+    var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
 
     // One parsed-formula cache for the whole run; single free site.
     var formula_cache = deps_mod.FormulaCache.init(allocator);
@@ -361,7 +355,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Path wins over tap-form when `.rb` is present — a typo like
         // `user/repo/foo.rb` hits local-file error, not a GitHub 404.
         if (local_only or isLocalFormulaPath(pkg_name)) {
-            installLocalFormula(allocator, pkg_name, &db, &linker, prefix, dry_run, force) catch |e| {
+            installLocalFormula(ctx, allocator, pkg_name, &db, &linker, prefix, dry_run, force) catch |e| {
                 // Skip the generic summary when the inner error line already
                 // told the user what went wrong.
                 if (!localErrorIsAnnounced(e)) {
@@ -373,7 +367,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         // Handle tap formulas separately (they don't use GHCR)
         if (isTapFormula(pkg_name)) {
-            installTapFormula(allocator, pkg_name, &db, &linker, prefix, dry_run, force) catch |e| {
+            installTapFormula(ctx, allocator, pkg_name, &db, &linker, prefix, dry_run, force) catch |e| {
                 output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
             };
             continue;
@@ -387,7 +381,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                     continue;
                 }
                 // Try cask
-                installCask(allocator, pkg_name, &db, &api, dry_run) catch |e| {
+                installCask(ctx, allocator, pkg_name, &db, &api, dry_run) catch |e| {
                     output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                 };
                 continue;
@@ -403,7 +397,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
             // Collect jobs for this formula + its deps
             collectFormulaJobs(.{
-                .io = io,
+                .io = ctx.io,
                 .allocator = allocator,
                 .api = &api,
                 .http_pool = &http_pool,
@@ -416,7 +410,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             };
             output.emitNdjsonEvent(allocator, .resolved, pkg_name, null);
         } else {
-            installCask(allocator, pkg_name, &db, &api, dry_run) catch |e| {
+            installCask(ctx, allocator, pkg_name, &db, &api, dry_run) catch |e| {
                 output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
             };
         }
@@ -535,9 +529,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 continue;
             }
             const t = std.Thread.spawn(.{}, downloadWorker, .{
-                allocator, &ghcr, &http_pool, &store, job,
+                ctx.io, allocator, &ghcr, &http_pool, &store, job,
             }) catch {
-                downloadWorker(allocator, &ghcr, &http_pool, &store, job);
+                downloadWorker(ctx.io, allocator, &ghcr, &http_pool, &store, job);
                 continue;
             };
             threads.append(allocator, t) catch {
@@ -574,7 +568,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // inheritance on `pinned`.
     if (force) {
         for (all_jobs.items) |job| {
-            pruneCellarForReinstall(prefix, job.name, job.version_str);
+            pruneCellarForReinstall(ctx, prefix, job.name, job.version_str);
         }
     }
 
@@ -596,6 +590,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const worker_count = @min(max_workers, all_jobs.items.len);
 
         var pool_ctx: MaterializePool = .{
+            .io = ctx.io,
             .next_idx = std.atomic.Value(usize).init(0),
             .jobs = all_jobs.items,
             .prefix = prefix,
@@ -664,13 +659,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 .{ job.name, failed_dep },
             );
             // orphan keg cleanup; user already sees the skip warning above.
-            cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
+            cellar_mod.remove(ctx.io, prefix, job.name, job.version_str) catch {};
             try failed_kegs.put(job.name, {});
             failed_count += 1;
             continue;
         }
 
-        linkAndRecord(io, allocator, job, mats[i].keg_path, &db, &linker, prefix, &formula_cache) catch {
+        linkAndRecord(ctx.io, allocator, job, mats[i].keg_path, &db, &linker, prefix, &formula_cache) catch {
             // The underlying error was already logged with a tag by
             // linkAndRecord — just record that this job failed so its
             // dependents in the rest of the loop get skipped above.
@@ -680,7 +675,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         };
 
         if (job.post_install_defined) {
-            drive(allocator, job.name, job.version_str, job.formula_json, prefix, use_system_ruby_list);
+            drive(ctx, allocator, job.name, job.version_str, job.formula_json, prefix, use_system_ruby_list);
         }
     }
 
@@ -766,7 +761,7 @@ fn linkAndRecord(
         linker.linkOpt(job.name, job.version_str) catch {};
         recordDeps(db, keg_id, formula);
     }
-    maybeRegisterService(allocator, db, formula, prefix);
+    maybeRegisterService(io, allocator, db, formula, prefix);
     // Annotate keg-only packages inline so the single line reads as success,
     // not as a "not linking" warning paired with a separate ✓.
     const keg_only_suffix: []const u8 = if (job.keg_only) " (keg-only — dependency only)" else "";
@@ -776,6 +771,7 @@ fn linkAndRecord(
 /// Register a launchd service when the formula carries a `service:` block.
 /// Best-effort: failures warn but don't fail the install.
 fn maybeRegisterService(
+    io: std.Io,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     formula: *const formula_mod.Formula,
@@ -798,7 +794,7 @@ fn maybeRegisterService(
     var log_dir_buf: [512]u8 = undefined;
     if (std.fmt.bufPrint(&log_dir_buf, "{s}/var/log", .{prefix})) |dir| {
         // launchd creates the file on first run; missing dir surfaces there.
-        fs_compat.cwd().makePath(dir) catch {};
+        std.Io.Dir.cwd().createDirPath(io, dir) catch {};
     } else |_| {}
 
     var cellar_buf: [512]u8 = undefined;
@@ -818,20 +814,15 @@ fn maybeRegisterService(
         .keep_alive = def.keep_alive,
     };
 
-    // Threaded with parent environ so register's plist write + downstream
-    // launchctl bootstrap (called from cli/services) reach PATH; transitional
-    // shim until T-070g.
-    var sup_threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
-    defer sup_threaded.deinit();
-    supervisor_mod.register(.{ .allocator = allocator, .io = sup_threaded.io(), .db = db }, spec, formula.name, false, cellar_path, prefix) catch |err| {
+    supervisor_mod.register(.{ .allocator = allocator, .io = io, .db = db }, spec, formula.name, false, cellar_path, prefix) catch |err| {
         output.warn("could not register service for {s}: {s}", .{ formula.name, @errorName(err) });
     };
 }
 
 /// HEAD-based fallback for extensionless cask URLs.
 /// Follows redirects to discover the real file extension.
-fn resolveCaskArtifactViaHead(allocator: std.mem.Allocator, url: []const u8) cask_mod.ArtifactType {
-    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
+fn resolveCaskArtifactViaHead(ctx: *const AppCtx, allocator: std.mem.Allocator, url: []const u8) cask_mod.ArtifactType {
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
     var resolved = http.headResolved(url) catch return .unknown;
@@ -842,6 +833,7 @@ fn resolveCaskArtifactViaHead(allocator: std.mem.Allocator, url: []const u8) cas
 
 /// Install a cask (DMG, ZIP, or PKG).
 fn installCask(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     token: []const u8,
     db: *sqlite.Database,
@@ -871,7 +863,7 @@ fn installCask(
     // Extensionless URLs (e.g. download APIs that 302 to the real file):
     // resolve via HEAD to discover the final URL and Content-Disposition.
     if (artifact_type == .unknown) {
-        artifact_type = resolveCaskArtifactViaHead(allocator, cask.url);
+        artifact_type = resolveCaskArtifactViaHead(ctx, allocator, cask.url);
     }
 
     if (dry_run) {
@@ -898,12 +890,7 @@ fn installCask(
 
     const prefix = atomic.maltPrefix();
 
-    // Per-cask Threaded carries the parent environ for HTTP + spawn.
-    // Transitional shim until cli takes AppCtx directly.
-    const cask_environ = fs_compat.processEnviron();
-    var cask_threaded: std.Io.Threaded = .init(allocator, .{ .environ = cask_environ });
-    defer cask_threaded.deinit();
-    var installer = cask_mod.CaskInstaller.init(cask_threaded.io(), cask_environ, allocator, db, prefix);
+    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
     installer.artifact_type_override = artifact_type;
 
     // Progress bar for cask download
@@ -934,22 +921,27 @@ fn installCask(
 test "kegPresent returns true only when <prefix>/Cellar/<name> exists" {
     const testing = std.testing;
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
     const prefix = try std.fmt.bufPrint(
         &path_buf,
         "/tmp/malt_kegpresent_{d}",
-        .{fs_compat.nanoTimestamp()},
+        .{ts},
     );
-    fs_compat.deleteTreeAbsolute(prefix) catch {};
-    try fs_compat.cwd().makePath(prefix);
-    defer fs_compat.deleteTreeAbsolute(prefix) catch {};
+    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
 
-    try testing.expect(!kegPresent(prefix, "ghost"));
+    try testing.expect(!kegPresent(&ctx, prefix, "ghost"));
 
     var keg_buf: [std.fs.max_path_bytes]u8 = undefined;
     const keg = try std.fmt.bufPrint(&keg_buf, "{s}/Cellar/ghost", .{prefix});
-    try fs_compat.cwd().makePath(keg);
+    try std.Io.Dir.cwd().createDirPath(ctx.io, keg);
 
-    try testing.expect(kegPresent(prefix, "ghost"));
-    try testing.expect(!kegPresent(prefix, "other"));
+    try testing.expect(kegPresent(&ctx, prefix, "ghost"));
+    try testing.expect(!kegPresent(&ctx, prefix, "other"));
 }

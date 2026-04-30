@@ -2,11 +2,12 @@
 //! Manage taps (tap/untap).
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const tap_mod = @import("../core/tap.zig");
 const atomic = @import("../fs/atomic.zig");
+const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
@@ -77,24 +78,24 @@ test "formatTapLine renders refresh hint for an unpinned tap" {
     );
 }
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    return run(allocator, args, .add);
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    return run(ctx, allocator, args, .add);
 }
 
 /// Primitive entry point for core/bundle's dispatcher: add a single tap by
 /// name. Argv parsing stays in `execute`; this is the non-argv seam.
-pub fn tapAdd(allocator: std.mem.Allocator, name: []const u8) !void {
+pub fn tapAdd(ctx: *const AppCtx, allocator: std.mem.Allocator, name: []const u8) !void {
     const argv = [_][]const u8{name};
-    return run(allocator, &argv, .add);
+    return run(ctx, allocator, &argv, .add);
 }
 
-pub fn executeUntap(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    return run(allocator, args, .remove);
+pub fn executeUntap(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    return run(ctx, allocator, args, .remove);
 }
 
 const Action = enum { add, remove };
 
-fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !void {
+fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8, action: Action) !void {
     if (help.showIfRequested(args, if (action == .add) "tap" else "untap")) return;
 
     // --refresh <name>: update the stored commit pin to current HEAD.
@@ -126,18 +127,12 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
     defer db.close();
     schema.initSchema(&db) catch return;
 
-    // Per-command Threaded carries the parent environ for HTTP / token
-    // pickup. Transitional shim until cli takes AppCtx directly.
-    const threaded_environ = fs_compat.processEnviron();
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = threaded_environ });
-    defer threaded.deinit();
-
     if (refresh_target) |target| {
         if (action != .add) {
             output.err("--refresh is only valid with `mt tap`", .{});
             return error.Aborted;
         }
-        try refreshTap(allocator, &db, target, threaded.io(), threaded_environ);
+        try refreshTap(ctx, allocator, &db, target);
         return;
     }
 
@@ -164,7 +159,7 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
             // it half-written. Empty on OOM keeps the listing best-effort.
             const line = formatTapLine(allocator, t) catch "";
             defer if (line.len != 0) allocator.free(line);
-            fs_compat.stdoutFile().writeAll(line) catch {};
+            io_mod.stdoutFile().writeStreamingAll(ctx.io, line) catch {};
             allocator.free(t.name);
             allocator.free(t.url);
             if (t.commit_sha) |sha| allocator.free(sha);
@@ -185,7 +180,7 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
             const repo = name[slash + 1 ..];
             // Resolve HEAD so the tap is pinned from day one. Failing
             // here beats silently registering an unpinned tap.
-            const sha = tap_mod.resolveHeadCommit(threaded.io(), threaded_environ, allocator, user, repo) catch |e| {
+            const sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, user, repo) catch |e| {
                 output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
                 return error.Aborted;
             };
@@ -208,7 +203,7 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
     }
 }
 
-fn refreshTap(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8, io: std.Io, environ: std.process.Environ) !void {
+fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !void {
     validateTapName(name) catch {
         output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{name});
         return error.Aborted;
@@ -216,7 +211,7 @@ fn refreshTap(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const 
     const slash = std.mem.findScalar(u8, name, '/').?;
     const user = name[0..slash];
     const repo = name[slash + 1 ..];
-    const sha = tap_mod.resolveHeadCommit(io, environ, allocator, user, repo) catch |e| {
+    const sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, user, repo) catch |e| {
         output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
         return error.Aborted;
     };

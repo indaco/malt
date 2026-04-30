@@ -2,7 +2,7 @@
 //! the orchestrator that executes a built plan under a single lock.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const sqlite = @import("../../db/sqlite.zig");
 const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
@@ -93,7 +93,7 @@ fn warnBanner() void {
     output.warnPlain("{s}", .{rule});
 }
 
-pub fn writeManifest(allocator: std.mem.Allocator, path: []const u8) Error!void {
+pub fn writeManifest(ctx: *const AppCtx, allocator: std.mem.Allocator, path: []const u8) Error!void {
     const prefix = atomic.maltPrefix();
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return Error.DatabaseError;
@@ -134,38 +134,39 @@ pub fn writeManifest(allocator: std.mem.Allocator, path: []const u8) Error!void 
         }
     } else |_| {}
 
-    try writeBytesToPath(path, aw.written());
+    try writeBytesToPath(ctx, path, aw.written());
 }
 
-fn writeBytesToPath(path: []const u8, bytes: []const u8) Error!void {
+fn writeBytesToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8) Error!void {
+    const io = ctx.io;
     if (std.fs.path.dirname(path)) |dir| {
         if (dir.len > 0) {
             // Parent may already exist; the subsequent createFile reports real errors.
             if (std.fs.path.isAbsolute(dir)) {
-                fs_compat.makeDirAbsolute(dir) catch {};
+                std.Io.Dir.createDirAbsolute(io, dir, .default_dir) catch {};
             } else {
-                fs_compat.cwd().makePath(dir) catch {};
+                std.Io.Dir.cwd().createDirPath(io, dir) catch {};
             }
         }
     }
     const file = if (std.fs.path.isAbsolute(path))
-        fs_compat.createFileAbsolute(path, .{ .truncate = true }) catch return Error.OpenFileFailed
+        std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true }) catch return Error.OpenFileFailed
     else
-        fs_compat.cwd().createFile(path, .{ .truncate = true }) catch return Error.OpenFileFailed;
-    defer file.close();
-    file.writeAll(bytes) catch return Error.WriteFailed;
+        std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch return Error.OpenFileFailed;
+    defer file.close(io);
+    file.writeStreamingAll(io, bytes) catch return Error.WriteFailed;
 }
 
-pub fn deleteTarget(path: []const u8) bool {
-    fs_compat.deleteTreeAbsolute(path) catch {
+pub fn deleteTarget(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.cwd().deleteTree(io, path) catch {
         output.warn("could not remove {s}", .{path});
         return false;
     };
     return true;
 }
 
-pub fn deletePrefixRoot(path: []const u8) bool {
-    fs_compat.deleteDirAbsolute(path) catch |e| switch (e) {
+pub fn deletePrefixRoot(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.deleteDirAbsolute(io, path) catch |e| switch (e) {
         error.FileNotFound => return true,
         error.DirNotEmpty => {
             output.info("prefix {s} not empty — leaving it in place", .{path});
@@ -179,11 +180,11 @@ pub fn deletePrefixRoot(path: []const u8) bool {
     return true;
 }
 
-pub fn verifyWipe(plan: []const Target) void {
+pub fn verifyWipe(io: std.Io, plan: []const Target) void {
     var leaks: usize = 0;
     for (plan) |t| {
         if (t.category == .prefix_root) continue;
-        fs_compat.accessAbsolute(t.path, .{}) catch continue;
+        std.Io.Dir.accessAbsolute(io, t.path, .{}) catch continue;
         output.warn("verification: {s} still present", .{t.path});
         leaks += 1;
     }
@@ -192,7 +193,7 @@ pub fn verifyWipe(plan: []const Target) void {
     }
 }
 
-pub fn runWipe(allocator: std.mem.Allocator, opts: Options, prefix: []const u8, cache_dir: []const u8, dry_run: bool) !void {
+pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, prefix: []const u8, cache_dir: []const u8, dry_run: bool) !void {
     warnBanner();
     output.dimPlain("prefix:  {s}", .{prefix});
     output.dimPlain("cache:   {s}", .{cache_dir});
@@ -202,9 +203,11 @@ pub fn runWipe(allocator: std.mem.Allocator, opts: Options, prefix: []const u8, 
     const plan = try buildPlan(allocator, opts, prefix, cache_dir);
     defer freePlan(allocator, plan);
 
+    const io = ctx.io;
+
     var total_bytes: u64 = 0;
     for (plan) |t| {
-        const size = util.pathSize(allocator, t.path);
+        const size = util.pathSize(io, allocator, t.path);
         total_bytes += size;
         var sz_buf: [32]u8 = undefined;
         const sz = util.formatBytes(size, &sz_buf);
@@ -220,7 +223,7 @@ pub fn runWipe(allocator: std.mem.Allocator, opts: Options, prefix: []const u8, 
         if (dry_run) {
             output.info("would write backup manifest to {s}", .{bp});
         } else {
-            try writeManifest(allocator, bp);
+            try writeManifest(ctx, allocator, bp);
             output.success("backup manifest written to {s}", .{bp});
         }
     }
@@ -253,19 +256,19 @@ pub fn runWipe(allocator: std.mem.Allocator, opts: Options, prefix: []const u8, 
             },
             else => {},
         }
-        if (deleteTarget(t.path)) removed += 1 else skipped += 1;
+        if (deleteTarget(io, t.path)) removed += 1 else skipped += 1;
     }
 
     if (lk_maybe) |*lk| lk.release();
 
     if (db_idx) |idx| {
-        if (deleteTarget(plan[idx].path)) removed += 1 else skipped += 1;
+        if (deleteTarget(io, plan[idx].path)) removed += 1 else skipped += 1;
     }
     if (prefix_idx) |idx| {
-        if (deletePrefixRoot(plan[idx].path)) removed += 1 else skipped += 1;
+        if (deletePrefixRoot(io, plan[idx].path)) removed += 1 else skipped += 1;
     }
 
-    verifyWipe(plan);
+    verifyWipe(io, plan);
 
     var sum_buf: [128]u8 = undefined;
     const sum = std.fmt.bufPrint(&sum_buf, "removed {d} target(s), skipped {d}", .{ removed, skipped }) catch "";

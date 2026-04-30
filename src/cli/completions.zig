@@ -2,7 +2,8 @@
 //! Prints shell completion scripts for bash, zsh, or fish to stdout.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
+const io_mod = @import("../ui/io.zig");
 const help = @import("help.zig");
 
 pub const Shell = enum { bash, zsh, fish };
@@ -24,17 +25,17 @@ pub fn scriptFor(shell: Shell) []const u8 {
     };
 }
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     _ = allocator;
     if (help.showIfRequested(args, "completions")) return;
 
     if (args.len == 0) {
-        printUsage();
+        printUsage(ctx);
         std.process.exit(2);
     }
 
     const shell = parseShell(args[0]) orelse {
-        const stderr = fs_compat.stderrFile();
+        const stderr = io_mod.stderrFile();
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(
             &buf,
@@ -42,14 +43,14 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             .{args[0]},
         ) catch "malt: unknown shell. Supported shells: bash, zsh, fish\n";
         // exit(2) below is the real signal; a closed stderr shouldn't block that.
-        stderr.writeAll(msg) catch {};
+        stderr.writeStreamingAll(ctx.io, msg) catch {};
         std.process.exit(2);
     };
 
-    try fs_compat.stdoutFile().writeAll(scriptFor(shell));
+    try io_mod.stdoutFile().writeStreamingAll(ctx.io, scriptFor(shell));
 }
 
-fn printUsage() void {
+fn printUsage(ctx: *const AppCtx) void {
     const usage =
         \\Usage: malt completions <shell>
         \\
@@ -63,7 +64,7 @@ fn printUsage() void {
         \\
     ;
     // Usage is diagnostic; caller always follows with exit(2).
-    fs_compat.stderrFile().writeAll(usage) catch {};
+    io_mod.stderrFile().writeStreamingAll(ctx.io, usage) catch {};
 }
 
 // ---------------------------------------------------------------------------
