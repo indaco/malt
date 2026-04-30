@@ -16,7 +16,6 @@
 //! members.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
 const builtin = @import("builtin");
 const sqlite = @import("../../db/sqlite.zig");
 const schema = @import("../../db/schema.zig");
@@ -114,6 +113,7 @@ pub const Options = struct {
 };
 
 pub fn run(
+    io: std.Io,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     manifest: manifest_mod.Manifest,
@@ -127,7 +127,7 @@ pub fn run(
         return RunnerError.OutOfMemory;
     defer allocator.free(bundles_dir);
     // bundles/ may already exist; the lock file create below surfaces real errors.
-    fs_compat.cwd().makePath(bundles_dir) catch {};
+    std.Io.Dir.cwd().createDirPath(io, bundles_dir) catch {};
 
     const lock_path = std.fmt.allocPrint(allocator, "{s}/{s}.lock", .{ bundles_dir, bundle_name }) catch
         return RunnerError.OutOfMemory;
@@ -146,29 +146,29 @@ pub fn run(
 
     // 1. taps
     for (manifest.taps) |t| {
-        try recordMember(allocator, .{ .tap = t }, opts, &failures, &previews);
+        try recordMember(io, allocator, .{ .tap = t }, opts, &failures, &previews);
     }
 
     // 2. formulas
     for (manifest.formulas) |f| {
-        try recordMember(allocator, .{ .formula = f.name }, opts, &failures, &previews);
+        try recordMember(io, allocator, .{ .formula = f.name }, opts, &failures, &previews);
     }
 
     // 3. casks
     for (manifest.casks) |c| {
-        try recordMember(allocator, .{ .cask = c.name }, opts, &failures, &previews);
+        try recordMember(io, allocator, .{ .cask = c.name }, opts, &failures, &previews);
     }
 
     // 4. services start (auto_start only). Best-effort.
     for (manifest.services) |s| {
         if (!s.auto_start) continue;
-        try recordMember(allocator, .{ .service_start = s.name }, opts, &failures, &previews);
+        try recordMember(io, allocator, .{ .service_start = s.name }, opts, &failures, &previews);
     }
 
     var db_record_error: ?[]const u8 = null;
     // 5. Record bundle and members in DB (even on partial failure). Skipped
     //    in dry-run so the preview path stays read-only.
-    if (!opts.dry_run) recordBundle(allocator, db, manifest) catch |e| {
+    if (!opts.dry_run) recordBundle(io, allocator, db, manifest) catch |e| {
         db_record_error = @errorName(e);
     };
 
@@ -212,6 +212,7 @@ const MemberCall = union(enum) {
 };
 
 fn recordMember(
+    io: std.Io,
     allocator: std.mem.Allocator,
     call: MemberCall,
     opts: Options,
@@ -224,7 +225,7 @@ fn recordMember(
         return;
     }
 
-    callMember(allocator, call, opts) catch |e| {
+    callMember(io, allocator, call, opts) catch |e| {
         failures.append(allocator, .{
             .kind = call.kind(),
             .name = call.name(),
@@ -233,10 +234,10 @@ fn recordMember(
     };
 }
 
-fn callMember(allocator: std.mem.Allocator, call: MemberCall, opts: Options) !void {
+fn callMember(io: std.Io, allocator: std.mem.Allocator, call: MemberCall, opts: Options) !void {
     // Test escape hatch: when malt_bin is set, fall back to subprocess so
     // tests can substitute /usr/bin/false to assert exit-code propagation.
-    if (opts.malt_bin) |bin| return runSubprocess(allocator, bin, call);
+    if (opts.malt_bin) |bin| return runSubprocess(io, allocator, bin, call);
 
     const d = opts.dispatcher orelse return RunnerError.NoDispatcher;
     switch (call) {
@@ -247,7 +248,7 @@ fn callMember(allocator: std.mem.Allocator, call: MemberCall, opts: Options) !vo
     }
 }
 
-fn runSubprocess(allocator: std.mem.Allocator, bin: []const u8, call: MemberCall) !void {
+fn runSubprocess(io: std.Io, allocator: std.mem.Allocator, bin: []const u8, call: MemberCall) !void {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.append(allocator, bin);
@@ -272,10 +273,8 @@ fn runSubprocess(allocator: std.mem.Allocator, bin: []const u8, call: MemberCall
         },
     }
 
-    var child = fs_compat.Child.init(argv.items, allocator);
-    child.stdout_behavior = .inherit;
-    child.stderr_behavior = .inherit;
-    const term = try child.spawnAndWait();
+    var child = std.process.spawn(io, .{ .argv = argv.items }) catch return error.MemberFailed;
+    const term = child.wait(io) catch return error.MemberFailed;
     switch (term) {
         .exited => |code| if (code != 0) return error.MemberFailed,
         else => return error.MemberFailed,
@@ -283,6 +282,7 @@ fn runSubprocess(allocator: std.mem.Allocator, bin: []const u8, call: MemberCall
 }
 
 fn recordBundle(
+    io: std.Io,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     manifest: manifest_mod.Manifest,
@@ -300,7 +300,7 @@ fn recordBundle(
     );
     defer ins.finalize();
     try ins.bindText(1, name);
-    try ins.bindInt(2, fs_compat.timestamp());
+    try ins.bindInt(2, std.Io.Clock.real.now(io).toSeconds());
     try ins.bindInt(3, @intCast(manifest.version));
     _ = try ins.step();
 

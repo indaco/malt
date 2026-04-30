@@ -562,11 +562,10 @@ test "run records per-member failures and keeps going" {
 }
 
 test "orderForRemoval reorders formulas so dependents land before their deps" {
-    const fs_compat = @import("../../fs/compat.zig");
     const dir = "/tmp/malt_bundle_cleanup_topo_inline";
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
 
     var db_path_buf: [256]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
@@ -621,11 +620,10 @@ test "orderForRemoval reorders formulas so dependents land before their deps" {
 }
 
 test "orderForRemoval falls back to alphabetical when the dep graph cycles" {
-    const fs_compat = @import("../../fs/compat.zig");
     const dir = "/tmp/malt_bundle_cleanup_topo_cycle";
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
 
     var db_path_buf: [256]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
@@ -685,11 +683,10 @@ test "orderForRemoval falls back to alphabetical when the dep graph cycles" {
 }
 
 test "orderForRemoval is a no-op when no in-plan deps exist" {
-    const fs_compat = @import("../../fs/compat.zig");
     const dir = "/tmp/malt_bundle_cleanup_topo_noop";
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
 
     var db_path_buf: [256]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
@@ -717,11 +714,10 @@ test "orderForRemoval is a no-op when no in-plan deps exist" {
 }
 
 test "collectInstalled returns direct formulas and every cask, sorted" {
-    const fs_compat = @import("../../fs/compat.zig");
     const dir = "/tmp/malt_bundle_cleanup_collect_inline";
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
 
     var db_path_buf: [256]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);

@@ -62,7 +62,7 @@ test "dry-run runner does not fork and skips DB write" {
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
+    var report = try runner.run(malt.io_mod.ctx(), testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
     defer report.deinit();
 
     var stmt = try t.db.prepare("SELECT COUNT(*) FROM bundles;");
@@ -81,7 +81,7 @@ test "non-dry runner with mocked malt_bin records bundle even on member failure"
     // Use /usr/bin/false: spawns succeed but each call exits non-zero.
     // The runner should still record the bundle row despite every member
     // landing in the failures list.
-    var report = try runner.run(testing.allocator, &t.db, m, .{
+    var report = try runner.run(malt.io_mod.ctx(), testing.allocator, &t.db, m, .{
         .dry_run = false,
         .malt_bin = "/usr/bin/false",
         .prefix = t.dir,
@@ -122,7 +122,7 @@ test "runner routes members through the provided dispatcher" {
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{
+    var report = try runner.run(malt.io_mod.ctx(), testing.allocator, &t.db, m, .{
         .dry_run = false,
         .prefix = t.dir,
         .dispatcher = &dispatcher,
@@ -201,7 +201,7 @@ test "runner returns Report with per-member failures, not a bool" {
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{
+    var report = try runner.run(malt.io_mod.ctx(), testing.allocator, &t.db, m, .{
         .dry_run = false,
         .malt_bin = "/usr/bin/false",
         .prefix = t.dir,
@@ -229,7 +229,7 @@ test "dry-run report captures previews, no failures, no DB write" {
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{
+    var report = try runner.run(malt.io_mod.ctx(), testing.allocator, &t.db, m, .{
         .dry_run = true,
         .prefix = t.dir,
     });
@@ -250,7 +250,7 @@ test "runner refuses in-process bundle install with no dispatcher and no malt_bi
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{
+    var report = try runner.run(malt.io_mod.ctx(), testing.allocator, &t.db, m, .{
         .dry_run = false,
         .prefix = t.dir,
     });
@@ -283,7 +283,7 @@ test "round-trip: parse Brewfile fixture, run dry, no panic" {
     var m = try malt.bundle_brewfile.parse(testing.allocator, fixture, null);
     defer m.deinit();
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
+    var report = try runner.run(malt.io_mod.ctx(), testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
     defer report.deinit();
 }
 
@@ -379,6 +379,6 @@ test "real-world Brewfile shapes parse without error" {
     try testing.expect(m.formulas.len >= 8);
     try testing.expect(m.casks.len >= 3);
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
+    var report = try runner.run(malt.io_mod.ctx(), testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
     defer report.deinit();
 }

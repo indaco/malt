@@ -46,18 +46,25 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Schema is idempotent; subcommand queries surface the real error if the DB is broken.
     schema.initSchema(&db) catch {};
 
+    // Per-command Threaded carries the parent environ so launchctl spawns
+    // resolve via PATH. Transitional shim until T-070g threads `*const AppCtx`
+    // into `services.execute`.
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
     if (std.mem.eql(u8, sub, "list") or std.mem.eql(u8, sub, "ls")) {
-        return cmdList(allocator, &db);
+        return cmdList(io, allocator, &db);
     } else if (std.mem.eql(u8, sub, "start")) {
-        return cmdOne(allocator, &db, rest, .start);
+        return cmdOne(io, allocator, &db, rest, .start);
     } else if (std.mem.eql(u8, sub, "stop")) {
-        return cmdOne(allocator, &db, rest, .stop);
+        return cmdOne(io, allocator, &db, rest, .stop);
     } else if (std.mem.eql(u8, sub, "restart")) {
-        return cmdOne(allocator, &db, rest, .restart);
+        return cmdOne(io, allocator, &db, rest, .restart);
     } else if (std.mem.eql(u8, sub, "status")) {
-        return cmdStatus(allocator, &db, rest);
+        return cmdStatus(io, allocator, &db, rest);
     } else if (std.mem.eql(u8, sub, "logs")) {
-        return cmdLogs(allocator, rest);
+        return cmdLogs(io, allocator, rest);
     }
 
     output.err("Unknown services subcommand: {s}", .{sub});
@@ -66,13 +73,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
 const Lifecycle = enum { start, stop, restart };
 
-fn cmdOne(allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const []const u8, op: Lifecycle) !void {
+fn cmdOne(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const []const u8, op: Lifecycle) !void {
     if (rest.len != 1) {
         output.err("services {s}: expected a single service name", .{@tagName(op)});
         return ServicesError.InvalidArgs;
     }
     const name = rest[0];
-    const ctx: supervisor.SupervisorCtx = .{ .allocator = allocator, .db = db };
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = allocator, .io = io, .db = db };
     switch (op) {
         .start => try supervisor.start(ctx, name),
         .stop => try supervisor.stop(ctx, name),
@@ -81,15 +88,15 @@ fn cmdOne(allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const []co
     output.success("services {s}: {s}", .{ @tagName(op), name });
 }
 
-fn cmdList(allocator: std.mem.Allocator, db: *sqlite.Database) !void {
-    const items = try supervisor.list(.{ .allocator = allocator, .db = db });
+fn cmdList(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database) !void {
+    const items = try supervisor.list(.{ .allocator = allocator, .io = io, .db = db });
     defer supervisor.freeServiceInfos(allocator, items);
     if (items.len == 0) {
         output.info("no services registered", .{});
         return;
     }
     for (items) |s| {
-        const runtime = supervisor.queryRuntime(allocator, s.name);
+        const runtime = supervisor.queryRuntime(io, allocator, s.name);
         const as: []const u8 = if (s.auto_start) "auto" else "manual";
         output.plain("{s}\t{s}\t{s}\t{s}", .{
             s.name,
@@ -100,18 +107,18 @@ fn cmdList(allocator: std.mem.Allocator, db: *sqlite.Database) !void {
     }
 }
 
-fn cmdStatus(allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const []const u8) !void {
-    if (rest.len == 0) return cmdList(allocator, db);
+fn cmdStatus(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, rest: []const []const u8) !void {
+    if (rest.len == 0) return cmdList(io, allocator, db);
     const name = rest[0];
     if (!supervisor.hasService(db, name)) {
         output.err("no such service: {s}", .{name});
         return ServicesError.SupervisorError;
     }
-    const runtime = supervisor.queryRuntime(allocator, name);
+    const runtime = supervisor.queryRuntime(io, allocator, name);
     output.info("service {s}: {s}", .{ name, supervisor.runtimeStateName(runtime) });
 }
 
-fn cmdLogs(allocator: std.mem.Allocator, rest: []const []const u8) !void {
+fn cmdLogs(io: std.Io, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     if (rest.len < 1) {
         output.err("services logs: expected service name", .{});
         return ServicesError.InvalidArgs;
@@ -140,9 +147,9 @@ fn cmdLogs(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     const w = &stdout_writer.interface;
     if (follow) {
         const main_mod = @import("../main.zig");
-        try supervisor.followLog(allocator, path, tail_n, w, main_mod.isInterrupted);
+        try supervisor.followLog(io, allocator, path, tail_n, w, main_mod.isInterrupted);
     } else {
-        try supervisor.tailLog(allocator, path, tail_n, w);
+        try supervisor.tailLog(io, allocator, path, tail_n, w);
     }
     try w.flush();
 }

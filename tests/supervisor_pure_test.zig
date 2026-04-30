@@ -21,7 +21,7 @@ test "SupervisorCtx bundles allocator and db into one param" {
     defer db.close();
     try schema.initSchema(&db);
 
-    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .db = &db };
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = malt.io_mod.ctx(), .db = &db };
     try testing.expectError(error.ServiceNotFound, supervisor.start(ctx, "absent"));
     try testing.expectError(error.ServiceNotFound, supervisor.stop(ctx, "absent"));
     try testing.expectError(error.ServiceNotFound, supervisor.restart(ctx, "absent"));
@@ -80,7 +80,7 @@ test "list is empty on a fresh database and hasService returns false" {
     defer db.close();
     try schema.initSchema(&db);
 
-    const list = try supervisor.list(.{ .allocator = testing.allocator, .db = &db });
+    const list = try supervisor.list(.{ .allocator = testing.allocator, .io = malt.io_mod.ctx(), .db = &db });
     defer supervisor.freeServiceInfos(testing.allocator, list);
     try testing.expectEqual(@as(usize, 0), list.len);
     try testing.expect(!supervisor.hasService(&db, "anything"));
@@ -110,7 +110,7 @@ test "register writes a plist and a DB row that list reports back" {
         .stdout_path = "/tmp/malt_sup_register/out.log",
         .stderr_path = "/tmp/malt_sup_register/err.log",
     };
-    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .db = &db };
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = malt.io_mod.ctx(), .db = &db };
     try supervisor.register(ctx, spec, "testkeg", true, cellar, prefix);
 
     try testing.expect(supervisor.hasService(&db, "com.malt.test.svc"));
@@ -139,7 +139,7 @@ test "tailLog writes the last N lines into the provided writer" {
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try supervisor.tailLog(testing.allocator, path, 2, &aw.writer);
+    try supervisor.tailLog(malt.io_mod.ctx(), testing.allocator, path, 2, &aw.writer);
 
     // Should end with the last 2 lines ("d" and "e").
     try testing.expect(std.mem.indexOf(u8, aw.written(), "d") != null);
@@ -151,7 +151,7 @@ test "start/stop/restart return ServiceNotFound when no DB row exists" {
     defer db.close();
     try schema.initSchema(&db);
 
-    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .db = &db };
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = malt.io_mod.ctx(), .db = &db };
     try testing.expectError(error.ServiceNotFound, supervisor.start(ctx, "absent"));
     try testing.expectError(error.ServiceNotFound, supervisor.stop(ctx, "absent"));
     try testing.expectError(error.ServiceNotFound, supervisor.restart(ctx, "absent"));
@@ -175,12 +175,14 @@ test "stopAndUnregister is a no-op on an absent service and still wipes the row"
     stmt.finalize();
 
     try testing.expect(supervisor.hasService(&db, "ghost"));
-    supervisor.stopAndUnregister(.{ .allocator = testing.allocator, .db = &db }, "ghost");
+    supervisor.stopAndUnregister(.{ .allocator = testing.allocator, .io = malt.io_mod.ctx(), .db = &db }, "ghost");
     try testing.expect(!supervisor.hasService(&db, "ghost"));
 }
 
 test "queryRuntime returns not_loaded for a label launchctl has never heard of" {
-    const state = supervisor.queryRuntime(testing.allocator, "com.malt.nonexistent.test.xyz");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = malt.fs_compat.processEnviron() });
+    defer threaded.deinit();
+    const state = supervisor.queryRuntime(threaded.io(), testing.allocator, "com.malt.nonexistent.test.xyz");
     // We don't own the user's launchctl state, but an unknown label must
     // never come back as `running`.
     try testing.expect(state != .running);
@@ -191,6 +193,6 @@ test "tailLog reports IoFailed for a missing file" {
     defer aw.deinit();
     try testing.expectError(
         error.IoFailed,
-        supervisor.tailLog(testing.allocator, "/tmp/malt_sup_tail_missing_xyz", 1, &aw.writer),
+        supervisor.tailLog(malt.io_mod.ctx(), testing.allocator, "/tmp/malt_sup_tail_missing_xyz", 1, &aw.writer),
     );
 }

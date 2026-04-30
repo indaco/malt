@@ -810,7 +810,12 @@ fn maybeRegisterService(
         .keep_alive = def.keep_alive,
     };
 
-    supervisor_mod.register(.{ .allocator = allocator, .db = db }, spec, formula.name, false, cellar_path, prefix) catch |err| {
+    // Threaded with parent environ so register's plist write + downstream
+    // launchctl bootstrap (called from cli/services) reach PATH; transitional
+    // shim until T-070g.
+    var sup_threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
+    defer sup_threaded.deinit();
+    supervisor_mod.register(.{ .allocator = allocator, .io = sup_threaded.io(), .db = db }, spec, formula.name, false, cellar_path, prefix) catch |err| {
         output.warn("could not register service for {s}: {s}", .{ formula.name, @errorName(err) });
     };
 }

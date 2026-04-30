@@ -112,8 +112,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     output.info("Uninstalling {s} {s}...", .{ name, version });
 
     // Stop and unregister any associated launchd service before tearing down
-    // files. The service name we register matches the formula name.
-    supervisor_mod.stopAndUnregister(.{ .allocator = allocator, .db = &db }, name);
+    // files. The service name we register matches the formula name. Build a
+    // Threaded with the parent environ so launchctl reaches PATH; transitional
+    // shim until T-070g.
+    var sup_threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
+    defer sup_threaded.deinit();
+    supervisor_mod.stopAndUnregister(.{ .allocator = allocator, .io = sup_threaded.io(), .db = &db }, name);
 
     // Unlink symlinks
     var lnk = linker.Linker.init(allocator, &db, prefix);

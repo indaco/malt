@@ -556,6 +556,7 @@ pub fn runPostInstall(
 
     const exit_code = sandbox.runRubySandboxed(
         allocator,
+        fs_compat.processEnviron(),
         ruby_path,
         tmp_path,
         cellar_path,

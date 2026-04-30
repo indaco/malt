@@ -133,7 +133,7 @@ fn cmdInstall(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     var db = try openDb();
     defer db.close();
 
-    var report = runner_mod.run(allocator, &db, manifest, .{
+    var report = runner_mod.run(io_mod.ctx(), allocator, &db, manifest, .{
         .dry_run = dry_run,
         .dispatcher = &default_dispatcher,
     }) catch |e| {
