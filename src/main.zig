@@ -285,6 +285,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer threaded.deinit();
     const ctx: AppCtx = .{ .io = threaded.io(), .environ = init.environ };
 
+    // Seed the ui package state once so output/progress/color stop
+    // pulling io/environ from `io_mod.ctx()` / `std.c.environ` globals.
+    const output_mod = @import("ui/output.zig");
+    const progress_mod = @import("ui/progress.zig");
+    output_mod.setRuntime(ctx.io, ctx.environ);
+    progress_mod.setIo(ctx.io);
+    color_mod.setRuntime(ctx.io, ctx.environ);
+
     var args_it = try init.args.iterateAllocator(allocator);
     defer args_it.deinit();
     _ = args_it.skip(); // skip argv0
