@@ -9,7 +9,6 @@ const schema = @import("../db/schema.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const outdated_mod = @import("outdated.zig");
-const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
