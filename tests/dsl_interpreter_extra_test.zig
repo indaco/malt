@@ -58,7 +58,7 @@ fn run(ruby_src: []const u8) !void {
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    try dsl.executePostInstall(alloc, .{
+    try dsl.executePostInstall(malt.io_mod.ctx(), malt.fs_compat.processEnviron(), alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,

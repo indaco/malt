@@ -29,9 +29,37 @@ fn uniqueSandbox(suffix: []const u8) ![]u8 {
     return p;
 }
 
+/// Live-environ Threaded so DSL builtins that spawn or read child pipes
+/// (system, safePopenRead, macosVersion) reach a real PATH. Lifetime
+/// scoped via `defer LiveIo.deinit`.
+const LiveIo = struct {
+    threaded: std.Io.Threaded,
+    pub fn init() LiveIo {
+        return .{ .threaded = .init(testing.allocator, .{ .environ = malt.fs_compat.processEnviron() }) };
+    }
+    pub fn deinit(self: *LiveIo) void {
+        self.threaded.deinit();
+    }
+    pub fn io(self: *LiveIo) std.Io {
+        return self.threaded.io();
+    }
+};
+
 fn mkCtx(root: []const u8) ExecCtx {
     return .{
         .allocator = testing.allocator,
+        .io = malt.io_mod.ctx(),
+        .environ = malt.fs_compat.processEnviron(),
+        .cellar_path = root,
+        .malt_prefix = root,
+    };
+}
+
+fn mkCtxLive(lio: *LiveIo, root: []const u8) ExecCtx {
+    return .{
+        .allocator = testing.allocator,
+        .io = lio.io(),
+        .environ = malt.fs_compat.processEnviron(),
         .cellar_path = root,
         .malt_prefix = root,
     };
@@ -339,7 +367,7 @@ test "FileUtils.cp with an array copies each file into the destination directory
     defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const ctx = ExecCtx{ .allocator = arena.allocator(), .cellar_path = root, .malt_prefix = root };
+    const ctx = ExecCtx{ .allocator = arena.allocator(), .io = malt.io_mod.ctx(), .environ = malt.fs_compat.processEnviron(), .cellar_path = root, .malt_prefix = root };
 
     const dst_dir = try std.fmt.allocPrint(testing.allocator, "{s}/dst", .{root});
     defer testing.allocator.free(dst_dir);
@@ -419,7 +447,7 @@ test "FileUtils.ln_sf with an array symlinks each target into the dest dir" {
     defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const ctx = ExecCtx{ .allocator = arena.allocator(), .cellar_path = root, .malt_prefix = root };
+    const ctx = ExecCtx{ .allocator = arena.allocator(), .io = malt.io_mod.ctx(), .environ = malt.fs_compat.processEnviron(), .cellar_path = root, .malt_prefix = root };
     const t1 = try std.fmt.allocPrint(testing.allocator, "{s}/t1", .{root});
     defer testing.allocator.free(t1);
     const t2 = try std.fmt.allocPrint(testing.allocator, "{s}/t2", .{root});
@@ -509,6 +537,18 @@ test "FileUtils.chmod returns nil for a non-int mode and is a no-op" {
 fn arenaCtx(arena: *std.heap.ArenaAllocator, root: []const u8) ExecCtx {
     return .{
         .allocator = arena.allocator(),
+        .io = malt.io_mod.ctx(),
+        .environ = malt.fs_compat.processEnviron(),
+        .cellar_path = root,
+        .malt_prefix = root,
+    };
+}
+
+fn arenaCtxLive(arena: *std.heap.ArenaAllocator, lio: *LiveIo, root: []const u8) ExecCtx {
+    return .{
+        .allocator = arena.allocator(),
+        .io = lio.io(),
+        .environ = malt.fs_compat.processEnviron(),
         .cellar_path = root,
         .malt_prefix = root,
     };
@@ -517,14 +557,18 @@ fn arenaCtx(arena: *std.heap.ArenaAllocator, root: []const u8) ExecCtx {
 test "system runs /bin/true and returns true" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const v = try process.system(arenaCtx(&arena, "/tmp/malt"), null, &.{.{ .string = "/usr/bin/true" }});
+    var lio = LiveIo.init();
+    defer lio.deinit();
+    const v = try process.system(arenaCtxLive(&arena, &lio, "/tmp/malt"), null, &.{.{ .string = "/usr/bin/true" }});
     try testing.expect(v.bool);
 }
 
 test "system runs /bin/false and returns false" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const v = try process.system(arenaCtx(&arena, "/tmp/malt"), null, &.{.{ .string = "/usr/bin/false" }});
+    var lio = LiveIo.init();
+    defer lio.deinit();
+    const v = try process.system(arenaCtxLive(&arena, &lio, "/tmp/malt"), null, &.{.{ .string = "/usr/bin/false" }});
     try testing.expect(!v.bool);
 }
 
@@ -538,7 +582,9 @@ test "system with no args returns nil" {
 test "quietSystem always returns nil regardless of exit code" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const v = try process.quietSystem(arenaCtx(&arena, "/tmp/malt"), null, &.{.{ .string = "/usr/bin/false" }});
+    var lio = LiveIo.init();
+    defer lio.deinit();
+    const v = try process.quietSystem(arenaCtxLive(&arena, &lio, "/tmp/malt"), null, &.{.{ .string = "/usr/bin/false" }});
     try testing.expect(v == .nil);
 }
 
@@ -587,7 +633,9 @@ test "osMac is true, osLinux is false, cpuArch is arm64 or x86_64" {
 test "macosVersion returns a non-empty string" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const v = try process.macosVersion(arenaCtx(&arena, "/tmp/malt"), null, &.{});
+    var lio = LiveIo.init();
+    defer lio.deinit();
+    const v = try process.macosVersion(arenaCtxLive(&arena, &lio, "/tmp/malt"), null, &.{});
     try testing.expect(v.string.len > 0);
 }
 
@@ -603,9 +651,11 @@ test "pathnameNew wraps a string into a Pathname value" {
 test "envGet returns nil for absent keys, string for present keys" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const ctx = arenaCtx(&arena, "/tmp/malt");
+    // ctx.environ is a snapshot captured at construction; mutate the
+    // process env first so the snapshot reflects the test fixture.
     _ = c.setenv("MALT_DSL_ENV_TEST", "yes", 1);
     defer _ = c.unsetenv("MALT_DSL_ENV_TEST");
+    const ctx = arenaCtx(&arena, "/tmp/malt");
     const got = try process.envGet(ctx, null, &.{.{ .string = "MALT_DSL_ENV_TEST" }});
     try testing.expectEqualStrings("yes", got.string);
 
@@ -626,6 +676,8 @@ test "envSet does not touch the real environment but returns the written value" 
 test "formulaLookup returns MALT_PREFIX/opt/<name>" {
     const ctx = ExecCtx{
         .allocator = testing.allocator,
+        .io = malt.io_mod.ctx(),
+        .environ = malt.fs_compat.processEnviron(),
         .cellar_path = "/tmp/malt",
         .malt_prefix = "/tmp/malt",
     };
@@ -637,7 +689,9 @@ test "formulaLookup returns MALT_PREFIX/opt/<name>" {
 test "safePopenRead captures stdout and chomps trailing newline" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const v = try process.safePopenRead(arenaCtx(&arena, "/tmp/malt"), null, &.{ .{ .string = "/bin/echo" }, .{ .string = "hello" } });
+    var lio = LiveIo.init();
+    defer lio.deinit();
+    const v = try process.safePopenRead(arenaCtxLive(&arena, &lio, "/tmp/malt"), null, &.{ .{ .string = "/bin/echo" }, .{ .string = "hello" } });
     try testing.expectEqualStrings("hello", v.string);
 }
 

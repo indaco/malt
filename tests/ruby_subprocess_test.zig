@@ -409,7 +409,7 @@ test "ca-certificates-shape: dispatcher with unparseable siblings leaves flog cl
     var flog = malt.dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    try malt.dsl.executePostInstall(alloc, .{
+    try malt.dsl.executePostInstall(malt.io_mod.ctx(), malt.fs_compat.processEnviron(), alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,

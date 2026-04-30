@@ -135,6 +135,7 @@ test "sandbox: dotdot in middle" {
 test "sandbox: validateResolved accepts valid literal path" {
     // Path does not exist on disk, so only literal validation runs
     try sandbox.validateResolved(
+        malt.io_mod.ctx(),
         "/opt/malt/Cellar/foo/1.0/bin/mybin",
         cellar,
         prefix,
@@ -143,6 +144,7 @@ test "sandbox: validateResolved accepts valid literal path" {
 
 test "sandbox: validateResolved rejects dotdot" {
     const result = sandbox.validateResolved(
+        malt.io_mod.ctx(),
         "/opt/malt/Cellar/foo/1.0/../../evil",
         cellar,
         prefix,
@@ -152,6 +154,7 @@ test "sandbox: validateResolved rejects dotdot" {
 
 test "sandbox: validateResolved rejects outside prefix" {
     const result = sandbox.validateResolved(
+        malt.io_mod.ctx(),
         "/etc/passwd",
         cellar,
         prefix,
@@ -195,6 +198,7 @@ test "sandbox: symlink escape detected by validateResolved" {
 
     // validateResolved should catch the escape because resolved path is /tmp
     const result = sandbox.validateResolved(
+        malt.io_mod.ctx(),
         symlink_dir,
         cellar_dir,
         tmp_path,

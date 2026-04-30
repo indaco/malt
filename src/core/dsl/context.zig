@@ -88,6 +88,15 @@ pub const ExecContext = struct {
     /// methods table; deinit is a no-op because the caller tears it down.
     arena: std.mem.Allocator,
 
+    /// `std.Io` threaded from the cli caller (built once with the parent
+    /// `Environ` so spawn finds PATH). Builtins read it directly instead
+    /// of pulling `io_mod.ctx()`.
+    io: std.Io,
+
+    /// Live process environ used by `process.zig` (PATH lookup, ENV[]) and
+    /// any other builtin that needs `getenv`-style access.
+    environ: std.process.Environ,
+
     /// Cellar path for the current formula — also stored in `paths[.prefix]`,
     /// kept as a direct field so builtins (sandbox validation) can read it
     /// without a lookup.
@@ -120,6 +129,8 @@ pub const ExecContext = struct {
 
     pub fn init(
         arena: std.mem.Allocator,
+        io: std.Io,
+        environ: std.process.Environ,
         ref: FormulaRef,
         malt_prefix: []const u8,
         flog: *FallbackLog,
@@ -147,6 +158,8 @@ pub const ExecContext = struct {
 
         var ctx = ExecContext{
             .arena = arena,
+            .io = io,
+            .environ = environ,
             .cellar_path = cellar_path,
             .malt_prefix = malt_prefix,
             .paths = paths,

@@ -10,6 +10,7 @@ const dsl = @import("../../core/dsl/root.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
 const output = @import("../../ui/output.zig");
 const io_mod = @import("../../ui/io.zig");
+const fs_compat = @import("../../fs/compat.zig");
 
 const download = @import("download.zig");
 
@@ -148,9 +149,17 @@ pub fn executeDslPostInstall(
     var flog = dsl.FallbackLog.init(allocator);
     defer flog.deinit();
 
+    // Build a Threaded with the parent environ so DSL `system`/`safe_popen`
+    // spawns reach PATH. Transitional shim until cli/install threads
+    // `*const AppCtx` here (T-070g).
+    const environ = fs_compat.processEnviron();
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
     // DSL errors reflect in `flog`; the router reads the log as the source
     // of truth so silent skips downgrade the same as hard failures.
-    dsl.executePostInstall(allocator, .{
+    dsl.executePostInstall(io, environ, allocator, .{
         .name = formula.name,
         .version = formula.version,
         .pkg_version = formula.pkg_version,

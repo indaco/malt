@@ -57,7 +57,11 @@ fn runSnippet(
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    dsl.executePostInstall(alloc, .{
+    const environ = malt.fs_compat.processEnviron();
+    var threaded: std.Io.Threaded = .init(alloc, .{ .environ = environ });
+    defer threaded.deinit();
+
+    dsl.executePostInstall(threaded.io(), environ, alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,
@@ -824,7 +828,7 @@ test "interpreter: unknown method is logged in fallback log" {
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    dsl.executePostInstall(alloc, .{
+    dsl.executePostInstall(malt.io_mod.ctx(), malt.fs_compat.processEnviron(), alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,
@@ -1524,7 +1528,7 @@ test "parse_error: malformed source populates fallback log with location" {
     defer flog.deinit();
 
     // Stray `]` with no matching open — a guaranteed parser error.
-    const result = dsl.executePostInstall(alloc, .{
+    const result = dsl.executePostInstall(malt.io_mod.ctx(), malt.fs_compat.processEnviron(), alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,
@@ -2520,7 +2524,7 @@ test "interpreter: arena-owned path bindings leak-clean under testing.allocator"
         \\_a = HOMEBREW_PREFIX
         \\_a = HOMEBREW_CELLAR
     ;
-    try dsl.executePostInstall(testing.allocator, .{
+    try dsl.executePostInstall(malt.io_mod.ctx(), malt.fs_compat.processEnviron(), testing.allocator, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,
@@ -2540,6 +2544,8 @@ test "ExecContext.pushScope propagates OOM from the arena" {
 
     var ctx: dsl.ExecContext = .{
         .arena = failing.allocator(),
+        .io = malt.io_mod.ctx(),
+        .environ = malt.fs_compat.processEnviron(),
         .cellar_path = "",
         .malt_prefix = "",
         .paths = std.EnumArray(malt.dsl.context.PathBinding, []const u8).initFill(""),
@@ -2565,6 +2571,8 @@ test "ExecContext.pushMethodScope propagates OOM from the arena" {
 
     var ctx: dsl.ExecContext = .{
         .arena = failing.allocator(),
+        .io = malt.io_mod.ctx(),
+        .environ = malt.fs_compat.processEnviron(),
         .cellar_path = "",
         .malt_prefix = "",
         .paths = std.EnumArray(malt.dsl.context.PathBinding, []const u8).initFill(""),
@@ -2593,7 +2601,7 @@ test "ExecContext.init with FormulaRef projects cellar + pkgshare paths" {
     defer flog.deinit();
 
     const prefix = "/opt/testmalt";
-    var ctx = try dsl.ExecContext.init(a, .{
+    var ctx = try dsl.ExecContext.init(a, malt.io_mod.ctx(), malt.fs_compat.processEnviron(), .{
         .name = "ffmpeg",
         .version = "7.1.2",
         .pkg_version = "7.1.2",
@@ -2621,6 +2629,8 @@ test "executePostInstall accepts FormulaRef and binds formula_name" {
     defer flog.deinit();
 
     try dsl.executePostInstall(
+        malt.io_mod.ctx(),
+        malt.fs_compat.processEnviron(),
         a,
         .{ .name = "acme", .version = "9.9.9", .pkg_version = "9.9.9" },
         "_ = pkgshare\n",
