@@ -326,9 +326,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var ghcr = ghcr_mod.GhcrClient.init(io_mod.ctx(), allocator, &http);
     defer ghcr.deinit();
 
+    // Threaded io carries the parent environ for spawn / cosign / launchctl.
+    // Transitional shim until cli takes AppCtx directly.
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
     // Set up store + linker
-    var store = store_mod.Store.init(allocator, &db, prefix);
-    var linker = linker_mod.Linker.init(allocator, &db, prefix);
+    var store = store_mod.Store.init(io, allocator, &db, prefix);
+    var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
 
     // One parsed-formula cache for the whole run; single free site.
     var formula_cache = deps_mod.FormulaCache.init(allocator);
@@ -397,6 +403,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
             // Collect jobs for this formula + its deps
             collectFormulaJobs(.{
+                .io = io,
                 .allocator = allocator,
                 .api = &api,
                 .http_pool = &http_pool,
@@ -657,13 +664,13 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 .{ job.name, failed_dep },
             );
             // orphan keg cleanup; user already sees the skip warning above.
-            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
+            cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             try failed_kegs.put(job.name, {});
             failed_count += 1;
             continue;
         }
 
-        linkAndRecord(allocator, job, mats[i].keg_path, &db, &linker, prefix, &formula_cache) catch {
+        linkAndRecord(io, allocator, job, mats[i].keg_path, &db, &linker, prefix, &formula_cache) catch {
             // The underlying error was already logged with a tag by
             // linkAndRecord — just record that this job failed so its
             // dependents in the rest of the loop get skipped above.
@@ -690,6 +697,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 /// Link + record a materialised keg. Must run serially: linker conflict
 /// checks read live symlink state and SQLite is single-writer.
 fn linkAndRecord(
+    io: std.Io,
     allocator: std.mem.Allocator,
     job: *DownloadJob,
     keg_path: []const u8,
@@ -705,7 +713,7 @@ fn linkAndRecord(
     const formula = cache.get(job.name) orelse blk: {
         break :blk cache.getOrParse(job.name, job.formula_json) catch |err| {
             output.err("Failed to parse formula for {s}: {s}", .{ job.name, @errorName(err) });
-            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
+            cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.CellarFailed;
         };
     };
@@ -719,7 +727,7 @@ fn linkAndRecord(
                 output.err("  {s} already linked by {s}", .{ conflict.link_path, conflict.existing_keg });
             }
             output.err("Use --force to overwrite, or uninstall the conflicting package first.", .{});
-            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
+            cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.LinkFailed;
         }
     }
@@ -728,7 +736,7 @@ fn linkAndRecord(
     if (!job.keg_only) {
         const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
-            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
+            cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
         };
 
@@ -738,7 +746,7 @@ fn linkAndRecord(
             // Rollback: unlink what was partially created + remove DB record + cellar.
             linker.unlink(keg_id) catch {};
             deleteKeg(db, keg_id);
-            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
+            cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.LinkFailed;
         };
         // `recorded` after both succeed — link rollback undoes the keg
@@ -750,7 +758,7 @@ fn linkAndRecord(
     } else {
         const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
-            cellar_mod.remove(prefix, job.name, job.version_str) catch {};
+            cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
         };
         // keg-only has no public link phase to roll back.
@@ -889,7 +897,13 @@ fn installCask(
     output.info("Installing cask {s} {s}...", .{ cask.token, cask.version });
 
     const prefix = atomic.maltPrefix();
-    var installer = cask_mod.CaskInstaller.init(allocator, db, prefix);
+
+    // Per-cask Threaded carries the parent environ for HTTP + spawn.
+    // Transitional shim until cli takes AppCtx directly.
+    const cask_environ = fs_compat.processEnviron();
+    var cask_threaded: std.Io.Threaded = .init(allocator, .{ .environ = cask_environ });
+    defer cask_threaded.deinit();
+    var installer = cask_mod.CaskInstaller.init(cask_threaded.io(), cask_environ, allocator, db, prefix);
     installer.artifact_type_override = artifact_type;
 
     // Progress bar for cask download

@@ -108,6 +108,7 @@ test "materialize handles version with revision suffix" {
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "abc123",
@@ -146,6 +147,7 @@ test "materialize handles exact version match (no revision)" {
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "def456",
@@ -178,6 +180,7 @@ test "placeholder substitution runs for relocatable bottles" {
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "rel123",
@@ -214,6 +217,7 @@ test "placeholder substitution replaces multiple tokens in single file" {
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "multi123",
@@ -265,6 +269,7 @@ test "files with no placeholders are left unchanged" {
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "clean123",
@@ -311,6 +316,7 @@ test "binary files are skipped by text patching without error" {
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "bin123",
@@ -377,6 +383,7 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
     // store-relocated/<sha>/ via a temp Cellar entry + relocated.save.
     try createBottleFixture(testing.allocator, prefix, "stub-store", "cached", "1.0");
     const keg_pre = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "stub-store",
@@ -385,7 +392,7 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
         ":any",
     );
     testing.allocator.free(keg_pre.path);
-    try relocated_mod.save(testing.allocator, prefix, valid_test_sha, "cached", "1.0");
+    try relocated_mod.save(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "cached", "1.0");
     // Wipe the just-built Cellar entry — the cache must rebuild it.
     const cellar_keg_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/cached/1.0", .{prefix});
     defer testing.allocator.free(cellar_keg_path);
@@ -394,6 +401,7 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
     // No `store/<sha>/` exists for `valid_test_sha` — the only way this
     // call can succeed is via the cache short-circuit.
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         valid_test_sha,
@@ -425,8 +433,9 @@ test "materializeWithCellar populates the relocated cache after a cold install" 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
 
-    try testing.expect(!relocated_mod.has(prefix, valid_test_sha));
+    try testing.expect(!relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         valid_test_sha,
@@ -437,7 +446,7 @@ test "materializeWithCellar populates the relocated cache after a cold install" 
     defer testing.allocator.free(keg.path);
 
     // Snapshot must run on the success path so warm reinstalls hit it.
-    try testing.expect(relocated_mod.has(prefix, valid_test_sha));
+    try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
 }
 
 test "describeError returns a non-empty, distinct message for every CellarError" {
@@ -482,6 +491,7 @@ test "failed materialize cleans up empty Cellar/{name}/ parent dir" {
     defer restoreMaltPrefix("");
 
     const result = cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "no-such-sha",
@@ -520,6 +530,7 @@ test "failed materialize leaves sibling versions untouched" {
     defer restoreMaltPrefix("");
 
     const result = cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "missing-sha",
@@ -681,6 +692,7 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
     // The exact bug scenario: `:any` bottle that would have skipped Mach-O
     // patching before P1.
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         sha,
@@ -863,6 +875,7 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         sha,
@@ -953,6 +966,7 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         sha,

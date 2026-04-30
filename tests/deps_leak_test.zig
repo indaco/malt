@@ -114,7 +114,7 @@ test "resolve frees duped dep strings on the BFS visited-dedup path" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "a", &api, &tdb.db, &cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "a", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     // Each distinct dep appears exactly once.
@@ -153,7 +153,7 @@ test "resolve empty dep graph still returns a freeable slice" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "solo", &api, &tdb.db, &cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "solo", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 0), result.len);

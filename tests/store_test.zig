@@ -22,7 +22,7 @@ fn setupTestStore(allocator: std.mem.Allocator) !struct { db: sqlite.Database, s
     var db = try sqlite.Database.open(db_path);
     try schema.initSchema(&db);
 
-    const store = store_mod.Store.init(allocator, &db, prefix);
+    const store = store_mod.Store.init(std.Options.debug_io, allocator, &db, prefix);
     return .{ .db = db, .store = store, .prefix = prefix };
 }
 

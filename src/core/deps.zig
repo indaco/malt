@@ -3,7 +3,6 @@
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const api_mod = @import("../net/api.zig");
-const fs_compat = @import("../fs/compat.zig");
 const formula_mod = @import("formula.zig");
 
 pub const DepError = error{
@@ -91,6 +90,7 @@ pub const FormulaCache = struct {
 /// from `getDeps` is either moved into `result`/`queue` or freed on the spot.
 /// `cache` is shared with the download pipeline so each formula parses once.
 pub fn resolve(
+    io: std.Io,
     allocator: std.mem.Allocator,
     root_name: []const u8,
     api: *api_mod.BrewApi,
@@ -138,7 +138,7 @@ pub fn resolve(
 
         // Append to `result` before marking `visited` — `visited` borrows from
         // `result`'s stable storage, and reversing risks leak or dangle on OOM.
-        const installed = isInstalled(db, dep_name);
+        const installed = isInstalled(io, db, dep_name);
         result.append(allocator, .{
             .name = dep_name,
             .already_installed = installed,
@@ -223,7 +223,7 @@ pub fn findOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) ![]const 
 
 // --- helpers ---
 
-fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
+fn isInstalled(io: std.Io, db: *sqlite.Database, name: []const u8) bool {
     var stmt = db.prepare("SELECT cellar_path FROM kegs WHERE name = ?1 LIMIT 1;") catch return false;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return false;
@@ -232,13 +232,13 @@ fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
     // Trust the DB only when the cellar_path is still on disk.
     const cp_raw = stmt.columnText(0) orelse return false;
     const cellar_path = std.mem.sliceTo(cp_raw, 0);
-    fs_compat.accessAbsolute(cellar_path, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(io, cellar_path, .{}) catch return false;
     return true;
 }
 
 /// Keep `opt/{name}` pointing at the keg's DB-recorded cellar_path.
 /// No-op when already correct; silent on failure.
-pub fn ensureOptLink(db: *sqlite.Database, prefix: []const u8, name: []const u8) void {
+pub fn ensureOptLink(io: std.Io, db: *sqlite.Database, prefix: []const u8, name: []const u8) void {
     var stmt = db.prepare("SELECT cellar_path FROM kegs WHERE name = ?1 LIMIT 1;") catch return;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return;
@@ -251,22 +251,22 @@ pub fn ensureOptLink(db: *sqlite.Database, prefix: []const u8, name: []const u8)
 
     // Fast path: symlink already resolves to the DB's cellar_path.
     var target_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (fs_compat.readLinkAbsolute(opt_path, &target_buf)) |target| {
-        if (std.mem.eql(u8, target, cellar_path)) return;
+    if (std.Io.Dir.readLinkAbsolute(io, opt_path, &target_buf)) |target_len| {
+        if (std.mem.eql(u8, target_buf[0..target_len], cellar_path)) return;
     } else |_| {}
 
     var opt_parent_buf: [512]u8 = undefined;
     const opt_parent = std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{prefix}) catch return;
-    fs_compat.makeDirAbsolute(opt_parent) catch |e| switch (e) {
+    std.Io.Dir.createDirAbsolute(io, opt_parent, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return,
     };
-    var parent_dir = fs_compat.openDirAbsolute(opt_parent, .{}) catch return;
-    defer parent_dir.close();
+    var parent_dir = std.Io.Dir.openDirAbsolute(io, opt_parent, .{}) catch return;
+    defer parent_dir.close(io);
     // Stale opt/<name> may not exist on first link; symLink would EEXIST otherwise.
-    parent_dir.deleteFile(name) catch {};
+    parent_dir.deleteFile(io, name) catch {};
     // Best-effort opt refresh: a failure here leaves the DB correct; `mt link` recovers.
-    parent_dir.symLink(cellar_path, name, .{}) catch {};
+    parent_dir.symLink(io, cellar_path, name, .{}) catch {};
 }
 
 /// Resolve a formula's direct deps through the shared cache. JSON without

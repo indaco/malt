@@ -69,7 +69,7 @@ test "walkPrefix: clean tree yields no findings" {
     try malt.fs_compat.cwd().makePath(base ++ "/bin");
     (try malt.fs_compat.createFileAbsolute(base ++ "/bin/foo", .{})).close();
 
-    const findings = try perms.walkPrefix(testing.allocator, base, perms.currentUid(), 64);
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, base, perms.currentUid(), 64);
     defer perms.freeFindings(testing.allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
@@ -88,7 +88,7 @@ test "walkPrefix: detects other-writable file" {
     };
     if (c.chmod(path, 0o666) != 0) return error.TestUnexpectedResult;
 
-    const findings = try perms.walkPrefix(testing.allocator, base, perms.currentUid(), 64);
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, base, perms.currentUid(), 64);
     defer perms.freeFindings(testing.allocator, findings);
 
     // Must find at least the world_writable file; may also flag the
@@ -105,6 +105,7 @@ test "walkPrefix: detects other-writable file" {
 
 test "walkPrefix: missing prefix returns empty findings, no error" {
     const findings = try perms.walkPrefix(
+        std.Options.debug_io,
         testing.allocator,
         "/tmp/malt_perms_definitely_does_not_exist_xyz",
         perms.currentUid(),
@@ -130,7 +131,7 @@ test "walkPrefix: respects max_findings cap" {
         if (c.chmod(p.ptr, 0o666) != 0) return error.TestUnexpectedResult;
     }
 
-    const findings = try perms.walkPrefix(testing.allocator, base, perms.currentUid(), 2);
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, base, perms.currentUid(), 2);
     defer perms.freeFindings(testing.allocator, findings);
     try testing.expect(findings.len <= 2);
 }

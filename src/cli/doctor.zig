@@ -282,6 +282,7 @@ fn checkApfs(ctx: CheckCtx, name: []const u8) CheckResult {
 fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
     // Cap the walk so pathological trees don't balloon doctor's memory.
     const findings = perms_mod.walkPrefix(
+        io_mod.ctx(),
         ctx.allocator,
         ctx.prefix,
         perms_mod.currentUid(),

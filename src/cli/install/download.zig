@@ -27,6 +27,7 @@ const InstallError = record.InstallError;
 /// six pointers through every call. Opens a DI seam for tests to swap in
 /// fakes by replacing fields.
 pub const InstallJobDeps = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     api: *api_mod.BrewApi,
     http_pool: *client_mod.HttpClientPool,
@@ -94,6 +95,14 @@ pub fn downloadWorker(
     defer thread_arena.deinit();
     const allocator = thread_arena.allocator();
 
+    // Per-worker Threaded carries the parent environ so bottle.download
+    // can hit the file system. Transitional shim until the worker takes
+    // AppCtx directly.
+    const fs_compat_local = @import("../../fs/compat.zig");
+    var worker_threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat_local.processEnviron() });
+    defer worker_threaded.deinit();
+    const worker_io = worker_threaded.io();
+
     // Skip if already in store
     if (store.exists(job.sha256)) {
         job.store_sha256 = job.sha256;
@@ -133,7 +142,7 @@ pub fn downloadWorker(
     var dl_ok = false;
     var last_err: bottle_mod.BottleError = bottle_mod.BottleError.DownloadFailed;
     while (dl_attempt < max_attempts) : (dl_attempt += 1) {
-        if (bottle_mod.download(allocator, ghcr, http, repo, digest, job.sha256, tmp_dir, progress_cb)) |_| {
+        if (bottle_mod.download(worker_io, allocator, ghcr, http, repo, digest, job.sha256, tmp_dir, progress_cb)) |_| {
             dl_ok = true;
             break;
         } else |dl_err| {
@@ -324,7 +333,7 @@ pub fn collectFormulaJobs(
     // (the same caller allocator) — so the allocator here must match
     // `allocator`, otherwise free on the API-allocated bytes is a no-op
     // on the wrong allocator.
-    const deps = deps_mod.resolve(allocator, formula.name, api, db, cache) catch &.{};
+    const deps = deps_mod.resolve(ctx.io, allocator, formula.name, api, db, cache) catch &.{};
     defer {
         for (deps) |d| allocator.free(d.name);
         // `catch &.{}` yields a static empty slice with no backing
@@ -337,7 +346,7 @@ pub fn collectFormulaJobs(
     const heal_prefix = atomic.maltPrefix();
     for (deps) |dep| {
         if (!dep.already_installed) continue;
-        deps_mod.ensureOptLink(db, heal_prefix, dep.name);
+        deps_mod.ensureOptLink(ctx.io, db, heal_prefix, dep.name);
     }
 
     // Fetch every dep's formula JSON **in parallel**. Each worker
@@ -593,7 +602,14 @@ fn materializeOne(
     defer arena.deinit();
     const tmp_allocator = arena.allocator();
 
+    // Per-worker Threaded for materialize (file IO + relocated_store).
+    // Transitional shim until the worker takes AppCtx directly.
+    const fs_compat_local = @import("../../fs/compat.zig");
+    var mat_threaded: std.Io.Threaded = .init(tmp_allocator, .{ .environ = fs_compat_local.processEnviron() });
+    defer mat_threaded.deinit();
+
     const keg = cellar_mod.materializeWithCellar(
+        mat_threaded.io(),
         tmp_allocator,
         prefix,
         job.store_sha256,

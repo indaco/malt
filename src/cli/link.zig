@@ -57,7 +57,14 @@ pub fn executeLink(allocator: std.mem.Allocator, args: []const []const u8) !void
         return error.Aborted;
     };
     const cellar_path = std.mem.sliceTo(cellar_path_raw, 0);
-    var linker = linker_mod.Linker.init(allocator, &db, prefix);
+
+    // Per-command Threaded carries the parent environ. Transitional shim
+    // until cli takes AppCtx directly.
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
 
     // Check for conflicts unless --overwrite
     if (!overwrite) {
@@ -129,7 +136,14 @@ pub fn executeUnlink(allocator: std.mem.Allocator, args: []const []const u8) !vo
     }
 
     const keg_id = stmt.columnInt(0);
-    var linker = linker_mod.Linker.init(allocator, &db, prefix);
+
+    // Per-command Threaded carries the parent environ. Transitional shim
+    // until cli takes AppCtx directly.
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
 
     linker.unlink(keg_id) catch {
         output.err("Failed to remove symlinks for {s}", .{name});

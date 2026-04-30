@@ -66,7 +66,7 @@ test "link creates symlinks for every file in a keg and records them in the DB" 
     insert.finalize();
     const keg_id: i64 = 1;
 
-    var linker = linker_mod.Linker.init(testing.allocator, &db, prefix);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
     try linker.link(keg, "foo", keg_id);
 
     // Symlink should exist at {prefix}/bin/foo-tool -> {keg}/bin/foo-tool
@@ -101,7 +101,7 @@ test "linkOpt creates opt/{name} -> Cellar/{name}/{version}" {
     defer db.close();
     try schema.initSchema(&db);
 
-    var linker = linker_mod.Linker.init(testing.allocator, &db, prefix);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
     try linker.linkOpt("bar", "2.0");
 
     var opt_buf: [512]u8 = undefined;
@@ -132,7 +132,7 @@ test "checkConflicts flags a symlink that points into a different keg" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
-    var linker = linker_mod.Linker.init(testing.allocator, &db, prefix);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
     try linker.link(keg_a, "alpha", 1);
 
     // Now the `bin/tool` symlink points into alpha. Check beta's conflicts.
@@ -166,7 +166,7 @@ test "checkConflicts is empty when nothing is linked yet" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     try schema.initSchema(&db);
-    var linker = linker_mod.Linker.init(testing.allocator, &db, prefix);
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
 
     const conflicts = try linker.checkConflicts(keg);
     defer testing.allocator.free(conflicts);
@@ -180,6 +180,6 @@ test "unlink surfaces SqliteError when links table is missing" {
     defer db.close();
     // Intentionally no schema.initSchema — `links` does not exist.
 
-    var linker = linker_mod.Linker.init(testing.allocator, &db, "/tmp/malt_unused");
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, "/tmp/malt_unused");
     try testing.expectError(sqlite.SqliteError.PrepareFailed, linker.unlink(1));
 }

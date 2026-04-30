@@ -138,6 +138,7 @@ test "collectFormulaJobs parses each formula exactly once via shared cache" {
 
     try install.collectFormulaJobs(
         .{
+            .io = std.Options.debug_io,
             .allocator = alloc,
             .api = &api,
             .http_pool = &http_pool,
@@ -213,6 +214,7 @@ test "FormulaCache holds at most one entry per unique dep across the run" {
 
     try install.collectFormulaJobs(
         .{
+            .io = std.Options.debug_io,
             .allocator = alloc,
             .api = &api,
             .http_pool = &http_pool,
@@ -273,7 +275,7 @@ test "resolve walks deps for JSON missing the name field" {
     var formula_cache = deps_mod.FormulaCache.init(alloc);
     defer formula_cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "thin", &api, &tdb.db, &formula_cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "thin", &api, &tdb.db, &formula_cache);
     defer {
         for (result) |d| alloc.free(d.name);
         if (result.len > 0) alloc.free(result);
@@ -386,6 +388,7 @@ test "shared deps across multi-package install collapse to one parse" {
     defer formula_cache.deinit();
 
     const ctx: install.InstallJobDeps = .{
+        .io = std.Options.debug_io,
         .allocator = alloc,
         .api = &api,
         .http_pool = &http_pool,

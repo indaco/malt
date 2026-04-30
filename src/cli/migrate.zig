@@ -205,8 +205,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var ghcr = ghcr_mod.GhcrClient.init(io_mod.ctx(), allocator, &http);
     defer ghcr.deinit();
 
-    var store = store_mod.Store.init(allocator, &db, prefix);
-    var linker = linker_mod.Linker.init(allocator, &db, prefix);
+    // Threaded io built once for the whole migrate run — covers spawn
+    // (via core/cask/child_mod), HTTP (network code already takes io),
+    // and pure file I/O. Transitional shim until cli takes AppCtx
+    // directly.
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var store = store_mod.Store.init(io, allocator, &db, prefix);
+    var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
 
     // Resume manifest: a crashed/^C run resumes from where it stopped
     // instead of redoing every keg.

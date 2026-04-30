@@ -261,7 +261,7 @@ test "resolve walks a small BFS dep graph and dedups via visited" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db, &cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "alpha", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     // Expect both beta and gamma to appear, in BFS order.
@@ -295,7 +295,7 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db, &cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "alpha", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -331,7 +331,7 @@ test "resolve returns empty when root formula JSON is missing from cache" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "nope", &api, &tdb.db, &cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "nope", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
     try testing.expectEqual(@as(usize, 0), result.len);
 }
@@ -361,7 +361,7 @@ test "resolve handles a dep whose sub-fetch fails by falling through" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db, &cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "alpha", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -395,7 +395,7 @@ test "resolve treats a DB keg with a vanished cellar_path as not-installed" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db, &cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "alpha", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -468,7 +468,7 @@ test "ensureOptLink recreates a missing opt/<name> symlink" {
     var miss_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, p.readOptLink("zstd", &miss_buf));
 
-    deps_mod.ensureOptLink(&p.db, p.root, "zstd");
+    deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "zstd");
 
     var got_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target = try p.readOptLink("zstd", &got_buf);
@@ -483,8 +483,8 @@ test "ensureOptLink is idempotent when the symlink is already correct" {
     defer testing.allocator.free(cellar);
     _ = try insertKegWithCellar(&p.db, "zstd", "dependency", cellar);
 
-    deps_mod.ensureOptLink(&p.db, p.root, "zstd"); // first call creates
-    deps_mod.ensureOptLink(&p.db, p.root, "zstd"); // second call must be a no-op
+    deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "zstd"); // first call creates
+    deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "zstd"); // second call must be a no-op
 
     var got_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target = try p.readOptLink("zstd", &got_buf);
@@ -508,7 +508,7 @@ test "ensureOptLink replaces a stale symlink pointing at an old cellar" {
     defer testing.allocator.free(cellar);
     _ = try insertKegWithCellar(&p.db, "zstd", "dependency", cellar);
 
-    deps_mod.ensureOptLink(&p.db, p.root, "zstd");
+    deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "zstd");
 
     var got_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target = try p.readOptLink("zstd", &got_buf);
@@ -520,7 +520,7 @@ test "ensureOptLink silently skips names the DB does not know" {
     defer p.deinit();
 
     // No DB row for 'ghost' → ensureOptLink must be a no-op, not panic.
-    deps_mod.ensureOptLink(&p.db, p.root, "ghost");
+    deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "ghost");
 
     var miss_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, p.readOptLink("ghost", &miss_buf));

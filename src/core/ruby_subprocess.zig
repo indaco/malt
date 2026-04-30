@@ -4,10 +4,6 @@
 //! Homebrew DSL.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
-const io_mod = @import("../ui/io.zig");
-const builtin = @import("builtin");
-const codesign = @import("../macho/codesign.zig");
 const pins = @import("pins.zig");
 const http_client = @import("../net/client.zig");
 const api_mod = @import("../net/api.zig");
@@ -57,14 +53,14 @@ const max_formula_rb_bytes: usize = 1024 * 1024;
 /// pair every successful return with one `defer allocator.free(...)`.
 ///
 /// Public for testability; not part of the stable surface.
-pub fn detectRuby(allocator: std.mem.Allocator) ?[]const u8 {
+pub fn detectRuby(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator) ?[]const u8 {
     const candidates = [_][]const u8{
         "/opt/homebrew/opt/ruby/bin/ruby",
         "/usr/local/opt/ruby/bin/ruby",
         "/usr/bin/ruby",
     };
     for (candidates) |path| {
-        fs_compat.accessAbsolute(path, .{}) catch continue;
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
         return allocator.dupe(u8, path) catch return null;
     }
 
@@ -72,22 +68,22 @@ pub fn detectRuby(allocator: std.mem.Allocator) ?[]const u8 {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
 
     // User-local version managers: rbenv, asdf
-    if (fs_compat.getenv("HOME")) |home| {
+    if (std.process.Environ.getPosix(environ, "HOME")) |home| {
         const shim_suffixes = [_][]const u8{ "/.rbenv/shims/ruby", "/.asdf/shims/ruby" };
         for (shim_suffixes) |suffix| {
             const path = std.fmt.bufPrint(&buf, "{s}{s}", .{ home, suffix }) catch continue;
-            fs_compat.accessAbsolute(path, .{}) catch continue;
+            std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
             return allocator.dupe(u8, path) catch return null;
         }
     }
 
     // PATH search
-    if (fs_compat.getenv("PATH")) |path_env| {
+    if (std.process.Environ.getPosix(environ, "PATH")) |path_env| {
         var it = std.mem.splitScalar(u8, path_env, ':');
         while (it.next()) |dir| {
             if (dir.len == 0) continue;
             const candidate = std.fmt.bufPrint(&buf, "{s}/ruby", .{dir}) catch continue;
-            fs_compat.accessAbsolute(candidate, .{}) catch continue;
+            std.Io.Dir.accessAbsolute(io, candidate, .{}) catch continue;
             return allocator.dupe(u8, candidate) catch return null;
         }
     }
@@ -96,13 +92,13 @@ pub fn detectRuby(allocator: std.mem.Allocator) ?[]const u8 {
 }
 
 /// Locate the homebrew-core tap clone on disk. Returns the tap path or null.
-pub fn findHomebrewCoreTap() ?[]const u8 {
+pub fn findHomebrewCoreTap(io: std.Io) ?[]const u8 {
     const tap_paths = [_][]const u8{
         "/opt/homebrew/Library/Taps/homebrew/homebrew-core",
         "/usr/local/Homebrew/Library/Taps/homebrew/homebrew-core",
     };
     for (tap_paths) |path| {
-        fs_compat.accessAbsolute(path, .{}) catch continue;
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
         return path;
     }
     return null;
@@ -111,19 +107,19 @@ pub fn findHomebrewCoreTap() ?[]const u8 {
 /// Resolve the .rb source file path for a formula within the tap.
 /// Tries new sharded layout first (Formula/f/foo.rb), falls back to flat
 /// (Formula/foo.rb).
-pub fn resolveFormulaRbPath(buf: *[1024]u8, tap_path: []const u8, name: []const u8) ?[]const u8 {
+pub fn resolveFormulaRbPath(io: std.Io, buf: *[1024]u8, tap_path: []const u8, name: []const u8) ?[]const u8 {
     if (name.len == 0) return null;
 
     // New layout: Formula/FIRST_LETTER/NAME.rb
     const new_path = std.fmt.bufPrint(buf, "{s}/Formula/{c}/{s}.rb", .{
         tap_path, name[0], name,
     }) catch return null;
-    fs_compat.accessAbsolute(new_path, .{}) catch {
+    std.Io.Dir.accessAbsolute(io, new_path, .{}) catch {
         // Fall through to old layout
         const old_path = std.fmt.bufPrint(buf, "{s}/Formula/{s}.rb", .{
             tap_path, name,
         }) catch return null;
-        fs_compat.accessAbsolute(old_path, .{}) catch return null;
+        std.Io.Dir.accessAbsolute(io, old_path, .{}) catch return null;
         return old_path;
     };
     return new_path;
@@ -143,7 +139,7 @@ pub fn resolveFormulaRbPath(buf: *[1024]u8, tap_path: []const u8, name: []const 
 /// Returns the post_install body or null on any fetch / verify / parse
 /// failure. All failures are silent-to-caller; the caller decides
 /// whether to warn.
-pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
+pub fn fetchPostInstallFromGitHub(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
     // Reject anything that wouldn't pass the API name allowlist
     // ([a-z0-9@._+-]) — the URL path substitutes the name directly.
     api_mod.validateName(name) catch return null;
@@ -159,7 +155,7 @@ pub fn fetchPostInstallFromGitHub(allocator: std.mem.Allocator, name: []const u8
         .{ &pins.homebrew_core_commit_sha, name[0], name },
     ) catch return null;
 
-    var http = http_client.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
+    var http = http_client.HttpClient.init(io, environ, allocator);
     defer http.deinit();
 
     var resp = http.get(url) catch return null;
@@ -342,14 +338,17 @@ fn findMatchingEnd(source: []const u8, start: usize, indent: usize) ?struct {
 /// Extract the post_install method body + sibling helpers from a formula
 /// .rb source file. Thin file-IO wrapper around `extractPostInstallFromSource`
 /// so the parsing contract lives in one place.
-pub fn extractPostInstallBody(allocator: std.mem.Allocator, rb_path: []const u8) ?[]const u8 {
-    const file = fs_compat.openFileAbsolute(rb_path, .{}) catch return null;
-    defer file.close();
+pub fn extractPostInstallBody(io: std.Io, allocator: std.mem.Allocator, rb_path: []const u8) ?[]const u8 {
+    const file = std.Io.Dir.openFileAbsolute(io, rb_path, .{}) catch return null;
+    defer file.close(io);
 
-    const source = file.readToEndAlloc(allocator, 1024 * 1024) catch return null;
+    const st = file.stat(io) catch return null;
+    const size: usize = @intCast(@min(@as(u64, 1024 * 1024), st.size));
+    const source = allocator.alloc(u8, size) catch return null;
     defer allocator.free(source);
+    const n = file.readPositionalAll(io, source, 0) catch return null;
 
-    return extractPostInstallFromSource(allocator, source);
+    return extractPostInstallFromSource(allocator, source[0..n]);
 }
 
 /// Generate the Ruby wrapper script that provides a FormulaStub sandbox
@@ -464,6 +463,8 @@ pub fn generateWrapper(
 /// - A Ruby interpreter available on the system
 /// - The homebrew-core tap cloned locally (for the .rb formula source)
 pub fn runPostInstall(
+    io: std.Io,
+    environ: std.process.Environ,
     allocator: std.mem.Allocator,
     name: []const u8,
     version: []const u8,
@@ -481,19 +482,19 @@ pub fn runPostInstall(
     // maps each RubyError variant to user-facing text.
 
     // 1. Find Ruby (caller-owned heap slice — see detectRuby contract).
-    const ruby_path = detectRuby(allocator) orelse return RubyError.RubyNotFound;
+    const ruby_path = detectRuby(io, environ, allocator) orelse return RubyError.RubyNotFound;
     defer allocator.free(ruby_path);
 
     // 2. Find homebrew-core tap
-    const tap_path = findHomebrewCoreTap() orelse return RubyError.TapNotFound;
+    const tap_path = findHomebrewCoreTap(io) orelse return RubyError.TapNotFound;
 
     // 3. Resolve .rb source file
     var rb_buf: [1024]u8 = undefined;
-    const rb_path = resolveFormulaRbPath(&rb_buf, tap_path, name) orelse
+    const rb_path = resolveFormulaRbPath(io, &rb_buf, tap_path, name) orelse
         return RubyError.FormulaSourceNotFound;
 
     // 4. Extract post_install body
-    const body = extractPostInstallBody(allocator, rb_path) orelse
+    const body = extractPostInstallBody(io, allocator, rb_path) orelse
         return RubyError.PostInstallBodyNotFound;
     defer allocator.free(body);
 
@@ -508,7 +509,7 @@ pub fn runPostInstall(
     // and an attacker cannot pre-create the target to redirect execution.
     var tmp_path_buf: [256]u8 = undefined;
     var rand_bytes: [16]u8 = undefined;
-    fs_compat.randomBytes(&rand_bytes);
+    io.random(&rand_bytes);
     const hex = std.fmt.bytesToHex(rand_bytes, .lower);
     const pid = std.c.getpid();
     const tmp_path = std.fmt.bufPrint(
@@ -517,21 +518,21 @@ pub fn runPostInstall(
         .{ name, pid, hex[0..] },
     ) catch return RubyError.ScriptWriteFailed;
 
-    const tmp_file = fs_compat.createFileAbsolute(tmp_path, .{
+    const tmp_file = std.Io.Dir.createFileAbsolute(io, tmp_path, .{
         .exclusive = true,
         .permissions = std.Io.File.Permissions.fromMode(0o600),
     }) catch return RubyError.ScriptWriteFailed;
-    tmp_file.writeAll(script) catch {
-        tmp_file.close();
+    tmp_file.writeStreamingAll(io, script) catch {
+        tmp_file.close(io);
         // Cleanup of the partial tmp script; ScriptWriteFailed is the real error.
-        fs_compat.deleteFileAbsolute(tmp_path) catch {};
+        std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
         return RubyError.ScriptWriteFailed;
     };
-    tmp_file.close();
+    tmp_file.close(io);
 
     // Ensure cleanup — tmp path is PID+random, so a late-running delete
     // only ever targets this process's own script.
-    defer fs_compat.deleteFileAbsolute(tmp_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
 
     // 7. Spawn Ruby under sandbox-exec with a per-formula profile,
     //    scrubbed env, and resource limits. stdout/stderr inherit the
@@ -546,7 +547,7 @@ pub fn runPostInstall(
         .{ prefix, name, version },
     ) catch return RubyError.PostInstallFailed;
 
-    const home = fs_compat.getenv("HOME") orelse "/tmp";
+    const home = std.process.Environ.getPosix(environ, "HOME") orelse "/tmp";
     const env: sandbox.ScrubbedEnv = .{
         .home = home,
         .path = sandbox.SANDBOX_PATH,
@@ -556,7 +557,7 @@ pub fn runPostInstall(
 
     const exit_code = sandbox.runRubySandboxed(
         allocator,
-        fs_compat.processEnviron(),
+        environ,
         ruby_path,
         tmp_path,
         cellar_path,

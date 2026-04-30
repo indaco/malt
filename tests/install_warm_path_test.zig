@@ -103,6 +103,7 @@ test "install → uninstall → reinstall takes the relocated cache short-circui
     // First install: full pipeline runs; snapshot lands in the cache.
     {
         const keg = try cellar_mod.materializeWithCellar(
+            std.Options.debug_io,
             testing.allocator,
             prefix,
             test_sha,
@@ -112,7 +113,7 @@ test "install → uninstall → reinstall takes the relocated cache short-circui
         );
         defer testing.allocator.free(keg.path);
     }
-    try testing.expect(relocated.has(prefix, test_sha));
+    try testing.expect(relocated.has(std.Options.debug_io, prefix, test_sha));
 
     // Uninstall: drop the Cellar tree so the next materialize has to rebuild.
     const cellar_keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/warmpkg/1.0", .{prefix});
@@ -129,6 +130,7 @@ test "install → uninstall → reinstall takes the relocated cache short-circui
 
     // Reinstall: must succeed via the cache short-circuit alone.
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         test_sha,
@@ -163,6 +165,7 @@ test "non-APFS-style cache miss still allows a successful pipeline reinstall" {
     // First materialize.
     {
         const keg = try cellar_mod.materializeWithCellar(
+            std.Options.debug_io,
             testing.allocator,
             prefix,
             test_sha,
@@ -176,14 +179,15 @@ test "non-APFS-style cache miss still allows a successful pipeline reinstall" {
     // Tamper with the cache so it cannot be hit on the second pass: drop
     // the relocated entry. The second materialize must still succeed via
     // the regular pipeline, and rebuild the cache afterwards.
-    try relocated.remove(prefix, test_sha);
-    try testing.expect(!relocated.has(prefix, test_sha));
+    try relocated.remove(std.Options.debug_io, prefix, test_sha);
+    try testing.expect(!relocated.has(std.Options.debug_io, prefix, test_sha));
 
     const cellar_keg = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/nocache/0.1", .{prefix});
     defer testing.allocator.free(cellar_keg);
     try malt.fs_compat.deleteTreeAbsolute(cellar_keg);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         test_sha,
@@ -194,5 +198,5 @@ test "non-APFS-style cache miss still allows a successful pipeline reinstall" {
     defer testing.allocator.free(keg.path);
     // Pipeline rebuilt the keg AND restored the cache — warm reinstalls
     // are fast again.
-    try testing.expect(relocated.has(prefix, test_sha));
+    try testing.expect(relocated.has(std.Options.debug_io, prefix, test_sha));
 }

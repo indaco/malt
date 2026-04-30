@@ -2,7 +2,6 @@
 //! Cellar materialization: clonefile from store, Mach-O patching, codesigning.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
 const clonefile = @import("../fs/clonefile.zig");
 // Binary-format-agnostic relocation facade. The Linux task plugs in
 // an ELF backend behind the same surface, so cellar never reaches past
@@ -66,13 +65,14 @@ pub const Keg = struct {
 /// 5. Ad-hoc codesign on arm64
 /// Uses errdefer to clean up Cellar entry on failure.
 pub fn materialize(
+    io: std.Io,
     allocator: std.mem.Allocator,
     prefix: []const u8,
     store_sha256: []const u8,
     name: []const u8,
     version: []const u8,
 ) CellarError!Keg {
-    return materializeWithCellar(allocator, prefix, store_sha256, name, version, "");
+    return materializeWithCellar(io, allocator, prefix, store_sha256, name, version, "");
 }
 
 /// Materialize with an explicit cellar type from the bottle metadata.
@@ -80,6 +80,7 @@ pub fn materialize(
 /// patching is skipped (relocatable bottle). Text placeholder substitution
 /// (@@HOMEBREW_PREFIX@@, @@HOMEBREW_CELLAR@@) always runs.
 pub fn materializeWithCellar(
+    io: std.Io,
     allocator: std.mem.Allocator,
     prefix: []const u8,
     store_sha256: []const u8,
@@ -101,12 +102,12 @@ pub fn materializeWithCellar(
     // it and skip the expensive extract → patch → codesign pipeline.
     // Falls through on any cache miss/error so a flaky cache never breaks
     // the install.
-    if (relocated_store.has(prefix, store_sha256)) cache_hit: {
-        relocated_store.materialize(allocator, prefix, store_sha256, name, version) catch |e| {
+    if (relocated_store.has(io, prefix, store_sha256)) cache_hit: {
+        relocated_store.materialize(io, allocator, prefix, store_sha256, name, version) catch |e| {
             std.log.debug("relocated cache miss for {s}: {s}", .{ store_sha256, @errorName(e) });
             break :cache_hit;
         };
-        writeInstallReceipt(cellar_path, name, version, store_sha256);
+        writeInstallReceipt(io, cellar_path, name, version, store_sha256);
         const owned = allocator.dupe(u8, cellar_path) catch return CellarError.OutOfMemory;
         return .{ .name = name, .version = version, .path = owned };
     }
@@ -124,7 +125,7 @@ pub fn materializeWithCellar(
     var parent_buf: [512]u8 = undefined;
     const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch
         return CellarError.OutOfMemory;
-    fs_compat.makeDirAbsolute(parent) catch |e| switch (e) {
+    std.Io.Dir.createDirAbsolute(io, parent, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return CellarError.CloneFailed,
     };
@@ -134,14 +135,14 @@ pub fn materializeWithCellar(
     var keg_rev_buf: [512]u8 = undefined;
     const src = blk: {
         // 1. Exact match: {store}/{name}/{version}
-        fs_compat.accessAbsolute(keg_src, .{}) catch {
+        std.Io.Dir.accessAbsolute(io, keg_src, .{}) catch {
             // 2. Scan {store}/{name}/ for a dir starting with "{version}_"
             var name_dir_buf: [512]u8 = undefined;
             const name_dir_path = std.fmt.bufPrint(&name_dir_buf, "{s}/{s}", .{ store_path, name }) catch break :blk store_path;
-            var name_dir = fs_compat.openDirAbsolute(name_dir_path, .{ .iterate = true }) catch break :blk store_path;
-            defer name_dir.close();
+            var name_dir = std.Io.Dir.openDirAbsolute(io, name_dir_path, .{ .iterate = true }) catch break :blk store_path;
+            defer name_dir.close(io);
             var it = name_dir.iterate();
-            while (it.next() catch null) |entry| {
+            while (it.next(io) catch null) |entry| {
                 if (entry.kind != .directory) continue;
                 // Match "{version}_..." (revision suffix)
                 if (entry.name.len > version.len and
@@ -165,8 +166,8 @@ pub fn materializeWithCellar(
     // `deleteDirAbsolute` only succeeds when the directory is empty, so
     // installed sibling versions are left untouched.
     errdefer {
-        fs_compat.deleteTreeAbsolute(cellar_path) catch {};
-        fs_compat.deleteDirAbsolute(parent) catch {};
+        std.Io.Dir.cwd().deleteTree(io, cellar_path) catch {};
+        std.Io.Dir.deleteDirAbsolute(io, parent) catch {};
     }
 
     // Clone from store to Cellar
@@ -215,6 +216,7 @@ pub fn materializeWithCellar(
     }
 
     walkMachOAndPatch(
+        io,
         allocator,
         cellar_path,
         macho_reps_buf[0..macho_reps_len],
@@ -252,13 +254,13 @@ pub fn materializeWithCellar(
     }
 
     // Write INSTALL_RECEIPT.json for brew compatibility
-    writeInstallReceipt(cellar_path, name, version, store_sha256);
+    writeInstallReceipt(io, cellar_path, name, version, store_sha256);
 
     // Snapshot the post-relocation keg so the next install of the same
     // bottle sha takes the cache short-circuit at the top of this
     // function. Snapshot failure is non-fatal — the user-visible install
     // already succeeded.
-    relocated_store.save(allocator, prefix, store_sha256, name, version) catch |e| {
+    relocated_store.save(io, allocator, prefix, store_sha256, name, version) catch |e| {
         std.log.debug("relocated cache save failed for {s}: {s}", .{ store_sha256, @errorName(e) });
     };
 
@@ -297,13 +299,14 @@ const Replacement = struct {
 /// through to the generic `PatchFailed`. Per-file I/O errors are
 /// skipped so a single bad binary does not abort the whole materialize.
 fn walkMachOAndPatch(
+    io: std.Io,
     allocator: std.mem.Allocator,
     dir_path: []const u8,
     replacements: []const Replacement,
     modified_out: *std.ArrayList([]const u8),
 ) CellarError!void {
-    var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
 
     var walker = dir.walk(allocator) catch return;
     defer walker.deinit();
@@ -317,7 +320,7 @@ fn walkMachOAndPatch(
     for (replacements, 0..) |r, i| patch_reps_buf[i] = .{ .old = r.old, .new = r.new };
     const patch_reps = patch_reps_buf[0..replacements.len];
 
-    while (walker.next() catch null) |entry| {
+    while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
 
         const full_path = std.fs.path.join(allocator, &.{ dir_path, entry.path }) catch continue;
@@ -325,13 +328,13 @@ fn walkMachOAndPatch(
         defer if (!keep_path) allocator.free(full_path);
 
         // Check if Mach-O by reading magic.
-        const file = fs_compat.openFileAbsolute(full_path, .{}) catch continue;
+        const file = std.Io.Dir.openFileAbsolute(io, full_path, .{}) catch continue;
         var magic_buf: [4]u8 = undefined;
-        const n = file.readAll(&magic_buf) catch {
-            file.close();
+        const n = file.readPositionalAll(io, &magic_buf, 0) catch {
+            file.close(io);
             continue;
         };
-        file.close();
+        file.close(io);
         if (n < 4) continue;
 
         if (!parser_mod.isMachO(&magic_buf)) continue;
@@ -366,12 +369,13 @@ fn walkMachOAndPatch(
 
 /// Write a brew-compatible INSTALL_RECEIPT.json to the keg directory.
 /// This allows Homebrew to recognize malt-installed packages.
-fn writeInstallReceipt(cellar_path: []const u8, name: []const u8, version: []const u8, store_sha256: []const u8) void {
-    writeInstallReceiptFull(cellar_path, name, version, store_sha256, null, true);
+fn writeInstallReceipt(io: std.Io, cellar_path: []const u8, name: []const u8, version: []const u8, store_sha256: []const u8) void {
+    writeInstallReceiptFull(io, cellar_path, name, version, store_sha256, null, true);
 }
 
 /// Public version with full options for tap installs.
 pub fn writeInstallReceiptFull(
+    io: std.Io,
     cellar_path: []const u8,
     name: []const u8,
     version: []const u8,
@@ -382,10 +386,10 @@ pub fn writeInstallReceiptFull(
     var path_buf: [512]u8 = undefined;
     const receipt_path = std.fmt.bufPrint(&path_buf, "{s}/INSTALL_RECEIPT.json", .{cellar_path}) catch return;
 
-    const file = fs_compat.createFileAbsolute(receipt_path, .{}) catch return;
-    defer file.close();
+    const file = std.Io.Dir.createFileAbsolute(io, receipt_path, .{}) catch return;
+    defer file.close(io);
 
-    const timestamp = fs_compat.timestamp();
+    const timestamp = std.Io.Clock.real.now(io).toSeconds();
     const tap_str = tap orelse "homebrew/core";
     const reason = if (is_direct) "true" else "false";
     const dep_reason = if (is_direct) "false" else "true";
@@ -430,13 +434,13 @@ pub fn writeInstallReceiptFull(
 
     // INSTALL_RECEIPT.json is consumed by Homebrew-compat tools only; a
     // partial write leaves the keg usable, and the DB is the source of truth.
-    file.writeAll(json) catch {};
+    file.writeStreamingAll(io, json) catch {};
 }
 
 /// Remove a keg from the Cellar.
-pub fn remove(prefix: []const u8, name: []const u8, version: []const u8) CellarError!void {
+pub fn remove(io: std.Io, prefix: []const u8, name: []const u8, version: []const u8) CellarError!void {
     var buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
         return CellarError.OutOfMemory;
-    fs_compat.deleteTreeAbsolute(cellar_path) catch return CellarError.RemoveFailed;
+    std.Io.Dir.cwd().deleteTree(io, cellar_path) catch return CellarError.RemoveFailed;
 }

@@ -26,7 +26,13 @@ pub fn runStoreOrphans(allocator: std.mem.Allocator, prefix: []const u8, dry_run
     defer db.close();
     schema.initSchema(&db) catch return result;
 
-    var store = store_mod.Store.init(allocator, &db, prefix);
+    // Per-tier Threaded carries the parent environ. Transitional shim
+    // until cli takes AppCtx directly.
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var store = store_mod.Store.init(io, allocator, &db, prefix);
     var orphans_list = store.orphans() catch {
         output.err("store-orphans: failed to enumerate orphans", .{});
         return result;
@@ -100,8 +106,14 @@ pub fn runUnusedDeps(allocator: std.mem.Allocator, prefix: []const u8, dry_run: 
 
     output.info("unused-deps: removing {d} package(s):", .{orphans.len});
 
-    var linker = linker_mod.Linker.init(allocator, &db, prefix);
-    var store = store_mod.Store.init(allocator, &db, prefix);
+    // Per-tier Threaded carries the parent environ. Transitional shim
+    // until cli takes AppCtx directly.
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
+    var store = store_mod.Store.init(io, allocator, &db, prefix);
 
     // Per-orphan removal is best-effort across all steps: a partially-linked
     // or partially-materialized keg must still be cleanable. Callers rely on
@@ -119,7 +131,7 @@ pub fn runUnusedDeps(allocator: std.mem.Allocator, prefix: []const u8, dry_run: 
 
             linker.unlink(keg_id) catch {};
             if (version_ptr) |v| {
-                cellar_mod.remove(prefix, name, std.mem.sliceTo(v, 0)) catch {};
+                cellar_mod.remove(io, prefix, name, std.mem.sliceTo(v, 0)) catch {};
             }
             {
                 var parent_buf: [512]u8 = undefined;

@@ -71,7 +71,12 @@ pub fn routePostInstallOutcome(
             output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{name});
             if (output.isVerbose()) flog.printUnknown(name);
             if (output.isDebug()) flog.printFatal(name);
-            ruby_sub.runPostInstall(allocator, name, version_str, prefix) catch |e| {
+            // Per-call Threaded so ruby_subprocess can spawn / fetch.
+            // Transitional shim until cli/install threads `*const AppCtx`.
+            const environ = fs_compat.processEnviron();
+            var threaded_rb: std.Io.Threaded = .init(allocator, .{ .environ = environ });
+            defer threaded_rb.deinit();
+            ruby_sub.runPostInstall(threaded_rb.io(), environ, allocator, name, version_str, prefix) catch |e| {
                 output.warn("post_install subprocess failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
                 break :blk .ruby_fallback_failed;
             };
@@ -172,16 +177,23 @@ pub fn executeDslPostInstall(
 /// homebrew-core tap, fall back to the pinned GitHub fetch. Returned
 /// slice (when non-null) is owned by the caller.
 fn locateDslSource(allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
-    const tap_path = ruby_sub.findHomebrewCoreTap();
+    // Per-call Threaded carries the parent environ for the GitHub HTTP
+    // path. Transitional shim until cli/install threads `*const AppCtx`.
+    const environ = fs_compat.processEnviron();
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const tap_path = ruby_sub.findHomebrewCoreTap(io);
     var rb_buf: [1024]u8 = undefined;
     const rb_path = if (tap_path) |tp|
-        ruby_sub.resolveFormulaRbPath(&rb_buf, tp, name)
+        ruby_sub.resolveFormulaRbPath(io, &rb_buf, tp, name)
     else
         null;
     if (rb_path) |sp| {
-        if (ruby_sub.extractPostInstallBody(allocator, sp)) |s| return s;
+        if (ruby_sub.extractPostInstallBody(io, allocator, sp)) |s| return s;
     }
-    return ruby_sub.fetchPostInstallFromGitHub(allocator, name);
+    return ruby_sub.fetchPostInstallFromGitHub(io, environ, allocator, name);
 }
 
 /// End-to-end post_install dispatch shared by `install` and `migrate`:
@@ -217,7 +229,12 @@ pub fn drive(
 
     if (useSystemRubyForFormula(use_system_ruby_list, name)) {
         output.warn("Running post_install for {s} via system Ruby...", .{name});
-        ruby_sub.runPostInstall(allocator, name, version_str, prefix) catch |e| {
+        // Per-call Threaded for ruby_subprocess spawn / HTTP. Transitional
+        // shim until cli/install threads `*const AppCtx`.
+        const environ = fs_compat.processEnviron();
+        var threaded_rb: std.Io.Threaded = .init(allocator, .{ .environ = environ });
+        defer threaded_rb.deinit();
+        ruby_sub.runPostInstall(threaded_rb.io(), environ, allocator, name, version_str, prefix) catch |e| {
             output.warn("post_install failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
         };
     } else {

@@ -376,7 +376,7 @@ const c_env = struct {
 test "githubAuthHeader: returns null when MALT_GITHUB_TOKEN unset" {
     _ = c_env.unsetenv("MALT_GITHUB_TOKEN");
     var buf: [256]u8 = undefined;
-    try testing.expect(tap.githubAuthHeader(&buf) == null);
+    try testing.expect(tap.githubAuthHeader(malt.fs_compat.processEnviron(), &buf) == null);
 }
 
 test "githubAuthHeader: returns Bearer header when MALT_GITHUB_TOKEN set" {
@@ -384,7 +384,7 @@ test "githubAuthHeader: returns Bearer header when MALT_GITHUB_TOKEN set" {
     defer _ = c_env.unsetenv("MALT_GITHUB_TOKEN");
 
     var buf: [256]u8 = undefined;
-    const h = tap.githubAuthHeader(&buf) orelse return error.TestUnexpectedNull;
+    const h = tap.githubAuthHeader(malt.fs_compat.processEnviron(), &buf) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("Authorization", h.name);
     try testing.expectEqualStrings("Bearer ghp_testtoken", h.value);
 }
@@ -393,7 +393,7 @@ test "githubAuthHeader: empty-string token behaves as unset" {
     _ = c_env.setenv("MALT_GITHUB_TOKEN", "", 1);
     defer _ = c_env.unsetenv("MALT_GITHUB_TOKEN");
     var buf: [256]u8 = undefined;
-    try testing.expect(tap.githubAuthHeader(&buf) == null);
+    try testing.expect(tap.githubAuthHeader(malt.fs_compat.processEnviron(), &buf) == null);
 }
 
 // ────────────────────────────────────────────────────────────────────

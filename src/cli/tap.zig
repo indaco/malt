@@ -126,12 +126,18 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
     defer db.close();
     schema.initSchema(&db) catch return;
 
+    // Per-command Threaded carries the parent environ for HTTP / token
+    // pickup. Transitional shim until cli takes AppCtx directly.
+    const threaded_environ = fs_compat.processEnviron();
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = threaded_environ });
+    defer threaded.deinit();
+
     if (refresh_target) |target| {
         if (action != .add) {
             output.err("--refresh is only valid with `mt tap`", .{});
             return error.Aborted;
         }
-        try refreshTap(allocator, &db, target);
+        try refreshTap(allocator, &db, target, threaded.io(), threaded_environ);
         return;
     }
 
@@ -179,7 +185,7 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
             const repo = name[slash + 1 ..];
             // Resolve HEAD so the tap is pinned from day one. Failing
             // here beats silently registering an unpinned tap.
-            const sha = tap_mod.resolveHeadCommit(allocator, user, repo) catch |e| {
+            const sha = tap_mod.resolveHeadCommit(threaded.io(), threaded_environ, allocator, user, repo) catch |e| {
                 output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
                 return error.Aborted;
             };
@@ -202,7 +208,7 @@ fn run(allocator: std.mem.Allocator, args: []const []const u8, action: Action) !
     }
 }
 
-fn refreshTap(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) !void {
+fn refreshTap(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8, io: std.Io, environ: std.process.Environ) !void {
     validateTapName(name) catch {
         output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{name});
         return error.Aborted;
@@ -210,7 +216,7 @@ fn refreshTap(allocator: std.mem.Allocator, db: *sqlite.Database, name: []const 
     const slash = std.mem.findScalar(u8, name, '/').?;
     const user = name[0..slash];
     const repo = name[slash + 1 ..];
-    const sha = tap_mod.resolveHeadCommit(allocator, user, repo) catch |e| {
+    const sha = tap_mod.resolveHeadCommit(io, environ, allocator, user, repo) catch |e| {
         output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
         return error.Aborted;
     };

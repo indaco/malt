@@ -120,14 +120,14 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     supervisor_mod.stopAndUnregister(.{ .allocator = allocator, .io = sup_threaded.io(), .db = &db }, name);
 
     // Unlink symlinks
-    var lnk = linker.Linker.init(allocator, &db, prefix);
+    var lnk = linker.Linker.init(sup_threaded.io(), allocator, &db, prefix);
     lnk.unlink(keg_id) catch {
         output.warn("Could not remove all symlinks for {s}", .{name});
     };
 
     // Remove Cellar directory (dir name carries the _<revision> suffix
     // when the keg was installed with revision > 0).
-    cellar.remove(prefix, name, pkg_version) catch {
+    cellar.remove(sup_threaded.io(), prefix, name, pkg_version) catch {
         output.warn("Could not remove cellar entry for {s} {s}", .{ name, version });
     };
     // Also remove parent if empty (e.g. Cellar/jq/ after removing Cellar/jq/1.8.1/)
@@ -145,7 +145,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Decrement store ref
     if (sha256.len > 0) {
-        var st = store.Store.init(allocator, &db, prefix);
+        var st = store.Store.init(sup_threaded.io(), allocator, &db, prefix);
         st.decrementRef(sha256) catch {
             output.warn("Could not decrement store ref for {s}", .{name});
         };
@@ -169,10 +169,17 @@ fn uninstallCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Da
         return error.Aborted;
     };
 
+    // Per-uninstall Threaded carries the parent environ. Transitional shim
+    // until cli takes AppCtx directly.
+    const cask_environ = fs_compat.processEnviron();
+    var cask_threaded: std.Io.Threaded = .init(allocator, .{ .environ = cask_environ });
+    defer cask_threaded.deinit();
+    const cask_io = cask_threaded.io();
+
     // Check if running (unless --force)
     if (!force) {
         if (info.appPath()) |app_path| {
-            if (cask_mod.CaskInstaller.isAppRunningPub(allocator, app_path)) {
+            if (cask_mod.CaskInstaller.isAppRunningPub(cask_io, allocator, app_path)) {
                 output.err("{s} appears to be running. Quit the app first, or use --force.", .{token});
                 return error.Aborted;
             }
@@ -181,7 +188,7 @@ fn uninstallCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Da
 
     output.info("Uninstalling cask {s}...", .{token});
 
-    var installer = cask_mod.CaskInstaller.init(allocator, db, prefix);
+    var installer = cask_mod.CaskInstaller.init(cask_io, cask_environ, allocator, db, prefix);
     installer.uninstall(token) catch {
         output.err("Failed to uninstall cask {s}", .{token});
         return error.Aborted;

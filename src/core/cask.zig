@@ -2,8 +2,6 @@
 //! Cask JSON parsing and installation (DMG, PKG, ZIP, tar.gz).
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
-const io_mod = @import("../ui/io.zig");
 
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
@@ -265,14 +263,16 @@ fn firstArtifactArray(obj: std.json.ObjectMap, key: []const u8) ?std.json.Array 
 /// CaskInstaller — handles DMG, ZIP, and PKG cask installations.
 pub const CaskInstaller = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
+    environ: std.process.Environ,
     prefix: [:0]const u8,
     db: *sqlite.Database,
     progress: ?client_mod.ProgressCallback,
     /// Pre-resolved type for extensionless URLs (HEAD fallback).
     artifact_type_override: ?ArtifactType = null,
 
-    pub fn init(allocator: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]const u8) CaskInstaller {
-        return .{ .allocator = allocator, .db = db, .prefix = prefix, .progress = null };
+    pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]const u8) CaskInstaller {
+        return .{ .allocator = allocator, .io = io, .environ = environ, .db = db, .prefix = prefix, .progress = null };
     }
 
     /// Install a cask. Downloads, verifies SHA256, and installs based on artifact type.
@@ -285,7 +285,7 @@ pub const CaskInstaller = struct {
         var cache_buf: [512]u8 = undefined;
         const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask", .{self.prefix}) catch
             return CaskError.OutOfMemory;
-        fs_compat.makeDirAbsolute(cache_dir) catch |e| switch (e) {
+        std.Io.Dir.createDirAbsolute(self.io, cache_dir, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return CaskError.InstallFailed,
         };
@@ -295,7 +295,7 @@ pub const CaskInstaller = struct {
             return CaskError.DownloadFailed;
         errdefer {
             // cache already leaked to disk; nothing to do on cleanup failure.
-            fs_compat.cwd().deleteFile(cache_path) catch {};
+            std.Io.Dir.cwd().deleteFile(self.io, cache_path) catch {};
             self.allocator.free(cache_path);
         }
 
@@ -305,7 +305,7 @@ pub const CaskInstaller = struct {
 
         // Determine target: prefix-aware sandbox / /Applications / ~/Applications.
         var app_dir_buf: [512]u8 = undefined;
-        const app_dir = applicationsDir(self.prefix, &app_dir_buf);
+        const app_dir = applicationsDir(self.io, self.environ, self.prefix, &app_dir_buf);
 
         // Install based on type
         const app_path = switch (artifact_type) {
@@ -349,22 +349,22 @@ pub const CaskInstaller = struct {
             const app_path = std.mem.sliceTo(p, 0);
 
             // Check if the app is running (best-effort)
-            if (isAppRunning(self.allocator, app_path)) return CaskError.UninstallFailed;
+            if (isAppRunning(self.io, self.allocator, app_path)) return CaskError.UninstallFailed;
 
             // app may already be gone (manual delete); continue to DB cleanup.
-            fs_compat.deleteTreeAbsolute(app_path) catch {};
+            std.Io.Dir.cwd().deleteTree(self.io, app_path) catch {};
         }
 
         // Caskroom bookkeeping; continue so later removals still run.
         var caskroom_buf: [512]u8 = undefined;
         const caskroom_path = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch "";
-        if (caskroom_path.len > 0) fs_compat.deleteTreeAbsolute(caskroom_path) catch {};
+        if (caskroom_path.len > 0) std.Io.Dir.cwd().deleteTree(self.io, caskroom_path) catch {};
 
         var cache_buf: [512]u8 = undefined;
         for ([_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz" }) |ext| {
             const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask/{s}{s}", .{ self.prefix, token, ext }) catch continue;
             // cache file may not exist for this extension.
-            fs_compat.cwd().deleteFile(cache_file) catch {};
+            std.Io.Dir.cwd().deleteFile(self.io, cache_file) catch {};
         }
 
         // DB row cleanup; uninstall already did the user-visible work.
@@ -402,7 +402,7 @@ pub const CaskInstaller = struct {
         errdefer self.allocator.free(dest);
 
         // Download via HTTP client
-        var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), self.allocator);
+        var http = client_mod.HttpClient.init(self.io, self.environ, self.allocator);
         defer http.deinit();
 
         var resp = try http.getWithHeaders(cask.url, &.{}, progress);
@@ -411,15 +411,15 @@ pub const CaskInstaller = struct {
         if (resp.status != 200) return error.DownloadFailed;
 
         // Write to file
-        const file = try fs_compat.createFileAbsolute(dest, .{});
-        defer file.close();
-        try file.writeAll(resp.body);
+        const file = try std.Io.Dir.createFileAbsolute(self.io, dest, .{});
+        defer file.close(self.io);
+        try file.writeStreamingAll(self.io, resp.body);
 
         return dest;
     }
 
-    fn verifySha256(_: *CaskInstaller, file_path: []const u8, expected: ?[]const u8) !void {
-        return verifyFileSha256(file_path, expected);
+    fn verifySha256(self: *CaskInstaller, file_path: []const u8, expected: ?[]const u8) !void {
+        return verifyFileSha256(self.io, file_path, expected);
     }
 
     fn installDmg(self: *CaskInstaller, dmg_path: []const u8, app_dir: []const u8, cask: *const Cask) ![]const u8 {
@@ -427,7 +427,7 @@ pub const CaskInstaller = struct {
         var mount_buf: [512]u8 = undefined;
         const mount_point = std.fmt.bufPrint(&mount_buf, "{s}/tmp/cask_mount_{s}", .{ self.prefix, cask.token }) catch
             return error.InstallFailed;
-        fs_compat.makeDirAbsolute(mount_point) catch |e| switch (e) {
+        std.Io.Dir.createDirAbsolute(self.io, mount_point, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return error.InstallFailed,
         };
@@ -439,20 +439,20 @@ pub const CaskInstaller = struct {
             "-mountpoint", mount_point,
             dmg_path,
         };
-        child_mod.runOrFail(self.allocator, &mount_argv) catch return error.InstallFailed;
+        child_mod.runOrFail(self.io, &mount_argv) catch return error.InstallFailed;
 
         // Unmount on any exit; kernel reaps stuck mounts on reboot if both fail.
         defer {
             const detach_argv = [_][]const u8{ "hdiutil", "detach", mount_point, "-quiet" };
-            child_mod.runOrFail(self.allocator, &detach_argv) catch {};
-            fs_compat.deleteDirAbsolute(mount_point) catch {};
+            child_mod.runOrFail(self.io, &detach_argv) catch {};
+            std.Io.Dir.deleteDirAbsolute(self.io, mount_point) catch {};
         }
 
         // Find the .app bundle name (from JSON artifacts or by scanning mount point).
         // app_name_buf owns the fallback name past iterator teardown.
         var app_name_buf: [256]u8 = undefined;
         const app_name = parseAppName(cask.parsed.value.object) orelse
-            findAppInDir(mount_point, &app_name_buf) orelse
+            findAppInDir(self.io, mount_point, &app_name_buf) orelse
             return error.InstallFailed;
 
         // Source and destination paths
@@ -464,11 +464,11 @@ pub const CaskInstaller = struct {
         errdefer self.allocator.free(dst_app);
 
         // existing app may not be present (fresh install).
-        fs_compat.deleteTreeAbsolute(dst_app) catch {};
+        std.Io.Dir.cwd().deleteTree(self.io, dst_app) catch {};
 
         // Copy .app bundle using ditto (preserves resource forks, xattrs)
         const ditto_argv = [_][]const u8{ "ditto", src_app, dst_app };
-        child_mod.runOrFail(self.allocator, &ditto_argv) catch return error.InstallFailed;
+        child_mod.runOrFail(self.io, &ditto_argv) catch return error.InstallFailed;
 
         return dst_app;
     }
@@ -478,21 +478,21 @@ pub const CaskInstaller = struct {
         var tmp_buf: [512]u8 = undefined;
         const extract_dir = std.fmt.bufPrint(&tmp_buf, "{s}/tmp/cask_extract_{s}", .{ self.prefix, cask.token }) catch
             return error.InstallFailed;
-        fs_compat.makeDirAbsolute(extract_dir) catch |e| switch (e) {
+        std.Io.Dir.createDirAbsolute(self.io, extract_dir, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return error.InstallFailed,
         };
         // temp extract dir; leftover tolerated if teardown races.
-        defer fs_compat.deleteTreeAbsolute(extract_dir) catch {};
+        defer std.Io.Dir.cwd().deleteTree(self.io, extract_dir) catch {};
 
         // Extract with ditto -xk (handles macOS-specific ZIP features)
         const ditto_argv = [_][]const u8{ "ditto", "-xk", zip_path, extract_dir };
-        child_mod.runOrFail(self.allocator, &ditto_argv) catch return error.InstallFailed;
+        child_mod.runOrFail(self.io, &ditto_argv) catch return error.InstallFailed;
 
         // Find the .app. app_name_buf owns the fallback past iterator teardown.
         var app_name_buf: [256]u8 = undefined;
         const app_name = parseAppName(cask.parsed.value.object) orelse
-            findAppInDir(extract_dir, &app_name_buf) orelse
+            findAppInDir(self.io, extract_dir, &app_name_buf) orelse
             return error.InstallFailed;
 
         var src_buf: [512]u8 = undefined;
@@ -503,11 +503,11 @@ pub const CaskInstaller = struct {
         errdefer self.allocator.free(dst_app);
 
         // existing app may not be present.
-        fs_compat.deleteTreeAbsolute(dst_app) catch {};
+        std.Io.Dir.cwd().deleteTree(self.io, dst_app) catch {};
 
         // Move .app to /Applications
         const mv_argv = [_][]const u8{ "ditto", src_app, dst_app };
-        child_mod.runOrFail(self.allocator, &mv_argv) catch return error.InstallFailed;
+        child_mod.runOrFail(self.io, &mv_argv) catch return error.InstallFailed;
 
         return dst_app;
     }
@@ -533,7 +533,7 @@ pub const CaskInstaller = struct {
         const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{
             self.prefix, cask.token, cask.version,
         }) catch return error.InstallFailed;
-        fs_compat.cwd().makePath(caskroom_ver) catch return error.InstallFailed;
+        std.Io.Dir.cwd().createDirPath(self.io, caskroom_ver) catch return error.InstallFailed;
 
         archive_mod.extractTarGz(archive_path, caskroom_ver) catch return error.InstallFailed;
 
@@ -547,7 +547,7 @@ pub const CaskInstaller = struct {
         // zip path's "promote .app to app_dir" shape.
         var app_name_buf: [256]u8 = undefined;
         const app_name = parseAppName(cask.parsed.value.object) orelse
-            findAppInDir(caskroom_ver, &app_name_buf) orelse
+            findAppInDir(self.io, caskroom_ver, &app_name_buf) orelse
             return error.InstallFailed;
 
         var src_buf: [512]u8 = undefined;
@@ -558,9 +558,9 @@ pub const CaskInstaller = struct {
         errdefer self.allocator.free(dst_app);
 
         // existing app may not be present.
-        fs_compat.deleteTreeAbsolute(dst_app) catch {};
+        std.Io.Dir.cwd().deleteTree(self.io, dst_app) catch {};
         const mv_argv = [_][]const u8{ "ditto", src_app, dst_app };
-        child_mod.runOrFail(self.allocator, &mv_argv) catch return error.InstallFailed;
+        child_mod.runOrFail(self.io, &mv_argv) catch return error.InstallFailed;
         return dst_app;
     }
 
@@ -585,7 +585,7 @@ pub const CaskInstaller = struct {
         if (std.mem.indexOfScalar(u8, src, '/') != null) {
             return try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ root, src });
         }
-        return (findFileInTree(self.allocator, root, src) catch null) orelse
+        return (findFileInTree(self.io, self.allocator, root, src) catch null) orelse
             error.InstallFailed;
     }
 
@@ -604,37 +604,37 @@ pub const CaskInstaller = struct {
         defer self.allocator.free(abs_bin);
 
         // Archives sometimes land without the x-bit when built on CI.
-        const exec_file = fs_compat.openFileAbsolute(abs_bin, .{ .mode = .read_write }) catch
+        const exec_file = std.Io.Dir.openFileAbsolute(self.io, abs_bin, .{ .mode = .read_write }) catch
             return error.InstallFailed;
         // chmod may fail on FUSE/NFS mounts; symlink still works if bit was set.
-        exec_file.chmod(0o755) catch {};
-        exec_file.close();
+        exec_file.setPermissions(self.io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+        exec_file.close(self.io);
 
         var bin_parent_buf: [512]u8 = undefined;
         const bin_parent = std.fmt.bufPrint(&bin_parent_buf, "{s}/bin", .{self.prefix}) catch
             return error.InstallFailed;
-        fs_compat.cwd().makePath(bin_parent) catch return error.InstallFailed;
+        std.Io.Dir.cwd().createDirPath(self.io, bin_parent) catch return error.InstallFailed;
 
         const link_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ bin_parent, link_name });
         errdefer self.allocator.free(link_path);
 
         // stale link may not exist (fresh install); symLink below is authoritative.
-        fs_compat.cwd().deleteFile(link_path) catch {};
-        fs_compat.symLinkAbsolute(abs_bin, link_path, .{}) catch return error.InstallFailed;
+        std.Io.Dir.cwd().deleteFile(self.io, link_path) catch {};
+        std.Io.Dir.symLinkAbsolute(self.io, abs_bin, link_path, .{}) catch return error.InstallFailed;
         return link_path;
     }
 
     fn installPkg(self: *CaskInstaller, pkg_path: []const u8) ![]const u8 {
         // PKG installs require sudo — the caller must confirm
         const argv = [_][]const u8{ "sudo", "installer", "-pkg", pkg_path, "-target", "/" };
-        child_mod.runOrFail(self.allocator, &argv) catch return error.InstallFailed;
+        child_mod.runOrFail(self.io, &argv) catch return error.InstallFailed;
         // PKG installs don't have a single app path — record the pkg location
         return std.fmt.allocPrint(self.allocator, "{s}", .{pkg_path}) catch return error.OutOfMemory;
     }
 
     /// Public wrapper for isAppRunning (used by uninstall.zig).
-    pub fn isAppRunningPub(allocator: std.mem.Allocator, app_path: []const u8) bool {
-        return isAppRunning(allocator, app_path);
+    pub fn isAppRunningPub(io: std.Io, allocator: std.mem.Allocator, app_path: []const u8) bool {
+        return isAppRunning(io, allocator, app_path);
     }
 
     fn recordCaskroom(self: *CaskInstaller, cask: *const Cask) !void {
@@ -644,7 +644,7 @@ pub const CaskInstaller = struct {
             self.prefix, cask.token, cask.version,
         }) catch return;
         // Caskroom dir is cosmetic bookkeeping; install already recorded in DB.
-        fs_compat.cwd().makePath(caskroom_ver) catch {};
+        std.Io.Dir.cwd().createDirPath(self.io, caskroom_ver) catch {};
     }
 };
 
@@ -653,17 +653,18 @@ pub const CaskInstaller = struct {
 /// often nest the binary one or two levels deep, so the installer can't
 /// assume it sits at the extraction root. Returns null on no match.
 pub fn findFileInTree(
+    io: std.Io,
     allocator: std.mem.Allocator,
     root: []const u8,
     name: []const u8,
 ) !?[]u8 {
-    var dir = fs_compat.openDirAbsolute(root, .{ .iterate = true }) catch return null;
-    defer dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
 
     var walker = dir.walk(allocator) catch return null;
     defer walker.deinit();
 
-    while (walker.next() catch null) |entry| {
+    while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.eql(u8, std.fs.path.basename(entry.path), name)) continue;
         return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, entry.path });
@@ -676,11 +677,11 @@ pub fn findFileInTree(
 /// internal entry buffer dies with the iterator, so the name must be
 /// copied out before `dir.close()` fires. Returns null if no `.app`
 /// exists, the directory can't be opened, or the name does not fit.
-pub fn findAppInDir(dir_path: []const u8, out_buf: []u8) ?[]const u8 {
-    var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch return null;
-    defer dir.close();
+pub fn findAppInDir(io: std.Io, dir_path: []const u8, out_buf: []u8) ?[]const u8 {
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(io) catch null) |entry| {
         if (entry.kind == .directory and std.mem.endsWith(u8, entry.name, ".app")) {
             if (entry.name.len > out_buf.len) return null;
             @memcpy(out_buf[0..entry.name.len], entry.name);
@@ -693,30 +694,34 @@ pub fn findAppInDir(dir_path: []const u8, out_buf: []u8) ?[]const u8 {
 /// Compute the SHA256 of `file_path` as lowercase hex. Delegates to
 /// the shared streaming helper so the chunk loop and buffer size are
 /// defined in exactly one place.
-pub fn hashFileSha256(file_path: []const u8) ![64]u8 {
-    return hash_mod.hashFileSha256Hex(file_path);
+pub fn hashFileSha256(io: std.Io, file_path: []const u8) ![64]u8 {
+    return hash_mod.hashFileSha256Hex(io, file_path);
 }
 
 /// Verify `file_path` hashes to `expected` (lowercase hex). A null
 /// `expected` or the literal `"no_check"` skips verification —
 /// mirrors Homebrew's `sha256 :no_check` escape hatch for casks that
 /// cannot be pinned (auto-updating installers).
-pub fn verifyFileSha256(file_path: []const u8, expected: ?[]const u8) !void {
+pub fn verifyFileSha256(io: std.Io, file_path: []const u8, expected: ?[]const u8) !void {
     const expected_hash = expected orelse return;
     if (std.mem.eql(u8, expected_hash, "no_check")) return;
 
-    const got = try hashFileSha256(file_path);
+    const got = try hashFileSha256(io, file_path);
     // Constant-time SHA compare — mirrors install.zig to close the
     // byte-by-byte timing oracle on the expected hash.
     if (!install_cmd.constantTimeEql(u8, &got, expected_hash)) return error.Sha256Mismatch;
 }
 
 /// Check if an application is currently running by its path.
-fn isAppRunning(allocator: std.mem.Allocator, app_path: []const u8) bool {
+fn isAppRunning(io: std.Io, allocator: std.mem.Allocator, app_path: []const u8) bool {
+    _ = allocator;
     const argv = [_][]const u8{ "pgrep", "-f", app_path };
-    var child = fs_compat.Child.init(&argv, allocator);
-    child.spawn() catch return false;
-    const term = child.wait() catch return false;
+    var child = std.process.spawn(io, .{
+        .argv = &argv,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return false;
+    const term = child.wait(io) catch return false;
     return switch (term) {
         .exited => |code| code == 0, // pgrep exits 0 if match found
         .signal, .stopped, .unknown => false,
@@ -771,16 +776,16 @@ pub fn resolveAppDir(
 /// `resolveAppDir` with the env probes and an mkdir on the chosen path
 /// so `ditto`/`unzip` can write there immediately. The caller owns `out`;
 /// the returned slice is either a compile-time literal or a slice of `out`.
-fn applicationsDir(prefix: []const u8, out: []u8) []const u8 {
-    const env_appdir = fs_compat.getenv("MALT_APPDIR");
-    const env_home = fs_compat.getenv("HOME");
+fn applicationsDir(io: std.Io, environ: std.process.Environ, prefix: []const u8, out: []u8) []const u8 {
+    const env_appdir = std.process.Environ.getPosix(environ, "MALT_APPDIR");
+    const env_home = std.process.Environ.getPosix(environ, "HOME");
 
     const test_path = "/Applications/.malt_write_test";
-    const probe = fs_compat.createFileAbsolute(test_path, .{});
+    const probe = std.Io.Dir.createFileAbsolute(io, test_path, .{});
     const system_writable = if (probe) |f| blk: {
-        f.close();
+        f.close(io);
         // probe file cleanup; leaving it behind would still be benign.
-        fs_compat.cwd().deleteFile(test_path) catch {};
+        std.Io.Dir.cwd().deleteFile(io, test_path) catch {};
         break :blk true;
     } else |_| false;
 
@@ -790,7 +795,7 @@ fn applicationsDir(prefix: []const u8, out: []u8) []const u8 {
     // is a literal, not a slice of `out`, and either pre-exists or we
     // already proved it unwritable above).
     if (chosen.ptr != "/Applications".ptr) {
-        fs_compat.makeDirAbsolute(chosen) catch |e| switch (e) {
+        std.Io.Dir.createDirAbsolute(io, chosen, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return "/Applications",
         };

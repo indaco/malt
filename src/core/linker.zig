@@ -1,5 +1,4 @@
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
 const sqlite = @import("../db/sqlite.zig");
 
 pub const LinkError = error{ ConflictFound, LinkFailed, UnlinkFailed, OutOfMemory };
@@ -11,11 +10,12 @@ pub const Conflict = struct {
 
 pub const Linker = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     db: *sqlite.Database,
     prefix: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, db: *sqlite.Database, prefix: []const u8) Linker {
-        return .{ .allocator = allocator, .db = db, .prefix = prefix };
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, prefix: []const u8) Linker {
+        return .{ .allocator = allocator, .io = io, .db = db, .prefix = prefix };
     }
 
     /// Check for symlink conflicts before linking.
@@ -28,17 +28,17 @@ pub const Linker = struct {
             var keg_dir_buf: [512]u8 = undefined;
             const keg_subdir = std.fmt.bufPrint(&keg_dir_buf, "{s}/{s}", .{ keg_path, subdir }) catch continue;
 
-            var dir = fs_compat.openDirAbsolute(keg_subdir, .{ .iterate = true }) catch continue;
-            defer dir.close();
+            var dir = std.Io.Dir.openDirAbsolute(self.io, keg_subdir, .{ .iterate = true }) catch continue;
+            defer dir.close(self.io);
 
             var prefix_dir_buf: [512]u8 = undefined;
             const prefix_subdir = std.fmt.bufPrint(&prefix_dir_buf, "{s}/{s}", .{ self.prefix, subdir }) catch continue;
 
-            var prefix_dir = fs_compat.openDirAbsolute(prefix_subdir, .{}) catch continue;
-            defer prefix_dir.close();
+            var prefix_dir = std.Io.Dir.openDirAbsolute(self.io, prefix_subdir, .{}) catch continue;
+            defer prefix_dir.close(self.io);
 
             var iter = dir.iterate();
-            while (iter.next() catch null) |entry| {
+            while (iter.next(self.io) catch null) |entry| {
                 if (entry.kind == .directory) continue;
 
                 // Check if a symlink already exists at the target location.
@@ -46,7 +46,8 @@ pub const Linker = struct {
                 // previous `max_path_bytes` (~4 KiB) was stack-wasteful when
                 // scanning kegs with many files.
                 var link_target_buf: [1024]u8 = undefined;
-                const link_target = prefix_dir.readLink(entry.name, &link_target_buf) catch continue;
+                const link_target_len = prefix_dir.readLink(self.io, entry.name, &link_target_buf) catch continue;
+                const link_target = link_target_buf[0..link_target_len];
 
                 // If the existing symlink points into a different keg, it's a conflict
                 if (!std.mem.startsWith(u8, link_target, keg_path)) {
@@ -94,22 +95,22 @@ pub const Linker = struct {
         var keg_dir_buf: [512]u8 = undefined;
         const keg_subdir = std.fmt.bufPrint(&keg_dir_buf, "{s}/{s}", .{ keg_path, subdir }) catch return;
 
-        var dir = fs_compat.openDirAbsolute(keg_subdir, .{ .iterate = true }) catch return;
-        defer dir.close();
+        var dir = std.Io.Dir.openDirAbsolute(self.io, keg_subdir, .{ .iterate = true }) catch return;
+        defer dir.close(self.io);
 
         // Ensure parent dir exists
         var parent_buf: [512]u8 = undefined;
         const parent = std.fmt.bufPrint(&parent_buf, "{s}/{s}", .{ self.prefix, subdir }) catch return;
-        fs_compat.makeDirAbsolute(parent) catch |e| switch (e) {
+        std.Io.Dir.createDirAbsolute(self.io, parent, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
 
-        var parent_dir = fs_compat.openDirAbsolute(parent, .{}) catch return;
-        defer parent_dir.close();
+        var parent_dir = std.Io.Dir.openDirAbsolute(self.io, parent, .{}) catch return;
+        defer parent_dir.close(self.io);
 
         var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
+        while (iter.next(self.io) catch null) |entry| {
             if (entry.kind == .directory) continue;
 
             var target_buf: [512]u8 = undefined;
@@ -120,13 +121,13 @@ pub const Linker = struct {
             var tmp_name_buf: [280]u8 = undefined;
             const tmp_name = std.fmt.bufPrint(&tmp_name_buf, ".malt_tmp_{s}", .{entry.name}) catch continue;
             // Stale tmp from a prior aborted link; symLink would otherwise EEXIST.
-            parent_dir.deleteFile(tmp_name) catch {};
-            parent_dir.symLink(target, tmp_name, .{}) catch continue;
-            parent_dir.rename(tmp_name, entry.name) catch {
+            parent_dir.deleteFile(self.io, tmp_name) catch {};
+            parent_dir.symLink(self.io, target, tmp_name, .{}) catch continue;
+            parent_dir.rename(tmp_name, parent_dir, entry.name, self.io) catch {
                 // Rename failed — fall back to direct replacement (non-atomic).
-                parent_dir.deleteFile(tmp_name) catch {};
-                parent_dir.deleteFile(entry.name) catch {};
-                parent_dir.symLink(target, entry.name, .{}) catch continue;
+                parent_dir.deleteFile(self.io, tmp_name) catch {};
+                parent_dir.deleteFile(self.io, entry.name) catch {};
+                parent_dir.symLink(self.io, target, entry.name, .{}) catch continue;
             };
 
             // Build the full link path for DB recording
@@ -149,22 +150,22 @@ pub const Linker = struct {
     pub fn linkOpt(self: *Linker, name: []const u8, version: []const u8) !void {
         var opt_parent_buf: [512]u8 = undefined;
         const opt_parent = std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{self.prefix}) catch return;
-        fs_compat.makeDirAbsolute(opt_parent) catch |e| switch (e) {
+        std.Io.Dir.createDirAbsolute(self.io, opt_parent, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
 
-        var opt_dir = fs_compat.openDirAbsolute(opt_parent, .{}) catch return;
-        defer opt_dir.close();
+        var opt_dir = std.Io.Dir.openDirAbsolute(self.io, opt_parent, .{}) catch return;
+        defer opt_dir.close(self.io);
 
         var cellar_buf: [512]u8 = undefined;
         const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ self.prefix, name, version }) catch return;
 
         // Stale opt link from a prior version; symLink would otherwise EEXIST.
-        opt_dir.deleteFile(name) catch {};
+        opt_dir.deleteFile(self.io, name) catch {};
 
         // Opt is convenience; install remains functional via the versioned link.
-        opt_dir.symLink(cellar_path, name, .{}) catch {};
+        opt_dir.symLink(self.io, cellar_path, name, .{}) catch {};
     }
 
     /// Remove all symlinks for a keg (from DB).
@@ -177,7 +178,7 @@ pub const Linker = struct {
             const link_path = stmt.columnText(0) orelse continue;
             const path_slice = std.mem.sliceTo(link_path, 0);
             // Symlink may already be gone from the filesystem; DB row is the source of truth we're flushing.
-            fs_compat.cwd().deleteFile(path_slice) catch {};
+            std.Io.Dir.cwd().deleteFile(self.io, path_slice) catch {};
         }
 
         var del_stmt = try self.db.prepare("DELETE FROM links WHERE keg_id = ?1;");

@@ -120,7 +120,7 @@ pub fn verifyAll(io: std.Io, allocator: std.mem.Allocator, in: VerifyInputs) Ver
     _ = std.fmt.hexToBytes(&expected, expected_hex) catch return error.InvalidHex;
 
     // Stream to bound RSS during self-update — the tarball can be 256 MiB.
-    const actual = hash.hashFileSha256Raw(in.tarball_path) catch return error.ReadFailed;
+    const actual = hash.hashFileSha256Raw(io, in.tarball_path) catch return error.ReadFailed;
     if (!install_cmd.constantTimeEql(u8, &expected, &actual)) return error.ChecksumMismatch;
 }
 

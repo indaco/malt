@@ -252,7 +252,13 @@ fn upgradeFormula(
     var ghcr = ghcr_mod.GhcrClient.init(io_mod.ctx(), allocator, http);
     defer ghcr.deinit();
 
-    var store = store_mod.Store.init(allocator, db, prefix);
+    // Per-formula Threaded carries the parent environ. Transitional shim
+    // until cli takes AppCtx directly.
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var store = store_mod.Store.init(io, allocator, db, prefix);
 
     if (!store.exists(bottle.sha256)) {
         // Parse GHCR URL to extract repo + digest
@@ -278,7 +284,7 @@ fn upgradeFormula(
         };
 
         output.info("  Downloading {s}...", .{name});
-        _ = bottle_mod.download(allocator, &ghcr, http, repo, digest, bottle.sha256, tmp_dir, null) catch {
+        _ = bottle_mod.download(io, allocator, &ghcr, http, repo, digest, bottle.sha256, tmp_dir, null) catch {
             output.err("  Download failed: {s}", .{name});
             atomic.cleanupTempDir(tmp_dir);
             allocator.free(tmp_dir);
@@ -306,6 +312,7 @@ fn upgradeFormula(
     // Step 5: Materialize new version to Cellar
     output.dim("Materializing {s} to cellar...", .{name});
     const new_keg = cellar_mod.materialize(
+        io,
         allocator,
         prefix,
         bottle.sha256,
@@ -319,7 +326,7 @@ fn upgradeFormula(
     output.emitNdjsonEvent(allocator, .materialized, name, "ok");
 
     // Step 6: Unlink old symlinks
-    var linker = linker_mod.Linker.init(allocator, db, prefix);
+    var linker = linker_mod.Linker.init(io, allocator, db, prefix);
     linker.unlink(old_keg_id) catch {
         output.warn("Could not remove old symlinks for {s}", .{name});
     };
@@ -330,7 +337,7 @@ fn upgradeFormula(
         // Rollback: re-link old version
         restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
         // rollback cellar cleanup; a leftover keg is tolerable if the rollback is already failing.
-        cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
+        cellar_mod.remove(io, prefix, formula.name, formula.pkg_version) catch {};
         return;
     };
 
@@ -343,7 +350,7 @@ fn upgradeFormula(
         deleteKeg(db, new_keg_id);
         restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
         // rollback cellar cleanup.
-        cellar_mod.remove(prefix, formula.name, formula.pkg_version) catch {};
+        cellar_mod.remove(io, prefix, formula.name, formula.pkg_version) catch {};
         return;
     };
     // `recorded` after both succeed — link rollback above undoes the
@@ -356,7 +363,7 @@ fn upgradeFormula(
 
     // Step 8: Remove old DB record + Cellar entry (success path only)
     deleteKeg(db, old_keg_id);
-    cellar_mod.remove(prefix, name, old_pkg_version) catch {
+    cellar_mod.remove(io, prefix, name, old_pkg_version) catch {
         output.warn("Could not remove old cellar entry for {s} {s}", .{ name, old_pkg_version });
     };
     // Also remove parent if empty
@@ -578,8 +585,13 @@ fn upgradeCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Data
     // after recordInstall so a `--force` upgrade preserves the user's hold.
     const was_pinned = pin_mod.isPinned(db, token);
 
+    // Per-cask Threaded carries the parent environ for HTTP + spawn.
+    // Transitional shim until cli takes AppCtx directly.
+    const cask_environ = fs_compat.processEnviron();
+    var cask_threaded: std.Io.Threaded = .init(allocator, .{ .environ = cask_environ });
+    defer cask_threaded.deinit();
     // Uninstall old version
-    var installer = cask_mod.CaskInstaller.init(allocator, db, prefix);
+    var installer = cask_mod.CaskInstaller.init(cask_threaded.io(), cask_environ, allocator, db, prefix);
     installer.uninstall(token) catch {
         output.err("Failed to remove old version of {s}", .{token});
         return error.Aborted;

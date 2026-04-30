@@ -233,7 +233,7 @@ test "fixOrphanedStore: sweeps refcount-zero entries against a real DB" {
     const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
     try fs_compat.makeDirAbsolute(entry_dir);
 
-    var store = store_mod.Store.init(testing.allocator, &db, prefix);
+    var store = store_mod.Store.init(std.Options.debug_io, testing.allocator, &db, prefix);
     try store.incrementRef(sha);
     try store.decrementRef(sha);
 

@@ -123,19 +123,25 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer lk.release();
 
+    // Per-command Threaded carries the parent environ. Transitional shim
+    // until cli takes AppCtx directly.
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
     // Unlink current version
-    var linker = linker_mod.Linker.init(allocator, &db, prefix);
+    var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
     linker.unlink(current_id) catch {
         output.warn("Could not unlink current {s} — links may be stale", .{name});
     };
 
     // Remove current cellar entry
-    cellar.remove(prefix, name, current_ver) catch {
+    cellar.remove(io, prefix, name, current_ver) catch {
         output.warn("Could not remove cellar entry for {s} {s}", .{ name, current_ver });
     };
 
     // Materialize the old version from store
-    const keg = cellar.materialize(allocator, prefix, target.sha256, name, target.version) catch {
+    const keg = cellar.materialize(io, allocator, prefix, target.sha256, name, target.version) catch {
         output.err("Failed to materialize {s} {s} from store", .{ name, target.version });
         return error.Aborted;
     };

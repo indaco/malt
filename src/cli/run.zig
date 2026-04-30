@@ -240,7 +240,10 @@ fn ephemeralRun(
     } else return;
 
     output.info("Downloading {s} {s}...", .{ pkg_name, formula.version });
-    _ = bottle_mod.download(allocator, &ghcr, &http, repo, digest, bottle.sha256, dest_dir, null) catch {
+    // Per-run Threaded for bottle download. Transitional shim until cli takes AppCtx directly.
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = fs_compat.processEnviron() });
+    defer threaded.deinit();
+    _ = bottle_mod.download(threaded.io(), allocator, &ghcr, &http, repo, digest, bottle.sha256, dest_dir, null) catch {
         output.err("Failed to download {s}", .{pkg_name});
         return error.Aborted;
     };

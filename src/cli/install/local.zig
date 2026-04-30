@@ -90,18 +90,25 @@ pub fn installTapFormula(
     var tap_slug_buf: [128]u8 = undefined;
     const tap_slug = std.fmt.bufPrint(&tap_slug_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
         return InstallError.FormulaNotFound;
+    // Per-command Threaded carries the parent environ for HTTP / token
+    // pickup. Transitional shim until cli takes AppCtx directly.
+    const threaded_environ = fs_compat.processEnviron();
+    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = threaded_environ });
+    defer threaded.deinit();
+    const local_io = threaded.io();
+
     const commit_sha = blk: {
         if ((tap_mod.getCommitSha(allocator, db, tap_slug) catch null)) |cached| {
             break :blk cached;
         }
-        break :blk tap_mod.resolveHeadCommit(allocator, parts.user, parts.repo) catch |e| {
+        break :blk tap_mod.resolveHeadCommit(local_io, threaded_environ, allocator, parts.user, parts.repo) catch |e| {
             output.err("Could not resolve {s}'s HEAD commit: {s}", .{ tap_slug, tap_mod.describeResolveError(e) });
             return InstallError.FormulaNotFound;
         };
     };
     defer allocator.free(commit_sha);
 
-    var http = client_mod.HttpClient.init(io_mod.ctx(), fs_compat.processEnviron(), allocator);
+    var http = client_mod.HttpClient.init(local_io, threaded_environ, allocator);
     defer http.deinit();
 
     // Try Formula/ first, then Casks/
@@ -731,7 +738,12 @@ fn materializeTapCask(
     };
     defer cask.deinit();
 
-    var installer = cask_mod.CaskInstaller.init(allocator, db, prefix_z);
+    // Per-install Threaded carries the parent environ for HTTP + spawn.
+    // Transitional shim until cli takes AppCtx directly.
+    const cask_environ = fs_compat.processEnviron();
+    var cask_threaded: std.Io.Threaded = .init(allocator, .{ .environ = cask_environ });
+    defer cask_threaded.deinit();
+    var installer = cask_mod.CaskInstaller.init(cask_threaded.io(), cask_environ, allocator, db, prefix_z);
     installer.artifact_type_override = kind;
 
     var bar = progress_mod.ProgressBar.init(cask.token, 0);
