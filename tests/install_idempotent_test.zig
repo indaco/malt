@@ -24,7 +24,20 @@ fn pathExists(path: []const u8) bool {
 fn seedCellarKeg(prefix: []const u8, name: []const u8, version: []const u8) !void {
     const dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
     defer testing.allocator.free(dir);
-    try malt.fs_compat.cwd().makePath(dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), dir);
+}
+
+/// Drop a zero-byte 404 marker into the API cache so a subsequent
+/// `BrewApi` lookup short-circuits with `NotFound` without opening a
+/// network connection.
+fn seedNotFound(prefix: []const u8, key: []const u8) !void {
+    const api_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
+    defer testing.allocator.free(api_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), api_dir);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.404", .{ api_dir, key });
+    defer testing.allocator.free(marker);
+    const f = try std.Io.Dir.createFileAbsolute(malt.io_mod.ctx(), marker, .{});
+    f.close(malt.io_mod.ctx());
 }
 
 /// Redirect fd 2 to /dev/null and return a saved dup. Subprocess stderr
@@ -59,7 +72,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
         0,
     );
     malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().makePath(path);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -119,7 +132,7 @@ test "execute --force falls through to the existing path even when the keg exist
     defer arena.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
-    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
     // `--force` drives the full pipeline; we don't care about the eventual
     // outcome for an unresolvable name, only that the DB was opened.
     install.execute(&ctx, arena.allocator(), &.{ "--force", "--quiet", "seedpkg" }) catch {};
@@ -136,6 +149,15 @@ test "execute falls through when one of several args is missing from the Cellar"
     }
 
     try seedCellarKeg(prefix, "alpha", "1.0");
+    // Pre-seed 404 markers for every API key the fall-through pipeline
+    // touches; with both args resolving from the cache, no TCP connect
+    // is attempted and we sidestep the intermittent BADF abort inside
+    // `Io.Threaded.posixConnect` when group-cancellation closes the
+    // socket fd between `socket(2)` and `connect(2)`.
+    try seedNotFound(prefix, "formula_alpha");
+    try seedNotFound(prefix, "cask_alpha");
+    try seedNotFound(prefix, "formula_missing");
+    try seedNotFound(prefix, "cask_missing");
 
     const db_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
     defer testing.allocator.free(db_file);
@@ -148,7 +170,7 @@ test "execute falls through when one of several args is missing from the Cellar"
     defer restoreStderr(saved_stderr);
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
-    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
     install.execute(&ctx, arena.allocator(), &.{ "--quiet", "alpha", "missing" }) catch {};
 
     try testing.expect(pathExists(db_file));

@@ -35,8 +35,8 @@ fn makePrefix(prefix_buf: *[128]u8, label: []const u8) ![]const u8 {
 
 fn writeFile(path: []const u8, content: []const u8) !void {
     const f = try fs_compat.createFileAbsolute(path, .{ .truncate = true });
-    defer f.close();
-    try f.writeAll(content);
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), content);
 }
 
 fn pathExists(path: []const u8) bool {
@@ -127,9 +127,9 @@ test "fixBrokenSymlinks: dangling links are unlinked, valid links survive" {
     try writeFile(anchor, "x");
 
     var bin = try fs_compat.openDirAbsolute(bin_dir, .{ .iterate = true });
-    defer bin.close();
-    try bin.symLink(anchor, "alive", .{});
-    try bin.symLink("/tmp/malt-doctor-fix-vanished-target", "dead", .{});
+    defer bin.close(malt.io_mod.ctx());
+    try bin.symLink(malt.io_mod.ctx(), anchor, "alive", .{});
+    try bin.symLink(malt.io_mod.ctx(), "/tmp/malt-doctor-fix-vanished-target", "dead", .{});
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -213,8 +213,8 @@ test "executeFix: live run sweeps stale lock + broken symlinks together" {
     const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
     try fs_compat.makeDirAbsolute(bin_dir);
     var bin = try fs_compat.openDirAbsolute(bin_dir, .{ .iterate = true });
-    defer bin.close();
-    try bin.symLink("/tmp/malt-doctor-fix-vanished-multi", "ghost", .{});
+    defer bin.close(malt.io_mod.ctx());
+    try bin.symLink(malt.io_mod.ctx(), "/tmp/malt-doctor-fix-vanished-multi", "ghost", .{});
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

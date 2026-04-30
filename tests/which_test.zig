@@ -33,18 +33,18 @@ fn makePrefixWithKeg(suffix: []const u8, name: []const u8, version: []const u8) 
         .{ prefix, name, version },
     );
     defer testing.allocator.free(keg_bin);
-    try malt.fs_compat.cwd().makePath(keg_bin);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg_bin);
 
     const real_bin = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ keg_bin, name });
     defer testing.allocator.free(real_bin);
     {
         const f = try malt.fs_compat.createFileAbsolute(real_bin, .{ .truncate = true });
-        defer f.close();
+        defer f.close(malt.io_mod.ctx());
     }
 
     const prefix_bin = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{prefix});
     defer testing.allocator.free(prefix_bin);
-    try malt.fs_compat.cwd().makePath(prefix_bin);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix_bin);
 
     const link_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ prefix_bin, name });
     defer testing.allocator.free(link_path);

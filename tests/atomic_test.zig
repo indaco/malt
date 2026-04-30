@@ -275,7 +275,7 @@ test "createTempDir creates a unique directory under the prefix and cleanup remo
     // Must exist as an absolute dir under {prefix}/tmp/
     try testing.expect(std.mem.startsWith(u8, dir, "/tmp/malt_atomic_ctmp/tmp/label_"));
     var open_dir = try malt.fs_compat.openDirAbsolute(dir, .{});
-    open_dir.close();
+    open_dir.close(malt.io_mod.ctx());
 
     atomic.cleanupTempDir(std.Options.debug_io, dir);
     try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(dir, .{}));
@@ -290,16 +290,16 @@ test "atomicRename moves a file within the same filesystem" {
     const src = "/tmp/malt_atomic_rename/src.txt";
     const dst = "/tmp/malt_atomic_rename/dst.txt";
     const f = try malt.fs_compat.createFileAbsolute(src, .{});
-    try f.writeAll("payload");
-    f.close();
+    try f.writeStreamingAll(malt.io_mod.ctx(), "payload");
+    f.close(malt.io_mod.ctx());
 
     try atomic.atomicRename(std.Options.debug_io, testing.allocator, src, dst);
     try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(src, .{}));
 
     const moved = try malt.fs_compat.openFileAbsolute(dst, .{});
-    defer moved.close();
+    defer moved.close(malt.io_mod.ctx());
     var buf: [16]u8 = undefined;
-    const n = try moved.readAll(&buf);
+    const n = try moved.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
     try testing.expectEqualStrings("payload", buf[0..n]);
 }
 
@@ -320,9 +320,9 @@ test "atomicWriteFile writes full payload to a fresh path" {
     try atomic.atomicWriteFile(std.Options.debug_io, dst, "{\"formulae\":[]}");
 
     const f = try malt.fs_compat.openFileAbsolute(dst, .{});
-    defer f.close();
+    defer f.close(malt.io_mod.ctx());
     var buf: [64]u8 = undefined;
-    const n = try f.readAll(&buf);
+    const n = try f.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
     try testing.expectEqualStrings("{\"formulae\":[]}", buf[0..n]);
 }
 
@@ -336,16 +336,16 @@ test "atomicWriteFile replaces an existing file's contents in one step" {
     // Seed with old bytes so we can prove the replacement lands whole.
     {
         const f = try malt.fs_compat.createFileAbsolute(dst, .{});
-        defer f.close();
-        try f.writeAll("OLD_PAYLOAD_THAT_SHOULD_VANISH");
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), "OLD_PAYLOAD_THAT_SHOULD_VANISH");
     }
 
     try atomic.atomicWriteFile(std.Options.debug_io, dst, "NEW");
 
     const f = try malt.fs_compat.openFileAbsolute(dst, .{});
-    defer f.close();
+    defer f.close(malt.io_mod.ctx());
     var buf: [64]u8 = undefined;
-    const n = try f.readAll(&buf);
+    const n = try f.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
     try testing.expectEqualStrings("NEW", buf[0..n]);
 }
 
@@ -361,10 +361,10 @@ test "atomicWriteFile leaves no sibling .tmp files behind on success" {
     // Only `cache.json` must remain — a stale tempfile would accumulate
     // across calls and eventually blow up a user's cache dir.
     var dir = try malt.fs_compat.openDirAbsolute(base, .{ .iterate = true });
-    defer dir.close();
+    defer dir.close(malt.io_mod.ctx());
     var iter = dir.iterate();
     var count: usize = 0;
-    while (try iter.next()) |entry| {
+    while (try iter.next(malt.io_mod.ctx())) |entry| {
         try testing.expectEqualStrings("cache.json", entry.name);
         count += 1;
     }
@@ -398,18 +398,18 @@ test "atomicRename moves a directory tree within the same filesystem" {
     const child = "/tmp/malt_atomic_rename_dir/src/inner.txt";
     {
         const f = try malt.fs_compat.createFileAbsolute(child, .{});
-        defer f.close();
-        try f.writeAll("payload");
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), "payload");
     }
 
     try atomic.atomicRename(std.Options.debug_io, testing.allocator, src, dst);
     try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(src, .{}));
 
     var moved = try malt.fs_compat.openDirAbsolute(dst, .{});
-    defer moved.close();
-    const inner = try moved.openFile("inner.txt", .{});
-    defer inner.close();
+    defer moved.close(malt.io_mod.ctx());
+    const inner = try moved.openFile(malt.io_mod.ctx(), "inner.txt", .{});
+    defer inner.close(malt.io_mod.ctx());
     var buf: [16]u8 = undefined;
-    const n = try inner.readAll(&buf);
+    const n = try inner.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
     try testing.expectEqualStrings("payload", buf[0..n]);
 }

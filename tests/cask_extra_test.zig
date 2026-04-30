@@ -14,7 +14,7 @@ fn testIo() std.Io {
 }
 
 fn testEnviron() std.process.Environ {
-    return malt.fs_compat.processEnviron();
+    return malt.app_ctx.processEnviron();
 }
 
 test "isAppRunningPub returns false for a path no pgrep match can cover" {
@@ -94,7 +94,7 @@ test "artifact_type_override bypasses URL detection" {
 
     // With override: passes the type gate (gets further before failing)
     installer.artifact_type_override = .dmg;
-    malt.fs_compat.cwd().makePath(prefix ++ "/cache/Cask") catch {};
+    malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix ++ "/cache/Cask") catch {};
     defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     const result = installer.install(&c);
     // Should fail on download, not on the type gate
@@ -118,7 +118,7 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
     // Stage a scratch "app bundle" that uninstall will try to delete.
     const base = "/tmp/malt_cask_uninstall_test";
     malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.cwd().makePath(base);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), base);
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     const app_path_z = try std.fmt.allocPrintSentinel(
@@ -134,7 +134,7 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
     try testing.expect(cask.isInstalled(&db, "firefox"));
 
     const prefix: [:0]const u8 = "/tmp/mc-uninstall";
-    malt.fs_compat.cwd().makePath(prefix) catch {};
+    malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix) catch {};
     defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();

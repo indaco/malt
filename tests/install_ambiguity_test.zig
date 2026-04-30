@@ -38,18 +38,18 @@ const formula_wget_json =
 fn seedCacheFile(prefix: []const u8, rel: []const u8, body: []const u8) !void {
     const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
     defer testing.allocator.free(cache_api);
-    try malt.fs_compat.cwd().makePath(cache_api);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), cache_api);
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, rel });
     defer testing.allocator.free(path);
-    const f = try malt.fs_compat.cwd().createFile(path, .{});
-    defer f.close();
-    try f.writeAll(body);
+    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), path, .{});
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), body);
 }
 
 test "ambiguity warning fires when both formula and cask are cached" {
     const prefix_z: [:0]const u8 = "/tmp/mamb_b";
     malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
     defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
@@ -84,7 +84,7 @@ test "ambiguity warning fires when both formula and cask are cached" {
 test "ambiguity warning is silent when no cask cache is present" {
     const prefix_z: [:0]const u8 = "/tmp/mamb_n";
     malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
     defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");

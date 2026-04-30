@@ -20,7 +20,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
         0,
     );
     malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().makePath(path);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
     try malt.fs_compat.makeDirAbsolute(db_dir);
@@ -52,7 +52,7 @@ test "execute with unresolvable user/repo aborts (no network pin = no add)" {
     // `tap_mod`, which doesn't need network.
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
-    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.fs_compat.processEnviron() };
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
     try testing.expectError(
         error.Aborted,
         tap_cli.execute(&ctx, testing.allocator, &.{"user/repo"}),

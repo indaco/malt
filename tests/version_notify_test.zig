@@ -231,8 +231,8 @@ test "readCache: corrupt file surfaces InvalidPayload (caller can choose to igno
     const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
     {
         const f = try fs_compat.createFileAbsolute(path, .{});
-        defer f.close();
-        try f.writeAll("garbage{not_json");
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), "garbage{not_json");
     }
 
     try testing.expectError(error.InvalidPayload, notifier.readCache(io, testing.allocator, path));

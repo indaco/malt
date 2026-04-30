@@ -51,7 +51,7 @@ fn setupMaltDirs(allocator: std.mem.Allocator, prefix: []const u8) !void {
     for (dirs) |d| {
         const p = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, d });
         defer allocator.free(p);
-        malt.fs_compat.cwd().makePath(p) catch {};
+        malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), p) catch {};
     }
 }
 
@@ -68,7 +68,7 @@ fn createBottleFixture(
         .{ prefix, sha, name, ver },
     );
     defer allocator.free(keg);
-    try malt.fs_compat.cwd().makePath(keg);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg);
 
     const bin_dir = try std.fmt.allocPrint(allocator, "{s}/bin", .{keg});
     defer allocator.free(bin_dir);
@@ -77,8 +77,8 @@ fn createBottleFixture(
     const script = try std.fmt.allocPrint(allocator, "{s}/bin/hello", .{keg});
     defer allocator.free(script);
     const f = try malt.fs_compat.createFileAbsolute(script, .{});
-    defer f.close();
-    try f.writeAll("#!/bin/sh\nprefix=@@HOMEBREW_PREFIX@@\n");
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), "#!/bin/sh\nprefix=@@HOMEBREW_PREFIX@@\n");
 }
 
 fn pathExists(path: []const u8) bool {

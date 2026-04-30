@@ -23,9 +23,9 @@ fn setupSourceTree(root: []const u8) !void {
     // A regular file.
     var f_buf: [512]u8 = undefined;
     const fpath = try std.fmt.bufPrint(&f_buf, "{s}/hello.txt", .{src});
-    const f = try malt.fs_compat.cwd().createFile(fpath, .{});
-    defer f.close();
-    try f.writeAll("hi\n");
+    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), fpath, .{});
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), "hi\n");
 
     // A nested file.
     var sub_buf: [512]u8 = undefined;
@@ -33,9 +33,9 @@ fn setupSourceTree(root: []const u8) !void {
     try malt.fs_compat.makeDirAbsolute(sub);
     var sub_f_buf: [512]u8 = undefined;
     const sf_path = try std.fmt.bufPrint(&sub_f_buf, "{s}/world.txt", .{sub});
-    const sf = try malt.fs_compat.cwd().createFile(sf_path, .{});
-    defer sf.close();
-    try sf.writeAll("nested\n");
+    const sf = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), sf_path, .{});
+    defer sf.close(malt.io_mod.ctx());
+    try sf.writeStreamingAll(malt.io_mod.ctx(), "nested\n");
 }
 
 test "isApfs returns a plausible bool for the repo tmp dir" {
@@ -67,19 +67,19 @@ test "cloneTree duplicates a small directory tree" {
     // Verify the cloned top-level file exists with the same contents.
     var verify_buf: [512]u8 = undefined;
     const cloned = try std.fmt.bufPrint(&verify_buf, "{s}/hello.txt", .{dst});
-    const f = try malt.fs_compat.cwd().openFile(cloned, .{});
-    defer f.close();
+    const f = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), cloned, .{});
+    defer f.close(malt.io_mod.ctx());
     var contents: [16]u8 = undefined;
-    const n = try f.readAll(&contents);
+    const n = try f.readPositionalAll(malt.io_mod.ctx(), &contents, 0);
     try testing.expectEqualStrings("hi\n", contents[0..n]);
 
     // And the nested file.
     var nested_buf: [512]u8 = undefined;
     const nested = try std.fmt.bufPrint(&nested_buf, "{s}/inner/world.txt", .{dst});
-    const nf = try malt.fs_compat.cwd().openFile(nested, .{});
-    defer nf.close();
+    const nf = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), nested, .{});
+    defer nf.close(malt.io_mod.ctx());
     var nb: [16]u8 = undefined;
-    const nn = try nf.readAll(&nb);
+    const nn = try nf.readPositionalAll(malt.io_mod.ctx(), &nb, 0);
     try testing.expectEqualStrings("nested\n", nb[0..nn]);
 }
 
@@ -134,24 +134,24 @@ test "copyTreeFallback duplicates files, subdirs, and symlinks" {
     // Add a symlink into the source tree so the sym_link branch runs.
     var link_path_buf: [512]u8 = undefined;
     const link_path = try std.fmt.bufPrint(&link_path_buf, "{s}/link.txt", .{src});
-    malt.fs_compat.cwd().symLink("hello.txt", link_path, .{}) catch {};
+    malt.fs_compat.cwd().symLink(malt.io_mod.ctx(), "hello.txt", link_path, .{}) catch {};
 
     try clonefile.copyTreeFallback(std.Options.debug_io, testing.allocator, src, dst);
 
     // Verify the top-level file is present.
     var check_buf: [512]u8 = undefined;
     const check = try std.fmt.bufPrint(&check_buf, "{s}/hello.txt", .{dst});
-    const f = try malt.fs_compat.cwd().openFile(check, .{});
-    defer f.close();
+    const f = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), check, .{});
+    defer f.close(malt.io_mod.ctx());
     var contents: [16]u8 = undefined;
-    const n = try f.readAll(&contents);
+    const n = try f.readPositionalAll(malt.io_mod.ctx(), &contents, 0);
     try testing.expectEqualStrings("hi\n", contents[0..n]);
 
     // And the nested file.
     var nested_buf: [512]u8 = undefined;
     const nested = try std.fmt.bufPrint(&nested_buf, "{s}/inner/world.txt", .{dst});
-    const nf = try malt.fs_compat.cwd().openFile(nested, .{});
-    defer nf.close();
+    const nf = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), nested, .{});
+    defer nf.close(malt.io_mod.ctx());
 }
 
 test "copyTreeFallback is idempotent when the destination already exists" {
@@ -170,8 +170,8 @@ test "copyTreeFallback is idempotent when the destination already exists" {
     // Verify the nested file was still copied.
     var check_buf: [512]u8 = undefined;
     const check = try std.fmt.bufPrint(&check_buf, "{s}/inner/world.txt", .{dst});
-    const f = try malt.fs_compat.cwd().openFile(check, .{});
-    defer f.close();
+    const f = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), check, .{});
+    defer f.close(malt.io_mod.ctx());
 }
 
 test "copyTreeFallback errors when source directory does not exist" {
@@ -226,9 +226,9 @@ test "cloneTree falls back to copyTree on a non-APFS volume" {
 
     var verify_buf: [512]u8 = undefined;
     const copied = try std.fmt.bufPrint(&verify_buf, "{s}/hello.txt", .{dst});
-    const f = try malt.fs_compat.cwd().openFile(copied, .{});
-    defer f.close();
+    const f = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), copied, .{});
+    defer f.close(malt.io_mod.ctx());
     var contents: [16]u8 = undefined;
-    const n = try f.readAll(&contents);
+    const n = try f.readPositionalAll(malt.io_mod.ctx(), &contents, 0);
     try testing.expectEqualStrings("hi\n", contents[0..n]);
 }

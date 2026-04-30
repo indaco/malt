@@ -53,8 +53,8 @@ test "commit moves directory to store and exists returns true" {
     const test_file = try std.fmt.allocPrint(testing.allocator, "{s}/test.txt", .{src});
     defer testing.allocator.free(test_file);
     const f = try malt.fs_compat.createFileAbsolute(test_file, .{});
-    try f.writeAll("hello");
-    f.close();
+    try f.writeStreamingAll(malt.io_mod.ctx(), "hello");
+    f.close(malt.io_mod.ctx());
 
     try ctx.store.commitFrom("abc123sha", src);
     try testing.expect(ctx.store.exists("abc123sha"));

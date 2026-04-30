@@ -45,7 +45,7 @@ fn createTestDir(allocator: std.mem.Allocator) ![:0]const u8 {
 fn createBottleFixture(allocator: std.mem.Allocator, prefix: []const u8, sha: []const u8, name: []const u8, ver_dir: []const u8) !void {
     const keg = try std.fmt.allocPrint(allocator, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, ver_dir });
     defer allocator.free(keg);
-    try malt.fs_compat.cwd().makePath(keg);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg);
 
     const bin_dir = try std.fmt.allocPrint(allocator, "{s}/bin", .{keg});
     defer allocator.free(bin_dir);
@@ -55,8 +55,8 @@ fn createBottleFixture(allocator: std.mem.Allocator, prefix: []const u8, sha: []
     defer allocator.free(script_path);
     {
         const f = try malt.fs_compat.createFileAbsolute(script_path, .{});
-        try f.writeAll("#!/bin/sh\nprefix=@@HOMEBREW_PREFIX@@\ncellar=@@HOMEBREW_CELLAR@@\necho $prefix\n");
-        f.close();
+        try f.writeStreamingAll(malt.io_mod.ctx(), "#!/bin/sh\nprefix=@@HOMEBREW_PREFIX@@\ncellar=@@HOMEBREW_CELLAR@@\necho $prefix\n");
+        f.close(malt.io_mod.ctx());
     }
 
     const lib_dir = try std.fmt.allocPrint(allocator, "{s}/lib", .{keg});
@@ -67,8 +67,8 @@ fn createBottleFixture(allocator: std.mem.Allocator, prefix: []const u8, sha: []
     defer allocator.free(pc_path);
     {
         const f = try malt.fs_compat.createFileAbsolute(pc_path, .{});
-        try f.writeAll("prefix=@@HOMEBREW_PREFIX@@\nlibdir=${prefix}/lib\ncellar=@@HOMEBREW_CELLAR@@\n");
-        f.close();
+        try f.writeStreamingAll(malt.io_mod.ctx(), "prefix=@@HOMEBREW_PREFIX@@\nlibdir=${prefix}/lib\ncellar=@@HOMEBREW_CELLAR@@\n");
+        f.close(malt.io_mod.ctx());
     }
 }
 
@@ -77,16 +77,16 @@ fn setupMaltDirs(allocator: std.mem.Allocator, prefix: []const u8) !void {
     for (dirs) |d| {
         const p = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, d });
         defer allocator.free(p);
-        malt.fs_compat.cwd().makePath(p) catch {};
+        malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), p) catch {};
     }
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     const file = try malt.fs_compat.openFileAbsolute(path, .{});
-    defer file.close();
-    const stat = try file.stat();
+    defer file.close(malt.io_mod.ctx());
+    const stat = try file.stat(malt.io_mod.ctx());
     const buf = try allocator.alloc(u8, stat.size);
-    const n = try file.readAll(buf);
+    const n = try file.readPositionalAll(malt.io_mod.ctx(), buf, 0);
     return buf[0..n];
 }
 
@@ -251,7 +251,7 @@ test "files with no placeholders are left unchanged" {
 
     const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/clean123/noop/1.0", .{prefix});
     defer testing.allocator.free(keg_dir);
-    try malt.fs_compat.cwd().makePath(keg_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg_dir);
 
     const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{keg_dir});
     defer testing.allocator.free(bin_dir);
@@ -261,8 +261,8 @@ test "files with no placeholders are left unchanged" {
     defer testing.allocator.free(file_path);
     {
         const f = try malt.fs_compat.createFileAbsolute(file_path, .{});
-        try f.writeAll("#!/bin/sh\necho hello world\n");
-        f.close();
+        try f.writeStreamingAll(malt.io_mod.ctx(), "#!/bin/sh\necho hello world\n");
+        f.close(malt.io_mod.ctx());
     }
 
     const old_env = setMaltPrefix(prefix);
@@ -298,7 +298,7 @@ test "binary files are skipped by text patching without error" {
 
     const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/bin123/binpkg/1.0", .{prefix});
     defer testing.allocator.free(keg_dir);
-    try malt.fs_compat.cwd().makePath(keg_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg_dir);
 
     const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{keg_dir});
     defer testing.allocator.free(bin_dir);
@@ -308,8 +308,8 @@ test "binary files are skipped by text patching without error" {
     defer testing.allocator.free(file_path);
     {
         const f = try malt.fs_compat.createFileAbsolute(file_path, .{});
-        try f.writeAll("\xcf\xfa\xed\xfe\x00\x00\x00@@HOMEBREW_PREFIX@@\x00more\x00binary");
-        f.close();
+        try f.writeStreamingAll(malt.io_mod.ctx(), "\xcf\xfa\xed\xfe\x00\x00\x00@@HOMEBREW_PREFIX@@\x00more\x00binary");
+        f.close(malt.io_mod.ctx());
     }
 
     const old_env = setMaltPrefix(prefix);
@@ -524,7 +524,7 @@ test "failed materialize leaves sibling versions untouched" {
     // version that a later failed materialize of keeper 2.0 must NOT delete.
     const keeper_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/keeper/1.0", .{prefix});
     defer testing.allocator.free(keeper_dir);
-    try malt.fs_compat.cwd().makePath(keeper_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keeper_dir);
 
     _ = setMaltPrefix(prefix);
     defer restoreMaltPrefix("");
@@ -558,8 +558,8 @@ test "patchTextFiles replaces all placeholder occurrences" {
     defer testing.allocator.free(file_path);
     {
         const f = try malt.fs_compat.createFileAbsolute(file_path, .{});
-        try f.writeAll("a=@@HOMEBREW_PREFIX@@\nb=@@HOMEBREW_PREFIX@@\nc=@@HOMEBREW_CELLAR@@\n");
-        f.close();
+        try f.writeStreamingAll(malt.io_mod.ctx(), "a=@@HOMEBREW_PREFIX@@\nb=@@HOMEBREW_PREFIX@@\nc=@@HOMEBREW_CELLAR@@\n");
+        f.close(malt.io_mod.ctx());
     }
 
     const replacements = [_]patcher.Replacement{
@@ -567,7 +567,7 @@ test "patchTextFiles replaces all placeholder occurrences" {
         .{ .old = "@@HOMEBREW_CELLAR@@", .new = "/opt/malt/Cellar" },
         .{ .old = "/unused", .new = "/opt/malt" },
     };
-    const count = try patcher.patchTextFiles(testing.allocator, dir, &replacements);
+    const count = try patcher.patchTextFiles(malt.io_mod.ctx(), testing.allocator, dir, &replacements);
     try testing.expect(count > 0);
 
     const content = try readFile(testing.allocator, file_path);
@@ -666,7 +666,7 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
         .{ prefix, sha, name, version },
     );
     defer testing.allocator.free(keg_bin_dir);
-    try malt.fs_compat.cwd().makePath(keg_bin_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg_bin_dir);
 
     const bin_path = try std.fmt.allocPrint(
         testing.allocator,
@@ -682,8 +682,8 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
     defer testing.allocator.free(fixture);
     {
         const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
-        defer f.close();
-        try f.writeAll(fixture);
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), fixture);
     }
 
     const old_env = setMaltPrefix(prefix);
@@ -851,7 +851,7 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
         .{ prefix, sha, name, version },
     );
     defer testing.allocator.free(keg_bin_dir);
-    try malt.fs_compat.cwd().makePath(keg_bin_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg_bin_dir);
 
     const bin_path = try std.fmt.allocPrint(
         testing.allocator,
@@ -867,8 +867,8 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
     defer testing.allocator.free(fixture);
     {
         const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
-        defer f.close();
-        try f.writeAll(fixture);
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), fixture);
     }
 
     const old_env = setMaltPrefix(prefix);
@@ -942,7 +942,7 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
         .{ prefix, sha, name, version },
     );
     defer testing.allocator.free(keg_bin_dir);
-    try malt.fs_compat.cwd().makePath(keg_bin_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg_bin_dir);
 
     const bin_path = try std.fmt.allocPrint(
         testing.allocator,
@@ -958,8 +958,8 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
     defer testing.allocator.free(fixture);
     {
         const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
-        defer f.close();
-        try f.writeAll(fixture);
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), fixture);
     }
 
     const old_env = setMaltPrefix(prefix);

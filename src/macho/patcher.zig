@@ -2,7 +2,6 @@
 //! Path relocation in load commands and text file patching.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
 const parser = @import("parser.zig");
 
 pub const PatchError = error{
@@ -52,13 +51,14 @@ pub const PatchOutcome = struct {
 /// fit; new code should call `patchPathsCollecting` instead and flush
 /// the overflow list via `flushOverflow`.
 pub fn patchPaths(
+    io: std.Io,
     allocator: std.mem.Allocator,
     file_path: []const u8,
     old_prefix: []const u8,
     new_prefix: []const u8,
 ) PatchError!PatchResult {
     const reps = [_]Replacement{.{ .old = old_prefix, .new = new_prefix }};
-    var outcome = try patchPathsCollecting(allocator, file_path, &reps);
+    var outcome = try patchPathsCollecting(io, allocator, file_path, &reps);
     defer outcome.deinit(allocator);
     if (outcome.overflow.len > 0) return PatchError.PathTooLong;
     return .{ .patched_count = outcome.patched_count, .skipped_count = outcome.skipped_count };
@@ -70,19 +70,20 @@ pub fn patchPaths(
 /// (first match wins per load command), so the file is opened, read,
 /// and rewritten at most once regardless of replacement count.
 pub fn patchPathsCollecting(
+    io: std.Io,
     allocator: std.mem.Allocator,
     file_path: []const u8,
     replacements: []const Replacement,
 ) PatchError!PatchOutcome {
-    const file = fs_compat.cwd().openFile(file_path, .{ .mode = .read_write }) catch
+    const file = std.Io.Dir.cwd().openFile(io, file_path, .{ .mode = .read_write }) catch
         return PatchError.OpenFailed;
-    defer file.close();
+    defer file.close(io);
 
-    const stat = file.stat() catch return PatchError.IoError;
+    const stat = file.stat(io) catch return PatchError.IoError;
     const data = allocator.alloc(u8, stat.size) catch return PatchError.OutOfMemory;
     defer allocator.free(data);
 
-    const bytes_read = file.readAll(data) catch return PatchError.IoError;
+    const bytes_read = file.readPositionalAll(io, data, 0) catch return PatchError.IoError;
     if (bytes_read < data.len) return PatchError.IoError;
 
     var macho = parser.parse(allocator, data) catch return PatchError.ParseFailed;
@@ -144,7 +145,7 @@ pub fn patchPathsCollecting(
     }
 
     if (patched > 0) {
-        file.writeAllAt(data, 0) catch return PatchError.IoError;
+        file.writePositionalAll(io, data, 0) catch return PatchError.IoError;
     }
 
     return .{
@@ -275,6 +276,7 @@ pub fn classifyInstallNameToolStderr(stderr: []const u8) FallbackError {
 /// exit is mapped through `classifyInstallNameToolStderr` so the
 /// user-facing remediation is specific.
 pub fn flushOverflow(
+    io: std.Io,
     allocator: std.mem.Allocator,
     file_path: []const u8,
     entries: []const OverflowEntry,
@@ -285,10 +287,11 @@ pub fn flushOverflow(
         return FallbackError.OutOfMemory;
     defer allocator.free(argv);
 
-    var child = fs_compat.Child.init(argv, allocator);
-    child.stdout_behavior = .ignore;
-    child.stderr_behavior = .pipe;
-    child.spawn() catch |e| switch (e) {
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .stdout = .ignore,
+        .stderr = .pipe,
+    }) catch |e| switch (e) {
         // `FileNotFound` is what `std.process.spawn` returns when the
         // binary is not on PATH — caller's doctor check should have
         // surfaced this already, but bottle installs may run before
@@ -298,11 +301,13 @@ pub fn flushOverflow(
     };
 
     const stderr_file = child.stderr orelse return FallbackError.IoError;
-    const stderr_bytes = fs_compat.readFileToEndAlloc(stderr_file, allocator, 64 * 1024) catch
+    var read_buf: [4096]u8 = undefined;
+    var reader = stderr_file.readerStreaming(io, &read_buf);
+    const stderr_bytes = reader.interface.allocRemaining(allocator, std.Io.Limit.limited(64 * 1024)) catch
         return FallbackError.IoError;
     defer allocator.free(stderr_bytes);
 
-    const term = child.wait() catch return FallbackError.InstallNameToolFailed;
+    const term = child.wait(io) catch return FallbackError.InstallNameToolFailed;
     switch (term) {
         .exited => |code| {
             if (code != 0) return classifyInstallNameToolStderr(stderr_bytes);
@@ -320,35 +325,36 @@ pub fn flushOverflow(
 /// substitutions on every file. With the new API, `cellar.zig` passes all
 /// four replacements in one call and each file is opened once.
 pub fn patchTextFiles(
+    io: std.Io,
     allocator: std.mem.Allocator,
     dir_path: []const u8,
     replacements: []const Replacement,
 ) !u32 {
     if (replacements.len == 0) return 0;
 
-    var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch return 0;
-    defer dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return 0;
+    defer dir.close(io);
 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
     var count: u32 = 0;
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
 
         // Read file
-        const file = dir.openFile(entry.path, .{ .mode = .read_write }) catch continue;
-        defer file.close();
+        const file = dir.openFile(io, entry.path, .{ .mode = .read_write }) catch continue;
+        defer file.close(io);
 
-        const stat = file.stat() catch continue;
+        const stat = file.stat(io) catch continue;
         if (stat.size > 10 * 1024 * 1024) continue; // Skip files > 10MB
         if (stat.size == 0) continue;
 
         const content = allocator.alloc(u8, stat.size) catch continue;
         defer allocator.free(content);
 
-        const bytes_read = file.readAll(content) catch continue;
+        const bytes_read = file.readPositionalAll(io, content, 0) catch continue;
         if (bytes_read < content.len) continue;
 
         // Check if binary (null bytes in first 8KB)
@@ -381,10 +387,10 @@ pub fn patchTextFiles(
         if (modified) {
             defer if (current.ptr != content.ptr) allocator.free(current);
             // Write back
-            file.writeAllAt(current, 0) catch continue;
+            file.writePositionalAll(io, current, 0) catch continue;
             // Truncate if new content is shorter; trailing bytes are harmless if truncate fails
             // (Mach-O loader stops at size recorded in header, not file size).
-            file.setEndPos(current.len) catch {};
+            file.setLength(io, current.len) catch {};
             count += 1;
         }
     }

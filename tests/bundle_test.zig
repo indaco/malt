@@ -294,7 +294,7 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
     // the runner must skip `recordBundle`, leaving the `bundles` table empty.
     const dir_z: [:0]const u8 = "/tmp/malt_bundle_dry_run_cli_wire";
     malt.fs_compat.deleteTreeAbsolute(dir_z) catch {};
-    try malt.fs_compat.cwd().makePath(dir_z);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), dir_z);
     defer malt.fs_compat.deleteTreeAbsolute(dir_z) catch {};
 
     _ = c.setenv("MALT_PREFIX", dir_z.ptr, 1);
@@ -306,9 +306,9 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
     const bf_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{dir_z});
     defer testing.allocator.free(bf_path);
     {
-        const f = try malt.fs_compat.cwd().createFile(bf_path, .{});
-        defer f.close();
-        try f.writeAll("# empty\n");
+        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), bf_path, .{});
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), "# empty\n");
     }
 
     malt.output.setDryRun(true);

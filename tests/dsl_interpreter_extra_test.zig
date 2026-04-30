@@ -34,7 +34,7 @@ fn minimalJson(alloc: std.mem.Allocator) ![]const u8 {
 fn setupCellar(prefix_dir: []const u8) !void {
     const cellar_path = try std.fs.path.join(testing.allocator, &.{ prefix_dir, "Cellar", "testpkg", "1.0" });
     defer testing.allocator.free(cellar_path);
-    try malt.fs_compat.cwd().makePath(cellar_path);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), cellar_path);
 }
 
 fn run(ruby_src: []const u8) !void {
@@ -58,7 +58,7 @@ fn run(ruby_src: []const u8) !void {
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    try dsl.executePostInstall(malt.io_mod.ctx(), malt.fs_compat.processEnviron(), alloc, .{
+    try dsl.executePostInstall(malt.io_mod.ctx(), malt.app_ctx.processEnviron(), alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,

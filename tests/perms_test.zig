@@ -66,8 +66,8 @@ test "walkPrefix: clean tree yields no findings" {
     const base = "/tmp/malt_perms_clean";
     malt.fs_compat.deleteTreeAbsolute(base) catch {};
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.cwd().makePath(base ++ "/bin");
-    (try malt.fs_compat.createFileAbsolute(base ++ "/bin/foo", .{})).close();
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), base ++ "/bin");
+    (try malt.fs_compat.createFileAbsolute(base ++ "/bin/foo", .{})).close(malt.io_mod.ctx());
 
     const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, base, perms.currentUid(), 64);
     defer perms.freeFindings(testing.allocator, findings);
@@ -78,9 +78,9 @@ test "walkPrefix: detects other-writable file" {
     const base = "/tmp/malt_perms_other_writable";
     malt.fs_compat.deleteTreeAbsolute(base) catch {};
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.cwd().makePath(base);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), base);
     const path = base ++ "/world_writable.txt";
-    (try malt.fs_compat.createFileAbsolute(path, .{})).close();
+    (try malt.fs_compat.createFileAbsolute(path, .{})).close(malt.io_mod.ctx());
 
     // chmod o+w
     const c = struct {
@@ -119,7 +119,7 @@ test "walkPrefix: respects max_findings cap" {
     const base = "/tmp/malt_perms_cap";
     malt.fs_compat.deleteTreeAbsolute(base) catch {};
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.cwd().makePath(base);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), base);
     const c = struct {
         extern "c" fn chmod(path: [*:0]const u8, mode: u16) c_int;
     };
@@ -127,7 +127,7 @@ test "walkPrefix: respects max_findings cap" {
     for (0..5) |i| {
         var buf: [64]u8 = undefined;
         const p = try std.fmt.bufPrintSentinel(&buf, "{s}/f{d}", .{ base, i }, 0);
-        (try malt.fs_compat.createFileAbsolute(p, .{})).close();
+        (try malt.fs_compat.createFileAbsolute(p, .{})).close(malt.io_mod.ctx());
         if (c.chmod(p.ptr, 0o666) != 0) return error.TestUnexpectedResult;
     }
 

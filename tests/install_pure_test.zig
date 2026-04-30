@@ -306,14 +306,14 @@ test "pruneCellarForReinstall wipes an existing Cellar dir so --force can re-mat
 
     const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0/bin", .{prefix});
     defer testing.allocator.free(keg_dir);
-    try malt.fs_compat.cwd().makePath(keg_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg_dir);
 
     const file = try std.fmt.allocPrint(testing.allocator, "{s}/foo", .{keg_dir});
     defer testing.allocator.free(file);
     {
-        const f = try malt.fs_compat.cwd().createFile(file, .{});
-        defer f.close();
-        try f.writeAll("payload");
+        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), file, .{});
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), "payload");
     }
 
     install.pruneCellarForReinstall(&malt.app_ctx.debug_ctx, prefix, "foo", "1.0");
@@ -431,7 +431,7 @@ test "ensureDirs creates every required subdirectory under a fresh prefix" {
         const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ prefix, s });
         defer testing.allocator.free(p);
         var d = try malt.fs_compat.openDirAbsolute(p, .{});
-        d.close();
+        d.close(malt.io_mod.ctx());
     }
 }
 

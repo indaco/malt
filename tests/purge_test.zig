@@ -275,8 +275,8 @@ fn makeDir(path: []const u8) !void {
 
 fn makeFile(path: []const u8, content: []const u8) !void {
     const f = try malt.fs_compat.createFileAbsolute(path, .{ .truncate = true });
-    defer f.close();
-    try f.writeAll(content);
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), content);
 }
 
 fn pathExists(path: []const u8) bool {

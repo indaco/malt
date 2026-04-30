@@ -10,6 +10,18 @@ pub const AppCtx = struct {
     environ: std.process.Environ,
 };
 
+/// Parent `environ` as `std.process.Environ`, read directly from
+/// `std.c.environ`. Production `main` builds an AppCtx from
+/// `std.process.Init.Minimal` instead — this helper is for integration
+/// tests that need to spawn children with the real PATH (`/opt/homebrew/bin`,
+/// etc.) without threading an init through every test fixture.
+pub fn processEnviron() std.process.Environ {
+    var n: usize = 0;
+    while (std.c.environ[n] != null) : (n += 1) {}
+    const slice: [:null]const ?[*:0]const u8 = @ptrCast(std.c.environ[0..n :null]);
+    return .{ .block = .{ .slice = slice } };
+}
+
 /// Test-only borrowed ctx with `debug_io` and an empty environ. Plenty
 /// for argv-parsing / dry-run / help paths and any pure-fs probe that
 /// only needs blocking syscalls — no spawn, no env lookup.

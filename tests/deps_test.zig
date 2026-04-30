@@ -225,9 +225,9 @@ const TempCacheDir = struct {
         };
         var path_buf: [512]u8 = undefined;
         const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ self.path, name });
-        const f = try malt.fs_compat.cwd().createFile(full, .{});
-        defer f.close();
-        try f.writeAll(json);
+        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), full, .{});
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), json);
     }
 };
 
@@ -316,8 +316,8 @@ test "resolve returns empty when root formula JSON is missing from cache" {
     try malt.fs_compat.makeDirAbsolute(api_dir);
     var marker_buf: [512]u8 = undefined;
     const marker = try std.fmt.bufPrint(&marker_buf, "{s}/api/formula_nope.404", .{dir.path});
-    const f = try malt.fs_compat.cwd().createFile(marker, .{});
-    f.close();
+    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), marker, .{});
+    f.close(malt.io_mod.ctx());
 
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
@@ -348,8 +348,8 @@ test "resolve handles a dep whose sub-fetch fails by falling through" {
     try dir.writeFormula("alpha", "{\"name\":\"alpha\",\"dependencies\":[\"missing\"]}");
     var marker_buf: [512]u8 = undefined;
     const marker = try std.fmt.bufPrint(&marker_buf, "{s}/api/formula_missing.404", .{dir.path});
-    const f = try malt.fs_compat.cwd().createFile(marker, .{});
-    f.close();
+    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), marker, .{});
+    f.close(malt.io_mod.ctx());
 
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
@@ -500,8 +500,8 @@ test "ensureOptLink replaces a stale symlink pointing at an old cellar" {
     const opt_parent = try std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{p.root});
     try malt.fs_compat.makeDirAbsolute(opt_parent);
     var dir = try malt.fs_compat.openDirAbsolute(opt_parent, .{});
-    defer dir.close();
-    try dir.symLink("/tmp/malt_stale_old_zstd", "zstd", .{});
+    defer dir.close(malt.io_mod.ctx());
+    try dir.symLink(malt.io_mod.ctx(), "/tmp/malt_stale_old_zstd", "zstd", .{});
 
     // DB points at the CURRENT cellar path.
     const cellar = try p.cellarFor("zstd", "1.5.7");

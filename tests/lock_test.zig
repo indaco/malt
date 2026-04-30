@@ -17,7 +17,7 @@ fn uniquePath(suffix: []const u8) ![]const u8 {
 test "acquire writes pid, release clears the file, holderPid parses back" {
     const path = try uniquePath("basic");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.cwd().deleteFile(path) catch {};
+    defer malt.fs_compat.cwd().deleteFile(malt.io_mod.ctx(), path) catch {};
 
     var l = try lock.LockFile.acquire(path, 1000);
 
@@ -38,7 +38,7 @@ test "holderPid returns null when the file does not exist" {
 test "acquire times out when an existing lock is held" {
     const path = try uniquePath("timeout");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.cwd().deleteFile(path) catch {};
+    defer malt.fs_compat.cwd().deleteFile(malt.io_mod.ctx(), path) catch {};
 
     var held = try lock.LockFile.acquire(path, 500);
     defer held.release();
@@ -51,10 +51,10 @@ test "acquire times out when an existing lock is held" {
 test "holderPid returns null on an empty file (vacated after release)" {
     const path = try uniquePath("empty");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.cwd().deleteFile(path) catch {};
+    defer malt.fs_compat.cwd().deleteFile(malt.io_mod.ctx(), path) catch {};
 
     const f = try malt.fs_compat.createFileAbsolute(path, .{});
-    f.close();
+    f.close(malt.io_mod.ctx());
 
     try testing.expect(lock.LockFile.holderPid(path) == null);
 }

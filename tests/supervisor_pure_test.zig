@@ -125,17 +125,17 @@ test "register writes a plist and a DB row that list reports back" {
 
     // plist file exists on disk
     var f = try malt.fs_compat.openFileAbsolute(list[0].plist_path, .{});
-    f.close();
+    f.close(malt.io_mod.ctx());
 }
 
 test "tailLog writes the last N lines into the provided writer" {
     const path = "/tmp/malt_sup_tail.log";
-    malt.fs_compat.cwd().deleteFile(path) catch {};
-    defer malt.fs_compat.cwd().deleteFile(path) catch {};
+    malt.fs_compat.cwd().deleteFile(malt.io_mod.ctx(), path) catch {};
+    defer malt.fs_compat.cwd().deleteFile(malt.io_mod.ctx(), path) catch {};
 
     const f = try malt.fs_compat.createFileAbsolute(path, .{});
-    try f.writeAll("a\nb\nc\nd\ne\n");
-    f.close();
+    try f.writeStreamingAll(malt.io_mod.ctx(), "a\nb\nc\nd\ne\n");
+    f.close(malt.io_mod.ctx());
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
@@ -180,7 +180,7 @@ test "stopAndUnregister is a no-op on an absent service and still wipes the row"
 }
 
 test "queryRuntime returns not_loaded for a label launchctl has never heard of" {
-    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = malt.fs_compat.processEnviron() });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = malt.app_ctx.processEnviron() });
     defer threaded.deinit();
     const state = supervisor.queryRuntime(threaded.io(), testing.allocator, "com.malt.nonexistent.test.xyz");
     // We don't own the user's launchctl state, but an unknown label must

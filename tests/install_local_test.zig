@@ -321,7 +321,7 @@ test "interpolateVersion falls back to the raw URL when the buffer is too small"
 // ─── expandTildePath ─────────────────────────────────────────────────
 
 test "expandTildePath passes non-tilde input through unchanged" {
-    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.app_ctx.processEnviron() };
     var buf: [256]u8 = undefined;
     const got = install.expandTildePath(&ctx, &buf, "./foo.rb") orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("./foo.rb", got);
@@ -332,14 +332,14 @@ test "expandTildePath rewrites ~/ into $HOME/" {
     _ = c.setenv("HOME", home_z, 1);
     defer _ = c.unsetenv("HOME");
 
-    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.app_ctx.processEnviron() };
     var buf: [256]u8 = undefined;
     const got = install.expandTildePath(&ctx, &buf, "~/formulas/wget.rb") orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("/tmp/fake_home_for_tilde_test/formulas/wget.rb", got);
 }
 
 test "expandTildePath leaves `~alice/foo` alone (no `/` after `~`)" {
-    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.app_ctx.processEnviron() };
     var buf: [256]u8 = undefined;
     const got = install.expandTildePath(&ctx, &buf, "~alice/foo.rb") orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("~alice/foo.rb", got);
@@ -347,7 +347,7 @@ test "expandTildePath leaves `~alice/foo` alone (no `/` after `~`)" {
 
 test "expandTildePath returns null when HOME is unset and ~/ is used" {
     _ = c.unsetenv("HOME");
-    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.fs_compat.processEnviron() };
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.app_ctx.processEnviron() };
     var buf: [256]u8 = undefined;
     try testing.expect(install.expandTildePath(&ctx, &buf, "~/foo.rb") == null);
 }
@@ -363,7 +363,7 @@ test "expandTildePath returns null when HOME is unset and ~/ is used" {
 fn setupPrefix(comptime fixed: [:0]const u8) !void {
     comptime std.debug.assert(fixed.len <= "/opt/homebrew".len);
     malt.fs_compat.deleteTreeAbsolute(fixed) catch {};
-    try malt.fs_compat.cwd().makePath(fixed);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), fixed);
     _ = c.setenv("MALT_PREFIX", fixed.ptr, 1);
 }
 
@@ -374,8 +374,8 @@ fn cleanupPrefix(comptime fixed: [:0]const u8) void {
 
 fn writeFile(abs_path: []const u8, content: []const u8) !void {
     const f = try malt.fs_compat.createFileAbsolute(abs_path, .{});
-    defer f.close();
-    try f.writeAll(content);
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), content);
 }
 
 const sample_rb =
@@ -536,8 +536,8 @@ test "execute --local tolerates a world-writable fixture (advisory only)" {
     // 0o666 — any local user could rewrite it between checkout and
     // install.
     const f = try malt.fs_compat.openFileAbsolute(rb_path, .{ .mode = .read_only });
-    try f.chmod(0o666);
-    f.close();
+    try f.setPermissions(malt.io_mod.ctx(), std.Io.File.Permissions.fromMode(@intCast(0o666)));
+    f.close(malt.io_mod.ctx());
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -624,7 +624,7 @@ fn seedLocalKeg(
     // to tear down when uninstall is exercised.
     const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
     defer testing.allocator.free(cellar_dir);
-    try malt.fs_compat.cwd().makePath(cellar_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), cellar_dir);
 
     var stmt = try db.prepare(
         "INSERT INTO kegs (name, full_name, version, tap, store_sha256, cellar_path, install_reason)" ++
@@ -644,7 +644,7 @@ test "isInstalled sees a locally-recorded keg by name" {
     try setupPrefix(prefix);
     defer cleanupPrefix(prefix);
 
-    try malt.fs_compat.cwd().makePath("/tmp/mlh/db");
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), "/tmp/mlh/db");
     const db_path = "/tmp/mlh/db/malt.db";
     try seedLocalKeg(db_path, prefix, "wget", "1.0", "/tmp/mlh/wget.rb");
 
@@ -661,7 +661,7 @@ test "uninstall + purge CLI flow treats tap='local' rows like any other keg" {
     try setupPrefix(prefix);
     defer cleanupPrefix(prefix);
 
-    try malt.fs_compat.cwd().makePath("/tmp/mli/db");
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), "/tmp/mli/db");
     try seedLocalKeg("/tmp/mli/db/malt.db", prefix, "wget", "1.0", "/tmp/mli/wget.rb");
 
     // Reopen to confirm the row is queryable with a fresh handle.
@@ -688,7 +688,7 @@ test "execute --local rejects a directory path (not a regular file)" {
     // check is what rejects it (rather than basename check).
     const dir_path = try std.fmt.allocPrint(testing.allocator, "{s}/fake.rb", .{prefix});
     defer testing.allocator.free(dir_path);
-    try malt.fs_compat.cwd().makePath(dir_path);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), dir_path);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

@@ -92,8 +92,8 @@ test "tailLog returns last N lines of a small file" {
     const log_path = "/tmp/malt_services_test_tail/sample.log";
     {
         var f = try malt.fs_compat.createFileAbsolute(log_path, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll("alpha\nbeta\ngamma\ndelta\nepsilon\n");
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), "alpha\nbeta\ngamma\ndelta\nepsilon\n");
     }
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);

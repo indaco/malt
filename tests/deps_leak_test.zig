@@ -71,9 +71,9 @@ const TempCacheDir = struct {
         };
         var path_buf: [512]u8 = undefined;
         const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ self.path, name });
-        const f = try malt.fs_compat.cwd().createFile(full, .{});
-        defer f.close();
-        try f.writeAll(json);
+        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), full, .{});
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), json);
     }
 };
 

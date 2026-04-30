@@ -25,7 +25,7 @@ fn uniqueSandbox(suffix: []const u8) ![]u8 {
         "/tmp/malt_dsl_builtins_{d}_{s}",
         .{ malt.fs_compat.nanoTimestamp(), suffix },
     );
-    malt.fs_compat.cwd().makePath(p) catch {};
+    malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), p) catch {};
     return p;
 }
 
@@ -35,7 +35,7 @@ fn uniqueSandbox(suffix: []const u8) ![]u8 {
 const LiveIo = struct {
     threaded: std.Io.Threaded,
     pub fn init() LiveIo {
-        return .{ .threaded = .init(testing.allocator, .{ .environ = malt.fs_compat.processEnviron() }) };
+        return .{ .threaded = .init(testing.allocator, .{ .environ = malt.app_ctx.processEnviron() }) };
     }
     pub fn deinit(self: *LiveIo) void {
         self.threaded.deinit();
@@ -49,7 +49,7 @@ fn mkCtx(root: []const u8) ExecCtx {
     return .{
         .allocator = testing.allocator,
         .io = malt.io_mod.ctx(),
-        .environ = malt.fs_compat.processEnviron(),
+        .environ = malt.app_ctx.processEnviron(),
         .cellar_path = root,
         .malt_prefix = root,
     };
@@ -59,7 +59,7 @@ fn mkCtxLive(lio: *LiveIo, root: []const u8) ExecCtx {
     return .{
         .allocator = testing.allocator,
         .io = lio.io(),
-        .environ = malt.fs_compat.processEnviron(),
+        .environ = malt.app_ctx.processEnviron(),
         .cellar_path = root,
         .malt_prefix = root,
     };
@@ -80,7 +80,7 @@ test "Pathname.mkpath creates a directory tree under the receiver" {
 
     _ = try pathname.mkpath(ctx, Value{ .pathname = nested }, &.{});
     var d = try malt.fs_compat.openDirAbsolute(nested, .{});
-    d.close();
+    d.close(malt.io_mod.ctx());
 }
 
 test "Pathname.exist?, .directory?, .file?, .symlink? classify entries correctly" {
@@ -100,7 +100,7 @@ test "Pathname.exist?, .directory?, .file?, .symlink? classify entries correctly
     defer testing.allocator.free(missing_path);
 
     const f = try malt.fs_compat.createFileAbsolute(file_path, .{});
-    f.close();
+    f.close(malt.io_mod.ctx());
     try malt.fs_compat.makeDirAbsolute(dir_path);
     try malt.fs_compat.symLinkAbsolute(file_path, link_path, .{});
 
@@ -170,8 +170,8 @@ test "Pathname.children returns array of children; empty for missing dir" {
     defer testing.allocator.free(a);
     const b = try std.fmt.allocPrint(testing.allocator, "{s}/b", .{root});
     defer testing.allocator.free(b);
-    (try malt.fs_compat.createFileAbsolute(a, .{})).close();
-    (try malt.fs_compat.createFileAbsolute(b, .{})).close();
+    (try malt.fs_compat.createFileAbsolute(a, .{})).close(malt.io_mod.ctx());
+    (try malt.fs_compat.createFileAbsolute(b, .{})).close(malt.io_mod.ctx());
 
     const result = try pathname.children(ctx, Value{ .pathname = root }, &.{});
     defer {
@@ -221,7 +221,7 @@ test "Pathname.unlink deletes a file in the sandbox" {
 
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/goodbye.txt", .{root});
     defer testing.allocator.free(path);
-    (try malt.fs_compat.createFileAbsolute(path, .{})).close();
+    (try malt.fs_compat.createFileAbsolute(path, .{})).close(malt.io_mod.ctx());
 
     _ = try pathname.unlink(ctx, Value{ .pathname = path }, &.{});
     try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(path, .{}));
@@ -237,7 +237,7 @@ test "Pathname.install_symlink creates and replaces a symlink in the sandbox" {
     defer testing.allocator.free(src);
     const dst = try std.fmt.allocPrint(testing.allocator, "{s}/sub/link", .{root});
     defer testing.allocator.free(dst);
-    (try malt.fs_compat.createFileAbsolute(src, .{})).close();
+    (try malt.fs_compat.createFileAbsolute(src, .{})).close(malt.io_mod.ctx());
 
     const args = [_]Value{.{ .string = dst }};
     _ = try pathname.installSymlink(ctx, Value{ .pathname = src }, &args);
@@ -258,7 +258,7 @@ test "Pathname.glob with receiver returns matching entries" {
     for ([_][]const u8{ "libfoo.dylib", "libbar.dylib", "readme.txt" }) |name| {
         const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ lib_dir, name });
         defer testing.allocator.free(p);
-        (try malt.fs_compat.createFileAbsolute(p, .{})).close();
+        (try malt.fs_compat.createFileAbsolute(p, .{})).close(malt.io_mod.ctx());
     }
 
     const args = [_]Value{.{ .string = "*.dylib" }};
@@ -277,7 +277,7 @@ test "Pathname.glob bare form (no receiver) splits dirname/basename of the patte
     const ctx = mkCtx(root);
     const a_path = try std.fmt.allocPrint(testing.allocator, "{s}/a.zig", .{root});
     defer testing.allocator.free(a_path);
-    (try malt.fs_compat.createFileAbsolute(a_path, .{})).close();
+    (try malt.fs_compat.createFileAbsolute(a_path, .{})).close(malt.io_mod.ctx());
 
     const pattern = try std.fmt.allocPrint(testing.allocator, "{s}/*.zig", .{root});
     defer testing.allocator.free(pattern);
@@ -298,7 +298,7 @@ test "Pathname.glob honours {a,b,c} brace expansion" {
     for ([_][]const u8{ "a.c", "a.h", "a.o" }) |name| {
         const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ root, name });
         defer testing.allocator.free(p);
-        (try malt.fs_compat.createFileAbsolute(p, .{})).close();
+        (try malt.fs_compat.createFileAbsolute(p, .{})).close(malt.io_mod.ctx());
     }
     const args = [_]Value{.{ .string = "*.{c,h}" }};
     const result = try pathname.glob(ctx, Value{ .pathname = root }, &args);
@@ -323,12 +323,12 @@ test "FileUtils.mkdir_p + touch + rm round-trip through the sandbox" {
     defer testing.allocator.free(nested);
     _ = try fileutils.mkdirP(ctx, null, &.{.{ .string = nested }});
     var d = try malt.fs_compat.openDirAbsolute(nested, .{});
-    d.close();
+    d.close(malt.io_mod.ctx());
 
     const file = try std.fmt.allocPrint(testing.allocator, "{s}/a/b/c/hello", .{root});
     defer testing.allocator.free(file);
     _ = try fileutils.touch(ctx, null, &.{.{ .string = file }});
-    (try malt.fs_compat.openFileAbsolute(file, .{})).close();
+    (try malt.fs_compat.openFileAbsolute(file, .{})).close(malt.io_mod.ctx());
 
     _ = try fileutils.rm(ctx, null, &.{.{ .string = file }});
     try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(file, .{}));
@@ -346,8 +346,8 @@ test "FileUtils.cp copies a single file into the sandbox" {
     defer testing.allocator.free(dst);
     {
         const f = try malt.fs_compat.createFileAbsolute(src, .{});
-        try f.writeAll("payload");
-        f.close();
+        try f.writeStreamingAll(malt.io_mod.ctx(), "payload");
+        f.close(malt.io_mod.ctx());
     }
     _ = try fileutils.cp(ctx, null, &.{
         .{ .string = src },
@@ -355,9 +355,9 @@ test "FileUtils.cp copies a single file into the sandbox" {
     });
 
     const f = try malt.fs_compat.openFileAbsolute(dst, .{});
-    defer f.close();
+    defer f.close(malt.io_mod.ctx());
     var buf: [32]u8 = undefined;
-    const n = try f.readAll(&buf);
+    const n = try f.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
     try testing.expectEqualStrings("payload", buf[0..n]);
 }
 
@@ -367,7 +367,7 @@ test "FileUtils.cp with an array copies each file into the destination directory
     defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const ctx = ExecCtx{ .allocator = arena.allocator(), .io = malt.io_mod.ctx(), .environ = malt.fs_compat.processEnviron(), .cellar_path = root, .malt_prefix = root };
+    const ctx = ExecCtx{ .allocator = arena.allocator(), .io = malt.io_mod.ctx(), .environ = malt.app_ctx.processEnviron(), .cellar_path = root, .malt_prefix = root };
 
     const dst_dir = try std.fmt.allocPrint(testing.allocator, "{s}/dst", .{root});
     defer testing.allocator.free(dst_dir);
@@ -378,8 +378,8 @@ test "FileUtils.cp with an array copies each file into the destination directory
     defer testing.allocator.free(src_b);
     for ([_][]const u8{ src_a, src_b }) |p| {
         const f = try malt.fs_compat.createFileAbsolute(p, .{});
-        try f.writeAll("x");
-        f.close();
+        try f.writeStreamingAll(malt.io_mod.ctx(), "x");
+        f.close(malt.io_mod.ctx());
     }
 
     const items = [_]Value{ .{ .string = src_a }, .{ .string = src_b } };
@@ -388,7 +388,7 @@ test "FileUtils.cp with an array copies each file into the destination directory
     for ([_][]const u8{ "a.txt", "b.txt" }) |name| {
         const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dst_dir, name });
         defer testing.allocator.free(p);
-        (try malt.fs_compat.openFileAbsolute(p, .{})).close();
+        (try malt.fs_compat.openFileAbsolute(p, .{})).close(malt.io_mod.ctx());
     }
 }
 
@@ -400,14 +400,14 @@ test "FileUtils.rm_r (and rm_rf alias) delete a directory tree" {
 
     const tree = try std.fmt.allocPrint(testing.allocator, "{s}/tree/a/b", .{root});
     defer testing.allocator.free(tree);
-    try malt.fs_compat.cwd().makePath(tree);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), tree);
 
     const root_tree = try std.fmt.allocPrint(testing.allocator, "{s}/tree", .{root});
     defer testing.allocator.free(root_tree);
     _ = try fileutils.rmR(ctx, null, &.{.{ .string = root_tree }});
     try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(root_tree, .{}));
 
-    try malt.fs_compat.cwd().makePath(tree);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), tree);
     _ = try fileutils.rmRf(ctx, null, &.{.{ .string = root_tree }});
     try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(root_tree, .{}));
 }
@@ -419,7 +419,7 @@ test "FileUtils.rm with an array silently skips out-of-sandbox paths but removes
     const ctx = mkCtx(root);
     const good = try std.fmt.allocPrint(testing.allocator, "{s}/good.txt", .{root});
     defer testing.allocator.free(good);
-    (try malt.fs_compat.createFileAbsolute(good, .{})).close();
+    (try malt.fs_compat.createFileAbsolute(good, .{})).close(malt.io_mod.ctx());
 
     const items = [_]Value{ .{ .string = "/etc/passwd" }, .{ .string = good } };
     _ = try fileutils.rm(ctx, null, &.{.{ .array = &items }});
@@ -435,7 +435,7 @@ test "FileUtils.chmod with an array of paths chmods each one" {
     defer testing.allocator.free(a);
     const b = try std.fmt.allocPrint(testing.allocator, "{s}/b", .{root});
     defer testing.allocator.free(b);
-    for ([_][]const u8{ a, b }) |p| (try malt.fs_compat.createFileAbsolute(p, .{})).close();
+    for ([_][]const u8{ a, b }) |p| (try malt.fs_compat.createFileAbsolute(p, .{})).close(malt.io_mod.ctx());
 
     const items = [_]Value{ .{ .string = a }, .{ .string = b } };
     _ = try fileutils.chmod(ctx, null, &.{ .{ .int = 0o644 }, .{ .array = &items } });
@@ -447,14 +447,14 @@ test "FileUtils.ln_sf with an array symlinks each target into the dest dir" {
     defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const ctx = ExecCtx{ .allocator = arena.allocator(), .io = malt.io_mod.ctx(), .environ = malt.fs_compat.processEnviron(), .cellar_path = root, .malt_prefix = root };
+    const ctx = ExecCtx{ .allocator = arena.allocator(), .io = malt.io_mod.ctx(), .environ = malt.app_ctx.processEnviron(), .cellar_path = root, .malt_prefix = root };
     const t1 = try std.fmt.allocPrint(testing.allocator, "{s}/t1", .{root});
     defer testing.allocator.free(t1);
     const t2 = try std.fmt.allocPrint(testing.allocator, "{s}/t2", .{root});
     defer testing.allocator.free(t2);
     const dst = try std.fmt.allocPrint(testing.allocator, "{s}/links", .{root});
     defer testing.allocator.free(dst);
-    for ([_][]const u8{ t1, t2 }) |p| (try malt.fs_compat.createFileAbsolute(p, .{})).close();
+    for ([_][]const u8{ t1, t2 }) |p| (try malt.fs_compat.createFileAbsolute(p, .{})).close(malt.io_mod.ctx());
 
     const items = [_]Value{ .{ .string = t1 }, .{ .string = t2 } };
     _ = try fileutils.lnSf(ctx, null, &.{ .{ .array = &items }, .{ .string = dst } });
@@ -476,10 +476,10 @@ test "FileUtils.mv renames within the sandbox" {
     defer testing.allocator.free(src);
     const dst = try std.fmt.allocPrint(testing.allocator, "{s}/y.txt", .{root});
     defer testing.allocator.free(dst);
-    (try malt.fs_compat.createFileAbsolute(src, .{})).close();
+    (try malt.fs_compat.createFileAbsolute(src, .{})).close(malt.io_mod.ctx());
     _ = try fileutils.mv(ctx, null, &.{ .{ .string = src }, .{ .string = dst } });
     try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(src, .{}));
-    (try malt.fs_compat.openFileAbsolute(dst, .{})).close();
+    (try malt.fs_compat.openFileAbsolute(dst, .{})).close(malt.io_mod.ctx());
 }
 
 test "FileUtils.ln_s/ln_sf create (and force-replace) symlinks" {
@@ -491,7 +491,7 @@ test "FileUtils.ln_s/ln_sf create (and force-replace) symlinks" {
     defer testing.allocator.free(target);
     const link = try std.fmt.allocPrint(testing.allocator, "{s}/sub/link", .{root});
     defer testing.allocator.free(link);
-    (try malt.fs_compat.createFileAbsolute(target, .{})).close();
+    (try malt.fs_compat.createFileAbsolute(target, .{})).close(malt.io_mod.ctx());
 
     _ = try fileutils.lnS(ctx, null, &.{ .{ .string = target }, .{ .string = link } });
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -520,7 +520,7 @@ test "FileUtils.chmod returns nil for a non-int mode and is a no-op" {
     const ctx = mkCtx(root);
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/f", .{root});
     defer testing.allocator.free(path);
-    (try malt.fs_compat.createFileAbsolute(path, .{})).close();
+    (try malt.fs_compat.createFileAbsolute(path, .{})).close(malt.io_mod.ctx());
     const v = try fileutils.chmod(ctx, null, &.{ .{ .string = "0755" }, .{ .string = path } });
     try testing.expect(v == .nil);
 }
@@ -538,7 +538,7 @@ fn arenaCtx(arena: *std.heap.ArenaAllocator, root: []const u8) ExecCtx {
     return .{
         .allocator = arena.allocator(),
         .io = malt.io_mod.ctx(),
-        .environ = malt.fs_compat.processEnviron(),
+        .environ = malt.app_ctx.processEnviron(),
         .cellar_path = root,
         .malt_prefix = root,
     };
@@ -548,7 +548,7 @@ fn arenaCtxLive(arena: *std.heap.ArenaAllocator, lio: *LiveIo, root: []const u8)
     return .{
         .allocator = arena.allocator(),
         .io = lio.io(),
-        .environ = malt.fs_compat.processEnviron(),
+        .environ = malt.app_ctx.processEnviron(),
         .cellar_path = root,
         .malt_prefix = root,
     };
@@ -677,7 +677,7 @@ test "formulaLookup returns MALT_PREFIX/opt/<name>" {
     const ctx = ExecCtx{
         .allocator = testing.allocator,
         .io = malt.io_mod.ctx(),
-        .environ = malt.fs_compat.processEnviron(),
+        .environ = malt.app_ctx.processEnviron(),
         .cellar_path = "/tmp/malt",
         .malt_prefix = "/tmp/malt",
     };

@@ -25,7 +25,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
         0,
     );
     malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().makePath(path);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -40,7 +40,7 @@ test "mt upgrade <nonexistent> surfaces a non-zero exit" {
     // short-circuit to silent-return) but no packages are installed.
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().makePath(db_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -54,7 +54,7 @@ test "mt upgrade <nonexistent> surfaces a non-zero exit" {
 fn openSeededDb(prefix: [:0]const u8) !sqlite.Database {
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().makePath(db_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
 
     var buf: [512]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0);
@@ -140,7 +140,7 @@ test "mt upgrade --pinned without --dry-run or --force errors with usage" {
 
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().makePath(db_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

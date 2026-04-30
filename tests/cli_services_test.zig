@@ -21,7 +21,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
         0,
     );
     malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().makePath(path);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
     try malt.fs_compat.makeDirAbsolute(db_dir);

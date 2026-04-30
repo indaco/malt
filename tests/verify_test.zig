@@ -14,7 +14,7 @@ const fs_compat = malt.fs_compat;
 const LiveIo = struct {
     threaded: std.Io.Threaded,
     pub fn init() LiveIo {
-        return .{ .threaded = .init(testing.allocator, .{ .environ = fs_compat.processEnviron() }) };
+        return .{ .threaded = .init(testing.allocator, .{ .environ = malt.app_ctx.processEnviron() }) };
     }
     pub fn deinit(self: *LiveIo) void {
         self.threaded.deinit();
@@ -115,11 +115,11 @@ test "lookupSha256 ignores malformed lines without crashing" {
 fn writeFakeCosign(path: []const u8, exit_code: u8) !void {
     fs_compat.deleteFileAbsolute(path) catch {};
     const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close();
+    defer f.close(malt.io_mod.ctx());
     var buf: [64]u8 = undefined;
     const script = try std.fmt.bufPrint(&buf, "#!/bin/sh\nexit {d}\n", .{exit_code});
-    try f.writeAll(script);
-    try f.chmod(0o755);
+    try f.writeStreamingAll(malt.io_mod.ctx(), script);
+    try f.setPermissions(malt.io_mod.ctx(), std.Io.File.Permissions.fromMode(@intCast(0o755)));
 }
 
 const fake_args = verify.CosignBlob{
@@ -252,8 +252,8 @@ const Fixture = struct {
 
 fn writeFile(path: []const u8, content: []const u8) !void {
     const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll(content);
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), content);
 }
 
 test "verifyAll accepts a valid tarball + matching checksum + good cosign" {
@@ -359,11 +359,11 @@ test "verifyAll streams a large tarball without loading it whole (smoke)" {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     {
         const tf = try fs_compat.createFileAbsolute(tarball, .{});
-        defer tf.close();
+        defer tf.close(malt.io_mod.ctx());
         var remaining = total;
         while (remaining > 0) {
             const n = @min(remaining, chunk.len);
-            try tf.writeAll(chunk[0..n]);
+            try tf.writeStreamingAll(malt.io_mod.ctx(), chunk[0..n]);
             hasher.update(chunk[0..n]);
             remaining -= n;
         }

@@ -196,13 +196,13 @@ test "upgrade emits bracketing lock_acquired + install_complete under ndjson" {
     defer testing.allocator.free(path);
     malt.fs_compat.deleteTreeAbsolute(path) catch {};
     defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().makePath(path);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().makePath(db_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
 
     const prior = setNdjsonOn();
     defer restoreNdjson(prior);

@@ -170,7 +170,7 @@ test "doctor.externalToolAvailable returns true when the tool is on PATH" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const environ = malt.fs_compat.processEnviron();
+    const environ = malt.app_ctx.processEnviron();
     try testing.expect(malt.doctor.externalToolAvailable(io, environ, patch.external_tool_name));
 }
 
@@ -178,7 +178,7 @@ test "doctor.externalToolAvailable returns false for a clearly-missing binary" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const environ = malt.fs_compat.processEnviron();
+    const environ = malt.app_ctx.processEnviron();
     try testing.expect(!malt.doctor.externalToolAvailable(io, environ, "mt_no_such_binary_ever_xyz"));
 }
 
@@ -236,9 +236,9 @@ test "countMissingLocalSources does not flag kegs whose .rb still exists" {
     // is guaranteed to be readable from the test process.
     const self_path = "/tmp/mt_doctor_present_formula.rb";
     const f = try malt.fs_compat.createFileAbsolute(self_path, .{});
-    defer malt.fs_compat.cwd().deleteFile(self_path) catch {};
-    try f.writeAll("class X end\n");
-    f.close();
+    defer malt.fs_compat.cwd().deleteFile(malt.io_mod.ctx(), self_path) catch {};
+    try f.writeStreamingAll(malt.io_mod.ctx(), "class X end\n");
+    f.close(malt.io_mod.ctx());
 
     try seedKeg(&db, "present", "local", self_path);
 
@@ -258,9 +258,9 @@ test "countMissingLocalSources mixes stale and present rows correctly" {
 
     const present_path = "/tmp/mt_doctor_mixed_present.rb";
     const f = try malt.fs_compat.createFileAbsolute(present_path, .{});
-    defer malt.fs_compat.cwd().deleteFile(present_path) catch {};
-    try f.writeAll("x");
-    f.close();
+    defer malt.fs_compat.cwd().deleteFile(malt.io_mod.ctx(), present_path) catch {};
+    try f.writeStreamingAll(malt.io_mod.ctx(), "x");
+    f.close(malt.io_mod.ctx());
 
     try seedKeg(&db, "p1", "local", present_path);
     try seedKeg(&db, "g1", "local", "/tmp/mt_doctor_mixed_missing_1.rb");

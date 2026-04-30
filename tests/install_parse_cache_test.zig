@@ -45,9 +45,9 @@ fn seedCache(cache_dir: []const u8, name: []const u8, json: []const u8) !void {
     };
     var path_buf: [512]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
-    const f = try malt.fs_compat.cwd().createFile(path, .{});
-    defer f.close();
-    try f.writeAll(json);
+    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), path, .{});
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), json);
 }
 
 /// Unique sha per dep so the dedup branch can't collapse jobs.
@@ -252,17 +252,17 @@ test "resolve walks deps for JSON missing the name field" {
     var root_buf: [512]u8 = undefined;
     const root_path = try std.fmt.bufPrint(&root_buf, "{s}/api/formula_thin.json", .{cache_dir});
     {
-        const f = try malt.fs_compat.cwd().createFile(root_path, .{});
-        defer f.close();
-        try f.writeAll(root_json);
+        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), root_path, .{});
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), root_json);
     }
 
     inline for (.{ "leaf_one", "leaf_two" }) |leaf| {
         var leaf_buf: [512]u8 = undefined;
         const leaf_path = try std.fmt.bufPrint(&leaf_buf, "{s}/api/formula_{s}.json", .{ cache_dir, leaf });
-        const f = try malt.fs_compat.cwd().createFile(leaf_path, .{});
-        defer f.close();
-        try f.writeAll("{\"dependencies\":[]}");
+        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), leaf_path, .{});
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), "{\"dependencies\":[]}");
     }
 
     var http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);

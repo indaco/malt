@@ -19,12 +19,12 @@ test "findCachedBinary returns the path when the cached binary exists" {
 
     const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/run/{s}/{s}/{s}/bin", .{ base, sha, pkg, ver });
     defer testing.allocator.free(bin_dir);
-    try malt.fs_compat.cwd().makePath(bin_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), bin_dir);
 
     const expected_bin = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, pkg });
     defer testing.allocator.free(expected_bin);
     const f = try malt.fs_compat.createFileAbsolute(expected_bin, .{});
-    f.close();
+    f.close(malt.io_mod.ctx());
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -65,11 +65,11 @@ test "findCachedBinary keys cache slot on sha256, not just pkg+version" {
 
     const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/run/{s}/{s}/{s}/bin", .{ base, sha_a, pkg, ver });
     defer testing.allocator.free(bin_dir);
-    try malt.fs_compat.cwd().makePath(bin_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), bin_dir);
     const bin_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, pkg });
     defer testing.allocator.free(bin_path);
     const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
-    f.close();
+    f.close(malt.io_mod.ctx());
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -93,11 +93,11 @@ test "findCachedBinary requires the version directory to match" {
 
     const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/run/{s}/{s}/1.7.1/bin", .{ base, sha, pkg });
     defer testing.allocator.free(bin_dir);
-    try malt.fs_compat.cwd().makePath(bin_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), bin_dir);
     const bin_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, pkg });
     defer testing.allocator.free(bin_path);
     const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
-    f.close();
+    f.close(malt.io_mod.ctx());
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

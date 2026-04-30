@@ -193,8 +193,9 @@ test "findReadAllInLoop reports the line number of the first offender" {
 // cask fix) re-introduces the bug pattern anywhere under src/.
 
 test "no readAll() inside a loop anywhere under src/" {
-    var dir = try fs.cwd().openDir("src", .{ .iterate = true });
-    defer dir.close();
+    const io = malt.io_mod.ctx();
+    var dir = try fs.cwd().openDir(io, "src", .{ .iterate = true });
+    defer dir.close(io);
 
     var walker = try dir.walk(testing.allocator);
     defer walker.deinit();
@@ -205,19 +206,21 @@ test "no readAll() inside a loop anywhere under src/" {
         failures.deinit(testing.allocator);
     }
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
 
-        const file = try dir.openFile(entry.path, .{});
-        defer file.close();
-        const content = try file.readToEndAlloc(testing.allocator, 1 << 22);
+        const file = try dir.openFile(io, entry.path, .{});
+        defer file.close(io);
+        const stat = try file.stat(io);
+        const content = try testing.allocator.alloc(u8, @intCast(stat.size));
         defer testing.allocator.free(content);
+        _ = try file.readPositionalAll(io, content, 0);
 
         if (findReadAllInLoop(content)) |line| {
             const msg = try std.fmt.allocPrint(
                 testing.allocator,
-                "src/{s}:{d}: readAll() inside a loop — use readAllAt or fs_compat.streamFile",
+                "src/{s}:{d}: readAll() inside a loop — use readAllAt or stream the file",
                 .{ entry.path, line },
             );
             try failures.append(testing.allocator, msg);

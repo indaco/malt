@@ -391,9 +391,9 @@ test "isOutdated detects version mismatch" {
     try cask.recordInstall(&db, &c, "/Applications/Firefox.app");
 
     const prefix: [:0]const u8 = "/tmp/malt_test";
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .environ = malt.fs_compat.processEnviron() });
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .environ = malt.app_ctx.processEnviron() });
     defer threaded.deinit();
-    var installer = cask.CaskInstaller.init(threaded.io(), malt.fs_compat.processEnviron(), std.testing.allocator, &db, prefix);
+    var installer = cask.CaskInstaller.init(threaded.io(), malt.app_ctx.processEnviron(), std.testing.allocator, &db, prefix);
 
     try std.testing.expect(installer.isOutdated("firefox", "124.0"));
     try std.testing.expect(!installer.isOutdated("firefox", "123.0"));
@@ -422,8 +422,8 @@ fn tempFilePath(tag: []const u8, buf: []u8) ![]const u8 {
 
 fn writeFile(path: []const u8, bytes: []const u8) !void {
     const f = try malt_fs.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll(bytes);
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), bytes);
 }
 
 /// Independent SHA256 of `bytes` as lowercase hex, computed in one
@@ -449,7 +449,7 @@ fn hashTempFile(alloc: std.mem.Allocator, tag: []const u8, size: usize) !void {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath(tag, &path_buf);
     try writeFile(p, payload);
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(malt.io_mod.ctx(), p) catch {};
 
     const got = try cask.hashFileSha256(testIo(), p);
     const want = referenceHex(payload);
@@ -462,7 +462,7 @@ test "hashFileSha256 matches reference for an empty file" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("empty", &path_buf);
     try writeFile(p, "");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(malt.io_mod.ctx(), p) catch {};
 
     const got = try cask.hashFileSha256(testIo(), p);
     // SHA256 of empty input.
@@ -512,7 +512,7 @@ test "hashFileSha256 of 'abc' matches the NIST test vector" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("nist_abc", &path_buf);
     try writeFile(p, "abc");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(malt.io_mod.ctx(), p) catch {};
 
     const got = try cask.hashFileSha256(testIo(), p);
     try testing.expectEqualSlices(
@@ -535,7 +535,7 @@ test "verifyFileSha256 accepts the correct digest on a tiny file" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("tiny_ok", &path_buf);
     try writeFile(p, "hello");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(malt.io_mod.ctx(), p) catch {};
 
     // `printf 'hello' | shasum -a 256`
     try cask.verifyFileSha256(testIo(), p, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
@@ -547,7 +547,7 @@ test "verifyFileSha256 rejects a digest with a single flipped bit" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("flip", &path_buf);
     try writeFile(p, "hello");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(malt.io_mod.ctx(), p) catch {};
 
     try testing.expectError(
         error.Sha256Mismatch,
@@ -561,7 +561,7 @@ test "verifyFileSha256 rejects an uppercase digest (strict lower-hex)" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("upper", &path_buf);
     try writeFile(p, "hello");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(malt.io_mod.ctx(), p) catch {};
 
     try testing.expectError(
         error.Sha256Mismatch,
@@ -573,7 +573,7 @@ test "verifyFileSha256 rejects a truncated or over-length digest" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("length", &path_buf);
     try writeFile(p, "hello");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(malt.io_mod.ctx(), p) catch {};
 
     try testing.expectError(error.Sha256Mismatch, cask.verifyFileSha256(testIo(), p, "2cf2"));
     try testing.expectError(
@@ -589,7 +589,7 @@ test "verifyFileSha256 skips verification on null or :no_check" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("skip", &path_buf);
     try writeFile(p, "anything");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(malt.io_mod.ctx(), p) catch {};
 
     try cask.verifyFileSha256(testIo(), p, null);
     try cask.verifyFileSha256(testIo(), p, "no_check");
@@ -609,7 +609,7 @@ test "verifyFileSha256 accepts a correct digest on a >1 MiB file" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("big_ok", &path_buf);
     try writeFile(p, payload);
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(malt.io_mod.ctx(), p) catch {};
 
     const expected = referenceHex(payload);
     try cask.verifyFileSha256(testIo(), p, &expected);
@@ -661,7 +661,7 @@ test "findAppInDir returns null when no .app bundle is present" {
     var readme_buf: [256]u8 = undefined;
     const readme = try std.fmt.bufPrint(&readme_buf, "{s}/README", .{dir_path});
     const f = try malt_fs.createFileAbsolute(readme, .{});
-    f.close();
+    f.close(malt.io_mod.ctx());
 
     var out: [64]u8 = undefined;
     try testing.expect(cask.findAppInDir(testIo(), dir_path, &out) == null);
@@ -677,7 +677,7 @@ test "findFileInTree returns absolute path for a file at the root" {
     var file_buf: [256]u8 = undefined;
     const file_path = try std.fmt.bufPrint(&file_buf, "{s}/tool", .{dir_path});
     const f = try malt_fs.createFileAbsolute(file_path, .{});
-    f.close();
+    f.close(malt.io_mod.ctx());
 
     const got = (try cask.findFileInTree(testIo(), testing.allocator, dir_path, "tool")) orelse
         return error.TestUnexpectedResult;
@@ -700,7 +700,7 @@ test "findFileInTree finds a binary nested one level deep" {
     var file_buf: [384]u8 = undefined;
     const file_path = try std.fmt.bufPrint(&file_buf, "{s}/tool", .{sub});
     const f = try malt_fs.createFileAbsolute(file_path, .{});
-    f.close();
+    f.close(malt.io_mod.ctx());
 
     const got = (try cask.findFileInTree(testIo(), testing.allocator, dir_path, "tool")) orelse
         return error.TestUnexpectedResult;
@@ -763,12 +763,12 @@ test "verifyFileSha256 accepts only the exact-byte payload (collision check)" {
     var ap_buf: [128]u8 = undefined;
     const ap = try tempFilePath("coll_a", &ap_buf);
     try writeFile(ap, a);
-    defer malt_fs.cwd().deleteFile(ap) catch {};
+    defer malt_fs.cwd().deleteFile(malt.io_mod.ctx(), ap) catch {};
 
     var bp_buf: [128]u8 = undefined;
     const bp = try tempFilePath("coll_b", &bp_buf);
     try writeFile(bp, b);
-    defer malt_fs.cwd().deleteFile(bp) catch {};
+    defer malt_fs.cwd().deleteFile(malt.io_mod.ctx(), bp) catch {};
 
     const hex_a = referenceHex(a);
     try cask.verifyFileSha256(testIo(), ap, &hex_a);

@@ -21,7 +21,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
         0,
     );
     malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().makePath(path);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -47,18 +47,18 @@ test "execute with no positional args reports NoPackages" {
 fn seedFormulaCache(prefix: []const u8, name: []const u8, json: []const u8) !void {
     const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
     defer testing.allocator.free(cache_api);
-    try malt.fs_compat.cwd().makePath(cache_api);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), cache_api);
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.json", .{ cache_api, name });
     defer testing.allocator.free(path);
-    const f = try malt.fs_compat.cwd().createFile(path, .{});
-    defer f.close();
-    try f.writeAll(json);
+    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), path, .{});
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), json);
 }
 
 test "execute --dry-run prints a plan for a cached formula" {
     const prefix_z: [:0]const u8 = "/tmp/mm";
     malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix_z);
     const prefix: []const u8 = prefix_z;
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
     defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
@@ -96,7 +96,7 @@ test "execute --dry-run prints a plan for a cached formula" {
 test "execute with --formula forces formula-only and errors on an unresolvable name" {
     const prefix_z: [:0]const u8 = "/tmp/mf";
     malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
     defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
@@ -117,7 +117,7 @@ test "execute with --formula forces formula-only and errors on an unresolvable n
 test "execute with a tap-formula-shaped name routes through the tap path in dry-run" {
     const prefix_z: [:0]const u8 = "/tmp/mt";
     malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
     defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
@@ -136,14 +136,14 @@ test "execute with a tap-formula-shaped name routes through the tap path in dry-
 test "execute --dry-run with an already-installed package short-circuits" {
     const prefix_z: [:0]const u8 = "/tmp/mi";
     malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
     defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix_z});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().makePath(db_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
     const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
 
@@ -204,7 +204,7 @@ test "execute --only-dependencies on a leaf formula plans nothing" {
     // branch so a future refactor cannot accidentally print a 0-package plan.
     const prefix_z: [:0]const u8 = "/tmp/mol";
     malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
     defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
@@ -253,7 +253,7 @@ test "execute --only-dependencies --dry-run plans deps but skips the requested f
     // is the cheapest way to assert the plan's contents from the outside.
     const prefix_z: [:0]const u8 = "/tmp/mod";
     malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
     defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
@@ -329,7 +329,7 @@ test "execute --dry-run routes a revisioned formula through the install pipeline
     // place of the plain `version`.
     const prefix_z: [:0]const u8 = "/tmp/mr";
     malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
     defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");

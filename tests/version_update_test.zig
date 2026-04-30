@@ -115,8 +115,8 @@ test "writeResponseBody: createFileAbsolute failure leaves zero leaked allocatio
 
 fn writeFile(path: []const u8, content: []const u8) !void {
     const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll(content);
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), content);
 }
 
 fn makeScratch(allocator: std.mem.Allocator, tag: []const u8) ![]u8 {

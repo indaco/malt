@@ -23,7 +23,7 @@ fn makeKegWithBinary(prefix: []const u8, name: []const u8, version: []const u8, 
         "{s}/Cellar/{s}/{s}",
         .{ prefix, name, version },
     );
-    try malt.fs_compat.cwd().makePath(keg);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg);
 
     const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{keg});
     defer testing.allocator.free(bin_dir);
@@ -32,8 +32,8 @@ fn makeKegWithBinary(prefix: []const u8, name: []const u8, version: []const u8, 
     const bin_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, bin_name });
     defer testing.allocator.free(bin_path);
     const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
-    try f.writeAll("#!/bin/sh\necho hi\n");
-    f.close();
+    try f.writeStreamingAll(malt.io_mod.ctx(), "#!/bin/sh\necho hi\n");
+    f.close(malt.io_mod.ctx());
 
     return keg;
 }
@@ -43,7 +43,7 @@ test "link creates symlinks for every file in a keg and records them in the DB" 
     defer testing.allocator.free(prefix);
     defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
 
-    try malt.fs_compat.cwd().makePath(prefix);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix);
     const keg = try makeKegWithBinary(prefix, "foo", "1.0", "foo-tool");
     defer testing.allocator.free(keg);
 
@@ -92,10 +92,10 @@ test "linkOpt creates opt/{name} -> Cellar/{name}/{version}" {
     const prefix = try uniquePrefix("link_opt");
     defer testing.allocator.free(prefix);
     defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    try malt.fs_compat.cwd().makePath(prefix);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix);
     const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/bar/2.0", .{prefix});
     defer testing.allocator.free(cellar);
-    try malt.fs_compat.cwd().makePath(cellar);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), cellar);
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -120,7 +120,7 @@ test "checkConflicts flags a symlink that points into a different keg" {
     const prefix = try uniquePrefix("link_conflict");
     defer testing.allocator.free(prefix);
     defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    try malt.fs_compat.cwd().makePath(prefix);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix);
 
     // Two kegs that both ship a `bin/tool` binary.
     const keg_a = try makeKegWithBinary(prefix, "alpha", "1.0", "tool");
@@ -159,7 +159,7 @@ test "checkConflicts is empty when nothing is linked yet" {
     const prefix = try uniquePrefix("link_no_conflict");
     defer testing.allocator.free(prefix);
     defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    try malt.fs_compat.cwd().makePath(prefix);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix);
     const keg = try makeKegWithBinary(prefix, "gamma", "1.0", "tool");
     defer testing.allocator.free(keg);
 

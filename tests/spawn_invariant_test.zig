@@ -52,15 +52,15 @@ test "no shell-invocation patterns anywhere under src/" {
     const alloc = testing.allocator;
     // Walk src/ from the project root. Tests run with CWD at project
     // root per build.zig conventions.
-    var dir = try fs_compat.cwd().openDir("src", .{ .iterate = true });
-    defer dir.close();
+    var dir = try fs_compat.cwd().openDir(malt.io_mod.ctx(), "src", .{ .iterate = true });
+    defer dir.close(malt.io_mod.ctx());
     var walker = try dir.walk(alloc);
     defer walker.deinit();
 
     var violations: std.ArrayList(u8) = .empty;
     defer violations.deinit(alloc);
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(malt.io_mod.ctx())) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
 

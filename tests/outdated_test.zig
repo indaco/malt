@@ -44,9 +44,9 @@ const TempCacheDir = struct {
         };
         var path_buf: [512]u8 = undefined;
         const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ self.path, rel });
-        const f = try malt.fs_compat.cwd().createFile(full, .{});
-        defer f.close();
-        try f.writeAll(content);
+        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), full, .{});
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), content);
     }
 };
 
@@ -231,10 +231,10 @@ fn setupPinnedPrefix(suffix: []const u8) ![:0]u8 {
         0,
     );
     malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().makePath(path);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().makePath(db_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -409,11 +409,11 @@ const UpdateEnv = struct {
             0,
         );
         malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-        try malt.fs_compat.cwd().makePath(prefix);
-        try malt.fs_compat.cwd().makePath(cache);
+        try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix);
+        try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), cache);
         const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
         defer testing.allocator.free(db_dir);
-        try malt.fs_compat.cwd().makePath(db_dir);
+        try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
 
         _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
         _ = c.setenv("MALT_CACHE", cache.ptr, 1);
@@ -431,12 +431,12 @@ const UpdateEnv = struct {
     fn writeApiFile(self: UpdateEnv, rel: []const u8, body: []const u8) !void {
         var dir_buf: [512]u8 = undefined;
         const api_dir = try std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_path});
-        try malt.fs_compat.cwd().makePath(api_dir);
+        try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), api_dir);
         var path_buf: [512]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ api_dir, rel });
-        const f = try malt.fs_compat.cwd().createFile(path, .{});
-        defer f.close();
-        try f.writeAll(body);
+        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), path, .{});
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), body);
     }
 
     fn apiFileExists(self: UpdateEnv, rel: []const u8) bool {
@@ -751,9 +751,9 @@ test "readSnapshot returns null on garbage contents" {
     defer dir.deinit();
     const path = try outdated_mod.snapshotPath(testing.allocator, dir.path);
     defer testing.allocator.free(path);
-    const f = try malt.fs_compat.cwd().createFile(path, .{});
-    defer f.close();
-    try f.writeAll("not-json-at-all");
+    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), path, .{});
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), "not-json-at-all");
     try testing.expectEqual(@as(?outdated_mod.OwnedSnapshot, null), outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, dir.path));
 }
 

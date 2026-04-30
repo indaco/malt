@@ -69,8 +69,8 @@ fn resetScratch(allocator: std.mem.Allocator, tag: []const u8) ![]u8 {
 
 fn touch(path: []const u8) !void {
     const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll("");
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), "");
 }
 
 test "classifyResolved reports homebrew when a shim points into /Cellar/" {
@@ -81,7 +81,7 @@ test "classifyResolved reports homebrew when a shim points into /Cellar/" {
     // Stand up a `Cellar/malt/0.6.0/bin/malt` real file.
     const cellar = try std.fmt.allocPrint(std.testing.allocator, "{s}/Cellar/malt/0.6.0/bin", .{dir});
     defer std.testing.allocator.free(cellar);
-    try fs_compat.cwd().makePath(cellar);
+    try fs_compat.cwd().createDirPath(malt.io_mod.ctx(), cellar);
     const real = try std.fmt.allocPrint(std.testing.allocator, "{s}/malt", .{cellar});
     defer std.testing.allocator.free(real);
     try touch(real);
@@ -89,7 +89,7 @@ test "classifyResolved reports homebrew when a shim points into /Cellar/" {
     // Create a `bin/malt` shim pointing at the real file.
     const bin = try std.fmt.allocPrint(std.testing.allocator, "{s}/bin", .{dir});
     defer std.testing.allocator.free(bin);
-    try fs_compat.cwd().makePath(bin);
+    try fs_compat.cwd().createDirPath(malt.io_mod.ctx(), bin);
     const shim = try std.fmt.allocPrint(std.testing.allocator, "{s}/malt", .{bin});
     defer std.testing.allocator.free(shim);
     try fs_compat.symLinkAbsolute(real, shim, .{});

@@ -134,28 +134,28 @@ test "pickAssetUrl returns null when nothing matches" {
 
 /// Reset a scratch directory tree for a single test. Fixtures from
 /// earlier runs must not influence the current one.
-fn resetTree(path: []const u8) !malt.fs_compat.Dir {
+fn resetTree(path: []const u8) !std.Io.Dir {
     malt.fs_compat.deleteTreeAbsolute(path) catch {};
     try malt.fs_compat.makeDirAbsolute(path);
     return malt.fs_compat.openDirAbsolute(path, .{ .iterate = true });
 }
 
-fn touch(dir: malt.fs_compat.Dir, rel: []const u8, content: []const u8) !void {
-    const f = try dir.createFile(rel, .{});
-    defer f.close();
-    try f.writeAll(content);
+fn touch(dir: std.Io.Dir, rel: []const u8, content: []const u8) !void {
+    const f = try dir.createFile(malt.io_mod.ctx(), rel, .{});
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), content);
 }
 
 test "findReleaseBinary locates malt nested under GoReleaser's versioned dir" {
     // Mirrors the real tarball layout: malt_<ver>_darwin_all/{LICENSE,README,malt}
     const base = "/tmp/malt_findbin_nested";
     var dir = try resetTree(base);
-    defer dir.close();
+    defer dir.close(malt.io_mod.ctx());
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
-    try dir.makePath("malt_0.3.1_darwin_all");
-    var sub = try dir.openDir("malt_0.3.1_darwin_all", .{});
-    defer sub.close();
+    try dir.createDirPath(malt.io_mod.ctx(), "malt_0.3.1_darwin_all");
+    var sub = try dir.openDir(malt.io_mod.ctx(), "malt_0.3.1_darwin_all", .{});
+    defer sub.close(malt.io_mod.ctx());
     try touch(sub, "LICENSE", "MIT");
     try touch(sub, "README.md", "# malt");
     try touch(sub, "malt", "binary-bytes");
@@ -166,9 +166,9 @@ test "findReleaseBinary locates malt nested under GoReleaser's versioned dir" {
 
     try testing.expect(std.mem.endsWith(u8, found, "/malt_0.3.1_darwin_all/malt"));
     const f = try malt.fs_compat.openFileAbsolute(found, .{});
-    defer f.close();
+    defer f.close(malt.io_mod.ctx());
     var buf: [64]u8 = undefined;
-    const n = try f.readAll(&buf);
+    const n = try f.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
     try testing.expectEqualStrings("binary-bytes", buf[0..n]);
 }
 
@@ -176,7 +176,7 @@ test "findReleaseBinary accepts a flat layout with the binary at the root" {
     // Forks or future layouts may drop the wrap-in-dir.
     const base = "/tmp/malt_findbin_flat";
     var dir = try resetTree(base);
-    defer dir.close();
+    defer dir.close(malt.io_mod.ctx());
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     try touch(dir, "malt", "binary-bytes");
@@ -191,12 +191,12 @@ test "findReleaseBinary accepts the `mt` alias when `malt` is absent" {
     // Survives a release that renames the binary to the short alias.
     const base = "/tmp/malt_findbin_mt_only";
     var dir = try resetTree(base);
-    defer dir.close();
+    defer dir.close(malt.io_mod.ctx());
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
-    try dir.makePath("wrap");
-    var sub = try dir.openDir("wrap", .{});
-    defer sub.close();
+    try dir.createDirPath(malt.io_mod.ctx(), "wrap");
+    var sub = try dir.openDir(malt.io_mod.ctx(), "wrap", .{});
+    defer sub.close(malt.io_mod.ctx());
     try touch(sub, "mt", "binary-bytes");
 
     var out_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -209,7 +209,7 @@ test "findReleaseBinary returns null when the archive has no matching binary" {
     // Caller surfaces a clear error instead of silently no-op'ing.
     const base = "/tmp/malt_findbin_missing";
     var dir = try resetTree(base);
-    defer dir.close();
+    defer dir.close(malt.io_mod.ctx());
     defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
 
     try touch(dir, "LICENSE", "MIT");

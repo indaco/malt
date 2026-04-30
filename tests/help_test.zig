@@ -60,7 +60,7 @@ test "helpFor falls back gracefully for unknown commands" {
 // Relies on the pre-built binary under zig-out/bin/malt; skipped if absent.
 test "--help output lands on stdout, not stderr" {
     const bin_path = "zig-out/bin/malt";
-    malt.fs_compat.cwd().access(bin_path, .{}) catch return error.SkipZigTest;
+    malt.fs_compat.cwd().access(malt.io_mod.ctx(), bin_path, .{}) catch return error.SkipZigTest;
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

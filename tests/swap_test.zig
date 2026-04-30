@@ -20,8 +20,8 @@ fn resetScratch(allocator: std.mem.Allocator, tag: []const u8) ![]u8 {
 
 fn writeFile(path: []const u8, content: []const u8) !void {
     const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll(content);
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), content);
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -31,8 +31,8 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 /// Returns the POSIX mode bits (rwxrwxrwx = 0o777) of `path`.
 fn modeBits(path: []const u8) !u32 {
     const f = try fs_compat.openFileAbsolute(path, .{});
-    defer f.close();
-    const st = try f.stat();
+    defer f.close(malt.io_mod.ctx());
+    const st = try f.stat(malt.io_mod.ctx());
     return @intCast(st.permissions.toMode() & 0o777);
 }
 

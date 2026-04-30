@@ -70,9 +70,9 @@ const TempCacheDir = struct {
         };
         var path_buf: [512]u8 = undefined;
         const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ self.path, rel });
-        const f = try malt.fs_compat.cwd().createFile(full, .{});
-        defer f.close();
-        try f.writeAll(content);
+        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), full, .{});
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), content);
     }
 };
 
@@ -305,9 +305,12 @@ test "cachedExists ignores stale mtime — existence is the only check" {
     try dir.writeCacheFile("cask_old.json", "{}");
     var path_buf: [512]u8 = undefined;
     const full = try std.fmt.bufPrint(&path_buf, "{s}/api/cask_old.json", .{dir.path});
-    const file = try malt.fs_compat.cwd().openFile(full, .{ .mode = .write_only });
-    defer file.close();
-    try file.updateTimes(0, 0);
+    const file = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), full, .{ .mode = .write_only });
+    defer file.close(malt.io_mod.ctx());
+    try file.setTimestamps(malt.io_mod.ctx(), .{
+        .access_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+        .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+    });
 
     var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
     try testing.expect(api.cachedExists("old", .cask));
@@ -337,10 +340,13 @@ test "readNotFoundCache returns false for stale marker" {
     var path_buf: [512]u8 = undefined;
     const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_old.404", .{dir.path});
     // Reopen and set mtime back via posix.utimensat-like helper.
-    const file = try malt.fs_compat.cwd().openFile(full, .{ .mode = .write_only });
-    defer file.close();
+    const file = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), full, .{ .mode = .write_only });
+    defer file.close(malt.io_mod.ctx());
     // Zig File.updateTimes signature: (atime, mtime) in ns.
-    try file.updateTimes(0, 0);
+    try file.setTimestamps(malt.io_mod.ctx(), .{
+        .access_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+        .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+    });
 
     var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
     try testing.expect(!api.readNotFoundCache("old", "formula_"));

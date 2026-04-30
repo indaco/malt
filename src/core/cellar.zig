@@ -238,7 +238,7 @@ pub fn materializeWithCellar(
         .{ .old = "/opt/homebrew", .new = new_prefix },
         .{ .old = "/usr/local", .new = new_prefix },
     };
-    _ = text_patcher.patchTextFiles(allocator, cellar_path, &text_replacements) catch |e| {
+    _ = text_patcher.patchTextFiles(io, allocator, cellar_path, &text_replacements) catch |e| {
         std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
     };
 
@@ -248,7 +248,7 @@ pub fn materializeWithCellar(
     // homebrew path references (tree, etc.), the modified list is empty
     // and the ~15 ms codesign subprocess is skipped entirely.
     if (codesign.isArm64() and modified_macho_paths.items.len > 0) {
-        codesign.adHocSignAll(allocator, modified_macho_paths.items) catch |e| {
+        codesign.adHocSignAll(io, allocator, modified_macho_paths.items) catch |e| {
             std.log.warn("codesigning failed for {s}: {s}", .{ cellar_path, @errorName(e) });
         };
     }
@@ -342,12 +342,12 @@ fn walkMachOAndPatch(
         // One read/write per file for all replacements. Slots that fit
         // are rewritten in process; slots that overflow are queued for
         // the install_name_tool fallback below.
-        var outcome = patch.patchPathsCollecting(allocator, full_path, patch_reps) catch
+        var outcome = patch.patchPathsCollecting(io, allocator, full_path, patch_reps) catch
             continue;
         defer outcome.deinit(allocator);
 
         if (outcome.overflow.len > 0) {
-            patch.flushOverflow(allocator, full_path, outcome.overflow) catch |e| switch (e) {
+            patch.flushOverflow(io, allocator, full_path, outcome.overflow) catch |e| switch (e) {
                 patch.FallbackError.InsufficientHeaderPad => return CellarError.InsufficientHeaderPad,
                 patch.FallbackError.InstallNameToolMissing => return CellarError.InstallNameToolMissing,
                 patch.FallbackError.OutOfMemory => return CellarError.OutOfMemory,

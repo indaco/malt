@@ -408,9 +408,9 @@ fn seedCache(cache_dir: []const u8, name: []const u8, json: []const u8) !void {
     };
     var path_buf: [512]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
-    const f = try malt.fs_compat.cwd().createFile(path, .{});
-    defer f.close();
-    try f.writeAll(json);
+    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), path, .{});
+    defer f.close(malt.io_mod.ctx());
+    try f.writeStreamingAll(malt.io_mod.ctx(), json);
 }
 
 fn formulaJsonWithDep(comptime name: []const u8, comptime dep: []const u8) []const u8 {

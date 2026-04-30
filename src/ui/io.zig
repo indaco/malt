@@ -1,12 +1,14 @@
-//! Thin shim over `std.Options.debug_io` so call sites don't have to thread
-//! an `Io` instance through every function signature during the 0.16
-//! migration. Long-term the app should accept `std.process.Init` and pass
-//! a real `Io` through the call graph.
+//! Process-wide stdout/stderr sinks plus a test-only capture path.
+//! Subcommands receive their `std.Io` through `AppCtx`; this module keeps
+//! the test sink and the `stderrWriteAll`/`stdoutWriteAll` write helpers
+//! that wrap it.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// Default process-wide Io used for stdout/stderr writes.
+/// Backing `Io` for the write helpers below. Production paths reach this
+/// only via `stderrWriteAll` / `stdoutWriteAll`; tests may import it
+/// directly to drive `std.Io.*` calls without threading an explicit io.
 pub fn ctx() std.Io {
     return std.Options.debug_io;
 }

@@ -191,7 +191,7 @@ test "sandbox: symlink escape detected by validateResolved" {
     );
     defer testing.allocator.free(cellar_dir);
 
-    malt.fs_compat.cwd().symLink("/tmp", symlink_dir, .{}) catch {
+    malt.fs_compat.cwd().symLink(malt.io_mod.ctx(), "/tmp", symlink_dir, .{}) catch {
         // If we can't create symlinks (permissions), skip the test
         return;
     };

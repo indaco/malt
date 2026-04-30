@@ -17,7 +17,7 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
     // we assert it stays intact.
     const dir_z: [:0]const u8 = "/tmp/malt_bundle_cleanup_cli_dry_run";
     malt.fs_compat.deleteTreeAbsolute(dir_z) catch {};
-    try malt.fs_compat.cwd().makePath(dir_z);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), dir_z);
     defer malt.fs_compat.deleteTreeAbsolute(dir_z) catch {};
 
     _ = c.setenv("MALT_PREFIX", dir_z.ptr, 1);
@@ -25,7 +25,7 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
 
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{dir_z});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().makePath(db_dir);
+    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
     const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
     {
@@ -59,9 +59,9 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
     const bf_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{dir_z});
     defer testing.allocator.free(bf_path);
     {
-        const f = try malt.fs_compat.cwd().createFile(bf_path, .{});
-        defer f.close();
-        try f.writeAll("brew \"wget\"\ncask \"ghostty\"\n");
+        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), bf_path, .{});
+        defer f.close(malt.io_mod.ctx());
+        try f.writeStreamingAll(malt.io_mod.ctx(), "brew \"wget\"\ncask \"ghostty\"\n");
     }
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});

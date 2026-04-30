@@ -516,7 +516,7 @@ test "HttpClient.get injects auth header when HOMEBREW_GITHUB_API_TOKEN is set" 
     _ = setenv("HOMEBREW_GITHUB_API_TOKEN", "fake-testing-token", 1);
     defer _ = unsetenv("HOMEBREW_GITHUB_API_TOKEN");
 
-    var http = client_mod.HttpClient.init(std.Options.debug_io, malt.fs_compat.processEnviron(), testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, malt.app_ctx.processEnviron(), testing.allocator);
     defer http.deinit();
 
     // The URL matches the formulae.brew.sh guard so the header path runs.
