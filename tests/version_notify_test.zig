@@ -162,6 +162,7 @@ test "decodeState: missing required field yields null (not an error)" {
 
 test "writeCache + readCache full round-trip on disk" {
     const allocator = testing.allocator;
+    const io = malt.io_mod.ctx();
 
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_test_{d}", .{fs_compat.nanoTimestamp()});
@@ -171,13 +172,13 @@ test "writeCache + readCache full round-trip on disk" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
 
-    try notifier.writeCache(path, .{
+    try notifier.writeCache(io, path, .{
         .checked_at = 42,
         .latest_tag = "v0.99.0",
         .current_seen = "0.10.0",
     });
 
-    const got = (try notifier.readCache(allocator, path)) orelse return error.TestExpectedNonNull;
+    const got = (try notifier.readCache(io, allocator, path)) orelse return error.TestExpectedNonNull;
     defer notifier.freeState(allocator, got);
 
     try testing.expectEqual(@as(i64, 42), got.checked_at);
@@ -187,6 +188,7 @@ test "writeCache + readCache full round-trip on disk" {
 
 test "writeCache creates the parent directory when absent" {
     const allocator = testing.allocator;
+    const io = malt.io_mod.ctx();
 
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_mkdir_{d}", .{fs_compat.nanoTimestamp()});
@@ -194,29 +196,31 @@ test "writeCache creates the parent directory when absent" {
     defer fs_compat.deleteTreeAbsolute(dir) catch {};
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    // Three-deep path to confirm `makePath` recurses (not just the leaf).
+    // Three-deep path to confirm `createDirPath` recurses (not just the leaf).
     const path = try std.fmt.bufPrint(&path_buf, "{s}/a/b/c/version-notify.json", .{dir});
 
-    try notifier.writeCache(path, .{
+    try notifier.writeCache(io, path, .{
         .checked_at = 0,
         .latest_tag = "v1.0.0",
         .current_seen = "0.0.0",
     });
 
-    const got = (try notifier.readCache(allocator, path)) orelse return error.TestExpectedNonNull;
+    const got = (try notifier.readCache(io, allocator, path)) orelse return error.TestExpectedNonNull;
     defer notifier.freeState(allocator, got);
     try testing.expectEqualStrings("v1.0.0", got.latest_tag);
 }
 
 test "readCache: missing file is null, not an error" {
+    const io = malt.io_mod.ctx();
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&buf, "/tmp/malt_notify_absent_{d}.json", .{fs_compat.nanoTimestamp()});
     fs_compat.deleteFileAbsolute(path) catch {};
-    const got = try notifier.readCache(testing.allocator, path);
+    const got = try notifier.readCache(io, testing.allocator, path);
     try testing.expect(got == null);
 }
 
 test "readCache: corrupt file surfaces InvalidPayload (caller can choose to ignore)" {
+    const io = malt.io_mod.ctx();
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_corrupt_{d}", .{fs_compat.nanoTimestamp()});
     fs_compat.deleteTreeAbsolute(dir) catch {};
@@ -231,5 +235,5 @@ test "readCache: corrupt file surfaces InvalidPayload (caller can choose to igno
         try f.writeAll("garbage{not_json");
     }
 
-    try testing.expectError(error.InvalidPayload, notifier.readCache(testing.allocator, path));
+    try testing.expectError(error.InvalidPayload, notifier.readCache(io, testing.allocator, path));
 }

@@ -37,7 +37,7 @@ test "cleanUpdateArtefacts removes the .old sibling" {
     try writeFile(target, "live");
     try writeFile(old, "previous");
 
-    const cleaned = try cleanup.cleanUpdateArtefacts(target);
+    const cleaned = try cleanup.cleanUpdateArtefacts(malt.io_mod.ctx(), target);
     try testing.expectEqual(@as(u32, 1), cleaned.old);
     try testing.expectEqual(@as(u32, 0), cleaned.staging);
     try testing.expect(!exists(old));
@@ -60,7 +60,7 @@ test "cleanUpdateArtefacts removes all .malt-update-* staging files" {
     try writeFile(s1, "orphan-1");
     try writeFile(s2, "orphan-2");
 
-    const cleaned = try cleanup.cleanUpdateArtefacts(target);
+    const cleaned = try cleanup.cleanUpdateArtefacts(malt.io_mod.ctx(), target);
     try testing.expectEqual(@as(u32, 2), cleaned.staging);
     try testing.expect(!exists(s1));
     try testing.expect(!exists(s2));
@@ -76,7 +76,7 @@ test "cleanUpdateArtefacts on an already-clean tree is a no-op" {
     defer testing.allocator.free(target);
     try writeFile(target, "live");
 
-    const cleaned = try cleanup.cleanUpdateArtefacts(target);
+    const cleaned = try cleanup.cleanUpdateArtefacts(malt.io_mod.ctx(), target);
     try testing.expectEqual(@as(u32, 0), cleaned.total());
     try testing.expect(exists(target));
 }
@@ -99,7 +99,7 @@ test "cleanUpdateArtefacts does not touch unrelated hidden files" {
     try writeFile(bystander, "user");
     try writeFile(also, "mac");
 
-    const cleaned = try cleanup.cleanUpdateArtefacts(target);
+    const cleaned = try cleanup.cleanUpdateArtefacts(malt.io_mod.ctx(), target);
     try testing.expectEqual(@as(u32, 0), cleaned.total());
     try testing.expect(exists(bystander));
     try testing.expect(exists(also));

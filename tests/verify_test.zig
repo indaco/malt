@@ -10,6 +10,20 @@ const malt = @import("malt");
 const verify = malt.update_verify;
 const fs_compat = malt.fs_compat;
 
+/// Live-environ Threaded so subprocess PATH lookup matches the parent.
+const LiveIo = struct {
+    threaded: std.Io.Threaded,
+    pub fn init() LiveIo {
+        return .{ .threaded = .init(testing.allocator, .{ .environ = fs_compat.processEnviron() }) };
+    }
+    pub fn deinit(self: *LiveIo) void {
+        self.threaded.deinit();
+    }
+    pub fn io(self: *LiveIo) std.Io {
+        return self.threaded.io();
+    }
+};
+
 // SHA256("hello world")
 const HELLO_WORLD_HEX = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
 // SHA256("")
@@ -116,19 +130,23 @@ const fake_args = verify.CosignBlob{
 };
 
 test "verifyCosignBlob returns CosignNotFound when the binary is missing" {
+    var lio = LiveIo.init();
+    defer lio.deinit();
     var args = fake_args;
     args.cosign_bin = "/tmp/malt_nonexistent_cosign_xyz_99";
-    try testing.expectError(error.CosignNotFound, verify.verifyCosignBlob(testing.allocator, args));
+    try testing.expectError(error.CosignNotFound, verify.verifyCosignBlob(lio.io(), testing.allocator, args));
 }
 
 test "verifyCosignBlob accepts a cosign that exits 0" {
+    var lio = LiveIo.init();
+    defer lio.deinit();
     const path = "/tmp/malt_fake_cosign_ok";
     try writeFakeCosign(path, 0);
     defer fs_compat.deleteFileAbsolute(path) catch {};
 
     var args = fake_args;
     args.cosign_bin = path;
-    try verify.verifyCosignBlob(testing.allocator, args);
+    try verify.verifyCosignBlob(lio.io(), testing.allocator, args);
 }
 
 // libc env mutators: Zig 0.16 has no std wrapper for these and the
@@ -165,7 +183,9 @@ test "verifyCosignBlob finds a bare 'cosign' via PATH (regression: gh#151)" {
 
     var args = fake_args;
     args.cosign_bin = "cosign";
-    try verify.verifyCosignBlob(testing.allocator, args);
+    var lio = LiveIo.init();
+    defer lio.deinit();
+    try verify.verifyCosignBlob(lio.io(), testing.allocator, args);
 }
 
 // --- verifyAll (end-to-end, local fixtures) ------------------------------
@@ -237,43 +257,55 @@ fn writeFile(path: []const u8, content: []const u8) !void {
 }
 
 test "verifyAll accepts a valid tarball + matching checksum + good cosign" {
+    var lio = LiveIo.init();
+    defer lio.deinit();
     var fx = try Fixture.setup(testing.allocator, "happy", "hello world", HELLO_WORLD_HEX_LINE, 0);
     defer fx.deinit(testing.allocator);
-    try verify.verifyAll(testing.allocator, fx.inputs());
+    try verify.verifyAll(lio.io(), testing.allocator, fx.inputs());
 }
 
 test "verifyAll rejects a tampered tarball (SHA256 mismatch)" {
+    var lio = LiveIo.init();
+    defer lio.deinit();
     var fx = try Fixture.setup(testing.allocator, "sha_mismatch", "hello WORLD", HELLO_WORLD_HEX_LINE, 0);
     defer fx.deinit(testing.allocator);
-    try testing.expectError(error.ChecksumMismatch, verify.verifyAll(testing.allocator, fx.inputs()));
+    try testing.expectError(error.ChecksumMismatch, verify.verifyAll(lio.io(), testing.allocator, fx.inputs()));
 }
 
 test "verifyAll rejects when checksums.txt omits the archive" {
+    var lio = LiveIo.init();
+    defer lio.deinit();
     const unrelated = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  other.tar.gz\n";
     var fx = try Fixture.setup(testing.allocator, "missing_entry", "hello world", unrelated, 0);
     defer fx.deinit(testing.allocator);
-    try testing.expectError(error.ChecksumMissing, verify.verifyAll(testing.allocator, fx.inputs()));
+    try testing.expectError(error.ChecksumMissing, verify.verifyAll(lio.io(), testing.allocator, fx.inputs()));
 }
 
 test "verifyAll rejects when cosign exits non-zero (signature tampered)" {
+    var lio = LiveIo.init();
+    defer lio.deinit();
     var fx = try Fixture.setup(testing.allocator, "cosign_fail", "hello world", HELLO_WORLD_HEX_LINE, 1);
     defer fx.deinit(testing.allocator);
-    try testing.expectError(error.CosignVerifyFailed, verify.verifyAll(testing.allocator, fx.inputs()));
+    try testing.expectError(error.CosignVerifyFailed, verify.verifyAll(lio.io(), testing.allocator, fx.inputs()));
 }
 
 test "verifyAll reports CosignNotFound when the binary is missing" {
+    var lio = LiveIo.init();
+    defer lio.deinit();
     var fx = try Fixture.setup(testing.allocator, "no_cosign", "hello world", HELLO_WORLD_HEX_LINE, 0);
     defer fx.deinit(testing.allocator);
     var inputs = fx.inputs();
     inputs.cosign_bin = "/tmp/malt_verifyall_absent_cosign_xyz";
-    try testing.expectError(error.CosignNotFound, verify.verifyAll(testing.allocator, inputs));
+    try testing.expectError(error.CosignNotFound, verify.verifyAll(lio.io(), testing.allocator, inputs));
 }
 
 test "verifyAll reports ReadFailed when the tarball cannot be read" {
+    var lio = LiveIo.init();
+    defer lio.deinit();
     var fx = try Fixture.setup(testing.allocator, "missing_tarball", "hello world", HELLO_WORLD_HEX_LINE, 0);
     defer fx.deinit(testing.allocator);
     try fs_compat.deleteFileAbsolute(fx.tarball);
-    try testing.expectError(error.ReadFailed, verify.verifyAll(testing.allocator, fx.inputs()));
+    try testing.expectError(error.ReadFailed, verify.verifyAll(lio.io(), testing.allocator, fx.inputs()));
 }
 
 // --- verifyAll (multi-chunk tarball) --------------------------------------
@@ -351,7 +383,9 @@ test "verifyAll streams a large tarball without loading it whole (smoke)" {
     try writeFile(sigstore, "{}");
     try writeFakeCosign(cosign_bin, 0);
 
-    try verify.verifyAll(testing.allocator, .{
+    var lio = LiveIo.init();
+    defer lio.deinit();
+    try verify.verifyAll(lio.io(), testing.allocator, .{
         .cosign_bin = cosign_bin,
         .tarball_path = tarball,
         .checksums_path = checksums,
@@ -363,6 +397,8 @@ test "verifyAll streams a large tarball without loading it whole (smoke)" {
 }
 
 test "verifyAll accepts a multi-chunk tarball whose hash matches" {
+    var lio = LiveIo.init();
+    defer lio.deinit();
     const payload = try patternedPayload(testing.allocator, 160 * 1024);
     defer testing.allocator.free(payload);
 
@@ -376,10 +412,12 @@ test "verifyAll accepts a multi-chunk tarball whose hash matches" {
 
     var fx = try Fixture.setup(testing.allocator, "multi_ok", payload, line, 0);
     defer fx.deinit(testing.allocator);
-    try verify.verifyAll(testing.allocator, fx.inputs());
+    try verify.verifyAll(lio.io(), testing.allocator, fx.inputs());
 }
 
 test "verifyAll rejects a multi-chunk tarball whose content was tampered" {
+    var lio = LiveIo.init();
+    defer lio.deinit();
     const payload = try patternedPayload(testing.allocator, 160 * 1024);
     defer testing.allocator.free(payload);
 
@@ -399,15 +437,17 @@ test "verifyAll rejects a multi-chunk tarball whose content was tampered" {
 
     var fx = try Fixture.setup(testing.allocator, "multi_bad", tampered, line, 0);
     defer fx.deinit(testing.allocator);
-    try testing.expectError(error.ChecksumMismatch, verify.verifyAll(testing.allocator, fx.inputs()));
+    try testing.expectError(error.ChecksumMismatch, verify.verifyAll(lio.io(), testing.allocator, fx.inputs()));
 }
 
 test "verifyCosignBlob errors when cosign exits non-zero" {
+    var lio = LiveIo.init();
+    defer lio.deinit();
     const path = "/tmp/malt_fake_cosign_fail";
     try writeFakeCosign(path, 1);
     defer fs_compat.deleteFileAbsolute(path) catch {};
 
     var args = fake_args;
     args.cosign_bin = path;
-    try testing.expectError(error.CosignVerifyFailed, verify.verifyCosignBlob(testing.allocator, args));
+    try testing.expectError(error.CosignVerifyFailed, verify.verifyCosignBlob(lio.io(), testing.allocator, args));
 }

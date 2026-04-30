@@ -341,7 +341,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // Best-effort passive notice on successful subcommands. Owns its
         // own suppression list (CI, --quiet/--json/ndjson/--dry-run, env
         // opt-out, non-TTY, brew origin, version/help meta-commands).
-        notifier.maybeNotify(allocator, version, cmd_str);
+        notifier.maybeNotify(&ctx, allocator, version, cmd_str);
     } else {
         // Unknown command — try transparent brew fallback
         try brewFallback(allocator, args);
@@ -349,7 +349,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_args: []const []const u8) !void {
-    _ = ctx;
     switch (cmd) {
         .install => try install.execute(allocator, cmd_args),
         .uninstall => try uninstall.execute(allocator, cmd_args),
@@ -381,7 +380,7 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         .version_cmd => {
             // "mt version" — check for "mt version update" subcommand
             if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
-                try version_update.execute(allocator, cmd_args[1..]);
+                try version_update.execute(ctx, allocator, cmd_args[1..]);
             } else {
                 printVersion();
             }

@@ -95,7 +95,7 @@ test "classifyResolved reports homebrew when a shim points into /Cellar/" {
     try fs_compat.symLinkAbsolute(real, shim, .{});
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    try testing.expectEqual(origin.Origin.homebrew, origin.classifyResolved(&buf, shim));
+    try testing.expectEqual(origin.Origin.homebrew, origin.classifyResolved(malt.io_mod.ctx(), &buf, shim));
 }
 
 test "classifyResolved reports direct for a non-symlinked direct install" {
@@ -108,7 +108,7 @@ test "classifyResolved reports direct for a non-symlinked direct install" {
     try touch(path);
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    try testing.expectEqual(origin.Origin.direct, origin.classifyResolved(&buf, path));
+    try testing.expectEqual(origin.Origin.direct, origin.classifyResolved(malt.io_mod.ctx(), &buf, path));
 }
 
 test "classifyResolved falls back to direct when the path cannot be resolved" {
@@ -116,6 +116,6 @@ test "classifyResolved falls back to direct when the path cannot be resolved" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectEqual(
         origin.Origin.direct,
-        origin.classifyResolved(&buf, "/tmp/malt_origin_test_absent_xyz_99"),
+        origin.classifyResolved(malt.io_mod.ctx(), &buf, "/tmp/malt_origin_test_absent_xyz_99"),
     );
 }

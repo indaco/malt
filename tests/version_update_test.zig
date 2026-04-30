@@ -80,7 +80,7 @@ test "writeResponseBody: writes body and returns caller-owned path" {
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
     const dir_abs = try tmpDirAbsolute(&tmp, &buf);
 
-    const path = try updater.writeResponseBody(testing.allocator, dir_abs, "payload.bin", "hello-T011");
+    const path = try updater.writeResponseBody(io_mod.ctx(), testing.allocator, dir_abs, "payload.bin", "hello-T011");
     defer testing.allocator.free(path);
 
     const expected_suffix = "/payload.bin";
@@ -98,6 +98,7 @@ test "writeResponseBody: createFileAbsolute failure leaves zero leaked allocatio
     defer output_mod.setQuiet(false);
 
     const result = updater.writeResponseBody(
+        io_mod.ctx(),
         testing.allocator,
         "/nonexistent/malt-T011-guardrail",
         "payload.bin",
@@ -140,7 +141,7 @@ test "resolveTwinRegularFile: returns sibling mt when invoked as malt" {
     try writeFile(mt_path, "m");
 
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const twin = updater.resolveTwinRegularFile(malt_path, &buf) orelse return error.ExpectedTwin;
+    const twin = updater.resolveTwinRegularFile(io_mod.ctx(), malt_path, &buf) orelse return error.ExpectedTwin;
     try testing.expectEqualStrings(mt_path, twin);
 }
 
@@ -159,7 +160,7 @@ test "resolveTwinRegularFile: returns sibling malt when invoked as mt" {
     try writeFile(mt_path, "m");
 
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const twin = updater.resolveTwinRegularFile(mt_path, &buf) orelse return error.ExpectedTwin;
+    const twin = updater.resolveTwinRegularFile(io_mod.ctx(), mt_path, &buf) orelse return error.ExpectedTwin;
     try testing.expectEqualStrings(malt_path, twin);
 }
 
@@ -180,7 +181,7 @@ test "resolveTwinRegularFile: returns null when sibling is a symlink" {
     try fs_compat.symLinkAbsolute(malt_path, mt_path, .{});
 
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
-    try testing.expect(updater.resolveTwinRegularFile(malt_path, &buf) == null);
+    try testing.expect(updater.resolveTwinRegularFile(io_mod.ctx(), malt_path, &buf) == null);
 }
 
 test "resolveTwinRegularFile: returns null when no sibling exists" {
@@ -195,7 +196,7 @@ test "resolveTwinRegularFile: returns null when no sibling exists" {
     try writeFile(malt_path, "m");
 
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
-    try testing.expect(updater.resolveTwinRegularFile(malt_path, &buf) == null);
+    try testing.expect(updater.resolveTwinRegularFile(io_mod.ctx(), malt_path, &buf) == null);
 }
 
 test "resolveTwinRegularFile: returns null for unrelated basenames" {
@@ -210,7 +211,7 @@ test "resolveTwinRegularFile: returns null for unrelated basenames" {
     try writeFile(other_path, "x");
 
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
-    try testing.expect(updater.resolveTwinRegularFile(other_path, &buf) == null);
+    try testing.expect(updater.resolveTwinRegularFile(io_mod.ctx(), other_path, &buf) == null);
 }
 
 // --- buildSudoInstallArgv ------------------------------------------------

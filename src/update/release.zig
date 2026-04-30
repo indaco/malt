@@ -6,7 +6,6 @@
 //! spinning up an HTTP fixture.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
 
 /// Single source of truth for the GitHub release endpoint. Shared with the
 /// passive notifier so it doesn't drift away from the authenticated updater.
@@ -71,17 +70,18 @@ pub fn matchesAssetName(name: []const u8, arch_str: []const u8) bool {
 /// Accepting `mt` as well covers future releases that drop `malt` in
 /// favour of the short alias, so self-update survives a rename.
 pub fn findReleaseBinary(
+    io: std.Io,
     allocator: std.mem.Allocator,
     tmp_dir: []const u8,
     out_buf: []u8,
 ) ?[]const u8 {
-    var dir = fs_compat.openDirAbsolute(tmp_dir, .{ .iterate = true }) catch return null;
-    defer dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(io, tmp_dir, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
 
     var walker = dir.walk(allocator) catch return null;
     defer walker.deinit();
 
-    while (walker.next() catch null) |entry| {
+    while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
         const base = std.fs.path.basename(entry.path);
         if (!std.mem.eql(u8, base, "malt") and !std.mem.eql(u8, base, "mt")) continue;
