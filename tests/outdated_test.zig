@@ -7,6 +7,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const outdated_mod = malt.cli_outdated;
 const update_mod = malt.cli_update;
 const api_mod = malt.api;
@@ -26,27 +27,27 @@ const TempCacheDir = struct {
 
     fn init(comptime tag: []const u8) !TempCacheDir {
         const p = "/tmp/malt_outdated_test_" ++ tag;
-        malt.fs_compat.deleteTreeAbsolute(p) catch {};
-        try malt.fs_compat.makeDirAbsolute(p);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
+        try test_io.makeDirAbsolute(std.Options.debug_io, p);
         return .{ .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
-        malt.fs_compat.deleteTreeAbsolute(self.path) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
     }
 
     fn writeCacheFile(self: *TempCacheDir, rel: []const u8, content: []const u8) !void {
         var api_buf: [512]u8 = undefined;
         const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
-        malt.fs_compat.makeDirAbsolute(api_dir) catch |e| switch (e) {
+        test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
         const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ self.path, rel });
-        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), full, .{});
-        defer f.close(malt.io_mod.ctx());
-        try f.writeStreamingAll(malt.io_mod.ctx(), content);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, full, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, content);
     }
 };
 
@@ -227,14 +228,16 @@ fn setupPinnedPrefix(suffix: []const u8) ![:0]u8 {
     const path = try std.fmt.allocPrintSentinel(
         testing.allocator,
         "/tmp/malt_outdated_pinned_{d}_{s}",
-        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        .{ test_io.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
         0,
     );
-    malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), path);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -271,7 +274,7 @@ fn insertCask(db: *sqlite.Database, token: []const u8, pinned: bool) !void {
 test "loadCaskRows .pinned_only returns only pinned casks" {
     const path = try setupPinnedPrefix("filter_pinned_casks");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     var db = try openSeededDb(path);
@@ -291,7 +294,7 @@ test "loadCaskRows .pinned_only returns only pinned casks" {
 test "loadCaskRows .all returns every installed cask" {
     const path = try setupPinnedPrefix("filter_all_casks");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     var db = try openSeededDb(path);
@@ -310,7 +313,7 @@ test "loadCaskRows .all returns every installed cask" {
 test "outdated execute --pinned-only walks pinned casks alongside formulas" {
     const path = try setupPinnedPrefix("exec_pinned_mixed");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -334,7 +337,7 @@ test "outdated execute --pinned-only walks pinned casks alongside formulas" {
 test "loadFormulaRows .pinned_only returns only pinned rows" {
     const path = try setupPinnedPrefix("filter_pinned");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     var db = try openSeededDb(path);
@@ -354,7 +357,7 @@ test "loadFormulaRows .pinned_only returns only pinned rows" {
 test "loadFormulaRows .all returns every installed row" {
     const path = try setupPinnedPrefix("filter_all");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     var db = try openSeededDb(path);
@@ -373,7 +376,7 @@ test "loadFormulaRows .all returns every installed row" {
 test "loadFormulaRows .pinned_only on an empty DB is a no-op" {
     const path = try setupPinnedPrefix("filter_empty");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     var db = try openSeededDb(path);
@@ -399,7 +402,9 @@ const UpdateEnv = struct {
         const prefix = try std.fmt.allocPrintSentinel(
             testing.allocator,
             "/tmp/malt_update_test_{d}_{s}",
-            .{ malt.fs_compat.nanoTimestamp(), suffix },
+            .{ test_io.nanoTimestamp(
+                std.Options.debug_io,
+            ), suffix },
             0,
         );
         const cache = try std.fmt.allocPrintSentinel(
@@ -408,12 +413,12 @@ const UpdateEnv = struct {
             .{prefix},
             0,
         );
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-        try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix);
-        try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), cache);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+        try test_io.cwd().createDirPath(std.Options.debug_io, cache);
         const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
         defer testing.allocator.free(db_dir);
-        try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
         _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
         _ = c.setenv("MALT_CACHE", cache.ptr, 1);
@@ -423,7 +428,7 @@ const UpdateEnv = struct {
     fn deinit(self: *UpdateEnv) void {
         _ = c.unsetenv("MALT_PREFIX");
         _ = c.unsetenv("MALT_CACHE");
-        malt.fs_compat.deleteTreeAbsolute(self.prefix_path) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.prefix_path) catch {};
         testing.allocator.free(self.prefix_path);
         testing.allocator.free(self.cache_path);
     }
@@ -431,18 +436,18 @@ const UpdateEnv = struct {
     fn writeApiFile(self: UpdateEnv, rel: []const u8, body: []const u8) !void {
         var dir_buf: [512]u8 = undefined;
         const api_dir = try std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_path});
-        try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), api_dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, api_dir);
         var path_buf: [512]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ api_dir, rel });
-        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), path, .{});
-        defer f.close(malt.io_mod.ctx());
-        try f.writeStreamingAll(malt.io_mod.ctx(), body);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, body);
     }
 
     fn apiFileExists(self: UpdateEnv, rel: []const u8) bool {
         var path_buf: [512]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ self.cache_path, rel }) catch return false;
-        malt.fs_compat.accessAbsolute(path, .{}) catch return false;
+        test_io.accessAbsolute(std.Options.debug_io, path, .{}) catch return false;
         return true;
     }
 };
@@ -526,7 +531,9 @@ test "update without --check deletes a stale snapshot to force fresh recompute n
     // Pre-existing snapshot from a prior run: the cache wipe just
     // dropped its data source, so the snapshot has no business surviving.
     try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, env.cache_path, .{
-        .generated_at_ms = malt.fs_compat.milliTimestamp(),
+        .generated_at_ms = test_io.milliTimestamp(
+            std.Options.debug_io,
+        ),
         .formulas = &[_]outdated_mod.OutdatedEntry{},
         .casks = &[_]outdated_mod.OutdatedEntry{},
     });
@@ -556,7 +563,9 @@ test "outdated execute reads a fresh snapshot and never overwrites it" {
     // Use a fixed marker timestamp on a fresh snapshot. The snapshot
     // path must NOT rewrite the file (recompute would update the
     // timestamp), so the marker survives across execute().
-    const marker_ts: i64 = malt.fs_compat.milliTimestamp() - 1000;
+    const marker_ts: i64 = test_io.milliTimestamp(
+        std.Options.debug_io,
+    ) - 1000;
     const formulas = [_]outdated_mod.OutdatedEntry{
         .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("9.9") },
     };
@@ -594,7 +603,9 @@ test "outdated execute drops snapshot entries whose keg was uninstalled" {
         try insertKegV1(&db, "alpha");
     }
 
-    const marker_ts: i64 = malt.fs_compat.milliTimestamp() - 1000;
+    const marker_ts: i64 = test_io.milliTimestamp(
+        std.Options.debug_io,
+    ) - 1000;
     const formulas = [_]outdated_mod.OutdatedEntry{
         .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
         .{ .name = @constCast("ghost"), .installed = @constCast("0.5"), .latest = @constCast("1.0") },
@@ -653,7 +664,9 @@ test "outdated execute on a stale snapshot emits the cached entries (used as pro
         .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("3.0") },
     };
     try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, env.cache_path, .{
-        .generated_at_ms = malt.fs_compat.milliTimestamp() - month_ms,
+        .generated_at_ms = test_io.milliTimestamp(
+            std.Options.debug_io,
+        ) - month_ms,
         .formulas = &formulas,
         .casks = &[_]outdated_mod.OutdatedEntry{},
     });
@@ -691,7 +704,9 @@ test "outdated execute --refresh skips the snapshot and recomputes" {
         .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("bogus") },
     };
     try outdated_mod.writeSnapshot(std.Options.debug_io, testing.allocator, env.cache_path, .{
-        .generated_at_ms = malt.fs_compat.milliTimestamp(),
+        .generated_at_ms = test_io.milliTimestamp(
+            std.Options.debug_io,
+        ),
         .formulas = &formulas,
         .casks = &[_]outdated_mod.OutdatedEntry{},
     });
@@ -751,17 +766,17 @@ test "readSnapshot returns null on garbage contents" {
     defer dir.deinit();
     const path = try outdated_mod.snapshotPath(testing.allocator, dir.path);
     defer testing.allocator.free(path);
-    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), path, .{});
-    defer f.close(malt.io_mod.ctx());
-    try f.writeStreamingAll(malt.io_mod.ctx(), "not-json-at-all");
+    const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, "not-json-at-all");
     try testing.expectEqual(@as(?outdated_mod.OwnedSnapshot, null), outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, dir.path));
 }
 
 test "writeSnapshot creates the cache directory if missing" {
     const tag = "snapshot_mkdir";
     const path = "/tmp/malt_outdated_test_" ++ tag;
-    malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
 
     const snap: outdated_mod.Snapshot = .{
         .generated_at_ms = 0,
@@ -781,7 +796,7 @@ test "writeSnapshot creates the cache directory if missing" {
 test "outdated execute --pinned-only is a quiet no-op when no kegs are pinned" {
     const path = try setupPinnedPrefix("exec_no_pins");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {

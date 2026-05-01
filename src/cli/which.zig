@@ -5,7 +5,6 @@ const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const atomic = @import("../fs/atomic.zig");
 const color = @import("../ui/color.zig");
-const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
@@ -78,7 +77,7 @@ pub fn encodeHuman(w: *std.Io.Writer, res: Resolution, colorize: bool) !void {
 }
 
 pub fn execute(ctx: *const AppCtx, _: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "which")) return;
+    if (help.showIfRequested(ctx, args, "which")) return;
 
     var arg: ?[]const u8 = null;
     for (args) |a| {
@@ -122,7 +121,7 @@ pub fn execute(ctx: *const AppCtx, _: std.mem.Allocator, args: []const []const u
     };
 
     var stdout_buf: [1024]u8 = undefined;
-    var stdout_fw = io_mod.stdoutFile().writer(ctx.io, &stdout_buf);
+    var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};

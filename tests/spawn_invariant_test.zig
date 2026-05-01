@@ -15,7 +15,8 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
-const fs_compat = malt.fs_compat;
+const test_io = @import("test_io");
+const fs_compat = test_io;
 
 fn isBanned(line: []const u8) bool {
     const banned = [_][]const u8{
@@ -52,20 +53,20 @@ test "no shell-invocation patterns anywhere under src/" {
     const alloc = testing.allocator;
     // Walk src/ from the project root. Tests run with CWD at project
     // root per build.zig conventions.
-    var dir = try fs_compat.cwd().openDir(malt.io_mod.ctx(), "src", .{ .iterate = true });
-    defer dir.close(malt.io_mod.ctx());
+    var dir = try fs_compat.cwd().openDir(std.Options.debug_io, "src", .{ .iterate = true });
+    defer dir.close(std.Options.debug_io);
     var walker = try dir.walk(alloc);
     defer walker.deinit();
 
     var violations: std.ArrayList(u8) = .empty;
     defer violations.deinit(alloc);
 
-    while (try walker.next(malt.io_mod.ctx())) |entry| {
+    while (try walker.next(std.Options.debug_io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
 
-        const f = try entry.dir.openFile(malt.io_mod.ctx(), entry.basename, .{});
-        defer f.close(malt.io_mod.ctx());
+        const f = try entry.dir.openFile(std.Options.debug_io, entry.basename, .{});
+        defer f.close(std.Options.debug_io);
         const src = try fs_compat.readFileToEndAlloc(f, alloc, 4 * 1024 * 1024);
         defer alloc.free(src);
 

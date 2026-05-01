@@ -5,15 +5,18 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const manifest = malt.cli_migrate_manifest;
-const fs_compat = malt.fs_compat;
+const fs_compat = test_io;
 
 fn scratchManifestPath(suffix: []const u8) ![:0]u8 {
     return std.fmt.allocPrintSentinel(
         testing.allocator,
         "/tmp/mt_manifest_{d}_{s}.json",
-        .{ fs_compat.nanoTimestamp(), suffix },
+        .{ fs_compat.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
         0,
     );
 }
@@ -21,7 +24,7 @@ fn scratchManifestPath(suffix: []const u8) ![:0]u8 {
 test "loadFromPath returns an empty manifest when the file does not exist" {
     const path = try scratchManifestPath("missing");
     defer testing.allocator.free(path);
-    fs_compat.deleteFileAbsolute(path) catch {};
+    fs_compat.deleteFileAbsolute(std.Options.debug_io, path) catch {};
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -35,7 +38,7 @@ test "loadFromPath returns an empty manifest when the file does not exist" {
 test "writeAtomic + loadFromPath round-trip the completed list" {
     const path = try scratchManifestPath("roundtrip");
     defer testing.allocator.free(path);
-    defer fs_compat.deleteFileAbsolute(path) catch {};
+    defer fs_compat.deleteFileAbsolute(std.Options.debug_io, path) catch {};
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -58,7 +61,7 @@ test "writeAtomic + loadFromPath round-trip the completed list" {
 test "writeAtomic over an existing file replaces its contents" {
     const path = try scratchManifestPath("replace");
     defer testing.allocator.free(path);
-    defer fs_compat.deleteFileAbsolute(path) catch {};
+    defer fs_compat.deleteFileAbsolute(std.Options.debug_io, path) catch {};
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

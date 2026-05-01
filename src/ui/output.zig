@@ -2,8 +2,8 @@
 //! Human + JSON output formatting.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const color = @import("color.zig");
-const io_mod = @import("io.zig");
 
 pub const OutputMode = enum {
     human,
@@ -19,17 +19,24 @@ var mode: OutputMode = .human;
 /// without losing the final summary.
 var ndjson: bool = false;
 
-/// Process-wide io seeded once from `main` via `setIo`. Defaults to
+/// Process-wide io seeded once from `main` via `setRuntime`. Defaults to
 /// `debug_io` so tests that don't seed see deterministic, allocation-
 /// free behaviour.
 var pkg_io: std.Io = std.Options.debug_io;
 var pkg_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } };
+/// Stdio sinks seeded by `main`. Default `-1` so unconfigured tests
+/// silently drop writes (BadFileDescriptor) instead of leaking onto fd 1
+/// or 2 — keeps `zig build test` quiet by default.
+var pkg_stdout: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
+var pkg_stderr: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
 
 /// Seed the io/environ used by writes, isatty probes, and timestamps.
 /// Called by `main` after `AppCtx` is built.
-pub fn setRuntime(io: std.Io, environ: std.process.Environ) void {
+pub fn setRuntime(io: std.Io, environ: std.process.Environ, stdout: std.Io.File, stderr: std.Io.File) void {
     pkg_io = io;
     pkg_environ = environ;
+    pkg_stdout = stdout;
+    pkg_stderr = stderr;
 }
 
 pub fn setQuiet(q: bool) void {
@@ -73,12 +80,69 @@ pub fn isNdjson() bool {
     return ndjson;
 }
 
+/// Test-only stderr / stdout capture. Tests run sequentially in a binary,
+/// so no lock; elided from release via `builtin.is_test` guards.
+var capture_list: ?*std.ArrayList(u8) = null;
+var capture_allocator: std.mem.Allocator = undefined;
+var stdout_capture_list: ?*std.ArrayList(u8) = null;
+var stdout_capture_allocator: std.mem.Allocator = undefined;
+
+/// Test-only: redirect stderr writes into `buf`. Pair with `endStderrCapture`.
+pub fn beginStderrCapture(allocator: std.mem.Allocator, buf: *std.ArrayList(u8)) void {
+    if (!builtin.is_test) return;
+    capture_list = buf;
+    capture_allocator = allocator;
+}
+
+/// Test-only: stop redirecting stderr writes.
+pub fn endStderrCapture() void {
+    if (!builtin.is_test) return;
+    capture_list = null;
+}
+
+/// Test-only: redirect stdout writes into `buf`. Pair with `endStdoutCapture`.
+/// Needed for asserting JSON-mode payloads that land on stdout.
+pub fn beginStdoutCapture(allocator: std.mem.Allocator, buf: *std.ArrayList(u8)) void {
+    if (!builtin.is_test) return;
+    stdout_capture_list = buf;
+    stdout_capture_allocator = allocator;
+}
+
+pub fn endStdoutCapture() void {
+    if (!builtin.is_test) return;
+    stdout_capture_list = null;
+}
+
+/// Capture-aware stderr write. Tests that have set up a capture buffer
+/// see writes there; everything else goes to the seeded `pkg_stderr`.
+pub fn writeStderrAll(bytes: []const u8) void {
+    if (builtin.is_test) {
+        if (capture_list) |list| {
+            list.appendSlice(capture_allocator, bytes) catch {};
+            return;
+        }
+    }
+    pkg_stderr.writeStreamingAll(pkg_io, bytes) catch return;
+}
+
+/// Capture-aware stdout write. Tests with a stdout capture buffer see
+/// writes there; everything else goes to the seeded `pkg_stdout`.
+pub fn writeStdoutAll(bytes: []const u8) void {
+    if (builtin.is_test) {
+        if (stdout_capture_list) |list| {
+            list.appendSlice(stdout_capture_allocator, bytes) catch {};
+            return;
+        }
+    }
+    pkg_stdout.writeStreamingAll(pkg_io, bytes) catch return;
+}
+
 fn writeStderr(bytes: []const u8) void {
-    io_mod.stderrWriteAll(bytes);
+    writeStderrAll(bytes);
 }
 
 fn writeStdout(bytes: []const u8) void {
-    io_mod.stdoutWriteAll(bytes);
+    writeStdoutAll(bytes);
 }
 
 /// Shared implementation for info/warn/success/err. One concrete

@@ -15,7 +15,7 @@ const help = @import("help.zig");
 pub const UpdateError = error{Aborted} || std.mem.Allocator.Error;
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) UpdateError!void {
-    if (help.showIfRequested(args, "update")) return;
+    if (help.showIfRequested(ctx, args, "update")) return;
 
     var check_only = false;
     for (args) |arg| {

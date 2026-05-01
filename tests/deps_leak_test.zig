@@ -17,6 +17,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const deps_mod = malt.deps;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
@@ -31,7 +32,7 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_deps_leak_test_" ++ tag;
-        malt.fs_compat.makeDirAbsolute(dir) catch {};
+        test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
         var buf: [256]u8 = undefined;
         const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(path);
@@ -42,7 +43,7 @@ const TempDb = struct {
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        malt.fs_compat.deleteTreeAbsolute(self.dir) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
     }
 };
 
@@ -53,27 +54,27 @@ const TempCacheDir = struct {
 
     fn init(comptime tag: []const u8) !TempCacheDir {
         const p = "/tmp/malt_deps_leak_cache_" ++ tag;
-        malt.fs_compat.deleteTreeAbsolute(p) catch {};
-        try malt.fs_compat.makeDirAbsolute(p);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
+        try test_io.makeDirAbsolute(std.Options.debug_io, p);
         return .{ .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
-        malt.fs_compat.deleteTreeAbsolute(self.path) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
     }
 
     fn writeFormula(self: *TempCacheDir, name: []const u8, json: []const u8) !void {
         var api_buf: [512]u8 = undefined;
         const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
-        malt.fs_compat.makeDirAbsolute(api_dir) catch |e| switch (e) {
+        test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
         const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ self.path, name });
-        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), full, .{});
-        defer f.close(malt.io_mod.ctx());
-        try f.writeStreamingAll(malt.io_mod.ctx(), json);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, full, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, json);
     }
 };
 

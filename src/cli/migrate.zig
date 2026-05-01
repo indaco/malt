@@ -16,7 +16,6 @@ const ghcr_mod = @import("../net/ghcr.zig");
 const api_mod = @import("../net/api.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
-const io_mod = @import("../ui/io.zig");
 const codesign = @import("../macho/codesign.zig");
 const help = @import("help.zig");
 const keg_mod = @import("migrate/keg.zig");
@@ -70,7 +69,7 @@ pub fn scanCellarKegs(
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "migrate")) return;
+    if (help.showIfRequested(ctx, args, "migrate")) return;
 
     last_run_parallel = false;
 
@@ -423,7 +422,7 @@ fn emitDryRunJson(
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     try buildDryRunJson(&aw.writer, brew_prefix, keg_names, dry_run, start_ts);
-    io_mod.stdoutWriteAll(aw.written());
+    output.writeStdoutAll(aw.written());
 }
 
 /// Build + flush the final-summary JSON document to stdout.
@@ -449,7 +448,7 @@ fn emitSummaryJson(
         failed_names,
         start_ts,
     );
-    io_mod.stdoutWriteAll(aw.written());
+    output.writeStdoutAll(aw.written());
 }
 
 /// Dry-run JSON `{dry_run, brew_prefix, kegs, count, time_ms}`; `pub` for direct test assertions.

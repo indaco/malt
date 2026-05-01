@@ -3,13 +3,14 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const archive = @import("malt").archive;
 
 fn resetDir(path: []const u8) !std.Io.Dir {
-    malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.makeDirAbsolute(path);
-    return malt.fs_compat.openDirAbsolute(path, .{});
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, path);
+    return test_io.openDirAbsolute(std.Options.debug_io, path, .{});
 }
 
 fn runTar(argv: []const []const u8) !void {
@@ -37,29 +38,29 @@ fn spawnIo() std.Io.Threaded {
 test "extractTarGz decompresses a real tar.gz produced by system tar" {
     const base = "/tmp/malt_archive_targz_ok";
     var dir = try resetDir(base);
-    defer dir.close(malt.io_mod.ctx());
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     // Build a simple payload: base/src/hello.txt
-    try dir.createDirPath(malt.io_mod.ctx(), "src");
+    try dir.createDirPath(std.Options.debug_io, "src");
     {
-        const f = try dir.createFile(malt.io_mod.ctx(), "src/hello.txt", .{});
-        try f.writeStreamingAll(malt.io_mod.ctx(), "hi");
-        f.close(malt.io_mod.ctx());
+        const f = try dir.createFile(std.Options.debug_io, "src/hello.txt", .{});
+        try f.writeStreamingAll(std.Options.debug_io, "hi");
+        f.close(std.Options.debug_io);
     }
 
     const archive_path = base ++ "/payload.tar.gz";
     try runTar(&.{ "tar", "czf", archive_path, "-C", base, "src" });
 
     // Remove the src dir so we can observe extraction re-creating it.
-    try malt.fs_compat.deleteTreeAbsolute(base ++ "/src");
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, base ++ "/src");
 
     try archive.extractTarGz(std.Options.debug_io, archive_path, base);
 
-    const f = try dir.openFile(malt.io_mod.ctx(), "src/hello.txt", .{});
-    defer f.close(malt.io_mod.ctx());
+    const f = try dir.openFile(std.Options.debug_io, "src/hello.txt", .{});
+    defer f.close(std.Options.debug_io);
     var out: [8]u8 = undefined;
-    const n = try f.readPositionalAll(malt.io_mod.ctx(), &out, 0);
+    const n = try f.readPositionalAll(std.Options.debug_io, &out, 0);
     try testing.expectEqualStrings("hi", out[0..n]);
 }
 
@@ -72,19 +73,19 @@ test "extractTarGz decompresses a real tar.gz produced by system tar" {
 test "extractTarGz extracts an archive living outside the destination dir" {
     const src_dir = "/tmp/malt_archive_targz_split_src";
     const dest_dir = "/tmp/malt_archive_targz_split_dest";
-    malt.fs_compat.deleteTreeAbsolute(src_dir) catch {};
-    malt.fs_compat.deleteTreeAbsolute(dest_dir) catch {};
-    try malt.fs_compat.makeDirAbsolute(src_dir);
-    try malt.fs_compat.makeDirAbsolute(dest_dir);
-    defer malt.fs_compat.deleteTreeAbsolute(src_dir) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(dest_dir) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, src_dir) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, dest_dir) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, src_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, dest_dir);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, src_dir) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, dest_dir) catch {};
 
     // Build payload in src_dir and tarball it into src_dir/tap_download.tar.gz.
-    try malt.fs_compat.makeDirAbsolute(src_dir ++ "/payload");
+    try test_io.makeDirAbsolute(std.Options.debug_io, src_dir ++ "/payload");
     {
-        const f = try malt.fs_compat.createFileAbsolute(src_dir ++ "/payload/bin", .{});
-        try f.writeStreamingAll(malt.io_mod.ctx(), "#!/bin/sh\n");
-        f.close(malt.io_mod.ctx());
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, src_dir ++ "/payload/bin", .{});
+        try f.writeStreamingAll(std.Options.debug_io, "#!/bin/sh\n");
+        f.close(std.Options.debug_io);
     }
     const archive_path = src_dir ++ "/tap_download.tar.gz";
     try runTar(&.{ "tar", "czf", archive_path, "-C", src_dir, "payload" });
@@ -92,8 +93,8 @@ test "extractTarGz extracts an archive living outside the destination dir" {
     try archive.extractTarGz(std.Options.debug_io, archive_path, dest_dir);
 
     // The payload landed in dest_dir, not next to the archive.
-    const f = try malt.fs_compat.openFileAbsolute(dest_dir ++ "/payload/bin", .{});
-    defer f.close(malt.io_mod.ctx());
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, dest_dir ++ "/payload/bin", .{});
+    defer f.close(std.Options.debug_io);
 }
 
 // S8: native tar.gz extractor (no `tar xzf` subprocess). The bottle
@@ -106,33 +107,33 @@ test "extractTarGz extracts an archive living outside the destination dir" {
 test "extractTarGz preserves exec bits, symlinks, and deep paths" {
     const base = "/tmp/malt_archive_targz_perms";
     var dir = try resetDir(base);
-    defer dir.close(malt.io_mod.ctx());
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     // Build the source tree to tar up: an executable, a deep file, and
     // a relative symlink pointing at the executable.
     const src_root = base ++ "/src";
-    try malt.fs_compat.makeDirAbsolute(src_root);
-    try dir.createDirPath(malt.io_mod.ctx(), "src/bin");
-    try dir.createDirPath(malt.io_mod.ctx(), "src/a/b/c/d/e/f");
+    try test_io.makeDirAbsolute(std.Options.debug_io, src_root);
+    try dir.createDirPath(std.Options.debug_io, "src/bin");
+    try dir.createDirPath(std.Options.debug_io, "src/a/b/c/d/e/f");
     {
-        const f = try dir.createFile(malt.io_mod.ctx(), "src/bin/hello", .{ .permissions = std.Io.File.Permissions.fromMode(0o755) });
-        try f.writeStreamingAll(malt.io_mod.ctx(), "#!/bin/sh\necho hi\n");
-        f.close(malt.io_mod.ctx());
+        const f = try dir.createFile(std.Options.debug_io, "src/bin/hello", .{ .permissions = std.Io.File.Permissions.fromMode(0o755) });
+        try f.writeStreamingAll(std.Options.debug_io, "#!/bin/sh\necho hi\n");
+        f.close(std.Options.debug_io);
     }
     {
-        const f = try dir.createFile(malt.io_mod.ctx(), "src/a/b/c/d/e/f/deep.txt", .{});
-        try f.writeStreamingAll(malt.io_mod.ctx(), "deep");
-        f.close(malt.io_mod.ctx());
+        const f = try dir.createFile(std.Options.debug_io, "src/a/b/c/d/e/f/deep.txt", .{});
+        try f.writeStreamingAll(std.Options.debug_io, "deep");
+        f.close(std.Options.debug_io);
     }
     // Relative symlink sitting next to the executable, pointing at it
     // by basename — the usual bottle shape.
-    const src_subdir = try dir.openDir(malt.io_mod.ctx(), "src/bin", .{});
+    const src_subdir = try dir.openDir(std.Options.debug_io, "src/bin", .{});
     defer {
         var m = src_subdir;
-        m.close(malt.io_mod.ctx());
+        m.close(std.Options.debug_io);
     }
-    try src_subdir.symLink(malt.io_mod.ctx(), "hello", "hello_link", .{});
+    try src_subdir.symLink(std.Options.debug_io, "hello", "hello_link", .{});
 
     // Tar it up; GNU/BSD tar both preserve exec bits and symlinks by
     // default, so the round-trip through our native extractor is the
@@ -142,41 +143,41 @@ test "extractTarGz preserves exec bits, symlinks, and deep paths" {
 
     // Nuke the source tree so observed state after extract can only
     // come from our extractor.
-    try malt.fs_compat.deleteTreeAbsolute(src_root);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, src_root);
 
     try archive.extractTarGz(std.Options.debug_io, archive_path, base);
 
     // Exec bit preserved (tar.ExtractOptions.ModeMode.executable_bit_only
     // is the default — owner-x copied to group/other).
-    const st = try dir.statFile(malt.io_mod.ctx(), "src/bin/hello", .{});
+    const st = try dir.statFile(std.Options.debug_io, "src/bin/hello", .{});
     const mode = st.permissions.toMode();
     try testing.expect(mode & 0o111 != 0);
 
     // Symlink extracted as a link, not a copy — readLink succeeds and
     // returns the original relative target.
     var link_buf: [64]u8 = undefined;
-    const target_len = try dir.readLink(malt.io_mod.ctx(), "src/bin/hello_link", &link_buf);
+    const target_len = try dir.readLink(std.Options.debug_io, "src/bin/hello_link", &link_buf);
     try testing.expectEqualStrings("hello", link_buf[0..target_len]);
 
     // Deep nested path reached intact.
-    const deep = try dir.openFile(malt.io_mod.ctx(), "src/a/b/c/d/e/f/deep.txt", .{});
-    defer deep.close(malt.io_mod.ctx());
+    const deep = try dir.openFile(std.Options.debug_io, "src/a/b/c/d/e/f/deep.txt", .{});
+    defer deep.close(std.Options.debug_io);
     var buf: [8]u8 = undefined;
-    const n = try deep.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
+    const n = try deep.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expectEqualStrings("deep", buf[0..n]);
 }
 
 test "extractTarGz rejects a non-gzip archive" {
     const base = "/tmp/malt_archive_targz_badmagic";
     var dir = try resetDir(base);
-    defer dir.close(malt.io_mod.ctx());
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     // Write an archive file with wrong magic bytes.
     const archive_path = base ++ "/payload.tar.gz";
-    const f = try malt.fs_compat.createFileAbsolute(archive_path, .{});
-    try f.writeStreamingAll(malt.io_mod.ctx(), "NOPE, not gzip");
-    f.close(malt.io_mod.ctx());
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, archive_path, .{});
+    try f.writeStreamingAll(std.Options.debug_io, "NOPE, not gzip");
+    f.close(std.Options.debug_io);
 
     try testing.expectError(error.ExtractionFailed, archive.extractTarGz(std.Options.debug_io, archive_path, base));
 }
@@ -184,8 +185,8 @@ test "extractTarGz rejects a non-gzip archive" {
 test "extractTarGz rejects a missing archive" {
     const base = "/tmp/malt_archive_targz_missing";
     var dir = try resetDir(base);
-    defer dir.close(malt.io_mod.ctx());
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     try testing.expectError(error.ExtractionFailed, archive.extractTarGz(std.Options.debug_io, base ++ "/nope.tar.gz", base));
 }
@@ -209,30 +210,30 @@ fn runCmd(argv: []const []const u8) !void {
 test "extractZip decompresses a real zip produced by system zip" {
     const base = "/tmp/malt_archive_zip_ok";
     var dir = try resetDir(base);
-    defer dir.close(malt.io_mod.ctx());
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     // Build a payload mirroring what a HashiCorp-style release contains:
     // a single executable at the archive root, no nested directory. The
     // binary-finding walker in the tap-install path depends on exactly
     // this shape.
     {
-        const f = try dir.createFile(malt.io_mod.ctx(), "terraform", .{ .permissions = std.Io.File.Permissions.fromMode(0o755) });
-        try f.writeStreamingAll(malt.io_mod.ctx(), "#!/bin/sh\necho hi\n");
-        f.close(malt.io_mod.ctx());
+        const f = try dir.createFile(std.Options.debug_io, "terraform", .{ .permissions = std.Io.File.Permissions.fromMode(0o755) });
+        try f.writeStreamingAll(std.Options.debug_io, "#!/bin/sh\necho hi\n");
+        f.close(std.Options.debug_io);
     }
     const archive_path = base ++ "/payload.zip";
     try runCmd(&.{ "zip", "-j", "-q", archive_path, base ++ "/terraform" });
-    try malt.fs_compat.deleteFileAbsolute(base ++ "/terraform");
+    try test_io.deleteFileAbsolute(std.Options.debug_io, base ++ "/terraform");
 
     var threaded = spawnIo();
     defer threaded.deinit();
     try archive.extractZip(threaded.io(), archive_path, base);
 
-    const f = try dir.openFile(malt.io_mod.ctx(), "terraform", .{});
-    defer f.close(malt.io_mod.ctx());
+    const f = try dir.openFile(std.Options.debug_io, "terraform", .{});
+    defer f.close(std.Options.debug_io);
     var buf: [32]u8 = undefined;
-    const n = try f.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
+    const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expect(n > 0);
     try testing.expect(std.mem.startsWith(u8, buf[0..n], "#!/bin/sh"));
 }
@@ -240,13 +241,13 @@ test "extractZip decompresses a real zip produced by system zip" {
 test "extractZip rejects a non-zip archive" {
     const base = "/tmp/malt_archive_zip_badmagic";
     var dir = try resetDir(base);
-    defer dir.close(malt.io_mod.ctx());
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     const archive_path = base ++ "/payload.zip";
-    const f = try malt.fs_compat.createFileAbsolute(archive_path, .{});
-    try f.writeStreamingAll(malt.io_mod.ctx(), "NOPE, not a zip");
-    f.close(malt.io_mod.ctx());
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, archive_path, .{});
+    try f.writeStreamingAll(std.Options.debug_io, "NOPE, not a zip");
+    f.close(std.Options.debug_io);
 
     try testing.expectError(error.ExtractionFailed, archive.extractZip(std.Options.debug_io, archive_path, base));
 }
@@ -254,8 +255,8 @@ test "extractZip rejects a non-zip archive" {
 test "extractZip rejects a missing archive" {
     const base = "/tmp/malt_archive_zip_missing";
     var dir = try resetDir(base);
-    defer dir.close(malt.io_mod.ctx());
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     try testing.expectError(error.ExtractionFailed, archive.extractZip(std.Options.debug_io, base ++ "/nope.zip", base));
 }
@@ -267,42 +268,42 @@ test "extractZip rejects a missing archive" {
 // before hitting the bad one, which the test forbids.
 test "extractTarGz rejects tar-slip and leaves dest untouched" {
     const base = "/tmp/malt_archive_tarslip_targz";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.makeDirAbsolute(base);
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
     const dest = base ++ "/dest";
-    try malt.fs_compat.makeDirAbsolute(dest);
+    try test_io.makeDirAbsolute(std.Options.debug_io, dest);
 
     const src_dir = base ++ "/src";
-    try malt.fs_compat.makeDirAbsolute(src_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, src_dir);
     {
-        const f = try malt.fs_compat.createFileAbsolute(src_dir ++ "/good.txt", .{});
-        try f.writeStreamingAll(malt.io_mod.ctx(), "safe");
-        f.close(malt.io_mod.ctx());
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, src_dir ++ "/good.txt", .{});
+        try f.writeStreamingAll(std.Options.debug_io, "safe");
+        f.close(std.Options.debug_io);
     }
     {
-        const f = try malt.fs_compat.createFileAbsolute(src_dir ++ "/bad.txt", .{});
-        try f.writeStreamingAll(malt.io_mod.ctx(), "hostile");
-        f.close(malt.io_mod.ctx());
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, src_dir ++ "/bad.txt", .{});
+        try f.writeStreamingAll(std.Options.debug_io, "hostile");
+        f.close(std.Options.debug_io);
     }
 
     const archive_path = base ++ "/hostile.tar.gz";
     try runCmd(&.{ "tar", "czf", archive_path, "-C", src_dir, "-s", "|^bad.txt|../escape.txt|", "good.txt", "bad.txt" });
 
     try testing.expectError(error.ExtractionFailed, archive.extractTarGz(std.Options.debug_io, archive_path, dest));
-    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(dest ++ "/good.txt", .{}));
-    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(base ++ "/escape.txt", .{}));
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, dest ++ "/good.txt", .{}));
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, base ++ "/escape.txt", .{}));
 }
 
 // tar-slip for zip: macOS `zip` normalises `..` out at creation, so
 // we lean on python3's zipfile to emit the entry name verbatim.
 test "extractZip rejects tar-slip and leaves dest untouched" {
     const base = "/tmp/malt_archive_tarslip_zip";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.makeDirAbsolute(base);
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
     const dest = base ++ "/dest";
-    try malt.fs_compat.makeDirAbsolute(dest);
+    try test_io.makeDirAbsolute(std.Options.debug_io, dest);
 
     const archive_path = base ++ "/hostile.zip";
     const script = "import zipfile\n" ++
@@ -314,29 +315,29 @@ test "extractZip rejects tar-slip and leaves dest untouched" {
     var threaded = spawnIo();
     defer threaded.deinit();
     try testing.expectError(error.ExtractionFailed, archive.extractZip(threaded.io(), archive_path, dest));
-    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(dest ++ "/good.txt", .{}));
-    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(base ++ "/escape.txt", .{}));
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, dest ++ "/good.txt", .{}));
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, base ++ "/escape.txt", .{}));
 }
 
 test "extractTarXzFile rejects tar-slip and leaves dest untouched" {
     const base = "/tmp/malt_archive_tarslip_tarxz";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.makeDirAbsolute(base);
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
     const dest = base ++ "/dest";
-    try malt.fs_compat.makeDirAbsolute(dest);
+    try test_io.makeDirAbsolute(std.Options.debug_io, dest);
 
     const src_dir = base ++ "/src";
-    try malt.fs_compat.makeDirAbsolute(src_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, src_dir);
     {
-        const f = try malt.fs_compat.createFileAbsolute(src_dir ++ "/good.txt", .{});
-        try f.writeStreamingAll(malt.io_mod.ctx(), "safe");
-        f.close(malt.io_mod.ctx());
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, src_dir ++ "/good.txt", .{});
+        try f.writeStreamingAll(std.Options.debug_io, "safe");
+        f.close(std.Options.debug_io);
     }
     {
-        const f = try malt.fs_compat.createFileAbsolute(src_dir ++ "/bad.txt", .{});
-        try f.writeStreamingAll(malt.io_mod.ctx(), "hostile");
-        f.close(malt.io_mod.ctx());
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, src_dir ++ "/bad.txt", .{});
+        try f.writeStreamingAll(std.Options.debug_io, "hostile");
+        f.close(std.Options.debug_io);
     }
 
     const archive_path = base ++ "/hostile.tar.xz";
@@ -345,27 +346,27 @@ test "extractTarXzFile rejects tar-slip and leaves dest untouched" {
     var threaded = spawnIo();
     defer threaded.deinit();
     try testing.expectError(error.ExtractionFailed, archive.extractTarXzFile(threaded.io(), archive_path, dest));
-    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(dest ++ "/good.txt", .{}));
-    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(base ++ "/escape.txt", .{}));
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, dest ++ "/good.txt", .{}));
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, base ++ "/escape.txt", .{}));
 }
 
 test "extractTarGz rejects a symlink entry whose target escapes dest" {
     const base = "/tmp/malt_archive_tarslip_targz_symlink";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.makeDirAbsolute(base);
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
     const dest = base ++ "/dest";
-    try malt.fs_compat.makeDirAbsolute(dest);
+    try test_io.makeDirAbsolute(std.Options.debug_io, dest);
 
     const src_dir = base ++ "/src";
-    try malt.fs_compat.makeDirAbsolute(src_dir);
-    try malt.fs_compat.symLinkAbsolute("/etc/passwd", src_dir ++ "/badlink", .{});
+    try test_io.makeDirAbsolute(std.Options.debug_io, src_dir);
+    try test_io.symLinkAbsolute(std.Options.debug_io, "/etc/passwd", src_dir ++ "/badlink", .{});
 
     const archive_path = base ++ "/sym.tar.gz";
     try runCmd(&.{ "tar", "czf", archive_path, "-C", src_dir, "badlink" });
 
     try testing.expectError(error.ExtractionFailed, archive.extractTarGz(std.Options.debug_io, archive_path, dest));
-    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(dest ++ "/badlink", .{}));
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, dest ++ "/badlink", .{}));
 }
 
 test "isSafeEntryPath rejects escape paths" {
@@ -437,45 +438,45 @@ test "extractTarGz accepts a symlink whose relative target stays inside dest" {
     // these would break every Homebrew bottle that ships xctoolchain-style
     // cross-dir links.
     const base = "/tmp/malt_archive_targz_intra_symlink";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.makeDirAbsolute(base);
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     const src_root = base ++ "/src";
-    try malt.fs_compat.makeDirAbsolute(src_root);
-    var src_dir = try malt.fs_compat.openDirAbsolute(src_root, .{});
+    try test_io.makeDirAbsolute(std.Options.debug_io, src_root);
+    var src_dir = try test_io.openDirAbsolute(std.Options.debug_io, src_root, .{});
     defer {
         var sd = src_dir;
-        sd.close(malt.io_mod.ctx());
+        sd.close(std.Options.debug_io);
     }
-    try src_dir.createDirPath(malt.io_mod.ctx(), "bin");
-    try src_dir.createDirPath(malt.io_mod.ctx(), "Toolchains/x.xctoolchain/usr");
+    try src_dir.createDirPath(std.Options.debug_io, "bin");
+    try src_dir.createDirPath(std.Options.debug_io, "Toolchains/x.xctoolchain/usr");
     {
-        const f = try src_dir.createFile(malt.io_mod.ctx(), "bin/llvm-tool", .{});
-        try f.writeStreamingAll(malt.io_mod.ctx(), "#!/bin/sh\n");
-        f.close(malt.io_mod.ctx());
+        const f = try src_dir.createFile(std.Options.debug_io, "bin/llvm-tool", .{});
+        try f.writeStreamingAll(std.Options.debug_io, "#!/bin/sh\n");
+        f.close(std.Options.debug_io);
     }
     // Symlink target uses `..` to point at the sibling `bin` dir — exactly
     // the shape Apple .xctoolchain bundles ship with.
-    var usr_dir = try src_dir.openDir(malt.io_mod.ctx(), "Toolchains/x.xctoolchain/usr", .{});
+    var usr_dir = try src_dir.openDir(std.Options.debug_io, "Toolchains/x.xctoolchain/usr", .{});
     defer {
         var ud = usr_dir;
-        ud.close(malt.io_mod.ctx());
+        ud.close(std.Options.debug_io);
     }
-    try usr_dir.symLink(malt.io_mod.ctx(), "../../../bin", "bin", .{});
+    try usr_dir.symLink(std.Options.debug_io, "../../../bin", "bin", .{});
 
     const archive_path = base ++ "/payload.tar.gz";
     try runTar(&.{ "tar", "czf", archive_path, "-C", base, "src" });
-    try malt.fs_compat.deleteTreeAbsolute(src_root);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, src_root);
 
     try archive.extractTarGz(std.Options.debug_io, archive_path, base);
 
     var link_buf: [64]u8 = undefined;
-    var dest_dir = try malt.fs_compat.openDirAbsolute(base, .{});
+    var dest_dir = try test_io.openDirAbsolute(std.Options.debug_io, base, .{});
     defer {
         var dd = dest_dir;
-        dd.close(malt.io_mod.ctx());
+        dd.close(std.Options.debug_io);
     }
-    const target_len = try dest_dir.readLink(malt.io_mod.ctx(), "src/Toolchains/x.xctoolchain/usr/bin", &link_buf);
+    const target_len = try dest_dir.readLink(std.Options.debug_io, "src/Toolchains/x.xctoolchain/usr/bin", &link_buf);
     try testing.expectEqualStrings("../../../bin", link_buf[0..target_len]);
 }

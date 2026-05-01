@@ -20,7 +20,6 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
-const io_mod = @import("../ui/io.zig");
 const help = @import("help.zig");
 
 pub const Kind = enum { formula, cask };
@@ -41,7 +40,7 @@ pub const Error = error{
 };
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "backup")) return;
+    if (help.showIfRequested(ctx, args, "backup")) return;
 
     var output_path: ?[]const u8 = null;
     var include_versions = false;
@@ -127,7 +126,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // ── Resolve destination and write ────────────────────────────────────
     if (output_path) |p| {
         if (std.mem.eql(u8, p, "-")) {
-            io_mod.stdoutWriteAll(bytes);
+            output.writeStdoutAll(bytes);
             return;
         }
         try writeToPath(ctx, p, bytes);

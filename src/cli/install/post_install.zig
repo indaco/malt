@@ -10,7 +10,6 @@ const formula_mod = @import("../../core/formula.zig");
 const dsl = @import("../../core/dsl/root.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
 const output = @import("../../ui/output.zig");
-const io_mod = @import("../../ui/io.zig");
 
 const download = @import("download.zig");
 
@@ -115,7 +114,7 @@ fn emitPostInstallJson(
     defer allocator.free(entries_json);
     w.writeAll(entries_json) catch return;
     w.writeAll("}\n") catch return;
-    io_mod.stdoutWriteAll(aw.written());
+    output.writeStdoutAll(aw.written());
 }
 
 /// Outcome of a single DSL post_install attempt. `.parse_failed` lets

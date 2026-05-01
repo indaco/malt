@@ -5,7 +5,7 @@
 const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const atomic = @import("../fs/atomic.zig");
-const io_mod = @import("../ui/io.zig");
+const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
 pub const Shell = enum { bash, zsh, fish };
@@ -62,13 +62,13 @@ fn writeShellEnv(w: *std.Io.Writer, shell: Shell, prefix: []const u8) std.Io.Wri
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "shellenv")) return;
+    if (help.showIfRequested(ctx, args, "shellenv")) return;
 
     const shell = resolveShell(ctx, args) orelse std.process.exit(2);
 
     const out = try render(allocator, shell, atomic.maltPrefix());
     defer allocator.free(out);
-    io_mod.stdoutWriteAll(out);
+    output.writeStdoutAll(out);
 }
 
 fn resolveShell(ctx: *const AppCtx, args: []const []const u8) ?Shell {
@@ -80,11 +80,11 @@ fn resolveShell(ctx: *const AppCtx, args: []const []const u8) ?Shell {
             "malt: unknown shell '{s}'. Supported: bash, zsh, fish\n",
             .{args[0]},
         ) catch "malt: unknown shell. Supported: bash, zsh, fish\n";
-        io_mod.stderrWriteAll(msg);
+        output.writeStderrAll(msg);
         return null;
     }
     if (detectFromShellPath(std.process.Environ.getPosix(ctx.environ, "SHELL"))) |s| return s;
-    io_mod.stderrWriteAll(
+    output.writeStderrAll(
         "malt: could not detect shell from $SHELL. Pass bash, zsh, or fish explicitly.\n",
     );
     return null;

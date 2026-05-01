@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
-const io_mod = @import("../ui/io.zig");
 const help = @import("help.zig");
 
 pub const Shell = enum { bash, zsh, fish };
@@ -27,7 +26,7 @@ pub fn scriptFor(shell: Shell) []const u8 {
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     _ = allocator;
-    if (help.showIfRequested(args, "completions")) return;
+    if (help.showIfRequested(ctx, args, "completions")) return;
 
     if (args.len == 0) {
         printUsage(ctx);
@@ -35,7 +34,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 
     const shell = parseShell(args[0]) orelse {
-        const stderr = io_mod.stderrFile();
+        const stderr = ctx.stderr;
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(
             &buf,
@@ -47,7 +46,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         std.process.exit(2);
     };
 
-    try io_mod.stdoutFile().writeStreamingAll(ctx.io, scriptFor(shell));
+    ctx.stdout.writeStreamingAll(ctx.io, scriptFor(shell)) catch {};
 }
 
 fn printUsage(ctx: *const AppCtx) void {
@@ -64,7 +63,7 @@ fn printUsage(ctx: *const AppCtx) void {
         \\
     ;
     // Usage is diagnostic; caller always follows with exit(2).
-    io_mod.stderrFile().writeStreamingAll(ctx.io, usage) catch {};
+    ctx.stderr.writeStreamingAll(ctx.io, usage) catch {};
 }
 
 // ---------------------------------------------------------------------------

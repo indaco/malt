@@ -7,7 +7,6 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const tap_mod = @import("../core/tap.zig");
 const atomic = @import("../fs/atomic.zig");
-const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
@@ -96,7 +95,7 @@ pub fn executeUntap(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []co
 const Action = enum { add, remove };
 
 fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8, action: Action) !void {
-    if (help.showIfRequested(args, if (action == .add) "tap" else "untap")) return;
+    if (help.showIfRequested(ctx, args, if (action == .add) "tap" else "untap")) return;
 
     // --refresh <name>: update the stored commit pin to current HEAD.
     var refresh_target: ?[]const u8 = null;
@@ -159,7 +158,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             // it half-written. Empty on OOM keeps the listing best-effort.
             const line = formatTapLine(allocator, t) catch "";
             defer if (line.len != 0) allocator.free(line);
-            io_mod.stdoutFile().writeStreamingAll(ctx.io, line) catch {};
+            ctx.stdout.writeStreamingAll(ctx.io, line) catch {};
             allocator.free(t.name);
             allocator.free(t.url);
             if (t.commit_sha) |sha| allocator.free(sha);

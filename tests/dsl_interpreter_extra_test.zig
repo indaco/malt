@@ -4,6 +4,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const dsl = malt.dsl;
 const formula_mod = malt.formula;
 
@@ -34,7 +35,7 @@ fn minimalJson(alloc: std.mem.Allocator) ![]const u8 {
 fn setupCellar(prefix_dir: []const u8) !void {
     const cellar_path = try std.fs.path.join(testing.allocator, &.{ prefix_dir, "Cellar", "testpkg", "1.0" });
     defer testing.allocator.free(cellar_path);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), cellar_path);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar_path);
 }
 
 fn run(ruby_src: []const u8) !void {
@@ -46,7 +47,7 @@ fn run(ruby_src: []const u8) !void {
     defer tmp.cleanup();
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const prefix = blk: {
-        const n = try std.Io.Dir.realPath(tmp.dir, malt.io_mod.ctx(), &path_buf);
+        const n = try std.Io.Dir.realPath(tmp.dir, std.Options.debug_io, &path_buf);
         break :blk path_buf[0..n];
     };
     try setupCellar(prefix);
@@ -58,7 +59,7 @@ fn run(ruby_src: []const u8) !void {
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    try dsl.executePostInstall(malt.io_mod.ctx(), malt.app_ctx.processEnviron(), alloc, .{
+    try dsl.executePostInstall(std.Options.debug_io, malt.app_ctx.processEnviron(), alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,

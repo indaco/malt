@@ -7,7 +7,6 @@ const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const output = @import("../ui/output.zig");
-const io_mod = @import("../ui/io.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const cask_mod = @import("../core/cask.zig");
@@ -765,7 +764,7 @@ test "summaryMessage picks the message that matches the active scope" {
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "outdated")) return;
+    if (help.showIfRequested(ctx, args, "outdated")) return;
 
     var cask_only = false;
     var formula_only = false;
@@ -790,7 +789,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer allocator.free(cache_dir);
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw = io_mod.stdoutFile().writer(ctx.io, &stdout_buf);
+    var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};

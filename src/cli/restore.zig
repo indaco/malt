@@ -19,7 +19,7 @@ pub const Error = error{
 };
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "restore")) return;
+    if (help.showIfRequested(ctx, args, "restore")) return;
 
     // `--dry-run` is a global flag consumed by main.zig before we get here,
     // so we read it via `output.isDryRun()` rather than from `args`.

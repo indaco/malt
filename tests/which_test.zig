@@ -8,6 +8,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const which = malt.cli_which;
 
 const c = struct {
@@ -22,10 +23,12 @@ fn makePrefixWithKeg(suffix: []const u8, name: []const u8, version: []const u8) 
     const prefix = try std.fmt.allocPrintSentinel(
         testing.allocator,
         "/tmp/malt_which_{d}_{s}",
-        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        .{ test_io.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
         0,
     );
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     const keg_bin = try std.fmt.allocPrint(
         testing.allocator,
@@ -33,22 +36,22 @@ fn makePrefixWithKeg(suffix: []const u8, name: []const u8, version: []const u8) 
         .{ prefix, name, version },
     );
     defer testing.allocator.free(keg_bin);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg_bin);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_bin);
 
     const real_bin = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ keg_bin, name });
     defer testing.allocator.free(real_bin);
     {
-        const f = try malt.fs_compat.createFileAbsolute(real_bin, .{ .truncate = true });
-        defer f.close(malt.io_mod.ctx());
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, real_bin, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
     }
 
     const prefix_bin = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{prefix});
     defer testing.allocator.free(prefix_bin);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix_bin);
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_bin);
 
     const link_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ prefix_bin, name });
     defer testing.allocator.free(link_path);
-    try malt.fs_compat.symLinkAbsolute(real_bin, link_path, .{});
+    try test_io.symLinkAbsolute(std.Options.debug_io, real_bin, link_path, .{});
 
     return prefix;
 }
@@ -56,7 +59,7 @@ fn makePrefixWithKeg(suffix: []const u8, name: []const u8, version: []const u8) 
 test "execute resolves a bare binary name through the prefix bin symlink" {
     const prefix = try makePrefixWithKeg("bare", "jq", "1.7.1");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
@@ -69,7 +72,7 @@ test "execute resolves a bare binary name through the prefix bin symlink" {
 test "execute accepts an absolute path under the prefix" {
     const prefix = try makePrefixWithKeg("abs", "wget", "1.25.0");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
@@ -85,7 +88,7 @@ test "execute accepts an absolute path under the prefix" {
 test "execute on an unknown name returns Aborted" {
     const prefix = try makePrefixWithKeg("unknown", "wget", "1.25.0");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
@@ -102,7 +105,7 @@ test "execute with no positional arg returns Aborted with usage" {
 test "execute on an absolute path that is not a symlink returns Aborted" {
     const prefix = try makePrefixWithKeg("plain", "tree", "2.2.1");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 

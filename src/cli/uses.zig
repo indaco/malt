@@ -7,13 +7,12 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
-const io_mod = @import("../ui/io.zig");
 const color = @import("../ui/color.zig");
 const cli_info = @import("info.zig");
 const help = @import("help.zig");
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "uses")) return;
+    if (help.showIfRequested(ctx, args, "uses")) return;
 
     // Parse flags. `--json` is consumed by the global parser and read
     // off the `output` module, mirroring the pattern in `info`.
@@ -39,7 +38,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer if (db_opt) |*d| d.close();
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw = io_mod.stdoutFile().writer(ctx.io, &stdout_buf);
+    var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};

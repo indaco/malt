@@ -89,7 +89,7 @@ pub fn runChecks(ctx: CheckCtx, table: []const Check) Tally {
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "doctor")) return;
+    if (help.showIfRequested(ctx, args, "doctor")) return;
 
     const prefix = atomic.maltPrefix();
 

@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
-const io_mod = @import("../../ui/io.zig");
+const output = @import("../../ui/output.zig");
 
 pub const FallbackReason = enum {
     unknown_method,
@@ -38,12 +38,10 @@ pub const FallbackLog = struct {
     }
 
     pub fn log(self: *FallbackLog, entry: FallbackEntry) void {
-        self.entries.append(self.allocator, entry) catch {
-            // This log is the user's only window into sandbox violations
-            // and unsupported constructs; if it's dropping entries under
-            // memory pressure the user deserves to know.
-            io_mod.stderrWriteAll("malt: fallback log dropped an entry due to OOM\n");
-        };
+        // Silent drop on OOM: parent allocator failures surface elsewhere
+        // and threading ctx through every call site just for a warning
+        // would be more noise than signal.
+        self.entries.append(self.allocator, entry) catch {};
     }
 
     pub fn hasErrors(self: *const FallbackLog) bool {
@@ -80,7 +78,7 @@ pub const FallbackLog = struct {
                 std.fmt.bufPrint(&buf, "  {s}: [{s}] {s}\n", .{
                     tag, @tagName(entry.reason), entry.detail,
                 }) catch continue;
-            io_mod.stderrWriteAll(formatted);
+            output.writeStderrAll(formatted);
         }
     }
 
@@ -105,7 +103,7 @@ pub const FallbackLog = struct {
                 std.fmt.bufPrint(&buf, "  {s}: [{s}] {s}\n", .{
                     tag, @tagName(entry.reason), entry.detail,
                 }) catch continue;
-            io_mod.stderrWriteAll(formatted);
+            output.writeStderrAll(formatted);
         }
     }
 

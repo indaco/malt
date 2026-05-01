@@ -249,6 +249,7 @@ test "findFailedDep flags the first dep name that appears in failed_kegs" {
 }
 
 const malt = @import("malt");
+const test_io = @import("test_io");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const formula_mod = malt.formula;
@@ -298,40 +299,44 @@ test "pruneCellarForReinstall wipes an existing Cellar dir so --force can re-mat
     const prefix = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_prune_cellar_{d}",
-        .{malt.fs_compat.nanoTimestamp()},
+        .{test_io.nanoTimestamp(
+            std.Options.debug_io,
+        )},
     );
     defer testing.allocator.free(prefix);
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0/bin", .{prefix});
     defer testing.allocator.free(keg_dir);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
 
     const file = try std.fmt.allocPrint(testing.allocator, "{s}/foo", .{keg_dir});
     defer testing.allocator.free(file);
     {
-        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), file, .{});
-        defer f.close(malt.io_mod.ctx());
-        try f.writeStreamingAll(malt.io_mod.ctx(), "payload");
+        const f = try test_io.cwd().createFile(std.Options.debug_io, file, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "payload");
     }
 
     install.pruneCellarForReinstall(&malt.app_ctx.debug_ctx, prefix, "foo", "1.0");
 
     const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix});
     defer testing.allocator.free(cellar_dir);
-    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(cellar_dir, .{}));
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, cellar_dir, .{}));
 }
 
 test "pruneCellarForReinstall is a no-op when the destination is missing" {
     const prefix = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_prune_cellar_missing_{d}",
-        .{malt.fs_compat.nanoTimestamp()},
+        .{test_io.nanoTimestamp(
+            std.Options.debug_io,
+        )},
     );
     defer testing.allocator.free(prefix);
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     // Never created — pruning must not fault, panic, or leak.
     install.pruneCellarForReinstall(&malt.app_ctx.debug_ctx, prefix, "ghost", "1.0");
@@ -418,11 +423,13 @@ test "ensureDirs creates every required subdirectory under a fresh prefix" {
     const prefix = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_install_ensure_dirs_{d}",
-        .{malt.fs_compat.nanoTimestamp()},
+        .{test_io.nanoTimestamp(
+            std.Options.debug_io,
+        )},
     );
     defer testing.allocator.free(prefix);
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     try install.ensureDirs(&malt.app_ctx.debug_ctx, prefix);
 
@@ -430,8 +437,8 @@ test "ensureDirs creates every required subdirectory under a fresh prefix" {
     for (subs) |s| {
         const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ prefix, s });
         defer testing.allocator.free(p);
-        var d = try malt.fs_compat.openDirAbsolute(p, .{});
-        d.close(malt.io_mod.ctx());
+        var d = try test_io.openDirAbsolute(std.Options.debug_io, p, .{});
+        d.close(std.Options.debug_io);
     }
 }
 
@@ -455,7 +462,7 @@ test "findFailedDep returns null when no dep is in the failed set" {
 // ---------------------------------------------------------------------------
 
 const dsl = @import("malt").dsl;
-const io_mod = @import("malt").io_mod;
+const io_mod = @import("malt").output;
 const color_mod = @import("malt").color;
 const output_mod = @import("malt").output;
 

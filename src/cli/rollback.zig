@@ -17,7 +17,7 @@ const help = @import("help.zig");
 /// already emitted a message via `output.err`; main.zig catches it and exits
 /// non-zero without printing a stack trace.
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "rollback")) return;
+    if (help.showIfRequested(ctx, args, "rollback")) return;
 
     if (args.len == 0) {
         output.err("Usage: mt rollback <package>", .{});

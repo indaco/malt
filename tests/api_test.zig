@@ -8,6 +8,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const api_mod = malt.api;
 const client_mod = malt.client;
 
@@ -51,28 +52,28 @@ const TempCacheDir = struct {
 
     fn init(comptime tag: []const u8) !TempCacheDir {
         const p = "/tmp/malt_api_test_" ++ tag;
-        malt.fs_compat.deleteTreeAbsolute(p) catch {};
-        try malt.fs_compat.makeDirAbsolute(p);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
+        try test_io.makeDirAbsolute(std.Options.debug_io, p);
         return .{ .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
-        malt.fs_compat.deleteTreeAbsolute(self.path) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
     }
 
     fn writeCacheFile(self: *TempCacheDir, rel: []const u8, content: []const u8) !void {
         // Make cache_dir/api first
         var api_buf: [512]u8 = undefined;
         const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
-        malt.fs_compat.makeDirAbsolute(api_dir) catch |e| switch (e) {
+        test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
         const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ self.path, rel });
-        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), full, .{});
-        defer f.close(malt.io_mod.ctx());
-        try f.writeStreamingAll(malt.io_mod.ctx(), content);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, full, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, content);
     }
 };
 
@@ -305,9 +306,9 @@ test "cachedExists ignores stale mtime — existence is the only check" {
     try dir.writeCacheFile("cask_old.json", "{}");
     var path_buf: [512]u8 = undefined;
     const full = try std.fmt.bufPrint(&path_buf, "{s}/api/cask_old.json", .{dir.path});
-    const file = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), full, .{ .mode = .write_only });
-    defer file.close(malt.io_mod.ctx());
-    try file.setTimestamps(malt.io_mod.ctx(), .{
+    const file = try test_io.cwd().openFile(std.Options.debug_io, full, .{ .mode = .write_only });
+    defer file.close(std.Options.debug_io);
+    try file.setTimestamps(std.Options.debug_io, .{
         .access_timestamp = .{ .new = .{ .nanoseconds = 0 } },
         .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } },
     });
@@ -340,10 +341,10 @@ test "readNotFoundCache returns false for stale marker" {
     var path_buf: [512]u8 = undefined;
     const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_old.404", .{dir.path});
     // Reopen and set mtime back via posix.utimensat-like helper.
-    const file = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), full, .{ .mode = .write_only });
-    defer file.close(malt.io_mod.ctx());
+    const file = try test_io.cwd().openFile(std.Options.debug_io, full, .{ .mode = .write_only });
+    defer file.close(std.Options.debug_io);
     // Zig File.updateTimes signature: (atime, mtime) in ns.
-    try file.setTimestamps(malt.io_mod.ctx(), .{
+    try file.setTimestamps(std.Options.debug_io, .{
         .access_timestamp = .{ .new = .{ .nanoseconds = 0 } },
         .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } },
     });

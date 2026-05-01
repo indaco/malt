@@ -3,6 +3,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const origin = malt.update_origin;
 
 const Case = struct {
@@ -58,30 +59,30 @@ test "classify is slash-anchored — no false positives on 'cellar' substrings" 
 // brew shim like `/opt/homebrew/bin/malt` pointing into `Cellar` is
 // detected as homebrew instead of being treated as a direct install.
 
-const fs_compat = malt.fs_compat;
+const fs_compat = test_io;
 
 fn resetScratch(allocator: std.mem.Allocator, tag: []const u8) ![]u8 {
     const dir = try std.fmt.allocPrint(allocator, "/tmp/malt_origin_test_{s}", .{tag});
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     return dir;
 }
 
 fn touch(path: []const u8) !void {
-    const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close(malt.io_mod.ctx());
-    try f.writeStreamingAll(malt.io_mod.ctx(), "");
+    const f = try fs_compat.createFileAbsolute(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, "");
 }
 
 test "classifyResolved reports homebrew when a shim points into /Cellar/" {
     const dir = try resetScratch(std.testing.allocator, "shim");
     defer std.testing.allocator.free(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
     // Stand up a `Cellar/malt/0.6.0/bin/malt` real file.
     const cellar = try std.fmt.allocPrint(std.testing.allocator, "{s}/Cellar/malt/0.6.0/bin", .{dir});
     defer std.testing.allocator.free(cellar);
-    try fs_compat.cwd().createDirPath(malt.io_mod.ctx(), cellar);
+    try fs_compat.cwd().createDirPath(std.Options.debug_io, cellar);
     const real = try std.fmt.allocPrint(std.testing.allocator, "{s}/malt", .{cellar});
     defer std.testing.allocator.free(real);
     try touch(real);
@@ -89,26 +90,26 @@ test "classifyResolved reports homebrew when a shim points into /Cellar/" {
     // Create a `bin/malt` shim pointing at the real file.
     const bin = try std.fmt.allocPrint(std.testing.allocator, "{s}/bin", .{dir});
     defer std.testing.allocator.free(bin);
-    try fs_compat.cwd().createDirPath(malt.io_mod.ctx(), bin);
+    try fs_compat.cwd().createDirPath(std.Options.debug_io, bin);
     const shim = try std.fmt.allocPrint(std.testing.allocator, "{s}/malt", .{bin});
     defer std.testing.allocator.free(shim);
-    try fs_compat.symLinkAbsolute(real, shim, .{});
+    try fs_compat.symLinkAbsolute(std.Options.debug_io, real, shim, .{});
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    try testing.expectEqual(origin.Origin.homebrew, origin.classifyResolved(malt.io_mod.ctx(), &buf, shim));
+    try testing.expectEqual(origin.Origin.homebrew, origin.classifyResolved(std.Options.debug_io, &buf, shim));
 }
 
 test "classifyResolved reports direct for a non-symlinked direct install" {
     const dir = try resetScratch(std.testing.allocator, "direct");
     defer std.testing.allocator.free(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/malt", .{dir});
     defer std.testing.allocator.free(path);
     try touch(path);
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    try testing.expectEqual(origin.Origin.direct, origin.classifyResolved(malt.io_mod.ctx(), &buf, path));
+    try testing.expectEqual(origin.Origin.direct, origin.classifyResolved(std.Options.debug_io, &buf, path));
 }
 
 test "classifyResolved falls back to direct when the path cannot be resolved" {
@@ -116,6 +117,6 @@ test "classifyResolved falls back to direct when the path cannot be resolved" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectEqual(
         origin.Origin.direct,
-        origin.classifyResolved(malt.io_mod.ctx(), &buf, "/tmp/malt_origin_test_absent_xyz_99"),
+        origin.classifyResolved(std.Options.debug_io, &buf, "/tmp/malt_origin_test_absent_xyz_99"),
     );
 }

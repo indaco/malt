@@ -44,7 +44,7 @@ pub fn pinSkip(db: *sqlite.Database, name: []const u8, force: bool, audit_mode: 
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "upgrade")) return;
+    if (help.showIfRequested(ctx, args, "upgrade")) return;
 
     var cask_only = false;
     var formula_only = false;

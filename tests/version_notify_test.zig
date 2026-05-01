@@ -8,8 +8,9 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const notifier = malt.update_notifier;
-const fs_compat = malt.fs_compat;
+const fs_compat = test_io;
 
 test "shouldNotify: full table — equal/newer/post-update" {
     const Case = struct {
@@ -162,12 +163,14 @@ test "decodeState: missing required field yields null (not an error)" {
 
 test "writeCache + readCache full round-trip on disk" {
     const allocator = testing.allocator;
-    const io = malt.io_mod.ctx();
+    const io = std.Options.debug_io;
 
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_test_{d}", .{fs_compat.nanoTimestamp()});
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_test_{d}", .{fs_compat.nanoTimestamp(
+        std.Options.debug_io,
+    )});
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
@@ -188,12 +191,14 @@ test "writeCache + readCache full round-trip on disk" {
 
 test "writeCache creates the parent directory when absent" {
     const allocator = testing.allocator;
-    const io = malt.io_mod.ctx();
+    const io = std.Options.debug_io;
 
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_mkdir_{d}", .{fs_compat.nanoTimestamp()});
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_mkdir_{d}", .{fs_compat.nanoTimestamp(
+        std.Options.debug_io,
+    )});
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     // Three-deep path to confirm `createDirPath` recurses (not just the leaf).
@@ -211,28 +216,32 @@ test "writeCache creates the parent directory when absent" {
 }
 
 test "readCache: missing file is null, not an error" {
-    const io = malt.io_mod.ctx();
+    const io = std.Options.debug_io;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&buf, "/tmp/malt_notify_absent_{d}.json", .{fs_compat.nanoTimestamp()});
-    fs_compat.deleteFileAbsolute(path) catch {};
+    const path = try std.fmt.bufPrint(&buf, "/tmp/malt_notify_absent_{d}.json", .{fs_compat.nanoTimestamp(
+        std.Options.debug_io,
+    )});
+    fs_compat.deleteFileAbsolute(std.Options.debug_io, path) catch {};
     const got = try notifier.readCache(io, testing.allocator, path);
     try testing.expect(got == null);
 }
 
 test "readCache: corrupt file surfaces InvalidPayload (caller can choose to ignore)" {
-    const io = malt.io_mod.ctx();
+    const io = std.Options.debug_io;
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_corrupt_{d}", .{fs_compat.nanoTimestamp()});
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_corrupt_{d}", .{fs_compat.nanoTimestamp(
+        std.Options.debug_io,
+    )});
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
     {
-        const f = try fs_compat.createFileAbsolute(path, .{});
-        defer f.close(malt.io_mod.ctx());
-        try f.writeStreamingAll(malt.io_mod.ctx(), "garbage{not_json");
+        const f = try fs_compat.createFileAbsolute(std.Options.debug_io, path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "garbage{not_json");
     }
 
     try testing.expectError(error.InvalidPayload, notifier.readCache(io, testing.allocator, path));

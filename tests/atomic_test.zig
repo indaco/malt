@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const atomic = @import("malt").atomic;
 
@@ -263,9 +264,9 @@ test "maltCacheDir honours MALT_CACHE env var" {
 
 test "createTempDir creates a unique directory under the prefix and cleanup removes it" {
     const base = "/tmp/malt_atomic_ctmp";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    malt.fs_compat.makeDirAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    test_io.makeDirAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
     setPrefix("/tmp/malt_atomic_ctmp");
     defer unsetPrefix();
 
@@ -274,32 +275,32 @@ test "createTempDir creates a unique directory under the prefix and cleanup remo
 
     // Must exist as an absolute dir under {prefix}/tmp/
     try testing.expect(std.mem.startsWith(u8, dir, "/tmp/malt_atomic_ctmp/tmp/label_"));
-    var open_dir = try malt.fs_compat.openDirAbsolute(dir, .{});
-    open_dir.close(malt.io_mod.ctx());
+    var open_dir = try test_io.openDirAbsolute(std.Options.debug_io, dir, .{});
+    open_dir.close(std.Options.debug_io);
 
     atomic.cleanupTempDir(std.Options.debug_io, dir);
-    try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(dir, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(std.Options.debug_io, dir, .{}));
 }
 
 test "atomicRename moves a file within the same filesystem" {
     const base = "/tmp/malt_atomic_rename";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    malt.fs_compat.makeDirAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    test_io.makeDirAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     const src = "/tmp/malt_atomic_rename/src.txt";
     const dst = "/tmp/malt_atomic_rename/dst.txt";
-    const f = try malt.fs_compat.createFileAbsolute(src, .{});
-    try f.writeStreamingAll(malt.io_mod.ctx(), "payload");
-    f.close(malt.io_mod.ctx());
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, src, .{});
+    try f.writeStreamingAll(std.Options.debug_io, "payload");
+    f.close(std.Options.debug_io);
 
     try atomic.atomicRename(std.Options.debug_io, testing.allocator, src, dst);
-    try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(src, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, src, .{}));
 
-    const moved = try malt.fs_compat.openFileAbsolute(dst, .{});
-    defer moved.close(malt.io_mod.ctx());
+    const moved = try test_io.openFileAbsolute(std.Options.debug_io, dst, .{});
+    defer moved.close(std.Options.debug_io);
     var buf: [16]u8 = undefined;
-    const n = try moved.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
+    const n = try moved.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expectEqualStrings("payload", buf[0..n]);
 }
 
@@ -312,59 +313,59 @@ test "cleanupTempDir is a no-op on a non-existent path" {
 // contract — fresh path, overwrite, no stale tempfile, missing parent.
 test "atomicWriteFile writes full payload to a fresh path" {
     const base = "/tmp/malt_atomic_write_fresh";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.makeDirAbsolute(base);
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     const dst = base ++ "/cache.json";
     try atomic.atomicWriteFile(std.Options.debug_io, dst, "{\"formulae\":[]}");
 
-    const f = try malt.fs_compat.openFileAbsolute(dst, .{});
-    defer f.close(malt.io_mod.ctx());
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, dst, .{});
+    defer f.close(std.Options.debug_io);
     var buf: [64]u8 = undefined;
-    const n = try f.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
+    const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expectEqualStrings("{\"formulae\":[]}", buf[0..n]);
 }
 
 test "atomicWriteFile replaces an existing file's contents in one step" {
     const base = "/tmp/malt_atomic_write_replace";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.makeDirAbsolute(base);
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     const dst = base ++ "/cache.json";
     // Seed with old bytes so we can prove the replacement lands whole.
     {
-        const f = try malt.fs_compat.createFileAbsolute(dst, .{});
-        defer f.close(malt.io_mod.ctx());
-        try f.writeStreamingAll(malt.io_mod.ctx(), "OLD_PAYLOAD_THAT_SHOULD_VANISH");
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, dst, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "OLD_PAYLOAD_THAT_SHOULD_VANISH");
     }
 
     try atomic.atomicWriteFile(std.Options.debug_io, dst, "NEW");
 
-    const f = try malt.fs_compat.openFileAbsolute(dst, .{});
-    defer f.close(malt.io_mod.ctx());
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, dst, .{});
+    defer f.close(std.Options.debug_io);
     var buf: [64]u8 = undefined;
-    const n = try f.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
+    const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expectEqualStrings("NEW", buf[0..n]);
 }
 
 test "atomicWriteFile leaves no sibling .tmp files behind on success" {
     const base = "/tmp/malt_atomic_write_no_tmp";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.makeDirAbsolute(base);
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     const dst = base ++ "/cache.json";
     try atomic.atomicWriteFile(std.Options.debug_io, dst, "payload");
 
     // Only `cache.json` must remain — a stale tempfile would accumulate
     // across calls and eventually blow up a user's cache dir.
-    var dir = try malt.fs_compat.openDirAbsolute(base, .{ .iterate = true });
-    defer dir.close(malt.io_mod.ctx());
+    var dir = try test_io.openDirAbsolute(std.Options.debug_io, base, .{ .iterate = true });
+    defer dir.close(std.Options.debug_io);
     var iter = dir.iterate();
     var count: usize = 0;
-    while (try iter.next(malt.io_mod.ctx())) |entry| {
+    while (try iter.next(std.Options.debug_io)) |entry| {
         try testing.expectEqualStrings("cache.json", entry.name);
         count += 1;
     }
@@ -384,32 +385,32 @@ test "atomicWriteFile surfaces FileNotFound when the parent dir is missing" {
 
 test "atomicRename moves a directory tree within the same filesystem" {
     const base = "/tmp/malt_atomic_rename_dir";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    malt.fs_compat.makeDirAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    test_io.makeDirAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     const src = "/tmp/malt_atomic_rename_dir/src";
     const dst = "/tmp/malt_atomic_rename_dir/dst";
-    try malt.fs_compat.makeDirAbsolute(src);
+    try test_io.makeDirAbsolute(std.Options.debug_io, src);
 
     // Put a file inside so an accidental copy+delete fallback would be
     // observable — a plain `rename(2)` on a same-FS directory must not
     // drop child entries.
     const child = "/tmp/malt_atomic_rename_dir/src/inner.txt";
     {
-        const f = try malt.fs_compat.createFileAbsolute(child, .{});
-        defer f.close(malt.io_mod.ctx());
-        try f.writeStreamingAll(malt.io_mod.ctx(), "payload");
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, child, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "payload");
     }
 
     try atomic.atomicRename(std.Options.debug_io, testing.allocator, src, dst);
-    try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(src, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(std.Options.debug_io, src, .{}));
 
-    var moved = try malt.fs_compat.openDirAbsolute(dst, .{});
-    defer moved.close(malt.io_mod.ctx());
-    const inner = try moved.openFile(malt.io_mod.ctx(), "inner.txt", .{});
-    defer inner.close(malt.io_mod.ctx());
+    var moved = try test_io.openDirAbsolute(std.Options.debug_io, dst, .{});
+    defer moved.close(std.Options.debug_io);
+    const inner = try moved.openFile(std.Options.debug_io, "inner.txt", .{});
+    defer inner.close(std.Options.debug_io);
     var buf: [16]u8 = undefined;
-    const n = try inner.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
+    const n = try inner.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expectEqualStrings("payload", buf[0..n]);
 }

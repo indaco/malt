@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const upgrade = malt.upgrade;
 const sqlite = malt.sqlite;
@@ -21,11 +22,13 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const path = try std.fmt.allocPrintSentinel(
         testing.allocator,
         "/tmp/malt_upgrade_exec_{d}_{s}",
-        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        .{ test_io.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
         0,
     );
-    malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), path);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -33,14 +36,14 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
 test "mt upgrade <nonexistent> surfaces a non-zero exit" {
     const path = try setupPrefix("nonexistent_pkg");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // Seed an empty DB so the `db/` dir exists (lock acquire doesn't
     // short-circuit to silent-return) but no packages are installed.
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -54,7 +57,7 @@ test "mt upgrade <nonexistent> surfaces a non-zero exit" {
 fn openSeededDb(prefix: [:0]const u8) !sqlite.Database {
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
     var buf: [512]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&buf, "{s}/db/malt.db", .{prefix}, 0);
@@ -77,7 +80,7 @@ fn insertPinnedKeg(db: *sqlite.Database, name: []const u8) !void {
 test "mt upgrade <pinned> is a quiet no-op (no API call)" {
     const path = try setupPrefix("pinned_skip_named");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -96,7 +99,7 @@ test "mt upgrade <pinned> is a quiet no-op (no API call)" {
 test "mt upgrade (no args) skips pinned kegs without aggregating failures" {
     const path = try setupPrefix("pinned_skip_bulk");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -116,7 +119,7 @@ test "mt upgrade (no args) skips pinned kegs without aggregating failures" {
 test "mt upgrade --pinned --dry-run with no pinned kegs is a quiet no-op" {
     const path = try setupPrefix("pinned_audit_empty");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -135,12 +138,12 @@ test "mt upgrade --pinned --dry-run with no pinned kegs is a quiet no-op" {
 test "mt upgrade --pinned without --dry-run or --force errors with usage" {
     const path = try setupPrefix("pinned_requires_audit");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -164,7 +167,7 @@ fn insertPinnedCask(db: *sqlite.Database, token: []const u8, version: []const u8
 test "mt upgrade <pinned-cask> is a quiet no-op (no API call)" {
     const path = try setupPrefix("pinned_skip_named_cask");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -183,7 +186,7 @@ test "mt upgrade <pinned-cask> is a quiet no-op (no API call)" {
 test "recordKeg inherits pinned=1 from an existing keg of the same name" {
     const path = try setupPrefix("recordkeg_inherit_pin");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     var db = try openSeededDb(path);
@@ -219,7 +222,7 @@ test "force-upgrade-cask orchestration: pin survives removeRecord + recordInstal
     // pin so the user's hold survives.
     const path = try setupPrefix("force_upgrade_cask_pin");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     var db = try openSeededDb(path);
@@ -257,7 +260,7 @@ test "force-upgrade-cask orchestration: pin survives removeRecord + recordInstal
 test "recordKeg defaults pinned=0 when no prior keg of that name exists" {
     const path = try setupPrefix("recordkeg_fresh_pin");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     var db = try openSeededDb(path);
@@ -288,7 +291,7 @@ test "recordKeg defaults pinned=0 when no prior keg of that name exists" {
 test "pinSkip honours --force and audit_mode for casks too" {
     const path = try setupPrefix("pinskip_cask");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     var db = try openSeededDb(path);
@@ -303,7 +306,7 @@ test "pinSkip honours --force and audit_mode for casks too" {
 test "mt upgrade --pinned --dry-run reaches the cask path (no formula-only override)" {
     const path = try setupPrefix("pinned_audit_cask");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -328,7 +331,7 @@ test "mt upgrade --pinned --dry-run reaches the cask path (no formula-only overr
 test "pinSkip honours --force and audit_mode: pinned + override = no skip" {
     const path = try setupPrefix("pinskip_helper");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     var db = try openSeededDb(path);

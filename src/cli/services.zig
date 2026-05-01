@@ -6,7 +6,6 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
-const io_mod = @import("../ui/io.zig");
 const supervisor = @import("../core/services/supervisor.zig");
 
 pub const ServicesError = error{
@@ -135,7 +134,7 @@ fn cmdLogs(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []con
     }
     const path = try supervisor.logPath(allocator, name, if (stream == .stdout) .stdout else .stderr);
     defer allocator.free(path);
-    const stdout = io_mod.stdoutFile();
+    const stdout = ctx.stdout;
     var write_buf: [4096]u8 = undefined;
     var stdout_writer = stdout.writer(ctx.io, &write_buf);
     const w = &stdout_writer.interface;
@@ -176,6 +175,5 @@ fn printHelp(ctx: *const AppCtx) !void {
         \\                    --follow / -f tails appended bytes until SIGINT.
         \\
     ;
-    const f = io_mod.stderrFile();
-    try f.writeStreamingAll(ctx.io, msg);
+    ctx.stderr.writeStreamingAll(ctx.io, msg) catch {};
 }

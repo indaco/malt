@@ -28,7 +28,7 @@ pub const formatBytes = util.formatBytes;
 const TierResult = util.TierResult;
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "purge")) return;
+    if (help.showIfRequested(ctx, args, "purge")) return;
 
     const opts = parseArgs(args) catch {
         output.err("invalid arguments — run `mt purge --help` for usage", .{});

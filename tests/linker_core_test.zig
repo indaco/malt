@@ -5,6 +5,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const linker_mod = malt.linker;
@@ -13,7 +14,9 @@ fn uniquePrefix(suffix: []const u8) ![]u8 {
     return std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_linker_test_{d}_{s}",
-        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        .{ test_io.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
     );
 }
 
@@ -23,17 +26,17 @@ fn makeKegWithBinary(prefix: []const u8, name: []const u8, version: []const u8, 
         "{s}/Cellar/{s}/{s}",
         .{ prefix, name, version },
     );
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), keg);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg);
 
     const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{keg});
     defer testing.allocator.free(bin_dir);
-    try malt.fs_compat.makeDirAbsolute(bin_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, bin_dir);
 
     const bin_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, bin_name });
     defer testing.allocator.free(bin_path);
-    const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
-    try f.writeStreamingAll(malt.io_mod.ctx(), "#!/bin/sh\necho hi\n");
-    f.close(malt.io_mod.ctx());
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, bin_path, .{});
+    try f.writeStreamingAll(std.Options.debug_io, "#!/bin/sh\necho hi\n");
+    f.close(std.Options.debug_io);
 
     return keg;
 }
@@ -41,9 +44,9 @@ fn makeKegWithBinary(prefix: []const u8, name: []const u8, version: []const u8, 
 test "link creates symlinks for every file in a keg and records them in the DB" {
     const prefix = try uniquePrefix("link_basic");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix);
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
     const keg = try makeKegWithBinary(prefix, "foo", "1.0", "foo-tool");
     defer testing.allocator.free(keg);
 
@@ -73,7 +76,7 @@ test "link creates symlinks for every file in a keg and records them in the DB" 
     var link_path_buf: [512]u8 = undefined;
     const link_path = try std.fmt.bufPrint(&link_path_buf, "{s}/bin/foo-tool", .{prefix});
     var target_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const target = try malt.fs_compat.readLinkAbsolute(link_path, &target_buf);
+    const target = try test_io.readLinkAbsolute(std.Options.debug_io, link_path, &target_buf);
     try testing.expect(std.mem.indexOf(u8, target, "/Cellar/foo/1.0/bin/foo-tool") != null);
 
     // Row in links table
@@ -85,17 +88,17 @@ test "link creates symlinks for every file in a keg and records them in the DB" 
 
     // unlink removes both the symlink and the DB row.
     try linker.unlink(keg_id);
-    try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(link_path, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, link_path, .{}));
 }
 
 test "linkOpt creates opt/{name} -> Cellar/{name}/{version}" {
     const prefix = try uniquePrefix("link_opt");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
     const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/bar/2.0", .{prefix});
     defer testing.allocator.free(cellar);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), cellar);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar);
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -107,20 +110,20 @@ test "linkOpt creates opt/{name} -> Cellar/{name}/{version}" {
     var opt_buf: [512]u8 = undefined;
     const opt_path = try std.fmt.bufPrint(&opt_buf, "{s}/opt/bar", .{prefix});
     var target_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const target = try malt.fs_compat.readLinkAbsolute(opt_path, &target_buf);
+    const target = try test_io.readLinkAbsolute(std.Options.debug_io, opt_path, &target_buf);
     try testing.expect(std.mem.endsWith(u8, target, "/Cellar/bar/2.0"));
 
     // Re-running linkOpt must replace the existing symlink atomically.
     try linker.linkOpt("bar", "2.0");
-    const target2 = try malt.fs_compat.readLinkAbsolute(opt_path, &target_buf);
+    const target2 = try test_io.readLinkAbsolute(std.Options.debug_io, opt_path, &target_buf);
     try testing.expect(std.mem.endsWith(u8, target2, "/Cellar/bar/2.0"));
 }
 
 test "checkConflicts flags a symlink that points into a different keg" {
     const prefix = try uniquePrefix("link_conflict");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
 
     // Two kegs that both ship a `bin/tool` binary.
     const keg_a = try makeKegWithBinary(prefix, "alpha", "1.0", "tool");
@@ -158,8 +161,8 @@ test "checkConflicts flags a symlink that points into a different keg" {
 test "checkConflicts is empty when nothing is linked yet" {
     const prefix = try uniquePrefix("link_no_conflict");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
     const keg = try makeKegWithBinary(prefix, "gamma", "1.0", "tool");
     defer testing.allocator.free(keg);
 

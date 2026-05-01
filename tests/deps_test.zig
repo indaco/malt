@@ -4,6 +4,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const formula_mod = malt.formula;
 const deps_mod = malt.deps;
 const sqlite = malt.sqlite;
@@ -51,7 +52,7 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_deps_test_" ++ tag;
-        malt.fs_compat.makeDirAbsolute(dir) catch {};
+        test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
         var buf: [256]u8 = undefined;
         const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(path);
@@ -62,7 +63,7 @@ const TempDb = struct {
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        malt.fs_compat.deleteTreeAbsolute(self.dir) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
     }
 };
 
@@ -207,27 +208,27 @@ const TempCacheDir = struct {
 
     fn init(comptime tag: []const u8) !TempCacheDir {
         const p = "/tmp/malt_deps_cache_" ++ tag;
-        malt.fs_compat.deleteTreeAbsolute(p) catch {};
-        try malt.fs_compat.makeDirAbsolute(p);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
+        try test_io.makeDirAbsolute(std.Options.debug_io, p);
         return .{ .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
-        malt.fs_compat.deleteTreeAbsolute(self.path) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
     }
 
     fn writeFormula(self: *TempCacheDir, name: []const u8, json: []const u8) !void {
         var api_buf: [512]u8 = undefined;
         const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
-        malt.fs_compat.makeDirAbsolute(api_dir) catch |e| switch (e) {
+        test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
         const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ self.path, name });
-        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), full, .{});
-        defer f.close(malt.io_mod.ctx());
-        try f.writeStreamingAll(malt.io_mod.ctx(), json);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, full, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, json);
     }
 };
 
@@ -313,11 +314,11 @@ test "resolve returns empty when root formula JSON is missing from cache" {
     // touching the network.
     var api_dir_buf: [512]u8 = undefined;
     const api_dir = try std.fmt.bufPrint(&api_dir_buf, "{s}/api", .{dir.path});
-    try malt.fs_compat.makeDirAbsolute(api_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, api_dir);
     var marker_buf: [512]u8 = undefined;
     const marker = try std.fmt.bufPrint(&marker_buf, "{s}/api/formula_nope.404", .{dir.path});
-    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), marker, .{});
-    f.close(malt.io_mod.ctx());
+    const f = try test_io.cwd().createFile(std.Options.debug_io, marker, .{});
+    f.close(std.Options.debug_io);
 
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
@@ -348,8 +349,8 @@ test "resolve handles a dep whose sub-fetch fails by falling through" {
     try dir.writeFormula("alpha", "{\"name\":\"alpha\",\"dependencies\":[\"missing\"]}");
     var marker_buf: [512]u8 = undefined;
     const marker = try std.fmt.bufPrint(&marker_buf, "{s}/api/formula_missing.404", .{dir.path});
-    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), marker, .{});
-    f.close(malt.io_mod.ctx());
+    const f = try test_io.cwd().createFile(std.Options.debug_io, marker, .{});
+    f.close(std.Options.debug_io);
 
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
@@ -410,9 +411,9 @@ const TempPrefix = struct {
 
     fn init(comptime tag: []const u8) !TempPrefix {
         const root = "/tmp/malt_opt_link_" ++ tag;
-        malt.fs_compat.deleteTreeAbsolute(root) catch {};
-        try malt.fs_compat.makeDirAbsolute(root);
-        errdefer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+        try test_io.makeDirAbsolute(std.Options.debug_io, root);
+        errdefer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
 
         var db_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/malt.db", .{root}, 0);
@@ -424,25 +425,25 @@ const TempPrefix = struct {
 
     fn deinit(self: *TempPrefix) void {
         self.db.close();
-        malt.fs_compat.deleteTreeAbsolute(self.root) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.root) catch {};
     }
 
     fn cellarFor(self: *const TempPrefix, name: []const u8, version: []const u8) ![]const u8 {
         var cellar_root_buf: [512]u8 = undefined;
         const cellar_root = try std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{self.root});
-        malt.fs_compat.makeDirAbsolute(cellar_root) catch |e| switch (e) {
+        test_io.makeDirAbsolute(std.Options.debug_io, cellar_root) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var name_buf: [512]u8 = undefined;
         const name_dir = try std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ cellar_root, name });
-        malt.fs_compat.makeDirAbsolute(name_dir) catch |e| switch (e) {
+        test_io.makeDirAbsolute(std.Options.debug_io, name_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ name_dir, version });
-        malt.fs_compat.makeDirAbsolute(path) catch |e| switch (e) {
+        test_io.makeDirAbsolute(std.Options.debug_io, path) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
@@ -452,7 +453,7 @@ const TempPrefix = struct {
     fn readOptLink(self: *const TempPrefix, name: []const u8, buf: []u8) ![]u8 {
         var path_buf: [512]u8 = undefined;
         const opt_path = try std.fmt.bufPrint(&path_buf, "{s}/opt/{s}", .{ self.root, name });
-        return malt.fs_compat.readLinkAbsolute(opt_path, buf);
+        return test_io.readLinkAbsolute(std.Options.debug_io, opt_path, buf);
     }
 };
 
@@ -498,10 +499,10 @@ test "ensureOptLink replaces a stale symlink pointing at an old cellar" {
     // Pre-create a symlink to an OLD cellar path that the DB no longer knows.
     var opt_parent_buf: [512]u8 = undefined;
     const opt_parent = try std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{p.root});
-    try malt.fs_compat.makeDirAbsolute(opt_parent);
-    var dir = try malt.fs_compat.openDirAbsolute(opt_parent, .{});
-    defer dir.close(malt.io_mod.ctx());
-    try dir.symLink(malt.io_mod.ctx(), "/tmp/malt_stale_old_zstd", "zstd", .{});
+    try test_io.makeDirAbsolute(std.Options.debug_io, opt_parent);
+    var dir = try test_io.openDirAbsolute(std.Options.debug_io, opt_parent, .{});
+    defer dir.close(std.Options.debug_io);
+    try dir.symLink(std.Options.debug_io, "/tmp/malt_stale_old_zstd", "zstd", .{});
 
     // DB points at the CURRENT cellar path.
     const cellar = try p.cellarFor("zstd", "1.5.7");

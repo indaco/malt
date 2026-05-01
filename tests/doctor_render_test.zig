@@ -10,7 +10,7 @@ const std = @import("std");
 const testing = std.testing;
 const doctor = @import("malt").doctor;
 const color = @import("malt").color;
-const io_mod = @import("malt").io_mod;
+const io_mod = @import("malt").output;
 const output = @import("malt").output;
 
 // Pin the palette so escape-string assertions stay deterministic
@@ -153,6 +153,7 @@ test "null detail omits the em-dash entirely" {
 // an in-memory SQLite so the test is hermetic.
 
 const malt = @import("malt");
+const test_io = @import("test_io");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const patch = malt.patch;
@@ -235,10 +236,10 @@ test "countMissingLocalSources does not flag kegs whose .rb still exists" {
     // Use the running test binary as the "file exists" witness — it
     // is guaranteed to be readable from the test process.
     const self_path = "/tmp/mt_doctor_present_formula.rb";
-    const f = try malt.fs_compat.createFileAbsolute(self_path, .{});
-    defer malt.fs_compat.cwd().deleteFile(malt.io_mod.ctx(), self_path) catch {};
-    try f.writeStreamingAll(malt.io_mod.ctx(), "class X end\n");
-    f.close(malt.io_mod.ctx());
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, self_path, .{});
+    defer test_io.cwd().deleteFile(std.Options.debug_io, self_path) catch {};
+    try f.writeStreamingAll(std.Options.debug_io, "class X end\n");
+    f.close(std.Options.debug_io);
 
     try seedKeg(&db, "present", "local", self_path);
 
@@ -257,10 +258,10 @@ test "countMissingLocalSources mixes stale and present rows correctly" {
     try schema.initSchema(&db);
 
     const present_path = "/tmp/mt_doctor_mixed_present.rb";
-    const f = try malt.fs_compat.createFileAbsolute(present_path, .{});
-    defer malt.fs_compat.cwd().deleteFile(malt.io_mod.ctx(), present_path) catch {};
-    try f.writeStreamingAll(malt.io_mod.ctx(), "x");
-    f.close(malt.io_mod.ctx());
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, present_path, .{});
+    defer test_io.cwd().deleteFile(std.Options.debug_io, present_path) catch {};
+    try f.writeStreamingAll(std.Options.debug_io, "x");
+    f.close(std.Options.debug_io);
 
     try seedKeg(&db, "p1", "local", present_path);
     try seedKeg(&db, "g1", "local", "/tmp/mt_doctor_mixed_missing_1.rb");

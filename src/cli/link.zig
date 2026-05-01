@@ -11,7 +11,7 @@ const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
 pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "link")) return;
+    if (help.showIfRequested(ctx, args, "link")) return;
 
     if (args.len == 0) {
         output.err("Usage: mt link <formula>", .{});
@@ -93,7 +93,7 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
 }
 
 pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "unlink")) return;
+    if (help.showIfRequested(ctx, args, "unlink")) return;
 
     if (args.len == 0) {
         output.err("Usage: mt unlink <formula>", .{});

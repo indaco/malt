@@ -6,7 +6,6 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
-const io_mod = @import("../ui/io.zig");
 const manifest_mod = @import("../core/bundle/manifest.zig");
 const brewfile_mod = @import("../core/bundle/brewfile.zig");
 const brewfile_emit = @import("../core/bundle/brewfile_emit.zig");
@@ -102,7 +101,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         std.mem.eql(u8, args[0], "-h") or
         std.mem.eql(u8, args[0], "--help"))
     {
-        try printHelp();
+        try printHelp(ctx);
         return;
     }
 
@@ -365,9 +364,8 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
         try populateFromInstalled(&manifest, &db);
     }
 
-    const stdout = io_mod.stdoutFile();
     var write_buf: [4096]u8 = undefined;
-    var stdout_writer = stdout.writer(ctx.io, &write_buf);
+    var stdout_writer = ctx.stdout.writer(ctx.io, &write_buf);
     const w = &stdout_writer.interface;
     switch (format) {
         .brewfile => try brewfile_emit.emit(manifest, w),
@@ -571,7 +569,7 @@ fn openDb(ctx: *const AppCtx) !sqlite.Database {
     return db;
 }
 
-fn printHelp() !void {
+fn printHelp(ctx: *const AppCtx) !void {
     const msg =
         \\Usage: malt bundle <subcommand> [args]
         \\
@@ -591,5 +589,5 @@ fn printHelp() !void {
         \\  ./Brewfile, ./Maltfile.json, ~/.config/malt/Brewfile, ~/.config/malt/Maltfile.json
         \\
     ;
-    io_mod.stderrWriteAll(msg);
+    ctx.stderr.writeStreamingAll(ctx.io, msg) catch {};
 }

@@ -8,31 +8,32 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const swap = malt.update_swap;
-const fs_compat = malt.fs_compat;
+const fs_compat = test_io;
 
 fn resetScratch(allocator: std.mem.Allocator, tag: []const u8) ![]u8 {
     const dir = try std.fmt.allocPrint(allocator, "/tmp/malt_swap_test_{s}", .{tag});
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     return dir;
 }
 
 fn writeFile(path: []const u8, content: []const u8) !void {
-    const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close(malt.io_mod.ctx());
-    try f.writeStreamingAll(malt.io_mod.ctx(), content);
+    const f = try fs_compat.createFileAbsolute(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, content);
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return fs_compat.readFileAbsoluteAlloc(allocator, path, 1 << 16);
+    return fs_compat.readFileAbsoluteAlloc(std.Options.debug_io, allocator, path, 1 << 16);
 }
 
 /// Returns the POSIX mode bits (rwxrwxrwx = 0o777) of `path`.
 fn modeBits(path: []const u8) !u32 {
-    const f = try fs_compat.openFileAbsolute(path, .{});
-    defer f.close(malt.io_mod.ctx());
-    const st = try f.stat(malt.io_mod.ctx());
+    const f = try fs_compat.openFileAbsolute(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    const st = try f.stat(std.Options.debug_io);
     return @intCast(st.permissions.toMode() & 0o777);
 }
 
@@ -57,7 +58,7 @@ const Paths = struct {
     }
 
     fn deinit(self: *Paths, allocator: std.mem.Allocator) void {
-        fs_compat.deleteTreeAbsolute(self.dir) catch {};
+        fs_compat.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
         allocator.free(self.dir);
         allocator.free(self.target);
         allocator.free(self.new);
@@ -75,7 +76,7 @@ test "atomicReplace swaps target and preserves original at .old" {
     try writeFile(p.target, "version-1-bytes");
     try writeFile(p.new, "version-2-bytes");
 
-    try swap.atomicReplace(malt.io_mod.ctx(), p.target, p.new);
+    try swap.atomicReplace(std.Options.debug_io, p.target, p.new);
 
     const target_contents = try readFile(testing.allocator, p.target);
     defer testing.allocator.free(target_contents);
@@ -93,7 +94,7 @@ test "atomicReplace leaves the swapped-in target executable (owner + group + oth
     try writeFile(p.target, "old");
     try writeFile(p.new, "new"); // createFile defaults to non-executable
 
-    try swap.atomicReplace(malt.io_mod.ctx(), p.target, p.new);
+    try swap.atomicReplace(std.Options.debug_io, p.target, p.new);
 
     // All three execute bits must be set (0o755 = rwxr-xr-x).
     const mode = try modeBits(p.target);
@@ -107,7 +108,7 @@ test "atomicReplace leaves new_path untouched - it is copied, not moved" {
     try writeFile(p.target, "old");
     try writeFile(p.new, "fresh");
 
-    try swap.atomicReplace(malt.io_mod.ctx(), p.target, p.new);
+    try swap.atomicReplace(std.Options.debug_io, p.target, p.new);
 
     // Caller still owns new_path and can inspect / re-use it.
     const new_contents = try readFile(testing.allocator, p.new);
@@ -122,10 +123,10 @@ test "atomicReplace removes the staging file on success" {
     try writeFile(p.target, "old");
     try writeFile(p.new, "new");
 
-    try swap.atomicReplace(malt.io_mod.ctx(), p.target, p.new);
+    try swap.atomicReplace(std.Options.debug_io, p.target, p.new);
 
     // Staged temp must not leak into the target directory.
-    try testing.expectError(error.FileNotFound, fs_compat.accessAbsolute(p.staged, .{}));
+    try testing.expectError(error.FileNotFound, fs_compat.accessAbsolute(std.Options.debug_io, p.staged, .{}));
 }
 
 // --- prior-run cleanup ---------------------------------------------------
@@ -138,7 +139,7 @@ test "atomicReplace overwrites a stale .old from a prior run" {
     try writeFile(p.target, "version-2");
     try writeFile(p.new, "version-3");
 
-    try swap.atomicReplace(malt.io_mod.ctx(), p.target, p.new);
+    try swap.atomicReplace(std.Options.debug_io, p.target, p.new);
 
     // The stale .old must have been replaced with the just-swapped-out
     // target, not preserved.
@@ -155,7 +156,7 @@ test "atomicReplace overwrites a stale staged file from a killed prior run" {
     try writeFile(p.target, "version-1");
     try writeFile(p.new, "version-2");
 
-    try swap.atomicReplace(malt.io_mod.ctx(), p.target, p.new);
+    try swap.atomicReplace(std.Options.debug_io, p.target, p.new);
 
     const target_contents = try readFile(testing.allocator, p.target);
     defer testing.allocator.free(target_contents);
@@ -171,9 +172,9 @@ test "atomicReplace returns StagingFailed when target directory is missing" {
 
     // Target dir literally does not exist - staging must not hit rename.
     const target = "/tmp/malt_swap_test_missing_dir_xyz_99/malt";
-    fs_compat.deleteTreeAbsolute("/tmp/malt_swap_test_missing_dir_xyz_99") catch {};
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, "/tmp/malt_swap_test_missing_dir_xyz_99") catch {};
 
-    try testing.expectError(error.StagingFailed, swap.atomicReplace(malt.io_mod.ctx(), target, p.new));
+    try testing.expectError(error.StagingFailed, swap.atomicReplace(std.Options.debug_io, target, p.new));
 }
 
 test "atomicReplace returns StagingFailed when new_path does not exist" {
@@ -182,7 +183,7 @@ test "atomicReplace returns StagingFailed when new_path does not exist" {
     try writeFile(p.target, "old");
     // Deliberately do not create p.new.
 
-    try testing.expectError(error.StagingFailed, swap.atomicReplace(malt.io_mod.ctx(), p.target, p.new));
+    try testing.expectError(error.StagingFailed, swap.atomicReplace(std.Options.debug_io, p.target, p.new));
 
     // Target must be untouched when staging fails.
     const target_contents = try readFile(testing.allocator, p.target);
@@ -196,7 +197,7 @@ test "atomicReplace returns SwapFailed when target does not exist" {
     try writeFile(p.new, "new");
     // Deliberately do not create p.target.
 
-    try testing.expectError(error.SwapFailed, swap.atomicReplace(malt.io_mod.ctx(), p.target, p.new));
+    try testing.expectError(error.SwapFailed, swap.atomicReplace(std.Options.debug_io, p.target, p.new));
 }
 
 test "atomicReplace returns PermissionDenied when target dir is read-only" {
@@ -217,7 +218,7 @@ test "atomicReplace returns PermissionDenied when target dir is read-only" {
     if (std.c.chmod(dir_z.ptr, 0o555) != 0) return error.SkipZigTest;
     defer _ = std.c.chmod(dir_z.ptr, 0o755);
 
-    try testing.expectError(error.PermissionDenied, swap.atomicReplace(malt.io_mod.ctx(), p.target, p.new));
+    try testing.expectError(error.PermissionDenied, swap.atomicReplace(std.Options.debug_io, p.target, p.new));
 
     // Target must still be intact after a permission-denied staging.
     _ = std.c.chmod(dir_z.ptr, 0o755);

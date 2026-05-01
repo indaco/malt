@@ -10,6 +10,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const install = malt.install;
 const deps_mod = malt.deps;
 const sqlite = malt.sqlite;
@@ -21,7 +22,7 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_parse_cache_test_" ++ tag;
-        malt.fs_compat.makeDirAbsolute(dir) catch {};
+        test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
@@ -32,22 +33,22 @@ const TempDb = struct {
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        malt.fs_compat.deleteTreeAbsolute(self.dir) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
     }
 };
 
 fn seedCache(cache_dir: []const u8, name: []const u8, json: []const u8) !void {
     var api_buf: [512]u8 = undefined;
     const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{cache_dir});
-    malt.fs_compat.makeDirAbsolute(api_dir) catch |e| switch (e) {
+    test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };
     var path_buf: [512]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ cache_dir, name });
-    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), path, .{});
-    defer f.close(malt.io_mod.ctx());
-    try f.writeStreamingAll(malt.io_mod.ctx(), json);
+    const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, json);
 }
 
 /// Unique sha per dep so the dedup branch can't collapse jobs.
@@ -101,9 +102,9 @@ test "collectFormulaJobs parses each formula exactly once via shared cache" {
     defer tdb.deinit();
 
     const cache_dir = "/tmp/malt_parse_cache_test_six_dep_cache_apicache";
-    malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
-    malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
 
     const root_json = rootJsonWithFiveDeps();
     try seedCache(cache_dir, "root", root_json);
@@ -177,9 +178,9 @@ test "FormulaCache holds at most one entry per unique dep across the run" {
     defer tdb.deinit();
 
     const cache_dir = "/tmp/malt_parse_cache_test_bound_apicache";
-    malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
-    malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
 
     const root_json = rootJsonWithFiveDeps();
     try seedCache(cache_dir, "root", root_json);
@@ -238,13 +239,13 @@ test "resolve walks deps for JSON missing the name field" {
     const alloc = testing.allocator;
 
     const cache_dir = "/tmp/malt_parse_cache_test_no_name_apicache";
-    malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
-    malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
 
     var api_buf: [512]u8 = undefined;
     const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{cache_dir});
-    try malt.fs_compat.makeDirAbsolute(api_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, api_dir);
 
     // Minimal JSON — no `name` field. The cache cannot type-parse this,
     // but BFS still needs the dep list.
@@ -252,17 +253,17 @@ test "resolve walks deps for JSON missing the name field" {
     var root_buf: [512]u8 = undefined;
     const root_path = try std.fmt.bufPrint(&root_buf, "{s}/api/formula_thin.json", .{cache_dir});
     {
-        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), root_path, .{});
-        defer f.close(malt.io_mod.ctx());
-        try f.writeStreamingAll(malt.io_mod.ctx(), root_json);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, root_path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, root_json);
     }
 
     inline for (.{ "leaf_one", "leaf_two" }) |leaf| {
         var leaf_buf: [512]u8 = undefined;
         const leaf_path = try std.fmt.bufPrint(&leaf_buf, "{s}/api/formula_{s}.json", .{ cache_dir, leaf });
-        const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), leaf_path, .{});
-        defer f.close(malt.io_mod.ctx());
-        try f.writeStreamingAll(malt.io_mod.ctx(), "{\"dependencies\":[]}");
+        const f = try test_io.cwd().createFile(std.Options.debug_io, leaf_path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "{\"dependencies\":[]}");
     }
 
     var http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
@@ -327,9 +328,9 @@ test "shared deps across multi-package install collapse to one parse" {
     defer tdb.deinit();
 
     const cache_dir = "/tmp/malt_parse_cache_test_multi_pkg_apicache";
-    malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
-    malt.fs_compat.makeDirAbsolute(cache_dir) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(cache_dir) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
+    test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
 
     // Two roots ("alpha", "omega") that share one dep ("shared_lib").
     const alpha_json = "{\"name\":\"alpha\"," ++

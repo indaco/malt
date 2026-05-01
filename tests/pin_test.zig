@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const cli_pin = malt.cli_pin;
 const sqlite = malt.sqlite;
@@ -19,14 +20,16 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const path = try std.fmt.allocPrintSentinel(
         testing.allocator,
         "/tmp/malt_pin_test_{d}_{s}",
-        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        .{ test_io.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
         0,
     );
-    malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), path);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -62,7 +65,7 @@ fn readPinned(db: *sqlite.Database, name: []const u8) !bool {
 test "mt pin <name> sets pinned=1 on installed keg" {
     const path = try setupPrefix("pin_set");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -81,7 +84,7 @@ test "mt pin <name> sets pinned=1 on installed keg" {
 test "mt unpin <name> clears pinned" {
     const path = try setupPrefix("unpin_clear");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -100,7 +103,7 @@ test "mt unpin <name> clears pinned" {
 test "mt pin with no args returns Aborted (usage)" {
     const path = try setupPrefix("pin_noargs");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     try testing.expectError(error.Aborted, cli_pin.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{}));
@@ -109,7 +112,7 @@ test "mt pin with no args returns Aborted (usage)" {
 test "mt unpin with no args returns Aborted (usage)" {
     const path = try setupPrefix("unpin_noargs");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     try testing.expectError(error.Aborted, cli_pin.executeUnpin(&malt.app_ctx.debug_ctx, testing.allocator, &.{}));
@@ -118,7 +121,7 @@ test "mt unpin with no args returns Aborted (usage)" {
 test "mt pin <not-installed> returns Aborted" {
     const path = try setupPrefix("pin_notinst");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -135,7 +138,7 @@ test "mt pin <not-installed> returns Aborted" {
 test "mt unpin <not-installed> returns Aborted" {
     const path = try setupPrefix("unpin_notinst");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -152,7 +155,7 @@ test "mt unpin <not-installed> returns Aborted" {
 test "isPinned reflects DB column" {
     const path = try setupPrefix("ispinned");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     var db = try openDb(path);
@@ -187,7 +190,7 @@ fn readCaskPinned(db: *sqlite.Database, token: []const u8) !bool {
 test "mt pin <cask-token> falls through kegs and sets casks.pinned" {
     const path = try setupPrefix("pin_cask_set");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -206,7 +209,7 @@ test "mt pin <cask-token> falls through kegs and sets casks.pinned" {
 test "mt unpin <cask-token> clears casks.pinned" {
     const path = try setupPrefix("unpin_cask_clear");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -225,7 +228,7 @@ test "mt unpin <cask-token> clears casks.pinned" {
 test "mt pin <cask> is idempotent — re-pinning a cask still succeeds" {
     const path = try setupPrefix("pin_cask_idempotent");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {
@@ -244,7 +247,7 @@ test "mt pin <cask> is idempotent — re-pinning a cask still succeeds" {
 test "isPinned reflects casks.pinned via fall-through" {
     const path = try setupPrefix("ispinned_cask");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     var db = try openDb(path);
@@ -259,7 +262,7 @@ test "isPinned reflects casks.pinned via fall-through" {
 test "mt pin is idempotent — re-pinning is a no-op success" {
     const path = try setupPrefix("pin_idempotent");
     defer testing.allocator.free(path);
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     {

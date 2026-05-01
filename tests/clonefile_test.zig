@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const clonefile = @import("malt").clonefile;
 
@@ -14,28 +15,28 @@ fn tmpRoot(comptime tag: []const u8) []const u8 {
 }
 
 fn setupSourceTree(root: []const u8) !void {
-    malt.fs_compat.deleteTreeAbsolute(root) catch {};
-    try malt.fs_compat.makeDirAbsolute(root);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, root);
     var src_buf: [512]u8 = undefined;
     const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
-    try malt.fs_compat.makeDirAbsolute(src);
+    try test_io.makeDirAbsolute(std.Options.debug_io, src);
 
     // A regular file.
     var f_buf: [512]u8 = undefined;
     const fpath = try std.fmt.bufPrint(&f_buf, "{s}/hello.txt", .{src});
-    const f = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), fpath, .{});
-    defer f.close(malt.io_mod.ctx());
-    try f.writeStreamingAll(malt.io_mod.ctx(), "hi\n");
+    const f = try test_io.cwd().createFile(std.Options.debug_io, fpath, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, "hi\n");
 
     // A nested file.
     var sub_buf: [512]u8 = undefined;
     const sub = try std.fmt.bufPrint(&sub_buf, "{s}/inner", .{src});
-    try malt.fs_compat.makeDirAbsolute(sub);
+    try test_io.makeDirAbsolute(std.Options.debug_io, sub);
     var sub_f_buf: [512]u8 = undefined;
     const sf_path = try std.fmt.bufPrint(&sub_f_buf, "{s}/world.txt", .{sub});
-    const sf = try malt.fs_compat.cwd().createFile(malt.io_mod.ctx(), sf_path, .{});
-    defer sf.close(malt.io_mod.ctx());
-    try sf.writeStreamingAll(malt.io_mod.ctx(), "nested\n");
+    const sf = try test_io.cwd().createFile(std.Options.debug_io, sf_path, .{});
+    defer sf.close(std.Options.debug_io);
+    try sf.writeStreamingAll(std.Options.debug_io, "nested\n");
 }
 
 test "isApfs returns a plausible bool for the repo tmp dir" {
@@ -54,7 +55,7 @@ test "isApfs returns true for a path that cannot be stat'd (fallback assumption)
 
 test "cloneTree duplicates a small directory tree" {
     const root = tmpRoot("basic");
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
@@ -67,25 +68,25 @@ test "cloneTree duplicates a small directory tree" {
     // Verify the cloned top-level file exists with the same contents.
     var verify_buf: [512]u8 = undefined;
     const cloned = try std.fmt.bufPrint(&verify_buf, "{s}/hello.txt", .{dst});
-    const f = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), cloned, .{});
-    defer f.close(malt.io_mod.ctx());
+    const f = try test_io.cwd().openFile(std.Options.debug_io, cloned, .{});
+    defer f.close(std.Options.debug_io);
     var contents: [16]u8 = undefined;
-    const n = try f.readPositionalAll(malt.io_mod.ctx(), &contents, 0);
+    const n = try f.readPositionalAll(std.Options.debug_io, &contents, 0);
     try testing.expectEqualStrings("hi\n", contents[0..n]);
 
     // And the nested file.
     var nested_buf: [512]u8 = undefined;
     const nested = try std.fmt.bufPrint(&nested_buf, "{s}/inner/world.txt", .{dst});
-    const nf = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), nested, .{});
-    defer nf.close(malt.io_mod.ctx());
+    const nf = try test_io.cwd().openFile(std.Options.debug_io, nested, .{});
+    defer nf.close(std.Options.debug_io);
     var nb: [16]u8 = undefined;
-    const nn = try nf.readPositionalAll(malt.io_mod.ctx(), &nb, 0);
+    const nn = try nf.readPositionalAll(std.Options.debug_io, &nb, 0);
     try testing.expectEqualStrings("nested\n", nb[0..nn]);
 }
 
 test "cloneTree fails with AlreadyExists when dst already exists" {
     const root = tmpRoot("exists");
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
@@ -96,7 +97,7 @@ test "cloneTree fails with AlreadyExists when dst already exists" {
     // Pre-create dst — clonefile(2) EEXIST → CloneError.AlreadyExists on APFS.
     // On non-APFS filesystems the fallback may overwrite gracefully, so we
     // only assert the error on APFS.
-    try malt.fs_compat.makeDirAbsolute(dst);
+    try test_io.makeDirAbsolute(std.Options.debug_io, dst);
     const result = clonefile.cloneTree(std.Options.debug_io, testing.allocator, src, dst);
     if (clonefile.isApfs("/tmp")) {
         try testing.expectError(clonefile.CloneError.AlreadyExists, result);
@@ -123,7 +124,7 @@ test "cloneTree errors on a missing source when the fallback path is taken" {
 
 test "copyTreeFallback duplicates files, subdirs, and symlinks" {
     const root = tmpRoot("fallback");
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
@@ -134,29 +135,29 @@ test "copyTreeFallback duplicates files, subdirs, and symlinks" {
     // Add a symlink into the source tree so the sym_link branch runs.
     var link_path_buf: [512]u8 = undefined;
     const link_path = try std.fmt.bufPrint(&link_path_buf, "{s}/link.txt", .{src});
-    malt.fs_compat.cwd().symLink(malt.io_mod.ctx(), "hello.txt", link_path, .{}) catch {};
+    test_io.cwd().symLink(std.Options.debug_io, "hello.txt", link_path, .{}) catch {};
 
     try clonefile.copyTreeFallback(std.Options.debug_io, testing.allocator, src, dst);
 
     // Verify the top-level file is present.
     var check_buf: [512]u8 = undefined;
     const check = try std.fmt.bufPrint(&check_buf, "{s}/hello.txt", .{dst});
-    const f = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), check, .{});
-    defer f.close(malt.io_mod.ctx());
+    const f = try test_io.cwd().openFile(std.Options.debug_io, check, .{});
+    defer f.close(std.Options.debug_io);
     var contents: [16]u8 = undefined;
-    const n = try f.readPositionalAll(malt.io_mod.ctx(), &contents, 0);
+    const n = try f.readPositionalAll(std.Options.debug_io, &contents, 0);
     try testing.expectEqualStrings("hi\n", contents[0..n]);
 
     // And the nested file.
     var nested_buf: [512]u8 = undefined;
     const nested = try std.fmt.bufPrint(&nested_buf, "{s}/inner/world.txt", .{dst});
-    const nf = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), nested, .{});
-    defer nf.close(malt.io_mod.ctx());
+    const nf = try test_io.cwd().openFile(std.Options.debug_io, nested, .{});
+    defer nf.close(std.Options.debug_io);
 }
 
 test "copyTreeFallback is idempotent when the destination already exists" {
     const root = tmpRoot("fallback_idem");
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     try setupSourceTree(root);
 
     var src_buf: [512]u8 = undefined;
@@ -164,14 +165,14 @@ test "copyTreeFallback is idempotent when the destination already exists" {
     var dst_buf: [512]u8 = undefined;
     const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst_idem", .{root});
 
-    try malt.fs_compat.makeDirAbsolute(dst);
+    try test_io.makeDirAbsolute(std.Options.debug_io, dst);
     try clonefile.copyTreeFallback(std.Options.debug_io, testing.allocator, src, dst);
 
     // Verify the nested file was still copied.
     var check_buf: [512]u8 = undefined;
     const check = try std.fmt.bufPrint(&check_buf, "{s}/inner/world.txt", .{dst});
-    const f = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), check, .{});
-    defer f.close(malt.io_mod.ctx());
+    const f = try test_io.cwd().openFile(std.Options.debug_io, check, .{});
+    defer f.close(std.Options.debug_io);
 }
 
 test "copyTreeFallback errors when source directory does not exist" {
@@ -188,7 +189,7 @@ test "copyTreeFallback errors when source directory does not exist" {
 // MALT_TEST_NON_APFS_DIR. On the common macOS dev box every visible mount
 // is APFS, so we skip with a clear message instead of inventing one.
 test "cloneTree falls back to copyTree on a non-APFS volume" {
-    const non_apfs_dir = malt.fs_compat.getenv("MALT_TEST_NON_APFS_DIR") orelse {
+    const non_apfs_dir = test_io.getenv("MALT_TEST_NON_APFS_DIR") orelse {
         std.log.warn(
             "skipping non-APFS fallback test: set MALT_TEST_NON_APFS_DIR to a writable non-APFS mount to enable",
             .{},
@@ -206,7 +207,7 @@ test "cloneTree falls back to copyTree on a non-APFS volume" {
     // Source on the repo tmp root (APFS in CI's macOS runner); dst on the
     // caller-provided non-APFS mount so clonefile(2) returns ENOTSUP.
     const src_root = tmpRoot("nonapfs_src");
-    defer malt.fs_compat.deleteTreeAbsolute(src_root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, src_root) catch {};
     try setupSourceTree(src_root);
 
     var src_buf: [512]u8 = undefined;
@@ -218,17 +219,17 @@ test "cloneTree falls back to copyTree on a non-APFS volume" {
         "{s}/malt_clonefile_nonapfs_dst",
         .{non_apfs_dir},
     );
-    malt.fs_compat.deleteTreeAbsolute(dst) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(dst) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, dst) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, dst) catch {};
 
     // Without the fix, OPNOTSUPP is misclassified and this returns IoError.
     try clonefile.cloneTree(std.Options.debug_io, testing.allocator, src, dst);
 
     var verify_buf: [512]u8 = undefined;
     const copied = try std.fmt.bufPrint(&verify_buf, "{s}/hello.txt", .{dst});
-    const f = try malt.fs_compat.cwd().openFile(malt.io_mod.ctx(), copied, .{});
-    defer f.close(malt.io_mod.ctx());
+    const f = try test_io.cwd().openFile(std.Options.debug_io, copied, .{});
+    defer f.close(std.Options.debug_io);
     var contents: [16]u8 = undefined;
-    const n = try f.readPositionalAll(malt.io_mod.ctx(), &contents, 0);
+    const n = try f.readPositionalAll(std.Options.debug_io, &contents, 0);
     try testing.expectEqualStrings("hi\n", contents[0..n]);
 }

@@ -11,7 +11,6 @@ const ghcr_mod = @import("../net/ghcr.zig");
 const api_mod = @import("../net/api.zig");
 const atomic = @import("../fs/atomic.zig");
 const lock_mod = @import("../db/lock.zig");
-const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
@@ -94,7 +93,7 @@ pub fn findCachedBinary(
 }
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "run")) return;
+    if (help.showIfRequested(ctx, args, "run")) return;
 
     const parsed = parseArgs(args) orelse {
         output.err("Usage: mt run [--keep] <package> [-- <args...>]", .{});
@@ -276,7 +275,7 @@ fn ephemeralRun(
     } else {
         output.info("Running {s} {s} (ephemeral)...", .{ pkg_name, formula.version });
     }
-    const stderr = io_mod.stderrFile();
+    const stderr = ctx.stderr;
     // Separator is purely cosmetic; a closed stderr shouldn't kill the run.
     stderr.writeStreamingAll(ctx.io, "---\n") catch {};
 

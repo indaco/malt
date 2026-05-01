@@ -4,7 +4,6 @@
 const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
 const output = @import("../../ui/output.zig");
-const io_mod = @import("../../ui/io.zig");
 const args_mod = @import("args.zig");
 
 pub const Error = args_mod.Error;
@@ -67,5 +66,5 @@ pub fn confirmScope(yes: bool, expected: []const u8, scope_label: []const u8) Er
 }
 
 pub fn writeStderr(s: []const u8) void {
-    io_mod.stderrWriteAll(s);
+    output.writeStderrAll(s);
 }

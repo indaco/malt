@@ -145,7 +145,7 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
 });
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "install")) return;
+    if (help.showIfRequested(ctx, args, "install")) return;
 
     // Parse flags
     var packages: std.ArrayList([]const u8) = .empty;

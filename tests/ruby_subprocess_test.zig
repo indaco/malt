@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const ruby = @import("malt").ruby_subprocess;
 
@@ -19,9 +20,11 @@ fn uniqueDir(suffix: []const u8) ![]u8 {
     const p = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_ruby_sub_{d}_{s}",
-        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        .{ test_io.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
     );
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), p);
+    try test_io.cwd().createDirPath(std.Options.debug_io, p);
     return p;
 }
 
@@ -39,7 +42,7 @@ test "resolveFormulaRbPath returns null for an empty name" {
 test "resolveFormulaRbPath returns null when neither layout exists" {
     const tap = try uniqueDir("no_formula");
     defer testing.allocator.free(tap);
-    defer malt.fs_compat.deleteTreeAbsolute(tap) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
     var buf: [1024]u8 = undefined;
     try testing.expect(ruby.resolveFormulaRbPath(testIo(), &buf, tap, "wget") == null);
 }
@@ -47,13 +50,13 @@ test "resolveFormulaRbPath returns null when neither layout exists" {
 test "resolveFormulaRbPath prefers the sharded Formula/{first}/{name}.rb layout" {
     const tap = try uniqueDir("sharded");
     defer testing.allocator.free(tap);
-    defer malt.fs_compat.deleteTreeAbsolute(tap) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
     const shard_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Formula/w", .{tap});
     defer testing.allocator.free(shard_dir);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), shard_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, shard_dir);
     const rb = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{shard_dir});
     defer testing.allocator.free(rb);
-    (try malt.fs_compat.createFileAbsolute(rb, .{})).close(malt.io_mod.ctx());
+    (try test_io.createFileAbsolute(std.Options.debug_io, rb, .{})).close(std.Options.debug_io);
 
     var buf: [1024]u8 = undefined;
     const got = ruby.resolveFormulaRbPath(testIo(), &buf, tap, "wget");
@@ -64,13 +67,13 @@ test "resolveFormulaRbPath prefers the sharded Formula/{first}/{name}.rb layout"
 test "resolveFormulaRbPath falls back to the flat Formula/{name}.rb layout" {
     const tap = try uniqueDir("flat");
     defer testing.allocator.free(tap);
-    defer malt.fs_compat.deleteTreeAbsolute(tap) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
     const flat_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Formula", .{tap});
     defer testing.allocator.free(flat_dir);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), flat_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, flat_dir);
     const rb = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{flat_dir});
     defer testing.allocator.free(rb);
-    (try malt.fs_compat.createFileAbsolute(rb, .{})).close(malt.io_mod.ctx());
+    (try test_io.createFileAbsolute(std.Options.debug_io, rb, .{})).close(std.Options.debug_io);
 
     var buf: [1024]u8 = undefined;
     const got = ruby.resolveFormulaRbPath(testIo(), &buf, tap, "wget");
@@ -81,13 +84,13 @@ test "resolveFormulaRbPath falls back to the flat Formula/{name}.rb layout" {
 test "extractPostInstallBody returns null when the file has no post_install" {
     const tap = try uniqueDir("no_postinstall");
     defer testing.allocator.free(tap);
-    defer malt.fs_compat.deleteTreeAbsolute(tap) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
     const rb = try std.fmt.allocPrint(testing.allocator, "{s}/hello.rb", .{tap});
     defer testing.allocator.free(rb);
     {
-        const f = try malt.fs_compat.createFileAbsolute(rb, .{});
-        try f.writeStreamingAll(malt.io_mod.ctx(), "class Hello < Formula\n  url \"x\"\nend\n");
-        f.close(malt.io_mod.ctx());
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, rb, .{});
+        try f.writeStreamingAll(std.Options.debug_io, "class Hello < Formula\n  url \"x\"\nend\n");
+        f.close(std.Options.debug_io);
     }
     try testing.expect(ruby.extractPostInstallBody(testIo(), testing.allocator, rb) == null);
 }
@@ -255,12 +258,12 @@ test "fetchPostInstallFromGitHub returns null for an empty name" {
 test "extractPostInstallBody captures the body between def post_install and matching end" {
     const tap = try uniqueDir("with_postinstall");
     defer testing.allocator.free(tap);
-    defer malt.fs_compat.deleteTreeAbsolute(tap) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
     const rb = try std.fmt.allocPrint(testing.allocator, "{s}/hello.rb", .{tap});
     defer testing.allocator.free(rb);
     {
-        const f = try malt.fs_compat.createFileAbsolute(rb, .{});
-        try f.writeStreamingAll(malt.io_mod.ctx(),
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, rb, .{});
+        try f.writeStreamingAll(std.Options.debug_io,
             \\class Hello < Formula
             \\  def post_install
             \\    mkdir_p "etc/hello"
@@ -269,7 +272,7 @@ test "extractPostInstallBody captures the body between def post_install and matc
             \\end
             \\
         );
-        f.close(malt.io_mod.ctx());
+        f.close(std.Options.debug_io);
     }
     const body = ruby.extractPostInstallBody(testIo(), testing.allocator, rb);
     try testing.expect(body != null);
@@ -419,7 +422,7 @@ test "ca-certificates-shape: dispatcher with unparseable siblings leaves flog cl
     var flog = malt.dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    try malt.dsl.executePostInstall(malt.io_mod.ctx(), malt.app_ctx.processEnviron(), alloc, .{
+    try malt.dsl.executePostInstall(std.Options.debug_io, malt.app_ctx.processEnviron(), alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,

@@ -6,6 +6,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const install = @import("malt").install;
 
 const c = struct {
@@ -362,20 +363,20 @@ test "expandTildePath returns null when HOME is unset and ~/ is used" {
 // timestamp. Different suffixes keep concurrent tests from colliding.
 fn setupPrefix(comptime fixed: [:0]const u8) !void {
     comptime std.debug.assert(fixed.len <= "/opt/homebrew".len);
-    malt.fs_compat.deleteTreeAbsolute(fixed) catch {};
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), fixed);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, fixed) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, fixed);
     _ = c.setenv("MALT_PREFIX", fixed.ptr, 1);
 }
 
 fn cleanupPrefix(comptime fixed: [:0]const u8) void {
-    malt.fs_compat.deleteTreeAbsolute(fixed) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, fixed) catch {};
     _ = c.unsetenv("MALT_PREFIX");
 }
 
 fn writeFile(abs_path: []const u8, content: []const u8) !void {
-    const f = try malt.fs_compat.createFileAbsolute(abs_path, .{});
-    defer f.close(malt.io_mod.ctx());
-    try f.writeStreamingAll(malt.io_mod.ctx(), content);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, abs_path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, content);
 }
 
 const sample_rb =
@@ -535,9 +536,9 @@ test "execute --local tolerates a world-writable fixture (advisory only)" {
 
     // 0o666 — any local user could rewrite it between checkout and
     // install.
-    const f = try malt.fs_compat.openFileAbsolute(rb_path, .{ .mode = .read_only });
-    try f.setPermissions(malt.io_mod.ctx(), std.Io.File.Permissions.fromMode(@intCast(0o666)));
-    f.close(malt.io_mod.ctx());
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, rb_path, .{ .mode = .read_only });
+    try f.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(@intCast(0o666)));
+    f.close(std.Options.debug_io);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -624,7 +625,7 @@ fn seedLocalKeg(
     // to tear down when uninstall is exercised.
     const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
     defer testing.allocator.free(cellar_dir);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), cellar_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar_dir);
 
     var stmt = try db.prepare(
         "INSERT INTO kegs (name, full_name, version, tap, store_sha256, cellar_path, install_reason)" ++
@@ -644,7 +645,7 @@ test "isInstalled sees a locally-recorded keg by name" {
     try setupPrefix(prefix);
     defer cleanupPrefix(prefix);
 
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), "/tmp/mlh/db");
+    try test_io.cwd().createDirPath(std.Options.debug_io, "/tmp/mlh/db");
     const db_path = "/tmp/mlh/db/malt.db";
     try seedLocalKeg(db_path, prefix, "wget", "1.0", "/tmp/mlh/wget.rb");
 
@@ -661,7 +662,7 @@ test "uninstall + purge CLI flow treats tap='local' rows like any other keg" {
     try setupPrefix(prefix);
     defer cleanupPrefix(prefix);
 
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), "/tmp/mli/db");
+    try test_io.cwd().createDirPath(std.Options.debug_io, "/tmp/mli/db");
     try seedLocalKeg("/tmp/mli/db/malt.db", prefix, "wget", "1.0", "/tmp/mli/wget.rb");
 
     // Reopen to confirm the row is queryable with a fresh handle.
@@ -688,7 +689,7 @@ test "execute --local rejects a directory path (not a regular file)" {
     // check is what rejects it (rather than basename check).
     const dir_path = try std.fmt.allocPrint(testing.allocator, "{s}/fake.rb", .{prefix});
     defer testing.allocator.free(dir_path);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), dir_path);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir_path);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

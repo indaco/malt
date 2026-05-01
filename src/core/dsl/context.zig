@@ -89,8 +89,7 @@ pub const ExecContext = struct {
     arena: std.mem.Allocator,
 
     /// `std.Io` threaded from the cli caller (built once with the parent
-    /// `Environ` so spawn finds PATH). Builtins read it directly instead
-    /// of pulling `io_mod.ctx()`.
+    /// `Environ` so spawn finds PATH). Builtins read it directly.
     io: std.Io,
 
     /// Live process environ used by `process.zig` (PATH lookup, ENV[]) and

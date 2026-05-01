@@ -2,7 +2,6 @@
 //! CLI entry point and command dispatch for the `mt` binary.
 
 const std = @import("std");
-const io_mod = @import("ui/io.zig");
 const color_mod = @import("ui/color.zig");
 const AppCtx = @import("app_ctx.zig").AppCtx;
 
@@ -282,14 +281,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Single Threaded io for the whole process; outlives the ctx it backs.
     var threaded: std.Io.Threaded = .init(backing, .{ .environ = init.environ });
     defer threaded.deinit();
-    const ctx: AppCtx = .{ .io = threaded.io(), .environ = init.environ };
+    const ctx: AppCtx = .{
+        .io = threaded.io(),
+        .environ = init.environ,
+        .stdout = std.Io.File.stdout(),
+        .stderr = std.Io.File.stderr(),
+    };
 
     // Seed the ui package state once so output/progress/color stop
-    // pulling io/environ from `io_mod.ctx()` / `std.c.environ` globals.
+    // pulling io/environ/stdio from module-level globals.
     const output_mod = @import("ui/output.zig");
     const progress_mod = @import("ui/progress.zig");
-    output_mod.setRuntime(ctx.io, ctx.environ);
-    progress_mod.setIo(ctx.io);
+    output_mod.setRuntime(ctx.io, ctx.environ, ctx.stdout, ctx.stderr);
+    progress_mod.setRuntime(ctx.io, ctx.stderr);
     color_mod.setRuntime(ctx.io, ctx.environ);
 
     var args_it = try init.args.iterateAllocator(allocator);
@@ -302,7 +306,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const args = args_list.items;
 
     if (args.len == 0) {
-        printUsage();
+        printUsage(&ctx);
         return;
     }
 
@@ -331,7 +335,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     if (!found_cmd) {
-        printUsage();
+        printUsage(&ctx);
         return;
     }
     const cmd_args = filtered.items;
@@ -389,15 +393,15 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
             if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
                 try version_update.execute(ctx, allocator, cmd_args[1..]);
             } else {
-                printVersion();
+                printVersion(ctx);
             }
         },
-        .help => printUsage(),
-        .version => printVersion(),
+        .help => printUsage(ctx),
+        .version => printVersion(ctx),
     }
 }
 
-fn printUsage() void {
+fn printUsage(ctx: *const AppCtx) void {
     const usage =
         \\malt — a fast, drop-in Homebrew alternative for macOS.
         \\Warm installs in milliseconds. post_install scripts that actually run.
@@ -458,11 +462,11 @@ fn printUsage() void {
         \\                    Suppress the "newer malt available" stderr notice
         \\
     ;
-    io_mod.stdoutWriteAll(usage);
+    ctx.stdout.writeStreamingAll(ctx.io, usage) catch {};
 }
 
-fn printVersion() void {
-    io_mod.stdoutWriteAll("malt " ++ version ++ "\n");
+fn printVersion(ctx: *const AppCtx) void {
+    ctx.stdout.writeStreamingAll(ctx.io, "malt " ++ version ++ "\n") catch {};
 }
 
 fn brewFallback(ctx: *const AppCtx, args: []const []const u8) !void {
@@ -500,7 +504,7 @@ fn brewFallback(ctx: *const AppCtx, args: []const []const u8) !void {
     if (args.len > 0) {
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "malt: '{s}' is not a malt command and brew was not found.\n", .{args[0]}) catch return;
-        io_mod.stderrWriteAll(msg);
+        ctx.stderr.writeStreamingAll(ctx.io, msg) catch {};
     }
-    io_mod.stderrWriteAll("Install Homebrew: https://brew.sh\n");
+    ctx.stderr.writeStreamingAll(ctx.io, "Install Homebrew: https://brew.sh\n") catch {};
 }

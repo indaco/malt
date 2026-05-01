@@ -1,4 +1,4 @@
-//! malt — lint-as-test for fs_compat.readAll misuse
+//! malt — lint-as-test for readAll misuse inside loops
 //!
 //! `readAll` is a positional read from offset 0 — safe for single-shot
 //! reads of a whole file, fatal inside a loop (every iteration reads
@@ -10,8 +10,8 @@
 
 const std = @import("std");
 const testing = std.testing;
-const malt = @import("malt");
-const fs = malt.fs_compat;
+const test_io = @import("test_io");
+const fs = test_io;
 
 /// Lines of look-ahead after a `while (` / `for (` header before we
 /// stop counting. Real streaming loops put the `readAll(` within a
@@ -141,7 +141,7 @@ test "findReadAllInLoop allows readAll when openFile opens a fresh handle per it
     // therefore safe regardless of being inside a while loop.
     const ok =
         \\while (walker.next() catch null) |entry| {
-        \\    const file = fs_compat.openFileAbsolute(path, .{}) catch continue;
+        \\    const file = fs_compat.openFileAbsolute(std.Options.debug_io, path, .{}) catch continue;
         \\    var magic: [4]u8 = undefined;
         \\    const n = file.readAll(&magic) catch continue;
         \\    _ = n;
@@ -193,7 +193,7 @@ test "findReadAllInLoop reports the line number of the first offender" {
 // cask fix) re-introduces the bug pattern anywhere under src/.
 
 test "no readAll() inside a loop anywhere under src/" {
-    const io = malt.io_mod.ctx();
+    const io = std.Options.debug_io;
     var dir = try fs.cwd().openDir(io, "src", .{ .iterate = true });
     defer dir.close(io);
 

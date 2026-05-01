@@ -5,6 +5,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const cask = malt.cask;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
@@ -94,8 +95,8 @@ test "artifact_type_override bypasses URL detection" {
 
     // With override: passes the type gate (gets further before failing)
     installer.artifact_type_override = .dmg;
-    malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix ++ "/cache/Cask") catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.cwd().createDirPath(std.Options.debug_io, prefix ++ "/cache/Cask") catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     const result = installer.install(&c);
     // Should fail on download, not on the type gate
     try testing.expectError(cask.CaskError.DownloadFailed, result);
@@ -117,9 +118,9 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
 
     // Stage a scratch "app bundle" that uninstall will try to delete.
     const base = "/tmp/malt_cask_uninstall_test";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), base);
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     const app_path_z = try std.fmt.allocPrintSentinel(
         testing.allocator,
@@ -128,14 +129,14 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
         0,
     );
     defer testing.allocator.free(app_path_z);
-    try malt.fs_compat.makeDirAbsolute(app_path_z);
+    try test_io.makeDirAbsolute(std.Options.debug_io, app_path_z);
 
     try cask.recordInstall(&db, &c, app_path_z);
     try testing.expect(cask.isInstalled(&db, "firefox"));
 
     const prefix: [:0]const u8 = "/tmp/mc-uninstall";
-    malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), prefix) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.cwd().createDirPath(std.Options.debug_io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
     var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix);
@@ -143,5 +144,5 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
 
     // DB row is gone and the staged "app bundle" has been removed.
     try testing.expect(!cask.isInstalled(&db, "firefox"));
-    try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(app_path_z, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(std.Options.debug_io, app_path_z, .{}));
 }

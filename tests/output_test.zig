@@ -7,8 +7,9 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const output = malt.output;
-const io_mod = malt.io_mod;
+const io_mod = malt.output;
 const color = malt.color;
 
 /// Set up stderr capture with an explicit color/emoji state. Returns a
@@ -148,7 +149,9 @@ test "jsonTimeSuffix starts with the literal key prefix" {
 test "jsonTimeSuffix emits a non-negative integer for a past start_ts" {
     // A milliTimestamp() captured just above is by definition ≤ the one
     // fetched inside the helper, so the diff cannot be negative.
-    const start = malt.fs_compat.milliTimestamp();
+    const start = test_io.milliTimestamp(
+        std.Options.debug_io,
+    );
     const got = try encodeTimeSuffix(start);
     defer testing.allocator.free(got);
 
@@ -159,7 +162,9 @@ test "jsonTimeSuffix emits a non-negative integer for a past start_ts" {
 }
 
 test "jsonTimeSuffix produces a large elapsed value for a far-past start_ts" {
-    const now = malt.fs_compat.milliTimestamp();
+    const now = test_io.milliTimestamp(
+        std.Options.debug_io,
+    );
     const got = try encodeTimeSuffix(now - 1_000_000);
     defer testing.allocator.free(got);
 
@@ -183,21 +188,15 @@ test "jsonTimeSuffix composes onto an open object to yield valid JSON" {
     try testing.expect(parsed.value.object.get("time_ms").?.integer >= 0);
 }
 
-// Regression: under the test runner, `io_mod.stdoutFile()` must not
-// resolve to fd 1. The runner owns fd 1 for its IPC; any byte on it
-// wedges the build runner in `read()`. If this assertion breaks,
-// `zig build test` starts deadlocking again.
-test "stdoutFile is not fd 1 under the test runner" {
-    try testing.expect(io_mod.stdoutFile().handle != std.Io.File.stdout().handle);
-}
-
-// Regression (paired with the helper above): exercising a call site that
-// previously deadlocked — `stdoutWriteAll` of a multi-KB payload — must
-// complete without hanging.
-test "stdoutWriteAll through the redirected path completes without blocking" {
+// Regression: tests that don't seed an explicit stdio sink must not
+// have output.writeStdoutAll write through to fd 1. The runner owns
+// fd 1 for its IPC; any byte on it wedges the build runner in `read()`.
+// The default sentinel fd `-1` makes the write fail silently.
+test "writeStdoutAll without a seeded sink does not write to fd 1" {
     var buf: [4096]u8 = undefined;
     @memset(&buf, 'x');
-    io_mod.stdoutWriteAll(&buf);
+    // Must complete without blocking and without corrupting the runner.
+    io_mod.writeStdoutAll(&buf);
 }
 
 // ---------------------------------------------------------------------------

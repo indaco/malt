@@ -6,6 +6,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const perms = malt.perms;
 
 test "classify: 0755 + current uid is ok" {
@@ -64,10 +65,10 @@ test "classify: setuid bit does not count as writable" {
 
 test "walkPrefix: clean tree yields no findings" {
     const base = "/tmp/malt_perms_clean";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), base ++ "/bin");
-    (try malt.fs_compat.createFileAbsolute(base ++ "/bin/foo", .{})).close(malt.io_mod.ctx());
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, base ++ "/bin");
+    (try test_io.createFileAbsolute(std.Options.debug_io, base ++ "/bin/foo", .{})).close(std.Options.debug_io);
 
     const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, base, perms.currentUid(), 64);
     defer perms.freeFindings(testing.allocator, findings);
@@ -76,11 +77,11 @@ test "walkPrefix: clean tree yields no findings" {
 
 test "walkPrefix: detects other-writable file" {
     const base = "/tmp/malt_perms_other_writable";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), base);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, base);
     const path = base ++ "/world_writable.txt";
-    (try malt.fs_compat.createFileAbsolute(path, .{})).close(malt.io_mod.ctx());
+    (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
 
     // chmod o+w
     const c = struct {
@@ -117,9 +118,9 @@ test "walkPrefix: missing prefix returns empty findings, no error" {
 
 test "walkPrefix: respects max_findings cap" {
     const base = "/tmp/malt_perms_cap";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), base);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, base);
     const c = struct {
         extern "c" fn chmod(path: [*:0]const u8, mode: u16) c_int;
     };
@@ -127,7 +128,7 @@ test "walkPrefix: respects max_findings cap" {
     for (0..5) |i| {
         var buf: [64]u8 = undefined;
         const p = try std.fmt.bufPrintSentinel(&buf, "{s}/f{d}", .{ base, i }, 0);
-        (try malt.fs_compat.createFileAbsolute(p, .{})).close(malt.io_mod.ctx());
+        (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
         if (c.chmod(p.ptr, 0o666) != 0) return error.TestUnexpectedResult;
     }
 

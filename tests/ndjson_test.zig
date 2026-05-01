@@ -9,9 +9,10 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const output = malt.output;
-const io_mod = malt.io_mod;
+const io_mod = malt.output;
 const upgrade = malt.upgrade;
 
 const c = struct {
@@ -190,19 +191,21 @@ test "upgrade emits bracketing lock_acquired + install_complete under ndjson" {
     const path = try std.fmt.allocPrintSentinel(
         testing.allocator,
         "/tmp/malt_ndjson_upgrade_{d}",
-        .{malt.fs_compat.nanoTimestamp()},
+        .{test_io.nanoTimestamp(
+            std.Options.debug_io,
+        )},
         0,
     );
     defer testing.allocator.free(path);
-    malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), path);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
 
     const prior = setNdjsonOn();
     defer restoreNdjson(prior);

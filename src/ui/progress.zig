@@ -8,30 +8,27 @@
 //! mid-chain output.
 
 const std = @import("std");
-const io_mod = @import("io.zig");
 
 const color = @import("color.zig");
 const output = @import("output.zig");
 
-/// Process-wide io seeded once from `main` via `setIo`. Mirrors the
-/// `pkg_io` pattern in `output`/`color` — calls into `progress` stay
-/// arg-stable while the global wrapper layer drops out.
+/// Process-wide io and stderr sink seeded once from `main` via
+/// `setRuntime`. `pkg_stderr` defaults to fd `-1` so unconfigured tests
+/// silently drop progress writes; `pkg_io` defaults to `debug_io`.
 var pkg_io: std.Io = std.Options.debug_io;
+var pkg_stderr: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
 
-pub fn setIo(io: std.Io) void {
+pub fn setRuntime(io: std.Io, stderr: std.Io.File) void {
     pkg_io = io;
-}
-
-fn stderrFile() std.Io.File {
-    return io_mod.stderrFile();
+    pkg_stderr = stderr;
 }
 
 fn supportsAnsi() bool {
-    return stderrFile().supportsAnsiEscapeCodes(pkg_io) catch false;
+    return pkg_stderr.supportsAnsiEscapeCodes(pkg_io) catch false;
 }
 
 fn writeStderrAll(bytes: []const u8) void {
-    stderrFile().writeStreamingAll(pkg_io, bytes) catch {};
+    pkg_stderr.writeStreamingAll(pkg_io, bytes) catch {};
 }
 
 fn nowMs() i64 {

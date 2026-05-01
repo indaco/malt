@@ -7,8 +7,9 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const verify = malt.update_verify;
-const fs_compat = malt.fs_compat;
+const fs_compat = test_io;
 
 /// Live-environ Threaded so subprocess PATH lookup matches the parent.
 const LiveIo = struct {
@@ -113,13 +114,13 @@ test "lookupSha256 ignores malformed lines without crashing" {
 /// and chmod it executable. Used as a drop-in `cosign_bin` so tests can
 /// exercise the subprocess path without depending on real cosign.
 fn writeFakeCosign(path: []const u8, exit_code: u8) !void {
-    fs_compat.deleteFileAbsolute(path) catch {};
-    const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close(malt.io_mod.ctx());
+    fs_compat.deleteFileAbsolute(std.Options.debug_io, path) catch {};
+    const f = try fs_compat.createFileAbsolute(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
     var buf: [64]u8 = undefined;
     const script = try std.fmt.bufPrint(&buf, "#!/bin/sh\nexit {d}\n", .{exit_code});
-    try f.writeStreamingAll(malt.io_mod.ctx(), script);
-    try f.setPermissions(malt.io_mod.ctx(), std.Io.File.Permissions.fromMode(@intCast(0o755)));
+    try f.writeStreamingAll(std.Options.debug_io, script);
+    try f.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(@intCast(0o755)));
 }
 
 const fake_args = verify.CosignBlob{
@@ -142,7 +143,7 @@ test "verifyCosignBlob accepts a cosign that exits 0" {
     defer lio.deinit();
     const path = "/tmp/malt_fake_cosign_ok";
     try writeFakeCosign(path, 0);
-    defer fs_compat.deleteFileAbsolute(path) catch {};
+    defer fs_compat.deleteFileAbsolute(std.Options.debug_io, path) catch {};
 
     var args = fake_args;
     args.cosign_bin = path;
@@ -161,9 +162,9 @@ test "verifyCosignBlob finds a bare 'cosign' via PATH (regression: gh#151)" {
     // a fake `cosign` into a scratch dir, prepend to PATH, and assert
     // bare-name spawn resolves it.
     const dir = "/tmp/malt_cosign_path_lookup";
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
     try writeFakeCosign(dir ++ "/cosign", 0);
 
@@ -206,8 +207,8 @@ const Fixture = struct {
 
     fn setup(allocator: std.mem.Allocator, tag: []const u8, tarball_bytes: []const u8, checksums_bytes: []const u8, cosign_exit: u8) !Fixture {
         const dir = try std.fmt.allocPrint(allocator, "/tmp/malt_verifyall_{s}", .{tag});
-        fs_compat.deleteTreeAbsolute(dir) catch {};
-        try fs_compat.makeDirAbsolute(dir);
+        fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+        try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
 
         const tarball = try std.fmt.allocPrint(allocator, "{s}/malt.tgz", .{dir});
         const checksums = try std.fmt.allocPrint(allocator, "{s}/checksums.txt", .{dir});
@@ -229,7 +230,7 @@ const Fixture = struct {
     }
 
     fn deinit(self: *const Fixture, allocator: std.mem.Allocator) void {
-        fs_compat.deleteTreeAbsolute(self.dir) catch {};
+        fs_compat.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
         allocator.free(self.dir);
         allocator.free(self.tarball);
         allocator.free(self.checksums);
@@ -251,9 +252,9 @@ const Fixture = struct {
 };
 
 fn writeFile(path: []const u8, content: []const u8) !void {
-    const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close(malt.io_mod.ctx());
-    try f.writeStreamingAll(malt.io_mod.ctx(), content);
+    const f = try fs_compat.createFileAbsolute(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, content);
 }
 
 test "verifyAll accepts a valid tarball + matching checksum + good cosign" {
@@ -304,7 +305,7 @@ test "verifyAll reports ReadFailed when the tarball cannot be read" {
     defer lio.deinit();
     var fx = try Fixture.setup(testing.allocator, "missing_tarball", "hello world", HELLO_WORLD_HEX_LINE, 0);
     defer fx.deinit(testing.allocator);
-    try fs_compat.deleteFileAbsolute(fx.tarball);
+    try fs_compat.deleteFileAbsolute(std.Options.debug_io, fx.tarball);
     try testing.expectError(error.ReadFailed, verify.verifyAll(lio.io(), testing.allocator, fx.inputs()));
 }
 
@@ -338,9 +339,9 @@ test "verifyAll streams a large tarball without loading it whole (smoke)" {
     const total: usize = mib * 1024 * 1024;
 
     const dir = "/tmp/malt_verifyall_smoke";
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
     const tarball = try std.fmt.allocPrint(testing.allocator, "{s}/malt.tgz", .{dir});
     defer testing.allocator.free(tarball);
@@ -358,12 +359,12 @@ test "verifyAll streams a large tarball without loading it whole (smoke)" {
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     {
-        const tf = try fs_compat.createFileAbsolute(tarball, .{});
-        defer tf.close(malt.io_mod.ctx());
+        const tf = try fs_compat.createFileAbsolute(std.Options.debug_io, tarball, .{});
+        defer tf.close(std.Options.debug_io);
         var remaining = total;
         while (remaining > 0) {
             const n = @min(remaining, chunk.len);
-            try tf.writeStreamingAll(malt.io_mod.ctx(), chunk[0..n]);
+            try tf.writeStreamingAll(std.Options.debug_io, chunk[0..n]);
             hasher.update(chunk[0..n]);
             remaining -= n;
         }
@@ -445,7 +446,7 @@ test "verifyCosignBlob errors when cosign exits non-zero" {
     defer lio.deinit();
     const path = "/tmp/malt_fake_cosign_fail";
     try writeFakeCosign(path, 1);
-    defer fs_compat.deleteFileAbsolute(path) catch {};
+    defer fs_compat.deleteFileAbsolute(std.Options.debug_io, path) catch {};
 
     var args = fake_args;
     args.cosign_bin = path;

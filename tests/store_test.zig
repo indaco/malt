@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const sqlite = @import("malt").sqlite;
 const schema = @import("malt").schema;
@@ -10,12 +11,12 @@ const store_mod = @import("malt").store;
 
 fn setupTestStore(allocator: std.mem.Allocator) !struct { db: sqlite.Database, store: store_mod.Store, prefix: []const u8 } {
     // Create temp directory as prefix
-    const prefix = try std.fmt.allocPrint(allocator, "/tmp/malt_test_{x}", .{malt.fs_compat.randomInt(u64)});
+    const prefix = try std.fmt.allocPrint(allocator, "/tmp/malt_test_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
 
-    malt.fs_compat.makeDirAbsolute(prefix) catch {};
+    test_io.makeDirAbsolute(std.Options.debug_io, prefix) catch {};
     const store_dir = try std.fmt.allocPrint(allocator, "{s}/store", .{prefix});
     defer allocator.free(store_dir);
-    malt.fs_compat.makeDirAbsolute(store_dir) catch {};
+    test_io.makeDirAbsolute(std.Options.debug_io, store_dir) catch {};
 
     const db_path = try std.fmt.allocPrintSentinel(allocator, "{s}/test.db", .{prefix}, 0);
     defer allocator.free(db_path);
@@ -30,7 +31,7 @@ test "exists returns false for missing entry" {
     var ctx = try setupTestStore(testing.allocator);
     defer {
         ctx.db.close();
-        malt.fs_compat.deleteTreeAbsolute(ctx.prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
         testing.allocator.free(ctx.prefix);
     }
 
@@ -41,20 +42,20 @@ test "commit moves directory to store and exists returns true" {
     var ctx = try setupTestStore(testing.allocator);
     defer {
         ctx.db.close();
-        malt.fs_compat.deleteTreeAbsolute(ctx.prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
         testing.allocator.free(ctx.prefix);
     }
 
     // Create a source directory with a file
-    const src = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_src_{x}", .{malt.fs_compat.randomInt(u64)});
+    const src = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_src_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
     defer testing.allocator.free(src);
-    malt.fs_compat.makeDirAbsolute(src) catch {};
+    test_io.makeDirAbsolute(std.Options.debug_io, src) catch {};
 
     const test_file = try std.fmt.allocPrint(testing.allocator, "{s}/test.txt", .{src});
     defer testing.allocator.free(test_file);
-    const f = try malt.fs_compat.createFileAbsolute(test_file, .{});
-    try f.writeStreamingAll(malt.io_mod.ctx(), "hello");
-    f.close(malt.io_mod.ctx());
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, test_file, .{});
+    try f.writeStreamingAll(std.Options.debug_io, "hello");
+    f.close(std.Options.debug_io);
 
     try ctx.store.commitFrom("abc123sha", src);
     try testing.expect(ctx.store.exists("abc123sha"));
@@ -64,14 +65,14 @@ test "duplicate commit is idempotent" {
     var ctx = try setupTestStore(testing.allocator);
     defer {
         ctx.db.close();
-        malt.fs_compat.deleteTreeAbsolute(ctx.prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
         testing.allocator.free(ctx.prefix);
     }
 
     // Create source and commit
-    const src = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_src2_{x}", .{malt.fs_compat.randomInt(u64)});
+    const src = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_src2_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
     defer testing.allocator.free(src);
-    malt.fs_compat.makeDirAbsolute(src) catch {};
+    test_io.makeDirAbsolute(std.Options.debug_io, src) catch {};
 
     try ctx.store.commitFrom("dup_sha", src);
     // Second commit should succeed (idempotent)
@@ -83,7 +84,7 @@ test "incrementRef and decrementRef update refcount" {
     var ctx = try setupTestStore(testing.allocator);
     defer {
         ctx.db.close();
-        malt.fs_compat.deleteTreeAbsolute(ctx.prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
         testing.allocator.free(ctx.prefix);
     }
     // setupTestStore stored a `*sqlite.Database` pointing at its own stack

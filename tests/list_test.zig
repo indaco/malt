@@ -6,6 +6,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const cli_list = malt.cli_list;
@@ -16,8 +17,8 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_list_test_" ++ tag;
-        malt.fs_compat.deleteTreeAbsolute(dir) catch {};
-        try malt.fs_compat.makeDirAbsolute(dir);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+        try test_io.makeDirAbsolute(std.Options.debug_io, dir);
         var buf: [256]u8 = undefined;
         const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(path);
@@ -28,7 +29,7 @@ const TempDb = struct {
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        malt.fs_compat.deleteTreeAbsolute(self.dir) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
     }
 };
 
@@ -62,7 +63,9 @@ fn runBuild(
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     // Use a fixed start_ts so the ",\"time_ms\":N" suffix is predictable.
-    try cli_list.buildListJson(db, &aw.writer, show_formula, show_cask, show_pinned, malt.fs_compat.milliTimestamp());
+    try cli_list.buildListJson(db, &aw.writer, show_formula, show_cask, show_pinned, test_io.milliTimestamp(
+        std.Options.debug_io,
+    ));
     return aw.toOwnedSlice();
 }
 

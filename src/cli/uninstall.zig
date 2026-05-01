@@ -17,7 +17,7 @@ const supervisor_mod = @import("../core/services/supervisor.zig");
 const help = @import("help.zig");
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "uninstall")) return;
+    if (help.showIfRequested(ctx, args, "uninstall")) return;
 
     var force = false;
     var force_cask = false;

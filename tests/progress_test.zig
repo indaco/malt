@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const progress_mod = @import("malt").progress;
 const client_mod = @import("malt").client;
@@ -323,7 +324,7 @@ test "Spinner drawFrame executes across frames" {
     var s = progress_mod.Spinner.init("spin");
     s.is_tty = true;
     s.start();
-    malt.fs_compat.sleepNanos(150 * std.time.ns_per_ms);
+    test_io.sleepNanos(std.Options.debug_io, 150 * std.time.ns_per_ms);
     s.stop();
 }
 
@@ -439,7 +440,7 @@ test "HttpClientPool blocks acquire when all clients are busy" {
     var t = try std.Thread.spawn(.{}, Ctx.run, .{&ctx});
 
     // Give the worker a moment to park.
-    malt.fs_compat.sleepNanos(50 * std.time.ns_per_ms);
+    test_io.sleepNanos(std.Options.debug_io, 50 * std.time.ns_per_ms);
     pool.release(held);
     t.join();
     try testing.expect(done.load(.acquire));

@@ -1,13 +1,14 @@
 //! malt — purge command tests
 //! Covers the pure helpers (parseArgs, buildPlan, formatBytes) plus a
 //! filesystem-level check that the plan, when applied with
-//! malt.fs_compat.deleteTreeAbsolute, actually removes every target path under
+//! test_io.deleteTreeAbsolute, actually removes every target path under
 //! a throwaway prefix built in /tmp.  The execute() function is NOT
 //! exercised here because it touches global output state, stdin, and
 //! the real database — covered by manual end-to-end runs instead.
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const purge = @import("malt").purge;
 
@@ -262,25 +263,25 @@ test "formatBytes caps at TB and never overflows the buffer" {
 
 // ── Filesystem-level plan application ────────────────────────────────────
 // Pre-populate a temp prefix with the directory layout that purge expects,
-// then call malt.fs_compat.deleteTreeAbsolute on each plan target and verify that
+// then call test_io.deleteTreeAbsolute on each plan target and verify that
 // everything is gone.  This covers the deletion ordering that execute()
 // relies on without requiring stdin, sqlite, or the global output state.
 
 fn makeDir(path: []const u8) !void {
-    malt.fs_compat.makeDirAbsolute(path) catch |e| switch (e) {
+    test_io.makeDirAbsolute(std.Options.debug_io, path) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };
 }
 
 fn makeFile(path: []const u8, content: []const u8) !void {
-    const f = try malt.fs_compat.createFileAbsolute(path, .{ .truncate = true });
-    defer f.close(malt.io_mod.ctx());
-    try f.writeStreamingAll(malt.io_mod.ctx(), content);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, content);
 }
 
 fn pathExists(path: []const u8) bool {
-    malt.fs_compat.accessAbsolute(path, .{}) catch return false;
+    test_io.accessAbsolute(std.Options.debug_io, path, .{}) catch return false;
     return true;
 }
 
@@ -289,7 +290,7 @@ test "applying the plan removes every pre-populated directory under a temp prefi
 
     // Unique temp prefix — std.crypto random bytes keep parallel runs safe.
     var rand_bytes: [8]u8 = undefined;
-    malt.fs_compat.randomBytes(&rand_bytes);
+    test_io.randomBytes(std.Options.debug_io, &rand_bytes);
     var hex_buf: [16]u8 = undefined;
     const hex_chars = "0123456789abcdef";
     for (rand_bytes, 0..) |b, i| {
@@ -301,9 +302,9 @@ test "applying the plan removes every pre-populated directory under a temp prefi
     const prefix = try std.fmt.bufPrint(&prefix_buf, "/tmp/malt-purge-test-{s}", .{&hex_buf});
 
     // Best-effort cleanup in case a prior run aborted mid-way.
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try makeDir(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     // Populate the directories the plan will target.
     const subdirs = [_][]const u8{
@@ -333,7 +334,7 @@ test "applying the plan removes every pre-populated directory under a temp prefi
     // Apply the plan in order (skipping .prefix_root; we verify it separately).
     for (plan) |t| {
         if (t.category == .prefix_root) continue;
-        malt.fs_compat.deleteTreeAbsolute(t.path) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, t.path) catch {};
     }
 
     // Every target except the prefix root must now be gone.
@@ -343,7 +344,7 @@ test "applying the plan removes every pre-populated directory under a temp prefi
     }
 
     // Prefix itself should be empty — a final deleteDirAbsolute succeeds.
-    try malt.fs_compat.deleteDirAbsolute(prefix);
+    try test_io.deleteDirAbsolute(std.Options.debug_io, prefix);
     try testing.expect(!pathExists(prefix));
 }
 
@@ -351,7 +352,7 @@ test "applying the plan with --keep-cache leaves the cache directory intact" {
     const allocator = testing.allocator;
 
     var rand_bytes: [8]u8 = undefined;
-    malt.fs_compat.randomBytes(&rand_bytes);
+    test_io.randomBytes(std.Options.debug_io, &rand_bytes);
     var hex_buf: [16]u8 = undefined;
     const hex_chars = "0123456789abcdef";
     for (rand_bytes, 0..) |b, i| {
@@ -361,9 +362,9 @@ test "applying the plan with --keep-cache leaves the cache directory intact" {
 
     var prefix_buf: [128]u8 = undefined;
     const prefix = try std.fmt.bufPrint(&prefix_buf, "/tmp/malt-purge-keepcache-{s}", .{&hex_buf});
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try makeDir(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     // Pre-create cache, Cellar, and db — enough to prove the kept path
     // survives while deleted paths do not.
@@ -383,7 +384,7 @@ test "applying the plan with --keep-cache leaves the cache directory intact" {
 
     for (plan) |t| {
         if (t.category == .prefix_root) continue;
-        malt.fs_compat.deleteTreeAbsolute(t.path) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, t.path) catch {};
     }
 
     // Cache must still exist and still contain the canary file.

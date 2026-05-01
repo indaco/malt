@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const dsl = @import("malt").dsl;
 const pathname = dsl.builtins.pathname;
@@ -23,9 +24,11 @@ fn uniqueSandbox(suffix: []const u8) ![]u8 {
     const p = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_dsl_builtins_{d}_{s}",
-        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        .{ test_io.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
     );
-    malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), p) catch {};
+    test_io.cwd().createDirPath(std.Options.debug_io, p) catch {};
     return p;
 }
 
@@ -48,7 +51,7 @@ const LiveIo = struct {
 fn mkCtx(root: []const u8) ExecCtx {
     return .{
         .allocator = testing.allocator,
-        .io = malt.io_mod.ctx(),
+        .io = std.Options.debug_io,
         .environ = malt.app_ctx.processEnviron(),
         .cellar_path = root,
         .malt_prefix = root,
@@ -72,21 +75,21 @@ fn mkCtxLive(lio: *LiveIo, root: []const u8) ExecCtx {
 test "Pathname.mkpath creates a directory tree under the receiver" {
     const root = try uniqueSandbox("mkpath");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
     const nested = try std.fmt.allocPrint(testing.allocator, "{s}/a/b/c", .{root});
     defer testing.allocator.free(nested);
 
     _ = try pathname.mkpath(ctx, Value{ .pathname = nested }, &.{});
-    var d = try malt.fs_compat.openDirAbsolute(nested, .{});
-    d.close(malt.io_mod.ctx());
+    var d = try test_io.openDirAbsolute(std.Options.debug_io, nested, .{});
+    d.close(std.Options.debug_io);
 }
 
 test "Pathname.exist?, .directory?, .file?, .symlink? classify entries correctly" {
     const root = try uniqueSandbox("classify");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
     // Create a regular file, a directory, and a symlink.
@@ -99,10 +102,10 @@ test "Pathname.exist?, .directory?, .file?, .symlink? classify entries correctly
     const missing_path = try std.fmt.allocPrint(testing.allocator, "{s}/missing", .{root});
     defer testing.allocator.free(missing_path);
 
-    const f = try malt.fs_compat.createFileAbsolute(file_path, .{});
-    f.close(malt.io_mod.ctx());
-    try malt.fs_compat.makeDirAbsolute(dir_path);
-    try malt.fs_compat.symLinkAbsolute(file_path, link_path, .{});
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{});
+    f.close(std.Options.debug_io);
+    try test_io.makeDirAbsolute(std.Options.debug_io, dir_path);
+    try test_io.symLinkAbsolute(std.Options.debug_io, file_path, link_path, .{});
 
     try testing.expect((try pathname.existQ(ctx, Value{ .pathname = file_path }, &.{})).bool);
     try testing.expect(!(try pathname.existQ(ctx, Value{ .pathname = missing_path }, &.{})).bool);
@@ -126,7 +129,7 @@ test "Pathname.exist?, .directory?, .file?, .symlink? classify entries correctly
 test "Pathname.write + Pathname.read round-trip content through the sandbox" {
     const root = try uniqueSandbox("rw");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/payload.txt", .{root});
@@ -142,7 +145,7 @@ test "Pathname.write + Pathname.read round-trip content through the sandbox" {
 test "Pathname.write returns PathSandboxViolation for paths outside the sandbox" {
     const root = try uniqueSandbox("violate");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     const args = [_]Value{.{ .string = "oops" }};
     try testing.expectError(
@@ -154,7 +157,7 @@ test "Pathname.write returns PathSandboxViolation for paths outside the sandbox"
 test "Pathname.read returns empty string for a missing file" {
     const root = try uniqueSandbox("read_missing");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     const out = try pathname.read(ctx, Value{ .pathname = "/tmp/malt_dsl_read_missing_xyz" }, &.{});
     try testing.expectEqualStrings("", out.string);
@@ -163,15 +166,15 @@ test "Pathname.read returns empty string for a missing file" {
 test "Pathname.children returns array of children; empty for missing dir" {
     const root = try uniqueSandbox("children");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
     const a = try std.fmt.allocPrint(testing.allocator, "{s}/a", .{root});
     defer testing.allocator.free(a);
     const b = try std.fmt.allocPrint(testing.allocator, "{s}/b", .{root});
     defer testing.allocator.free(b);
-    (try malt.fs_compat.createFileAbsolute(a, .{})).close(malt.io_mod.ctx());
-    (try malt.fs_compat.createFileAbsolute(b, .{})).close(malt.io_mod.ctx());
+    (try test_io.createFileAbsolute(std.Options.debug_io, a, .{})).close(std.Options.debug_io);
+    (try test_io.createFileAbsolute(std.Options.debug_io, b, .{})).close(std.Options.debug_io);
 
     const result = try pathname.children(ctx, Value{ .pathname = root }, &.{});
     defer {
@@ -216,49 +219,49 @@ test "Pathname.opt_bin/.opt_lib/.opt_include/.pkgetc append the right subdir" {
 test "Pathname.unlink deletes a file in the sandbox" {
     const root = try uniqueSandbox("unlink");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/goodbye.txt", .{root});
     defer testing.allocator.free(path);
-    (try malt.fs_compat.createFileAbsolute(path, .{})).close(malt.io_mod.ctx());
+    (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
 
     _ = try pathname.unlink(ctx, Value{ .pathname = path }, &.{});
-    try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(path, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, path, .{}));
 }
 
 test "Pathname.install_symlink creates and replaces a symlink in the sandbox" {
     const root = try uniqueSandbox("install_symlink");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
     const src = try std.fmt.allocPrint(testing.allocator, "{s}/source.txt", .{root});
     defer testing.allocator.free(src);
     const dst = try std.fmt.allocPrint(testing.allocator, "{s}/sub/link", .{root});
     defer testing.allocator.free(dst);
-    (try malt.fs_compat.createFileAbsolute(src, .{})).close(malt.io_mod.ctx());
+    (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
 
     const args = [_]Value{.{ .string = dst }};
     _ = try pathname.installSymlink(ctx, Value{ .pathname = src }, &args);
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const target = try malt.fs_compat.readLinkAbsolute(dst, &buf);
+    const target = try test_io.readLinkAbsolute(std.Options.debug_io, dst, &buf);
     try testing.expectEqualStrings(src, target);
 }
 
 test "Pathname.glob with receiver returns matching entries" {
     const root = try uniqueSandbox("glob");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     const lib_dir = try std.fmt.allocPrint(testing.allocator, "{s}/lib", .{root});
     defer testing.allocator.free(lib_dir);
-    try malt.fs_compat.makeDirAbsolute(lib_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, lib_dir);
     for ([_][]const u8{ "libfoo.dylib", "libbar.dylib", "readme.txt" }) |name| {
         const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ lib_dir, name });
         defer testing.allocator.free(p);
-        (try malt.fs_compat.createFileAbsolute(p, .{})).close(malt.io_mod.ctx());
+        (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
     }
 
     const args = [_]Value{.{ .string = "*.dylib" }};
@@ -273,11 +276,11 @@ test "Pathname.glob with receiver returns matching entries" {
 test "Pathname.glob bare form (no receiver) splits dirname/basename of the pattern" {
     const root = try uniqueSandbox("glob_bare");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     const a_path = try std.fmt.allocPrint(testing.allocator, "{s}/a.zig", .{root});
     defer testing.allocator.free(a_path);
-    (try malt.fs_compat.createFileAbsolute(a_path, .{})).close(malt.io_mod.ctx());
+    (try test_io.createFileAbsolute(std.Options.debug_io, a_path, .{})).close(std.Options.debug_io);
 
     const pattern = try std.fmt.allocPrint(testing.allocator, "{s}/*.zig", .{root});
     defer testing.allocator.free(pattern);
@@ -293,12 +296,12 @@ test "Pathname.glob bare form (no receiver) splits dirname/basename of the patte
 test "Pathname.glob honours {a,b,c} brace expansion" {
     const root = try uniqueSandbox("glob_brace");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     for ([_][]const u8{ "a.c", "a.h", "a.o" }) |name| {
         const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ root, name });
         defer testing.allocator.free(p);
-        (try malt.fs_compat.createFileAbsolute(p, .{})).close(malt.io_mod.ctx());
+        (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
     }
     const args = [_]Value{.{ .string = "*.{c,h}" }};
     const result = try pathname.glob(ctx, Value{ .pathname = root }, &args);
@@ -316,28 +319,28 @@ test "Pathname.glob honours {a,b,c} brace expansion" {
 test "FileUtils.mkdir_p + touch + rm round-trip through the sandbox" {
     const root = try uniqueSandbox("fileutils_basic");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
     const nested = try std.fmt.allocPrint(testing.allocator, "{s}/a/b/c", .{root});
     defer testing.allocator.free(nested);
     _ = try fileutils.mkdirP(ctx, null, &.{.{ .string = nested }});
-    var d = try malt.fs_compat.openDirAbsolute(nested, .{});
-    d.close(malt.io_mod.ctx());
+    var d = try test_io.openDirAbsolute(std.Options.debug_io, nested, .{});
+    d.close(std.Options.debug_io);
 
     const file = try std.fmt.allocPrint(testing.allocator, "{s}/a/b/c/hello", .{root});
     defer testing.allocator.free(file);
     _ = try fileutils.touch(ctx, null, &.{.{ .string = file }});
-    (try malt.fs_compat.openFileAbsolute(file, .{})).close(malt.io_mod.ctx());
+    (try test_io.openFileAbsolute(std.Options.debug_io, file, .{})).close(std.Options.debug_io);
 
     _ = try fileutils.rm(ctx, null, &.{.{ .string = file }});
-    try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(file, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, file, .{}));
 }
 
 test "FileUtils.cp copies a single file into the sandbox" {
     const root = try uniqueSandbox("fileutils_cp");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
     const src = try std.fmt.allocPrint(testing.allocator, "{s}/src.txt", .{root});
@@ -345,29 +348,29 @@ test "FileUtils.cp copies a single file into the sandbox" {
     const dst = try std.fmt.allocPrint(testing.allocator, "{s}/dst.txt", .{root});
     defer testing.allocator.free(dst);
     {
-        const f = try malt.fs_compat.createFileAbsolute(src, .{});
-        try f.writeStreamingAll(malt.io_mod.ctx(), "payload");
-        f.close(malt.io_mod.ctx());
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, src, .{});
+        try f.writeStreamingAll(std.Options.debug_io, "payload");
+        f.close(std.Options.debug_io);
     }
     _ = try fileutils.cp(ctx, null, &.{
         .{ .string = src },
         .{ .string = dst },
     });
 
-    const f = try malt.fs_compat.openFileAbsolute(dst, .{});
-    defer f.close(malt.io_mod.ctx());
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, dst, .{});
+    defer f.close(std.Options.debug_io);
     var buf: [32]u8 = undefined;
-    const n = try f.readPositionalAll(malt.io_mod.ctx(), &buf, 0);
+    const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expectEqualStrings("payload", buf[0..n]);
 }
 
 test "FileUtils.cp with an array copies each file into the destination directory" {
     const root = try uniqueSandbox("fileutils_cp_array");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const ctx = ExecCtx{ .allocator = arena.allocator(), .io = malt.io_mod.ctx(), .environ = malt.app_ctx.processEnviron(), .cellar_path = root, .malt_prefix = root };
+    const ctx = ExecCtx{ .allocator = arena.allocator(), .io = std.Options.debug_io, .environ = malt.app_ctx.processEnviron(), .cellar_path = root, .malt_prefix = root };
 
     const dst_dir = try std.fmt.allocPrint(testing.allocator, "{s}/dst", .{root});
     defer testing.allocator.free(dst_dir);
@@ -377,9 +380,9 @@ test "FileUtils.cp with an array copies each file into the destination directory
     const src_b = try std.fmt.allocPrint(testing.allocator, "{s}/b.txt", .{root});
     defer testing.allocator.free(src_b);
     for ([_][]const u8{ src_a, src_b }) |p| {
-        const f = try malt.fs_compat.createFileAbsolute(p, .{});
-        try f.writeStreamingAll(malt.io_mod.ctx(), "x");
-        f.close(malt.io_mod.ctx());
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{});
+        try f.writeStreamingAll(std.Options.debug_io, "x");
+        f.close(std.Options.debug_io);
     }
 
     const items = [_]Value{ .{ .string = src_a }, .{ .string = src_b } };
@@ -388,54 +391,54 @@ test "FileUtils.cp with an array copies each file into the destination directory
     for ([_][]const u8{ "a.txt", "b.txt" }) |name| {
         const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dst_dir, name });
         defer testing.allocator.free(p);
-        (try malt.fs_compat.openFileAbsolute(p, .{})).close(malt.io_mod.ctx());
+        (try test_io.openFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
     }
 }
 
 test "FileUtils.rm_r (and rm_rf alias) delete a directory tree" {
     const root = try uniqueSandbox("fileutils_rmr");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
     const tree = try std.fmt.allocPrint(testing.allocator, "{s}/tree/a/b", .{root});
     defer testing.allocator.free(tree);
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), tree);
+    try test_io.cwd().createDirPath(std.Options.debug_io, tree);
 
     const root_tree = try std.fmt.allocPrint(testing.allocator, "{s}/tree", .{root});
     defer testing.allocator.free(root_tree);
     _ = try fileutils.rmR(ctx, null, &.{.{ .string = root_tree }});
-    try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(root_tree, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(std.Options.debug_io, root_tree, .{}));
 
-    try malt.fs_compat.cwd().createDirPath(malt.io_mod.ctx(), tree);
+    try test_io.cwd().createDirPath(std.Options.debug_io, tree);
     _ = try fileutils.rmRf(ctx, null, &.{.{ .string = root_tree }});
-    try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(root_tree, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(std.Options.debug_io, root_tree, .{}));
 }
 
 test "FileUtils.rm with an array silently skips out-of-sandbox paths but removes the others" {
     const root = try uniqueSandbox("fileutils_rm_array");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     const good = try std.fmt.allocPrint(testing.allocator, "{s}/good.txt", .{root});
     defer testing.allocator.free(good);
-    (try malt.fs_compat.createFileAbsolute(good, .{})).close(malt.io_mod.ctx());
+    (try test_io.createFileAbsolute(std.Options.debug_io, good, .{})).close(std.Options.debug_io);
 
     const items = [_]Value{ .{ .string = "/etc/passwd" }, .{ .string = good } };
     _ = try fileutils.rm(ctx, null, &.{.{ .array = &items }});
-    try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(good, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, good, .{}));
 }
 
 test "FileUtils.chmod with an array of paths chmods each one" {
     const root = try uniqueSandbox("fileutils_chmod_array");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     const a = try std.fmt.allocPrint(testing.allocator, "{s}/a", .{root});
     defer testing.allocator.free(a);
     const b = try std.fmt.allocPrint(testing.allocator, "{s}/b", .{root});
     defer testing.allocator.free(b);
-    for ([_][]const u8{ a, b }) |p| (try malt.fs_compat.createFileAbsolute(p, .{})).close(malt.io_mod.ctx());
+    for ([_][]const u8{ a, b }) |p| (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
 
     const items = [_]Value{ .{ .string = a }, .{ .string = b } };
     _ = try fileutils.chmod(ctx, null, &.{ .{ .int = 0o644 }, .{ .array = &items } });
@@ -444,17 +447,17 @@ test "FileUtils.chmod with an array of paths chmods each one" {
 test "FileUtils.ln_sf with an array symlinks each target into the dest dir" {
     const root = try uniqueSandbox("fileutils_lnsf_array");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const ctx = ExecCtx{ .allocator = arena.allocator(), .io = malt.io_mod.ctx(), .environ = malt.app_ctx.processEnviron(), .cellar_path = root, .malt_prefix = root };
+    const ctx = ExecCtx{ .allocator = arena.allocator(), .io = std.Options.debug_io, .environ = malt.app_ctx.processEnviron(), .cellar_path = root, .malt_prefix = root };
     const t1 = try std.fmt.allocPrint(testing.allocator, "{s}/t1", .{root});
     defer testing.allocator.free(t1);
     const t2 = try std.fmt.allocPrint(testing.allocator, "{s}/t2", .{root});
     defer testing.allocator.free(t2);
     const dst = try std.fmt.allocPrint(testing.allocator, "{s}/links", .{root});
     defer testing.allocator.free(dst);
-    for ([_][]const u8{ t1, t2 }) |p| (try malt.fs_compat.createFileAbsolute(p, .{})).close(malt.io_mod.ctx());
+    for ([_][]const u8{ t1, t2 }) |p| (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
 
     const items = [_]Value{ .{ .string = t1 }, .{ .string = t2 } };
     _ = try fileutils.lnSf(ctx, null, &.{ .{ .array = &items }, .{ .string = dst } });
@@ -463,49 +466,49 @@ test "FileUtils.ln_sf with an array symlinks each target into the dest dir" {
         const link = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dst, name });
         defer testing.allocator.free(link);
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        _ = try malt.fs_compat.readLinkAbsolute(link, &buf);
+        _ = try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf);
     }
 }
 
 test "FileUtils.mv renames within the sandbox" {
     const root = try uniqueSandbox("fileutils_mv");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     const src = try std.fmt.allocPrint(testing.allocator, "{s}/x.txt", .{root});
     defer testing.allocator.free(src);
     const dst = try std.fmt.allocPrint(testing.allocator, "{s}/y.txt", .{root});
     defer testing.allocator.free(dst);
-    (try malt.fs_compat.createFileAbsolute(src, .{})).close(malt.io_mod.ctx());
+    (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
     _ = try fileutils.mv(ctx, null, &.{ .{ .string = src }, .{ .string = dst } });
-    try testing.expectError(error.FileNotFound, malt.fs_compat.openFileAbsolute(src, .{}));
-    (try malt.fs_compat.openFileAbsolute(dst, .{})).close(malt.io_mod.ctx());
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, src, .{}));
+    (try test_io.openFileAbsolute(std.Options.debug_io, dst, .{})).close(std.Options.debug_io);
 }
 
 test "FileUtils.ln_s/ln_sf create (and force-replace) symlinks" {
     const root = try uniqueSandbox("fileutils_ln");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     const target = try std.fmt.allocPrint(testing.allocator, "{s}/target", .{root});
     defer testing.allocator.free(target);
     const link = try std.fmt.allocPrint(testing.allocator, "{s}/sub/link", .{root});
     defer testing.allocator.free(link);
-    (try malt.fs_compat.createFileAbsolute(target, .{})).close(malt.io_mod.ctx());
+    (try test_io.createFileAbsolute(std.Options.debug_io, target, .{})).close(std.Options.debug_io);
 
     _ = try fileutils.lnS(ctx, null, &.{ .{ .string = target }, .{ .string = link } });
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    try testing.expectEqualStrings(target, try malt.fs_compat.readLinkAbsolute(link, &buf));
+    try testing.expectEqualStrings(target, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
 
     // ln_sf should overwrite the existing symlink silently.
     _ = try fileutils.lnSf(ctx, null, &.{ .{ .string = target }, .{ .string = link } });
-    try testing.expectEqualStrings(target, try malt.fs_compat.readLinkAbsolute(link, &buf));
+    try testing.expectEqualStrings(target, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
 }
 
 test "FileUtils.rm rejects paths outside the sandbox" {
     const root = try uniqueSandbox("fileutils_violate");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     try testing.expectError(
         error.PathSandboxViolation,
@@ -516,11 +519,11 @@ test "FileUtils.rm rejects paths outside the sandbox" {
 test "FileUtils.chmod returns nil for a non-int mode and is a no-op" {
     const root = try uniqueSandbox("fileutils_chmod_nil");
     defer testing.allocator.free(root);
-    defer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/f", .{root});
     defer testing.allocator.free(path);
-    (try malt.fs_compat.createFileAbsolute(path, .{})).close(malt.io_mod.ctx());
+    (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
     const v = try fileutils.chmod(ctx, null, &.{ .{ .string = "0755" }, .{ .string = path } });
     try testing.expect(v == .nil);
 }
@@ -537,7 +540,7 @@ test "FileUtils.chmod returns nil for a non-int mode and is a no-op" {
 fn arenaCtx(arena: *std.heap.ArenaAllocator, root: []const u8) ExecCtx {
     return .{
         .allocator = arena.allocator(),
-        .io = malt.io_mod.ctx(),
+        .io = std.Options.debug_io,
         .environ = malt.app_ctx.processEnviron(),
         .cellar_path = root,
         .malt_prefix = root,
@@ -670,13 +673,13 @@ test "envSet does not touch the real environment but returns the written value" 
     const ctx = mkCtx("/tmp/malt");
     const v = try process.envSet(ctx, null, &.{ .{ .string = "MALT_DSL_UNSET_KEY" }, .{ .string = "val" } });
     try testing.expectEqualStrings("val", v.string);
-    try testing.expect(malt.fs_compat.getenv("MALT_DSL_UNSET_KEY") == null);
+    try testing.expect(test_io.getenv("MALT_DSL_UNSET_KEY") == null);
 }
 
 test "formulaLookup returns MALT_PREFIX/opt/<name>" {
     const ctx = ExecCtx{
         .allocator = testing.allocator,
-        .io = malt.io_mod.ctx(),
+        .io = std.Options.debug_io,
         .environ = malt.app_ctx.processEnviron(),
         .cellar_path = "/tmp/malt",
         .malt_prefix = "/tmp/malt",
