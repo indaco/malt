@@ -38,7 +38,7 @@ jobs:
           echo "short=${SHA:0:12}" >>"$GITHUB_OUTPUT"
 
       - name: Open or update auto-PR
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: chore/pins-auto-bump
