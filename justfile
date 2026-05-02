@@ -296,6 +296,87 @@ patch:
     echo "▸ Bump + changelog ready on $branch."
     echo "▸ Review, then run: git push origin $branch && sley tag create --push"
 
+# Roll back a published release. Flips the GitHub release back to draft,
+# re-promotes the previous release to --latest, and reverts the matching
+# cask commit on indaco/homebrew-tap. The tag is preserved so existing
+# installs can still verify their artifacts.
+#
+# Usage: just release-rollback v0.10.1
+#
+# Requires: gh authenticated, push access to indaco/homebrew-tap.
+# See RELEASING.md for the manual follow-up checklist.
+[group('release')]
+release-rollback tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    tag={{ tag }}
+    case "$tag" in
+        v[0-9]*.[0-9]*.[0-9]*) ;;
+        *) echo "error: tag must be vX.Y.Z (got: $tag)" >&2; exit 1 ;;
+    esac
+
+    if ! gh release view "$tag" --repo indaco/malt --json isDraft >/dev/null 2>&1; then
+        echo "error: release $tag not found on indaco/malt" >&2
+        exit 1
+    fi
+
+    is_draft=$(gh release view "$tag" --repo indaco/malt --json isDraft --jq '.isDraft')
+    echo "▸ Rolling back $tag (draft=$is_draft)"
+    echo "  - flip release to draft"
+    echo "  - promote previous non-draft release to --latest"
+    echo "  - revert last commit on indaco/homebrew-tap (refused if it doesn't reference $tag)"
+    printf "Continue? [y/N] "
+    read -r reply
+    case "$reply" in y|Y) ;; *) echo "aborted"; exit 1 ;; esac
+
+    if [ "$is_draft" = "false" ]; then
+        gh release edit "$tag" --repo indaco/malt --draft=true
+        echo "✓ $tag is now a draft (assets preserved)"
+    else
+        echo "✓ $tag was already a draft"
+    fi
+
+    # Promote the next-newest non-draft, non-prerelease release. Drafting
+    # the current latest does NOT auto-promote anything else, so install.sh
+    # would 404 on /releases/latest until we set the flag explicitly.
+    prev=$(gh release list --repo indaco/malt --limit 50 \
+        --json tagName,isDraft,isPrerelease \
+        --jq "[.[] | select(.tagName != \"$tag\" and .isDraft == false and .isPrerelease == false)][0].tagName")
+    if [ -n "$prev" ] && [ "$prev" != "null" ]; then
+        gh release edit "$prev" --repo indaco/malt --latest
+        echo "✓ promoted $prev to --latest"
+    else
+        echo "warn: no previous non-draft release to promote — install.sh /releases/latest will 404"
+    fi
+
+    tap=$(mktemp -d)
+    trap 'rm -rf "$tap"' EXIT
+    git clone --depth=2 https://github.com/indaco/homebrew-tap.git "$tap" >/dev/null 2>&1
+    cd "$tap"
+    last_msg=$(git log -1 --format=%s)
+    case "$last_msg" in
+        *"$tag"*) ;;
+        *)
+            echo "error: last tap commit doesn't reference $tag (msg: $last_msg)" >&2
+            echo "       refusing to revert blindly — fix the tap manually" >&2
+            exit 1
+            ;;
+    esac
+    git -c user.name="malt-rollback" -c user.email="rollback@local" \
+        revert --no-edit HEAD >/dev/null
+    git push origin HEAD
+    echo "✓ tap reverted (was: $last_msg)"
+
+    echo
+    echo "Rollback complete. Manual follow-up:"
+    echo "  1. Open a tracking issue describing the regression"
+    echo "  2. Decide whether to communicate (README banner, GitHub release notes update)"
+    echo "  3. Cut a patch release from release/0.X with the fix:"
+    echo "       git checkout release/0.X"
+    echo "       just backport <fix-sha>"
+    echo "       just patch"
+
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
