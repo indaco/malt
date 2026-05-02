@@ -40,7 +40,7 @@ fn tableExists(db: *sqlite.Database, name: [:0]const u8) !bool {
     return stmt.columnInt(0) == 1;
 }
 
-test "initSchema runs v1 then migrates to v3" {
+test "initSchema runs v1 then migrates to v5" {
     var tdb = try TempDb.init("init");
     defer tdb.deinit();
 
@@ -52,7 +52,7 @@ test "initSchema runs v1 then migrates to v3" {
     try testing.expect(try tableExists(&tdb.db, "bundle_members"));
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 4), ver);
+    try testing.expectEqual(@as(i64, 5), ver);
 }
 
 test "migrate is idempotent on re-run" {
@@ -64,7 +64,7 @@ test "migrate is idempotent on re-run" {
     try schema.migrate(&tdb.db);
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 4), ver);
+    try testing.expectEqual(@as(i64, 5), ver);
 }
 
 test "v4 migration adds pinned column to casks" {
@@ -94,7 +94,7 @@ test "v4 migration is idempotent on re-run" {
     try schema.migrate(&tdb.db);
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 4), ver);
+    try testing.expectEqual(@as(i64, 5), ver);
 }
 
 test "v3 migration adds commit_sha column to taps" {
