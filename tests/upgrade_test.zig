@@ -327,3 +327,56 @@ test "pinSkip honours --force and audit_mode: pinned + override = no skip" {
     // unknown name: not pinned, not skipped
     try testing.expect(!upgrade.pinSkip(&db, "ghost", false, false));
 }
+
+// Regression: a Homebrew revision-bump upgrade leaves the old keg row
+// in place until step 8 of upgradeFormula, so recordKeg's INSERT must
+// not collide with it on (name, version) when only `revision` differs.
+// Pre-fix this aborted with SQLITE_CONSTRAINT_UNIQUE → "Failed to
+// record new version of <name> in database" — the bug from the user
+// report on libgit2 1.9.2 → 1.9.2_2 and python@3.14 3.14.4 → 3.14.4_1.
+test "recordKeg succeeds on a same-version revision-bump upgrade" {
+    const path = try setupPrefix("recordkeg_revision_bump");
+    defer testing.allocator.free(path);
+    defer malt.fs_compat.deleteTreeAbsolute(path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+
+    // Old row matches what `mt install libgit2` writes for revision 0:
+    // version='1.9.2', revision unset → defaults to 0.
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES ('libgit2', 'libgit2', '1.9.2', 'sha-old', '/cellar/libgit2/1.9.2');
+    );
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // revision: 2 → pkg_version "1.9.2_2"; upstream `version` stays "1.9.2".
+    const formula_json =
+        \\{
+        \\  "name": "libgit2",
+        \\  "full_name": "libgit2",
+        \\  "tap": "homebrew/core",
+        \\  "revision": 2,
+        \\  "versions": {"stable": "1.9.2"}
+        \\}
+    ;
+    var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
+    defer formula.deinit();
+
+    const new_keg_id = try upgrade.recordKeg(&db, &formula, "sha-new", "/cellar/libgit2/1.9.2_2");
+
+    // Both rows must coexist briefly — upgradeFormula deletes the old
+    // one in step 8, after symlinks flip to the new keg.
+    var stmt = try db.prepare("SELECT COUNT(*) FROM kegs WHERE name='libgit2';");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    try testing.expectEqual(@as(i64, 2), stmt.columnInt(0));
+
+    var rev_stmt = try db.prepare("SELECT revision FROM kegs WHERE id = ?1;");
+    defer rev_stmt.finalize();
+    try rev_stmt.bindInt(1, new_keg_id);
+    _ = try rev_stmt.step();
+    try testing.expectEqual(@as(i64, 2), rev_stmt.columnInt(0));
+}
