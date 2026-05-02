@@ -126,7 +126,10 @@ pub fn materializeWithCellar(
         return CellarError.OutOfMemory;
     fs_compat.makeDirAbsolute(parent) catch |e| switch (e) {
         error.PathAlreadyExists => {},
-        else => return CellarError.CloneFailed,
+        else => {
+            std.log.debug("cellar parent mkdir {s}: {s}", .{ parent, @errorName(e) });
+            return CellarError.CloneFailed;
+        },
     };
 
     // Try keg_src first (exact version match), then scan for a revision
@@ -169,8 +172,14 @@ pub fn materializeWithCellar(
         fs_compat.deleteDirAbsolute(parent) catch {};
     }
 
-    // Clone from store to Cellar
-    clonefile.cloneTree(allocator, src, cellar_path) catch return CellarError.CloneFailed;
+    // clonefile(2) returns EEXIST on a populated dst; pre-wipe to match
+    // the warm path and survive a SIGKILLed prior run or drop-in keg.
+    fs_compat.deleteTreeAbsolute(cellar_path) catch {};
+
+    clonefile.cloneTree(allocator, src, cellar_path) catch |e| {
+        std.log.debug("cellar clonefile {s} -> {s}: {s}", .{ src, cellar_path, @errorName(e) });
+        return CellarError.CloneFailed;
+    };
 
     const new_prefix = atomic.maltPrefix();
 
