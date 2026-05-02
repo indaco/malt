@@ -12,9 +12,71 @@ on:
 permissions: {}
 
 jobs:
+  # Pre-flight gate. Cheap (no build, no network beyond checkout) and
+  # blocks every downstream job — catches operator mistakes (malformed
+  # tag, missing changelog fragment, version/tag drift, tag pushed from
+  # an unsupported branch) before goreleaser burns 5-10m on the build.
+  tag-validate:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # Need full history so `git branch -r --contains` can resolve
+          # the tag against main/release branches.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag shape, .version, changelog, and source branch
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          # 1. Shape: vN.N.N exactly. Today's `v*` trigger would also
+          #    match `vfoo` — refuse anything that isn't a clean semver.
+          case "$TAG_NAME" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) fail "tag '$TAG_NAME' is not vX.Y.Z" ;;
+          esac
+
+          # 2. .version matches the tag (sans leading v). Catches the
+          #    "tagged but forgot to bump" / "bumped but tagged the
+          #    previous version" classes.
+          version_file="$(tr -d '[:space:]' <.version)"
+          expected="${TAG_NAME#v}"
+          if [ "$version_file" != "$expected" ]; then
+            fail ".version is '$version_file' but tag is '$TAG_NAME' (expected '$expected'). Run 'sley bump' before tagging."
+          fi
+
+          # 3. Changelog fragment exists and is non-empty. Otherwise the
+          #    notes job would fail mid-pipeline after goreleaser has
+          #    already published the draft.
+          notes=".changes/${TAG_NAME}.md"
+          if [ ! -s "$notes" ]; then
+            fail "missing or empty changelog at $notes — run 'sley changelog merge' before tagging."
+          fi
+
+          # 4. Tag must be reachable from main or a release/* branch.
+          #    Stops a tag pushed from a feature branch from accidentally
+          #    cutting a release with unmerged work.
+          if ! git branch -r --contains "$TAG_NAME" \
+              | grep -qE '^\s*origin/(main|release/)'; then
+            echo "branches containing $TAG_NAME:" >&2
+            git branch -r --contains "$TAG_NAME" >&2 || true
+            fail "tag '$TAG_NAME' is not on main or release/* — refusing to release."
+          fi
+
+          echo "✓ tag $TAG_NAME passed all pre-flight checks"
+
   goreleaser:
     name: goreleaser
     runs-on: macos-14
+    needs: tag-validate
     # id-token: write is the minimum for cosign keyless - it lets the
     # job mint a GitHub OIDC token that Sigstore exchanges for a
     # short-lived signing certificate. Nothing else is widened.
@@ -63,12 +125,165 @@ jobs:
           version: "~> v2"
           args: release --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TOKEN }}
+          # RELEASE_TOKEN (PAT, contents:write on indaco/malt) handles
+          # the draft upload. HOMEBREW_TOKEN is no longer in scope for
+          # this job — the cross-repo cask push runs in publish-cask
+          # after smoke validates the draft.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          # Tells the homebrew_casks block in .goreleaser.yaml to render
+          # the .rb into dist/ but not push to the tap. The tap push is
+          # deferred to publish-cask so a smoke failure leaves the tap
+          # untouched.
+          SKIP_CASK_UPLOAD: "true"
+
+      - name: Upload rendered cask for downstream publish
+        uses: actions/upload-artifact@v7
+        with:
+          name: homebrew-cask
+          # Goreleaser's exact path inside dist/ has shifted between
+          # versions; uploading any rendered .rb keeps this resilient.
+          # publish-cask asserts there's exactly one.
+          path: dist/**/*.rb
+          if-no-files-found: error
+          retention-days: 7
+
+  # Pre-promote validation. The release is still a draft at this point,
+  # so a failure here keeps it invisible to install.sh (which hits
+  # /releases/latest) and to anyone watching the releases page. We
+  # re-verify the cosign bundle against the workflow identity, check
+  # SHA256, and run both binaries from the universal tarball — the same
+  # trust path install.sh exercises, but bypassing /releases/latest so
+  # we can validate before flipping draft=false.
+  verify-artifacts:
+    name: Verify draft artifacts
+    runs-on: macos-14
+    needs: goreleaser
+    permissions:
+      contents: read
+    environment:
+      name: Release
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.1
+
+      - name: Download draft release artifacts
+        env:
+          # `gh release download` against a draft requires a token with
+          # contents:read on indaco/malt — RELEASE_TOKEN already has it.
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          mkdir -p /tmp/verify
+          gh release download "$TAG_NAME" \
+            --repo "${{ github.repository }}" \
+            --dir /tmp/verify
+          ls -la /tmp/verify
+
+      - name: Verify cosign signature on checksums
+        run: |
+          cd /tmp/verify
+          # Mirror install.sh's regex identity check exactly — if this
+          # passes, install.sh will too. (install.sh uses
+          # certificate-identity-regexp because the @<ref> suffix can be
+          # either refs/tags/<tag> or a full SHA depending on the run.)
+          cosign verify-blob \
+            --bundle checksums.txt.sigstore.json \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/\.github/workflows/release\.yml@" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            checksums.txt
+
+      - name: Verify SHA256 checksums
+        run: |
+          cd /tmp/verify
+          # --ignore-missing because the .sigstore.json bundle isn't in
+          # checksums.txt (it's the signature *of* checksums.txt).
+          shasum -a 256 -c checksums.txt --ignore-missing
+
+      - name: Extract and smoke-test the universal tarball
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          cd /tmp/verify
+          VERSION="${TAG_NAME#v}"
+          TARBALL="malt_${VERSION}_darwin_all.tar.gz"
+          if [ ! -f "$TARBALL" ]; then
+            echo "::error::expected tarball $TARBALL not found in draft assets"
+            ls -la
+            exit 1
+          fi
+          tar -xzf "$TARBALL"
+          # archives.wrap_in_directory=true → tarball roots at <name>/.
+          EXTRACTED_DIR=$(tar -tzf "$TARBALL" | head -1 | cut -d/ -f1)
+          "./${EXTRACTED_DIR}/malt" --version
+          "./${EXTRACTED_DIR}/mt" --version
+
+  # Push the rendered cask to indaco/homebrew-tap. Runs only after
+  # verify-artifacts so a failed smoke leaves the tap untouched — the
+  # cask push is the one irreversible side-effect of the release, so
+  # gating it behind smoke is what makes the pipeline fail-safe rather
+  # than fail-loud. HOMEBREW_TOKEN is scoped to this job only.
+  publish-cask:
+    name: Publish Homebrew cask
+    runs-on: ubuntu-latest
+    needs: verify-artifacts
+    permissions:
+      contents: read
+    environment:
+      name: Release
+    steps:
+      - name: Download rendered cask
+        uses: actions/download-artifact@v6
+        with:
+          name: homebrew-cask
+          path: /tmp/cask
+
+      - name: Locate cask file
+        id: cask
+        run: |
+          # Goreleaser may write the .rb under a versioned subdir; flatten.
+          mapfile -t found < <(find /tmp/cask -type f -name '*.rb')
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one .rb in artifact, got ${#found[@]}"
+            printf '  %s\n' "${found[@]}" >&2
+            exit 1
+          fi
+          echo "path=${found[0]}" >>"$GITHUB_OUTPUT"
+          echo "name=$(basename "${found[0]}")" >>"$GITHUB_OUTPUT"
+
+      - name: Push to homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+          CASK_PATH: ${{ steps.cask.outputs.path }}
+          CASK_NAME: ${{ steps.cask.outputs.name }}
+        run: |
+          set -euo pipefail
+          # Authenticated clone via the PAT — the URL form embeds the
+          # token in-process only; no global git config writes.
+          git clone --depth=1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/indaco/homebrew-tap.git" \
+            /tmp/tap
+
+          mkdir -p /tmp/tap/Casks
+          cp "$CASK_PATH" "/tmp/tap/Casks/${CASK_NAME}"
+
+          cd /tmp/tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "::notice::cask file unchanged — nothing to push"
+            exit 0
+          fi
+
+          git add "Casks/${CASK_NAME}"
+          git commit -m "Brew cask update for malt version ${TAG_NAME}"
+          git push origin HEAD
 
   create-release-notes:
     name: release-notes
     runs-on: ubuntu-latest
-    needs: goreleaser
+    needs: publish-cask
     permissions:
       contents: write
     environment:
@@ -102,12 +317,12 @@ jobs:
             --latest \
             --notes-file "$notes_file"
 
-  # End-to-end smoke: installs from the published release artifacts and
-  # verifies cosign + checksum + a trivial formula install. Runs here
-  # (not in a separate `release: published` workflow) so the job order
-  # is strictly sequential — goreleaser uploads, notes publish, smoke
-  # runs. A non-draft release would otherwise race two workflows on
-  # the same event and 404 on the asset before goreleaser uploads it.
+  # End-to-end smoke against the live release: install via the README
+  # one-liner, cosign + checksum + install a real formula. Runs here
+  # (not in a separate `release: published` workflow) so the order stays
+  # strictly sequential: goreleaser draft → verify-artifacts → publish
+  # cask → notes flip to non-draft → this smoke. A `release: published`
+  # trigger would race the other workflows on the same event.
   install-smoke:
     name: Install smoke (live release)
     runs-on: macos-14
@@ -115,6 +330,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    environment:
+      name: Release
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -130,5 +347,5 @@ jobs:
           # runner IP (shared across the macos-14 pool) to 5000/hr,
           # which both the propagation wait and install.sh probe rely
           # on. Contents-read is the only scope consulted.
-          MALT_SMOKE_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MALT_SMOKE_API_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: ./scripts/e2e/smoke_install_release.sh
