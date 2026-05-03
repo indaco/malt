@@ -110,9 +110,10 @@ test "writeResponseBody: createFileAbsolute failure leaves zero leaked allocatio
 
 // --- resolveTwinRegularFile ---------------------------------------------
 //
-// install.sh ships two independent binaries (`malt` and `mt`). The updater
-// has to swap both in lockstep, otherwise `malt --version` and `mt --version`
-// drift apart. These tests pin the twin-detection contract.
+// `mt` is a symlink to `malt` on fresh installs, but pre-symlink releases
+// shipped both as independent regular files. The updater has to detect
+// that legacy layout and swap both in lockstep — these tests pin the
+// twin-detection contract for back-compat.
 
 fn writeFile(path: []const u8, content: []const u8) !void {
     const f = try fs_compat.createFileAbsolute(std.Options.debug_io, path, .{});

@@ -108,7 +108,7 @@ cd malt
 ./scripts/install.sh
 ```
 
-Building requires [Zig 0.16.x](https://ziglang.org/download/) and produces both `malt` and `mt` (a built-in alias) in `zig-out/bin/`. For development builds (debug, tests, universal binary), see [Development builds](#development-builds).
+Building requires [Zig 0.16.x](https://ziglang.org/download/) and produces `malt` in `zig-out/bin/` with `mt` next to it as a symlink to `malt`. For development builds (debug, tests, universal binary), see [Development builds](#development-builds).
 
 ### First commands
 
@@ -129,7 +129,7 @@ mt outdated                       # what has updates available
 mt upgrade ripgrep                # atomic; old version is restored on failure
 ```
 
-`mt` and `malt` are the same binary; both names ship with every install method. Additional aliases: `remove` for `uninstall`, `ls` for `list`. Anywhere a flag accepts `--formula` or `--cask`, it also accepts `--formulae` or `--casks` - pick whichever reads more naturally.
+`mt` and `malt` are the same binary — `mt` is a symlink to `malt` and ships with every install method. Additional aliases: `remove` for `uninstall`, `ls` for `list`. Anywhere a flag accepts `--formula` or `--cask`, it also accepts `--formulae` or `--casks` - pick whichever reads more naturally.
 
 If you typed something malt doesn't implement, malt checks for `brew` and silently delegates. If `brew` isn't installed:
 
@@ -193,7 +193,8 @@ Commands grouped by what you're doing. Every command works with `malt` or `mt`, 
 At a glance - `malt -h`:
 
 ```text
-malt - a fast macOS package manager (Homebrew-compatible)
+malt — a fast, drop-in Homebrew alternative for macOS.
+Warm installs in milliseconds. post_install scripts that actually run.
 
 Usage: malt <command> [options] [arguments]
        mt <command> [options] [arguments]    (alias)

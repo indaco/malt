@@ -190,11 +190,16 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.err("Cannot determine current binary path", .{});
         return error.Aborted;
     };
-    const self_exe = self_exe_buf[0..n];
+    // `mt` is a symlink to `malt`; resolve through it so atomicReplace
+    // rewrites the real binary instead of clobbering the symlink.
+    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const self_exe = if (std.Io.Dir.cwd().realPathFile(ctx.io, self_exe_buf[0..n], &resolved_buf)) |m|
+        resolved_buf[0..m]
+    else |_|
+        self_exe_buf[0..n];
 
-    // install.sh ships two independent binaries (`malt` and `mt`) side by
-    // side; swapping only the invoked one leaves the other on the old
-    // version. Detect the twin so we can update both in lockstep.
+    // Legacy installs shipped both names as regular files; the sibling
+    // still needs its own swap. Symlink layouts return null here.
     var twin_buf: [std.fs.max_path_bytes]u8 = undefined;
     const twin_path: ?[]const u8 = resolveTwinRegularFile(ctx.io, self_exe, &twin_buf);
 
@@ -252,6 +257,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             notifier.markUpdatedTo(ctx, tag, latest);
             return;
         };
+        // Collapse the legacy dual-binary layout into the symlink layout
+        // (`mt` → `malt`). Best-effort: a failure here leaves both binaries
+        // up-to-date, just without the disk savings.
+        migrateTwinToSymlink(ctx, self_exe, mode_after_self) catch |e| {
+            output.warn("Could not migrate {s} to a symlink ({s}); both binaries are on {s}.", .{ tp, @errorName(e), latest });
+        };
+
         output.info("Updated {s} and {s} to {s} (previous kept at *.old)", .{ self_exe, tp, latest });
         notifier.markUpdatedTo(ctx, tag, latest);
         return;
@@ -309,6 +321,34 @@ fn installBinaryViaSudo(ctx: *const AppCtx, allocator: std.mem.Allocator, new_bi
     switch (term) {
         .exited => |code| if (code != 0) return error.SudoFailed,
         else => return error.SudoFailed,
+    }
+}
+
+/// Replace the legacy `mt` regular file with a symlink to `malt` so the
+/// install converges on the new layout after a self-update from a
+/// pre-symlink release. `ln -sfn` removes any existing file at the path
+/// (regular or symlink) before relinking, so this is idempotent.
+fn migrateTwinToSymlink(
+    ctx: *const AppCtx,
+    self_exe: []const u8,
+    mode: ReplaceMode,
+) !void {
+    // `mt` is always the symlink, `malt` is always the real binary —
+    // pick the right path regardless of which name the user invoked.
+    const dir = std.fs.path.dirname(self_exe) orelse return error.NoInstallDir;
+    var mt_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const mt_path = try std.fmt.bufPrint(&mt_buf, "{s}/mt", .{dir});
+
+    const argv: []const []const u8 = if (mode == .sudo)
+        &.{ "sudo", "ln", "-sfn", "malt", mt_path }
+    else
+        &.{ "ln", "-sfn", "malt", mt_path };
+
+    var child = std.process.spawn(ctx.io, .{ .argv = argv }) catch return error.SpawnFailed;
+    const term = child.wait(ctx.io) catch return error.SpawnFailed;
+    switch (term) {
+        .exited => |code| if (code != 0) return error.LinkFailed,
+        else => return error.LinkFailed,
     }
 }
 
