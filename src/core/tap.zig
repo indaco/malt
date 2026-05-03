@@ -1,7 +1,6 @@
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
-const fs_compat = @import("../fs/compat.zig");
 
 pub const TapInfo = struct {
     name: []const u8,
@@ -42,11 +41,10 @@ pub fn classifyResolveStatus(status: u16) TapError {
 /// `MALT_GITHUB_TOKEN`, or return null when the env var is unset or
 /// empty. Exclusive to `resolveHeadCommit` — no other codepath picks up
 /// this env var, so users who set it only affect tap-resolution calls.
-pub fn githubAuthHeader(buf: []u8) ?std.http.Header {
-    const raw = fs_compat.getenv("MALT_GITHUB_TOKEN") orelse return null;
-    const token = std.mem.sliceTo(raw, 0);
-    if (token.len == 0) return null;
-    const value = std.fmt.bufPrint(buf, "Bearer {s}", .{token}) catch return null;
+pub fn githubAuthHeader(environ: std.process.Environ, buf: []u8) ?std.http.Header {
+    const raw = std.process.Environ.getPosix(environ, "MALT_GITHUB_TOKEN") orelse return null;
+    if (raw.len == 0) return null;
+    const value = std.fmt.bufPrint(buf, "Bearer {s}", .{raw}) catch return null;
     return .{ .name = "Authorization", .value = value };
 }
 
@@ -209,6 +207,8 @@ pub fn parseCommitShaFromJson(body: []const u8) ?[]const u8 {
 /// can surface the actual cause (rate limit, 404, network, JSON). Caller
 /// owns the returned slice.
 pub fn resolveHeadCommit(
+    io: std.Io,
+    environ: std.process.Environ,
     allocator: std.mem.Allocator,
     user: []const u8,
     repo_bare: []const u8,
@@ -220,13 +220,13 @@ pub fn resolveHeadCommit(
         .{ user, repo_bare },
     ) catch return TapError.ResolveFailed;
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(io, environ, allocator);
     defer http.deinit();
 
     // MALT_GITHUB_TOKEN takes precedence; otherwise `http.get` falls
     // back to the HOMEBREW_GITHUB_API_TOKEN auto-inject in net/client.
     var auth_buf: [256]u8 = undefined;
-    var resp = if (githubAuthHeader(&auth_buf)) |header| blk: {
+    var resp = if (githubAuthHeader(environ, &auth_buf)) |header| blk: {
         const headers = [_]std.http.Header{header};
         break :blk http.getWithHeaders(url, &headers, null) catch return TapError.NetworkError;
     } else http.get(url) catch return TapError.NetworkError;

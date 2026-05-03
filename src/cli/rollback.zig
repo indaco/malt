@@ -2,7 +2,7 @@
 //! Revert a formula to its previous version using existing store entries.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
@@ -17,8 +17,8 @@ const formula_mod = @import("../core/formula.zig");
 /// `error.Aborted` is returned on every user-facing failure. The caller has
 /// already emitted a message via `output.err`; main.zig catches it and exits
 /// non-zero without printing a stack trace.
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "rollback")) return;
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "rollback")) return;
 
     if (args.len == 0) {
         output.err("Usage: mt rollback <package>", .{});
@@ -71,11 +71,11 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var store_buf: [512]u8 = undefined;
     const store_dir_path = std.fmt.bufPrint(&store_buf, "{s}/store", .{prefix}) catch return error.Aborted;
 
-    var store_dir = fs_compat.openDirAbsolute(store_dir_path, .{ .iterate = true }) catch {
+    var store_dir = std.Io.Dir.openDirAbsolute(ctx.io, store_dir_path, .{ .iterate = true }) catch {
         output.err("Cannot read store directory", .{});
         return error.Aborted;
     };
-    defer store_dir.close();
+    defer store_dir.close(ctx.io);
 
     // Collect available versions from store entries
     const Entry = struct { sha256: []const u8, version: []const u8 };
@@ -83,19 +83,19 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer entries.deinit(allocator);
 
     var iter = store_dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(ctx.io) catch null) |entry| {
         if (entry.kind != .directory) continue;
 
         // Check if this store entry contains {name}/ subdirectory
         var check_buf: [512]u8 = undefined;
         const check_path = std.fmt.bufPrint(&check_buf, "{s}/{s}/{s}", .{ store_dir_path, entry.name, name }) catch continue;
 
-        var keg_dir = fs_compat.openDirAbsolute(check_path, .{ .iterate = true }) catch continue;
-        defer keg_dir.close();
+        var keg_dir = std.Io.Dir.openDirAbsolute(ctx.io, check_path, .{ .iterate = true }) catch continue;
+        defer keg_dir.close(ctx.io);
 
         // The first subdirectory is the version
         var keg_iter = keg_dir.iterate();
-        while (keg_iter.next() catch null) |ver_entry| {
+        while (keg_iter.next(ctx.io) catch null) |ver_entry| {
             if (ver_entry.kind != .directory) continue;
             // Compare against the on-disk pkg_version label so a
             // revision-bumped current keg is skipped correctly.
@@ -134,18 +134,18 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer lk.release();
 
     // Unlink current version
-    var linker = linker_mod.Linker.init(allocator, &db, prefix);
+    var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
     linker.unlink(current_id) catch {
         output.warn("Could not unlink current {s} — links may be stale", .{name});
     };
 
     // Remove current cellar entry
-    cellar.remove(prefix, name, current_ver) catch {
+    cellar.remove(ctx.io, prefix, name, current_ver) catch {
         output.warn("Could not remove cellar entry for {s} {s}", .{ name, current_ver });
     };
 
     // Materialize the old version from store
-    const keg = cellar.materialize(allocator, prefix, target.sha256, name, target.version) catch {
+    const keg = cellar.materialize(ctx.io, allocator, prefix, target.sha256, name, target.version) catch {
         output.err("Failed to materialize {s} {s} from store", .{ name, target.version });
         return error.Aborted;
     };

@@ -6,6 +6,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const supervisor = malt.services_supervisor;
 const plist_mod = malt.services_plist;
 const sqlite = malt.sqlite;
@@ -21,7 +22,7 @@ test "SupervisorCtx bundles allocator and db into one param" {
     defer db.close();
     try schema.initSchema(&db);
 
-    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .db = &db };
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
     try testing.expectError(error.ServiceNotFound, supervisor.start(ctx, "absent"));
     try testing.expectError(error.ServiceNotFound, supervisor.stop(ctx, "absent"));
     try testing.expectError(error.ServiceNotFound, supervisor.restart(ctx, "absent"));
@@ -80,7 +81,7 @@ test "list is empty on a fresh database and hasService returns false" {
     defer db.close();
     try schema.initSchema(&db);
 
-    const list = try supervisor.list(.{ .allocator = testing.allocator, .db = &db });
+    const list = try supervisor.list(.{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db });
     defer supervisor.freeServiceInfos(testing.allocator, list);
     try testing.expectEqual(@as(usize, 0), list.len);
     try testing.expect(!supervisor.hasService(&db, "anything"));
@@ -89,10 +90,10 @@ test "list is empty on a fresh database and hasService returns false" {
 test "register writes a plist and a DB row that list reports back" {
     const prefix = "/tmp/malt_sup_register";
     const cellar = "/tmp/malt_sup_register/Cellar/testkeg/1.0";
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     _ = c.setenv("MALT_PREFIX", prefix, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -110,7 +111,7 @@ test "register writes a plist and a DB row that list reports back" {
         .stdout_path = "/tmp/malt_sup_register/out.log",
         .stderr_path = "/tmp/malt_sup_register/err.log",
     };
-    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .db = &db };
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
     try supervisor.register(ctx, spec, "testkeg", true, cellar, prefix);
 
     try testing.expect(supervisor.hasService(&db, "com.malt.test.svc"));
@@ -124,22 +125,22 @@ test "register writes a plist and a DB row that list reports back" {
     try testing.expect(list[0].auto_start);
 
     // plist file exists on disk
-    var f = try malt.fs_compat.openFileAbsolute(list[0].plist_path, .{});
-    f.close();
+    var f = try test_io.openFileAbsolute(std.Options.debug_io, list[0].plist_path, .{});
+    f.close(std.Options.debug_io);
 }
 
 test "tailLog writes the last N lines into the provided writer" {
     const path = "/tmp/malt_sup_tail.log";
-    malt.fs_compat.cwd().deleteFile(path) catch {};
-    defer malt.fs_compat.cwd().deleteFile(path) catch {};
+    test_io.cwd().deleteFile(std.Options.debug_io, path) catch {};
+    defer test_io.cwd().deleteFile(std.Options.debug_io, path) catch {};
 
-    const f = try malt.fs_compat.createFileAbsolute(path, .{});
-    try f.writeAll("a\nb\nc\nd\ne\n");
-    f.close();
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{});
+    try f.writeStreamingAll(std.Options.debug_io, "a\nb\nc\nd\ne\n");
+    f.close(std.Options.debug_io);
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try supervisor.tailLog(testing.allocator, path, 2, &aw.writer);
+    try supervisor.tailLog(std.Options.debug_io, testing.allocator, path, 2, &aw.writer);
 
     // Should end with the last 2 lines ("d" and "e").
     try testing.expect(std.mem.indexOf(u8, aw.written(), "d") != null);
@@ -151,7 +152,7 @@ test "start/stop/restart return ServiceNotFound when no DB row exists" {
     defer db.close();
     try schema.initSchema(&db);
 
-    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .db = &db };
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
     try testing.expectError(error.ServiceNotFound, supervisor.start(ctx, "absent"));
     try testing.expectError(error.ServiceNotFound, supervisor.stop(ctx, "absent"));
     try testing.expectError(error.ServiceNotFound, supervisor.restart(ctx, "absent"));
@@ -175,12 +176,14 @@ test "stopAndUnregister is a no-op on an absent service and still wipes the row"
     stmt.finalize();
 
     try testing.expect(supervisor.hasService(&db, "ghost"));
-    supervisor.stopAndUnregister(.{ .allocator = testing.allocator, .db = &db }, "ghost");
+    supervisor.stopAndUnregister(.{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db }, "ghost");
     try testing.expect(!supervisor.hasService(&db, "ghost"));
 }
 
 test "queryRuntime returns not_loaded for a label launchctl has never heard of" {
-    const state = supervisor.queryRuntime(testing.allocator, "com.malt.nonexistent.test.xyz");
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = malt.app_ctx.processEnviron() });
+    defer threaded.deinit();
+    const state = supervisor.queryRuntime(threaded.io(), testing.allocator, "com.malt.nonexistent.test.xyz");
     // We don't own the user's launchctl state, but an unknown label must
     // never come back as `running`.
     try testing.expect(state != .running);
@@ -191,6 +194,6 @@ test "tailLog reports IoFailed for a missing file" {
     defer aw.deinit();
     try testing.expectError(
         error.IoFailed,
-        supervisor.tailLog(testing.allocator, "/tmp/malt_sup_tail_missing_xyz", 1, &aw.writer),
+        supervisor.tailLog(std.Options.debug_io, testing.allocator, "/tmp/malt_sup_tail_missing_xyz", 1, &aw.writer),
     );
 }

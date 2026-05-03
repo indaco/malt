@@ -10,7 +10,6 @@
 //! the cosign subprocess, which is injected via `cosign_bin`).
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
 const hash = @import("../core/hash.zig");
 const install_cmd = @import("../cli/install.zig");
 
@@ -102,8 +101,8 @@ pub const VerifyInputs = struct {
 /// file, then SHA256-verify the tarball against the now-trusted list.
 /// Pure file I/O + subprocess — the caller is responsible for placing
 /// the three input files on disk. Testable without HTTP.
-pub fn verifyAll(allocator: std.mem.Allocator, in: VerifyInputs) VerifyError!void {
-    verifyCosignBlob(allocator, .{
+pub fn verifyAll(io: std.Io, allocator: std.mem.Allocator, in: VerifyInputs) VerifyError!void {
+    verifyCosignBlob(io, allocator, .{
         .cosign_bin = in.cosign_bin,
         .blob_path = in.checksums_path,
         .bundle_path = in.sigstore_path,
@@ -111,7 +110,7 @@ pub fn verifyAll(allocator: std.mem.Allocator, in: VerifyInputs) VerifyError!voi
         .oidc_issuer = in.oidc_issuer,
     }) catch |e| return e;
 
-    const checksums = fs_compat.readFileAbsoluteAlloc(allocator, in.checksums_path, 1 << 20) catch
+    const checksums = readFileAllAbsolute(io, allocator, in.checksums_path, 1 << 20) catch
         return error.ReadFailed;
     defer allocator.free(checksums);
 
@@ -121,13 +120,14 @@ pub fn verifyAll(allocator: std.mem.Allocator, in: VerifyInputs) VerifyError!voi
     _ = std.fmt.hexToBytes(&expected, expected_hex) catch return error.InvalidHex;
 
     // Stream to bound RSS during self-update — the tarball can be 256 MiB.
-    const actual = hash.hashFileSha256Raw(in.tarball_path) catch return error.ReadFailed;
+    const actual = hash.hashFileSha256Raw(io, in.tarball_path) catch return error.ReadFailed;
     if (!install_cmd.constantTimeEql(u8, &expected, &actual)) return error.ChecksumMismatch;
 }
 
 /// Shell out to `cosign verify-blob` with the same flags `install.sh` uses.
 /// Exit 0 = verified. Any other outcome maps to a CosignError.
-pub fn verifyCosignBlob(allocator: std.mem.Allocator, args: CosignBlob) CosignError!void {
+pub fn verifyCosignBlob(io: std.Io, allocator: std.mem.Allocator, args: CosignBlob) CosignError!void {
+    _ = allocator;
     const argv = [_][]const u8{
         args.cosign_bin,
         "verify-blob",
@@ -140,13 +140,31 @@ pub fn verifyCosignBlob(allocator: std.mem.Allocator, args: CosignBlob) CosignEr
         args.blob_path,
     };
 
-    var child = fs_compat.Child.init(&argv, allocator);
-    child.stdout_behavior = .ignore;
-    child.stderr_behavior = .ignore;
-    child.spawn() catch return error.CosignNotFound;
-    const term = child.wait() catch return error.CosignVerifyFailed;
+    var child = std.process.spawn(io, .{
+        .argv = &argv,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return error.CosignNotFound;
+    const term = child.wait(io) catch return error.CosignVerifyFailed;
     switch (term) {
         .exited => |code| if (code != 0) return error.CosignVerifyFailed,
         else => return error.CosignVerifyFailed,
     }
+}
+
+/// Read the entire contents of an absolute file path into a caller-owned slice.
+fn readFileAllAbsolute(io: std.Io, allocator: std.mem.Allocator, abs_path: []const u8, max_bytes: usize) ![]u8 {
+    const f = try std.Io.Dir.openFileAbsolute(io, abs_path, .{});
+    defer f.close(io);
+    const st = try f.stat(io);
+    const size = @min(@as(u64, max_bytes), st.size);
+    const buf = try allocator.alloc(u8, @intCast(size));
+    errdefer allocator.free(buf);
+    const n = try f.readPositionalAll(io, buf, 0);
+    if (n == buf.len) return buf;
+    if (allocator.resize(buf, n)) return buf[0..n];
+    const shrunk = try allocator.alloc(u8, n);
+    @memcpy(shrunk, buf[0..n]);
+    allocator.free(buf);
+    return shrunk;
 }

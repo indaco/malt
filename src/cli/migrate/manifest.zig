@@ -4,7 +4,7 @@
 //! shrinking the file when an entry is rolled back.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
 
@@ -49,11 +49,11 @@ pub const Manifest = struct {
     }
 
     /// Crash-safe rewrite via tempfile + rename: readers see old or new, never partial.
-    pub fn writeAtomic(self: *const Manifest, allocator: std.mem.Allocator, path: []const u8) !void {
+    pub fn writeAtomic(self: *const Manifest, io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
         var aw: std.Io.Writer.Allocating = .init(allocator);
         defer aw.deinit();
         try writeJson(&aw.writer, self.names());
-        try atomic.atomicWriteFile(path, aw.written());
+        try atomic.atomicWriteFile(io, path, aw.written());
     }
 };
 
@@ -101,10 +101,28 @@ pub fn writeJson(w: *std.Io.Writer, names: []const []const u8) !void {
 
 /// Missing file is treated as empty so first-run callers don't need
 /// to special-case it.
-pub fn loadFromPath(allocator: std.mem.Allocator, path: []const u8) !Manifest {
-    const bytes = fs_compat.readFileAbsoluteAlloc(allocator, path, max_manifest_bytes) catch |err| switch (err) {
+pub fn loadFromPath(ctx: *const AppCtx, allocator: std.mem.Allocator, path: []const u8) !Manifest {
+    const file = std.Io.Dir.openFileAbsolute(ctx.io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return Manifest.init(allocator),
         else => return err,
+    };
+    defer file.close(ctx.io);
+    const st = try file.stat(ctx.io);
+    const size: usize = @intCast(@min(@as(u64, max_manifest_bytes), st.size));
+    const buf = try allocator.alloc(u8, size);
+    const n = file.readPositionalAll(ctx.io, buf, 0) catch |err| {
+        allocator.free(buf);
+        return err;
+    };
+    const bytes = if (n == buf.len) buf else blk: {
+        if (allocator.resize(buf, n)) break :blk buf[0..n];
+        const trimmed = allocator.alloc(u8, n) catch |e| {
+            allocator.free(buf);
+            return e;
+        };
+        @memcpy(trimmed, buf[0..n]);
+        allocator.free(buf);
+        break :blk trimmed;
     };
     defer allocator.free(bytes);
     return parseJson(allocator, bytes);

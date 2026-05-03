@@ -4,18 +4,19 @@
 //! already surface it.
 
 const std = @import("std");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
-pub fn execute(_: std.mem.Allocator, args: []const []const u8) !void {
-    return run(args, .pin);
+pub fn execute(ctx: *const AppCtx, _: std.mem.Allocator, args: []const []const u8) !void {
+    return run(ctx, args, .pin);
 }
 
-pub fn executeUnpin(_: std.mem.Allocator, args: []const []const u8) !void {
-    return run(args, .unpin);
+pub fn executeUnpin(ctx: *const AppCtx, _: std.mem.Allocator, args: []const []const u8) !void {
+    return run(ctx, args, .unpin);
 }
 
 const Action = enum {
@@ -38,8 +39,8 @@ const Action = enum {
     }
 };
 
-fn run(args: []const []const u8, action: Action) !void {
-    if (help.showIfRequested(args, action.cmdName())) return;
+fn run(ctx: *const AppCtx, args: []const []const u8, action: Action) !void {
+    if (help.showIfRequested(ctx, args, action.cmdName())) return;
 
     if (args.len == 0) {
         output.err("Usage: mt {s} <name>", .{action.cmdName()});

@@ -1,6 +1,4 @@
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
-const io_mod = @import("../ui/io.zig");
 
 pub const DownloadError = error{
     Timeout,
@@ -81,6 +79,8 @@ pub fn schemeIsHttps(scheme: []const u8) bool {
 }
 
 pub const HttpClient = struct {
+    io: std.Io,
+    environ: std.process.Environ,
     allocator: std.mem.Allocator,
     client: std.http.Client,
 
@@ -96,10 +96,12 @@ pub const HttpClient = struct {
     /// Blob downloads (bottles, cask DMGs) get a much longer timeout.
     const blob_timeout_ns: u64 = 600 * std.time.ns_per_s; // 10 minutes
 
-    pub fn init(allocator: std.mem.Allocator) HttpClient {
+    pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator) HttpClient {
         return .{
+            .io = io,
+            .environ = environ,
             .allocator = allocator,
-            .client = .{ .allocator = allocator, .io = io_mod.ctx() },
+            .client = .{ .allocator = allocator, .io = io },
         };
     }
 
@@ -126,7 +128,7 @@ pub const HttpClient = struct {
     /// GET request; auto-injects HOMEBREW_GITHUB_API_TOKEN as Authorization
     /// for GitHub/Homebrew hosts. Caller owns the returned `Response`.
     pub fn get(self: *HttpClient, url: []const u8) !Response {
-        if (fs_compat.getenv("HOMEBREW_GITHUB_API_TOKEN")) |token| {
+        if (std.process.Environ.getPosix(self.environ, "HOMEBREW_GITHUB_API_TOKEN")) |token| {
             // Apply token to GitHub and Homebrew API requests
             if (std.mem.indexOf(u8, url, "github.com") != null or
                 std.mem.indexOf(u8, url, "formulae.brew.sh") != null or
@@ -332,7 +334,7 @@ pub const HttpClient = struct {
                     if (isTransientError(dl_err) and attempt < max_retries) {
                         resp.allocator.free(resp.body);
                         // Sleep is backoff jitter; interruption just retries sooner.
-                        std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch {};
+                        std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch {};
                         attempt += 1;
                         continue;
                     }
@@ -341,7 +343,7 @@ pub const HttpClient = struct {
             } else |err| {
                 if (attempt < max_retries) {
                     // Sleep is backoff jitter; interruption just retries sooner.
-                    std.Io.sleep(io_mod.ctx(), std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch {};
+                    std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch {};
                     attempt += 1;
                     continue;
                 }
@@ -408,12 +410,13 @@ pub const HttpClient = struct {
             self.timeout_ns;
         var request_done: std.Io.Event = .unset;
         const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
+            self.io,
             &request_done,
             effective_timeout,
             &req,
         }) catch null;
         defer {
-            request_done.set(io_mod.ctx());
+            request_done.set(self.io);
             if (watchdog) |w| w.join();
         }
 
@@ -429,17 +432,17 @@ pub const HttpClient = struct {
         };
         _ = body_reader.streamRemaining(&counting.writer) catch |e| switch (e) {
             error.WriteFailed => {
-                request_done.set(io_mod.ctx());
+                request_done.set(self.io);
                 if (counting.limit_exceeded) return error.ResponseTooLarge;
                 return error.ReadFailed;
             },
             error.ReadFailed => {
-                request_done.set(io_mod.ctx());
+                request_done.set(self.io);
                 return error.ReadFailed;
             },
         };
 
-        request_done.set(io_mod.ctx());
+        request_done.set(self.io);
         if (counting.limit_exceeded) return error.ResponseTooLarge;
 
         const body = try body_writer.toOwnedSlice();
@@ -455,11 +458,11 @@ pub const HttpClient = struct {
     /// setting `conn.closing` alone does not wake a `readv` already parked
     /// in the kernel, which hung malt for minutes on stalled TLS reads.
     fn watchdogFn(
+        io: std.Io,
         request_done: *std.Io.Event,
         timeout_ns: u64,
         req: *std.http.Client.Request,
     ) void {
-        const io = io_mod.ctx();
         const timeout: std.Io.Timeout = .{ .duration = .{
             .raw = std.Io.Duration.fromNanoseconds(@intCast(timeout_ns)),
             .clock = .awake,
@@ -513,20 +516,22 @@ fn formatUri(allocator: std.mem.Allocator, uri: std.Uri) ![]const u8 {
 /// handshake every time; pooling preserves no-sharing while reusing
 /// connections across the hot phase of an install.
 pub const HttpClientPool = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     clients: []HttpClient,
     busy: []bool,
     mutex: std.Io.Mutex,
     cond: std.Io.Condition,
 
-    pub fn init(allocator: std.mem.Allocator, size: usize) !HttpClientPool {
+    pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, size: usize) !HttpClientPool {
         const clients = try allocator.alloc(HttpClient, size);
         errdefer allocator.free(clients);
         const busy = try allocator.alloc(bool, size);
         errdefer allocator.free(busy);
         @memset(busy, false);
-        for (clients) |*c| c.* = HttpClient.init(allocator);
+        for (clients) |*c| c.* = HttpClient.init(io, environ, allocator);
         return .{
+            .io = io,
             .allocator = allocator,
             .clients = clients,
             .busy = busy,
@@ -543,9 +548,8 @@ pub const HttpClientPool = struct {
 
     /// Block until idle, mark busy, return exclusive pointer until `release`.
     pub fn acquire(self: *HttpClientPool) *HttpClient {
-        const io = io_mod.ctx();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         while (true) {
             for (self.busy, 0..) |b, i| {
                 if (!b) {
@@ -553,20 +557,19 @@ pub const HttpClientPool = struct {
                     return &self.clients[i];
                 }
             }
-            self.cond.waitUncancelable(io, &self.mutex);
+            self.cond.waitUncancelable(self.io, &self.mutex);
         }
     }
 
     /// Return an acquired client; foreign pointers are a programmer error.
     pub fn release(self: *HttpClientPool, client: *HttpClient) void {
-        const io = io_mod.ctx();
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         const base = @intFromPtr(self.clients.ptr);
         const addr = @intFromPtr(client);
         const idx = (addr - base) / @sizeOf(HttpClient);
         std.debug.assert(idx < self.clients.len);
         self.busy[idx] = false;
-        self.cond.signal(io);
+        self.cond.signal(self.io);
     }
 };

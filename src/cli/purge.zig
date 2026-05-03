@@ -2,6 +2,7 @@
 //! Refuses to run without a scope flag; full flag reference in `mt purge --help`.
 
 const std = @import("std");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const lock_mod = @import("../db/lock.zig");
@@ -26,8 +27,8 @@ pub const formatBytes = util.formatBytes;
 
 const TierResult = util.TierResult;
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "purge")) return;
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "purge")) return;
 
     const opts = parseArgs(args) catch {
         output.err("invalid arguments — run `mt purge --help` for usage", .{});
@@ -49,7 +50,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer allocator.free(cache_dir);
 
     if (opts.scope.wipe) {
-        try wipe_mod.runWipe(allocator, opts, prefix, cache_dir, dry_run);
+        try wipe_mod.runWipe(ctx, allocator, opts, prefix, cache_dir, dry_run);
         return;
     }
 
@@ -65,7 +66,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         if (dry_run) {
             output.info("would write backup manifest to {s}", .{bp});
         } else {
-            try wipe_mod.writeManifest(allocator, bp);
+            try wipe_mod.writeManifest(ctx, allocator, bp);
             output.success("backup manifest written to {s}", .{bp});
         }
     }
@@ -83,32 +84,32 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // its store ref to 0, and those fresh orphans only get swept on the
     // second pass.
     if (opts.scope.unused_deps) {
-        const r = try scopes_mod.runUnusedDeps(allocator, prefix, dry_run);
+        const r = try scopes_mod.runUnusedDeps(ctx, allocator, prefix, dry_run);
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
     if (opts.scope.store_orphans) {
-        const r = try scopes_mod.runStoreOrphans(allocator, prefix, dry_run);
+        const r = try scopes_mod.runStoreOrphans(ctx, allocator, prefix, dry_run);
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
     if (opts.scope.cache) {
-        const r = try scopes_mod.runCache(allocator, cache_dir, opts.cache_days, dry_run);
+        const r = try scopes_mod.runCache(ctx, allocator, cache_dir, opts.cache_days, dry_run);
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
     if (opts.scope.downloads) {
-        const r = try scopes_mod.runDownloads(allocator, cache_dir, dry_run);
+        const r = try scopes_mod.runDownloads(ctx, allocator, cache_dir, dry_run);
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
     if (opts.scope.stale_casks) {
-        const r = try scopes_mod.runStaleCasks(allocator, prefix, dry_run);
+        const r = try scopes_mod.runStaleCasks(ctx, allocator, prefix, dry_run);
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
     if (opts.scope.old_versions) {
-        const r = try scopes_mod.runOldVersions(allocator, prefix, dry_run);
+        const r = try scopes_mod.runOldVersions(ctx, allocator, prefix, dry_run);
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }

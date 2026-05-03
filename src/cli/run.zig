@@ -3,7 +3,7 @@
 //! `--keep` extracts under {cache}/run/<sha256>/ so subsequent runs skip download.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const formula_mod = @import("../core/formula.zig");
 const bottle_mod = @import("../core/bottle.zig");
 const client_mod = @import("../net/client.zig");
@@ -19,9 +19,9 @@ const help = @import("help.zig");
 /// via `MALT_RUN_KEEP_LOCK_TIMEOUT_MS` so CI / slow-link users can raise it.
 const default_keep_lock_timeout_ms: u32 = 300_000;
 
-fn keepLockTimeoutMs() u32 {
-    if (fs_compat.getenv("MALT_RUN_KEEP_LOCK_TIMEOUT_MS")) |v| {
-        return std.fmt.parseInt(u32, std.mem.sliceTo(v, 0), 10) catch default_keep_lock_timeout_ms;
+fn keepLockTimeoutMs(ctx: *const AppCtx) u32 {
+    if (std.process.Environ.getPosix(ctx.environ, "MALT_RUN_KEEP_LOCK_TIMEOUT_MS")) |v| {
+        return std.fmt.parseInt(u32, v, 10) catch default_keep_lock_timeout_ms;
     }
     return default_keep_lock_timeout_ms;
 }
@@ -78,6 +78,7 @@ pub fn buildKeepLockPath(buf: []u8, cache_dir: []const u8, sha256: []const u8) e
 /// Probe `{cache_dir}/run/<sha>/<pkg>/<ver>/bin/<pkg>`. Returns the path
 /// (borrowed from `buf`) on hit, null on miss.
 pub fn findCachedBinary(
+    ctx: *const AppCtx,
     buf: []u8,
     cache_dir: []const u8,
     sha256: []const u8,
@@ -87,12 +88,12 @@ pub fn findCachedBinary(
     const bin_path = std.fmt.bufPrint(buf, "{s}/run/{s}/{s}/{s}/bin/{s}", .{
         cache_dir, sha256, pkg_name, version, pkg_name,
     }) catch return error.PathTooLong;
-    fs_compat.accessAbsolute(bin_path, .{}) catch return null;
+    std.Io.Dir.accessAbsolute(ctx.io, bin_path, .{}) catch return null;
     return bin_path;
 }
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "run")) return;
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "run")) return;
 
     const parsed = parseArgs(args) orelse {
         output.err("Usage: mt run [--keep] <package> [-- <args...>]", .{});
@@ -104,15 +105,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     var bin_buf: [512]u8 = undefined;
     const installed_bin = std.fmt.bufPrint(&bin_buf, "{s}/bin/{s}", .{ prefix, parsed.pkg_name }) catch return;
-    fs_compat.accessAbsolute(installed_bin, .{}) catch {
-        return ephemeralRun(allocator, parsed.pkg_name, parsed.cmd_args, parsed.keep, prefix);
+    std.Io.Dir.accessAbsolute(ctx.io, installed_bin, .{}) catch {
+        return ephemeralRun(ctx, allocator, parsed.pkg_name, parsed.cmd_args, parsed.keep, prefix);
     };
 
     output.info("Running installed {s}...", .{parsed.pkg_name});
-    return try execBinary(allocator, installed_bin, parsed.cmd_args);
+    return try execBinary(ctx, allocator, installed_bin, parsed.cmd_args);
 }
 
 fn ephemeralRun(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     pkg_name: []const u8,
     cmd_args: []const []const u8,
@@ -121,12 +123,12 @@ fn ephemeralRun(
 ) !void {
     output.info("Fetching {s} for ephemeral run...", .{pkg_name});
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
     var cache_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch return;
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
 
     const formula_json = api.fetchFormula(pkg_name) catch {
         output.err("Formula '{s}' not found", .{pkg_name});
@@ -157,7 +159,7 @@ fn ephemeralRun(
             return error.Aborted;
         };
         // Lock file needs the run/ root to exist before open(O_CREAT).
-        fs_compat.cwd().makePath(run_root) catch {
+        std.Io.Dir.cwd().createDirPath(ctx.io, run_root) catch {
             output.err("Failed to create run cache root", .{});
             return error.Aborted;
         };
@@ -167,7 +169,7 @@ fn ephemeralRun(
             output.err("Cache lock path too long for {s}", .{pkg_name});
             return error.Aborted;
         };
-        keep_lock = lock_mod.LockFile.acquire(lock_path, keepLockTimeoutMs()) catch |e| {
+        keep_lock = lock_mod.LockFile.acquire(lock_path, keepLockTimeoutMs(ctx)) catch |e| {
             if (e == error.Timeout) {
                 if (lock_mod.LockFile.holderPid(lock_path)) |pid| {
                     output.err("Another `mt run --keep` for {s} is in progress (pid {d})", .{ pkg_name, pid });
@@ -182,15 +184,15 @@ fn ephemeralRun(
 
         // Probe under the lock — a peer that just released may have populated the slot.
         var hit_buf: [512]u8 = undefined;
-        if (findCachedBinary(&hit_buf, cache_dir, bottle.sha256, pkg_name, formula.version) catch null) |cached_bin| {
+        if (findCachedBinary(ctx, &hit_buf, cache_dir, bottle.sha256, pkg_name, formula.version) catch null) |cached_bin| {
             // Drop the lock before exec so peers can run the cached binary unblocked.
             releaseKeepLock(&keep_lock);
             output.info("Running cached {s} {s}...", .{ pkg_name, formula.version });
-            return try execBinary(allocator, cached_bin, cmd_args);
+            return try execBinary(ctx, allocator, cached_bin, cmd_args);
         }
     }
 
-    var ghcr = ghcr_mod.GhcrClient.init(allocator, &http);
+    var ghcr = ghcr_mod.GhcrClient.init(ctx.io, allocator, &http);
     defer ghcr.deinit();
 
     // Cache slot under {cache} so `mt purge --cache` wipes it; a tmp dir otherwise.
@@ -198,7 +200,7 @@ fn ephemeralRun(
     var dest_dir: []const u8 = undefined;
     var owned_tmp: ?[]const u8 = null;
     defer if (owned_tmp) |p| {
-        atomic.cleanupTempDir(p);
+        atomic.cleanupTempDir(ctx.io, p);
         allocator.free(p);
     };
 
@@ -209,20 +211,20 @@ fn ephemeralRun(
         };
         // Wipe stale partial state from a prior aborted run so the
         // tar extractor never trips on pre-existing entries.
-        fs_compat.deleteTreeAbsolute(dest_dir) catch {};
-        fs_compat.cwd().makePath(dest_dir) catch {
+        std.Io.Dir.cwd().deleteTree(ctx.io, dest_dir) catch {};
+        std.Io.Dir.cwd().createDirPath(ctx.io, dest_dir) catch {
             output.err("Failed to create run cache directory", .{});
             return error.Aborted;
         };
     } else {
-        owned_tmp = atomic.createTempDir(allocator, "run") catch {
+        owned_tmp = atomic.createTempDir(ctx.io, allocator, "run") catch {
             output.err("Failed to create temp directory", .{});
             return error.Aborted;
         };
         dest_dir = owned_tmp.?;
     }
     // Half-extracted cache slot is poison for the next --keep run; wipe on failure.
-    errdefer if (keep) fs_compat.deleteTreeAbsolute(dest_dir) catch {};
+    errdefer if (keep) std.Io.Dir.cwd().deleteTree(ctx.io, dest_dir) catch {};
 
     const ghcr_prefix = "https://ghcr.io/v2/";
     var repo_buf: [256]u8 = undefined;
@@ -239,7 +241,7 @@ fn ephemeralRun(
     } else return;
 
     output.info("Downloading {s} {s}...", .{ pkg_name, formula.version });
-    _ = bottle_mod.download(allocator, &ghcr, &http, repo, digest, bottle.sha256, dest_dir, null) catch {
+    _ = bottle_mod.download(ctx.io, allocator, &ghcr, &http, repo, digest, bottle.sha256, dest_dir, null) catch {
         output.err("Failed to download {s}", .{pkg_name});
         return error.Aborted;
     };
@@ -252,16 +254,16 @@ fn ephemeralRun(
         pkg_name,
     }) catch return;
 
-    fs_compat.accessAbsolute(bin_path, .{}) catch {
+    std.Io.Dir.accessAbsolute(ctx.io, bin_path, .{}) catch {
         output.err("Binary '{s}' not found in bottle", .{pkg_name});
         return error.Aborted;
     };
 
     {
-        const f = fs_compat.openFileAbsolute(bin_path, .{ .mode = .read_write }) catch return;
-        defer f.close();
+        const f = std.Io.Dir.openFileAbsolute(ctx.io, bin_path, .{ .mode = .read_write }) catch return;
+        defer f.close(ctx.io);
         // Bottles ship with +x; chmod is belt-and-suspenders. exec below surfaces EACCES.
-        f.chmod(0o755) catch {};
+        f.setPermissions(ctx.io, std.Io.File.Permissions.fromMode(0o755)) catch {};
     }
 
     // Slot fully populated; let waiting peers in before we hand off to exec.
@@ -273,14 +275,14 @@ fn ephemeralRun(
     } else {
         output.info("Running {s} {s} (ephemeral)...", .{ pkg_name, formula.version });
     }
-    const stderr = fs_compat.stderrFile();
+    const stderr = ctx.stderr;
     // Separator is purely cosmetic; a closed stderr shouldn't kill the run.
-    stderr.writeAll("---\n") catch {};
+    stderr.writeStreamingAll(ctx.io, "---\n") catch {};
 
-    try execBinary(allocator, bin_path, cmd_args);
+    try execBinary(ctx, allocator, bin_path, cmd_args);
 }
 
-fn execBinary(allocator: std.mem.Allocator, path: []const u8, cmd_args: []const []const u8) !void {
+fn execBinary(ctx: *const AppCtx, _: std.mem.Allocator, path: []const u8, cmd_args: []const []const u8) !void {
     // Build argv: [path] ++ cmd_args
     var argv_buf: [64][]const u8 = undefined;
     argv_buf[0] = path;
@@ -289,13 +291,12 @@ fn execBinary(allocator: std.mem.Allocator, path: []const u8, cmd_args: []const 
         argv_buf[i] = arg;
     }
 
-    var child = fs_compat.Child.init(argv_buf[0 .. argc + 1], allocator);
-    child.spawn() catch {
+    var child = std.process.spawn(ctx.io, .{ .argv = argv_buf[0 .. argc + 1] }) catch {
         output.err("Failed to execute binary", .{});
         return error.Aborted;
     };
     // Ephemeral run is fire-and-forget; child exit code isn't surfaced to the shell.
-    _ = child.wait() catch {};
+    _ = child.wait(ctx.io) catch {};
 }
 
 test "parseArgs splits at double dash" {

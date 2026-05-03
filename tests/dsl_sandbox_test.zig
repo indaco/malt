@@ -5,6 +5,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const malt = @import("malt");
+const test_io = @import("test_io");
 const dsl = malt.dsl;
 const sandbox = dsl.sandbox;
 const SandboxError = sandbox.SandboxError;
@@ -135,6 +136,7 @@ test "sandbox: dotdot in middle" {
 test "sandbox: validateResolved accepts valid literal path" {
     // Path does not exist on disk, so only literal validation runs
     try sandbox.validateResolved(
+        std.Options.debug_io,
         "/opt/malt/Cellar/foo/1.0/bin/mybin",
         cellar,
         prefix,
@@ -143,6 +145,7 @@ test "sandbox: validateResolved accepts valid literal path" {
 
 test "sandbox: validateResolved rejects dotdot" {
     const result = sandbox.validateResolved(
+        std.Options.debug_io,
         "/opt/malt/Cellar/foo/1.0/../../evil",
         cellar,
         prefix,
@@ -152,6 +155,7 @@ test "sandbox: validateResolved rejects dotdot" {
 
 test "sandbox: validateResolved rejects outside prefix" {
     const result = sandbox.validateResolved(
+        std.Options.debug_io,
         "/etc/passwd",
         cellar,
         prefix,
@@ -168,12 +172,12 @@ test "sandbox: symlink escape detected by validateResolved" {
     const tmp = std.testing.tmpDir(.{});
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const tmp_path = blk: {
-        const n = try std.Io.Dir.realPath(tmp.dir, malt.io_mod.ctx(), &buf);
+        const n = try std.Io.Dir.realPath(tmp.dir, std.Options.debug_io, &buf);
         break :blk buf[0..n];
     };
 
     // Create a "cellar" subdir
-    try std.Io.Dir.createDirPath(tmp.dir, malt.io_mod.ctx(), "cellar/pkg/1.0/bin");
+    try std.Io.Dir.createDirPath(tmp.dir, std.Options.debug_io, "cellar/pkg/1.0/bin");
 
     // Create a symlink from cellar/pkg/1.0/bin/escape -> /tmp
     const symlink_dir = try std.fs.path.join(
@@ -188,13 +192,14 @@ test "sandbox: symlink escape detected by validateResolved" {
     );
     defer testing.allocator.free(cellar_dir);
 
-    malt.fs_compat.cwd().symLink("/tmp", symlink_dir, .{}) catch {
+    test_io.cwd().symLink(std.Options.debug_io, "/tmp", symlink_dir, .{}) catch {
         // If we can't create symlinks (permissions), skip the test
         return;
     };
 
     // validateResolved should catch the escape because resolved path is /tmp
     const result = sandbox.validateResolved(
+        std.Options.debug_io,
         symlink_dir,
         cellar_dir,
         tmp_path,

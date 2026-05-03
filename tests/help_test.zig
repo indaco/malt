@@ -3,27 +3,40 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const help = @import("malt").cli_help;
 
+fn quietCtx() malt.app_ctx.AppCtx {
+    return .{
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .stdout = test_io.testSink(),
+        .stderr = test_io.testSink(),
+    };
+}
+
 test "showIfRequested returns false when -h/--help absent" {
+    const ctx = quietCtx();
     const args = [_][]const u8{ "install", "wget" };
-    try testing.expect(!help.showIfRequested(&args, "install"));
+    try testing.expect(!help.showIfRequested(&ctx, &args, "install"));
 }
 
 test "showIfRequested returns true for short -h" {
-    // Writes help text — redirected to stderr under the test runner by
-    // `io_mod.stdoutFile()`, so it doesn't corrupt the IPC pipe.
+    // Writes help text into the test-sink ctx so it does not corrupt the IPC pipe.
+    const ctx = quietCtx();
     const args = [_][]const u8{"-h"};
-    try testing.expect(help.showIfRequested(&args, "install"));
+    try testing.expect(help.showIfRequested(&ctx, &args, "install"));
 }
 
 test "showIfRequested returns true for long --help" {
+    const ctx = quietCtx();
     const args = [_][]const u8{"--help"};
-    try testing.expect(help.showIfRequested(&args, "purge"));
+    try testing.expect(help.showIfRequested(&ctx, &args, "purge"));
 }
 
 test "showIfRequested covers every documented command (exercises every branch of the static map)" {
+    const ctx = quietCtx();
     const commands = [_][]const u8{
         "install",  "uninstall",          "upgrade", "update",
         "outdated", "list",               "info",    "search",
@@ -34,7 +47,7 @@ test "showIfRequested covers every documented command (exercises every branch of
     };
     const args = [_][]const u8{"--help"};
     for (commands) |cmd| {
-        try testing.expect(help.showIfRequested(&args, cmd));
+        try testing.expect(help.showIfRequested(&ctx, &args, cmd));
     }
 }
 
@@ -59,8 +72,9 @@ test "helpFor falls back gracefully for unknown commands" {
 // Integration: verify that `malt <cmd> --help` writes to stdout (not stderr).
 // Relies on the pre-built binary under zig-out/bin/malt; skipped if absent.
 test "--help output lands on stdout, not stderr" {
+    const io = std.Options.debug_io;
     const bin_path = "zig-out/bin/malt";
-    malt.fs_compat.cwd().access(bin_path, .{}) catch return error.SkipZigTest;
+    test_io.cwd().access(io, bin_path, .{}) catch return error.SkipZigTest;
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

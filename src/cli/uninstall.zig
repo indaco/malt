@@ -2,7 +2,7 @@
 //! Remove installed packages.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -16,8 +16,8 @@ const formula_mod = @import("../core/formula.zig");
 const supervisor_mod = @import("../core/services/supervisor.zig");
 const help = @import("help.zig");
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "uninstall")) return;
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "uninstall")) return;
 
     var force = false;
     var force_cask = false;
@@ -63,7 +63,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Check if it's a cask first (or if --cask was passed)
     if (force_cask or cask_mod.isInstalled(&db, name)) {
-        try uninstallCask(allocator, name, &db, prefix, force);
+        try uninstallCask(ctx, allocator, name, &db, prefix, force);
         return;
     }
 
@@ -113,35 +113,35 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Stop and unregister any associated launchd service before tearing down
     // files. The service name we register matches the formula name.
-    supervisor_mod.stopAndUnregister(.{ .allocator = allocator, .db = &db }, name);
+    supervisor_mod.stopAndUnregister(.{ .allocator = allocator, .io = ctx.io, .db = &db }, name);
 
     // Unlink symlinks
-    var lnk = linker.Linker.init(allocator, &db, prefix);
+    var lnk = linker.Linker.init(ctx.io, allocator, &db, prefix);
     lnk.unlink(keg_id) catch {
         output.warn("Could not remove all symlinks for {s}", .{name});
     };
 
     // Remove Cellar directory (dir name carries the _<revision> suffix
     // when the keg was installed with revision > 0).
-    cellar.remove(prefix, name, pkg_version) catch {
+    cellar.remove(ctx.io, prefix, name, pkg_version) catch {
         output.warn("Could not remove cellar entry for {s} {s}", .{ name, version });
     };
     // Also remove parent if empty (e.g. Cellar/jq/ after removing Cellar/jq/1.8.1/)
     {
         var parent_buf: [512]u8 = undefined;
         const parent_path = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch "";
-        if (parent_path.len > 0) fs_compat.deleteDirAbsolute(parent_path) catch {}; // Only succeeds when empty; sibling versions keep the dir alive.
+        if (parent_path.len > 0) std.Io.Dir.deleteDirAbsolute(ctx.io, parent_path) catch {}; // Only succeeds when empty; sibling versions keep the dir alive.
     }
     // Remove opt/ symlink
     {
         var opt_buf: [512]u8 = undefined;
         const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch "";
-        if (opt_path.len > 0) fs_compat.cwd().deleteFile(opt_path) catch {}; // opt/ link absent on never-linked kegs.
+        if (opt_path.len > 0) std.Io.Dir.cwd().deleteFile(ctx.io, opt_path) catch {}; // opt/ link absent on never-linked kegs.
     }
 
     // Decrement store ref
     if (sha256.len > 0) {
-        var st = store.Store.init(allocator, &db, prefix);
+        var st = store.Store.init(ctx.io, allocator, &db, prefix);
         st.decrementRef(sha256) catch {
             output.warn("Could not decrement store ref for {s}", .{name});
         };
@@ -159,7 +159,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 /// Uninstall a cask by token.
-fn uninstallCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, force: bool) !void {
+fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, prefix: [:0]const u8, force: bool) !void {
     const info = cask_mod.lookupInstalled(db, token) orelse {
         output.err("{s} is not installed as a cask", .{token});
         return error.Aborted;
@@ -168,7 +168,7 @@ fn uninstallCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Da
     // Check if running (unless --force)
     if (!force) {
         if (info.appPath()) |app_path| {
-            if (cask_mod.CaskInstaller.isAppRunningPub(allocator, app_path)) {
+            if (cask_mod.CaskInstaller.isAppRunningPub(ctx.io, allocator, app_path)) {
                 output.err("{s} appears to be running. Quit the app first, or use --force.", .{token});
                 return error.Aborted;
             }
@@ -177,7 +177,7 @@ fn uninstallCask(allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Da
 
     output.info("Uninstalling cask {s}...", .{token});
 
-    var installer = cask_mod.CaskInstaller.init(allocator, db, prefix);
+    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
     installer.uninstall(token) catch {
         output.err("Failed to uninstall cask {s}", .{token});
         return error.Aborted;

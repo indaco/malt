@@ -4,7 +4,6 @@
 //! the single source of memory for every spawn.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
 
 pub const ChildError = error{
     SpawnFailed,
@@ -15,14 +14,14 @@ pub const ChildError = error{
 };
 
 /// Spawn `argv`, wait for it, and collapse the outcome into a narrow
-/// error set. `allocator` backs argv/env dup and any pipe reads.
+/// error set. `io` carries the parent `Environ` so PATH lookups for
+/// programs like `hdiutil` resolve.
 pub fn runOrFail(
-    allocator: std.mem.Allocator,
+    io: std.Io,
     argv: []const []const u8,
 ) ChildError!void {
-    var child = fs_compat.Child.init(argv, allocator);
-    child.spawn() catch return error.SpawnFailed;
-    const term = child.wait() catch return error.WaitFailed;
+    var child = std.process.spawn(io, .{ .argv = argv }) catch return error.SpawnFailed;
+    const term = child.wait(io) catch return error.WaitFailed;
     switch (term) {
         .exited => |code| if (code != 0) return error.NonZeroExit,
         .signal, .stopped, .unknown => return error.NonZeroExit,
@@ -30,16 +29,22 @@ pub fn runOrFail(
 }
 
 test "runOrFail returns void on exit code 0" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
     const argv = [_][]const u8{"/usr/bin/true"};
-    try runOrFail(std.testing.allocator, &argv);
+    try runOrFail(threaded.io(), &argv);
 }
 
 test "runOrFail returns NonZeroExit on a non-zero exit" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
     const argv = [_][]const u8{"/usr/bin/false"};
-    try std.testing.expectError(ChildError.NonZeroExit, runOrFail(std.testing.allocator, &argv));
+    try std.testing.expectError(ChildError.NonZeroExit, runOrFail(threaded.io(), &argv));
 }
 
 test "runOrFail returns SpawnFailed when program does not exist" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
     const argv = [_][]const u8{"/nonexistent/binary/malt_child_test"};
-    try std.testing.expectError(ChildError.SpawnFailed, runOrFail(std.testing.allocator, &argv));
+    try std.testing.expectError(ChildError.SpawnFailed, runOrFail(threaded.io(), &argv));
 }

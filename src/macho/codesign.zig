@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const fs_compat = @import("../fs/compat.zig");
 
 pub const CodesignError = error{
     CodesignFailed,
@@ -19,9 +18,9 @@ pub fn isArm64() bool {
 
 /// Ad-hoc codesign a single binary. Thin wrapper around `adHocSignAll`
 /// kept for callers that have exactly one path on hand.
-pub fn adHocSign(allocator: std.mem.Allocator, path: []const u8) CodesignError!void {
+pub fn adHocSign(io: std.Io, allocator: std.mem.Allocator, path: []const u8) CodesignError!void {
     const one = [_][]const u8{path};
-    return adHocSignAll(allocator, &one);
+    return adHocSignAll(io, allocator, &one);
 }
 
 /// Ad-hoc codesign every path in `paths` with a **single** `codesign`
@@ -32,7 +31,7 @@ pub fn adHocSign(allocator: std.mem.Allocator, path: []const u8) CodesignError!v
 /// N spawn + wait cycles (~15 ms each on arm64) into one. For packages
 /// with many Mach-O files (ffmpeg ships ~20+ dylibs and binaries) this
 /// is the difference between ~300 ms and ~15 ms of codesign cost.
-pub fn adHocSignAll(allocator: std.mem.Allocator, paths: []const []const u8) CodesignError!void {
+pub fn adHocSignAll(io: std.Io, allocator: std.mem.Allocator, paths: []const []const u8) CodesignError!void {
     if (paths.len == 0) return;
 
     // argv = ["codesign", "--force", "--sign", "-", path1, path2, ...]
@@ -45,12 +44,13 @@ pub fn adHocSignAll(allocator: std.mem.Allocator, paths: []const []const u8) Cod
     argv.appendAssumeCapacity("-");
     for (paths) |p| argv.appendAssumeCapacity(p);
 
-    var child = fs_compat.Child.init(argv.items, allocator);
-    // Redirect stdout/stderr to /dev/null to suppress codesign messages
-    child.stdout_behavior = .ignore;
-    child.stderr_behavior = .ignore;
-    child.spawn() catch return CodesignError.SpawnFailed;
-    const term = child.wait() catch return CodesignError.CodesignFailed;
+    // Redirect stdout/stderr to /dev/null to suppress codesign messages.
+    var spawned = std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return CodesignError.SpawnFailed;
+    const term = spawned.wait(io) catch return CodesignError.CodesignFailed;
     switch (term) {
         .exited => |code| {
             if (code != 0) return CodesignError.CodesignFailed;

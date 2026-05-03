@@ -5,13 +5,14 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const cli_run = malt.cli_run;
 
 test "findCachedBinary returns the path when the cached binary exists" {
     const base = "/tmp/malt_run_keep_hit";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     const sha = "abc123";
     const pkg = "jq";
@@ -19,26 +20,34 @@ test "findCachedBinary returns the path when the cached binary exists" {
 
     const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/run/{s}/{s}/{s}/bin", .{ base, sha, pkg, ver });
     defer testing.allocator.free(bin_dir);
-    try malt.fs_compat.cwd().makePath(bin_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
 
     const expected_bin = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, pkg });
     defer testing.allocator.free(expected_bin);
-    const f = try malt.fs_compat.createFileAbsolute(expected_bin, .{});
-    f.close();
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, expected_bin, .{});
+    f.close(std.Options.debug_io);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
     var probe_buf: [512]u8 = undefined;
-    const cached = try cli_run.findCachedBinary(&probe_buf, base, sha, pkg, ver);
+    const cached = try cli_run.findCachedBinary(&ctx, &probe_buf, base, sha, pkg, ver);
     try testing.expect(cached != null);
     try testing.expectEqualStrings(expected_bin, cached.?);
 }
 
 test "findCachedBinary reports miss when the cache is empty" {
     const base = "/tmp/malt_run_keep_miss";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
     var probe_buf: [512]u8 = undefined;
-    const cached = try cli_run.findCachedBinary(&probe_buf, base, "abc", "jq", "1.0");
+    const cached = try cli_run.findCachedBinary(&ctx, &probe_buf, base, "abc", "jq", "1.0");
     try testing.expect(cached == null);
 }
 
@@ -47,8 +56,8 @@ test "findCachedBinary reports miss when the cache is empty" {
 // when an upstream rebuilds with the same `version` string.
 test "findCachedBinary keys cache slot on sha256, not just pkg+version" {
     const base = "/tmp/malt_run_keep_sha_isolation";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     const sha_a = "aaa111";
     const sha_b = "bbb222";
@@ -57,38 +66,46 @@ test "findCachedBinary keys cache slot on sha256, not just pkg+version" {
 
     const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/run/{s}/{s}/{s}/bin", .{ base, sha_a, pkg, ver });
     defer testing.allocator.free(bin_dir);
-    try malt.fs_compat.cwd().makePath(bin_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
     const bin_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, pkg });
     defer testing.allocator.free(bin_path);
-    const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
-    f.close();
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, bin_path, .{});
+    f.close(std.Options.debug_io);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
     var probe_buf: [512]u8 = undefined;
-    const same_sha = try cli_run.findCachedBinary(&probe_buf, base, sha_a, pkg, ver);
+    const same_sha = try cli_run.findCachedBinary(&ctx, &probe_buf, base, sha_a, pkg, ver);
     try testing.expect(same_sha != null);
 
-    const other_sha = try cli_run.findCachedBinary(&probe_buf, base, sha_b, pkg, ver);
+    const other_sha = try cli_run.findCachedBinary(&ctx, &probe_buf, base, sha_b, pkg, ver);
     try testing.expect(other_sha == null);
 }
 
 test "findCachedBinary requires the version directory to match" {
     const base = "/tmp/malt_run_keep_ver_isolation";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     const sha = "abc";
     const pkg = "jq";
 
     const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/run/{s}/{s}/1.7.1/bin", .{ base, sha, pkg });
     defer testing.allocator.free(bin_dir);
-    try malt.fs_compat.cwd().makePath(bin_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
     const bin_path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ bin_dir, pkg });
     defer testing.allocator.free(bin_path);
-    const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
-    f.close();
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, bin_path, .{});
+    f.close(std.Options.debug_io);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
     var probe_buf: [512]u8 = undefined;
-    const wrong_ver = try cli_run.findCachedBinary(&probe_buf, base, sha, pkg, "2.0");
+    const wrong_ver = try cli_run.findCachedBinary(&ctx, &probe_buf, base, sha, pkg, "2.0");
     try testing.expect(wrong_ver == null);
 }
 
@@ -97,8 +114,8 @@ test "findCachedBinary requires the version directory to match" {
 // LockFile.acquire calls open new fds, which on macOS/Linux contend).
 test "LockFile blocks a second acquire on the same path" {
     const lock_path = "/tmp/malt_run_keep_lock_test.lock";
-    malt.fs_compat.deleteFileAbsolute(lock_path) catch {};
-    defer malt.fs_compat.deleteFileAbsolute(lock_path) catch {};
+    test_io.deleteFileAbsolute(std.Options.debug_io, lock_path) catch {};
+    defer test_io.deleteFileAbsolute(std.Options.debug_io, lock_path) catch {};
 
     var first = try malt.lock.LockFile.acquire(lock_path, 1_000);
     defer first.release();

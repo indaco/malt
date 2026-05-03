@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const tap_cli = @import("malt").cli_tap;
 
@@ -16,14 +17,16 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const path = try std.fmt.allocPrintSentinel(
         testing.allocator,
         "/tmp/malt_cli_tap_{d}_{s}",
-        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        .{ test_io.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
         0,
     );
-    malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().makePath(path);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.makeDirAbsolute(db_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, db_dir);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -31,25 +34,31 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
 test "execute with no args prints an empty list (no taps registered)" {
     const prefix = try setupPrefix("list_empty");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    try tap_cli.execute(testing.allocator, &.{});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try tap_cli.execute(&ctx, testing.allocator, &.{});
 }
 
 test "execute with unresolvable user/repo aborts (no network pin = no add)" {
     const prefix = try setupPrefix("unresolvable");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // `user/repo` isn't a real GitHub repo; HEAD resolution fails and
     // we refuse to register an unpinned tap. Idempotency + list-with-
     // rows paths are covered by tests/tap_test.zig directly against
     // `tap_mod`, which doesn't need network.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
     try testing.expectError(
         error.Aborted,
-        tap_cli.execute(testing.allocator, &.{"user/repo"}),
+        tap_cli.execute(&ctx, testing.allocator, &.{"user/repo"}),
     );
 }
 
@@ -57,7 +66,7 @@ test "execute with --help short-circuits before touching the database" {
     defer _ = c.unsetenv("MALT_PREFIX");
     _ = c.setenv("MALT_PREFIX", "/tmp/malt_cli_tap_help_no_db", 1);
     // Even though the db dir does not exist, --help must succeed.
-    try tap_cli.execute(testing.allocator, &.{"--help"});
+    try tap_cli.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--help"});
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +131,7 @@ test "validateTapName: rejects over-long components" {
 test "execute: malformed tap input is rejected with error.Aborted" {
     const prefix = try setupPrefix("reject_malformed");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // Each of these should be rejected by the validator and surface as a
@@ -132,10 +141,13 @@ test "execute: malformed tap input is rejected with error.Aborted" {
     const bad_inputs = [_][]const u8{
         "no-slash-here", "a/b/c", "/repo", "user/", "../evil", "user/bad char",
     };
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     for (bad_inputs) |name| {
         try testing.expectError(
             error.Aborted,
-            tap_cli.execute(testing.allocator, &.{name}),
+            tap_cli.execute(&ctx, testing.allocator, &.{name}),
         );
     }
 }
@@ -143,11 +155,14 @@ test "execute: malformed tap input is rejected with error.Aborted" {
 test "execute with a bare name (no slash) surfaces error.Aborted" {
     const prefix = try setupPrefix("bad_name");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(
         error.Aborted,
-        tap_cli.execute(testing.allocator, &.{"no_slash_here"}),
+        tap_cli.execute(&ctx, testing.allocator, &.{"no_slash_here"}),
     );
 }

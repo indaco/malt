@@ -3,7 +3,7 @@
 //! narrow set and the dispatch loop can classify errors exhaustively.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const sqlite = @import("../../db/sqlite.zig");
 const formula_mod = @import("../../core/formula.zig");
 const output = @import("../../ui/output.zig");
@@ -163,9 +163,9 @@ pub fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
 }
 
 /// Ensure all required directories under prefix exist.
-pub fn ensureDirs(prefix: []const u8) !void {
+pub fn ensureDirs(ctx: *const AppCtx, prefix: []const u8) !void {
     // Create the prefix directory itself first (e.g. /opt/malt)
-    fs_compat.makeDirAbsolute(prefix) catch |e| switch (e) {
+    std.Io.Dir.createDirAbsolute(ctx.io, prefix, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => {
             output.err("Cannot create prefix directory {s} — you may need: sudo mkdir -p {s} && sudo chown $USER {s}", .{ prefix, prefix, prefix });
@@ -192,7 +192,7 @@ pub fn ensureDirs(prefix: []const u8) !void {
     for (subdirs) |subdir| {
         var buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, subdir }) catch continue;
-        fs_compat.makeDirAbsolute(dir_path) catch |e| switch (e) {
+        std.Io.Dir.createDirAbsolute(ctx.io, dir_path, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => continue,
         };

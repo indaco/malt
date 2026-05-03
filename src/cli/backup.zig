@@ -15,12 +15,11 @@
 //! honoured by `malt restore`.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
-const io_mod = @import("../ui/io.zig");
 const help = @import("help.zig");
 
 pub const Kind = enum { formula, cask };
@@ -40,8 +39,8 @@ pub const Error = error{
     WriteFailed,
 };
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "backup")) return;
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "backup")) return;
 
     var output_path: ?[]const u8 = null;
     var include_versions = false;
@@ -127,48 +126,48 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // ── Resolve destination and write ────────────────────────────────────
     if (output_path) |p| {
         if (std.mem.eql(u8, p, "-")) {
-            io_mod.stdoutWriteAll(bytes);
+            output.writeStdoutAll(bytes);
             return;
         }
-        try writeToPath(p, bytes);
+        try writeToPath(ctx, p, bytes);
         output.success("Backup written to {s} ({d} packages)", .{ p, count });
         return;
     }
 
-    const default_path = try defaultBackupPath(allocator);
+    const default_path = try defaultBackupPath(ctx, allocator);
     defer allocator.free(default_path);
-    try writeToPath(default_path, bytes);
+    try writeToPath(ctx, default_path, bytes);
     output.success("Backup written to {s} ({d} packages)", .{ default_path, count });
 }
 
-fn writeToPath(path: []const u8, bytes: []const u8) Error!void {
+fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8) Error!void {
     // Create parent directories when the user supplied a nested path.
     if (std.fs.path.dirname(path)) |dir| {
         if (dir.len > 0) {
             if (std.fs.path.isAbsolute(dir)) {
-                fs_compat.makeDirAbsolute(dir) catch |e| switch (e) {
+                std.Io.Dir.createDirAbsolute(ctx.io, dir, .default_dir) catch |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => {},
                 };
             } else {
                 // Parent may already exist; the subsequent createFile reports real errors.
-                fs_compat.cwd().makePath(dir) catch {};
+                std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch {};
             }
         }
     }
 
     const file = if (std.fs.path.isAbsolute(path))
-        fs_compat.createFileAbsolute(path, .{ .truncate = true }) catch {
+        std.Io.Dir.createFileAbsolute(ctx.io, path, .{ .truncate = true }) catch {
             output.err("Failed to create {s}", .{path});
             return Error.OpenFileFailed;
         }
     else
-        fs_compat.cwd().createFile(path, .{ .truncate = true }) catch {
+        std.Io.Dir.cwd().createFile(ctx.io, path, .{ .truncate = true }) catch {
             output.err("Failed to create {s}", .{path});
             return Error.OpenFileFailed;
         };
-    defer file.close();
-    file.writeAll(bytes) catch return Error.WriteFailed;
+    defer file.close(ctx.io);
+    file.writeStreamingAll(ctx.io, bytes) catch return Error.WriteFailed;
 }
 
 /// Write the canonical header block at the top of a backup file.
@@ -245,8 +244,8 @@ pub fn parseBackup(allocator: std.mem.Allocator, text: []const u8) ![]Entry {
 /// `malt-backup-YYYY-MM-DDTHH-MM-SS.txt` in the current working directory.
 /// The timestamp uses UTC so two backups taken at the same wall-clock moment
 /// collide deterministically across time zones.
-pub fn defaultBackupPath(allocator: std.mem.Allocator) ![]u8 {
-    const secs = fs_compat.timestamp();
+pub fn defaultBackupPath(ctx: *const AppCtx, allocator: std.mem.Allocator) ![]u8 {
+    const secs = std.Io.Clock.real.now(ctx.io).toSeconds();
     const epoch_seconds: std.time.epoch.EpochSeconds = .{
         .secs = @intCast(@max(secs, 0)),
     };

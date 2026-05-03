@@ -2,7 +2,6 @@
 //! Fetches formula and cask metadata from formulae.brew.sh with caching.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
 const atomic = @import("../fs/atomic.zig");
 const client_mod = @import("client.zig");
 
@@ -120,12 +119,14 @@ pub fn findNameMatches(
 }
 
 pub const BrewApi = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     http: *client_mod.HttpClient,
     cache_dir: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, http: *client_mod.HttpClient, cache_dir: []const u8) BrewApi {
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, http: *client_mod.HttpClient, cache_dir: []const u8) BrewApi {
         return .{
+            .io = io,
             .allocator = allocator,
             .http = http,
             .cache_dir = cache_dir,
@@ -194,7 +195,7 @@ pub const BrewApi = struct {
         const prefix = prefixForKind(kind);
         var path_buf: [512]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, name }) catch return false;
-        _ = fs_compat.cwd().statFile(cache_path) catch return false;
+        _ = std.Io.Dir.cwd().statFile(self.io, cache_path, .{}) catch return false;
         return true;
     }
 
@@ -203,8 +204,8 @@ pub const BrewApi = struct {
     fn cachedFresh(self: *BrewApi, key: []const u8, prefix: []const u8) bool {
         var path_buf: [512]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return false;
-        const stat = fs_compat.cwd().statFile(cache_path) catch return false;
-        const now = fs_compat.timestamp();
+        const stat = std.Io.Dir.cwd().statFile(self.io, cache_path, .{}) catch return false;
+        const now = std.Io.Clock.real.now(self.io).toSeconds();
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         return now - mtime_secs <= cache_ttl_secs;
     }
@@ -242,16 +243,16 @@ pub const BrewApi = struct {
         var path_buf: [512]u8 = undefined;
         const p = std.fmt.bufPrint(&path_buf, "{s}/api/names_{s}.txt", .{ self.cache_dir, key }) catch return null;
 
-        const stat = fs_compat.cwd().statFile(p) catch return null;
-        const now = fs_compat.timestamp();
+        const stat = std.Io.Dir.cwd().statFile(self.io, p, .{}) catch return null;
+        const now = std.Io.Clock.real.now(self.io).toSeconds();
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         if (now - mtime_secs > index_ttl_secs) return null;
 
-        const file = fs_compat.cwd().openFile(p, .{}) catch return null;
-        defer file.close();
-        const s = file.stat() catch return null;
+        const file = std.Io.Dir.cwd().openFile(self.io, p, .{}) catch return null;
+        defer file.close(self.io);
+        const s = file.stat(self.io) catch return null;
         const buf = self.allocator.alloc(u8, s.size) catch return null;
-        const n = file.readAll(buf) catch {
+        const n = file.readPositionalAll(self.io, buf, 0) catch {
             self.allocator.free(buf);
             return null;
         };
@@ -265,7 +266,7 @@ pub const BrewApi = struct {
     fn writeNamesIndex(self: *const BrewApi, key: []const u8, data: []const u8) void {
         var dir_buf: [512]u8 = undefined;
         const dir = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
-        fs_compat.makeDirAbsolute(dir) catch |e| switch (e) {
+        std.Io.Dir.createDirAbsolute(self.io, dir, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
@@ -273,10 +274,10 @@ pub const BrewApi = struct {
         var path_buf: [512]u8 = undefined;
         const p = std.fmt.bufPrint(&path_buf, "{s}/api/names_{s}.txt", .{ self.cache_dir, key }) catch return;
 
-        const f = fs_compat.cwd().createFile(p, .{}) catch return;
-        defer f.close();
+        const f = std.Io.Dir.cwd().createFile(self.io, p, .{}) catch return;
+        defer f.close(self.io);
         // Partial index is discarded on next miss; next fetch re-populates from network.
-        f.writeAll(data) catch {};
+        f.writeStreamingAll(self.io, data) catch {};
     }
 
     /// Invalidate all cached API responses.
@@ -284,7 +285,7 @@ pub const BrewApi = struct {
         var api_path_buf: [512]u8 = undefined;
         const api_path = std.fmt.bufPrint(&api_path_buf, "{s}/api", .{self.cache_dir}) catch return;
         // Cache dir absent on first-ever run; wipe is purely opportunistic.
-        fs_compat.deleteTreeAbsolute(api_path) catch {};
+        std.Io.Dir.cwd().deleteTree(self.io, api_path) catch {};
     }
 
     // --- internal ---
@@ -322,17 +323,17 @@ pub const BrewApi = struct {
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return null;
 
         // Check freshness
-        const stat = fs_compat.cwd().statFile(cache_path) catch return null;
-        const now = fs_compat.timestamp();
+        const stat = std.Io.Dir.cwd().statFile(self.io, cache_path, .{}) catch return null;
+        const now = std.Io.Clock.real.now(self.io).toSeconds();
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         if (now - mtime_secs > cache_ttl_secs) return null;
 
         // Read file
-        const file = fs_compat.cwd().openFile(cache_path, .{}) catch return null;
-        defer file.close();
-        const file_stat = file.stat() catch return null;
+        const file = std.Io.Dir.cwd().openFile(self.io, cache_path, .{}) catch return null;
+        defer file.close(self.io);
+        const file_stat = file.stat(self.io) catch return null;
         const content = self.allocator.alloc(u8, file_stat.size) catch return null;
-        const bytes_read = file.readAll(content) catch {
+        const bytes_read = file.readPositionalAll(self.io, content, 0) catch {
             self.allocator.free(content);
             return null;
         };
@@ -346,7 +347,7 @@ pub const BrewApi = struct {
     pub fn writeCache(self: *const BrewApi, key: []const u8, prefix: []const u8, data: []const u8) void {
         var dir_buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
-        fs_compat.makeDirAbsolute(dir_path) catch |e| switch (e) {
+        std.Io.Dir.createDirAbsolute(self.io, dir_path, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
@@ -360,7 +361,7 @@ pub const BrewApi = struct {
         //
         // Cache is a latency optimization; a write failure (disk full,
         // permissions) just means the next call re-fetches over the network.
-        atomic.atomicWriteFile(cache_path, data) catch {};
+        atomic.atomicWriteFile(self.io, cache_path, data) catch {};
     }
 
     /// Check for a cached 404 marker. Returns true if a fresh marker
@@ -372,8 +373,8 @@ pub const BrewApi = struct {
         var path_buf: [512]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return false;
 
-        const stat = fs_compat.cwd().statFile(cache_path) catch return false;
-        const now = fs_compat.timestamp();
+        const stat = std.Io.Dir.cwd().statFile(self.io, cache_path, .{}) catch return false;
+        const now = std.Io.Clock.real.now(self.io).toSeconds();
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         if (now - mtime_secs > cache_ttl_secs) return false;
         return true;
@@ -386,7 +387,7 @@ pub const BrewApi = struct {
     pub fn writeNotFoundCache(self: *const BrewApi, key: []const u8, prefix: []const u8) void {
         var dir_buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
-        fs_compat.makeDirAbsolute(dir_path) catch |e| switch (e) {
+        std.Io.Dir.createDirAbsolute(self.io, dir_path, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return,
         };
@@ -394,8 +395,8 @@ pub const BrewApi = struct {
         var path_buf: [512]u8 = undefined;
         const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.404", .{ self.cache_dir, prefix, key }) catch return;
 
-        const file = fs_compat.cwd().createFile(cache_path, .{}) catch return;
-        file.close();
+        const file = std.Io.Dir.cwd().createFile(self.io, cache_path, .{}) catch return;
+        file.close(self.io);
     }
 
     /// Maximum cache size (200 MB). Entries are evicted by age (oldest first).
@@ -407,8 +408,8 @@ pub const BrewApi = struct {
         var dir_buf: [512]u8 = undefined;
         const api_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return 0;
 
-        var dir = fs_compat.openDirAbsolute(api_path, .{ .iterate = true }) catch return 0;
-        defer dir.close();
+        var dir = std.Io.Dir.openDirAbsolute(self.io, api_path, .{ .iterate = true }) catch return 0;
+        defer dir.close(self.io);
 
         // Collect entries with size + mtime
         const Entry = struct { name_buf: [256]u8, name_len: usize, size: u64, mtime: i128 };
@@ -417,9 +418,9 @@ pub const BrewApi = struct {
         var total_size: u64 = 0;
 
         var iter = dir.iterate();
-        while (iter.next() catch null) |e| {
+        while (iter.next(self.io) catch null) |e| {
             if (e.kind != .file) continue;
-            const stat = dir.statFile(e.name) catch continue;
+            const stat = dir.statFile(self.io, e.name, .{}) catch continue;
             var entry: Entry = .{ .name_buf = undefined, .name_len = e.name.len, .size = stat.size, .mtime = stat.mtime.nanoseconds };
             if (e.name.len > entry.name_buf.len) continue;
             @memcpy(entry.name_buf[0..e.name.len], e.name);
@@ -440,7 +441,7 @@ pub const BrewApi = struct {
         for (entries.items) |entry| {
             if (total_size <= max_cache_bytes) break;
             const name = entry.name_buf[0..entry.name_len];
-            dir.deleteFile(name) catch continue;
+            dir.deleteFile(self.io, name) catch continue;
             total_size -|= entry.size;
             evicted += 1;
         }
@@ -452,14 +453,14 @@ pub const BrewApi = struct {
         var dir_buf: [512]u8 = undefined;
         const api_path = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return 0;
 
-        var dir = fs_compat.openDirAbsolute(api_path, .{ .iterate = true }) catch return 0;
-        defer dir.close();
+        var dir = std.Io.Dir.openDirAbsolute(self.io, api_path, .{ .iterate = true }) catch return 0;
+        defer dir.close(self.io);
 
         var total: u64 = 0;
         var iter = dir.iterate();
-        while (iter.next() catch null) |e| {
+        while (iter.next(self.io) catch null) |e| {
             if (e.kind != .file) continue;
-            const stat = dir.statFile(e.name) catch continue;
+            const stat = dir.statFile(self.io, e.name, .{}) catch continue;
             total += stat.size;
         }
         return total;

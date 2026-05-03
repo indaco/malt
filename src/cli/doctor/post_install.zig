@@ -5,6 +5,7 @@
 //! per-function imports inside the walker.
 
 const std = @import("std");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const sqlite = @import("../../db/sqlite.zig");
 const output = @import("../../ui/output.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
@@ -15,7 +16,7 @@ const client_mod = @import("../../net/client.zig");
 
 /// Check post_install DSL support status for installed formulae.
 /// Called when `malt doctor --post-install-status` is passed.
-pub fn checkPostInstallStatus(allocator: std.mem.Allocator, prefix: []const u8) void {
+pub fn checkPostInstallStatus(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8) void {
     output.info("Post-install DSL status:", .{});
 
     var db_path_buf: [512]u8 = undefined;
@@ -31,12 +32,15 @@ pub fn checkPostInstallStatus(allocator: std.mem.Allocator, prefix: []const u8) 
     var no_pi_count: u32 = 0;
     var total: u32 = 0;
 
-    var http = client_mod.HttpClient.init(allocator);
+    const io = ctx.io;
+    const environ = ctx.environ;
+
+    var http = client_mod.HttpClient.init(io, environ, allocator);
     defer http.deinit();
 
     var cache_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch return;
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(io, allocator, &http, cache_dir);
 
     while (stmt.step() catch false) {
         const name_raw = stmt.columnText(0) orelse continue;
@@ -59,14 +63,14 @@ pub fn checkPostInstallStatus(allocator: std.mem.Allocator, prefix: []const u8) 
             continue;
         }
 
-        const tap_path = ruby_sub.findHomebrewCoreTap();
+        const tap_path = ruby_sub.findHomebrewCoreTap(io);
         var rb_buf: [1024]u8 = undefined;
-        const rb_path = if (tap_path) |tp| ruby_sub.resolveFormulaRbPath(&rb_buf, tp, name) else null;
+        const rb_path = if (tap_path) |tp| ruby_sub.resolveFormulaRbPath(io, &rb_buf, tp, name) else null;
 
         const post_install_src = if (rb_path) |src_path|
-            ruby_sub.extractPostInstallBody(allocator, src_path)
+            ruby_sub.extractPostInstallBody(io, allocator, src_path)
         else
-            ruby_sub.fetchPostInstallFromGitHub(allocator, name);
+            ruby_sub.fetchPostInstallFromGitHub(io, environ, allocator, name);
 
         if (post_install_src) |src| {
             defer allocator.free(src);

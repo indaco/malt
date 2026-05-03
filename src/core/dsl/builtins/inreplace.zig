@@ -3,7 +3,6 @@
 //! Block form is deferred to a future phase (requires interpreter cooperation).
 
 const std = @import("std");
-const fs_compat = @import("../../../fs/compat.zig");
 const values = @import("../values.zig");
 const sandbox = @import("../sandbox.zig");
 const pathname = @import("pathname.zig");
@@ -27,11 +26,7 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
         return BuiltinError.PathSandboxViolation;
 
     // Read file contents
-    const file = fs_compat.openFileAbsolute(path, .{}) catch {
-        return Value{ .nil = {} };
-    };
-    defer file.close();
-    const content = file.readToEndAlloc(ctx.allocator, 4 * 1024 * 1024) catch {
+    const content = readFileAllAbsolute(ctx.io, ctx.allocator, path, 4 * 1024 * 1024) catch {
         return Value{ .nil = {} };
     };
 
@@ -45,13 +40,13 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
     // fails (e.g. ENOSPC in the target directory), fall back to a direct
     // overwrite and log the fallback so the user is aware that the write
     // did *not* use the atomic path.
-    writeAtomic(path, new_content) catch |e| {
-        const stderr = fs_compat.stderrFile();
+    writeAtomic(ctx.io, path, new_content) catch |e| {
+        const stderr: std.Io.File = .{ .handle = std.posix.STDERR_FILENO, .flags = .{ .nonblocking = false } };
         var buf: [512]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "malt: inreplace atomic write failed ({s}); falling back to direct overwrite\n", .{@errorName(e)}) catch return Value{ .nil = {} };
         // Warning is advisory; fallback write is the load-bearing step.
-        stderr.writeAll(msg) catch {};
-        writeDirectly(path, new_content);
+        stderr.writeStreamingAll(ctx.io, msg) catch {};
+        writeDirectly(ctx.io, path, new_content);
     };
 
     return Value{ .nil = {} };
@@ -98,11 +93,11 @@ fn replaceAll(allocator: std.mem.Allocator, haystack: []const u8, needle: []cons
 }
 
 /// Write content atomically: write to temp file then rename over original.
-fn writeAtomic(path: []const u8, content: []const u8) !void {
+fn writeAtomic(io: std.Io, path: []const u8, content: []const u8) !void {
     const dir_path = std.fs.path.dirname(path) orelse "/";
 
-    var dir = try fs_compat.openDirAbsolute(dir_path, .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
+    defer dir.close(io);
 
     // Create a temp file in the same directory
     const basename = std.fs.path.basename(path);
@@ -110,27 +105,44 @@ fn writeAtomic(path: []const u8, content: []const u8) !void {
     const tmp_name = std.fmt.bufPrint(&tmp_name_buf, ".{s}.malt.tmp", .{basename}) catch return error.NameTooLong;
 
     // Write temp file
-    const tmp_file = dir.createFile(tmp_name, .{}) catch return error.AccessDenied;
-    tmp_file.writeAll(content) catch {
-        tmp_file.close();
+    const tmp_file = dir.createFile(io, tmp_name, .{}) catch return error.AccessDenied;
+    tmp_file.writeStreamingAll(io, content) catch {
+        tmp_file.close(io);
         // Cleanup of the partial tmp file; the write error is what we return.
-        dir.deleteFile(tmp_name) catch {};
+        dir.deleteFile(io, tmp_name) catch {};
         return error.AccessDenied;
     };
-    tmp_file.close();
+    tmp_file.close(io);
 
     // Rename over original
-    dir.rename(tmp_name, basename) catch {
+    dir.rename(tmp_name, dir, basename, io) catch {
         // Cleanup of the orphaned tmp file; the rename error is what we return.
-        dir.deleteFile(tmp_name) catch {};
+        dir.deleteFile(io, tmp_name) catch {};
         return error.AccessDenied;
     };
 }
 
 /// Fallback: direct overwrite (no atomicity guarantee).
-fn writeDirectly(path: []const u8, content: []const u8) void {
-    const out = fs_compat.createFileAbsolute(path, .{ .truncate = true }) catch return;
-    defer out.close();
+fn writeDirectly(io: std.Io, path: []const u8, content: []const u8) void {
+    const out = std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true }) catch return;
+    defer out.close(io);
     // Fallback path already logged a warning; no error channel left to surface.
-    out.writeAll(content) catch {};
+    out.writeStreamingAll(io, content) catch {};
+}
+
+/// Read the entire contents of an absolute file path into a caller-owned slice.
+fn readFileAllAbsolute(io: std.Io, allocator: std.mem.Allocator, abs_path: []const u8, max_bytes: usize) ![]u8 {
+    const f = try std.Io.Dir.openFileAbsolute(io, abs_path, .{});
+    defer f.close(io);
+    const st = try f.stat(io);
+    const size = @min(@as(u64, max_bytes), st.size);
+    const buf = try allocator.alloc(u8, @intCast(size));
+    errdefer allocator.free(buf);
+    const n = try f.readPositionalAll(io, buf, 0);
+    if (n == buf.len) return buf;
+    if (allocator.resize(buf, n)) return buf[0..n];
+    const shrunk = try allocator.alloc(u8, n);
+    @memcpy(shrunk, buf[0..n]);
+    allocator.free(buf);
+    return shrunk;
 }

@@ -27,7 +27,6 @@
 //!   files.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
 const builtin = @import("builtin");
 const sqlite = @import("../../db/sqlite.zig");
 const plist_mod = @import("plist.zig");
@@ -60,9 +59,12 @@ pub fn describeError(err: SupervisorError) []const u8 {
 
 /// Named-field bundle for supervisor entrypoints that would otherwise
 /// thread `(allocator, db)` through every call. Opens a DI seam for
-/// tests to swap in fakes by replacing fields.
+/// tests to swap in fakes by replacing fields. `io` carries the parent
+/// `Environ` (built once at the cli call site) so launchctl spawns
+/// resolve via PATH.
 pub const SupervisorCtx = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     db: *sqlite.Database,
 };
 
@@ -182,11 +184,11 @@ pub fn register(
 
     const dir = try serviceDir(allocator, spec.label);
     defer allocator.free(dir);
-    fs_compat.makeDirAbsolute(dir) catch |e| switch (e) {
+    std.Io.Dir.createDirAbsolute(ctx.io, dir, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         error.FileNotFound => {
             // Create the full parent path.
-            fs_compat.cwd().makePath(dir) catch return SupervisorError.IoFailed;
+            std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch return SupervisorError.IoFailed;
         },
         else => return SupervisorError.IoFailed,
     };
@@ -195,14 +197,14 @@ pub fn register(
         return SupervisorError.OutOfMemory;
     defer allocator.free(plist_path);
 
-    var file = fs_compat.createFileAbsolute(plist_path, .{ .truncate = true }) catch
+    var file = std.Io.Dir.createFileAbsolute(ctx.io, plist_path, .{ .truncate = true }) catch
         return SupervisorError.IoFailed;
-    defer file.close();
+    defer file.close(ctx.io);
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     plist_mod.render(spec, &aw.writer) catch return SupervisorError.IoFailed;
-    file.writeAll(aw.written()) catch return SupervisorError.IoFailed;
+    file.writeStreamingAll(ctx.io, aw.written()) catch return SupervisorError.IoFailed;
 
     var stmt = ctx.db.prepare(
         \\INSERT OR REPLACE INTO services(name, keg_name, plist_path, auto_start, last_status)
@@ -216,14 +218,15 @@ pub fn register(
     _ = stmt.step() catch return SupervisorError.DatabaseError;
 }
 
-fn runLaunchctl(allocator: std.mem.Allocator, argv: []const []const u8) SupervisorError!void {
+fn runLaunchctl(io: std.Io, argv: []const []const u8) SupervisorError!void {
     if (builtin.os.tag != .macos) return SupervisorError.OsNotSupported;
 
-    var child = fs_compat.Child.init(argv, allocator);
-    child.stdout_behavior = .ignore;
-    child.stderr_behavior = .ignore;
-
-    const term = child.spawnAndWait() catch return SupervisorError.LaunchctlFailed;
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return SupervisorError.LaunchctlFailed;
+    const term = child.wait(io) catch return SupervisorError.LaunchctlFailed;
     switch (term) {
         .exited => |code| if (code != 0) return SupervisorError.LaunchctlFailed,
         else => return SupervisorError.LaunchctlFailed,
@@ -253,7 +256,7 @@ pub fn start(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
     const domain = userDomain(allocator) catch return SupervisorError.OutOfMemory;
     defer allocator.free(domain);
 
-    try runLaunchctl(allocator, &.{ "launchctl", "bootstrap", domain, plist_path });
+    try runLaunchctl(ctx.io, &.{ "launchctl", "bootstrap", domain, plist_path });
     // Status is a UI hint; launchctl is the source of truth for liveness.
     setStatus(ctx.db, name, "running") catch {};
 }
@@ -266,7 +269,7 @@ pub fn stop(ctx: SupervisorCtx, name: []const u8) SupervisorError!void {
     const domain = userDomain(allocator) catch return SupervisorError.OutOfMemory;
     defer allocator.free(domain);
 
-    try runLaunchctl(allocator, &.{ "launchctl", "bootout", domain, plist_path });
+    try runLaunchctl(ctx.io, &.{ "launchctl", "bootout", domain, plist_path });
     // Status is a UI hint; launchctl is the source of truth for liveness.
     setStatus(ctx.db, name, "stopped") catch {};
 }
@@ -309,7 +312,7 @@ pub fn runtimeStateName(s: RuntimeState) []const u8 {
 /// Query launchctl for the runtime state of `label`. Returns `.not_loaded`
 /// on any failure (missing label, non-macOS, launchctl error) so callers can
 /// degrade to the DB-recorded status without aborting.
-pub fn queryRuntime(allocator: std.mem.Allocator, label: []const u8) RuntimeState {
+pub fn queryRuntime(io: std.Io, allocator: std.mem.Allocator, label: []const u8) RuntimeState {
     if (builtin.os.tag != .macos) return .not_loaded;
 
     // `launchctl list` output is at most a few hundred lines (one per
@@ -318,12 +321,7 @@ pub fn queryRuntime(allocator: std.mem.Allocator, label: []const u8) RuntimeStat
     // allocations. Streaming line-by-line via std.Io.Reader would shave
     // a sub-millisecond parse cost but the codebase doesn't otherwise
     // use that API, so the complexity isn't worth it for this cold path.
-    // `io_mod.ctx()` is the static `debug_io` whose internal allocator is
-    // `.failing` — `std.process.run` allocates argv/env and would OOM.
-    // Build a per-call `Threaded` io rooted at the caller's allocator.
-    var threaded: std.Io.Threaded = .init(allocator, .{});
-    defer threaded.deinit();
-    const result = std.process.run(allocator, threaded.io(), .{
+    const result = std.process.run(allocator, io, .{
         .argv = &.{ "launchctl", "list" },
         .stdout_limit = .limited(4 * 1024 * 1024),
         .stderr_limit = .limited(4 * 1024 * 1024),
@@ -354,17 +352,17 @@ pub fn hasService(db: *sqlite.Database, name: []const u8) bool {
     return stmt.step() catch false;
 }
 
-pub fn tailLog(allocator: std.mem.Allocator, path: []const u8, n: usize, writer: *std.Io.Writer) SupervisorError!void {
-    const f = fs_compat.openFileAbsolute(path, .{}) catch return SupervisorError.IoFailed;
-    defer f.close();
-    const stat = f.stat() catch return SupervisorError.IoFailed;
+pub fn tailLog(io: std.Io, allocator: std.mem.Allocator, path: []const u8, n: usize, writer: *std.Io.Writer) SupervisorError!void {
+    const f = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return SupervisorError.IoFailed;
+    defer f.close(io);
+    const stat = f.stat(io) catch return SupervisorError.IoFailed;
 
     // Read whole file if small; otherwise last 64 KiB.
     const read_size: usize = @min(stat.size, 64 * 1024);
     const buf = allocator.alloc(u8, read_size) catch return SupervisorError.OutOfMemory;
     defer allocator.free(buf);
     const seek_from: u64 = if (stat.size > read_size) stat.size - read_size else 0;
-    const read = f.readAllAt(buf, seek_from) catch return SupervisorError.IoFailed;
+    const read = f.readPositionalAll(io, buf, seek_from) catch return SupervisorError.IoFailed;
     const slice = buf[0..read];
 
     // Walk backwards, counting newlines.
@@ -389,26 +387,27 @@ pub fn tailLog(allocator: std.mem.Allocator, path: []const u8, n: usize, writer:
 /// `interrupted` is the caller's seam onto SIGINT (or any other stop signal);
 /// keeping it as a callback keeps this module free of CLI/main coupling.
 pub fn followLog(
+    io: std.Io,
     allocator: std.mem.Allocator,
     path: []const u8,
     tail_n: usize,
     writer: *std.Io.Writer,
     interrupted: *const fn () bool,
 ) SupervisorError!void {
-    try tailLog(allocator, path, tail_n, writer);
+    try tailLog(io, allocator, path, tail_n, writer);
     writer.flush() catch return SupervisorError.IoFailed;
 
-    const f = fs_compat.openFileAbsolute(path, .{}) catch return SupervisorError.IoFailed;
-    defer f.close();
-    var offset: u64 = (f.stat() catch return SupervisorError.IoFailed).size;
+    const f = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return SupervisorError.IoFailed;
+    defer f.close(io);
+    var offset: u64 = (f.stat(io) catch return SupervisorError.IoFailed).size;
 
     var buf: [4096]u8 = undefined;
     // 200 ms cadence is plenty for human-scale tails.
     const poll_ns: u64 = 200 * std.time.ns_per_ms;
     while (!interrupted()) {
-        const n = f.readAllAt(&buf, offset) catch return SupervisorError.IoFailed;
+        const n = f.readPositionalAll(io, &buf, offset) catch return SupervisorError.IoFailed;
         if (n == 0) {
-            fs_compat.sleepNanos(poll_ns);
+            std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(poll_ns)), .awake) catch {};
             continue;
         }
         writer.writeAll(buf[0..n]) catch return SupervisorError.IoFailed;
@@ -439,26 +438,43 @@ const FollowProbe = struct {
     fn cb() bool {
         calls += 1;
         if (append_at != 0 and calls == append_at) {
-            const f = fs_compat.openFileAbsolute(append_path, .{ .mode = .read_write }) catch return true;
-            defer f.close();
-            const st = f.stat() catch return true;
-            f.writeAllAt(append_bytes, st.size) catch {};
+            const f = std.Io.Dir.openFileAbsolute(test_io, append_path, .{ .mode = .read_write }) catch return true;
+            defer f.close(test_io);
+            const st = f.stat(test_io) catch return true;
+            f.writePositionalAll(test_io, append_bytes, st.size) catch {};
         }
         return calls >= stop_at;
     }
 };
 
+/// Per-test Threaded io shared by FollowProbe.cb. Tests sequence-execute,
+/// so a static handle is sufficient.
+var test_threaded: std.Io.Threaded = undefined;
+var test_io: std.Io = undefined;
+
+fn testIoInit() void {
+    test_threaded = .init(testing.allocator, .{});
+    test_io = test_threaded.io();
+}
+
+fn testIoDeinit() void {
+    test_threaded.deinit();
+}
+
 test "followLog prints initial tail and exits when interrupt is set before first poll" {
+    testIoInit();
+    defer testIoDeinit();
+
     const dir = "/tmp/malt_supervisor_follow_interrupt";
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(test_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
 
     const log_path = dir ++ "/sample.log";
     {
-        const f = try fs_compat.createFileAbsolute(log_path, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll("first\nsecond\n");
+        const f = try std.Io.Dir.createFileAbsolute(test_io, log_path, .{ .truncate = true });
+        defer f.close(test_io);
+        try f.writeStreamingAll(test_io, "first\nsecond\n");
     }
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -466,23 +482,26 @@ test "followLog prints initial tail and exits when interrupt is set before first
 
     FollowProbe.reset();
     FollowProbe.stop_at = 1;
-    try followLog(testing.allocator, log_path, 2, &aw.writer, FollowProbe.cb);
+    try followLog(test_io, testing.allocator, log_path, 2, &aw.writer, FollowProbe.cb);
 
     try testing.expectEqualStrings("first\nsecond\n", aw.written());
     try testing.expectEqual(@as(usize, 1), FollowProbe.calls);
 }
 
 test "followLog flushes appended bytes between polls" {
+    testIoInit();
+    defer testIoDeinit();
+
     const dir = "/tmp/malt_supervisor_follow_poll";
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(test_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
 
     const log_path = dir ++ "/sample.log";
     {
-        const f = try fs_compat.createFileAbsolute(log_path, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll("seed\n");
+        const f = try std.Io.Dir.createFileAbsolute(test_io, log_path, .{ .truncate = true });
+        defer f.close(test_io);
+        try f.writeStreamingAll(test_io, "seed\n");
     }
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -494,7 +513,7 @@ test "followLog flushes appended bytes between polls" {
     FollowProbe.append_at = 1;
     FollowProbe.stop_at = 3;
 
-    try followLog(testing.allocator, log_path, 0, &aw.writer, FollowProbe.cb);
+    try followLog(test_io, testing.allocator, log_path, 0, &aw.writer, FollowProbe.cb);
 
     try testing.expect(std.mem.indexOf(u8, aw.written(), "appended\n") != null);
     try testing.expectEqual(@as(usize, 3), FollowProbe.calls);

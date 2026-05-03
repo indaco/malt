@@ -6,6 +6,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const services_cli = malt.cli_services;
 
 const c = struct {
@@ -17,14 +18,16 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const path = try std.fmt.allocPrintSentinel(
         testing.allocator,
         "/tmp/malt_cli_services_{d}_{s}",
-        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        .{ test_io.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
         0,
     );
-    malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().makePath(path);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, path);
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.makeDirAbsolute(db_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, db_dir);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -41,58 +44,74 @@ test "describeError returns a distinct message for every ServicesError tag" {
 test "execute with no args prints help" {
     defer _ = c.unsetenv("MALT_PREFIX");
     _ = c.setenv("MALT_PREFIX", "/tmp/malt_cli_services_help_noargs", 1);
-    try services_cli.execute(testing.allocator, &.{});
+    try services_cli.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
 }
 
 test "execute with -h / --help prints help" {
     defer _ = c.unsetenv("MALT_PREFIX");
     _ = c.setenv("MALT_PREFIX", "/tmp/malt_cli_services_help_flag", 1);
-    try services_cli.execute(testing.allocator, &.{"-h"});
-    try services_cli.execute(testing.allocator, &.{"--help"});
+    try services_cli.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"-h"});
+    try services_cli.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--help"});
 }
 
 test "execute list on an empty prefix reports no services" {
     const prefix = try setupPrefix("list_empty");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
-    try services_cli.execute(testing.allocator, &.{"list"});
-    try services_cli.execute(testing.allocator, &.{"ls"});
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try services_cli.execute(&ctx, testing.allocator, &.{"list"});
+    try services_cli.execute(&ctx, testing.allocator, &.{"ls"});
     // status with no name falls back to the list path.
-    try services_cli.execute(testing.allocator, &.{"status"});
+    try services_cli.execute(&ctx, testing.allocator, &.{"status"});
 }
 
 test "execute with an unknown subcommand returns InvalidArgs" {
     const prefix = try setupPrefix("unknown");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(
         error.InvalidArgs,
-        services_cli.execute(testing.allocator, &.{"flarble"}),
+        services_cli.execute(&ctx, testing.allocator, &.{"flarble"}),
     );
 }
 
 test "execute status with a non-existent service returns SupervisorError" {
     const prefix = try setupPrefix("status_missing");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(
         error.SupervisorError,
-        services_cli.execute(testing.allocator, &.{ "status", "nope" }),
+        services_cli.execute(&ctx, testing.allocator, &.{ "status", "nope" }),
     );
 }
 
 test "execute start/stop/restart with wrong arity returns InvalidArgs" {
     const prefix = try setupPrefix("lifecycle_argv");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     for ([_][]const u8{ "start", "stop", "restart" }) |op| {
         try testing.expectError(
             error.InvalidArgs,
-            services_cli.execute(testing.allocator, &.{op}),
+            services_cli.execute(&ctx, testing.allocator, &.{op}),
         );
     }
 }
@@ -100,11 +119,15 @@ test "execute start/stop/restart with wrong arity returns InvalidArgs" {
 test "execute logs with no args returns InvalidArgs" {
     const prefix = try setupPrefix("logs_noargs");
     defer testing.allocator.free(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try testing.expectError(
         error.InvalidArgs,
-        services_cli.execute(testing.allocator, &.{"logs"}),
+        services_cli.execute(&ctx, testing.allocator, &.{"logs"}),
     );
 }
 

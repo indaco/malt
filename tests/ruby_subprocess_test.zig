@@ -4,51 +4,62 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const ruby = @import("malt").ruby_subprocess;
+
+fn testIo() std.Io {
+    return std.Options.debug_io;
+}
+
+fn testEnviron() std.process.Environ {
+    return malt.app_ctx.processEnviron();
+}
 
 fn uniqueDir(suffix: []const u8) ![]u8 {
     const p = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_ruby_sub_{d}_{s}",
-        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        .{ test_io.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
     );
-    try malt.fs_compat.cwd().makePath(p);
+    try test_io.cwd().createDirPath(std.Options.debug_io, p);
     return p;
 }
 
 test "findHomebrewCoreTap returns null when the canonical paths are absent" {
     // On most CI boxes the tap is absent. We can't assert true/null
     // deterministically, so we at least exercise the lookup loop.
-    _ = ruby.findHomebrewCoreTap();
+    _ = ruby.findHomebrewCoreTap(testIo());
 }
 
 test "resolveFormulaRbPath returns null for an empty name" {
     var buf: [1024]u8 = undefined;
-    try testing.expect(ruby.resolveFormulaRbPath(&buf, "/any/tap", "") == null);
+    try testing.expect(ruby.resolveFormulaRbPath(testIo(), &buf, "/any/tap", "") == null);
 }
 
 test "resolveFormulaRbPath returns null when neither layout exists" {
     const tap = try uniqueDir("no_formula");
     defer testing.allocator.free(tap);
-    defer malt.fs_compat.deleteTreeAbsolute(tap) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
     var buf: [1024]u8 = undefined;
-    try testing.expect(ruby.resolveFormulaRbPath(&buf, tap, "wget") == null);
+    try testing.expect(ruby.resolveFormulaRbPath(testIo(), &buf, tap, "wget") == null);
 }
 
 test "resolveFormulaRbPath prefers the sharded Formula/{first}/{name}.rb layout" {
     const tap = try uniqueDir("sharded");
     defer testing.allocator.free(tap);
-    defer malt.fs_compat.deleteTreeAbsolute(tap) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
     const shard_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Formula/w", .{tap});
     defer testing.allocator.free(shard_dir);
-    try malt.fs_compat.cwd().makePath(shard_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, shard_dir);
     const rb = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{shard_dir});
     defer testing.allocator.free(rb);
-    (try malt.fs_compat.createFileAbsolute(rb, .{})).close();
+    (try test_io.createFileAbsolute(std.Options.debug_io, rb, .{})).close(std.Options.debug_io);
 
     var buf: [1024]u8 = undefined;
-    const got = ruby.resolveFormulaRbPath(&buf, tap, "wget");
+    const got = ruby.resolveFormulaRbPath(testIo(), &buf, tap, "wget");
     try testing.expect(got != null);
     try testing.expect(std.mem.endsWith(u8, got.?, "/Formula/w/wget.rb"));
 }
@@ -56,16 +67,16 @@ test "resolveFormulaRbPath prefers the sharded Formula/{first}/{name}.rb layout"
 test "resolveFormulaRbPath falls back to the flat Formula/{name}.rb layout" {
     const tap = try uniqueDir("flat");
     defer testing.allocator.free(tap);
-    defer malt.fs_compat.deleteTreeAbsolute(tap) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
     const flat_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Formula", .{tap});
     defer testing.allocator.free(flat_dir);
-    try malt.fs_compat.cwd().makePath(flat_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, flat_dir);
     const rb = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{flat_dir});
     defer testing.allocator.free(rb);
-    (try malt.fs_compat.createFileAbsolute(rb, .{})).close();
+    (try test_io.createFileAbsolute(std.Options.debug_io, rb, .{})).close(std.Options.debug_io);
 
     var buf: [1024]u8 = undefined;
-    const got = ruby.resolveFormulaRbPath(&buf, tap, "wget");
+    const got = ruby.resolveFormulaRbPath(testIo(), &buf, tap, "wget");
     try testing.expect(got != null);
     try testing.expect(std.mem.endsWith(u8, got.?, "/Formula/wget.rb"));
 }
@@ -73,19 +84,19 @@ test "resolveFormulaRbPath falls back to the flat Formula/{name}.rb layout" {
 test "extractPostInstallBody returns null when the file has no post_install" {
     const tap = try uniqueDir("no_postinstall");
     defer testing.allocator.free(tap);
-    defer malt.fs_compat.deleteTreeAbsolute(tap) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
     const rb = try std.fmt.allocPrint(testing.allocator, "{s}/hello.rb", .{tap});
     defer testing.allocator.free(rb);
     {
-        const f = try malt.fs_compat.createFileAbsolute(rb, .{});
-        try f.writeAll("class Hello < Formula\n  url \"x\"\nend\n");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, rb, .{});
+        try f.writeStreamingAll(std.Options.debug_io, "class Hello < Formula\n  url \"x\"\nend\n");
+        f.close(std.Options.debug_io);
     }
-    try testing.expect(ruby.extractPostInstallBody(testing.allocator, rb) == null);
+    try testing.expect(ruby.extractPostInstallBody(testIo(), testing.allocator, rb) == null);
 }
 
 test "extractPostInstallBody returns null for a missing file" {
-    try testing.expect(ruby.extractPostInstallBody(testing.allocator, "/tmp/malt_ruby_missing_xyz.rb") == null);
+    try testing.expect(ruby.extractPostInstallBody(testIo(), testing.allocator, "/tmp/malt_ruby_missing_xyz.rb") == null);
 }
 
 test "extractPostInstallFromSource handles an in-memory Ruby body" {
@@ -239,18 +250,20 @@ test "generateWrapper rejects empty prefix" {
 }
 
 test "fetchPostInstallFromGitHub returns null for an empty name" {
-    try testing.expect(ruby.fetchPostInstallFromGitHub(testing.allocator, "") == null);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    try testing.expect(ruby.fetchPostInstallFromGitHub(threaded.io(), testEnviron(), testing.allocator, "") == null);
 }
 
 test "extractPostInstallBody captures the body between def post_install and matching end" {
     const tap = try uniqueDir("with_postinstall");
     defer testing.allocator.free(tap);
-    defer malt.fs_compat.deleteTreeAbsolute(tap) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
     const rb = try std.fmt.allocPrint(testing.allocator, "{s}/hello.rb", .{tap});
     defer testing.allocator.free(rb);
     {
-        const f = try malt.fs_compat.createFileAbsolute(rb, .{});
-        try f.writeAll(
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, rb, .{});
+        try f.writeStreamingAll(std.Options.debug_io,
             \\class Hello < Formula
             \\  def post_install
             \\    mkdir_p "etc/hello"
@@ -259,9 +272,9 @@ test "extractPostInstallBody captures the body between def post_install and matc
             \\end
             \\
         );
-        f.close();
+        f.close(std.Options.debug_io);
     }
-    const body = ruby.extractPostInstallBody(testing.allocator, rb);
+    const body = ruby.extractPostInstallBody(testIo(), testing.allocator, rb);
     try testing.expect(body != null);
     defer testing.allocator.free(body.?);
     try testing.expect(std.mem.indexOf(u8, body.?, "mkdir_p \"etc/hello\"") != null);
@@ -409,7 +422,7 @@ test "ca-certificates-shape: dispatcher with unparseable siblings leaves flog cl
     var flog = malt.dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    try malt.dsl.executePostInstall(alloc, .{
+    try malt.dsl.executePostInstall(std.Options.debug_io, malt.app_ctx.processEnviron(), alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,
@@ -425,41 +438,34 @@ test "ca-certificates-shape: dispatcher with unparseable siblings leaves flog cl
 // `'`, `\`, or a newline is a concrete attack on `--use-system-ruby`
 // (the directory listing flows back into name).
 
+fn runPostInstallTest(name: []const u8, version: []const u8, prefix: []const u8) ruby.RubyError!void {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    return ruby.runPostInstall(threaded.io(), testEnviron(), testing.allocator, name, version, prefix);
+}
+
 test "runPostInstall rejects single-quote in name with InvalidInput" {
-    const err = ruby.runPostInstall(testing.allocator, "p'k", "1.0", "/opt/malt");
-    try testing.expectError(error.InvalidInput, err);
+    try testing.expectError(error.InvalidInput, runPostInstallTest("p'k", "1.0", "/opt/malt"));
 }
 
 test "runPostInstall rejects backslash in name with InvalidInput" {
-    const err = ruby.runPostInstall(testing.allocator, "p\\k", "1.0", "/opt/malt");
-    try testing.expectError(error.InvalidInput, err);
+    try testing.expectError(error.InvalidInput, runPostInstallTest("p\\k", "1.0", "/opt/malt"));
 }
 
 test "runPostInstall rejects newline in version with InvalidInput" {
-    const err = ruby.runPostInstall(testing.allocator, "pkg", "1\n0", "/opt/malt");
-    try testing.expectError(error.InvalidInput, err);
+    try testing.expectError(error.InvalidInput, runPostInstallTest("pkg", "1\n0", "/opt/malt"));
 }
 
 test "runPostInstall rejects empty name/version/prefix with InvalidInput" {
-    try testing.expectError(
-        error.InvalidInput,
-        ruby.runPostInstall(testing.allocator, "", "1.0", "/opt/malt"),
-    );
-    try testing.expectError(
-        error.InvalidInput,
-        ruby.runPostInstall(testing.allocator, "pkg", "", "/opt/malt"),
-    );
-    try testing.expectError(
-        error.InvalidInput,
-        ruby.runPostInstall(testing.allocator, "pkg", "1.0", ""),
-    );
+    try testing.expectError(error.InvalidInput, runPostInstallTest("", "1.0", "/opt/malt"));
+    try testing.expectError(error.InvalidInput, runPostInstallTest("pkg", "", "/opt/malt"));
+    try testing.expectError(error.InvalidInput, runPostInstallTest("pkg", "1.0", ""));
 }
 
 test "runPostInstall rejects hostile prefix with InvalidInput" {
     // Even if the env-boundary check were bypassed, runPostInstall must
     // not produce a syntax-corrupt wrapper.
-    const err = ruby.runPostInstall(testing.allocator, "pkg", "1.0", "/tmp/m'x");
-    try testing.expectError(error.InvalidInput, err);
+    try testing.expectError(error.InvalidInput, runPostInstallTest("pkg", "1.0", "/tmp/m'x"));
 }
 
 test "describeError covers every RubyError variant with a user hint" {
@@ -479,7 +485,7 @@ test "detectRuby returns a heap-owned slice that the caller can free" {
     // (machine-dependent), but we *can* verify that freeing the result
     // does not double-free or fault — which only holds if every branch
     // returns heap memory rather than a mix of static and heap slices.
-    if (ruby.detectRuby(testing.allocator)) |path| {
+    if (ruby.detectRuby(testIo(), testEnviron(), testing.allocator)) |path| {
         defer testing.allocator.free(path);
         try testing.expect(path.len > 0);
         try testing.expect(std.mem.startsWith(u8, path, "/"));

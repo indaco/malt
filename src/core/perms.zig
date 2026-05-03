@@ -8,7 +8,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const fs_compat = @import("../fs/compat.zig");
 
 pub const PermReport = struct {
     group_writable: bool,
@@ -54,6 +53,7 @@ extern "c" fn lstat(path: [*:0]const u8, buf: *std.c.Stat) c_int;
 /// violate `classifyPermissions`. Caps at `max_findings` to bound
 /// memory on pathologically large prefixes.
 pub fn walkPrefix(
+    io: std.Io,
     allocator: std.mem.Allocator,
     prefix: []const u8,
     current_uid: std.c.uid_t,
@@ -68,16 +68,16 @@ pub fn walkPrefix(
     try checkPath(allocator, prefix, current_uid, &findings, max_findings);
     if (findings.items.len >= max_findings) return findings.toOwnedSlice(allocator);
 
-    var dir = fs_compat.openDirAbsolute(prefix, .{ .iterate = true }) catch |e| switch (e) {
+    var dir = std.Io.Dir.openDirAbsolute(io, prefix, .{ .iterate = true }) catch |e| switch (e) {
         error.FileNotFound => return findings.toOwnedSlice(allocator),
         else => return e,
     };
-    defer dir.close();
+    defer dir.close(io);
 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
-    while (walker.next() catch null) |entry| {
+    while (walker.next(io) catch null) |entry| {
         if (findings.items.len >= max_findings) break;
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const full = std.fmt.bufPrint(&buf, "{s}/{s}", .{ prefix, entry.path }) catch continue;

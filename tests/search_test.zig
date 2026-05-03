@@ -10,6 +10,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const api_mod = malt.api;
 const client_mod = malt.client;
 
@@ -94,32 +95,32 @@ const TempCacheDir = struct {
 
     fn init(comptime tag: []const u8) !TempCacheDir {
         const p = "/tmp/malt_search_test_" ++ tag;
-        malt.fs_compat.deleteTreeAbsolute(p) catch {};
-        try malt.fs_compat.makeDirAbsolute(p);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
+        try test_io.makeDirAbsolute(std.Options.debug_io, p);
         return .{ .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
-        malt.fs_compat.deleteTreeAbsolute(self.path) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
     }
 
     fn writeCacheFile(self: *TempCacheDir, rel: []const u8, content: []const u8) !void {
         var api_buf: [512]u8 = undefined;
         const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
-        malt.fs_compat.makeDirAbsolute(api_dir) catch |e| switch (e) {
+        test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
         const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ self.path, rel });
-        const f = try malt.fs_compat.cwd().createFile(full, .{});
-        defer f.close();
-        try f.writeAll(content);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, full, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, content);
     }
 };
 
 test "fetchNamesIndex returns a pre-seeded cache without touching the network" {
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
     var dir = try TempCacheDir.init("fetchidx_hit");
     defer dir.deinit();
@@ -127,7 +128,7 @@ test "fetchNamesIndex returns a pre-seeded cache without touching the network" {
     try dir.writeCacheFile("names_formula.txt", "go\nwget\n");
     try dir.writeCacheFile("names_cask.txt", "firefox\n");
 
-    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
 
     const f = try api.fetchNamesIndex(.formula);
     defer testing.allocator.free(f);
@@ -144,7 +145,7 @@ test "exists + fetchNamesIndex + findNameMatches compose end-to-end" {
     // index lookup, substring scan. Guards the composition after the
     // per-kind path was split into an isolated-HttpClient helper so
     // the two kinds could run on separate threads.
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
     var dir = try TempCacheDir.init("compose");
     defer dir.deinit();
@@ -152,7 +153,7 @@ test "exists + fetchNamesIndex + findNameMatches compose end-to-end" {
     try dir.writeCacheFile("formula_go.json", "{\"name\":\"go\"}");
     try dir.writeCacheFile("names_formula.txt", "argo\ncargo\ngo\ngolangci-lint\nnode\n");
 
-    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
 
     try testing.expect(try api.exists("go", .formula));
 
@@ -174,11 +175,11 @@ test "fetchNamesIndex reports missing cache as null via absence of the file" {
     // hit the network, so instead we just verify a fresh api.cacheSize
     // is zero and the cache file does not yet exist. TTL-expiry logic
     // shares a code path with readCache (already covered in api_test.zig).
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
     var dir = try TempCacheDir.init("fetchidx_miss");
     defer dir.deinit();
 
-    var api = api_mod.BrewApi.init(testing.allocator, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
     try testing.expectEqual(@as(u64, 0), api.cacheSize());
 }

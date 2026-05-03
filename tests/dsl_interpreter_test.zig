@@ -4,6 +4,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const dsl = malt.dsl;
 const formula_mod = malt.formula;
 
@@ -57,7 +58,11 @@ fn runSnippet(
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    dsl.executePostInstall(alloc, .{
+    const environ = malt.app_ctx.processEnviron();
+    var threaded: std.Io.Threaded = .init(alloc, .{ .environ = environ });
+    defer threaded.deinit();
+
+    dsl.executePostInstall(threaded.io(), environ, alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,
@@ -75,13 +80,13 @@ fn setupCellar(prefix_dir: []const u8) !void {
         &.{ prefix_dir, "Cellar", "testpkg", "1.0" },
     );
     defer testing.allocator.free(cellar_path);
-    try malt.fs_compat.cwd().makePath(cellar_path);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar_path);
 
     // Create etc, share, var
     for ([_][]const u8{ "etc", "share", "var" }) |sub| {
         const p = try std.fs.path.join(testing.allocator, &.{ prefix_dir, sub });
         defer testing.allocator.free(p);
-        try malt.fs_compat.cwd().makePath(p);
+        try test_io.cwd().createDirPath(std.Options.debug_io, p);
     }
 }
 
@@ -90,9 +95,9 @@ fn setupCellar(prefix_dir: []const u8) !void {
 fn makeTempPrefix() ![]const u8 {
     const tmp = std.testing.tmpDir(.{});
     // Get the real path of the temp directory
-    var buf: [malt.fs_compat.max_path_bytes]u8 = undefined;
+    var buf: [test_io.max_path_bytes]u8 = undefined;
     const prefix_path = blk: {
-        const n = try std.Io.Dir.realPath(tmp.dir, malt.io_mod.ctx(), &buf);
+        const n = try std.Io.Dir.realPath(tmp.dir, std.Options.debug_io, &buf);
         break :blk buf[0..n];
     };
     const owned = try testing.allocator.dupe(u8, prefix_path);
@@ -135,7 +140,7 @@ test "interpreter: pathname mkpath creates directory" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "share", "myapp" },
     );
     defer testing.allocator.free(expected);
-    malt.fs_compat.cwd().access(expected, .{}) catch {
+    test_io.cwd().access(std.Options.debug_io, expected, .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -158,10 +163,10 @@ test "interpreter: file write creates file with content" {
     );
     defer testing.allocator.free(expected_path);
 
-    const file = try malt.fs_compat.openFileAbsolute(expected_path, .{});
-    defer file.close();
+    const file = try test_io.openFileAbsolute(std.Options.debug_io, expected_path, .{});
+    defer file.close(std.Options.debug_io);
     var buf: [64]u8 = undefined;
-    const n = try file.readAll(&buf);
+    const n = try file.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expectEqualStrings("key=value", buf[0..n]);
 }
 
@@ -213,7 +218,7 @@ test "interpreter: variable assignment and use" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "share", "data" },
     );
     defer testing.allocator.free(expected);
-    malt.fs_compat.cwd().access(expected, .{}) catch {
+    test_io.cwd().access(std.Options.debug_io, expected, .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -417,14 +422,14 @@ test "interpreter: cp children copies files" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "share", "data" },
     );
     defer testing.allocator.free(share_data);
-    try malt.fs_compat.cwd().makePath(share_data);
+    try test_io.cwd().createDirPath(std.Options.debug_io, share_data);
 
     const file1 = try std.fs.path.join(testing.allocator, &.{ share_data, "a.txt" });
     defer testing.allocator.free(file1);
     {
-        const f = try malt.fs_compat.createFileAbsolute(file1, .{});
-        _ = try f.write("aaa");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, file1, .{});
+        _ = try f.writeStreamingAll(std.Options.debug_io, "aaa");
+        f.close(std.Options.debug_io);
     }
 
     // Create lib dir
@@ -433,7 +438,7 @@ test "interpreter: cp children copies files" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "lib" },
     );
     defer testing.allocator.free(lib_dir);
-    try malt.fs_compat.cwd().makePath(lib_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, lib_dir);
 
     const src =
         \\cp (prefix/"share"/"data").children, prefix/"lib"
@@ -455,13 +460,13 @@ test "interpreter: rm array inline deletes files" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "tmp" },
     );
     defer testing.allocator.free(tmp_dir);
-    try malt.fs_compat.cwd().makePath(tmp_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, tmp_dir);
 
     for ([_][]const u8{ "a.txt", "b.txt" }) |name| {
         const fp = try std.fs.path.join(testing.allocator, &.{ tmp_dir, name });
         defer testing.allocator.free(fp);
-        const f = try malt.fs_compat.createFileAbsolute(fp, .{});
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, fp, .{});
+        f.close(std.Options.debug_io);
     }
 
     const src =
@@ -484,14 +489,14 @@ test "interpreter: chmod array no error" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "bin" },
     );
     defer testing.allocator.free(bin_dir);
-    try malt.fs_compat.cwd().makePath(bin_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, bin_dir);
 
     const sbin_dir = try std.fs.path.join(
         testing.allocator,
         &.{ prefix, "Cellar", "testpkg", "1.0", "sbin" },
     );
     defer testing.allocator.free(sbin_dir);
-    try malt.fs_compat.cwd().makePath(sbin_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, sbin_dir);
 
     const src =
         \\chmod 0755, [prefix/"bin", prefix/"sbin"]
@@ -518,8 +523,8 @@ test "interpreter: file? returns true for existing file" {
     );
     defer testing.allocator.free(test_file);
     {
-        const f = try malt.fs_compat.createFileAbsolute(test_file, .{});
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, test_file, .{});
+        f.close(std.Options.debug_io);
     }
 
     const src = "ohai \"exists\" if (prefix/\"test.txt\").file?";
@@ -540,13 +545,13 @@ test "interpreter: children on directory no error" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "subdir" },
     );
     defer testing.allocator.free(subdir);
-    try malt.fs_compat.cwd().makePath(subdir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, subdir);
 
     const fp = try std.fs.path.join(testing.allocator, &.{ subdir, "x.txt" });
     defer testing.allocator.free(fp);
     {
-        const f = try malt.fs_compat.createFileAbsolute(fp, .{});
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, fp, .{});
+        f.close(std.Options.debug_io);
     }
 
     const src = "(prefix/\"subdir\").children";
@@ -572,12 +577,12 @@ test "interpreter: atomic_write creates file with content" {
     );
     defer testing.allocator.free(expected_path);
 
-    const file = malt.fs_compat.openFileAbsolute(expected_path, .{}) catch {
+    const file = test_io.openFileAbsolute(std.Options.debug_io, expected_path, .{}) catch {
         return error.TestUnexpectedResult;
     };
-    defer file.close();
+    defer file.close(std.Options.debug_io);
     var buf: [64]u8 = undefined;
-    const n = try file.readAll(&buf);
+    const n = try file.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expectEqualStrings("key=value\\n", buf[0..n]);
 }
 
@@ -599,9 +604,9 @@ test "interpreter: inreplace replaces content in file" {
     );
     defer testing.allocator.free(config_path);
     {
-        const f = try malt.fs_compat.createFileAbsolute(config_path, .{});
-        _ = try f.write("setting=OLD_VALUE\n");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, config_path, .{});
+        _ = try f.writeStreamingAll(std.Options.debug_io, "setting=OLD_VALUE\n");
+        f.close(std.Options.debug_io);
     }
 
     const src = "inreplace prefix/\"config.txt\", \"OLD_VALUE\", \"NEW_VALUE\"";
@@ -609,10 +614,10 @@ test "interpreter: inreplace replaces content in file" {
     try testing.expect(err == null);
 
     // Verify replacement
-    const file = try malt.fs_compat.openFileAbsolute(config_path, .{});
-    defer file.close();
+    const file = try test_io.openFileAbsolute(std.Options.debug_io, config_path, .{});
+    defer file.close(std.Options.debug_io);
     var buf: [128]u8 = undefined;
-    const n = try file.readAll(&buf);
+    const n = try file.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expectEqualStrings("setting=NEW_VALUE\n", buf[0..n]);
 }
 
@@ -701,7 +706,7 @@ test "interpreter: %w each loop creates dirs" {
             &.{ prefix, "Cellar", "testpkg", "1.0", "dirs", name },
         );
         defer testing.allocator.free(dir_path);
-        malt.fs_compat.cwd().access(dir_path, .{}) catch {
+        test_io.cwd().access(std.Options.debug_io, dir_path, .{}) catch {
             return error.TestUnexpectedResult;
         };
     }
@@ -724,7 +729,7 @@ test "interpreter: unless with negation executes body" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "keep" },
     );
     defer testing.allocator.free(expected);
-    malt.fs_compat.cwd().access(expected, .{}) catch {
+    test_io.cwd().access(std.Options.debug_io, expected, .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -784,8 +789,8 @@ test "interpreter: File.exist? returns true for existing file" {
     );
     defer testing.allocator.free(test_file);
     {
-        const f = try malt.fs_compat.createFileAbsolute(test_file, .{});
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, test_file, .{});
+        f.close(std.Options.debug_io);
     }
 
     const src = "ohai \"found\" if File.exist?(prefix/\"test.txt\")";
@@ -824,7 +829,7 @@ test "interpreter: unknown method is logged in fallback log" {
     var flog = dsl.FallbackLog.init(alloc);
     defer flog.deinit();
 
-    dsl.executePostInstall(alloc, .{
+    dsl.executePostInstall(std.Options.debug_io, malt.app_ctx.processEnviron(), alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,
@@ -864,14 +869,14 @@ test "coverage: rm_r removes directory tree" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "tmp", "subdir" },
     );
     defer testing.allocator.free(subdir);
-    try malt.fs_compat.cwd().makePath(subdir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, subdir);
 
     const file_path = try std.fs.path.join(testing.allocator, &.{ subdir, "file.txt" });
     defer testing.allocator.free(file_path);
     {
-        const f = try malt.fs_compat.createFileAbsolute(file_path, .{});
-        _ = try f.write("data");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{});
+        _ = try f.writeStreamingAll(std.Options.debug_io, "data");
+        f.close(std.Options.debug_io);
     }
 
     const src = "rm_r prefix/\"tmp\"";
@@ -884,7 +889,7 @@ test "coverage: rm_r removes directory tree" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "tmp" },
     );
     defer testing.allocator.free(tmp_dir);
-    const gone = malt.fs_compat.cwd().access(tmp_dir, .{});
+    const gone = test_io.cwd().access(std.Options.debug_io, tmp_dir, .{});
     try testing.expect(gone == error.FileNotFound);
 }
 
@@ -902,9 +907,9 @@ test "coverage: cp single file" {
     );
     defer testing.allocator.free(src_file);
     {
-        const f = try malt.fs_compat.createFileAbsolute(src_file, .{});
-        _ = try f.write("hello");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, src_file, .{});
+        _ = try f.writeStreamingAll(std.Options.debug_io, "hello");
+        f.close(std.Options.debug_io);
     }
 
     const src = "cp prefix/\"src.txt\", prefix/\"dst.txt\"";
@@ -917,12 +922,12 @@ test "coverage: cp single file" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "dst.txt" },
     );
     defer testing.allocator.free(dst_file);
-    const file = malt.fs_compat.openFileAbsolute(dst_file, .{}) catch {
+    const file = test_io.openFileAbsolute(std.Options.debug_io, dst_file, .{}) catch {
         return error.TestUnexpectedResult;
     };
-    defer file.close();
+    defer file.close(std.Options.debug_io);
     var buf: [64]u8 = undefined;
-    const n = try file.readAll(&buf);
+    const n = try file.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expectEqualStrings("hello", buf[0..n]);
 }
 
@@ -939,14 +944,14 @@ test "coverage: cp_r copies directory tree" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "srcdir" },
     );
     defer testing.allocator.free(srcdir);
-    try malt.fs_compat.cwd().makePath(srcdir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, srcdir);
 
     const a_txt = try std.fs.path.join(testing.allocator, &.{ srcdir, "a.txt" });
     defer testing.allocator.free(a_txt);
     {
-        const f = try malt.fs_compat.createFileAbsolute(a_txt, .{});
-        _ = try f.write("content");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, a_txt, .{});
+        _ = try f.writeStreamingAll(std.Options.debug_io, "content");
+        f.close(std.Options.debug_io);
     }
 
     // cp_r exercises the recursive directory copy path
@@ -969,9 +974,9 @@ test "coverage: mv renames file" {
     );
     defer testing.allocator.free(old_file);
     {
-        const f = try malt.fs_compat.createFileAbsolute(old_file, .{});
-        _ = try f.write("data");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, old_file, .{});
+        _ = try f.writeStreamingAll(std.Options.debug_io, "data");
+        f.close(std.Options.debug_io);
     }
 
     const src = "mv prefix/\"old.txt\", prefix/\"new.txt\"";
@@ -984,12 +989,12 @@ test "coverage: mv renames file" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "new.txt" },
     );
     defer testing.allocator.free(new_file);
-    malt.fs_compat.cwd().access(new_file, .{}) catch {
+    test_io.cwd().access(std.Options.debug_io, new_file, .{}) catch {
         return error.TestUnexpectedResult;
     };
 
     // Verify old.txt is gone
-    const old_gone = malt.fs_compat.cwd().access(old_file, .{});
+    const old_gone = test_io.cwd().access(std.Options.debug_io, old_file, .{});
     try testing.expect(old_gone == error.FileNotFound);
 }
 
@@ -1010,7 +1015,7 @@ test "coverage: touch creates file" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "touched.txt" },
     );
     defer testing.allocator.free(file_path);
-    malt.fs_compat.cwd().access(file_path, .{}) catch {
+    test_io.cwd().access(std.Options.debug_io, file_path, .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -1029,9 +1034,9 @@ test "coverage: ln_s creates symlink" {
     );
     defer testing.allocator.free(target_file);
     {
-        const f = try malt.fs_compat.createFileAbsolute(target_file, .{});
-        _ = try f.write("target");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, target_file, .{});
+        _ = try f.writeStreamingAll(std.Options.debug_io, "target");
+        f.close(std.Options.debug_io);
     }
 
     const src = "ln_s prefix/\"target.txt\", prefix/\"link.txt\"";
@@ -1044,7 +1049,7 @@ test "coverage: ln_s creates symlink" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "link.txt" },
     );
     defer testing.allocator.free(link_path);
-    malt.fs_compat.cwd().access(link_path, .{}) catch {
+    test_io.cwd().access(std.Options.debug_io, link_path, .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -1063,9 +1068,9 @@ test "coverage: ln_sf single target overwrites" {
     );
     defer testing.allocator.free(target_file);
     {
-        const f = try malt.fs_compat.createFileAbsolute(target_file, .{});
-        _ = try f.write("target");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, target_file, .{});
+        _ = try f.writeStreamingAll(std.Options.debug_io, "target");
+        f.close(std.Options.debug_io);
     }
 
     const link_path = try std.fs.path.join(
@@ -1074,9 +1079,9 @@ test "coverage: ln_sf single target overwrites" {
     );
     defer testing.allocator.free(link_path);
     {
-        const f = try malt.fs_compat.createFileAbsolute(link_path, .{});
-        _ = try f.write("old");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, link_path, .{});
+        _ = try f.writeStreamingAll(std.Options.debug_io, "old");
+        f.close(std.Options.debug_io);
     }
 
     const src = "ln_sf prefix/\"target.txt\", prefix/\"link.txt\"";
@@ -1101,7 +1106,7 @@ test "coverage: mkdir_p nested directories" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "a", "b", "c" },
     );
     defer testing.allocator.free(deep_dir);
-    malt.fs_compat.cwd().access(deep_dir, .{}) catch {
+    test_io.cwd().access(std.Options.debug_io, deep_dir, .{}) catch {
         return error.TestUnexpectedResult;
     };
 }
@@ -1149,8 +1154,8 @@ test "coverage: symlink? false for regular file" {
     );
     defer testing.allocator.free(file_path);
     {
-        const f = try malt.fs_compat.createFileAbsolute(file_path, .{});
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{});
+        f.close(std.Options.debug_io);
     }
 
     const src = "ohai \"sym\" if (prefix/\"regular.txt\").symlink?";
@@ -1172,9 +1177,9 @@ test "coverage: read returns file content" {
     );
     defer testing.allocator.free(data_file);
     {
-        const f = try malt.fs_compat.createFileAbsolute(data_file, .{});
-        _ = try f.write("test data");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, data_file, .{});
+        _ = try f.writeStreamingAll(std.Options.debug_io, "test data");
+        f.close(std.Options.debug_io);
     }
 
     const src = "x = (prefix/\"data.txt\").read";
@@ -1219,13 +1224,13 @@ test "coverage: glob finds matching files" {
         &.{ prefix, "Cellar", "testpkg", "1.0", "share" },
     );
     defer testing.allocator.free(share_dir);
-    try malt.fs_compat.cwd().makePath(share_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, share_dir);
 
     for ([_][]const u8{ "a.xml", "b.xml" }) |name| {
         const fp = try std.fs.path.join(testing.allocator, &.{ share_dir, name });
         defer testing.allocator.free(fp);
-        const f = try malt.fs_compat.createFileAbsolute(fp, .{});
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, fp, .{});
+        f.close(std.Options.debug_io);
     }
 
     const src = "(prefix/\"share\").glob(\"*.xml\")";
@@ -1247,9 +1252,9 @@ test "coverage: install_symlink creates link" {
     );
     defer testing.allocator.free(src_file);
     {
-        const f = try malt.fs_compat.createFileAbsolute(src_file, .{});
-        _ = try f.write("content");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, src_file, .{});
+        _ = try f.writeStreamingAll(std.Options.debug_io, "content");
+        f.close(std.Options.debug_io);
     }
 
     const src = "(prefix/\"src.txt\").install_symlink prefix/\"islink.txt\"";
@@ -1471,7 +1476,7 @@ test "coverage: each loop with mkpath in body" {
             &.{ prefix, "Cellar", "testpkg", "1.0", "dirs2", name },
         );
         defer testing.allocator.free(dir_path);
-        malt.fs_compat.cwd().access(dir_path, .{}) catch {
+        test_io.cwd().access(std.Options.debug_io, dir_path, .{}) catch {
             return error.TestUnexpectedResult;
         };
     }
@@ -1524,7 +1529,7 @@ test "parse_error: malformed source populates fallback log with location" {
     defer flog.deinit();
 
     // Stray `]` with no matching open — a guaranteed parser error.
-    const result = dsl.executePostInstall(alloc, .{
+    const result = dsl.executePostInstall(std.Options.debug_io, malt.app_ctx.processEnviron(), alloc, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,
@@ -1822,7 +1827,7 @@ test "interpreter: .each past a failed `system` keeps iterating" {
             &.{ prefix, "Cellar", "testpkg", "1.0", "share", name },
         );
         defer testing.allocator.free(p);
-        try malt.fs_compat.cwd().access(p, .{});
+        try test_io.cwd().access(std.Options.debug_io, p, .{});
     }
 }
 
@@ -2520,7 +2525,7 @@ test "interpreter: arena-owned path bindings leak-clean under testing.allocator"
         \\_a = HOMEBREW_PREFIX
         \\_a = HOMEBREW_CELLAR
     ;
-    try dsl.executePostInstall(testing.allocator, .{
+    try dsl.executePostInstall(std.Options.debug_io, malt.app_ctx.processEnviron(), testing.allocator, .{
         .name = f.name,
         .version = f.version,
         .pkg_version = f.pkg_version,
@@ -2540,6 +2545,8 @@ test "ExecContext.pushScope propagates OOM from the arena" {
 
     var ctx: dsl.ExecContext = .{
         .arena = failing.allocator(),
+        .io = std.Options.debug_io,
+        .environ = malt.app_ctx.processEnviron(),
         .cellar_path = "",
         .malt_prefix = "",
         .paths = std.EnumArray(malt.dsl.context.PathBinding, []const u8).initFill(""),
@@ -2565,6 +2572,8 @@ test "ExecContext.pushMethodScope propagates OOM from the arena" {
 
     var ctx: dsl.ExecContext = .{
         .arena = failing.allocator(),
+        .io = std.Options.debug_io,
+        .environ = malt.app_ctx.processEnviron(),
         .cellar_path = "",
         .malt_prefix = "",
         .paths = std.EnumArray(malt.dsl.context.PathBinding, []const u8).initFill(""),
@@ -2593,7 +2602,7 @@ test "ExecContext.init with FormulaRef projects cellar + pkgshare paths" {
     defer flog.deinit();
 
     const prefix = "/opt/testmalt";
-    var ctx = try dsl.ExecContext.init(a, .{
+    var ctx = try dsl.ExecContext.init(a, std.Options.debug_io, malt.app_ctx.processEnviron(), .{
         .name = "ffmpeg",
         .version = "7.1.2",
         .pkg_version = "7.1.2",
@@ -2621,6 +2630,8 @@ test "executePostInstall accepts FormulaRef and binds formula_name" {
     defer flog.deinit();
 
     try dsl.executePostInstall(
+        std.Options.debug_io,
+        malt.app_ctx.processEnviron(),
         a,
         .{ .name = "acme", .version = "9.9.9", .pkg_version = "9.9.9" },
         "_ = pkgshare\n",

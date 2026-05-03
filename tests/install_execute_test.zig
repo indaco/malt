@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const install = @import("malt").install;
 
@@ -17,11 +18,13 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const path = try std.fmt.allocPrintSentinel(
         testing.allocator,
         "/tmp/malt_install_exec_{d}_{s}",
-        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        .{ test_io.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
         0,
     );
-    malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().makePath(path);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -31,8 +34,8 @@ test "execute with --help short-circuits before touching the filesystem" {
     _ = c.setenv("MALT_PREFIX", "/tmp/malt_install_exec_help_skipfs", 1);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{"--help"});
-    try install.execute(arena.allocator(), &.{"-h"});
+    try install.execute(&malt.app_ctx.debug_ctx, arena.allocator(), &.{"--help"});
+    try install.execute(&malt.app_ctx.debug_ctx, arena.allocator(), &.{"-h"});
 }
 
 test "execute with no positional args reports NoPackages" {
@@ -40,28 +43,28 @@ test "execute with no positional args reports NoPackages" {
     _ = c.setenv("MALT_PREFIX", "/tmp/malt_install_exec_nopkg", 1);
     try testing.expectError(
         install.InstallError.NoPackages,
-        install.execute(testing.allocator, &.{ "--force", "--dry-run" }),
+        install.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--force", "--dry-run" }),
     );
 }
 
 fn seedFormulaCache(prefix: []const u8, name: []const u8, json: []const u8) !void {
     const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
     defer testing.allocator.free(cache_api);
-    try malt.fs_compat.cwd().makePath(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.json", .{ cache_api, name });
     defer testing.allocator.free(path);
-    const f = try malt.fs_compat.cwd().createFile(path, .{});
-    defer f.close();
-    try f.writeAll(json);
+    const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, json);
 }
 
 test "execute --dry-run prints a plan for a cached formula" {
     const prefix_z: [:0]const u8 = "/tmp/mm";
-    malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     const prefix: []const u8 = prefix_z;
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     const json =
@@ -87,15 +90,18 @@ test "execute --dry-run prints a plan for a cached formula" {
     // print "Dry run: would install ..." → return without downloading.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "alpha" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "alpha" });
 }
 
 test "execute with --formula forces formula-only and errors on an unresolvable name" {
     const prefix_z: [:0]const u8 = "/tmp/mf";
-    malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // `--formula` + an unknown name → fetchFormula fails → formula-only
@@ -105,15 +111,18 @@ test "execute with --formula forces formula-only and errors on an unresolvable n
     // return fires first).
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--formula", "--dry-run", "--quiet", "zz_nonexistent_formula_xyz" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--formula", "--dry-run", "--quiet", "zz_nonexistent_formula_xyz" });
 }
 
 test "execute with a tap-formula-shaped name routes through the tap path in dry-run" {
     const prefix_z: [:0]const u8 = "/tmp/mt";
-    malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // user/repo/formula triggers installTapFormula, which early-returns
@@ -121,20 +130,23 @@ test "execute with a tap-formula-shaped name routes through the tap path in dry-
     // surfaces via output.err.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "zzuser/zzrepo/zzformula" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "zzuser/zzrepo/zzformula" });
 }
 
 test "execute --dry-run with an already-installed package short-circuits" {
     const prefix_z: [:0]const u8 = "/tmp/mi";
-    malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix_z});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().makePath(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
 
@@ -162,7 +174,10 @@ test "execute --dry-run with an already-installed package short-circuits" {
     try seedFormulaCache(prefix_z, "seeded", json);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "seeded" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "seeded" });
 }
 
 test "execute refuses to run when MALT_PREFIX is absurdly long (> 256 bytes)" {
@@ -174,7 +189,7 @@ test "execute refuses to run when MALT_PREFIX is absurdly long (> 256 bytes)" {
     _ = c.setenv("MALT_PREFIX", too_long, 1);
     try testing.expectError(
         install.InstallError.PrefixAbsurd,
-        install.execute(testing.allocator, &.{"wget"}),
+        install.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"wget"}),
     );
 }
 
@@ -191,10 +206,10 @@ test "execute --only-dependencies on a leaf formula plans nothing" {
     // "Dry run: would install ..." line never fires. Pins the early-return
     // branch so a future refactor cannot accidentally print a 0-package plan.
     const prefix_z: [:0]const u8 = "/tmp/mol";
-    malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     const json =
@@ -224,10 +239,13 @@ test "execute --only-dependencies on a leaf formula plans nothing" {
 
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
-    malt.io_mod.beginStderrCapture(testing.allocator, &captured);
-    defer malt.io_mod.endStderrCapture();
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
 
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--only-dependencies", "leaf" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--only-dependencies", "leaf" });
 
     try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would install") == null);
 }
@@ -237,10 +255,10 @@ test "execute --only-dependencies --dry-run plans deps but skips the requested f
     // never materialises or links the requested package. Captured stderr
     // is the cheapest way to assert the plan's contents from the outside.
     const prefix_z: [:0]const u8 = "/tmp/mod";
-    malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     const dep_json =
@@ -290,10 +308,13 @@ test "execute --only-dependencies --dry-run plans deps but skips the requested f
 
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
-    malt.io_mod.beginStderrCapture(testing.allocator, &captured);
-    defer malt.io_mod.endStderrCapture();
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
 
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--only-dependencies", "alpha" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--only-dependencies", "alpha" });
 
     // The dry-run plan header is the load-bearing observation: with the
     // top-level filtered, only the single dep should land in the plan.
@@ -310,10 +331,10 @@ test "execute --dry-run routes a revisioned formula through the install pipeline
     // exercises every call site that reads `formula.pkg_version` in
     // place of the plain `version`.
     const prefix_z: [:0]const u8 = "/tmp/mr";
-    malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // revision=1 → the keg dir under Cellar must be "10.47_1", not "10.47".
@@ -337,5 +358,8 @@ test "execute --dry-run routes a revisioned formula through the install pipeline
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "rev1" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "rev1" });
 }

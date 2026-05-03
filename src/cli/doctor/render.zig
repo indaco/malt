@@ -7,7 +7,6 @@
 const std = @import("std");
 const output = @import("../../ui/output.zig");
 const color = @import("../../ui/color.zig");
-const io_mod = @import("../../ui/io.zig");
 
 pub const CheckStatus = enum { ok, warn_status, err_status };
 
@@ -85,5 +84,5 @@ pub fn printCheck(name: []const u8, status: CheckStatus, detail: ?[]const u8) vo
         .color = color.isColorEnabled(),
         .emoji = color.isEmojiEnabled(),
     }) catch {};
-    io_mod.stderrWriteAll(w.buffered());
+    output.writeStderrAll(w.buffered());
 }

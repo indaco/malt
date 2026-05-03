@@ -10,7 +10,7 @@ const std = @import("std");
 const testing = std.testing;
 const doctor = @import("malt").doctor;
 const color = @import("malt").color;
-const io_mod = @import("malt").io_mod;
+const io_mod = @import("malt").output;
 const output = @import("malt").output;
 
 // Pin the palette so escape-string assertions stay deterministic
@@ -153,6 +153,7 @@ test "null detail omits the em-dash entirely" {
 // an in-memory SQLite so the test is hermetic.
 
 const malt = @import("malt");
+const test_io = @import("test_io");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const patch = malt.patch;
@@ -167,11 +168,19 @@ test "doctor.externalToolAvailable returns true when the tool is on PATH" {
     // `install_name_tool` is part of Xcode Command Line Tools and is
     // always installed in the repo's dev environment — any bot that
     // can build malt can find it.
-    try testing.expect(malt.doctor.externalToolAvailable(patch.external_tool_name));
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const environ = malt.app_ctx.processEnviron();
+    try testing.expect(malt.doctor.externalToolAvailable(io, environ, patch.external_tool_name));
 }
 
 test "doctor.externalToolAvailable returns false for a clearly-missing binary" {
-    try testing.expect(!malt.doctor.externalToolAvailable("mt_no_such_binary_ever_xyz"));
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const environ = malt.app_ctx.processEnviron();
+    try testing.expect(!malt.doctor.externalToolAvailable(io, environ, "mt_no_such_binary_ever_xyz"));
 }
 
 fn seedKeg(db: *sqlite.Database, name: []const u8, tap: []const u8, full_name: []const u8) !void {
@@ -194,7 +203,11 @@ test "countMissingLocalSources ignores non-local kegs" {
     try seedKeg(&db, "foo", "homebrew/core", "foo");
     try seedKeg(&db, "bar", "user/tap", "bar");
 
-    const got = doctor.countMissingLocalSources(testing.allocator, &db);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const got = doctor.countMissingLocalSources(io, testing.allocator, &db);
     try testing.expectEqual(@as(u32, 0), got.total);
     try testing.expectEqual(@as(u32, 0), got.stale);
 }
@@ -206,7 +219,11 @@ test "countMissingLocalSources flags kegs whose .rb no longer exists" {
 
     try seedKeg(&db, "ghost", "local", "/tmp/mt_doctor_vanished_formula_xyz.rb");
 
-    const got = doctor.countMissingLocalSources(testing.allocator, &db);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const got = doctor.countMissingLocalSources(io, testing.allocator, &db);
     try testing.expectEqual(@as(u32, 1), got.total);
     try testing.expectEqual(@as(u32, 1), got.stale);
 }
@@ -219,14 +236,18 @@ test "countMissingLocalSources does not flag kegs whose .rb still exists" {
     // Use the running test binary as the "file exists" witness — it
     // is guaranteed to be readable from the test process.
     const self_path = "/tmp/mt_doctor_present_formula.rb";
-    const f = try malt.fs_compat.createFileAbsolute(self_path, .{});
-    defer malt.fs_compat.cwd().deleteFile(self_path) catch {};
-    try f.writeAll("class X end\n");
-    f.close();
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, self_path, .{});
+    defer test_io.cwd().deleteFile(std.Options.debug_io, self_path) catch {};
+    try f.writeStreamingAll(std.Options.debug_io, "class X end\n");
+    f.close(std.Options.debug_io);
 
     try seedKeg(&db, "present", "local", self_path);
 
-    const got = doctor.countMissingLocalSources(testing.allocator, &db);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const got = doctor.countMissingLocalSources(io, testing.allocator, &db);
     try testing.expectEqual(@as(u32, 1), got.total);
     try testing.expectEqual(@as(u32, 0), got.stale);
 }
@@ -237,16 +258,20 @@ test "countMissingLocalSources mixes stale and present rows correctly" {
     try schema.initSchema(&db);
 
     const present_path = "/tmp/mt_doctor_mixed_present.rb";
-    const f = try malt.fs_compat.createFileAbsolute(present_path, .{});
-    defer malt.fs_compat.cwd().deleteFile(present_path) catch {};
-    try f.writeAll("x");
-    f.close();
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, present_path, .{});
+    defer test_io.cwd().deleteFile(std.Options.debug_io, present_path) catch {};
+    try f.writeStreamingAll(std.Options.debug_io, "x");
+    f.close(std.Options.debug_io);
 
     try seedKeg(&db, "p1", "local", present_path);
     try seedKeg(&db, "g1", "local", "/tmp/mt_doctor_mixed_missing_1.rb");
     try seedKeg(&db, "g2", "local", "/tmp/mt_doctor_mixed_missing_2.rb");
 
-    const got = doctor.countMissingLocalSources(testing.allocator, &db);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const got = doctor.countMissingLocalSources(io, testing.allocator, &db);
     try testing.expectEqual(@as(u32, 3), got.total);
     try testing.expectEqual(@as(u32, 2), got.stale);
 }
@@ -275,7 +300,12 @@ test "runChecks tallies ok/warn/err into the summary counters" {
     };
 
     const tally = doctor.runChecks(
-        .{ .allocator = testing.allocator, .prefix = "/tmp" },
+        .{
+            .allocator = testing.allocator,
+            .prefix = "/tmp",
+            .io = std.Options.debug_io,
+            .environ = .empty,
+        },
         &fake,
     );
     try testing.expectEqual(@as(u32, 2), tally.warnings);
@@ -285,7 +315,12 @@ test "runChecks tallies ok/warn/err into the summary counters" {
 test "runChecks on an empty table returns zero counters" {
     const empty = [_]doctor.Check{};
     const tally = doctor.runChecks(
-        .{ .allocator = testing.allocator, .prefix = "/tmp" },
+        .{
+            .allocator = testing.allocator,
+            .prefix = "/tmp",
+            .io = std.Options.debug_io,
+            .environ = .empty,
+        },
         &empty,
     );
     try testing.expectEqual(@as(u32, 0), tally.warnings);

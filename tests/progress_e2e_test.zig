@@ -26,7 +26,7 @@ const TestTracker = struct {
 };
 
 test "HTTP GET with progress callback fires correctly" {
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
 
     var tracker = TestTracker{
@@ -60,7 +60,7 @@ test "HTTP GET with progress callback fires correctly" {
 }
 
 test "HTTP GET without progress (null) still works" {
-    var http = client_mod.HttpClient.init(testing.allocator);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
 
     // Use get() which goes through the standard metadata path (no progress)

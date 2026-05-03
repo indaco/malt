@@ -2,7 +2,6 @@
 //! Tree-walking evaluator; runtime state lives in `context.zig`.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
 const ast = @import("ast.zig");
 const values = @import("values.zig");
 const lexer_mod = @import("lexer.zig");
@@ -240,6 +239,8 @@ pub const Interpreter = struct {
 
         const builtin_ctx = builtins_root.pathname.ExecCtx{
             .allocator = self.allocator,
+            .io = self.ctx.io,
+            .environ = self.ctx.environ,
             .cellar_path = self.ctx.cellar_path,
             .malt_prefix = self.ctx.malt_prefix,
         };
@@ -562,7 +563,8 @@ pub const Interpreter = struct {
             // assembly OOM and the stream failure are tolerated.
             if (std.fmt.allocPrint(self.allocator, "  x {s}\n", .{msg_str})) |line| {
                 defer self.allocator.free(line);
-                fs_compat.stderrFile().writeAll(line) catch {};
+                const stderr: std.Io.File = .{ .handle = std.posix.STDERR_FILENO, .flags = .{ .nonblocking = false } };
+                stderr.writeStreamingAll(self.ctx.io, line) catch {};
             } else |_| {}
         }
         return DslError.PostInstallFailed;
@@ -726,6 +728,8 @@ pub const Interpreter = struct {
     fn sendByName(self: *Interpreter, item: Value, sym: []const u8, loc: SourceLoc) DslError!Value {
         const builtin_ctx = builtins_root.pathname.ExecCtx{
             .allocator = self.allocator,
+            .io = self.ctx.io,
+            .environ = self.ctx.environ,
             .cellar_path = self.ctx.cellar_path,
             .malt_prefix = self.ctx.malt_prefix,
         };
@@ -895,6 +899,8 @@ fn compare(left: Value, op: []const u8, right: Value) bool {
 
 /// Execute a formula's post_install block.
 pub fn executePostInstall(
+    io: std.Io,
+    environ: std.process.Environ,
     allocator: std.mem.Allocator,
     ref: FormulaRef,
     ruby_source: []const u8,
@@ -922,7 +928,7 @@ pub fn executePostInstall(
         return e;
     };
 
-    var ctx = try ExecContext.init(a, ref, malt_prefix, flog);
+    var ctx = try ExecContext.init(a, io, environ, ref, malt_prefix, flog);
     defer ctx.deinit();
     var interp = Interpreter.init(&ctx);
     try interp.execute(nodes);

@@ -3,31 +3,32 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const cleanup = malt.update_cleanup;
-const fs_compat = malt.fs_compat;
+const fs_compat = test_io;
 
 fn resetScratch(allocator: std.mem.Allocator, tag: []const u8) ![]u8 {
     const dir = try std.fmt.allocPrint(allocator, "/tmp/malt_cleanup_test_{s}", .{tag});
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     return dir;
 }
 
 fn writeFile(path: []const u8, content: []const u8) !void {
-    const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll(content);
+    const f = try fs_compat.createFileAbsolute(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, content);
 }
 
 fn exists(path: []const u8) bool {
-    fs_compat.accessAbsolute(path, .{}) catch return false;
+    fs_compat.accessAbsolute(std.Options.debug_io, path, .{}) catch return false;
     return true;
 }
 
 test "cleanUpdateArtefacts removes the .old sibling" {
     const dir = try resetScratch(testing.allocator, "old_only");
     defer testing.allocator.free(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
     const target = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
     defer testing.allocator.free(target);
@@ -37,7 +38,7 @@ test "cleanUpdateArtefacts removes the .old sibling" {
     try writeFile(target, "live");
     try writeFile(old, "previous");
 
-    const cleaned = try cleanup.cleanUpdateArtefacts(target);
+    const cleaned = try cleanup.cleanUpdateArtefacts(std.Options.debug_io, target);
     try testing.expectEqual(@as(u32, 1), cleaned.old);
     try testing.expectEqual(@as(u32, 0), cleaned.staging);
     try testing.expect(!exists(old));
@@ -47,7 +48,7 @@ test "cleanUpdateArtefacts removes the .old sibling" {
 test "cleanUpdateArtefacts removes all .malt-update-* staging files" {
     const dir = try resetScratch(testing.allocator, "staging_only");
     defer testing.allocator.free(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
     const target = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
     defer testing.allocator.free(target);
@@ -60,7 +61,7 @@ test "cleanUpdateArtefacts removes all .malt-update-* staging files" {
     try writeFile(s1, "orphan-1");
     try writeFile(s2, "orphan-2");
 
-    const cleaned = try cleanup.cleanUpdateArtefacts(target);
+    const cleaned = try cleanup.cleanUpdateArtefacts(std.Options.debug_io, target);
     try testing.expectEqual(@as(u32, 2), cleaned.staging);
     try testing.expect(!exists(s1));
     try testing.expect(!exists(s2));
@@ -70,13 +71,13 @@ test "cleanUpdateArtefacts removes all .malt-update-* staging files" {
 test "cleanUpdateArtefacts on an already-clean tree is a no-op" {
     const dir = try resetScratch(testing.allocator, "nothing");
     defer testing.allocator.free(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
     const target = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
     defer testing.allocator.free(target);
     try writeFile(target, "live");
 
-    const cleaned = try cleanup.cleanUpdateArtefacts(target);
+    const cleaned = try cleanup.cleanUpdateArtefacts(std.Options.debug_io, target);
     try testing.expectEqual(@as(u32, 0), cleaned.total());
     try testing.expect(exists(target));
 }
@@ -86,7 +87,7 @@ test "cleanUpdateArtefacts does not touch unrelated hidden files" {
     // exact prefix `.malt-update-` should be removed.
     const dir = try resetScratch(testing.allocator, "unrelated");
     defer testing.allocator.free(dir);
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
 
     const target = try std.fmt.allocPrint(testing.allocator, "{s}/malt", .{dir});
     defer testing.allocator.free(target);
@@ -99,7 +100,7 @@ test "cleanUpdateArtefacts does not touch unrelated hidden files" {
     try writeFile(bystander, "user");
     try writeFile(also, "mac");
 
-    const cleaned = try cleanup.cleanUpdateArtefacts(target);
+    const cleaned = try cleanup.cleanUpdateArtefacts(std.Options.debug_io, target);
     try testing.expectEqual(@as(u32, 0), cleaned.total());
     try testing.expect(exists(bystander));
     try testing.expect(exists(also));

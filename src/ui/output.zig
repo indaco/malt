@@ -2,9 +2,8 @@
 //! Human + JSON output formatting.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const color = @import("color.zig");
-const io_mod = @import("io.zig");
-const fs_compat = @import("../fs/compat.zig");
 
 pub const OutputMode = enum {
     human,
@@ -19,6 +18,26 @@ var mode: OutputMode = .human;
 /// Orthogonal to `mode`/`--json` so CI can stream per-step events
 /// without losing the final summary.
 var ndjson: bool = false;
+
+/// Process-wide io seeded once from `main` via `setRuntime`. Defaults to
+/// `debug_io` so tests that don't seed see deterministic, allocation-
+/// free behaviour.
+var pkg_io: std.Io = std.Options.debug_io;
+var pkg_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } };
+/// Stdio sinks seeded by `main`. Default `-1` so unconfigured tests
+/// silently drop writes (BadFileDescriptor) instead of leaking onto fd 1
+/// or 2 — keeps `zig build test` quiet by default.
+var pkg_stdout: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
+var pkg_stderr: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
+
+/// Seed the io/environ used by writes, isatty probes, and timestamps.
+/// Called by `main` after `AppCtx` is built.
+pub fn setRuntime(io: std.Io, environ: std.process.Environ, stdout: std.Io.File, stderr: std.Io.File) void {
+    pkg_io = io;
+    pkg_environ = environ;
+    pkg_stdout = stdout;
+    pkg_stderr = stderr;
+}
 
 pub fn setQuiet(q: bool) void {
     quiet = q;
@@ -61,6 +80,71 @@ pub fn isNdjson() bool {
     return ndjson;
 }
 
+/// Test-only stderr / stdout capture. Tests run sequentially in a binary,
+/// so no lock; elided from release via `builtin.is_test` guards.
+var capture_list: ?*std.ArrayList(u8) = null;
+var capture_allocator: std.mem.Allocator = undefined;
+var stdout_capture_list: ?*std.ArrayList(u8) = null;
+var stdout_capture_allocator: std.mem.Allocator = undefined;
+
+/// Test-only: redirect stderr writes into `buf`. Pair with `endStderrCapture`.
+pub fn beginStderrCapture(allocator: std.mem.Allocator, buf: *std.ArrayList(u8)) void {
+    if (!builtin.is_test) return;
+    capture_list = buf;
+    capture_allocator = allocator;
+}
+
+/// Test-only: stop redirecting stderr writes.
+pub fn endStderrCapture() void {
+    if (!builtin.is_test) return;
+    capture_list = null;
+}
+
+/// Test-only: redirect stdout writes into `buf`. Pair with `endStdoutCapture`.
+/// Needed for asserting JSON-mode payloads that land on stdout.
+pub fn beginStdoutCapture(allocator: std.mem.Allocator, buf: *std.ArrayList(u8)) void {
+    if (!builtin.is_test) return;
+    stdout_capture_list = buf;
+    stdout_capture_allocator = allocator;
+}
+
+pub fn endStdoutCapture() void {
+    if (!builtin.is_test) return;
+    stdout_capture_list = null;
+}
+
+/// Capture-aware stderr write. Tests that have set up a capture buffer
+/// see writes there; everything else goes to the seeded `pkg_stderr`.
+pub fn writeStderrAll(bytes: []const u8) void {
+    if (builtin.is_test) {
+        if (capture_list) |list| {
+            list.appendSlice(capture_allocator, bytes) catch {};
+            return;
+        }
+    }
+    pkg_stderr.writeStreamingAll(pkg_io, bytes) catch return;
+}
+
+/// Capture-aware stdout write. Tests with a stdout capture buffer see
+/// writes there; everything else goes to the seeded `pkg_stdout`.
+pub fn writeStdoutAll(bytes: []const u8) void {
+    if (builtin.is_test) {
+        if (stdout_capture_list) |list| {
+            list.appendSlice(stdout_capture_allocator, bytes) catch {};
+            return;
+        }
+    }
+    pkg_stdout.writeStreamingAll(pkg_io, bytes) catch return;
+}
+
+fn writeStderr(bytes: []const u8) void {
+    writeStderrAll(bytes);
+}
+
+fn writeStdout(bytes: []const u8) void {
+    writeStdoutAll(bytes);
+}
+
 /// Shared implementation for info/warn/success/err. One concrete
 /// function so the binary carries a single copy regardless of how
 /// many call sites route through it.
@@ -72,14 +156,14 @@ fn writePrefixedLine(
 ) void {
     const prefix: []const u8 = if (color.isEmojiEnabled()) emoji_prefix else plain_prefix;
     if (color.isColorEnabled()) {
-        io_mod.stderrWriteAll(role.code());
-        io_mod.stderrWriteAll(prefix);
-        io_mod.stderrWriteAll(color.Style.reset.code());
+        writeStderr(role.code());
+        writeStderr(prefix);
+        writeStderr(color.Style.reset.code());
     } else {
-        io_mod.stderrWriteAll(prefix);
+        writeStderr(prefix);
     }
-    io_mod.stderrWriteAll(msg);
-    io_mod.stderrWriteAll("\n");
+    writeStderr(msg);
+    writeStderr("\n");
 }
 
 pub fn info(comptime fmt: []const u8, args: anytype) void {
@@ -117,15 +201,15 @@ pub fn question(comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const prefix: []const u8 = if (color.isEmojiEnabled()) "  ? " else "  ? ";
     if (color.isColorEnabled()) {
-        io_mod.stderrWriteAll(color.SemanticStyle.info.code());
-        io_mod.stderrWriteAll(prefix);
-        io_mod.stderrWriteAll(color.Style.reset.code());
-        io_mod.stderrWriteAll(color.Style.bold.code());
-        io_mod.stderrWriteAll(msg);
-        io_mod.stderrWriteAll(color.Style.reset.code());
+        writeStderr(color.SemanticStyle.info.code());
+        writeStderr(prefix);
+        writeStderr(color.Style.reset.code());
+        writeStderr(color.Style.bold.code());
+        writeStderr(msg);
+        writeStderr(color.Style.reset.code());
     } else {
-        io_mod.stderrWriteAll(prefix);
-        io_mod.stderrWriteAll(msg);
+        writeStderr(prefix);
+        writeStderr(msg);
     }
 }
 
@@ -137,16 +221,16 @@ fn lineStyled(style_code: ?[]const u8, comptime fmt: []const u8, args: anytype) 
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     if (style_code) |code| {
         if (color.isColorEnabled()) {
-            io_mod.stderrWriteAll(code);
-            io_mod.stderrWriteAll(msg);
-            io_mod.stderrWriteAll(color.Style.reset.code());
+            writeStderr(code);
+            writeStderr(msg);
+            writeStderr(color.Style.reset.code());
         } else {
-            io_mod.stderrWriteAll(msg);
+            writeStderr(msg);
         }
     } else {
-        io_mod.stderrWriteAll(msg);
+        writeStderr(msg);
     }
-    io_mod.stderrWriteAll("\n");
+    writeStderr("\n");
 }
 
 /// Warn-coloured line with no icon — for multi-line warning blocks.
@@ -176,15 +260,15 @@ pub fn dim(comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const prefix: []const u8 = if (color.isEmojiEnabled()) "  ▸ " else "  > ";
     if (color.isColorEnabled()) {
-        io_mod.stderrWriteAll(color.SemanticStyle.detail.code());
-        io_mod.stderrWriteAll(prefix);
-        io_mod.stderrWriteAll(msg);
-        io_mod.stderrWriteAll(color.Style.reset.code());
+        writeStderr(color.SemanticStyle.detail.code());
+        writeStderr(prefix);
+        writeStderr(msg);
+        writeStderr(color.Style.reset.code());
     } else {
-        io_mod.stderrWriteAll(prefix);
-        io_mod.stderrWriteAll(msg);
+        writeStderr(prefix);
+        writeStderr(msg);
     }
-    io_mod.stderrWriteAll("\n");
+    writeStderr("\n");
 }
 
 /// Dim "nothing to do" status line (e.g. already-at-latest). The bullet
@@ -195,15 +279,15 @@ pub fn skip(comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const prefix: []const u8 = if (color.isEmojiEnabled()) "  · " else "  . ";
     if (color.isColorEnabled()) {
-        io_mod.stderrWriteAll(color.SemanticStyle.detail.code());
-        io_mod.stderrWriteAll(prefix);
-        io_mod.stderrWriteAll(msg);
-        io_mod.stderrWriteAll(color.Style.reset.code());
+        writeStderr(color.SemanticStyle.detail.code());
+        writeStderr(prefix);
+        writeStderr(msg);
+        writeStderr(color.Style.reset.code());
     } else {
-        io_mod.stderrWriteAll(prefix);
-        io_mod.stderrWriteAll(msg);
+        writeStderr(prefix);
+        writeStderr(msg);
     }
-    io_mod.stderrWriteAll("\n");
+    writeStderr("\n");
 }
 
 /// Read a single line from stdin and return true iff the trimmed input
@@ -212,7 +296,9 @@ pub fn skip(comptime fmt: []const u8, args: anytype) void {
 /// Returns false when stdin is not a TTY so that destructive commands
 /// refuse to run unattended without an explicit `--yes` opt-in.
 pub fn confirmTyped(expected: []const u8, prompt: []const u8) bool {
-    if (!fs_compat.isatty(std.posix.STDIN_FILENO)) return false;
+    const stdin_file: std.Io.File = .{ .handle = std.posix.STDIN_FILENO, .flags = .{ .nonblocking = false } };
+    const is_tty = stdin_file.isTty(pkg_io) catch false;
+    if (!is_tty) return false;
 
     question("{s}", .{prompt});
 
@@ -305,7 +391,7 @@ pub fn jsonStringArray(w: *std.Io.Writer, items: []const []const u8) !void {
 
 /// Write the `,"time_ms":N` suffix used by `--json` commands; `start_ts` is a `milliTimestamp()`.
 pub fn jsonTimeSuffix(w: *std.Io.Writer, start_ts: i64) !void {
-    const elapsed = fs_compat.milliTimestamp() - start_ts;
+    const elapsed = std.Io.Clock.real.now(pkg_io).toMilliseconds() - start_ts;
     var buf: [32]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, ",\"time_ms\":{d}", .{elapsed}) catch return;
     try w.writeAll(s);
@@ -317,7 +403,7 @@ pub fn jsonOutput(allocator: std.mem.Allocator, value: anytype) !void {
     defer aw.deinit();
     try std.json.Stringify.value(value, .{}, &aw.writer);
     try aw.writer.writeByte('\n');
-    io_mod.stdoutWriteAll(aw.written());
+    writeStdout(aw.written());
 }
 
 /// Closed vocabulary so call-site typos fail to compile. `@tagName` is
@@ -372,7 +458,7 @@ pub fn emitNdjsonEvent(
         jsonStr(&w, s) catch return;
     }
     w.writeAll("}\n") catch return;
-    io_mod.stdoutWriteAll(w.buffered());
+    writeStdout(w.buffered());
 }
 
 test "isNdjson defaults to false and setNdjson toggles it" {

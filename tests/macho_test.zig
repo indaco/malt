@@ -65,8 +65,10 @@ test "codesign isArm64 returns consistent result" {
 }
 
 test "patcher hasPrefix helper via patchPaths on non-existent file" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
     // patchPaths on a non-existent file should return OpenFailed
-    const result = patcher.patchPaths(testing.allocator, "/nonexistent/path/to/binary", "/opt/homebrew", "/opt/malt");
+    const result = patcher.patchPaths(threaded.io(), testing.allocator, "/nonexistent/path/to/binary", "/opt/homebrew", "/opt/malt");
     try testing.expectError(error.OpenFailed, result);
 }
 
@@ -292,11 +294,15 @@ test "patchPaths preserves trailing NUL at max_path_len-1 boundary" {
     @memcpy(buf[header_size + lc_size ..][0..old_path.len], old_path);
     // buf[header_size + lc_size + 15] stays 0 from the earlier @memset.
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
     var dir_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_abs_len = try std.Io.Dir.realPath(tmp.dir, malt.io_mod.ctx(), &dir_path_buf);
+    const dir_abs_len = try std.Io.Dir.realPath(tmp.dir, io, &dir_path_buf);
     var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const full_path = try std.fmt.bufPrint(
         &full_path_buf,
@@ -304,13 +310,14 @@ test "patchPaths preserves trailing NUL at max_path_len-1 boundary" {
         .{dir_path_buf[0..dir_abs_len]},
     );
     {
-        const f = try malt.fs_compat.createFileAbsolute(full_path, .{});
-        defer f.close();
-        try f.writeAll(buf);
+        const f = try std.Io.Dir.createFileAbsolute(io, full_path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, buf);
     }
 
     // Same-length patch: new_path_len == max_path_len - 1.
     const result = try patcher.patchPaths(
+        io,
         testing.allocator,
         full_path,
         "/opt/",
@@ -318,8 +325,12 @@ test "patchPaths preserves trailing NUL at max_path_len-1 boundary" {
     );
     try testing.expectEqual(@as(u32, 1), result.patched_count);
 
-    const patched = try malt.fs_compat.readFileAbsoluteAlloc(testing.allocator, full_path, 1024);
+    const opened = try std.Io.Dir.openFileAbsolute(io, full_path, .{});
+    defer opened.close(io);
+    const patched_stat = try opened.stat(io);
+    const patched = try testing.allocator.alloc(u8, @intCast(patched_stat.size));
     defer testing.allocator.free(patched);
+    _ = try opened.readPositionalAll(io, patched, 0);
 
     const slot = patched[header_size + lc_size ..][0..max_path_len];
     try testing.expectEqualStrings("/bin/aaaaaaaaaa", slot[0 .. max_path_len - 1]);

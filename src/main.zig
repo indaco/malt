@@ -2,9 +2,8 @@
 //! CLI entry point and command dispatch for the `mt` binary.
 
 const std = @import("std");
-const fs_compat = @import("fs/compat.zig");
-const io_mod = @import("ui/io.zig");
 const color_mod = @import("ui/color.zig");
+const AppCtx = @import("app_ctx.zig").AppCtx;
 
 // Release uses simple_panic so debug.Dwarf stays unreachable (~30 KB smaller).
 pub const panic = if (@import("builtin").mode == .Debug)
@@ -42,7 +41,7 @@ pub fn setInterruptedForTest(v: bool) void {
     interrupted.store(v, .release);
 }
 
-fn sigintHandler(_: std.c.SIG) callconv(.c) void {
+fn sigintHandler(_: std.posix.SIG) callconv(.c) void {
     interrupted.store(true, .release);
 }
 
@@ -239,6 +238,11 @@ test "applyGlobalFlag returns false for unrecognised flags" {
     try std.testing.expect(!applyGlobalFlag("wget"));
 }
 
+test "dispatch accepts AppCtx and routes help without panic" {
+    const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
+    try dispatch(std.testing.allocator, &ctx, .help, &.{});
+}
+
 test "applyGlobalFlag --output-format=ndjson does not flip --quiet" {
     // Compose with --quiet explicitly when needed; the streams are
     // already split (ndjson on stdout, human on stderr), so users
@@ -292,6 +296,24 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // Single Threaded io for the whole process; outlives the ctx it backs.
+    var threaded: std.Io.Threaded = .init(backing, .{ .environ = init.environ });
+    defer threaded.deinit();
+    const ctx: AppCtx = .{
+        .io = threaded.io(),
+        .environ = init.environ,
+        .stdout = std.Io.File.stdout(),
+        .stderr = std.Io.File.stderr(),
+    };
+
+    // Seed the ui package state once so output/progress/color stop
+    // pulling io/environ/stdio from module-level globals.
+    const output_mod = @import("ui/output.zig");
+    const progress_mod = @import("ui/progress.zig");
+    output_mod.setRuntime(ctx.io, ctx.environ, ctx.stdout, ctx.stderr);
+    progress_mod.setRuntime(ctx.io, ctx.stderr);
+    color_mod.setRuntime(ctx.io, ctx.environ);
+
     var args_it = try init.args.iterateAllocator(allocator);
     defer args_it.deinit();
     _ = args_it.skip(); // skip argv0
@@ -302,7 +324,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const args = args_list.items;
 
     if (args.len == 0) {
-        printUsage();
+        printUsage(&ctx);
         return;
     }
 
@@ -331,7 +353,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     if (!found_cmd) {
-        printUsage();
+        printUsage(&ctx);
         return;
     }
     const cmd_args = filtered.items;
@@ -341,63 +363,63 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // `error.Aborted`; the message has already been emitted via
         // `output.err`, so we just exit non-zero without a stack trace.
         // Every other error still propagates and surfaces normally.
-        dispatch(allocator, cmd, cmd_args) catch |e| switch (e) {
+        dispatch(allocator, &ctx, cmd, cmd_args) catch |e| switch (e) {
             error.Aborted => std.process.exit(1),
             else => return e,
         };
         // Best-effort passive notice on successful subcommands. Owns its
         // own suppression list (CI, --quiet/--json/ndjson/--dry-run, env
         // opt-out, non-TTY, brew origin, version/help meta-commands).
-        notifier.maybeNotify(allocator, version, cmd_str);
+        notifier.maybeNotify(&ctx, allocator, version, cmd_str);
     } else {
         // Unknown command — try transparent brew fallback
-        try brewFallback(allocator, args);
+        try brewFallback(&ctx, args);
     }
 }
 
-fn dispatch(allocator: std.mem.Allocator, cmd: Command, cmd_args: []const []const u8) !void {
+fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_args: []const []const u8) !void {
     switch (cmd) {
-        .install => try install.execute(allocator, cmd_args),
-        .uninstall => try uninstall.execute(allocator, cmd_args),
-        .upgrade => try upgrade.execute(allocator, cmd_args),
-        .update => try update.execute(allocator, cmd_args),
-        .outdated => try outdated.execute(allocator, cmd_args),
-        .list => try list.execute(allocator, cmd_args),
-        .info => try info.execute(allocator, cmd_args),
-        .search => try search.execute(allocator, cmd_args),
-        .doctor => try doctor.execute(allocator, cmd_args),
-        .tap => try tap.execute(allocator, cmd_args),
-        .untap => try tap.executeUntap(allocator, cmd_args),
-        .migrate => try migrate.execute(allocator, cmd_args),
-        .rollback => try rollback.execute(allocator, cmd_args),
-        .link => try link_cmd.executeLink(allocator, cmd_args),
-        .unlink => try link_cmd.executeUnlink(allocator, cmd_args),
-        .pin => try pin_cmd.execute(allocator, cmd_args),
-        .unpin => try pin_cmd.executeUnpin(allocator, cmd_args),
-        .run => try run_cmd.execute(allocator, cmd_args),
-        .completions => try completions.execute(allocator, cmd_args),
-        .shellenv => try shellenv.execute(allocator, cmd_args),
-        .backup => try backup.execute(allocator, cmd_args),
-        .restore => try restore.execute(allocator, cmd_args),
-        .purge => try purge.execute(allocator, cmd_args),
-        .services => try services.execute(allocator, cmd_args),
-        .bundle => try bundle.execute(allocator, cmd_args),
-        .uses => try uses.execute(allocator, cmd_args),
-        .which => try which_cmd.execute(allocator, cmd_args),
+        .install => try install.execute(ctx, allocator, cmd_args),
+        .uninstall => try uninstall.execute(ctx, allocator, cmd_args),
+        .upgrade => try upgrade.execute(ctx, allocator, cmd_args),
+        .update => try update.execute(ctx, allocator, cmd_args),
+        .outdated => try outdated.execute(ctx, allocator, cmd_args),
+        .list => try list.execute(ctx, allocator, cmd_args),
+        .info => try info.execute(ctx, allocator, cmd_args),
+        .search => try search.execute(ctx, allocator, cmd_args),
+        .doctor => try doctor.execute(ctx, allocator, cmd_args),
+        .tap => try tap.execute(ctx, allocator, cmd_args),
+        .untap => try tap.executeUntap(ctx, allocator, cmd_args),
+        .migrate => try migrate.execute(ctx, allocator, cmd_args),
+        .rollback => try rollback.execute(ctx, allocator, cmd_args),
+        .link => try link_cmd.executeLink(ctx, allocator, cmd_args),
+        .unlink => try link_cmd.executeUnlink(ctx, allocator, cmd_args),
+        .pin => try pin_cmd.execute(ctx, allocator, cmd_args),
+        .unpin => try pin_cmd.executeUnpin(ctx, allocator, cmd_args),
+        .run => try run_cmd.execute(ctx, allocator, cmd_args),
+        .completions => try completions.execute(ctx, allocator, cmd_args),
+        .shellenv => try shellenv.execute(ctx, allocator, cmd_args),
+        .backup => try backup.execute(ctx, allocator, cmd_args),
+        .restore => try restore.execute(ctx, allocator, cmd_args),
+        .purge => try purge.execute(ctx, allocator, cmd_args),
+        .services => try services.execute(ctx, allocator, cmd_args),
+        .bundle => try bundle.execute(ctx, allocator, cmd_args),
+        .uses => try uses.execute(ctx, allocator, cmd_args),
+        .which => try which_cmd.execute(ctx, allocator, cmd_args),
         .version_cmd => {
             // "mt version" — check for "mt version update" subcommand
             if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
-                try version_update.execute(allocator, cmd_args[1..]);
+                try version_update.execute(ctx, allocator, cmd_args[1..]);
             } else {
-                printVersion();
+                printVersion(ctx);
             }
         },
-        .help => printUsage(),
-        .version => printVersion(),
+        .help => printUsage(ctx),
+        .version => printVersion(ctx),
     }
 }
 
-fn printUsage() void {
+fn printUsage(ctx: *const AppCtx) void {
     const usage =
         \\malt — a fast, drop-in Homebrew alternative for macOS.
         \\Warm installs in milliseconds. post_install scripts that actually run.
@@ -458,14 +480,14 @@ fn printUsage() void {
         \\                    Suppress the "newer malt available" stderr notice
         \\
     ;
-    io_mod.stdoutWriteAll(usage);
+    ctx.stdout.writeStreamingAll(ctx.io, usage) catch {};
 }
 
-fn printVersion() void {
-    io_mod.stdoutWriteAll("malt " ++ version ++ "\n");
+fn printVersion(ctx: *const AppCtx) void {
+    ctx.stdout.writeStreamingAll(ctx.io, "malt " ++ version ++ "\n") catch {};
 }
 
-fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
+fn brewFallback(ctx: *const AppCtx, args: []const []const u8) !void {
     // Try to find and exec the real brew binary
     const brew_paths = [_][]const u8{
         "/opt/homebrew/bin/brew",
@@ -474,7 +496,7 @@ fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     for (brew_paths) |brew_path| {
-        fs_compat.accessAbsolute(brew_path, .{}) catch continue;
+        std.Io.Dir.accessAbsolute(ctx.io, brew_path, .{}) catch continue;
 
         // Build argv: [brew] ++ args
         var argv_buf: [128][]const u8 = undefined;
@@ -484,9 +506,9 @@ fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
             argv_buf[i] = arg;
         }
 
-        var child = fs_compat.Child.init(argv_buf[0 .. argc + 1], allocator);
-        child.spawn() catch continue;
-        const term = child.wait() catch continue;
+        const argv = argv_buf[0 .. argc + 1];
+        var spawned = std.process.spawn(ctx.io, .{ .argv = argv }) catch continue;
+        const term = spawned.wait(ctx.io) catch continue;
         switch (term) {
             .exited => |code| {
                 if (code != 0) return error.BrewFailed;
@@ -500,7 +522,7 @@ fn brewFallback(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len > 0) {
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "malt: '{s}' is not a malt command and brew was not found.\n", .{args[0]}) catch return;
-        io_mod.stderrWriteAll(msg);
+        ctx.stderr.writeStreamingAll(ctx.io, msg) catch {};
     }
-    io_mod.stderrWriteAll("Install Homebrew: https://brew.sh\n");
+    ctx.stderr.writeStreamingAll(ctx.io, "Install Homebrew: https://brew.sh\n") catch {};
 }

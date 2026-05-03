@@ -8,6 +8,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const uses = malt.cli_uses;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
@@ -15,7 +16,7 @@ const schema = malt.schema;
 fn makeDb(tag: []const u8) !sqlite.Database {
     var path_buf: [256]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt_uses_test_{s}.db", .{tag}, 0);
-    malt.fs_compat.deleteFileAbsolute(path) catch {};
+    test_io.deleteFileAbsolute(std.Options.debug_io, path) catch {};
     var db = try sqlite.Database.open(path);
     try schema.initSchema(&db);
     return db;

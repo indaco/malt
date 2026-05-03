@@ -2,7 +2,7 @@
 //! Manage symlinks for installed kegs.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const linker_mod = @import("../core/linker.zig");
@@ -10,8 +10,8 @@ const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
-pub fn executeLink(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "link")) return;
+pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "link")) return;
 
     if (args.len == 0) {
         output.err("Usage: mt link <formula>", .{});
@@ -57,7 +57,8 @@ pub fn executeLink(allocator: std.mem.Allocator, args: []const []const u8) !void
         return error.Aborted;
     };
     const cellar_path = std.mem.sliceTo(cellar_path_raw, 0);
-    var linker = linker_mod.Linker.init(allocator, &db, prefix);
+
+    var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
 
     // Check for conflicts unless --overwrite
     if (!overwrite) {
@@ -91,8 +92,8 @@ pub fn executeLink(allocator: std.mem.Allocator, args: []const []const u8) !void
     output.success("{s} linked", .{name});
 }
 
-pub fn executeUnlink(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "unlink")) return;
+pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "unlink")) return;
 
     if (args.len == 0) {
         output.err("Usage: mt unlink <formula>", .{});
@@ -129,7 +130,8 @@ pub fn executeUnlink(allocator: std.mem.Allocator, args: []const []const u8) !vo
     }
 
     const keg_id = stmt.columnInt(0);
-    var linker = linker_mod.Linker.init(allocator, &db, prefix);
+
+    var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
 
     linker.unlink(keg_id) catch {
         output.err("Failed to remove symlinks for {s}", .{name});
@@ -139,7 +141,7 @@ pub fn executeUnlink(allocator: std.mem.Allocator, args: []const []const u8) !vo
     // Also remove opt/ symlink
     var opt_buf: [512]u8 = undefined;
     const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch return;
-    fs_compat.cwd().deleteFile(opt_path) catch {}; // opt/ link absent on never-linked kegs
+    std.Io.Dir.cwd().deleteFile(ctx.io, opt_path) catch {}; // opt/ link absent on never-linked kegs
 
     output.success("{s} unlinked (keg remains installed)", .{name});
 }

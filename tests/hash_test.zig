@@ -9,20 +9,28 @@ const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
 const hash = malt.hash;
-const fs_compat = malt.fs_compat;
 
 /// 64 KiB — internal SHA256 read chunk. Boundary cases are expressed
 /// relative to this so the tests stay meaningful if the constant moves.
 const CHUNK: usize = 64 * 1024;
 
+fn testIo() std.Io {
+    return std.Options.debug_io;
+}
+
 fn tempPath(tag: []const u8, buf: []u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "/tmp/malt_hash_test_{s}_{d}", .{ tag, fs_compat.nanoTimestamp() });
+    const ts = std.Io.Clock.real.now(testIo()).toNanoseconds();
+    return std.fmt.bufPrint(buf, "/tmp/malt_hash_test_{s}_{d}", .{ tag, ts });
 }
 
 fn writeFile(path: []const u8, bytes: []const u8) !void {
-    const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll(bytes);
+    const f = try std.Io.Dir.createFileAbsolute(testIo(), path, .{});
+    defer f.close(testIo());
+    try f.writeStreamingAll(testIo(), bytes);
+}
+
+fn deleteFile(path: []const u8) void {
+    std.Io.Dir.deleteFileAbsolute(testIo(), path) catch {};
 }
 
 fn fillPattern(buf: []u8) void {
@@ -39,9 +47,9 @@ test "hashFileSha256Raw returns the canonical empty digest" {
     var buf: [128]u8 = undefined;
     const p = try tempPath("empty_raw", &buf);
     try writeFile(p, "");
-    defer fs_compat.deleteFileAbsolute(p) catch {};
+    defer deleteFile(p);
 
-    const got = try hash.hashFileSha256Raw(p);
+    const got = try hash.hashFileSha256Raw(testIo(), p);
     // SHA256("")
     const want = [_]u8{
         0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
@@ -56,9 +64,9 @@ test "hashFileSha256Raw matches NIST 'abc' vector" {
     var buf: [128]u8 = undefined;
     const p = try tempPath("abc_raw", &buf);
     try writeFile(p, "abc");
-    defer fs_compat.deleteFileAbsolute(p) catch {};
+    defer deleteFile(p);
 
-    const got = try hash.hashFileSha256Raw(p);
+    const got = try hash.hashFileSha256Raw(testIo(), p);
     const want = [_]u8{
         0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
         0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
@@ -79,9 +87,9 @@ test "hashFileSha256Raw streams past the chunk boundary" {
     var buf: [128]u8 = undefined;
     const p = try tempPath("multi_raw", &buf);
     try writeFile(p, payload);
-    defer fs_compat.deleteFileAbsolute(p) catch {};
+    defer deleteFile(p);
 
-    const got = try hash.hashFileSha256Raw(p);
+    const got = try hash.hashFileSha256Raw(testIo(), p);
     const want = referenceRaw(payload);
     try testing.expectEqualSlices(u8, &want, &got);
 }
@@ -89,7 +97,7 @@ test "hashFileSha256Raw streams past the chunk boundary" {
 test "hashFileSha256Raw propagates FileNotFound" {
     try testing.expectError(
         error.FileNotFound,
-        hash.hashFileSha256Raw("/tmp/malt_hash_test_absent_xyzzy.bin"),
+        hash.hashFileSha256Raw(testIo(), "/tmp/malt_hash_test_absent_xyzzy.bin"),
     );
 }
 
@@ -97,10 +105,10 @@ test "hashFileSha256Hex is the lowercase hex of hashFileSha256Raw" {
     var buf: [128]u8 = undefined;
     const p = try tempPath("hex_match", &buf);
     try writeFile(p, "hello world");
-    defer fs_compat.deleteFileAbsolute(p) catch {};
+    defer deleteFile(p);
 
-    const raw = try hash.hashFileSha256Raw(p);
-    const hex = try hash.hashFileSha256Hex(p);
+    const raw = try hash.hashFileSha256Raw(testIo(), p);
+    const hex = try hash.hashFileSha256Hex(testIo(), p);
     const expected_hex = std.fmt.bytesToHex(raw, .lower);
     try testing.expectEqualSlices(u8, &expected_hex, &hex);
 }

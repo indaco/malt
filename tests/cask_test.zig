@@ -3,9 +3,14 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const cask = malt.cask;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
+
+fn testIo() std.Io {
+    return std.Options.debug_io;
+}
 
 // --- artifactTypeFromUrl ---
 
@@ -117,8 +122,8 @@ const test_cask_json_v2 =
 
 fn openTempCaskDb(comptime tag: []const u8) !struct { dir: []const u8, db: sqlite.Database } {
     const dir = "/tmp/malt_cask_recordinstall_" ++ tag;
-    malt.fs_compat.deleteTreeAbsolute(dir) catch {};
-    try malt.fs_compat.makeDirAbsolute(dir);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, dir);
     var buf: [256]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
     var db = try sqlite.Database.open(path);
@@ -140,7 +145,7 @@ test "recordInstall preserves an existing pinned flag (force-upgrade keeps the h
     var t = try openTempCaskDb("preserve_pin");
     defer {
         t.db.close();
-        malt.fs_compat.deleteTreeAbsolute(t.dir) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, t.dir) catch {};
     }
 
     // Seed firefox at version 1 with pinned = 1.
@@ -162,7 +167,7 @@ test "recordInstall on a fresh cask defaults pinned to 0" {
     var t = try openTempCaskDb("fresh_pin");
     defer {
         t.db.close();
-        malt.fs_compat.deleteTreeAbsolute(t.dir) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, t.dir) catch {};
     }
 
     var c2 = try cask.parseCask(std.testing.allocator, test_cask_json_v2);
@@ -387,7 +392,9 @@ test "isOutdated detects version mismatch" {
     try cask.recordInstall(&db, &c, "/Applications/Firefox.app");
 
     const prefix: [:0]const u8 = "/tmp/malt_test";
-    var installer = cask.CaskInstaller.init(std.testing.allocator, &db, prefix);
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .environ = malt.app_ctx.processEnviron() });
+    defer threaded.deinit();
+    var installer = cask.CaskInstaller.init(threaded.io(), malt.app_ctx.processEnviron(), std.testing.allocator, &db, prefix);
 
     try std.testing.expect(installer.isOutdated("firefox", "124.0"));
     try std.testing.expect(!installer.isOutdated("firefox", "123.0"));
@@ -403,7 +410,7 @@ test "isOutdated detects version mismatch" {
 // output against independently-computed digests.
 
 const testing = std.testing;
-const malt_fs = malt.fs_compat;
+const malt_fs = test_io;
 
 /// 64 KiB — the internal SHA256 read buffer size. Every boundary
 /// case below is expressed relative to this so the tests stay
@@ -411,13 +418,15 @@ const malt_fs = malt.fs_compat;
 const CHUNK: usize = 64 * 1024;
 
 fn tempFilePath(tag: []const u8, buf: []u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "/tmp/malt_cask_verify_{s}_{d}", .{ tag, malt_fs.nanoTimestamp() });
+    return std.fmt.bufPrint(buf, "/tmp/malt_cask_verify_{s}_{d}", .{ tag, malt_fs.nanoTimestamp(
+        std.Options.debug_io,
+    ) });
 }
 
 fn writeFile(path: []const u8, bytes: []const u8) !void {
-    const f = try malt_fs.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll(bytes);
+    const f = try malt_fs.createFileAbsolute(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, bytes);
 }
 
 /// Independent SHA256 of `bytes` as lowercase hex, computed in one
@@ -443,9 +452,9 @@ fn hashTempFile(alloc: std.mem.Allocator, tag: []const u8, size: usize) !void {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath(tag, &path_buf);
     try writeFile(p, payload);
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(std.Options.debug_io, p) catch {};
 
-    const got = try cask.hashFileSha256(p);
+    const got = try cask.hashFileSha256(testIo(), p);
     const want = referenceHex(payload);
     try testing.expectEqualSlices(u8, &want, &got);
 }
@@ -456,9 +465,9 @@ test "hashFileSha256 matches reference for an empty file" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("empty", &path_buf);
     try writeFile(p, "");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(std.Options.debug_io, p) catch {};
 
-    const got = try cask.hashFileSha256(p);
+    const got = try cask.hashFileSha256(testIo(), p);
     // SHA256 of empty input.
     try testing.expectEqualSlices(
         u8,
@@ -506,9 +515,9 @@ test "hashFileSha256 of 'abc' matches the NIST test vector" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("nist_abc", &path_buf);
     try writeFile(p, "abc");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(std.Options.debug_io, p) catch {};
 
-    const got = try cask.hashFileSha256(p);
+    const got = try cask.hashFileSha256(testIo(), p);
     try testing.expectEqualSlices(
         u8,
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
@@ -519,7 +528,7 @@ test "hashFileSha256 of 'abc' matches the NIST test vector" {
 test "hashFileSha256 propagates FileNotFound for a missing path" {
     try testing.expectError(
         error.FileNotFound,
-        cask.hashFileSha256("/tmp/malt_cask_verify_absent_xyzzy.bin"),
+        cask.hashFileSha256(testIo(), "/tmp/malt_cask_verify_absent_xyzzy.bin"),
     );
 }
 
@@ -529,10 +538,10 @@ test "verifyFileSha256 accepts the correct digest on a tiny file" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("tiny_ok", &path_buf);
     try writeFile(p, "hello");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(std.Options.debug_io, p) catch {};
 
     // `printf 'hello' | shasum -a 256`
-    try cask.verifyFileSha256(p, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+    try cask.verifyFileSha256(testIo(), p, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
 }
 
 test "verifyFileSha256 rejects a digest with a single flipped bit" {
@@ -541,11 +550,11 @@ test "verifyFileSha256 rejects a digest with a single flipped bit" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("flip", &path_buf);
     try writeFile(p, "hello");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(std.Options.debug_io, p) catch {};
 
     try testing.expectError(
         error.Sha256Mismatch,
-        cask.verifyFileSha256(p, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9825"),
+        cask.verifyFileSha256(testIo(), p, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9825"),
     );
 }
 
@@ -555,11 +564,11 @@ test "verifyFileSha256 rejects an uppercase digest (strict lower-hex)" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("upper", &path_buf);
     try writeFile(p, "hello");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(std.Options.debug_io, p) catch {};
 
     try testing.expectError(
         error.Sha256Mismatch,
-        cask.verifyFileSha256(p, "2CF24DBA5FB0A30E26E83B2AC5B9E29E1B161E5C1FA7425E73043362938B9824"),
+        cask.verifyFileSha256(testIo(), p, "2CF24DBA5FB0A30E26E83B2AC5B9E29E1B161E5C1FA7425E73043362938B9824"),
     );
 }
 
@@ -567,12 +576,12 @@ test "verifyFileSha256 rejects a truncated or over-length digest" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("length", &path_buf);
     try writeFile(p, "hello");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(std.Options.debug_io, p) catch {};
 
-    try testing.expectError(error.Sha256Mismatch, cask.verifyFileSha256(p, "2cf2"));
+    try testing.expectError(error.Sha256Mismatch, cask.verifyFileSha256(testIo(), p, "2cf2"));
     try testing.expectError(
         error.Sha256Mismatch,
-        cask.verifyFileSha256(p, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b98240"),
+        cask.verifyFileSha256(testIo(), p, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b98240"),
     );
 }
 
@@ -583,10 +592,10 @@ test "verifyFileSha256 skips verification on null or :no_check" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("skip", &path_buf);
     try writeFile(p, "anything");
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(std.Options.debug_io, p) catch {};
 
-    try cask.verifyFileSha256(p, null);
-    try cask.verifyFileSha256(p, "no_check");
+    try cask.verifyFileSha256(testIo(), p, null);
+    try cask.verifyFileSha256(testIo(), p, "no_check");
 }
 
 test "verifyFileSha256 accepts a correct digest on a >1 MiB file" {
@@ -603,10 +612,10 @@ test "verifyFileSha256 accepts a correct digest on a >1 MiB file" {
     var path_buf: [128]u8 = undefined;
     const p = try tempFilePath("big_ok", &path_buf);
     try writeFile(p, payload);
-    defer malt_fs.cwd().deleteFile(p) catch {};
+    defer malt_fs.cwd().deleteFile(std.Options.debug_io, p) catch {};
 
     const expected = referenceHex(payload);
-    try cask.verifyFileSha256(p, &expected);
+    try cask.verifyFileSha256(testIo(), p, &expected);
 }
 
 test "verifyFileSha256 propagates FileNotFound rather than Sha256Mismatch" {
@@ -615,15 +624,17 @@ test "verifyFileSha256 propagates FileNotFound rather than Sha256Mismatch" {
     // corrupt" when nothing was ever read.
     try testing.expectError(
         error.FileNotFound,
-        cask.verifyFileSha256("/tmp/malt_cask_verify_missing_xyzzy.bin", "0" ** 64),
+        cask.verifyFileSha256(testIo(), "/tmp/malt_cask_verify_missing_xyzzy.bin", "0" ** 64),
     );
 }
 
 // ── findAppInDir: owns the returned name past iterator teardown ─────
 
 fn scratchDir(tag: []const u8, buf: []u8) ![]const u8 {
-    const p = try std.fmt.bufPrint(buf, "/tmp/malt_cask_findapp_{s}_{d}", .{ tag, malt_fs.nanoTimestamp() });
-    try malt_fs.makeDirAbsolute(p);
+    const p = try std.fmt.bufPrint(buf, "/tmp/malt_cask_findapp_{s}_{d}", .{ tag, malt_fs.nanoTimestamp(
+        std.Options.debug_io,
+    ) });
+    try malt_fs.makeDirAbsolute(std.Options.debug_io, p);
     return p;
 }
 
@@ -634,14 +645,14 @@ test "findAppInDir returns the .app name copied into the caller buffer" {
     // guarantee explicit.
     var dir_buf: [128]u8 = undefined;
     const dir_path = try scratchDir("ok", &dir_buf);
-    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+    defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
     var app_path_buf: [256]u8 = undefined;
     const app_path = try std.fmt.bufPrint(&app_path_buf, "{s}/Foo.app", .{dir_path});
-    try malt_fs.makeDirAbsolute(app_path);
+    try malt_fs.makeDirAbsolute(std.Options.debug_io, app_path);
 
     var out: [128]u8 = undefined;
-    const name = cask.findAppInDir(dir_path, &out) orelse return error.TestUnexpectedResult;
+    const name = cask.findAppInDir(testIo(), dir_path, &out) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("Foo.app", name);
     // The slice must be backed by the caller buffer, not iterator memory.
     try testing.expect(@intFromPtr(name.ptr) == @intFromPtr(&out));
@@ -650,15 +661,15 @@ test "findAppInDir returns the .app name copied into the caller buffer" {
 test "findAppInDir returns null when no .app bundle is present" {
     var dir_buf: [128]u8 = undefined;
     const dir_path = try scratchDir("none", &dir_buf);
-    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+    defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
     var readme_buf: [256]u8 = undefined;
     const readme = try std.fmt.bufPrint(&readme_buf, "{s}/README", .{dir_path});
-    const f = try malt_fs.createFileAbsolute(readme, .{});
-    f.close();
+    const f = try malt_fs.createFileAbsolute(std.Options.debug_io, readme, .{});
+    f.close(std.Options.debug_io);
 
     var out: [64]u8 = undefined;
-    try testing.expect(cask.findAppInDir(dir_path, &out) == null);
+    try testing.expect(cask.findAppInDir(testIo(), dir_path, &out) == null);
 }
 
 // ── findFileInTree: locates the binary inside a nested archive ──────
@@ -666,14 +677,14 @@ test "findAppInDir returns null when no .app bundle is present" {
 test "findFileInTree returns absolute path for a file at the root" {
     var dir_buf: [128]u8 = undefined;
     const dir_path = try scratchDir("flat", &dir_buf);
-    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+    defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
     var file_buf: [256]u8 = undefined;
     const file_path = try std.fmt.bufPrint(&file_buf, "{s}/tool", .{dir_path});
-    const f = try malt_fs.createFileAbsolute(file_path, .{});
-    f.close();
+    const f = try malt_fs.createFileAbsolute(std.Options.debug_io, file_path, .{});
+    f.close(std.Options.debug_io);
 
-    const got = (try cask.findFileInTree(testing.allocator, dir_path, "tool")) orelse
+    const got = (try cask.findFileInTree(testIo(), testing.allocator, dir_path, "tool")) orelse
         return error.TestUnexpectedResult;
     defer testing.allocator.free(got);
     try testing.expectEqualStrings(file_path, got);
@@ -685,18 +696,18 @@ test "findFileInTree finds a binary nested one level deep" {
     // wrapper to link the binary.
     var dir_buf: [128]u8 = undefined;
     const dir_path = try scratchDir("nested", &dir_buf);
-    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+    defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
     var sub_buf: [256]u8 = undefined;
     const sub = try std.fmt.bufPrint(&sub_buf, "{s}/tool-darwin-arm64", .{dir_path});
-    try malt_fs.makeDirAbsolute(sub);
+    try malt_fs.makeDirAbsolute(std.Options.debug_io, sub);
 
     var file_buf: [384]u8 = undefined;
     const file_path = try std.fmt.bufPrint(&file_buf, "{s}/tool", .{sub});
-    const f = try malt_fs.createFileAbsolute(file_path, .{});
-    f.close();
+    const f = try malt_fs.createFileAbsolute(std.Options.debug_io, file_path, .{});
+    f.close(std.Options.debug_io);
 
-    const got = (try cask.findFileInTree(testing.allocator, dir_path, "tool")) orelse
+    const got = (try cask.findFileInTree(testIo(), testing.allocator, dir_path, "tool")) orelse
         return error.TestUnexpectedResult;
     defer testing.allocator.free(got);
     try testing.expect(std.mem.endsWith(u8, got, "/tool-darwin-arm64/tool"));
@@ -705,28 +716,28 @@ test "findFileInTree finds a binary nested one level deep" {
 test "findFileInTree returns null when the file is absent" {
     var dir_buf: [128]u8 = undefined;
     const dir_path = try scratchDir("absent", &dir_buf);
-    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+    defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
-    try testing.expect((try cask.findFileInTree(testing.allocator, dir_path, "tool")) == null);
+    try testing.expect((try cask.findFileInTree(testIo(), testing.allocator, dir_path, "tool")) == null);
 }
 
 test "findFileInTree ignores directories sharing the basename" {
     // A directory matching `name` must not masquerade as the binary.
     var dir_buf: [128]u8 = undefined;
     const dir_path = try scratchDir("dironly", &dir_buf);
-    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+    defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
     var sub_buf: [256]u8 = undefined;
     const sub = try std.fmt.bufPrint(&sub_buf, "{s}/tool", .{dir_path});
-    try malt_fs.makeDirAbsolute(sub);
+    try malt_fs.makeDirAbsolute(std.Options.debug_io, sub);
 
-    try testing.expect((try cask.findFileInTree(testing.allocator, dir_path, "tool")) == null);
+    try testing.expect((try cask.findFileInTree(testIo(), testing.allocator, dir_path, "tool")) == null);
 }
 
 test "findAppInDir returns null when the .app name exceeds the out-buffer" {
     var dir_buf: [128]u8 = undefined;
     const dir_path = try scratchDir("toolong", &dir_buf);
-    defer malt_fs.deleteTreeAbsolute(dir_path) catch {};
+    defer malt_fs.deleteTreeAbsolute(std.Options.debug_io, dir_path) catch {};
 
     var app_path_buf: [256]u8 = undefined;
     const app_path = try std.fmt.bufPrint(
@@ -734,10 +745,10 @@ test "findAppInDir returns null when the .app name exceeds the out-buffer" {
         "{s}/AReallyLongApplicationBundleName.app",
         .{dir_path},
     );
-    try malt_fs.makeDirAbsolute(app_path);
+    try malt_fs.makeDirAbsolute(std.Options.debug_io, app_path);
 
     var out: [8]u8 = undefined; // too small on purpose
-    try testing.expect(cask.findAppInDir(dir_path, &out) == null);
+    try testing.expect(cask.findAppInDir(testIo(), dir_path, &out) == null);
 }
 
 test "verifyFileSha256 accepts only the exact-byte payload (collision check)" {
@@ -757,18 +768,18 @@ test "verifyFileSha256 accepts only the exact-byte payload (collision check)" {
     var ap_buf: [128]u8 = undefined;
     const ap = try tempFilePath("coll_a", &ap_buf);
     try writeFile(ap, a);
-    defer malt_fs.cwd().deleteFile(ap) catch {};
+    defer malt_fs.cwd().deleteFile(std.Options.debug_io, ap) catch {};
 
     var bp_buf: [128]u8 = undefined;
     const bp = try tempFilePath("coll_b", &bp_buf);
     try writeFile(bp, b);
-    defer malt_fs.cwd().deleteFile(bp) catch {};
+    defer malt_fs.cwd().deleteFile(std.Options.debug_io, bp) catch {};
 
     const hex_a = referenceHex(a);
-    try cask.verifyFileSha256(ap, &hex_a);
+    try cask.verifyFileSha256(testIo(), ap, &hex_a);
     // `a`'s hash must NOT validate `b` — this is exactly the property
     // the old bug could have broken.
-    try testing.expectError(error.Sha256Mismatch, cask.verifyFileSha256(bp, &hex_a));
+    try testing.expectError(error.Sha256Mismatch, cask.verifyFileSha256(testIo(), bp, &hex_a));
 }
 
 // --- applicationsDir is prefix-aware ---

@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const install = malt.install;
 
@@ -17,25 +18,27 @@ const c = struct {
 };
 
 fn pathExists(path: []const u8) bool {
-    malt.fs_compat.accessAbsolute(path, .{}) catch return false;
+    test_io.accessAbsolute(std.Options.debug_io, path, .{}) catch return false;
     return true;
 }
 
 fn seedCellarKeg(prefix: []const u8, name: []const u8, version: []const u8) !void {
     const dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
     defer testing.allocator.free(dir);
-    try malt.fs_compat.cwd().makePath(dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir);
 }
 
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const path = try std.fmt.allocPrintSentinel(
         testing.allocator,
         "/tmp/malt_install_idem_{d}_{s}",
-        .{ malt.fs_compat.nanoTimestamp(), suffix },
+        .{ test_io.nanoTimestamp(
+            std.Options.debug_io,
+        ), suffix },
         0,
     );
-    malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.cwd().makePath(path);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, path);
     _ = c.setenv("MALT_PREFIX", path.ptr, 1);
     return path;
 }
@@ -43,7 +46,7 @@ fn setupPrefix(suffix: []const u8) ![:0]u8 {
 test "execute short-circuits without opening the DB when the keg already exists" {
     const prefix = try setupPrefix("hit");
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
         _ = c.unsetenv("MALT_PREFIX");
     }
@@ -64,10 +67,13 @@ test "execute short-circuits without opening the DB when the keg already exists"
 
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
-    malt.io_mod.beginStderrCapture(testing.allocator, &captured);
-    defer malt.io_mod.endStderrCapture();
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
 
-    try install.execute(arena.allocator(), &.{"seedpkg"});
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{"seedpkg"});
 
     // No SQLite open ⇒ no malt.db file. No lock acquire ⇒ no malt.lock.
     try testing.expect(!pathExists(db_file));
@@ -78,7 +84,7 @@ test "execute short-circuits without opening the DB when the keg already exists"
 test "execute --force falls through to the existing path even when the keg exists" {
     const prefix = try setupPrefix("force");
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
         _ = c.unsetenv("MALT_PREFIX");
     }
@@ -90,9 +96,12 @@ test "execute --force falls through to the existing path even when the keg exist
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
     // `--force` drives the full pipeline; we don't care about the eventual
     // outcome for an unresolvable name, only that the DB was opened.
-    install.execute(arena.allocator(), &.{ "--force", "--quiet", "seedpkg" }) catch {};
+    install.execute(&ctx, arena.allocator(), &.{ "--force", "--quiet", "seedpkg" }) catch {};
 
     try testing.expect(pathExists(db_file));
 }
@@ -100,7 +109,7 @@ test "execute --force falls through to the existing path even when the keg exist
 test "execute falls through when one of several args is missing from the Cellar" {
     const prefix = try setupPrefix("partial");
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
         _ = c.unsetenv("MALT_PREFIX");
     }
@@ -115,7 +124,10 @@ test "execute falls through when one of several args is missing from the Cellar"
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    install.execute(arena.allocator(), &.{ "--quiet", "ALPHA_FIXTURE", "MISSING_FIXTURE" }) catch {};
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    install.execute(&ctx, arena.allocator(), &.{ "--quiet", "ALPHA_FIXTURE", "MISSING_FIXTURE" }) catch {};
 
     try testing.expect(pathExists(db_file));
 }
@@ -123,7 +135,7 @@ test "execute falls through when one of several args is missing from the Cellar"
 test "execute --dry-run skips the fast path so the plan still reaches the user" {
     const prefix = try setupPrefix("dryrun");
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
         _ = c.unsetenv("MALT_PREFIX");
     }
@@ -135,7 +147,10 @@ test "execute --dry-run skips the fast path so the plan still reaches the user" 
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    install.execute(arena.allocator(), &.{ "--dry-run", "--quiet", "seedpkg" }) catch {};
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "seedpkg" }) catch {};
 
     try testing.expect(pathExists(db_file));
 }

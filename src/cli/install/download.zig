@@ -3,7 +3,7 @@
 //! worker pools used by `collectFormulaJobs` and the execute flow.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const sqlite = @import("../../db/sqlite.zig");
 const formula_mod = @import("../../core/formula.zig");
 const bottle_mod = @import("../../core/bottle.zig");
@@ -26,6 +26,7 @@ const InstallError = record.InstallError;
 /// six pointers through every call. Opens a DI seam for tests to swap in
 /// fakes by replacing fields.
 pub const InstallJobDeps = struct {
+    io: std.Io,
     allocator: std.mem.Allocator,
     api: *api_mod.BrewApi,
     http_pool: *client_mod.HttpClientPool,
@@ -82,6 +83,7 @@ pub fn progressBridge(ctx: *anyopaque, bytes_so_far: u64, content_length: ?u64) 
 /// borrows a client for the duration of a single blob download and
 /// releases it so another worker can reuse the same TLS context.
 pub fn downloadWorker(
+    io: std.Io,
     _: std.mem.Allocator,
     ghcr: *ghcr_mod.GhcrClient,
     http_pool: *client_mod.HttpClientPool,
@@ -109,7 +111,7 @@ pub fn downloadWorker(
     const digest = ref.digest;
 
     // Create temp dir
-    const tmp_dir = atomic.createTempDir(allocator, job.name) catch return;
+    const tmp_dir = atomic.createTempDir(io, allocator, job.name) catch return;
 
     // The progress bar was created and pre-rendered by the main thread so that
     // every reserved line has content even before this worker starts producing
@@ -132,12 +134,12 @@ pub fn downloadWorker(
     var dl_ok = false;
     var last_err: bottle_mod.BottleError = bottle_mod.BottleError.DownloadFailed;
     while (dl_attempt < max_attempts) : (dl_attempt += 1) {
-        if (bottle_mod.download(allocator, ghcr, http, repo, digest, job.sha256, tmp_dir, progress_cb)) |_| {
+        if (bottle_mod.download(io, allocator, ghcr, http, repo, digest, job.sha256, tmp_dir, progress_cb)) |_| {
             dl_ok = true;
             break;
         } else |dl_err| {
             last_err = dl_err;
-            atomic.cleanupTempDir(tmp_dir);
+            atomic.cleanupTempDir(io, tmp_dir);
             if (dl_err == bottle_mod.BottleError.DownloadPermanent) {
                 output.err("  {s}: permanent HTTP error (404/410), not retrying", .{job.name});
                 break;
@@ -150,7 +152,7 @@ pub fn downloadWorker(
                 break;
             }
             if (dl_attempt + 1 < max_attempts) {
-                fs_compat.sleepNanos(retry_delays_ms[dl_attempt] * std.time.ns_per_ms);
+                std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[dl_attempt] * std.time.ns_per_ms)), .awake) catch {};
             }
         }
     }
@@ -166,7 +168,7 @@ pub fn downloadWorker(
 
     // Commit to store
     store.commitFrom(job.sha256, tmp_dir) catch {
-        atomic.cleanupTempDir(tmp_dir);
+        atomic.cleanupTempDir(io, tmp_dir);
         allocator.free(tmp_dir);
         return;
     };
@@ -193,6 +195,7 @@ pub fn downloadWorker(
 /// `result` is a slice inside `arena`, so the caller must dupe it
 /// into a longer-lived allocator before `arena.deinit()`.
 const FetchFormulaCtx = struct {
+    io: std.Io,
     arena: std.heap.ArenaAllocator,
     pool: *client_mod.HttpClientPool,
     cache_dir: []const u8,
@@ -202,7 +205,7 @@ const FetchFormulaCtx = struct {
     fn run(self: *FetchFormulaCtx) void {
         const http = self.pool.acquire();
         defer self.pool.release(http);
-        var local_api = api_mod.BrewApi.init(self.arena.allocator(), http, self.cache_dir);
+        var local_api = api_mod.BrewApi.init(self.io, self.arena.allocator(), http, self.cache_dir);
         self.result = local_api.fetchFormula(self.dep_name) catch null;
     }
 };
@@ -323,7 +326,7 @@ pub fn collectFormulaJobs(
     // (the same caller allocator) — so the allocator here must match
     // `allocator`, otherwise free on the API-allocated bytes is a no-op
     // on the wrong allocator.
-    const deps = deps_mod.resolve(allocator, formula.name, api, db, cache) catch &.{};
+    const deps = deps_mod.resolve(ctx.io, allocator, formula.name, api, db, cache) catch &.{};
     defer {
         for (deps) |d| allocator.free(d.name);
         // `catch &.{}` yields a static empty slice with no backing
@@ -336,7 +339,7 @@ pub fn collectFormulaJobs(
     const heal_prefix = atomic.maltPrefix();
     for (deps) |dep| {
         if (!dep.already_installed) continue;
-        deps_mod.ensureOptLink(db, heal_prefix, dep.name);
+        deps_mod.ensureOptLink(ctx.io, db, heal_prefix, dep.name);
     }
 
     // Fetch every dep's formula JSON **in parallel**. Each worker
@@ -360,6 +363,7 @@ pub fn collectFormulaJobs(
         }
         for (ctxs, 0..) |*c, i| {
             c.* = .{
+                .io = ctx.io,
                 .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
                 .pool = http_pool,
                 .cache_dir = api.cache_dir,
@@ -554,6 +558,7 @@ pub const MaterializeResult = struct {
 /// workers grab the next available job until the queue is drained —
 /// natural load-balancing without waves.
 pub const MaterializePool = struct {
+    io: std.Io,
     next_idx: std.atomic.Value(usize),
     jobs: []DownloadJob,
     prefix: []const u8,
@@ -571,7 +576,7 @@ pub fn materializePoolWorker(pool: *MaterializePool) void {
         if (idx >= pool.jobs.len) return;
         const job = &pool.jobs[idx];
         if (!job.succeeded) continue;
-        materializeOne(job, pool.prefix, &pool.results[idx]);
+        materializeOne(pool.io, job, pool.prefix, &pool.results[idx]);
     }
 }
 
@@ -584,6 +589,7 @@ pub fn materializePoolWorker(pool: *MaterializePool) void {
 /// buffers, etc.) and `std.heap.c_allocator` for the single long-lived
 /// output — the keg path — so it survives arena teardown.
 fn materializeOne(
+    io: std.Io,
     job: *DownloadJob,
     prefix: []const u8,
     result: *MaterializeResult,
@@ -593,6 +599,7 @@ fn materializeOne(
     const tmp_allocator = arena.allocator();
 
     const keg = cellar_mod.materializeWithCellar(
+        io,
         tmp_allocator,
         prefix,
         job.store_sha256,

@@ -4,7 +4,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const fs_compat = @import("../fs/compat.zig");
 
 /// Literal-colour styles for the few sites that need a specific hue
 /// (confirmTyped prompt, warnPlain fallback). Semantic roles live on
@@ -67,19 +66,40 @@ var emoji_enabled: ?bool = null;
 var background_cached: ?Background = null;
 var truecolor_cached: ?bool = null;
 
+/// Process-wide io + environ seeded once from `main` via `setRuntime`.
+/// Defaults stay benign so tests that don't seed see deterministic
+/// "no env vars, no terminal probe" output.
+var pkg_io: std.Io = std.Options.debug_io;
+var pkg_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } };
+
+/// Seed the io/environ used by env reads and TTY probes. Called by
+/// `main` after `AppCtx` is built. Inverse of relying on globals.
+pub fn setRuntime(io: std.Io, environ: std.process.Environ) void {
+    pkg_io = io;
+    pkg_environ = environ;
+}
+
+fn lookupEnv(name: []const u8) ?[:0]const u8 {
+    return std.process.Environ.getPosix(pkg_environ, name);
+}
+
+fn isTty(fd: std.posix.fd_t) bool {
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    return file.isTty(pkg_io) catch false;
+}
+
 pub fn isColorEnabled() bool {
     if (color_enabled) |v| return v;
     // Check NO_COLOR env var AND whether stderr is a tty
-    const no_color = fs_compat.getenv("NO_COLOR");
-    const is_tty = fs_compat.isatty(std.posix.STDERR_FILENO);
-    const result = no_color == null and is_tty;
+    const no_color = lookupEnv("NO_COLOR");
+    const result = no_color == null and isTty(std.posix.STDERR_FILENO);
     color_enabled = result;
     return result;
 }
 
 pub fn isEmojiEnabled() bool {
     if (emoji_enabled) |v| return v;
-    const no_emoji = fs_compat.getenv("MALT_NO_EMOJI");
+    const no_emoji = lookupEnv("MALT_NO_EMOJI");
     const result = no_emoji == null;
     emoji_enabled = result;
     return result;
@@ -115,9 +135,9 @@ pub fn background() Background {
 
 /// Chain: MALT_THEME env → OSC 11 query → COLORFGBG env → .unknown.
 fn detectBackground() Background {
-    if (themeFromEnv(fs_compat.getenv("MALT_THEME"))) |forced| return forced;
+    if (themeFromEnv(lookupEnv("MALT_THEME"))) |forced| return forced;
     if (queryOsc11Background()) |bg| return bg;
-    if (fs_compat.getenv("COLORFGBG")) |v| {
+    if (lookupEnv("COLORFGBG")) |v| {
         const parsed = parseColorFgBg(v);
         if (parsed != .unknown) return parsed;
     }
@@ -209,8 +229,8 @@ pub fn themeFromEnv(value: ?[]const u8) ?Background {
 /// the response. TTY-only; bounded by a 100 ms poll so a silent
 /// terminal never stalls malt.
 fn queryOsc11Background() ?Background {
-    if (!fs_compat.isatty(std.posix.STDIN_FILENO)) return null;
-    if (!fs_compat.isatty(std.posix.STDERR_FILENO)) return null;
+    if (!isTty(std.posix.STDIN_FILENO)) return null;
+    if (!isTty(std.posix.STDERR_FILENO)) return null;
 
     const stdin_fd = std.posix.STDIN_FILENO;
     const stderr_fd = std.posix.STDERR_FILENO;
@@ -324,7 +344,7 @@ pub fn truecolorFromEnv(value: ?[]const u8) bool {
 /// Cached truecolor-support accessor. Reads $COLORTERM once.
 pub fn truecolorSupported() bool {
     if (truecolor_cached) |v| return v;
-    const result = truecolorFromEnv(fs_compat.getenv("COLORTERM"));
+    const result = truecolorFromEnv(lookupEnv("COLORTERM"));
     truecolor_cached = result;
     return result;
 }

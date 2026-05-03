@@ -5,11 +5,11 @@
 //! human + JSON envelopes regardless of which command did the work.
 
 const std = @import("std");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const formula_mod = @import("../../core/formula.zig");
 const dsl = @import("../../core/dsl/root.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
 const output = @import("../../ui/output.zig");
-const io_mod = @import("../../ui/io.zig");
 
 const download = @import("download.zig");
 
@@ -45,6 +45,7 @@ pub const PostInstallStatus = enum {
 /// Pub so the install-pure tests can drive it with a synthetic flog and
 /// pin the exact output for every branch.
 pub fn routePostInstallOutcome(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     name: []const u8,
     version_str: []const u8,
@@ -70,7 +71,7 @@ pub fn routePostInstallOutcome(
             output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{name});
             if (output.isVerbose()) flog.printUnknown(name);
             if (output.isDebug()) flog.printFatal(name);
-            ruby_sub.runPostInstall(allocator, name, version_str, prefix) catch |e| {
+            ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix) catch |e| {
                 output.warn("post_install subprocess failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
                 break :blk .ruby_fallback_failed;
             };
@@ -113,7 +114,7 @@ fn emitPostInstallJson(
     defer allocator.free(entries_json);
     w.writeAll(entries_json) catch return;
     w.writeAll("}\n") catch return;
-    io_mod.stdoutWriteAll(aw.written());
+    output.writeStdoutAll(aw.written());
 }
 
 /// Outcome of a single DSL post_install attempt. `.parse_failed` lets
@@ -131,6 +132,7 @@ pub const DslPostInstallOutcome = enum {
 /// Narrow inputs (name + version + json bytes) keep migrate decoupled
 /// from install's `DownloadJob` shape.
 pub fn executeDslPostInstall(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     name: []const u8,
     version_str: []const u8,
@@ -150,29 +152,29 @@ pub fn executeDslPostInstall(
 
     // DSL errors reflect in `flog`; the router reads the log as the source
     // of truth so silent skips downgrade the same as hard failures.
-    dsl.executePostInstall(allocator, .{
+    dsl.executePostInstall(ctx.io, ctx.environ, allocator, .{
         .name = formula.name,
         .version = formula.version,
         .pkg_version = formula.pkg_version,
     }, post_install_src, prefix, &flog) catch {};
-    routePostInstallOutcome(allocator, name, version_str, prefix, &flog, use_system_ruby_list);
+    routePostInstallOutcome(ctx, allocator, name, version_str, prefix, &flog, use_system_ruby_list);
     return .handled;
 }
 
 /// Locate a DSL post_install body for `name`: prefer a locally cloned
 /// homebrew-core tap, fall back to the pinned GitHub fetch. Returned
 /// slice (when non-null) is owned by the caller.
-fn locateDslSource(allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
-    const tap_path = ruby_sub.findHomebrewCoreTap();
+fn locateDslSource(ctx: *const AppCtx, allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
+    const tap_path = ruby_sub.findHomebrewCoreTap(ctx.io);
     var rb_buf: [1024]u8 = undefined;
     const rb_path = if (tap_path) |tp|
-        ruby_sub.resolveFormulaRbPath(&rb_buf, tp, name)
+        ruby_sub.resolveFormulaRbPath(ctx.io, &rb_buf, tp, name)
     else
         null;
     if (rb_path) |sp| {
-        if (ruby_sub.extractPostInstallBody(allocator, sp)) |s| return s;
+        if (ruby_sub.extractPostInstallBody(ctx.io, allocator, sp)) |s| return s;
     }
-    return ruby_sub.fetchPostInstallFromGitHub(allocator, name);
+    return ruby_sub.fetchPostInstallFromGitHub(ctx.io, ctx.environ, allocator, name);
 }
 
 /// End-to-end post_install dispatch shared by `install` and `migrate`:
@@ -181,6 +183,7 @@ fn locateDslSource(allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
 /// is in `--use-system-ruby` scope) or the unified skip hint. Both
 /// commands route through here so human + JSON envelopes match exactly.
 pub fn drive(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     name: []const u8,
     version_str: []const u8,
@@ -188,9 +191,10 @@ pub fn drive(
     prefix: []const u8,
     use_system_ruby_list: []const []const u8,
 ) void {
-    if (locateDslSource(allocator, name)) |src| {
+    if (locateDslSource(ctx, allocator, name)) |src| {
         defer allocator.free(src);
         switch (executeDslPostInstall(
+            ctx,
             allocator,
             name,
             version_str,
@@ -208,7 +212,7 @@ pub fn drive(
 
     if (useSystemRubyForFormula(use_system_ruby_list, name)) {
         output.warn("Running post_install for {s} via system Ruby...", .{name});
-        ruby_sub.runPostInstall(allocator, name, version_str, prefix) catch |e| {
+        ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix) catch |e| {
             output.warn("post_install failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
         };
     } else {

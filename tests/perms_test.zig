@@ -6,6 +6,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const perms = malt.perms;
 
 test "classify: 0755 + current uid is ok" {
@@ -64,23 +65,23 @@ test "classify: setuid bit does not count as writable" {
 
 test "walkPrefix: clean tree yields no findings" {
     const base = "/tmp/malt_perms_clean";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.cwd().makePath(base ++ "/bin");
-    (try malt.fs_compat.createFileAbsolute(base ++ "/bin/foo", .{})).close();
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, base ++ "/bin");
+    (try test_io.createFileAbsolute(std.Options.debug_io, base ++ "/bin/foo", .{})).close(std.Options.debug_io);
 
-    const findings = try perms.walkPrefix(testing.allocator, base, perms.currentUid(), 64);
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, base, perms.currentUid(), 64);
     defer perms.freeFindings(testing.allocator, findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
 
 test "walkPrefix: detects other-writable file" {
     const base = "/tmp/malt_perms_other_writable";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.cwd().makePath(base);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, base);
     const path = base ++ "/world_writable.txt";
-    (try malt.fs_compat.createFileAbsolute(path, .{})).close();
+    (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
 
     // chmod o+w
     const c = struct {
@@ -88,7 +89,7 @@ test "walkPrefix: detects other-writable file" {
     };
     if (c.chmod(path, 0o666) != 0) return error.TestUnexpectedResult;
 
-    const findings = try perms.walkPrefix(testing.allocator, base, perms.currentUid(), 64);
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, base, perms.currentUid(), 64);
     defer perms.freeFindings(testing.allocator, findings);
 
     // Must find at least the world_writable file; may also flag the
@@ -105,6 +106,7 @@ test "walkPrefix: detects other-writable file" {
 
 test "walkPrefix: missing prefix returns empty findings, no error" {
     const findings = try perms.walkPrefix(
+        std.Options.debug_io,
         testing.allocator,
         "/tmp/malt_perms_definitely_does_not_exist_xyz",
         perms.currentUid(),
@@ -116,9 +118,9 @@ test "walkPrefix: missing prefix returns empty findings, no error" {
 
 test "walkPrefix: respects max_findings cap" {
     const base = "/tmp/malt_perms_cap";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.cwd().makePath(base);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, base);
     const c = struct {
         extern "c" fn chmod(path: [*:0]const u8, mode: u16) c_int;
     };
@@ -126,11 +128,11 @@ test "walkPrefix: respects max_findings cap" {
     for (0..5) |i| {
         var buf: [64]u8 = undefined;
         const p = try std.fmt.bufPrintSentinel(&buf, "{s}/f{d}", .{ base, i }, 0);
-        (try malt.fs_compat.createFileAbsolute(p, .{})).close();
+        (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
         if (c.chmod(p.ptr, 0o666) != 0) return error.TestUnexpectedResult;
     }
 
-    const findings = try perms.walkPrefix(testing.allocator, base, perms.currentUid(), 2);
+    const findings = try perms.walkPrefix(std.Options.debug_io, testing.allocator, base, perms.currentUid(), 2);
     defer perms.freeFindings(testing.allocator, findings);
     try testing.expect(findings.len <= 2);
 }

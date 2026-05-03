@@ -4,7 +4,7 @@
 //! does not recompile when this path changes.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const sqlite = @import("../../db/sqlite.zig");
 const atomic = @import("../../fs/atomic.zig");
 const cask_mod = @import("../../core/cask.zig");
@@ -67,6 +67,7 @@ const TapRegistration = struct {
 /// Install a tap formula by fetching the Ruby formula from GitHub and
 /// extracting URL + SHA256 for the current platform.
 pub fn installTapFormula(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     pkg_name: []const u8,
     db: *sqlite.Database,
@@ -89,18 +90,19 @@ pub fn installTapFormula(
     var tap_slug_buf: [128]u8 = undefined;
     const tap_slug = std.fmt.bufPrint(&tap_slug_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
         return InstallError.FormulaNotFound;
+
     const commit_sha = blk: {
         if ((tap_mod.getCommitSha(allocator, db, tap_slug) catch null)) |cached| {
             break :blk cached;
         }
-        break :blk tap_mod.resolveHeadCommit(allocator, parts.user, parts.repo) catch |e| {
+        break :blk tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, parts.user, parts.repo) catch |e| {
             output.err("Could not resolve {s}'s HEAD commit: {s}", .{ tap_slug, tap_mod.describeResolveError(e) });
             return InstallError.FormulaNotFound;
         };
     };
     defer allocator.free(commit_sha);
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
     // Try Formula/ first, then Casks/
@@ -167,7 +169,7 @@ pub fn installTapFormula(
         .app_name = parseCaskApp(resp.body),
         .tap_registration = .{ .url = tap_url, .commit_sha = commit_sha },
     };
-    try materializeRubyFormula(allocator, resolved, &http, db, linker, prefix, dry_run, force);
+    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force);
 }
 
 /// Install a formula from a local `.rb` file on disk. Gated by the
@@ -180,6 +182,7 @@ pub fn installTapFormula(
 /// `~/`); the canonical realpath used for messages and DB storage is
 /// derived inside the function.
 pub fn installLocalFormula(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     pkg_arg: []const u8,
     db: *sqlite.Database,
@@ -190,8 +193,8 @@ pub fn installLocalFormula(
 ) InstallError!void {
     // Expand a leading `~/` to `$HOME` so the common "drop it in
     // your dotfiles" path works without requiring shell expansion.
-    var home_buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const expanded = args.expandTildePath(&home_buf, pkg_arg) orelse {
+    var home_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const expanded = args.expandTildePath(ctx, &home_buf, pkg_arg) orelse {
         output.err("Cannot resolve home directory for '{s}'", .{pkg_arg});
         return InstallError.LocalFormulaNotReadable;
     };
@@ -200,11 +203,18 @@ pub fn installLocalFormula(
     // exists AND gives us a symlink-free absolute path for audit
     // messages and the kegs row — defeating the "relative path in a
     // shared Brewfile" footgun.
-    var real_buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const realpath = fs_compat.cwd().realpath(expanded, &real_buf) catch {
-        output.err("Cannot open local formula: {s}", .{pkg_arg});
-        return InstallError.LocalFormulaNotReadable;
-    };
+    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const real_n = if (std.fs.path.isAbsolute(expanded))
+        std.Io.Dir.realPathFileAbsolute(ctx.io, expanded, &real_buf) catch {
+            output.err("Cannot open local formula: {s}", .{pkg_arg});
+            return InstallError.LocalFormulaNotReadable;
+        }
+    else
+        std.Io.Dir.cwd().realPathFile(ctx.io, expanded, &real_buf) catch {
+            output.err("Cannot open local formula: {s}", .{pkg_arg});
+            return InstallError.LocalFormulaNotReadable;
+        };
+    const realpath = real_buf[0..real_n];
 
     // Security warning on every install — the `.rb` is a code-execution
     // vector (parse is pure, but post_install + the archive URL trust
@@ -214,12 +224,12 @@ pub fn installLocalFormula(
 
     // Reject non-regular files outright (directory, socket, device)
     // before allocating a read buffer.
-    const f = fs_compat.openFileAbsolute(realpath, .{ .mode = .read_only }) catch {
+    const f = std.Io.Dir.openFileAbsolute(ctx.io, realpath, .{ .mode = .read_only }) catch {
         output.err("Cannot open local formula: {s}", .{realpath});
         return InstallError.LocalFormulaNotReadable;
     };
-    defer f.close();
-    const st = f.stat() catch {
+    defer f.close(ctx.io);
+    const st = f.stat(ctx.io) catch {
         output.err("Cannot stat local formula: {s}", .{realpath});
         return InstallError.LocalFormulaNotReadable;
     };
@@ -241,9 +251,26 @@ pub fn installLocalFormula(
         .other_owner => output.warn("Local formula is not owned by you — another account wrote this file.", .{}),
     };
 
-    const body = f.readToEndAlloc(allocator, max_local_formula_bytes) catch {
+    const size: usize = @intCast(@min(@as(u64, max_local_formula_bytes), st.size));
+    const body_buf = allocator.alloc(u8, size) catch {
         output.err("Cannot read local formula: {s}", .{realpath});
         return InstallError.LocalFormulaNotReadable;
+    };
+    const n = f.readPositionalAll(ctx.io, body_buf, 0) catch {
+        allocator.free(body_buf);
+        output.err("Cannot read local formula: {s}", .{realpath});
+        return InstallError.LocalFormulaNotReadable;
+    };
+    const body = if (n == body_buf.len) body_buf else blk: {
+        if (allocator.resize(body_buf, n)) break :blk body_buf[0..n];
+        const trimmed = allocator.alloc(u8, n) catch {
+            allocator.free(body_buf);
+            output.err("Cannot read local formula: {s}", .{realpath});
+            return InstallError.LocalFormulaNotReadable;
+        };
+        @memcpy(trimmed, body_buf[0..n]);
+        allocator.free(body_buf);
+        break :blk trimmed;
     };
     defer allocator.free(body);
 
@@ -276,9 +303,9 @@ pub fn installLocalFormula(
         // No tap_registration — never pollute `mt tap` with a local path.
     };
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
-    try materializeRubyFormula(allocator, resolved, &http, db, linker, prefix, dry_run, force);
+    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force);
 }
 
 /// Ordered set of advisory risk labels that may fire on a `.rb` file
@@ -303,9 +330,9 @@ pub fn describeLocalPermissionRisk(mode: u32, file_uid: u32, effective_uid: u32)
 /// already-opened handle and routes them through the pure predicate.
 /// `Stat` in `std.Io` doesn't surface uid or mode bits directly, so a
 /// libc `fstat(2)` is the path of least resistance on macOS.
-fn fstatRisk(f: fs_compat.File) ?LocalPermissionRisk {
+fn fstatRisk(f: std.Io.File) ?LocalPermissionRisk {
     var raw: std.c.Stat = undefined;
-    if (std.c.fstat(f.inner.handle, &raw) != 0) return null;
+    if (std.c.fstat(f.handle, &raw) != 0) return null;
     const effective = std.c.geteuid();
     return describeLocalPermissionRisk(@intCast(raw.mode), @intCast(raw.uid), @intCast(effective));
 }
@@ -314,6 +341,7 @@ fn fstatRisk(f: fs_compat.File) ?LocalPermissionRisk {
 /// local installers. Does the network fetch for the archive, SHA256
 /// verification, cellar materialisation, and DB + linker commit.
 fn materializeRubyFormula(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     resolved: ResolvedRubyFormula,
     http: *client_mod.HttpClient,
@@ -338,7 +366,7 @@ fn materializeRubyFormula(
     // mounting, ditto, and `installer` live there. Tar.gz/tar.xz/zip
     // formula archives keep the simple-extract path below.
     if (tapCaskArtifactKind(resolved.url, resolved.app_name != null)) |kind| {
-        return materializeTapCask(allocator, resolved, db, kind, dry_run, force);
+        return materializeTapCask(ctx, allocator, resolved, db, kind, dry_run, force);
     }
 
     if (dry_run) {
@@ -397,11 +425,11 @@ fn materializeRubyFormula(
     var parent_buf: [512]u8 = undefined;
     const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, resolved.name }) catch
         return InstallError.CellarFailed;
-    fs_compat.makeDirAbsolute(parent) catch |e| switch (e) {
+    std.Io.Dir.createDirAbsolute(ctx.io, parent, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
     };
-    fs_compat.makeDirAbsolute(cellar_path) catch |e| switch (e) {
+    std.Io.Dir.createDirAbsolute(ctx.io, cellar_path, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
     };
@@ -409,7 +437,7 @@ fn materializeRubyFormula(
     var bin_buf: [512]u8 = undefined;
     const bin_path = std.fmt.bufPrint(&bin_buf, "{s}/bin", .{cellar_path}) catch
         return InstallError.CellarFailed;
-    fs_compat.makeDirAbsolute(bin_path) catch |e| switch (e) {
+    std.Io.Dir.createDirAbsolute(ctx.io, bin_path, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
     };
@@ -437,26 +465,26 @@ fn materializeRubyFormula(
     const tmp_archive = std.fmt.bufPrint(&tmp_buf, "{s}/tmp/tap_download{s}", .{ prefix, ext }) catch
         return InstallError.DownloadFailed;
 
-    const tmp_file = fs_compat.createFileAbsolute(tmp_archive, .{}) catch return InstallError.DownloadFailed;
-    tmp_file.writeAll(download_resp.body) catch {
-        tmp_file.close();
+    const tmp_file = std.Io.Dir.createFileAbsolute(ctx.io, tmp_archive, .{}) catch return InstallError.DownloadFailed;
+    tmp_file.writeStreamingAll(ctx.io, download_resp.body) catch {
+        tmp_file.close(ctx.io);
         return InstallError.DownloadFailed;
     };
-    tmp_file.close();
+    tmp_file.close(ctx.io);
     // Temp archive cleanup; leaks to tmp/ are reaped by the next install.
-    defer fs_compat.cwd().deleteFile(tmp_archive) catch {};
+    defer std.Io.Dir.cwd().deleteFile(ctx.io, tmp_archive) catch {};
 
     const archive_mod = @import("../../fs/archive.zig");
     switch (archive_kind) {
-        .tar_gz => archive_mod.extractTarGz(tmp_archive, cellar_path) catch {
+        .tar_gz => archive_mod.extractTarGz(ctx.io, tmp_archive, cellar_path) catch {
             output.err("Failed to extract archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
-        .tar_xz => archive_mod.extractTarXzFile(tmp_archive, cellar_path) catch {
+        .tar_xz => archive_mod.extractTarXzFile(ctx.io, tmp_archive, cellar_path) catch {
             output.err("Failed to extract .tar.xz archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
-        .zip => archive_mod.extractZip(tmp_archive, cellar_path) catch {
+        .zip => archive_mod.extractZip(ctx.io, tmp_archive, cellar_path) catch {
             output.err("Failed to extract .zip archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
@@ -470,22 +498,22 @@ fn materializeRubyFormula(
     // `longbridge` executable.
     const target_binary = resolved.binary_name orelse resolved.name;
     {
-        var cellar_dir = fs_compat.openDirAbsolute(cellar_path, .{ .iterate = true }) catch return InstallError.CellarFailed;
-        defer cellar_dir.close();
+        var cellar_dir = std.Io.Dir.openDirAbsolute(ctx.io, cellar_path, .{ .iterate = true }) catch return InstallError.CellarFailed;
+        defer cellar_dir.close(ctx.io);
 
         var walker = cellar_dir.walk(allocator) catch return InstallError.CellarFailed;
         defer walker.deinit();
 
-        while (walker.next() catch null) |entry| {
+        while (walker.next(ctx.io) catch null) |entry| {
             if (entry.kind != .file) continue;
             const basename = std.fs.path.basename(entry.path);
             if (std.mem.eql(u8, basename, target_binary)) {
                 const dest_name = std.fmt.bufPrint(&tmp_buf, "bin/{s}", .{basename}) catch continue;
-                cellar_dir.copyFile(entry.path, cellar_dir, dest_name, .{}) catch continue;
-                const bin_file = cellar_dir.openFile(dest_name, .{ .mode = .read_write }) catch continue;
-                defer bin_file.close();
+                std.Io.Dir.copyFile(cellar_dir, entry.path, cellar_dir, dest_name, ctx.io, .{}) catch continue;
+                const bin_file = cellar_dir.openFile(ctx.io, dest_name, .{ .mode = .read_write }) catch continue;
+                defer bin_file.close(ctx.io);
                 // chmod may fail on FUSE/NFS; linker still resolves the path.
-                bin_file.chmod(0o755) catch {};
+                bin_file.setPermissions(ctx.io, std.Io.File.Permissions.fromMode(0o755)) catch {};
                 break;
             }
         }
@@ -698,6 +726,7 @@ pub fn tapCaskArtifactKind(url: []const u8, has_app: bool) ?cask_mod.ArtifactTyp
 /// cask flow already exercises — the only thing the tap path adds is
 /// the JSON adapter.
 fn materializeTapCask(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     resolved: ResolvedRubyFormula,
     db: *sqlite.Database,
@@ -730,7 +759,7 @@ fn materializeTapCask(
     };
     defer cask.deinit();
 
-    var installer = cask_mod.CaskInstaller.init(allocator, db, prefix_z);
+    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix_z);
     installer.artifact_type_override = kind;
 
     var bar = progress_mod.ProgressBar.init(cask.token, 0);

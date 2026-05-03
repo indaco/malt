@@ -8,6 +8,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const info = malt.cli_info;
 
 test "openDb returns null when the prefix has no db/ directory" {
@@ -15,21 +16,21 @@ test "openDb returns null when the prefix has no db/ directory" {
     // cannot create intermediate dirs, so the open must fail and
     // the helper must turn that into a null instead of an error.
     const prefix = "/tmp/malt_info_test_missing_db";
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    try malt.fs_compat.makeDirAbsolute(prefix);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     try testing.expect(info.openDb(prefix) == null);
 }
 
 test "openDb succeeds and returns a usable handle when db/ exists" {
     const prefix = "/tmp/malt_info_test_ok_db";
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    try malt.fs_compat.makeDirAbsolute(prefix);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, prefix);
     var db_buf: [512]u8 = undefined;
     const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
-    try malt.fs_compat.makeDirAbsolute(db_dir);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, db_dir);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     var db = info.openDb(prefix) orelse return error.ExpectedDatabase;
     defer db.close();
@@ -40,7 +41,7 @@ test "openDb returns null when the prefix itself does not exist" {
     // pointed at a freshly-minted directory that hasn't been
     // populated by any malt command yet.
     const prefix = "/tmp/malt_info_test_no_prefix_at_all";
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     try testing.expect(info.openDb(prefix) == null);
 }
 

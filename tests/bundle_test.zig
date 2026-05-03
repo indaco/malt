@@ -6,6 +6,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const manifest_mod = malt.bundle_manifest;
@@ -17,8 +18,8 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_bundle_test_" ++ tag;
-        malt.fs_compat.deleteTreeAbsolute(dir) catch {};
-        try malt.fs_compat.makeDirAbsolute(dir);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+        try test_io.makeDirAbsolute(std.Options.debug_io, dir);
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
@@ -29,7 +30,7 @@ const TempDb = struct {
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        malt.fs_compat.deleteTreeAbsolute(self.dir) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
     }
 };
 
@@ -62,7 +63,7 @@ test "dry-run runner does not fork and skips DB write" {
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
+    var report = try runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
     defer report.deinit();
 
     var stmt = try t.db.prepare("SELECT COUNT(*) FROM bundles;");
@@ -81,7 +82,7 @@ test "non-dry runner with mocked malt_bin records bundle even on member failure"
     // Use /usr/bin/false: spawns succeed but each call exits non-zero.
     // The runner should still record the bundle row despite every member
     // landing in the failures list.
-    var report = try runner.run(testing.allocator, &t.db, m, .{
+    var report = try runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{
         .dry_run = false,
         .malt_bin = "/usr/bin/false",
         .prefix = t.dir,
@@ -122,7 +123,7 @@ test "runner routes members through the provided dispatcher" {
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{
+    var report = try runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{
         .dry_run = false,
         .prefix = t.dir,
         .dispatcher = &dispatcher,
@@ -201,7 +202,7 @@ test "runner returns Report with per-member failures, not a bool" {
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{
+    var report = try runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{
         .dry_run = false,
         .malt_bin = "/usr/bin/false",
         .prefix = t.dir,
@@ -229,7 +230,7 @@ test "dry-run report captures previews, no failures, no DB write" {
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{
+    var report = try runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{
         .dry_run = true,
         .prefix = t.dir,
     });
@@ -250,7 +251,7 @@ test "runner refuses in-process bundle install with no dispatcher and no malt_bi
     var m = try buildManifest(testing.allocator);
     defer m.deinit();
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{
+    var report = try runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{
         .dry_run = false,
         .prefix = t.dir,
     });
@@ -283,7 +284,7 @@ test "round-trip: parse Brewfile fixture, run dry, no panic" {
     var m = try malt.bundle_brewfile.parse(testing.allocator, fixture, null);
     defer m.deinit();
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
+    var report = try runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
     defer report.deinit();
 }
 
@@ -293,9 +294,9 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
     // `dry_run = false`. Pin the contract: when `output.isDryRun()` is true,
     // the runner must skip `recordBundle`, leaving the `bundles` table empty.
     const dir_z: [:0]const u8 = "/tmp/malt_bundle_dry_run_cli_wire";
-    malt.fs_compat.deleteTreeAbsolute(dir_z) catch {};
-    try malt.fs_compat.cwd().makePath(dir_z);
-    defer malt.fs_compat.deleteTreeAbsolute(dir_z) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, dir_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, dir_z) catch {};
 
     _ = c.setenv("MALT_PREFIX", dir_z.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
@@ -306,15 +307,18 @@ test "bundle install honors the global --dry-run flag set by main.zig" {
     const bf_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{dir_z});
     defer testing.allocator.free(bf_path);
     {
-        const f = try malt.fs_compat.cwd().createFile(bf_path, .{});
-        defer f.close();
-        try f.writeAll("# empty\n");
+        const f = try test_io.cwd().createFile(std.Options.debug_io, bf_path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "# empty\n");
     }
 
     malt.output.setDryRun(true);
     defer malt.output.setDryRun(false);
 
-    try malt.cli_bundle.execute(testing.allocator, &.{ "install", bf_path });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try malt.cli_bundle.execute(&ctx, testing.allocator, &.{ "install", bf_path });
 
     const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{dir_z}, 0);
     defer testing.allocator.free(db_path);
@@ -379,6 +383,6 @@ test "real-world Brewfile shapes parse without error" {
     try testing.expect(m.formulas.len >= 8);
     try testing.expect(m.casks.len >= 3);
 
-    var report = try runner.run(testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
+    var report = try runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
     defer report.deinit();
 }

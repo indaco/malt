@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const cellar_mod = @import("malt").cellar;
 const patcher = @import("malt").patcher;
@@ -20,7 +21,7 @@ const c = struct {
 // ---------------------------------------------------------------------------
 
 fn setMaltPrefix(prefix: [:0]const u8) [:0]const u8 {
-    const old = malt.fs_compat.getenv("MALT_PREFIX") orelse "";
+    const old = test_io.getenv("MALT_PREFIX") orelse "";
     _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
     return old;
 }
@@ -34,41 +35,41 @@ fn restoreMaltPrefix(old: [:0]const u8) void {
 }
 
 fn createTestDir(allocator: std.mem.Allocator) ![:0]const u8 {
-    const path = try std.fmt.allocPrint(allocator, "/tmp/malt_cellar_test_{x}", .{malt.fs_compat.randomInt(u64)});
+    const path = try std.fmt.allocPrint(allocator, "/tmp/malt_cellar_test_{x}", .{test_io.randomInt(std.Options.debug_io, u64)});
     defer allocator.free(path);
     const z = try allocator.allocSentinel(u8, path.len, 0);
     @memcpy(z, path);
-    try malt.fs_compat.makeDirAbsolute(z);
+    try test_io.makeDirAbsolute(std.Options.debug_io, z);
     return z;
 }
 
 fn createBottleFixture(allocator: std.mem.Allocator, prefix: []const u8, sha: []const u8, name: []const u8, ver_dir: []const u8) !void {
     const keg = try std.fmt.allocPrint(allocator, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, ver_dir });
     defer allocator.free(keg);
-    try malt.fs_compat.cwd().makePath(keg);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg);
 
     const bin_dir = try std.fmt.allocPrint(allocator, "{s}/bin", .{keg});
     defer allocator.free(bin_dir);
-    try malt.fs_compat.makeDirAbsolute(bin_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, bin_dir);
 
     const script_path = try std.fmt.allocPrint(allocator, "{s}/bin/hello", .{keg});
     defer allocator.free(script_path);
     {
-        const f = try malt.fs_compat.createFileAbsolute(script_path, .{});
-        try f.writeAll("#!/bin/sh\nprefix=@@HOMEBREW_PREFIX@@\ncellar=@@HOMEBREW_CELLAR@@\necho $prefix\n");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, script_path, .{});
+        try f.writeStreamingAll(std.Options.debug_io, "#!/bin/sh\nprefix=@@HOMEBREW_PREFIX@@\ncellar=@@HOMEBREW_CELLAR@@\necho $prefix\n");
+        f.close(std.Options.debug_io);
     }
 
     const lib_dir = try std.fmt.allocPrint(allocator, "{s}/lib", .{keg});
     defer allocator.free(lib_dir);
-    try malt.fs_compat.makeDirAbsolute(lib_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, lib_dir);
 
     const pc_path = try std.fmt.allocPrint(allocator, "{s}/lib/test.pc", .{keg});
     defer allocator.free(pc_path);
     {
-        const f = try malt.fs_compat.createFileAbsolute(pc_path, .{});
-        try f.writeAll("prefix=@@HOMEBREW_PREFIX@@\nlibdir=${prefix}/lib\ncellar=@@HOMEBREW_CELLAR@@\n");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, pc_path, .{});
+        try f.writeStreamingAll(std.Options.debug_io, "prefix=@@HOMEBREW_PREFIX@@\nlibdir=${prefix}/lib\ncellar=@@HOMEBREW_CELLAR@@\n");
+        f.close(std.Options.debug_io);
     }
 }
 
@@ -77,16 +78,16 @@ fn setupMaltDirs(allocator: std.mem.Allocator, prefix: []const u8) !void {
     for (dirs) |d| {
         const p = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, d });
         defer allocator.free(p);
-        malt.fs_compat.cwd().makePath(p) catch {};
+        test_io.cwd().createDirPath(std.Options.debug_io, p) catch {};
     }
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    const file = try malt.fs_compat.openFileAbsolute(path, .{});
-    defer file.close();
-    const stat = try file.stat();
+    const file = try test_io.openFileAbsolute(std.Options.debug_io, path, .{});
+    defer file.close(std.Options.debug_io);
+    const stat = try file.stat(std.Options.debug_io);
     const buf = try allocator.alloc(u8, stat.size);
-    const n = try file.readAll(buf);
+    const n = try file.readPositionalAll(std.Options.debug_io, buf, 0);
     return buf[0..n];
 }
 
@@ -97,7 +98,7 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 test "materialize handles version with revision suffix" {
     const prefix = try createTestDir(testing.allocator);
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
     }
 
@@ -108,6 +109,7 @@ test "materialize handles version with revision suffix" {
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "abc123",
@@ -120,13 +122,13 @@ test "materialize handles version with revision suffix" {
     // Verify flat structure: Cellar/pcre2/10.47/bin/hello should exist
     var bin_buf: [512]u8 = undefined;
     const bin_path = try std.fmt.bufPrint(&bin_buf, "{s}/bin/hello", .{keg.path});
-    try malt.fs_compat.accessAbsolute(bin_path, .{});
+    try test_io.accessAbsolute(std.Options.debug_io, bin_path, .{});
 
     // Verify no extra nesting: Cellar/pcre2/10.47/pcre2/ should NOT exist
     var nested_buf: [512]u8 = undefined;
     const nested_path = try std.fmt.bufPrint(&nested_buf, "{s}/pcre2", .{keg.path});
     const nested_exists = blk: {
-        malt.fs_compat.accessAbsolute(nested_path, .{}) catch break :blk false;
+        test_io.accessAbsolute(std.Options.debug_io, nested_path, .{}) catch break :blk false;
         break :blk true;
     };
     try testing.expect(!nested_exists);
@@ -141,7 +143,7 @@ test "materialize replaces a pre-existing Cellar/{name}/{version} directory (gh#
     // warm path's existing pre-wipe.
     const prefix = try createTestDir(testing.allocator);
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
     }
 
@@ -155,19 +157,20 @@ test "materialize replaces a pre-existing Cellar/{name}/{version} directory (gh#
         .{prefix},
     );
     defer testing.allocator.free(stale_keg);
-    try malt.fs_compat.cwd().makePath(stale_keg);
+    try test_io.cwd().createDirPath(std.Options.debug_io, stale_keg);
     const stale_file = try std.fmt.allocPrint(testing.allocator, "{s}/STALE_FILE", .{stale_keg});
     defer testing.allocator.free(stale_file);
     {
-        const f = try malt.fs_compat.createFileAbsolute(stale_file, .{});
-        try f.writeAll("stale\n");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, stale_file, .{});
+        try f.writeStreamingAll(std.Options.debug_io, "stale\n");
+        f.close(std.Options.debug_io);
     }
 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "stale123",
@@ -178,18 +181,18 @@ test "materialize replaces a pre-existing Cellar/{name}/{version} directory (gh#
     defer testing.allocator.free(keg.path);
 
     // STALE_FILE must be gone: the cold path wiped the dir before clonefile.
-    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(stale_file, .{}));
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, stale_file, .{}));
 
     // Fresh content from the bottle is in place.
     var bin_buf: [512]u8 = undefined;
     const bin_path = try std.fmt.bufPrint(&bin_buf, "{s}/bin/hello", .{keg.path});
-    try malt.fs_compat.accessAbsolute(bin_path, .{});
+    try test_io.accessAbsolute(std.Options.debug_io, bin_path, .{});
 }
 
 test "materialize handles exact version match (no revision)" {
     const prefix = try createTestDir(testing.allocator);
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
     }
 
@@ -200,6 +203,7 @@ test "materialize handles exact version match (no revision)" {
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "def456",
@@ -211,7 +215,7 @@ test "materialize handles exact version match (no revision)" {
 
     var buf: [512]u8 = undefined;
     const bin_path = try std.fmt.bufPrint(&buf, "{s}/bin/hello", .{keg.path});
-    try malt.fs_compat.accessAbsolute(bin_path, .{});
+    try test_io.accessAbsolute(std.Options.debug_io, bin_path, .{});
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +225,7 @@ test "materialize handles exact version match (no revision)" {
 test "placeholder substitution runs for relocatable bottles" {
     const prefix = try createTestDir(testing.allocator);
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
     }
 
@@ -232,6 +236,7 @@ test "placeholder substitution runs for relocatable bottles" {
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "rel123",
@@ -257,7 +262,7 @@ test "placeholder substitution runs for relocatable bottles" {
 test "placeholder substitution replaces multiple tokens in single file" {
     const prefix = try createTestDir(testing.allocator);
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
     }
 
@@ -268,6 +273,7 @@ test "placeholder substitution replaces multiple tokens in single file" {
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "multi123",
@@ -293,7 +299,7 @@ test "placeholder substitution replaces multiple tokens in single file" {
 test "files with no placeholders are left unchanged" {
     const prefix = try createTestDir(testing.allocator);
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
     }
 
@@ -301,24 +307,25 @@ test "files with no placeholders are left unchanged" {
 
     const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/clean123/noop/1.0", .{prefix});
     defer testing.allocator.free(keg_dir);
-    try malt.fs_compat.cwd().makePath(keg_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
 
     const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{keg_dir});
     defer testing.allocator.free(bin_dir);
-    try malt.fs_compat.makeDirAbsolute(bin_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, bin_dir);
 
     const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/bin/clean", .{keg_dir});
     defer testing.allocator.free(file_path);
     {
-        const f = try malt.fs_compat.createFileAbsolute(file_path, .{});
-        try f.writeAll("#!/bin/sh\necho hello world\n");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{});
+        try f.writeStreamingAll(std.Options.debug_io, "#!/bin/sh\necho hello world\n");
+        f.close(std.Options.debug_io);
     }
 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "clean123",
@@ -339,7 +346,7 @@ test "files with no placeholders are left unchanged" {
 test "binary files are skipped by text patching without error" {
     const prefix = try createTestDir(testing.allocator);
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
     }
 
@@ -347,24 +354,25 @@ test "binary files are skipped by text patching without error" {
 
     const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/bin123/binpkg/1.0", .{prefix});
     defer testing.allocator.free(keg_dir);
-    try malt.fs_compat.cwd().makePath(keg_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
 
     const bin_dir = try std.fmt.allocPrint(testing.allocator, "{s}/bin", .{keg_dir});
     defer testing.allocator.free(bin_dir);
-    try malt.fs_compat.makeDirAbsolute(bin_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, bin_dir);
 
     const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/bin/fakemach", .{keg_dir});
     defer testing.allocator.free(file_path);
     {
-        const f = try malt.fs_compat.createFileAbsolute(file_path, .{});
-        try f.writeAll("\xcf\xfa\xed\xfe\x00\x00\x00@@HOMEBREW_PREFIX@@\x00more\x00binary");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{});
+        try f.writeStreamingAll(std.Options.debug_io, "\xcf\xfa\xed\xfe\x00\x00\x00@@HOMEBREW_PREFIX@@\x00more\x00binary");
+        f.close(std.Options.debug_io);
     }
 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "bin123",
@@ -419,7 +427,7 @@ const valid_test_sha = "0123456789abcdef0123456789abcdef0123456789abcdef01234567
 test "materializeWithCellar short-circuits when the relocated cache has the sha" {
     const prefix = try createTestDir(testing.allocator);
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
     }
     try setupMaltDirs(testing.allocator, prefix);
@@ -431,6 +439,7 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
     // store-relocated/<sha>/ via a temp Cellar entry + relocated.save.
     try createBottleFixture(testing.allocator, prefix, "stub-store", "cached", "1.0");
     const keg_pre = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "stub-store",
@@ -439,15 +448,16 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
         ":any",
     );
     testing.allocator.free(keg_pre.path);
-    try relocated_mod.save(testing.allocator, prefix, valid_test_sha, "cached", "1.0");
+    try relocated_mod.save(std.Options.debug_io, testing.allocator, prefix, valid_test_sha, "cached", "1.0");
     // Wipe the just-built Cellar entry — the cache must rebuild it.
     const cellar_keg_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/cached/1.0", .{prefix});
     defer testing.allocator.free(cellar_keg_path);
-    try malt.fs_compat.deleteTreeAbsolute(cellar_keg_path);
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, cellar_keg_path);
 
     // No `store/<sha>/` exists for `valid_test_sha` — the only way this
     // call can succeed is via the cache short-circuit.
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         valid_test_sha,
@@ -470,7 +480,7 @@ test "materializeWithCellar short-circuits when the relocated cache has the sha"
 test "materializeWithCellar populates the relocated cache after a cold install" {
     const prefix = try createTestDir(testing.allocator);
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
     }
     try setupMaltDirs(testing.allocator, prefix);
@@ -479,8 +489,9 @@ test "materializeWithCellar populates the relocated cache after a cold install" 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
 
-    try testing.expect(!relocated_mod.has(prefix, valid_test_sha));
+    try testing.expect(!relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         valid_test_sha,
@@ -491,7 +502,7 @@ test "materializeWithCellar populates the relocated cache after a cold install" 
     defer testing.allocator.free(keg.path);
 
     // Snapshot must run on the success path so warm reinstalls hit it.
-    try testing.expect(relocated_mod.has(prefix, valid_test_sha));
+    try testing.expect(relocated_mod.has(std.Options.debug_io, prefix, valid_test_sha));
 }
 
 test "describeError returns a non-empty, distinct message for every CellarError" {
@@ -524,7 +535,7 @@ test "describeError returns a non-empty, distinct message for every CellarError"
 test "failed materialize cleans up empty Cellar/{name}/ parent dir" {
     const prefix = try createTestDir(testing.allocator);
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
     }
 
@@ -536,6 +547,7 @@ test "failed materialize cleans up empty Cellar/{name}/ parent dir" {
     defer restoreMaltPrefix("");
 
     const result = cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "no-such-sha",
@@ -549,7 +561,7 @@ test "failed materialize cleans up empty Cellar/{name}/ parent dir" {
     var parent_buf: [512]u8 = undefined;
     const parent = try std.fmt.bufPrint(&parent_buf, "{s}/Cellar/ghost", .{prefix});
     const parent_exists = blk: {
-        malt.fs_compat.accessAbsolute(parent, .{}) catch break :blk false;
+        test_io.accessAbsolute(std.Options.debug_io, parent, .{}) catch break :blk false;
         break :blk true;
     };
     try testing.expect(!parent_exists);
@@ -558,7 +570,7 @@ test "failed materialize cleans up empty Cellar/{name}/ parent dir" {
 test "failed materialize leaves sibling versions untouched" {
     const prefix = try createTestDir(testing.allocator);
     defer {
-        malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
         testing.allocator.free(prefix);
     }
 
@@ -568,12 +580,13 @@ test "failed materialize leaves sibling versions untouched" {
     // version that a later failed materialize of keeper 2.0 must NOT delete.
     const keeper_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/keeper/1.0", .{prefix});
     defer testing.allocator.free(keeper_dir);
-    try malt.fs_compat.cwd().makePath(keeper_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keeper_dir);
 
     _ = setMaltPrefix(prefix);
     defer restoreMaltPrefix("");
 
     const result = cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         "missing-sha",
@@ -587,22 +600,22 @@ test "failed materialize leaves sibling versions untouched" {
     // empty parent, but it must NOT recurse into a non-empty one.
     var alive_buf: [512]u8 = undefined;
     const alive = try std.fmt.bufPrint(&alive_buf, "{s}/Cellar/keeper/1.0", .{prefix});
-    try malt.fs_compat.accessAbsolute(alive, .{});
+    try test_io.accessAbsolute(std.Options.debug_io, alive, .{});
 }
 
 test "patchTextFiles replaces all placeholder occurrences" {
     const dir = try createTestDir(testing.allocator);
     defer {
-        malt.fs_compat.deleteTreeAbsolute(dir) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         testing.allocator.free(dir);
     }
 
     const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/multi.txt", .{dir});
     defer testing.allocator.free(file_path);
     {
-        const f = try malt.fs_compat.createFileAbsolute(file_path, .{});
-        try f.writeAll("a=@@HOMEBREW_PREFIX@@\nb=@@HOMEBREW_PREFIX@@\nc=@@HOMEBREW_CELLAR@@\n");
-        f.close();
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{});
+        try f.writeStreamingAll(std.Options.debug_io, "a=@@HOMEBREW_PREFIX@@\nb=@@HOMEBREW_PREFIX@@\nc=@@HOMEBREW_CELLAR@@\n");
+        f.close(std.Options.debug_io);
     }
 
     const replacements = [_]patcher.Replacement{
@@ -610,7 +623,7 @@ test "patchTextFiles replaces all placeholder occurrences" {
         .{ .old = "@@HOMEBREW_CELLAR@@", .new = "/opt/malt/Cellar" },
         .{ .old = "/unused", .new = "/opt/malt" },
     };
-    const count = try patcher.patchTextFiles(testing.allocator, dir, &replacements);
+    const count = try patcher.patchTextFiles(std.Options.debug_io, testing.allocator, dir, &replacements);
     try testing.expect(count > 0);
 
     const content = try readFile(testing.allocator, file_path);
@@ -687,16 +700,16 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
     const prefix_str = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/mp-{x}",
-        .{malt.fs_compat.randomInt(u32)},
+        .{test_io.randomInt(std.Options.debug_io, u32)},
     );
     defer testing.allocator.free(prefix_str);
 
     const prefix: [:0]const u8 = try testing.allocator.allocSentinel(u8, prefix_str.len, 0);
     defer testing.allocator.free(prefix);
     @memcpy(@constCast(prefix), prefix_str);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
-    try malt.fs_compat.makeDirAbsolute(prefix);
+    try test_io.makeDirAbsolute(std.Options.debug_io, prefix);
     try setupMaltDirs(testing.allocator, prefix);
 
     // Place a synthetic Mach-O inside the store tree.
@@ -709,7 +722,7 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
         .{ prefix, sha, name, version },
     );
     defer testing.allocator.free(keg_bin_dir);
-    try malt.fs_compat.cwd().makePath(keg_bin_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_bin_dir);
 
     const bin_path = try std.fmt.allocPrint(
         testing.allocator,
@@ -724,9 +737,9 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
     );
     defer testing.allocator.free(fixture);
     {
-        const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
-        defer f.close();
-        try f.writeAll(fixture);
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, bin_path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, fixture);
     }
 
     const old_env = setMaltPrefix(prefix);
@@ -735,6 +748,7 @@ test "materialize rewrites @@HOMEBREW_PREFIX@@ in Mach-O rpath for :any bottle" 
     // The exact bug scenario: `:any` bottle that would have skipped Mach-O
     // patching before P1.
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         sha,
@@ -871,16 +885,16 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
     const prefix_str = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/mp-{x}",
-        .{malt.fs_compat.randomInt(u32)},
+        .{test_io.randomInt(std.Options.debug_io, u32)},
     );
     defer testing.allocator.free(prefix_str);
 
     const prefix: [:0]const u8 = try testing.allocator.allocSentinel(u8, prefix_str.len, 0);
     defer testing.allocator.free(prefix);
     @memcpy(@constCast(prefix), prefix_str);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
-    try malt.fs_compat.makeDirAbsolute(prefix);
+    try test_io.makeDirAbsolute(std.Options.debug_io, prefix);
     try setupMaltDirs(testing.allocator, prefix);
 
     // Drop a fat Mach-O fixture into the store.
@@ -893,7 +907,7 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
         .{ prefix, sha, name, version },
     );
     defer testing.allocator.free(keg_bin_dir);
-    try malt.fs_compat.cwd().makePath(keg_bin_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_bin_dir);
 
     const bin_path = try std.fmt.allocPrint(
         testing.allocator,
@@ -908,15 +922,16 @@ test "P9: materialize patches @@HOMEBREW_PREFIX@@ in EVERY fat-binary arch slice
     );
     defer testing.allocator.free(fixture);
     {
-        const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
-        defer f.close();
-        try f.writeAll(fixture);
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, bin_path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, fixture);
     }
 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         sha,
@@ -962,16 +977,16 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
     const prefix_str = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/mp-{x}",
-        .{malt.fs_compat.randomInt(u32)},
+        .{test_io.randomInt(std.Options.debug_io, u32)},
     );
     defer testing.allocator.free(prefix_str);
 
     const prefix: [:0]const u8 = try testing.allocator.allocSentinel(u8, prefix_str.len, 0);
     defer testing.allocator.free(prefix);
     @memcpy(@constCast(prefix), prefix_str);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
-    try malt.fs_compat.makeDirAbsolute(prefix);
+    try test_io.makeDirAbsolute(std.Options.debug_io, prefix);
     try setupMaltDirs(testing.allocator, prefix);
 
     const sha = "p1cellar";
@@ -983,7 +998,7 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
         .{ prefix, sha, name, version },
     );
     defer testing.allocator.free(keg_bin_dir);
-    try malt.fs_compat.cwd().makePath(keg_bin_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_bin_dir);
 
     const bin_path = try std.fmt.allocPrint(
         testing.allocator,
@@ -998,15 +1013,16 @@ test "materialize rewrites @@HOMEBREW_CELLAR@@ in Mach-O rpath for :any bottle" 
     );
     defer testing.allocator.free(fixture);
     {
-        const f = try malt.fs_compat.createFileAbsolute(bin_path, .{});
-        defer f.close();
-        try f.writeAll(fixture);
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, bin_path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, fixture);
     }
 
     const old_env = setMaltPrefix(prefix);
     defer restoreMaltPrefix(old_env);
 
     const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
         testing.allocator,
         prefix,
         sha,

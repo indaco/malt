@@ -2,9 +2,9 @@
 //! Search formulas and casks.
 
 const std = @import("std");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
-const io_mod = @import("../ui/io.zig");
 const color = @import("../ui/color.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
@@ -21,8 +21,8 @@ const KindResults = struct {
     matches: []const []const u8 = &.{},
 };
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "search")) return;
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "search")) return;
 
     // Parse flags and positional args
     var search_formula = false;
@@ -84,13 +84,14 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     if (search_formula and search_cask) {
         var cask_task: KindTask = .{
+            .ctx = ctx,
             .allocator = c_arena.allocator(),
             .cache_dir = cache_dir,
             .kind = .cask,
             .query = search_query,
         };
         const worker = std.Thread.spawn(.{}, KindTask.run, .{&cask_task}) catch null;
-        formula = runKindIsolated(f_arena.allocator(), cache_dir, .formula, search_query);
+        formula = runKindIsolated(ctx, f_arena.allocator(), cache_dir, .formula, search_query);
         if (worker) |w| {
             w.join();
             cask = cask_task.result;
@@ -98,16 +99,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             // Spawn failed — fall back to running cask inline. Rare
             // enough (only on thread-creation failure) that the
             // sequential path is fine.
-            cask = runKindIsolated(c_arena.allocator(), cache_dir, .cask, search_query);
+            cask = runKindIsolated(ctx, c_arena.allocator(), cache_dir, .cask, search_query);
         }
     } else if (search_formula) {
-        formula = runKindIsolated(f_arena.allocator(), cache_dir, .formula, search_query);
+        formula = runKindIsolated(ctx, f_arena.allocator(), cache_dir, .formula, search_query);
     } else if (search_cask) {
-        cask = runKindIsolated(c_arena.allocator(), cache_dir, .cask, search_query);
+        cask = runKindIsolated(ctx, c_arena.allocator(), cache_dir, .cask, search_query);
     }
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw = io_mod.stdoutFile().writer(io_mod.ctx(), &stdout_buf);
+    var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};
@@ -123,14 +124,15 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 /// `mt search` is best-effort and a transient network failure should
 /// not abort the whole command.
 fn runKindIsolated(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     cache_dir: []const u8,
     kind: api_mod.BrewApi.Kind,
     query: []const u8,
 ) KindResults {
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     var r: KindResults = .{};
     r.exact = api.exists(query, kind) catch false;
     if (api.fetchNamesIndex(kind)) |idx| {
@@ -144,6 +146,7 @@ fn runKindIsolated(
 /// single pointer argument. The result is written back into the struct
 /// the caller allocated on its stack, read after `join()`.
 const KindTask = struct {
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     cache_dir: []const u8,
     kind: api_mod.BrewApi.Kind,
@@ -151,7 +154,7 @@ const KindTask = struct {
     result: KindResults = .{},
 
     fn run(self: *KindTask) void {
-        self.result = runKindIsolated(self.allocator, self.cache_dir, self.kind, self.query);
+        self.result = runKindIsolated(self.ctx, self.allocator, self.cache_dir, self.kind, self.query);
     }
 };
 

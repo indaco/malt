@@ -4,7 +4,7 @@
 //! the heavy lifting (DB lock, download, dependency resolution).
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const backup_mod = @import("backup.zig");
 const install_mod = @import("install.zig");
 const output = @import("../ui/output.zig");
@@ -18,8 +18,8 @@ pub const Error = error{
     InvalidArgs,
 };
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "restore")) return;
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "restore")) return;
 
     // `--dry-run` is a global flag consumed by main.zig before we get here,
     // so we read it via `output.isDryRun()` rather than from `args`.
@@ -49,7 +49,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     // ── Read the file ────────────────────────────────────────────────────
-    const text = readFile(allocator, path) catch |e| switch (e) {
+    const text = readFile(ctx, allocator, path) catch |e| switch (e) {
         error.FileNotFound => {
             output.err("Backup file not found: {s}", .{path});
             return Error.FileNotFound;
@@ -116,7 +116,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         if (force) try argv.append(allocator, "--force");
         for (formulae.items) |name| try argv.append(allocator, name);
 
-        install_mod.execute(allocator, argv.items) catch |e| {
+        install_mod.execute(ctx, allocator, argv.items) catch |e| {
             output.err("Formula restore returned error: {s}", .{@errorName(e)});
             any_failed = true;
         };
@@ -129,7 +129,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         if (force) try argv.append(allocator, "--force");
         for (casks.items) |name| try argv.append(allocator, name);
 
-        install_mod.execute(allocator, argv.items) catch |e| {
+        install_mod.execute(ctx, allocator, argv.items) catch |e| {
             output.err("Cask restore returned error: {s}", .{@errorName(e)});
             any_failed = true;
         };
@@ -140,17 +140,17 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 }
 
-fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+fn readFile(ctx: *const AppCtx, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const file = if (std.fs.path.isAbsolute(path))
-        try fs_compat.openFileAbsolute(path, .{})
+        try std.Io.Dir.openFileAbsolute(ctx.io, path, .{})
     else
-        try fs_compat.cwd().openFile(path, .{});
-    defer file.close();
+        try std.Io.Dir.cwd().openFile(ctx.io, path, .{});
+    defer file.close(ctx.io);
 
-    const stat = try file.stat();
+    const stat = try file.stat(ctx.io);
     const bytes = try allocator.alloc(u8, stat.size);
     errdefer allocator.free(bytes);
-    const n = try file.readAll(bytes);
+    const n = try file.readPositionalAll(ctx.io, bytes, 0);
     if (n != stat.size) return error.ReadFailed;
     return bytes;
 }

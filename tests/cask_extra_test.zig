@@ -5,14 +5,25 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const cask = malt.cask;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 
+fn testIo() std.Io {
+    return std.Options.debug_io;
+}
+
+fn testEnviron() std.process.Environ {
+    return malt.app_ctx.processEnviron();
+}
+
 test "isAppRunningPub returns false for a path no pgrep match can cover" {
     // An impossible sentinel path — pgrep will not match, so isAppRunning
     // exits non-zero and the wrapper returns false.
-    try testing.expect(!cask.CaskInstaller.isAppRunningPub(testing.allocator, "/nonexistent/Sentinel-path-never-running.app"));
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    try testing.expect(!cask.CaskInstaller.isAppRunningPub(threaded.io(), testing.allocator, "/nonexistent/Sentinel-path-never-running.app"));
 }
 
 test "CaskInstaller.uninstall on a missing token returns UninstallFailed" {
@@ -21,7 +32,9 @@ test "CaskInstaller.uninstall on a missing token returns UninstallFailed" {
     try schema.initSchema(&db);
 
     const prefix: [:0]const u8 = "/tmp/mcask";
-    var installer = cask.CaskInstaller.init(testing.allocator, &db, prefix);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix);
     try testing.expectError(cask.CaskError.UninstallFailed, installer.uninstall("nope-nope"));
 }
 
@@ -31,7 +44,9 @@ test "CaskInstaller.isOutdated returns false for an unknown token" {
     try schema.initSchema(&db);
 
     const prefix: [:0]const u8 = "/tmp/mcask2";
-    var installer = cask.CaskInstaller.init(testing.allocator, &db, prefix);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix);
     try testing.expect(!installer.isOutdated("nope-nope", "1.0"));
 }
 
@@ -49,7 +64,9 @@ test "CaskInstaller.install rejects a cask with an unknown artifact URL extensio
     try schema.initSchema(&db);
 
     const prefix: [:0]const u8 = "/tmp/mc3";
-    var installer = cask.CaskInstaller.init(testing.allocator, &db, prefix);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix);
     try testing.expectError(cask.CaskError.InstallFailed, installer.install(&c));
 }
 
@@ -69,15 +86,17 @@ test "artifact_type_override bypasses URL detection" {
     try schema.initSchema(&db);
 
     const prefix: [:0]const u8 = "/tmp/mc4";
-    var installer = cask.CaskInstaller.init(testing.allocator, &db, prefix);
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix);
 
     // Without override: fails at the type gate with InstallFailed
     try testing.expectError(cask.CaskError.InstallFailed, installer.install(&c));
 
     // With override: passes the type gate (gets further before failing)
     installer.artifact_type_override = .dmg;
-    malt.fs_compat.cwd().makePath(prefix ++ "/cache/Cask") catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.cwd().createDirPath(std.Options.debug_io, prefix ++ "/cache/Cask") catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     const result = installer.install(&c);
     // Should fail on download, not on the type gate
     try testing.expectError(cask.CaskError.DownloadFailed, result);
@@ -99,9 +118,9 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
 
     // Stage a scratch "app bundle" that uninstall will try to delete.
     const base = "/tmp/malt_cask_uninstall_test";
-    malt.fs_compat.deleteTreeAbsolute(base) catch {};
-    try malt.fs_compat.cwd().makePath(base);
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     const app_path_z = try std.fmt.allocPrintSentinel(
         testing.allocator,
@@ -110,18 +129,20 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
         0,
     );
     defer testing.allocator.free(app_path_z);
-    try malt.fs_compat.makeDirAbsolute(app_path_z);
+    try test_io.makeDirAbsolute(std.Options.debug_io, app_path_z);
 
     try cask.recordInstall(&db, &c, app_path_z);
     try testing.expect(cask.isInstalled(&db, "firefox"));
 
     const prefix: [:0]const u8 = "/tmp/mc-uninstall";
-    malt.fs_compat.cwd().makePath(prefix) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    var installer = cask.CaskInstaller.init(testing.allocator, &db, prefix);
+    test_io.cwd().createDirPath(std.Options.debug_io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix);
     try installer.uninstall("firefox");
 
     // DB row is gone and the staged "app bundle" has been removed.
     try testing.expect(!cask.isInstalled(&db, "firefox"));
-    try testing.expectError(error.FileNotFound, malt.fs_compat.openDirAbsolute(app_path_z, .{}));
+    try testing.expectError(error.FileNotFound, test_io.openDirAbsolute(std.Options.debug_io, app_path_z, .{}));
 }

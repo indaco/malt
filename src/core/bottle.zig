@@ -2,10 +2,8 @@
 //! Bottle download, SHA256 verification, and extraction pipeline.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
 
 const archive = @import("../fs/archive.zig");
-const atomic = @import("../fs/atomic.zig");
 const client_mod = @import("../net/client.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
 const install_cmd = @import("../cli/install.zig");
@@ -40,6 +38,7 @@ pub const BottleResult = struct {
 /// `HttpClientPool`); it must not be used concurrently by any other
 /// thread for the duration of this call.
 pub fn download(
+    io: std.Io,
     allocator: std.mem.Allocator,
     ghcr: *ghcr_mod.GhcrClient,
     http: *client_mod.HttpClient,
@@ -70,12 +69,12 @@ pub fn download(
     // byte-by-byte timing oracle against the expected hash.
     if (!install_cmd.constantTimeEql(u8, &computed_hex, expected_sha256)) {
         // Clean up dest_dir on mismatch; Sha256Mismatch is the real error.
-        fs_compat.deleteTreeAbsolute(dest_dir) catch {};
+        std.Io.Dir.cwd().deleteTree(io, dest_dir) catch {};
         return BottleError.Sha256Mismatch;
     }
 
     // Ensure dest_dir exists
-    fs_compat.makeDirAbsolute(dest_dir) catch |e| switch (e) {
+    std.Io.Dir.createDirAbsolute(io, dest_dir, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return BottleError.IoError,
     };
@@ -84,18 +83,18 @@ pub fn download(
     var tmp_path_buf: [512]u8 = undefined;
     const tmp_path = try buildTmpArchivePath(&tmp_path_buf, dest_dir);
 
-    const tmp_file = fs_compat.createFileAbsolute(tmp_path, .{}) catch return BottleError.IoError;
-    tmp_file.writeAll(body.items) catch {
-        tmp_file.close();
+    const tmp_file = std.Io.Dir.createFileAbsolute(io, tmp_path, .{}) catch return BottleError.IoError;
+    tmp_file.writeStreamingAll(io, body.items) catch {
+        tmp_file.close(io);
         return BottleError.IoError;
     };
-    tmp_file.close();
+    tmp_file.close(io);
 
     // Extract
-    archive.extractTarGz(tmp_path, dest_dir) catch return BottleError.ExtractionFailed;
+    archive.extractTarGz(io, tmp_path, dest_dir) catch return BottleError.ExtractionFailed;
 
     // Remove the temp archive file; a leftover tmp is harmless, overwritten on retry.
-    fs_compat.deleteFileAbsolute(tmp_path) catch {};
+    std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
 
     return .{
         .sha256 = expected_sha256,
@@ -104,15 +103,15 @@ pub fn download(
 }
 
 /// Verify SHA256 of a file on disk.
-pub fn verify(allocator: std.mem.Allocator, file_path: []const u8, expected_sha256: []const u8) !bool {
-    const file = fs_compat.openFileAbsolute(file_path, .{}) catch return false;
-    defer file.close();
+pub fn verify(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8, expected_sha256: []const u8) !bool {
+    const file = std.Io.Dir.openFileAbsolute(io, file_path, .{}) catch return false;
+    defer file.close(io);
 
-    const stat = file.stat() catch return false;
+    const stat = file.stat(io) catch return false;
     const data = allocator.alloc(u8, stat.size) catch return false;
     defer allocator.free(data);
 
-    const bytes_read = file.readAll(data) catch return false;
+    const bytes_read = file.readPositionalAll(io, data, 0) catch return false;
     if (bytes_read < data.len) return false;
 
     var hash: [32]u8 = undefined;
@@ -129,39 +128,41 @@ pub fn verify(allocator: std.mem.Allocator, file_path: []const u8, expected_sha2
 
 test "verify returns true when sha256 matches on-disk content" {
     const testing = std.testing;
+    const io = std.Options.debug_io;
     const base = "/tmp/malt_bottle_verify_ok";
-    fs_compat.deleteTreeAbsolute(base) catch {};
-    fs_compat.makeDirAbsolute(base) catch {};
-    defer fs_compat.deleteTreeAbsolute(base) catch {};
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
     const path = base ++ "/payload.bin";
-    const f = try fs_compat.createFileAbsolute(path, .{});
-    try f.writeAll("hello");
-    f.close();
+    const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+    try f.writeStreamingAll(io, "hello");
+    f.close(io);
 
     // SHA256("hello")
     const expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
-    try testing.expect(try verify(testing.allocator, path, expected));
+    try testing.expect(try verify(io, testing.allocator, path, expected));
 }
 
 test "verify returns false for a mismatching sha256" {
     const testing = std.testing;
+    const io = std.Options.debug_io;
     const base = "/tmp/malt_bottle_verify_mismatch";
-    fs_compat.deleteTreeAbsolute(base) catch {};
-    fs_compat.makeDirAbsolute(base) catch {};
-    defer fs_compat.deleteTreeAbsolute(base) catch {};
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
     const path = base ++ "/payload.bin";
-    const f = try fs_compat.createFileAbsolute(path, .{});
-    try f.writeAll("hello");
-    f.close();
+    const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+    try f.writeStreamingAll(io, "hello");
+    f.close(io);
 
-    try testing.expect(!try verify(testing.allocator, path, "00" ** 32));
+    try testing.expect(!try verify(io, testing.allocator, path, "00" ** 32));
 }
 
 test "verify returns false when the file does not exist" {
     const testing = std.testing;
-    try testing.expect(!try verify(testing.allocator, "/tmp/malt_bottle_verify_missing_xyz", "00" ** 32));
+    try testing.expect(!try verify(std.Options.debug_io, testing.allocator, "/tmp/malt_bottle_verify_missing_xyz", "00" ** 32));
 }
 
 test "buildTmpArchivePath returns PathTooLong for an oversized dest_dir" {

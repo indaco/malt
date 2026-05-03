@@ -8,6 +8,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 
@@ -16,16 +17,16 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
     // dry-run is the proof — any uninstall would mutate the database, and
     // we assert it stays intact.
     const dir_z: [:0]const u8 = "/tmp/malt_bundle_cleanup_cli_dry_run";
-    malt.fs_compat.deleteTreeAbsolute(dir_z) catch {};
-    try malt.fs_compat.cwd().makePath(dir_z);
-    defer malt.fs_compat.deleteTreeAbsolute(dir_z) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, dir_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, dir_z) catch {};
 
     _ = c.setenv("MALT_PREFIX", dir_z.ptr, 1);
     defer _ = c.unsetenv("MALT_PREFIX");
 
     const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{dir_z});
     defer testing.allocator.free(db_dir);
-    try malt.fs_compat.cwd().makePath(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
     defer testing.allocator.free(db_path);
     {
@@ -59,12 +60,15 @@ test "cli bundle cleanup --dry-run plans removal without dispatching" {
     const bf_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{dir_z});
     defer testing.allocator.free(bf_path);
     {
-        const f = try malt.fs_compat.cwd().createFile(bf_path, .{});
-        defer f.close();
-        try f.writeAll("brew \"wget\"\ncask \"ghostty\"\n");
+        const f = try test_io.cwd().createFile(std.Options.debug_io, bf_path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "brew \"wget\"\ncask \"ghostty\"\n");
     }
 
-    try malt.cli_bundle.execute(testing.allocator, &.{ "cleanup", "--dry-run", bf_path });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try malt.cli_bundle.execute(&ctx, testing.allocator, &.{ "cleanup", "--dry-run", bf_path });
 
     var db = try sqlite.Database.open(db_path);
     defer db.close();

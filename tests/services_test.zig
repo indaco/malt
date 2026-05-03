@@ -7,6 +7,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const supervisor = malt.services_supervisor;
@@ -17,8 +18,8 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_services_test_" ++ tag;
-        malt.fs_compat.deleteTreeAbsolute(dir) catch {};
-        try malt.fs_compat.makeDirAbsolute(dir);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+        try test_io.makeDirAbsolute(std.Options.debug_io, dir);
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
@@ -29,7 +30,7 @@ const TempDb = struct {
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        malt.fs_compat.deleteTreeAbsolute(self.dir) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
     }
 };
 
@@ -37,7 +38,7 @@ test "list returns empty initially" {
     var t = try TempDb.init("empty");
     defer t.deinit();
 
-    const items = try supervisor.list(.{ .allocator = testing.allocator, .db = &t.db });
+    const items = try supervisor.list(.{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &t.db });
     defer supervisor.freeServiceInfos(testing.allocator, items);
     try testing.expectEqual(@as(usize, 0), items.len);
 }
@@ -54,7 +55,7 @@ test "raw services row insert is reflected by list and hasService" {
     try testing.expect(supervisor.hasService(&t.db, "redis"));
     try testing.expect(!supervisor.hasService(&t.db, "missing"));
 
-    const items = try supervisor.list(.{ .allocator = testing.allocator, .db = &t.db });
+    const items = try supervisor.list(.{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &t.db });
     defer supervisor.freeServiceInfos(testing.allocator, items);
     try testing.expectEqual(@as(usize, 1), items.len);
     try testing.expectEqualStrings("redis", items[0].name);
@@ -62,7 +63,7 @@ test "raw services row insert is reflected by list and hasService" {
 }
 
 fn listAndFree(alloc: std.mem.Allocator, db: *sqlite.Database) !void {
-    const items = try supervisor.list(.{ .allocator = alloc, .db = db });
+    const items = try supervisor.list(.{ .allocator = alloc, .io = std.Options.debug_io, .db = db });
     supervisor.freeServiceInfos(alloc, items);
 }
 
@@ -91,14 +92,14 @@ test "tailLog returns last N lines of a small file" {
 
     const log_path = "/tmp/malt_services_test_tail/sample.log";
     {
-        var f = try malt.fs_compat.createFileAbsolute(log_path, .{ .truncate = true });
-        defer f.close();
-        try f.writeAll("alpha\nbeta\ngamma\ndelta\nepsilon\n");
+        var f = try test_io.createFileAbsolute(std.Options.debug_io, log_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "alpha\nbeta\ngamma\ndelta\nepsilon\n");
     }
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try supervisor.tailLog(testing.allocator, log_path, 2, &aw.writer);
+    try supervisor.tailLog(std.Options.debug_io, testing.allocator, log_path, 2, &aw.writer);
 
     try testing.expectEqualStrings("delta\nepsilon\n", aw.written());
 }

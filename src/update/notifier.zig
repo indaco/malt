@@ -6,12 +6,11 @@
 //! the `version`/`help` meta-commands.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
-const io_mod = @import("../ui/io.zig");
 const output = @import("../ui/output.zig");
 const client_mod = @import("../net/client.zig");
 const release = @import("release.zig");
 const origin_mod = @import("origin.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 
 const cache_filename = "version-notify.json";
 
@@ -70,9 +69,9 @@ pub fn isCiFromValues(values: []const ?[]const u8) bool {
     return false;
 }
 
-pub fn isCi() bool {
+pub fn isCi(environ: std.process.Environ) bool {
     inline for (ci_env_vars) |name| {
-        if (fs_compat.getenv(name)) |v| {
+        if (std.process.Environ.getPosix(environ, name)) |v| {
             if (v.len > 0) return true;
         }
     }
@@ -95,16 +94,16 @@ pub fn cacheDirFrom(env: EnvOverride, buf: []u8) ?[]const u8 {
     return null;
 }
 
-fn liveEnv() EnvOverride {
+fn liveEnv(environ: std.process.Environ) EnvOverride {
     return .{
-        .malt_cache = fs_compat.getenv("MALT_CACHE"),
-        .xdg_cache_home = fs_compat.getenv("XDG_CACHE_HOME"),
-        .home = fs_compat.getenv("HOME"),
+        .malt_cache = std.process.Environ.getPosix(environ, "MALT_CACHE"),
+        .xdg_cache_home = std.process.Environ.getPosix(environ, "XDG_CACHE_HOME"),
+        .home = std.process.Environ.getPosix(environ, "HOME"),
     };
 }
 
-pub fn cacheDir(buf: []u8) ?[]const u8 {
-    return cacheDirFrom(liveEnv(), buf);
+pub fn cacheDir(environ: std.process.Environ, buf: []u8) ?[]const u8 {
+    return cacheDirFrom(liveEnv(environ), buf);
 }
 
 pub fn cachePathFrom(env: EnvOverride, buf: []u8) ?[]const u8 {
@@ -113,8 +112,8 @@ pub fn cachePathFrom(env: EnvOverride, buf: []u8) ?[]const u8 {
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, cache_filename }) catch null;
 }
 
-pub fn cachePath(buf: []u8) ?[]const u8 {
-    return cachePathFrom(liveEnv(), buf);
+pub fn cachePath(environ: std.process.Environ, buf: []u8) ?[]const u8 {
+    return cachePathFrom(liveEnv(environ), buf);
 }
 
 /// Realistic failure: `error.NoSpaceLeft` when `buf` is undersized.
@@ -172,8 +171,8 @@ pub fn freeState(allocator: std.mem.Allocator, state: State) void {
 }
 
 /// Returns null when the file is absent (a torn or first run).
-pub fn readCache(allocator: std.mem.Allocator, path: []const u8) !?State {
-    const bytes = fs_compat.readFileAbsoluteAlloc(allocator, path, 64 * 1024) catch |e| switch (e) {
+pub fn readCache(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !?State {
+    const bytes = readFileAllAbsolute(io, allocator, path, 64 * 1024) catch |e| switch (e) {
         error.FileNotFound => return null,
         else => return e,
     };
@@ -183,20 +182,19 @@ pub fn readCache(allocator: std.mem.Allocator, path: []const u8) !?State {
 
 /// Creates the parent directory if missing. A torn write surfaces as
 /// `error.InvalidPayload` on the next read and is treated as no cache.
-pub fn writeCache(path: []const u8, state: State) !void {
+pub fn writeCache(io: std.Io, path: []const u8, state: State) !void {
     if (std.fs.path.dirname(path)) |dir| {
-        var cwd = fs_compat.cwd();
-        cwd.makePath(dir) catch {};
+        std.Io.Dir.cwd().createDirPath(io, dir) catch {};
     }
     var buf: [1024]u8 = undefined;
     const encoded = try encodeState(&buf, state);
-    const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll(encoded);
+    const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, encoded);
 }
 
-fn fetchLatestTag(allocator: std.mem.Allocator) ![]u8 {
-    var http = client_mod.HttpClient.init(allocator);
+fn fetchLatestTag(ctx: *const AppCtx, allocator: std.mem.Allocator) ![]u8 {
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     http.timeout_ns = network_timeout_ns;
     defer http.deinit();
     var resp = try http.get(release.releases_latest_url);
@@ -214,11 +212,11 @@ fn fetchLatestTag(allocator: std.mem.Allocator) ![]u8 {
 
 /// Errors degrade to `false` — a transient FS error must not silence
 /// the notifier for everyone.
-fn originIsHomebrew() bool {
-    var exe_buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const n = std.process.executablePath(io_mod.ctx(), &exe_buf) catch return false;
+fn originIsHomebrew(io: std.Io) bool {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.process.executablePath(io, &exe_buf) catch return false;
     var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
-    return origin_mod.classifyResolved(&resolved_buf, exe_buf[0..n]) == .homebrew;
+    return origin_mod.classifyResolved(io, &resolved_buf, exe_buf[0..n]) == .homebrew;
 }
 
 /// Install-pipeline commands deliberately aren't here — `bench.sh`
@@ -244,19 +242,20 @@ pub fn notifierDisabledFromValue(value: ?[]const u8) bool {
     return std.mem.eql(u8, v, "1");
 }
 
-fn notifierDisabled() bool {
-    return notifierDisabledFromValue(fs_compat.getenv("MALT_NO_VERSION_NOTIFIER"));
+fn notifierDisabled(environ: std.process.Environ) bool {
+    return notifierDisabledFromValue(std.process.Environ.getPosix(environ, "MALT_NO_VERSION_NOTIFIER"));
 }
 
 /// Cheapest checks first. `originIsHomebrew` is deliberately not here —
 /// the `executablePath` + `realpath` pair is deferred to `runNotify` so
 /// the cache-fresh hot path skips it entirely.
-fn suppressed(cmd_str: []const u8) bool {
+fn suppressed(io: std.Io, environ: std.process.Environ, cmd_str: []const u8) bool {
     if (isSkippedCommand(cmd_str)) return true;
     if (output.isQuiet() or output.isJson() or output.isNdjson() or output.isDryRun()) return true;
-    if (notifierDisabled()) return true;
-    if (isCi()) return true;
-    if (!fs_compat.isatty(std.posix.STDERR_FILENO)) return true;
+    if (notifierDisabled(environ)) return true;
+    if (isCi(environ)) return true;
+    const stderr_file: std.Io.File = .{ .handle = std.posix.STDERR_FILENO, .flags = .{ .nonblocking = false } };
+    if (!(stderr_file.isTty(io) catch false)) return true;
     return false;
 }
 
@@ -269,11 +268,11 @@ fn printNotice(latest_tag: []const u8, current_version: []const u8) void {
 
 /// Best-effort cache write so a successful self-update silences the
 /// nag immediately, not on the next 24h refresh.
-pub fn markUpdatedTo(latest_tag: []const u8, current_version: []const u8) void {
+pub fn markUpdatedTo(ctx: *const AppCtx, latest_tag: []const u8, current_version: []const u8) void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = cachePath(&path_buf) orelse return;
-    writeCache(path, .{
-        .checked_at = fs_compat.timestamp(),
+    const path = cachePath(ctx.environ, &path_buf) orelse return;
+    writeCache(ctx.io, path, .{
+        .checked_at = std.Io.Clock.real.now(ctx.io).toSeconds(),
         .latest_tag = latest_tag,
         .current_seen = current_version,
     }) catch {};
@@ -281,19 +280,19 @@ pub fn markUpdatedTo(latest_tag: []const u8, current_version: []const u8) void {
 
 /// Best-effort entrypoint. `cmd_str` is the canonical subcommand name;
 /// `version`/`help` aliases bypass the notice via the suppression list.
-pub fn maybeNotify(allocator: std.mem.Allocator, current_version: []const u8, cmd_str: []const u8) void {
-    if (suppressed(cmd_str)) return;
-    runNotify(allocator, current_version) catch {};
+pub fn maybeNotify(ctx: *const AppCtx, allocator: std.mem.Allocator, current_version: []const u8, cmd_str: []const u8) void {
+    if (suppressed(ctx.io, ctx.environ, cmd_str)) return;
+    runNotify(ctx, allocator, current_version) catch {};
 }
 
-fn runNotify(allocator: std.mem.Allocator, current_version: []const u8) !void {
+fn runNotify(ctx: *const AppCtx, allocator: std.mem.Allocator, current_version: []const u8) !void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = cachePath(&path_buf) orelse return;
+    const path = cachePath(ctx.environ, &path_buf) orelse return;
 
-    var state: ?State = readCache(allocator, path) catch null;
+    var state: ?State = readCache(ctx.io, allocator, path) catch null;
     defer if (state) |s| freeState(allocator, s);
 
-    const now = fs_compat.timestamp();
+    const now = std.Io.Clock.real.now(ctx.io).toSeconds();
     const need_refresh = if (state) |s| cacheStale(now, s.checked_at, cache_ttl_secs) else true;
 
     // The 33%-savings clause: cache fresh + no notice due → return without
@@ -308,14 +307,14 @@ fn runNotify(allocator: std.mem.Allocator, current_version: []const u8) !void {
     // Brew installs are owned by `brew upgrade --cask malt`; refresh and
     // print both make no sense for them. Origin check is a 2-syscall
     // executablePath + realpath, paid only on this rare-action path.
-    if (originIsHomebrew()) return;
+    if (originIsHomebrew(ctx.io)) return;
 
     if (need_refresh) {
         // Don't make the user wait out a 1.5s HTTP timeout after Ctrl-C.
         // Same convention as `cli/install.zig` and `cli/migrate.zig`.
         const main_mod = @import("../main.zig");
         if (main_mod.isInterrupted()) return;
-        refreshOnce(allocator, path, &state, now, current_version) catch {};
+        refreshOnce(ctx, allocator, path, &state, now, current_version) catch {};
     }
 
     const s = state orelse return;
@@ -326,13 +325,14 @@ fn runNotify(allocator: std.mem.Allocator, current_version: []const u8) !void {
 /// On network failure `state` is left untouched so the caller's old
 /// cache view survives a flaky GitHub API.
 fn refreshOnce(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     path: []const u8,
     state: *?State,
     now: i64,
     current_version: []const u8,
 ) !void {
-    const tag = try fetchLatestTag(allocator);
+    const tag = try fetchLatestTag(ctx, allocator);
     errdefer allocator.free(tag);
 
     // Preserve a previously-recorded `current_seen` if any; else start at
@@ -341,10 +341,27 @@ fn refreshOnce(
     const seen_dup = try allocator.dupe(u8, prior_seen);
     errdefer allocator.free(seen_dup);
 
-    writeCache(path, .{ .checked_at = now, .latest_tag = tag, .current_seen = prior_seen }) catch {};
+    writeCache(ctx.io, path, .{ .checked_at = now, .latest_tag = tag, .current_seen = prior_seen }) catch {};
 
     if (state.*) |old| freeState(allocator, old);
     state.* = .{ .checked_at = now, .latest_tag = tag, .current_seen = seen_dup };
+}
+
+/// Read the entire contents of an absolute file path into a caller-owned slice.
+fn readFileAllAbsolute(io: std.Io, allocator: std.mem.Allocator, abs_path: []const u8, max_bytes: usize) ![]u8 {
+    const f = try std.Io.Dir.openFileAbsolute(io, abs_path, .{});
+    defer f.close(io);
+    const st = try f.stat(io);
+    const size = @min(@as(u64, max_bytes), st.size);
+    const buf = try allocator.alloc(u8, @intCast(size));
+    errdefer allocator.free(buf);
+    const n = try f.readPositionalAll(io, buf, 0);
+    if (n == buf.len) return buf;
+    if (allocator.resize(buf, n)) return buf[0..n];
+    const shrunk = try allocator.alloc(u8, n);
+    @memcpy(shrunk, buf[0..n]);
+    allocator.free(buf);
+    return shrunk;
 }
 
 // --- pure-logic tests ----------------------------------------------------
@@ -490,20 +507,24 @@ test "encodeState: escapes JSON special characters in tag/version strings" {
 
 test "writeCache + readCache round-trip on a real file" {
     const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notifier_rt_{d}", .{fs_compat.nanoTimestamp()});
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    defer fs_compat.deleteTreeAbsolute(dir) catch {};
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notifier_rt_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
 
-    try writeCache(path, .{
+    try writeCache(io, path, .{
         .checked_at = 1714400000,
         .latest_tag = "v0.10.1",
         .current_seen = "0.10.0",
     });
-    const got = (try readCache(allocator, path)) orelse return error.TestExpectedNonNull;
+    const got = (try readCache(io, allocator, path)) orelse return error.TestExpectedNonNull;
     defer freeState(allocator, got);
 
     try std.testing.expectEqual(@as(i64, 1714400000), got.checked_at);
@@ -512,9 +533,13 @@ test "writeCache + readCache round-trip on a real file" {
 }
 
 test "readCache: missing file is null, not an error" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&buf, "/tmp/malt_notifier_absent_{d}.json", .{fs_compat.nanoTimestamp()});
-    fs_compat.deleteFileAbsolute(path) catch {};
-    const got = try readCache(std.testing.allocator, path);
+    const path = try std.fmt.bufPrint(&buf, "/tmp/malt_notifier_absent_{d}.json", .{std.Io.Clock.real.now(io).toNanoseconds()});
+    std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+    const got = try readCache(io, std.testing.allocator, path);
     try std.testing.expect(got == null);
 }

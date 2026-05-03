@@ -3,7 +3,7 @@
 //! a shared mutex so transactions stay atomic across threads.
 
 const std = @import("std");
-const fs_compat = @import("../../fs/compat.zig");
+const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const sqlite = @import("../../db/sqlite.zig");
 const store_mod = @import("../../core/store.zig");
 const linker_mod = @import("../../core/linker.zig");
@@ -12,7 +12,6 @@ const ghcr_mod = @import("../../net/ghcr.zig");
 const api_mod = @import("../../net/api.zig");
 const output = @import("../../ui/output.zig");
 const main_mod = @import("../../main.zig");
-const io_mod = @import("../../ui/io.zig");
 const keg_mod = @import("keg.zig");
 const manifest_mod = @import("manifest.zig");
 
@@ -33,8 +32,8 @@ pub fn workerCountFromEnv(env_value: ?[]const u8) u32 {
 }
 
 /// Read `MALT_MIGRATE_PARALLEL_WORKERS` from the live environment.
-pub fn workerCountFromLiveEnv() u32 {
-    return workerCountFromEnv(fs_compat.getenv("MALT_MIGRATE_PARALLEL_WORKERS"));
+pub fn workerCountFromLiveEnv(ctx: *const AppCtx) u32 {
+    return workerCountFromEnv(std.process.Environ.getPosix(ctx.environ, "MALT_MIGRATE_PARALLEL_WORKERS"));
 }
 
 /// Extra threads beyond the job count would just spin on an empty queue.
@@ -55,6 +54,7 @@ pub const KegOutcome = struct {
 /// serialise the post-success persistence so concurrent successes can
 /// flush without racing.
 pub const Pool = struct {
+    app_ctx: *const AppCtx,
     next_idx: std.atomic.Value(usize),
     keg_names: []const []const u8,
     outcomes: []KegOutcome,
@@ -79,6 +79,7 @@ pub const Pool = struct {
 /// pattern in `cli/install/download.zig` so TLS contexts stay warm
 /// without sharing mutable state across threads.
 fn worker(pool: *Pool) void {
+    const io = pool.app_ctx.io;
     while (true) {
         const idx = pool.next_idx.fetchAdd(1, .acq_rel);
         if (idx >= pool.keg_names.len) return;
@@ -89,10 +90,9 @@ fn worker(pool: *Pool) void {
             continue;
         }
 
-        const io_ctx = io_mod.ctx();
-        pool.manifest_mu.lockUncancelable(io_ctx);
+        pool.manifest_mu.lockUncancelable(io);
         const in_manifest = pool.manifest.contains(keg_name);
-        pool.manifest_mu.unlock(io_ctx);
+        pool.manifest_mu.unlock(io);
         // DB cross-check guards against a stale manifest after `mt
         // uninstall` — see the matching note in cli/migrate.zig.
         if (in_manifest and keg_mod.isInstalled(pool.db, keg_name)) {
@@ -106,11 +106,11 @@ fn worker(pool: *Pool) void {
 
         const http = pool.http_pool.acquire();
         defer pool.http_pool.release(http);
-        var api = api_mod.BrewApi.init(a, http, pool.cache_dir);
-        var ghcr = ghcr_mod.GhcrClient.init(a, http);
+        var api = api_mod.BrewApi.init(io, a, http, pool.cache_dir);
+        var ghcr = ghcr_mod.GhcrClient.init(io, a, http);
         defer ghcr.deinit();
 
-        const result = keg_mod.migrateKeg(a, keg_name, .{
+        const result = keg_mod.migrateKeg(pool.app_ctx, a, keg_name, .{
             .api = &api,
             .ghcr = &ghcr,
             .http = http,
@@ -124,14 +124,14 @@ fn worker(pool: *Pool) void {
         pool.outcomes[idx] = .{ .name = keg_name, .result = result };
 
         if (result == .migrated) {
-            pool.manifest_mu.lockUncancelable(io_ctx);
+            pool.manifest_mu.lockUncancelable(io);
             pool.manifest.add(keg_name) catch |e| {
                 output.warn("Resume manifest update failed for {s}: {s}", .{ keg_name, @errorName(e) });
             };
-            pool.manifest.writeAtomic(pool.manifest_allocator, pool.manifest_path) catch |e| {
+            pool.manifest.writeAtomic(io, pool.manifest_allocator, pool.manifest_path) catch |e| {
                 output.warn("Resume manifest write failed: {s}", .{@errorName(e)});
             };
-            pool.manifest_mu.unlock(io_ctx);
+            pool.manifest_mu.unlock(io);
         }
     }
 }

@@ -15,9 +15,7 @@ pub const schema = @import("db/schema.zig");
 pub const sqlite = @import("db/sqlite.zig");
 pub const atomic = @import("fs/atomic.zig");
 pub const clonefile = @import("fs/clonefile.zig");
-pub const fs_compat = @import("fs/compat.zig");
 pub const color = @import("ui/color.zig");
-pub const io_mod = @import("ui/io.zig");
 pub const codesign = @import("macho/codesign.zig");
 pub const parser = @import("macho/parser.zig");
 pub const patcher = @import("macho/patcher.zig");
@@ -76,6 +74,7 @@ pub const pins = @import("core/pins.zig");
 pub const perms = @import("core/perms.zig");
 pub const sandbox_macos = @import("core/sandbox/macos.zig");
 pub const main_mod = @import("main.zig");
+pub const app_ctx = @import("app_ctx.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

@@ -6,6 +6,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const release = malt.update_release;
 
 // --- asset matcher --------------------------------------------------------
@@ -134,41 +135,41 @@ test "pickAssetUrl returns null when nothing matches" {
 
 /// Reset a scratch directory tree for a single test. Fixtures from
 /// earlier runs must not influence the current one.
-fn resetTree(path: []const u8) !malt.fs_compat.Dir {
-    malt.fs_compat.deleteTreeAbsolute(path) catch {};
-    try malt.fs_compat.makeDirAbsolute(path);
-    return malt.fs_compat.openDirAbsolute(path, .{ .iterate = true });
+fn resetTree(path: []const u8) !std.Io.Dir {
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, path);
+    return test_io.openDirAbsolute(std.Options.debug_io, path, .{ .iterate = true });
 }
 
-fn touch(dir: malt.fs_compat.Dir, rel: []const u8, content: []const u8) !void {
-    const f = try dir.createFile(rel, .{});
-    defer f.close();
-    try f.writeAll(content);
+fn touch(dir: std.Io.Dir, rel: []const u8, content: []const u8) !void {
+    const f = try dir.createFile(std.Options.debug_io, rel, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, content);
 }
 
 test "findReleaseBinary locates malt nested under GoReleaser's versioned dir" {
     // Mirrors the real tarball layout: malt_<ver>_darwin_all/{LICENSE,README,malt}
     const base = "/tmp/malt_findbin_nested";
     var dir = try resetTree(base);
-    defer dir.close();
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
-    try dir.makePath("malt_0.3.1_darwin_all");
-    var sub = try dir.openDir("malt_0.3.1_darwin_all", .{});
-    defer sub.close();
+    try dir.createDirPath(std.Options.debug_io, "malt_0.3.1_darwin_all");
+    var sub = try dir.openDir(std.Options.debug_io, "malt_0.3.1_darwin_all", .{});
+    defer sub.close(std.Options.debug_io);
     try touch(sub, "LICENSE", "MIT");
     try touch(sub, "README.md", "# malt");
     try touch(sub, "malt", "binary-bytes");
 
     var out_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const found = release.findReleaseBinary(testing.allocator, base, &out_buf) orelse
+    const found = release.findReleaseBinary(std.Options.debug_io, testing.allocator, base, &out_buf) orelse
         return error.ExpectedMatch;
 
     try testing.expect(std.mem.endsWith(u8, found, "/malt_0.3.1_darwin_all/malt"));
-    const f = try malt.fs_compat.openFileAbsolute(found, .{});
-    defer f.close();
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, found, .{});
+    defer f.close(std.Options.debug_io);
     var buf: [64]u8 = undefined;
-    const n = try f.readAll(&buf);
+    const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
     try testing.expectEqualStrings("binary-bytes", buf[0..n]);
 }
 
@@ -176,13 +177,13 @@ test "findReleaseBinary accepts a flat layout with the binary at the root" {
     // Forks or future layouts may drop the wrap-in-dir.
     const base = "/tmp/malt_findbin_flat";
     var dir = try resetTree(base);
-    defer dir.close();
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     try touch(dir, "malt", "binary-bytes");
 
     var out_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const found = release.findReleaseBinary(testing.allocator, base, &out_buf) orelse
+    const found = release.findReleaseBinary(std.Options.debug_io, testing.allocator, base, &out_buf) orelse
         return error.ExpectedMatch;
     try testing.expect(std.mem.endsWith(u8, found, "/malt"));
 }
@@ -191,16 +192,16 @@ test "findReleaseBinary accepts the `mt` alias when `malt` is absent" {
     // Survives a release that renames the binary to the short alias.
     const base = "/tmp/malt_findbin_mt_only";
     var dir = try resetTree(base);
-    defer dir.close();
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
-    try dir.makePath("wrap");
-    var sub = try dir.openDir("wrap", .{});
-    defer sub.close();
+    try dir.createDirPath(std.Options.debug_io, "wrap");
+    var sub = try dir.openDir(std.Options.debug_io, "wrap", .{});
+    defer sub.close(std.Options.debug_io);
     try touch(sub, "mt", "binary-bytes");
 
     var out_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const found = release.findReleaseBinary(testing.allocator, base, &out_buf) orelse
+    const found = release.findReleaseBinary(std.Options.debug_io, testing.allocator, base, &out_buf) orelse
         return error.ExpectedMatch;
     try testing.expect(std.mem.endsWith(u8, found, "/wrap/mt"));
 }
@@ -209,20 +210,20 @@ test "findReleaseBinary returns null when the archive has no matching binary" {
     // Caller surfaces a clear error instead of silently no-op'ing.
     const base = "/tmp/malt_findbin_missing";
     var dir = try resetTree(base);
-    defer dir.close();
-    defer malt.fs_compat.deleteTreeAbsolute(base) catch {};
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
 
     try touch(dir, "LICENSE", "MIT");
     try touch(dir, "README.md", "# malt");
 
     var out_buf: [std.fs.max_path_bytes]u8 = undefined;
-    try testing.expect(release.findReleaseBinary(testing.allocator, base, &out_buf) == null);
+    try testing.expect(release.findReleaseBinary(std.Options.debug_io, testing.allocator, base, &out_buf) == null);
 }
 
 test "findReleaseBinary returns null when the prefix does not exist" {
     var out_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expect(
-        release.findReleaseBinary(testing.allocator, "/tmp/malt_findbin_absent_xyz_99", &out_buf) == null,
+        release.findReleaseBinary(std.Options.debug_io, testing.allocator, "/tmp/malt_findbin_absent_xyz_99", &out_buf) == null,
     );
 }
 

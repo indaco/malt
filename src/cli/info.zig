@@ -2,11 +2,11 @@
 //! Show package info (formulas and casks).
 
 const std = @import("std");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
-const io_mod = @import("../ui/io.zig");
 const color = @import("../ui/color.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
@@ -14,8 +14,8 @@ const formula_mod = @import("../core/formula.zig");
 const cask_mod = @import("../core/cask.zig");
 const help = @import("help.zig");
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "info")) return;
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "info")) return;
 
     // Parse flags and positional args. Note: `--json` and `--quiet`
     // are consumed by the global arg parser in `main.zig` and stored
@@ -54,7 +54,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer if (db_opt) |*d| d.close();
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_fw = io_mod.stdoutFile().writer(io_mod.ctx(), &stdout_buf);
+    var stdout_fw = ctx.stdout.writer(ctx.io, &stdout_buf);
     const stdout: *std.Io.Writer = &stdout_fw.interface;
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};
@@ -73,7 +73,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // homepage, version, dependencies) instead of just "not
     // installed". We only reach this path when the local DB lookup
     // missed or the DB was absent entirely.
-    if (try emitApiMetadata(allocator, name, stdout, json_mode, colorize, force_cask, force_formula)) return;
+    if (try emitApiMetadata(ctx, allocator, name, stdout, json_mode, colorize, force_cask, force_formula)) return;
 
     try emitNotFound(allocator, name, stdout, json_mode);
 }
@@ -148,6 +148,7 @@ fn emitNotFound(
 /// Silently returns false on network / parse failures — offline machines
 /// should still fall through cleanly to the "not installed" shape.
 fn emitApiMetadata(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     name: []const u8,
     stdout: *std.Io.Writer,
@@ -159,9 +160,9 @@ fn emitApiMetadata(
     const cache_dir = atomic.maltCacheDir(allocator) catch return false;
     defer allocator.free(cache_dir);
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(allocator, &http, cache_dir);
+    var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
 
     if (!force_cask) {
         if (try emitApiFormula(allocator, &api, name, stdout, json_mode, colorize)) return true;

@@ -13,6 +13,11 @@ const malt = @import("malt");
 const patcher = malt.patcher;
 const parser = malt.parser;
 
+fn testIo(threaded: *std.Io.Threaded) std.Io {
+    threaded.* = .init(testing.allocator, .{});
+    return threaded.io();
+}
+
 /// Build a Mach-O 64 binary with two LC_LOAD_DYLIB load commands.
 /// Each command has `cmdsize` bytes; its path region begins at the
 /// `sizeof(dylib_command)` offset and carries the caller-supplied path
@@ -61,25 +66,32 @@ fn buildTwoDylibFixture(
     return buf;
 }
 
-fn writeFixture(dir: []const u8, filename: []const u8, bytes: []const u8) ![]u8 {
+fn writeFixture(io: std.Io, dir: []const u8, filename: []const u8, bytes: []const u8) ![]u8 {
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, filename });
-    const f = try malt.fs_compat.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll(bytes);
+    const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, bytes);
     return path;
 }
 
-fn tmpSubdir(tag: []const u8) ![]u8 {
+fn tmpSubdir(io: std.Io, tag: []const u8) ![]u8 {
+    var seed_buf: [8]u8 = undefined;
+    io.random(&seed_buf);
+    const seed = std.mem.bytesToValue(u64, &seed_buf);
     const path = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_patcher_test_{s}_{x}",
-        .{ tag, malt.fs_compat.randomInt(u64) },
+        .{ tag, seed },
     );
-    try malt.fs_compat.cwd().makePath(path);
+    try std.Io.Dir.cwd().createDirPath(io, path);
     return path;
 }
 
 test "patchPathsCollecting mixes in-place rewrite with overflow entries" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
     // LC1: cmdsize 48, slot 24B, path "/O/short" — fits any /new-prefix/short replacement.
     // LC2: cmdsize 32, slot  8B, path "/O/x"     — replacement overflows the slot.
     const bytes = try buildTwoDylibFixture(
@@ -91,18 +103,18 @@ test "patchPathsCollecting mixes in-place rewrite with overflow entries" {
     );
     defer testing.allocator.free(bytes);
 
-    const dir = try tmpSubdir("mixed");
+    const dir = try tmpSubdir(io, "mixed");
     defer {
-        malt.fs_compat.deleteTreeAbsolute(dir) catch {};
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
         testing.allocator.free(dir);
     }
-    const path = try writeFixture(dir, "bin", bytes);
+    const path = try writeFixture(io, dir, "bin", bytes);
     defer testing.allocator.free(path);
 
     const replacements = [_]patcher.Replacement{
         .{ .old = "/O", .new = "/new-prefix" },
     };
-    var outcome = try patcher.patchPathsCollecting(testing.allocator, path, &replacements);
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
     defer outcome.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u32, 1), outcome.patched_count);
@@ -112,6 +124,10 @@ test "patchPathsCollecting mixes in-place rewrite with overflow entries" {
 }
 
 test "patchPathsCollecting does not error when a slot overflows" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
     // The whole point: `patchPaths` returns PathTooLong on overflow;
     // `patchPathsCollecting` must carry on and hand the overflow back.
     const bytes = try buildTwoDylibFixture(
@@ -123,12 +139,12 @@ test "patchPathsCollecting does not error when a slot overflows" {
     );
     defer testing.allocator.free(bytes);
 
-    const dir = try tmpSubdir("no_error");
+    const dir = try tmpSubdir(io, "no_error");
     defer {
-        malt.fs_compat.deleteTreeAbsolute(dir) catch {};
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
         testing.allocator.free(dir);
     }
-    const path = try writeFixture(dir, "bin", bytes);
+    const path = try writeFixture(io, dir, "bin", bytes);
     defer testing.allocator.free(path);
 
     const replacements = [_]patcher.Replacement{
@@ -136,11 +152,15 @@ test "patchPathsCollecting does not error when a slot overflows" {
     };
     // Must not surface PathTooLong: the per-slot failure is absorbed into
     // `outcome.overflow` so the caller can flush it via install_name_tool.
-    var outcome = try patcher.patchPathsCollecting(testing.allocator, path, &replacements);
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
     outcome.deinit(testing.allocator);
 }
 
 test "patchPathsCollecting on a no-overflow fixture returns an empty overflow list" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
     // Both slots easily fit a short replacement.
     const bytes = try buildTwoDylibFixture(
         testing.allocator,
@@ -151,18 +171,18 @@ test "patchPathsCollecting on a no-overflow fixture returns an empty overflow li
     );
     defer testing.allocator.free(bytes);
 
-    const dir = try tmpSubdir("no_overflow");
+    const dir = try tmpSubdir(io, "no_overflow");
     defer {
-        malt.fs_compat.deleteTreeAbsolute(dir) catch {};
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
         testing.allocator.free(dir);
     }
-    const path = try writeFixture(dir, "bin", bytes);
+    const path = try writeFixture(io, dir, "bin", bytes);
     defer testing.allocator.free(path);
 
     const replacements = [_]patcher.Replacement{
         .{ .old = "/O", .new = "/N" },
     };
-    var outcome = try patcher.patchPathsCollecting(testing.allocator, path, &replacements);
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
     defer outcome.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u32, 2), outcome.patched_count);
@@ -170,6 +190,10 @@ test "patchPathsCollecting on a no-overflow fixture returns an empty overflow li
 }
 
 test "patchPathsCollecting with only-overflow fixture reports zero in-place patches" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
     // Both slots too small to take the long replacement.
     const bytes = try buildTwoDylibFixture(
         testing.allocator,
@@ -180,18 +204,18 @@ test "patchPathsCollecting with only-overflow fixture reports zero in-place patc
     );
     defer testing.allocator.free(bytes);
 
-    const dir = try tmpSubdir("only_overflow");
+    const dir = try tmpSubdir(io, "only_overflow");
     defer {
-        malt.fs_compat.deleteTreeAbsolute(dir) catch {};
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
         testing.allocator.free(dir);
     }
-    const path = try writeFixture(dir, "bin", bytes);
+    const path = try writeFixture(io, dir, "bin", bytes);
     defer testing.allocator.free(path);
 
     const replacements = [_]patcher.Replacement{
         .{ .old = "/O", .new = "/a-long-replacement-prefix" },
     };
-    var outcome = try patcher.patchPathsCollecting(testing.allocator, path, &replacements);
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
     defer outcome.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u32, 0), outcome.patched_count);
@@ -199,6 +223,10 @@ test "patchPathsCollecting with only-overflow fixture reports zero in-place patc
 }
 
 test "patchPathsCollecting persists in-place rewrites to disk" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
     // After the call, re-parsing the file must show the rewritten slot for
     // the LC that fit, while the overflow slot stays untouched (fallback
     // will own it).
@@ -211,12 +239,12 @@ test "patchPathsCollecting persists in-place rewrites to disk" {
     );
     defer testing.allocator.free(bytes);
 
-    const dir = try tmpSubdir("persist");
+    const dir = try tmpSubdir(io, "persist");
     defer {
-        malt.fs_compat.deleteTreeAbsolute(dir) catch {};
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
         testing.allocator.free(dir);
     }
-    const path = try writeFixture(dir, "bin", bytes);
+    const path = try writeFixture(io, dir, "bin", bytes);
     defer testing.allocator.free(path);
 
     const replacements = [_]patcher.Replacement{
@@ -224,11 +252,15 @@ test "patchPathsCollecting persists in-place rewrites to disk" {
         // incl NUL) but LC2's 8B slot can't take "/medium-prefix/x" (17B).
         .{ .old = "/O", .new = "/medium-prefix" },
     };
-    var outcome = try patcher.patchPathsCollecting(testing.allocator, path, &replacements);
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
     outcome.deinit(testing.allocator);
 
-    const data = try malt.fs_compat.readFileAbsoluteAlloc(testing.allocator, path, 4096);
+    const opened = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer opened.close(io);
+    const stat_after = try opened.stat(io);
+    const data = try testing.allocator.alloc(u8, @intCast(stat_after.size));
     defer testing.allocator.free(data);
+    _ = try opened.readPositionalAll(io, data, 0);
 
     var re = try parser.parse(testing.allocator, data);
     defer re.deinit();
@@ -323,7 +355,9 @@ test "classifyInstallNameToolStderr falls back to InstallNameToolFailed for othe
 }
 
 test "flushOverflow on an empty list does nothing and returns ok" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
     // Defensive cheap path: callers can pass an empty overflow list
     // (no-overflow bottle); the driver must not spawn anything.
-    try patcher.flushOverflow(testing.allocator, "/tmp/whatever", &.{});
+    try patcher.flushOverflow(threaded.io(), testing.allocator, "/tmp/whatever", &.{});
 }

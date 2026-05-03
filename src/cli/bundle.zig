@@ -1,12 +1,11 @@
 //! malt — bundle command
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
-const io_mod = @import("../ui/io.zig");
 const manifest_mod = @import("../core/bundle/manifest.zig");
 const brewfile_mod = @import("../core/bundle/brewfile.zig");
 const brewfile_emit = @import("../core/bundle/brewfile_emit.zig");
@@ -19,48 +18,63 @@ const services_cmd = @import("services.zig");
 
 // Default in-process dispatcher: the CLI layer supplies this so the
 // runner can stay ignorant of cli/* while still calling into the real
-// install/tap/services primitives.
+// install/tap/services primitives. The opaque `ctx` slot carries the
+// process-wide AppCtx so the dispatch helpers can thread io / environ
+// through to install/tap/services without re-deriving them.
 fn cliInstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
-    _ = ctx;
-    return install_cmd.installAll(allocator, &.{name}, .{});
+    const app_ctx = appCtxFromOpaque(ctx);
+    return install_cmd.installAll(app_ctx, allocator, &.{name}, .{});
 }
 
 fn cliInstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
-    _ = ctx;
-    return install_cmd.installAll(allocator, &.{name}, .{ .cask = true });
+    const app_ctx = appCtxFromOpaque(ctx);
+    return install_cmd.installAll(app_ctx, allocator, &.{name}, .{ .cask = true });
 }
 
 fn cliTapAdd(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
-    _ = ctx;
-    return tap_cmd.tapAdd(allocator, name);
+    const app_ctx = appCtxFromOpaque(ctx);
+    return tap_cmd.tapAdd(app_ctx, allocator, name);
 }
 
 fn cliServiceStart(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
-    _ = ctx;
-    return services_cmd.servicesStart(allocator, name);
+    const app_ctx = appCtxFromOpaque(ctx);
+    return services_cmd.servicesStart(app_ctx, allocator, name);
 }
 
-const default_dispatcher = runner_mod.Dispatcher{
-    .installFormula = cliInstallFormula,
-    .installCask = cliInstallCask,
-    .tapAdd = cliTapAdd,
-    .serviceStart = cliServiceStart,
-};
-
 fn cliUninstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
-    _ = ctx;
-    return uninstall_cmd.execute(allocator, &.{name});
+    const app_ctx = appCtxFromOpaque(ctx);
+    return uninstall_cmd.execute(app_ctx, allocator, &.{name});
 }
 
 fn cliUninstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
-    _ = ctx;
-    return uninstall_cmd.execute(allocator, &.{ "--cask", name });
+    const app_ctx = appCtxFromOpaque(ctx);
+    return uninstall_cmd.execute(app_ctx, allocator, &.{ "--cask", name });
 }
 
-const default_cleanup_dispatcher = cleanup_mod.Dispatcher{
-    .uninstallFormula = cliUninstallFormula,
-    .uninstallCask = cliUninstallCask,
-};
+/// Cast the dispatcher's opaque `ctx` slot back to a borrowed AppCtx pointer.
+/// All call paths set the slot via `runDispatcher` / `cleanupDispatcher`
+/// before invoking the runner, so the expect-non-null read is sound.
+fn appCtxFromOpaque(ctx: ?*anyopaque) *const AppCtx {
+    return @ptrCast(@alignCast(ctx.?));
+}
+
+fn runDispatcher(ctx: *const AppCtx) runner_mod.Dispatcher {
+    return .{
+        .ctx = @ptrCast(@constCast(ctx)),
+        .installFormula = cliInstallFormula,
+        .installCask = cliInstallCask,
+        .tapAdd = cliTapAdd,
+        .serviceStart = cliServiceStart,
+    };
+}
+
+fn cleanupDispatcher(ctx: *const AppCtx) cleanup_mod.Dispatcher {
+    return .{
+        .ctx = @ptrCast(@constCast(ctx)),
+        .uninstallFormula = cliUninstallFormula,
+        .uninstallCask = cliUninstallCask,
+    };
+}
 
 pub const BundleError = error{
     InvalidArgs,
@@ -82,31 +96,31 @@ pub fn describeError(err: BundleError) []const u8 {
     };
 }
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0 or
         std.mem.eql(u8, args[0], "-h") or
         std.mem.eql(u8, args[0], "--help"))
     {
-        try printHelp();
+        try printHelp(ctx);
         return;
     }
 
     const sub = args[0];
     const rest = args[1..];
 
-    if (std.mem.eql(u8, sub, "install")) return cmdInstall(allocator, rest);
-    if (std.mem.eql(u8, sub, "cleanup")) return cmdCleanup(allocator, rest);
-    if (std.mem.eql(u8, sub, "create")) return cmdCreate(allocator, rest);
-    if (std.mem.eql(u8, sub, "list")) return cmdList(allocator);
-    if (std.mem.eql(u8, sub, "remove")) return cmdRemove(allocator, rest);
-    if (std.mem.eql(u8, sub, "export")) return cmdExport(allocator, rest);
-    if (std.mem.eql(u8, sub, "import")) return cmdImport(allocator, rest);
+    if (std.mem.eql(u8, sub, "install")) return cmdInstall(ctx, allocator, rest);
+    if (std.mem.eql(u8, sub, "cleanup")) return cmdCleanup(ctx, allocator, rest);
+    if (std.mem.eql(u8, sub, "create")) return cmdCreate(ctx, allocator, rest);
+    if (std.mem.eql(u8, sub, "list")) return cmdList(ctx, allocator);
+    if (std.mem.eql(u8, sub, "remove")) return cmdRemove(ctx, allocator, rest);
+    if (std.mem.eql(u8, sub, "export")) return cmdExport(ctx, allocator, rest);
+    if (std.mem.eql(u8, sub, "import")) return cmdImport(ctx, allocator, rest);
 
     output.err("Unknown bundle subcommand: {s}", .{sub});
     return BundleError.InvalidArgs;
 }
 
-fn cmdInstall(allocator: std.mem.Allocator, rest: []const []const u8) !void {
+fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     // main.zig strips the global `--dry-run` from argv; reading the
     // module-global here keeps bundle install aligned with every other
     // subcommand (install, upgrade, purge, …) and with its envelope.
@@ -120,22 +134,23 @@ fn cmdInstall(allocator: std.mem.Allocator, rest: []const []const u8) !void {
         }
     }
 
-    const path = try resolveBundlefile(allocator, explicit_path);
+    const path = try resolveBundlefile(ctx, allocator, explicit_path);
     defer allocator.free(path);
     output.info("using bundle file: {s}", .{path});
 
     var diag = brewfile_mod.Diagnostics.init(allocator);
     defer diag.deinit();
-    var manifest = try readManifest(allocator, path, &diag);
+    var manifest = try readManifest(ctx, allocator, path, &diag);
     defer manifest.deinit();
     for (diag.warnings.items) |w| output.warn("{s}", .{w});
 
-    var db = try openDb();
+    var db = try openDb(ctx);
     defer db.close();
 
-    var report = runner_mod.run(allocator, &db, manifest, .{
+    const dispatcher = runDispatcher(ctx);
+    var report = runner_mod.run(ctx.io, allocator, &db, manifest, .{
         .dry_run = dry_run,
-        .dispatcher = &default_dispatcher,
+        .dispatcher = &dispatcher,
     }) catch |e| {
         output.err("bundle install failed: {s}", .{@errorName(e)});
         return BundleError.RunnerFailed;
@@ -174,7 +189,7 @@ fn cmdInstall(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     output.success("bundle install complete", .{});
 }
 
-fn cmdCleanup(allocator: std.mem.Allocator, rest: []const []const u8) !void {
+fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     // main.zig strips the global `--dry-run` from argv; reading the
     // module-global keeps cleanup aligned with `bundle install`.
     var dry_run = output.isDryRun();
@@ -192,13 +207,13 @@ fn cmdCleanup(allocator: std.mem.Allocator, rest: []const []const u8) !void {
         }
     }
 
-    const path = try resolveBundlefile(allocator, explicit_path);
+    const path = try resolveBundlefile(ctx, allocator, explicit_path);
     defer allocator.free(path);
     output.info("using bundle file: {s}", .{path});
 
     var diag = brewfile_mod.Diagnostics.init(allocator);
     defer diag.deinit();
-    var manifest = try readManifest(allocator, path, &diag);
+    var manifest = try readManifest(ctx, allocator, path, &diag);
     defer manifest.deinit();
     for (diag.warnings.items) |w| output.warn("{s}", .{w});
 
@@ -206,7 +221,7 @@ fn cmdCleanup(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     // phase, so the per-member uninstalls below run against a freshly
     // opened handle each.
     var plan: cleanup_mod.Plan = blk: {
-        var db = try openDb();
+        var db = try openDb(ctx);
         defer db.close();
         var installed = cleanup_mod.collectInstalled(allocator, &db) catch
             return BundleError.DatabaseError;
@@ -243,9 +258,10 @@ fn cmdCleanup(allocator: std.mem.Allocator, rest: []const []const u8) !void {
         return;
     }
 
+    const dispatcher = cleanupDispatcher(ctx);
     var report = cleanup_mod.run(allocator, plan, .{
         .dry_run = false,
-        .dispatcher = &default_cleanup_dispatcher,
+        .dispatcher = &dispatcher,
     }) catch |e| {
         output.err("bundle cleanup failed: {s}", .{@errorName(e)});
         return BundleError.RunnerFailed;
@@ -261,9 +277,9 @@ fn cmdCleanup(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     output.success("bundle cleanup complete", .{});
 }
 
-fn cmdList(allocator: std.mem.Allocator) !void {
+fn cmdList(ctx: *const AppCtx, allocator: std.mem.Allocator) !void {
     _ = allocator;
-    var db = try openDb();
+    var db = try openDb(ctx);
     defer db.close();
 
     var stmt = db.prepare("SELECT name, created_at FROM bundles ORDER BY name;") catch
@@ -280,14 +296,14 @@ fn cmdList(allocator: std.mem.Allocator) !void {
     if (!any) output.info("no bundles registered", .{});
 }
 
-fn cmdRemove(allocator: std.mem.Allocator, rest: []const []const u8) !void {
+fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     _ = allocator;
     if (rest.len != 1) {
         output.err("bundle remove: expected <name>", .{});
         return BundleError.InvalidArgs;
     }
     const name = rest[0];
-    var db = try openDb();
+    var db = try openDb(ctx);
     defer db.close();
 
     var stmt = db.prepare("DELETE FROM bundles WHERE name = ?;") catch
@@ -298,7 +314,7 @@ fn cmdRemove(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     output.success("bundle removed: {s}", .{name});
 }
 
-fn cmdCreate(allocator: std.mem.Allocator, rest: []const []const u8) !void {
+fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     var format: Format = .brewfile;
     var out_path: []const u8 = "Brewfile";
     var i: usize = 0;
@@ -313,17 +329,17 @@ fn cmdCreate(allocator: std.mem.Allocator, rest: []const []const u8) !void {
         }
     }
 
-    var db = try openDb();
+    var db = try openDb(ctx);
     defer db.close();
 
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
     try populateFromInstalled(&manifest, &db);
-    try writeManifest(allocator, manifest, out_path, format);
+    try writeManifest(ctx, allocator, manifest, out_path, format);
     output.success("wrote {s}", .{out_path});
 }
 
-fn cmdExport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
+fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     var format: Format = .brewfile;
     var bundle_name: ?[]const u8 = null;
     var i: usize = 0;
@@ -337,7 +353,7 @@ fn cmdExport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
         }
     }
 
-    var db = try openDb();
+    var db = try openDb(ctx);
     defer db.close();
 
     var manifest = manifest_mod.Manifest.init(allocator);
@@ -348,9 +364,8 @@ fn cmdExport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
         try populateFromInstalled(&manifest, &db);
     }
 
-    const stdout = io_mod.stdoutFile();
     var write_buf: [4096]u8 = undefined;
-    var stdout_writer = stdout.writer(io_mod.ctx(), &write_buf);
+    var stdout_writer = ctx.stdout.writer(ctx.io, &write_buf);
     const w = &stdout_writer.interface;
     switch (format) {
         .brewfile => try brewfile_emit.emit(manifest, w),
@@ -359,7 +374,7 @@ fn cmdExport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     try w.flush();
 }
 
-fn cmdImport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
+fn cmdImport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     if (rest.len != 1) {
         output.err("bundle import: expected <file>", .{});
         return BundleError.InvalidArgs;
@@ -367,11 +382,11 @@ fn cmdImport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     const path = rest[0];
     var diag = brewfile_mod.Diagnostics.init(allocator);
     defer diag.deinit();
-    var manifest = try readManifest(allocator, path, &diag);
+    var manifest = try readManifest(ctx, allocator, path, &diag);
     defer manifest.deinit();
     for (diag.warnings.items) |w| output.warn("{s}", .{w});
 
-    var db = try openDb();
+    var db = try openDb(ctx);
     defer db.close();
 
     // Record metadata only; no install.
@@ -383,7 +398,7 @@ fn cmdImport(allocator: std.mem.Allocator, rest: []const []const u8) !void {
     const name = if (manifest.name.len > 0) manifest.name else path;
     stmt.bindText(1, name) catch return BundleError.DatabaseError;
     stmt.bindText(2, path) catch return BundleError.DatabaseError;
-    stmt.bindInt(3, fs_compat.timestamp()) catch return BundleError.DatabaseError;
+    stmt.bindInt(3, std.Io.Clock.real.now(ctx.io).toSeconds()) catch return BundleError.DatabaseError;
     stmt.bindInt(4, @intCast(manifest.version)) catch return BundleError.DatabaseError;
     _ = stmt.step() catch return BundleError.DatabaseError;
     output.success("bundle registered: {s}", .{name});
@@ -399,7 +414,7 @@ fn parseFormat(s: []const u8) ?Format {
     return null;
 }
 
-fn resolveBundlefile(allocator: std.mem.Allocator, explicit: ?[]const u8) ![]const u8 {
+fn resolveBundlefile(ctx: *const AppCtx, allocator: std.mem.Allocator, explicit: ?[]const u8) ![]const u8 {
     if (explicit) |p| return allocator.dupe(u8, p) catch return BundleError.BundlefileNotFound;
 
     const candidates = [_][]const u8{
@@ -407,16 +422,16 @@ fn resolveBundlefile(allocator: std.mem.Allocator, explicit: ?[]const u8) ![]con
         "Maltfile.json",
     };
     for (candidates) |c| {
-        fs_compat.cwd().access(c, .{}) catch continue;
+        std.Io.Dir.cwd().access(ctx.io, c, .{}) catch continue;
         return allocator.dupe(u8, c) catch return BundleError.BundlefileNotFound;
     }
 
     // ~/.config/malt
-    if (fs_compat.getenv("HOME")) |home| {
+    if (std.process.Environ.getPosix(ctx.environ, "HOME")) |home| {
         for ([_][]const u8{ "Brewfile", "Maltfile.json" }) |name| {
             const p = std.fmt.allocPrint(allocator, "{s}/.config/malt/{s}", .{ home, name }) catch
                 return BundleError.BundlefileNotFound;
-            fs_compat.accessAbsolute(p, .{}) catch {
+            std.Io.Dir.accessAbsolute(ctx.io, p, .{}) catch {
                 allocator.free(p);
                 continue;
             };
@@ -427,21 +442,22 @@ fn resolveBundlefile(allocator: std.mem.Allocator, explicit: ?[]const u8) ![]con
 }
 
 fn readManifest(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     path: []const u8,
     diag: ?*brewfile_mod.Diagnostics,
 ) !manifest_mod.Manifest {
     const file = if (std.fs.path.isAbsolute(path))
-        fs_compat.openFileAbsolute(path, .{}) catch return BundleError.BundlefileNotFound
+        std.Io.Dir.openFileAbsolute(ctx.io, path, .{}) catch return BundleError.BundlefileNotFound
     else
-        fs_compat.cwd().openFile(path, .{}) catch return BundleError.BundlefileNotFound;
-    defer file.close();
+        std.Io.Dir.cwd().openFile(ctx.io, path, .{}) catch return BundleError.BundlefileNotFound;
+    defer file.close(ctx.io);
 
-    const stat = file.stat() catch return BundleError.BundlefileNotFound;
+    const stat = file.stat(ctx.io) catch return BundleError.BundlefileNotFound;
     if (stat.size > 8 * 1024 * 1024) return BundleError.BundlefileParse;
     const body = allocator.alloc(u8, @intCast(stat.size)) catch return BundleError.BundlefileParse;
     defer allocator.free(body);
-    _ = file.readAll(body) catch return BundleError.BundlefileParse;
+    _ = file.readPositionalAll(ctx.io, body, 0) catch return BundleError.BundlefileParse;
 
     if (std.mem.endsWith(u8, path, ".json")) {
         return manifest_mod.parseJson(allocator, body) catch return BundleError.BundlefileParse;
@@ -450,6 +466,7 @@ fn readManifest(
 }
 
 fn writeManifest(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     manifest: manifest_mod.Manifest,
     path: []const u8,
@@ -457,12 +474,12 @@ fn writeManifest(
 ) !void {
     _ = allocator;
     const file = if (std.fs.path.isAbsolute(path))
-        fs_compat.createFileAbsolute(path, .{ .truncate = true }) catch return BundleError.WriteFailed
+        std.Io.Dir.createFileAbsolute(ctx.io, path, .{ .truncate = true }) catch return BundleError.WriteFailed
     else
-        fs_compat.cwd().createFile(path, .{ .truncate = true }) catch return BundleError.WriteFailed;
-    defer file.close();
+        std.Io.Dir.cwd().createFile(ctx.io, path, .{ .truncate = true }) catch return BundleError.WriteFailed;
+    defer file.close(ctx.io);
     var write_buf: [4096]u8 = undefined;
-    var fw = file.writer(&write_buf);
+    var fw = file.writer(ctx.io, &write_buf);
     const w = &fw.interface;
     switch (format) {
         .brewfile => brewfile_emit.emit(manifest, w) catch return BundleError.WriteFailed,
@@ -534,14 +551,14 @@ fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, na
     manifest.services = services.toOwnedSlice(a) catch return BundleError.DatabaseError;
 }
 
-fn openDb() !sqlite.Database {
+fn openDb(ctx: *const AppCtx) !sqlite.Database {
     const prefix = atomic.maltPrefix();
     var db_dir_buf: [512]u8 = undefined;
     const db_dir = std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix}) catch
         return BundleError.DatabaseError;
     // makePath is the idempotent "ensure" variant; a real permission/ENOSPC
     // failure surfaces at sqlite.Database.open below with a narrower error.
-    fs_compat.cwd().makePath(db_dir) catch {};
+    std.Io.Dir.cwd().createDirPath(ctx.io, db_dir) catch {};
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return BundleError.DatabaseError;
@@ -552,7 +569,7 @@ fn openDb() !sqlite.Database {
     return db;
 }
 
-fn printHelp() !void {
+fn printHelp(ctx: *const AppCtx) !void {
     const msg =
         \\Usage: malt bundle <subcommand> [args]
         \\
@@ -572,5 +589,5 @@ fn printHelp() !void {
         \\  ./Brewfile, ./Maltfile.json, ~/.config/malt/Brewfile, ~/.config/malt/Maltfile.json
         \\
     ;
-    io_mod.stderrWriteAll(msg);
+    ctx.stderr.writeStreamingAll(ctx.io, msg) catch {};
 }

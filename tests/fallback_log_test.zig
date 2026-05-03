@@ -53,9 +53,9 @@ test "hasFatal does NOT trip on parse_error (fallback path stays open)" {
 }
 
 test "printFatal does not crash on empty / fatal / non-fatal mixes" {
-    // We can't easily intercept stderr, but we can at least exercise the
-    // formatting branches (with-loc / no-loc / non-fatal-skipped) and
-    // confirm none of them panic or write through a stale buffer.
+    // Exercises the formatting branches (with-loc / no-loc / non-fatal-skipped).
+    // Writes route through `output.writeStderrAll` which silently drops when
+    // no capture buffer is set.
     var log = FallbackLog.init(testing.allocator);
     defer log.deinit();
     log.printFatal("empty"); // empty list, no-op

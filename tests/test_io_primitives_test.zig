@@ -1,4 +1,4 @@
-//! malt - fs_compat primitive-helper pinning tests.
+//! malt - test_io primitive-helper pinning tests.
 //!
 //! These helpers wrap clock / sleep / tty / env primitives. They're
 //! trivial on the surface but a silent regression (zero clock, noop
@@ -8,13 +8,13 @@
 
 const std = @import("std");
 const testing = std.testing;
-const malt = @import("malt");
-const fs = malt.fs_compat;
+const test_io = @import("test_io");
+const fs = test_io;
 
 // ── timestamps ───────────────────────────────────────────────────────
 
 test "timestamp returns a positive seconds-since-epoch value" {
-    const t = fs.timestamp();
+    const t = fs.timestamp(std.Options.debug_io);
     try testing.expect(t > 1_700_000_000); // after 2023-11-14, the project is post-this
 }
 
@@ -22,9 +22,9 @@ test "nanoTimestamp and milliTimestamp stay in lockstep with timestamp" {
     // Allow 5ms of drift across the three calls - they're independent
     // reads of CLOCK_REALTIME but should land within the same second
     // for a sane host clock.
-    const s = fs.timestamp();
-    const ms = fs.milliTimestamp();
-    const ns = fs.nanoTimestamp();
+    const s = fs.timestamp(std.Options.debug_io);
+    const ms = fs.milliTimestamp(std.Options.debug_io);
+    const ns = fs.nanoTimestamp(std.Options.debug_io);
 
     const ms_from_s = @as(i64, s) * std.time.ms_per_s;
     try testing.expect(@abs(ms - ms_from_s) < 1_000);
@@ -34,9 +34,9 @@ test "nanoTimestamp and milliTimestamp stay in lockstep with timestamp" {
 }
 
 test "milliTimestamp advances across a short sleep" {
-    const before = fs.milliTimestamp();
-    fs.sleepNanos(5 * std.time.ns_per_ms);
-    const after = fs.milliTimestamp();
+    const before = fs.milliTimestamp(std.Options.debug_io);
+    fs.sleepNanos(std.Options.debug_io, 5 * std.time.ns_per_ms);
+    const after = fs.milliTimestamp(std.Options.debug_io);
     try testing.expect(after >= before);
 }
 
@@ -44,14 +44,14 @@ test "milliTimestamp advances across a short sleep" {
 
 test "sleepNanos returns without error for a tiny duration" {
     // Smoke: the wrapper must not panic or deadlock on small values.
-    fs.sleepNanos(1_000);
+    fs.sleepNanos(std.Options.debug_io, 1_000);
 }
 
 test "sleepNanos waits at least the requested duration" {
     const want_ns: u64 = 2 * std.time.ns_per_ms;
-    const before = fs.nanoTimestamp();
-    fs.sleepNanos(want_ns);
-    const elapsed: u64 = @intCast(fs.nanoTimestamp() - before);
+    const before = fs.nanoTimestamp(std.Options.debug_io);
+    fs.sleepNanos(std.Options.debug_io, want_ns);
+    const elapsed: u64 = @intCast(fs.nanoTimestamp(std.Options.debug_io) - before);
     // Generous lower bound - scheduler jitter under CI load can trim a
     // few hundred microseconds, so accept anything >= half the target.
     try testing.expect(elapsed >= want_ns / 2);
@@ -64,14 +64,14 @@ test "sleepNanos waits at least the requested duration" {
 // returns a bool for every std fd without trapping.
 
 test "isatty returns a bool for the three standard fds" {
-    _ = fs.isatty(std.posix.STDIN_FILENO);
-    _ = fs.isatty(std.posix.STDOUT_FILENO);
-    _ = fs.isatty(std.posix.STDERR_FILENO);
+    _ = fs.isatty(std.Options.debug_io, std.posix.STDIN_FILENO);
+    _ = fs.isatty(std.Options.debug_io, std.posix.STDOUT_FILENO);
+    _ = fs.isatty(std.Options.debug_io, std.posix.STDERR_FILENO);
 }
 
 test "isatty returns false for a closed / invalid fd" {
     // fd 999 is almost certainly not open in the test runner.
-    try testing.expect(!fs.isatty(999));
+    try testing.expect(!fs.isatty(std.Options.debug_io, 999));
 }
 
 // ── getenv ───────────────────────────────────────────────────────────

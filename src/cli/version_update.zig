@@ -8,8 +8,6 @@
 //! `MALT_ALLOW_UNVERIFIED=1`.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
-const io_mod = @import("../ui/io.zig");
 const builtin = @import("builtin");
 const client_mod = @import("../net/client.zig");
 const archive = @import("../fs/archive.zig");
@@ -20,6 +18,7 @@ const release = @import("../update/release.zig");
 const verify = @import("../update/verify.zig");
 const swap = @import("../update/swap.zig");
 const notifier = @import("../update/notifier.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 
 const current_version = @import("../version.zig").value;
 const checksums_name = "checksums.txt";
@@ -47,15 +46,15 @@ pub fn parseArgs(args: []const []const u8) Opts {
     return opts;
 }
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     const opts = parseArgs(args);
 
-    if (opts.cleanup) return runCleanup();
+    if (opts.cleanup) return runCleanup(ctx);
 
     // Brew-managed installs must be upgraded via `brew`, otherwise the
     // Cellar/Caskroom metadata drifts from the file on disk. Route these
     // users at the tool that owns their install.
-    if (detectOrigin() == .homebrew) {
+    if (detectOrigin(ctx.io) == .homebrew) {
         output.info("This malt was installed via Homebrew.", .{});
         output.info("Update with: brew upgrade --cask malt", .{});
         return;
@@ -64,7 +63,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     output.info("Current version: {s}", .{current_version});
     output.info("Checking for updates...", .{});
 
-    var http = client_mod.HttpClient.init(allocator);
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
     var resp = http.get(release.releases_latest_url) catch {
@@ -137,25 +136,26 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // --- scratch dir under $TMPDIR, pid-tagged so concurrent invocations
     //     don't collide and `rm -rf` of a stale dir never hits /tmp root. ---
     var scratch_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const scratch = try buildScratchDir(&scratch_buf);
-    // Pre-clean any leftover scratch from an aborted prior run; makeDirAbsolute below surfaces real errors.
-    fs_compat.deleteTreeAbsolute(scratch) catch {};
-    fs_compat.makeDirAbsolute(scratch) catch {
+    const scratch = try buildScratchDir(ctx.environ, &scratch_buf);
+    // Pre-clean any leftover scratch from an aborted prior run; createDirAbsolute below surfaces real errors.
+    std.Io.Dir.cwd().deleteTree(ctx.io, scratch) catch {};
+    std.Io.Dir.createDirAbsolute(ctx.io, scratch, .default_dir) catch {
         output.err("Cannot create scratch dir at {s}", .{scratch});
         return error.Aborted;
     };
     // Teardown: scratch is pid-tagged, so a leftover tree is only our own dead run's.
-    defer fs_compat.deleteTreeAbsolute(scratch) catch {};
+    defer std.Io.Dir.cwd().deleteTree(ctx.io, scratch) catch {};
 
     // --- download tarball + checksums (always needed for SHA verify) ---
     output.info("Downloading {s}...", .{archive_name});
-    const tarball_path = try writeDownload(allocator, &http, tarball_url, scratch, archive_name);
+    const tarball_path = try writeDownload(ctx.io, allocator, &http, tarball_url, scratch, archive_name);
     defer allocator.free(tarball_path);
-    const checksums_path = try writeDownload(allocator, &http, checksums_url, scratch, checksums_name);
+    const checksums_path = try writeDownload(ctx.io, allocator, &http, checksums_url, scratch, checksums_name);
     defer allocator.free(checksums_path);
 
     // --- verification phase ---
     try runVerification(.{
+        .ctx = ctx,
         .allocator = allocator,
         .http = &http,
         .assets = assets,
@@ -169,24 +169,24 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // --- extract + find binary ---
     const extract_dir_buf = try std.fmt.allocPrint(allocator, "{s}/extract", .{scratch});
     defer allocator.free(extract_dir_buf);
-    fs_compat.makeDirAbsolute(extract_dir_buf) catch {
+    std.Io.Dir.createDirAbsolute(ctx.io, extract_dir_buf, .default_dir) catch {
         output.err("Cannot create extract dir", .{});
         return error.Aborted;
     };
-    archive.extractTarGz(tarball_path, extract_dir_buf) catch {
+    archive.extractTarGz(ctx.io, tarball_path, extract_dir_buf) catch {
         output.err("Failed to extract update", .{});
         return error.Aborted;
     };
 
     var new_binary_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const new_binary = release.findReleaseBinary(allocator, extract_dir_buf, &new_binary_buf) orelse {
+    const new_binary = release.findReleaseBinary(ctx.io, allocator, extract_dir_buf, &new_binary_buf) orelse {
         output.err("Binary 'malt' not found in release archive", .{});
         return error.Aborted;
     };
 
     // Separate stack buffer so `executablePath` doesn't overwrite `new_binary`.
-    var self_exe_buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const n = std.process.executablePath(io_mod.ctx(), &self_exe_buf) catch {
+    var self_exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.process.executablePath(ctx.io, &self_exe_buf) catch {
         output.err("Cannot determine current binary path", .{});
         return error.Aborted;
     };
@@ -195,8 +195,8 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // install.sh ships two independent binaries (`malt` and `mt`) side by
     // side; swapping only the invoked one leaves the other on the old
     // version. Detect the twin so we can update both in lockstep.
-    var twin_buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const twin_path: ?[]const u8 = resolveTwinRegularFile(self_exe, &twin_buf);
+    var twin_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const twin_path: ?[]const u8 = resolveTwinRegularFile(ctx.io, self_exe, &twin_buf);
 
     // --- confirm with the user unless --yes. TTY-only by design: CI
     //     or scripted runs must pass --yes explicitly. ---
@@ -213,7 +213,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     output.info("Replacing {s}...", .{self_exe});
-    const mode_after_self = replaceBinary(allocator, new_binary, self_exe, .user) catch |e| switch (e) {
+    const mode_after_self = replaceBinary(ctx, allocator, new_binary, self_exe, .user) catch |e| switch (e) {
         error.SudoSpawnFailed, error.SudoFailed => {
             output.err("sudo elevation failed for {s}.", .{self_exe});
             output.info("Manual update: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, self_exe });
@@ -240,7 +240,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         output.info("Replacing {s}...", .{tp});
         // Pass the post-self mode so the twin re-uses the elevation
         // decision instead of paying a second sudo prompt.
-        _ = replaceBinary(allocator, new_binary, tp, mode_after_self) catch |e| {
+        _ = replaceBinary(ctx, allocator, new_binary, tp, mode_after_self) catch |e| {
             // Don't roll back self: one updated binary beats a forced
             // downgrade on the one the user just invoked. Surface the
             // manual fix so they can close the gap.
@@ -249,16 +249,16 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.info("Finish manually: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, tp });
             output.info("Updated to {s} (previous {s} kept at {s}.old)", .{ latest, std.fs.path.basename(self_exe), self_exe });
             // Self is on the new version even though twin lagged — dismiss the nag.
-            notifier.markUpdatedTo(tag, latest);
+            notifier.markUpdatedTo(ctx, tag, latest);
             return;
         };
         output.info("Updated {s} and {s} to {s} (previous kept at *.old)", .{ self_exe, tp, latest });
-        notifier.markUpdatedTo(tag, latest);
+        notifier.markUpdatedTo(ctx, tag, latest);
         return;
     }
 
     output.info("Updated to {s} (previous kept at {s}.old)", .{ latest, self_exe });
-    notifier.markUpdatedTo(tag, latest);
+    notifier.markUpdatedTo(ctx, tag, latest);
 }
 
 /// How the previous swap was carried out. Threaded through twin handling
@@ -270,19 +270,20 @@ pub const ReplaceMode = enum { user, sudo };
 /// In `.sudo` mode, skip the unprivileged attempt entirely so callers
 /// can short-circuit a known-unwritable directory after the first prompt.
 fn replaceBinary(
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     new_binary: []const u8,
     target: []const u8,
     mode: ReplaceMode,
 ) !ReplaceMode {
     if (mode == .sudo) {
-        try installBinaryViaSudo(allocator, new_binary, target);
+        try installBinaryViaSudo(ctx, allocator, new_binary, target);
         return .sudo;
     }
-    swap.atomicReplace(target, new_binary) catch |e| switch (e) {
+    swap.atomicReplace(ctx.io, target, new_binary) catch |e| switch (e) {
         error.PermissionDenied => {
             output.warn("Cannot write to {s}; escalating with sudo.", .{std.fs.path.dirname(target) orelse target});
-            try installBinaryViaSudo(allocator, new_binary, target);
+            try installBinaryViaSudo(ctx, allocator, new_binary, target);
             return .sudo;
         },
         else => return e,
@@ -300,11 +301,11 @@ pub fn buildSudoInstallArgv(new_binary: []const u8, target: []const u8) [9][]con
 
 /// Spawn `sudo install` with the user's TTY inherited. Sudo prompts for
 /// the password on its own; we just propagate the exit status.
-fn installBinaryViaSudo(allocator: std.mem.Allocator, new_binary: []const u8, target: []const u8) !void {
+fn installBinaryViaSudo(ctx: *const AppCtx, allocator: std.mem.Allocator, new_binary: []const u8, target: []const u8) !void {
+    _ = allocator;
     const argv = buildSudoInstallArgv(new_binary, target);
-    var child = fs_compat.Child.init(&argv, allocator);
-    child.spawn() catch return error.SudoSpawnFailed;
-    const term = child.wait() catch return error.SudoSpawnFailed;
+    var child = std.process.spawn(ctx.io, .{ .argv = &argv }) catch return error.SudoSpawnFailed;
+    const term = child.wait(ctx.io) catch return error.SudoSpawnFailed;
     switch (term) {
         .exited => |code| if (code != 0) return error.SudoFailed,
         else => return error.SudoFailed,
@@ -315,7 +316,7 @@ fn installBinaryViaSudo(allocator: std.mem.Allocator, new_binary: []const u8, ta
 /// only when it is a plain regular file that needs its own swap. Symlinks
 /// track their target automatically after a swap, so we skip those.
 /// Returned slice points into `buf`.
-pub fn resolveTwinRegularFile(self_exe: []const u8, buf: []u8) ?[]const u8 {
+pub fn resolveTwinRegularFile(io: std.Io, self_exe: []const u8, buf: []u8) ?[]const u8 {
     const base = std.fs.path.basename(self_exe);
     const twin_base: []const u8 =
         if (std.mem.eql(u8, base, "malt")) "mt" else if (std.mem.eql(u8, base, "mt")) "malt" else return null;
@@ -326,8 +327,8 @@ pub fn resolveTwinRegularFile(self_exe: []const u8, buf: []u8) ?[]const u8 {
     // `readLinkAbsolute` is the cheapest lstat here: success = symlink
     // (skip), `error.NotLink` = regular file to update, anything else
     // (missing, permission) = nothing we can usefully replace.
-    var link_buf: [fs_compat.max_path_bytes]u8 = undefined;
-    if (fs_compat.readLinkAbsolute(twin_path, &link_buf)) |_| {
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (std.Io.Dir.readLinkAbsolute(io, twin_path, &link_buf)) |_| {
         return null;
     } else |err| switch (err) {
         error.NotLink => return twin_path,
@@ -337,8 +338,8 @@ pub fn resolveTwinRegularFile(self_exe: []const u8, buf: []u8) ?[]const u8 {
 
 /// Build `$TMPDIR/malt-update-<pid>/`. Falls back to `/tmp` when
 /// `$TMPDIR` is unset (sandboxes, minimal environments).
-fn buildScratchDir(buf: []u8) ![]const u8 {
-    const base = fs_compat.getenv("TMPDIR") orelse "/tmp";
+fn buildScratchDir(environ: std.process.Environ, buf: []u8) ![]const u8 {
+    const base: []const u8 = std.process.Environ.getPosix(environ, "TMPDIR") orelse "/tmp";
     const trimmed = std.mem.trimEnd(u8, base, "/");
     const pid = std.c.getpid();
     return std.fmt.bufPrint(buf, "{s}/malt-update-{d}", .{ trimmed, pid });
@@ -347,6 +348,7 @@ fn buildScratchDir(buf: []u8) ![]const u8 {
 /// Download `url` into `dir/name`, return the absolute path.
 /// Caller owns the returned slice.
 fn writeDownload(
+    io: std.Io,
     allocator: std.mem.Allocator,
     http: *client_mod.HttpClient,
     url: []const u8,
@@ -362,13 +364,14 @@ fn writeDownload(
         output.err("Download returned status {d} for {s}", .{ resp.status, url });
         return error.Aborted;
     }
-    return writeResponseBody(allocator, dir, name, resp.body);
+    return writeResponseBody(io, allocator, dir, name, resp.body);
 }
 
 /// Write `body` to `dir/name`, return the caller-owned absolute path.
 /// Split from `writeDownload` so the file-write half is reachable under
 /// `testing.allocator` without a live HTTP client (BUG-012 regression guard).
 pub fn writeResponseBody(
+    io: std.Io,
     allocator: std.mem.Allocator,
     dir: []const u8,
     name: []const u8,
@@ -376,12 +379,12 @@ pub fn writeResponseBody(
 ) ![]const u8 {
     const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, name });
     errdefer allocator.free(path);
-    const f = fs_compat.createFileAbsolute(path, .{}) catch {
+    const f = std.Io.Dir.createFileAbsolute(io, path, .{}) catch {
         output.err("Cannot create {s}", .{path});
         return error.Aborted;
     };
-    defer f.close();
-    f.writeAll(body) catch {
+    defer f.close(io);
+    f.writeStreamingAll(io, body) catch {
         output.err("Failed to write {s}", .{path});
         return error.Aborted;
     };
@@ -389,6 +392,7 @@ pub fn writeResponseBody(
 }
 
 const RunVerification = struct {
+    ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     http: *client_mod.HttpClient,
     assets: std.json.Array,
@@ -403,7 +407,7 @@ const RunVerification = struct {
 /// when the user has opted out of both with `--no-verify` and
 /// `MALT_ALLOW_UNVERIFIED=1`. Fails the update on any verify error.
 fn runVerification(rv: RunVerification) !void {
-    if (rv.opts.no_verify and unverifiedAllowed()) {
+    if (rv.opts.no_verify and unverifiedAllowed(rv.ctx.environ)) {
         output.warn("MALT_ALLOW_UNVERIFIED=1 and --no-verify - skipping signature and checksum verification", .{});
         output.warn("This update will not be cryptographically verified. Install cosign to enable verification.", .{});
         return;
@@ -413,11 +417,11 @@ fn runVerification(rv: RunVerification) !void {
         output.err("Release is missing {s}", .{sigstore_name});
         return error.Aborted;
     };
-    const sigstore_path = try writeDownload(rv.allocator, rv.http, sigstore_url, rv.scratch, sigstore_name);
+    const sigstore_path = try writeDownload(rv.ctx.io, rv.allocator, rv.http, sigstore_url, rv.scratch, sigstore_name);
     defer rv.allocator.free(sigstore_path);
 
     output.info("Verifying cosign signature + SHA256 checksum...", .{});
-    verify.verifyAll(rv.allocator, .{
+    verify.verifyAll(rv.ctx.io, rv.allocator, .{
         .tarball_path = rv.tarball_path,
         .checksums_path = rv.checksums_path,
         .sigstore_path = sigstore_path,
@@ -457,13 +461,13 @@ fn runVerification(rv: RunVerification) !void {
 
 /// Remove `<self_exe>.old` and any orphaned `.malt-update-*` staging
 /// files next to the running binary. Idempotent - a clean tree exits 0.
-fn runCleanup() !void {
-    var exe_buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const n = std.process.executablePath(io_mod.ctx(), &exe_buf) catch {
+fn runCleanup(ctx: *const AppCtx) !void {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.process.executablePath(ctx.io, &exe_buf) catch {
         output.err("Cannot determine current binary path", .{});
         return error.Aborted;
     };
-    const cleaned = cleanup.cleanUpdateArtefacts(exe_buf[0..n]) catch {
+    const cleaned = cleanup.cleanUpdateArtefacts(ctx.io, exe_buf[0..n]) catch {
         output.err("Cleanup failed", .{});
         return error.Aborted;
     };
@@ -477,14 +481,14 @@ fn runCleanup() !void {
 /// Resolve the running binary via `executablePath` + `realpath` and
 /// classify the install. Failure to resolve degrades to `.direct`, so
 /// a transient FS error never locks the updater out.
-fn detectOrigin() origin.Origin {
-    var exe_buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const n = std.process.executablePath(io_mod.ctx(), &exe_buf) catch return .direct;
+fn detectOrigin(io: std.Io) origin.Origin {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.process.executablePath(io, &exe_buf) catch return .direct;
     var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
-    return origin.classifyResolved(&resolved_buf, exe_buf[0..n]);
+    return origin.classifyResolved(io, &resolved_buf, exe_buf[0..n]);
 }
 
-fn unverifiedAllowed() bool {
-    const v = fs_compat.getenv("MALT_ALLOW_UNVERIFIED") orelse return false;
+fn unverifiedAllowed(environ: std.process.Environ) bool {
+    const v = std.process.Environ.getPosix(environ, "MALT_ALLOW_UNVERIFIED") orelse return false;
     return std.mem.eql(u8, v, "1");
 }

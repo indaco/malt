@@ -2,7 +2,7 @@
 //! System health check.
 
 const std = @import("std");
-const fs_compat = @import("../fs/compat.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
@@ -35,6 +35,8 @@ pub const printCheck = render.printCheck;
 pub const CheckCtx = struct {
     allocator: std.mem.Allocator,
     prefix: []const u8,
+    io: std.Io,
+    environ: std.process.Environ,
 };
 
 /// Per-check outcome; same tags the row renderer uses so the walker
@@ -86,14 +88,14 @@ pub fn runChecks(ctx: CheckCtx, table: []const Check) Tally {
     return tally;
 }
 
-pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (help.showIfRequested(args, "doctor")) return;
+pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "doctor")) return;
 
     const prefix = atomic.maltPrefix();
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--post-install-status")) {
-            post_install.checkPostInstallStatus(allocator, prefix);
+            post_install.checkPostInstallStatus(ctx, allocator, prefix);
             return;
         }
     }
@@ -101,7 +103,12 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const fix_requested = fix_mod.wantsFix(args);
 
     output.info("Running health checks...", .{});
-    const tally = runChecks(.{ .allocator = allocator, .prefix = prefix }, &checks);
+    const tally = runChecks(.{
+        .allocator = allocator,
+        .prefix = prefix,
+        .io = ctx.io,
+        .environ = ctx.environ,
+    }, &checks);
 
     if (fix_requested) {
         output.plain("", .{});
@@ -112,7 +119,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output.info("Applying safe-class fixes:", .{});
         }
 
-        const outcome = fix_mod.executeFix(.{ .prefix = prefix }, dry_run);
+        const outcome = fix_mod.executeFix(.{ .prefix = prefix, .io = ctx.io }, dry_run);
 
         if (outcome.plan.safe.count() == 0) {
             output.dim("no safe-class fixes to apply", .{});
@@ -209,7 +216,7 @@ fn checkDirectoryStructure(ctx: CheckCtx, name: []const u8) CheckResult {
     for (dirs) |dir| {
         var buf: [512]u8 = undefined;
         const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ ctx.prefix, dir }) catch continue;
-        fs_compat.accessAbsolute(p, .{}) catch {
+        std.Io.Dir.accessAbsolute(ctx.io, p, .{}) catch {
             if (first_missing_len == 0) {
                 const s = std.fmt.bufPrint(&first_missing_buf, "{s}", .{p}) catch &[_]u8{};
                 first_missing_len = s.len;
@@ -253,9 +260,9 @@ fn checkStaleLock(ctx: CheckCtx, name: []const u8) CheckResult {
     return .ok;
 }
 
-fn checkExternalTool(_: CheckCtx, name: []const u8) CheckResult {
+fn checkExternalTool(ctx: CheckCtx, name: []const u8) CheckResult {
     // Row title is also the PATH binary to probe.
-    if (externalToolAvailable(name)) {
+    if (externalToolAvailable(ctx.io, ctx.environ, name)) {
         printCheck(name, .ok, null);
         return .ok;
     }
@@ -281,6 +288,7 @@ fn checkApfs(ctx: CheckCtx, name: []const u8) CheckResult {
 fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
     // Cap the walk so pathological trees don't balloon doctor's memory.
     const findings = perms_mod.walkPrefix(
+        ctx.io,
         ctx.allocator,
         ctx.prefix,
         perms_mod.currentUid(),
@@ -318,7 +326,7 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
 }
 
 fn checkApiReachable(ctx: CheckCtx, name: []const u8) CheckResult {
-    var http = client_mod.HttpClient.init(ctx.allocator);
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, ctx.allocator);
     defer http.deinit();
     const status = http.head("https://formulae.brew.sh") catch {
         printCheck(name, .warn_status, "Cannot reach formulae.brew.sh");
@@ -349,16 +357,16 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     };
-    var store_dir = fs_compat.openDirAbsolute(store_path, .{ .iterate = true }) catch {
+    var store_dir = std.Io.Dir.openDirAbsolute(ctx.io, store_path, .{ .iterate = true }) catch {
         // store/ missing or unreadable — not an error, just skip.
         printCheck(name, .ok, null);
         return .ok;
     };
-    defer store_dir.close();
+    defer store_dir.close(ctx.io);
 
     var orphan_count: u32 = 0;
     var iter = store_dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(ctx.io) catch null) |entry| {
         // Each entry is a sha256 dir; classify via store_refs.
         var stmt = db.prepare(
             "SELECT refcount FROM store_refs WHERE store_sha256 = ?1;",
@@ -409,7 +417,7 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
     while (stmt.step() catch false) {
         const cellar_raw = stmt.columnText(2) orelse continue;
         const cellar_path = std.mem.sliceTo(cellar_raw, 0);
-        fs_compat.accessAbsolute(cellar_path, .{}) catch {
+        std.Io.Dir.accessAbsolute(ctx.io, cellar_path, .{}) catch {
             missing_count += 1;
         };
     }
@@ -435,13 +443,13 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
     for (link_dirs) |subdir| {
         var dir_buf: [512]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{s}", .{ ctx.prefix, subdir }) catch continue;
-        var dir = fs_compat.openDirAbsolute(dir_path, .{ .iterate = true }) catch continue;
-        defer dir.close();
+        var dir = std.Io.Dir.openDirAbsolute(ctx.io, dir_path, .{ .iterate = true }) catch continue;
+        defer dir.close(ctx.io);
 
         var dir_iter = dir.iterate();
-        while (dir_iter.next() catch null) |entry| {
+        while (dir_iter.next(ctx.io) catch null) |entry| {
             if (entry.kind == .sym_link) {
-                _ = dir.statFile(entry.name) catch {
+                _ = dir.statFile(ctx.io, entry.name, .{}) catch {
                     broken_count += 1;
                     continue;
                 };
@@ -470,12 +478,12 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
         return .ok;
     };
 
-    var cellar_dir = fs_compat.openDirAbsolute(cellar_root, .{ .iterate = true }) catch {
+    var cellar_dir = std.Io.Dir.openDirAbsolute(ctx.io, cellar_root, .{ .iterate = true }) catch {
         // No Cellar yet — nothing to scan.
         printCheck(name, .ok, null);
         return .ok;
     };
-    defer cellar_dir.close();
+    defer cellar_dir.close(ctx.io);
 
     var walker = cellar_dir.walk(ctx.allocator) catch {
         printCheck(name, .warn_status, "Could not walk Cellar tree");
@@ -487,9 +495,9 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
     var first_bad_buf: [256]u8 = undefined;
     var first_bad_len: usize = 0;
 
-    while (walker.next() catch null) |entry| {
+    while (walker.next(ctx.io) catch null) |entry| {
         if (entry.kind != .file) continue;
-        if (hasUnpatchedPlaceholder(ctx.allocator, &cellar_dir, entry.path) catch false) {
+        if (hasUnpatchedPlaceholder(ctx.io, ctx.allocator, &cellar_dir, entry.path) catch false) {
             bad_count += 1;
             if (first_bad_len == 0) {
                 const s = std.fmt.bufPrint(&first_bad_buf, "{s}", .{entry.path}) catch continue;
@@ -553,7 +561,7 @@ fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {
     };
     defer db.close();
 
-    const missing = countMissingLocalSources(ctx.allocator, &db);
+    const missing = countMissingLocalSources(ctx.io, ctx.allocator, &db);
     if (missing.total == 0 or missing.stale == 0) {
         printCheck(name, .ok, null);
         return .ok;
@@ -573,25 +581,26 @@ fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {
 /// `@@HOMEBREW_CELLAR@@`. Any I/O or parser error is treated as "not bad" —
 /// doctor's placeholder check is best-effort.
 fn hasUnpatchedPlaceholder(
+    io: std.Io,
     allocator: std.mem.Allocator,
-    base_dir: *fs_compat.Dir,
+    base_dir: *std.Io.Dir,
     rel_path: []const u8,
 ) !bool {
-    var file = base_dir.openFile(rel_path, .{}) catch return false;
-    defer file.close();
+    var file = base_dir.openFile(io, rel_path, .{}) catch return false;
+    defer file.close(io);
 
     var magic: [4]u8 = undefined;
-    const n = file.readAll(&magic) catch return false;
+    const n = file.readPositionalAll(io, &magic, 0) catch return false;
     if (n < 4) return false;
     if (!parser.isMachO(&magic)) return false;
 
     // Re-read the full file — parser needs the whole buffer.
-    const stat = file.stat() catch return false;
+    const stat = file.stat(io) catch return false;
     if (stat.size > 512 * 1024 * 1024) return false; // skip pathologically large files
     const data = allocator.alloc(u8, stat.size) catch return false;
     defer allocator.free(data);
 
-    const read = file.readAll(data) catch return false;
+    const read = file.readPositionalAll(io, data, 0) catch return false;
     if (read < data.len) return false;
 
     var macho = parser.parse(allocator, data) catch return false;
@@ -608,22 +617,22 @@ fn hasUnpatchedPlaceholder(
 /// Tries `/usr/bin/<tool>` first (where Xcode Command Line Tools land
 /// install_name_tool) and then walks `PATH` entry-by-entry. `pub` so
 /// the doctor render test can exercise both branches.
-pub fn externalToolAvailable(tool: []const u8) bool {
+pub fn externalToolAvailable(io: std.Io, environ: std.process.Environ, tool: []const u8) bool {
     // Fast path for the common macOS case — avoids allocating a PATH
     // walk on every `mt doctor` invocation.
     var fast_buf: [64]u8 = undefined;
     const fast_path = std.fmt.bufPrint(&fast_buf, "/usr/bin/{s}", .{tool}) catch null;
     if (fast_path) |p| {
-        if (fs_compat.accessAbsolute(p, .{})) |_| return true else |_| {}
+        if (std.Io.Dir.accessAbsolute(io, p, .{})) |_| return true else |_| {}
     }
 
-    const path_env = fs_compat.getenv("PATH") orelse return false;
+    const path_env = std.process.Environ.getPosix(environ, "PATH") orelse return false;
     var it = std.mem.splitScalar(u8, path_env, ':');
     while (it.next()) |dir| {
         if (dir.len == 0) continue;
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const full = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, tool }) catch continue;
-        if (fs_compat.accessAbsolute(full, .{})) |_| return true else |_| {}
+        if (std.Io.Dir.accessAbsolute(io, full, .{})) |_| return true else |_| {}
     }
     return false;
 }
@@ -644,6 +653,7 @@ pub const LocalSourceCensus = struct {
 /// — we are not reading the file. Silent on DB errors: a broken DB is
 /// reported by the separate SQLite-integrity check above.
 pub fn countMissingLocalSources(
+    io: std.Io,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
 ) LocalSourceCensus {
@@ -655,7 +665,7 @@ pub fn countMissingLocalSources(
         const path_ptr = stmt.columnText(0) orelse continue;
         const path = std.mem.sliceTo(path_ptr, 0);
         census.total += 1;
-        fs_compat.accessAbsolute(path, .{}) catch {
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch {
             census.stale += 1;
         };
     }

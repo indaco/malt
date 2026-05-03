@@ -7,11 +7,12 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const version_mod = malt.version;
 const updater = malt.cli_version_update;
 const output_mod = malt.output;
-const fs_compat = malt.fs_compat;
-const io_mod = malt.io_mod;
+const fs_compat = test_io;
+const io_mod = malt.output;
 
 test "version value is non-empty and trimmed" {
     try testing.expect(version_mod.value.len > 0);
@@ -66,7 +67,7 @@ test "parseArgs: unrecognised flags are ignored (do not crash)" {
 // allocations behind.
 
 fn tmpDirAbsolute(tmp: *std.testing.TmpDir, buf: []u8) ![]const u8 {
-    const n = try std.Io.Dir.realPath(tmp.dir, io_mod.ctx(), buf);
+    const n = try std.Io.Dir.realPath(tmp.dir, std.Options.debug_io, buf);
     return buf[0..n];
 }
 
@@ -80,13 +81,13 @@ test "writeResponseBody: writes body and returns caller-owned path" {
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
     const dir_abs = try tmpDirAbsolute(&tmp, &buf);
 
-    const path = try updater.writeResponseBody(testing.allocator, dir_abs, "payload.bin", "hello-T011");
+    const path = try updater.writeResponseBody(std.Options.debug_io, testing.allocator, dir_abs, "payload.bin", "hello-T011");
     defer testing.allocator.free(path);
 
     const expected_suffix = "/payload.bin";
     try testing.expect(std.mem.endsWith(u8, path, expected_suffix));
 
-    const contents = try fs_compat.readFileAbsoluteAlloc(testing.allocator, path, 1024);
+    const contents = try fs_compat.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, path, 1024);
     defer testing.allocator.free(contents);
     try testing.expectEqualStrings("hello-T011", contents);
 }
@@ -98,6 +99,7 @@ test "writeResponseBody: createFileAbsolute failure leaves zero leaked allocatio
     defer output_mod.setQuiet(false);
 
     const result = updater.writeResponseBody(
+        std.Options.debug_io,
         testing.allocator,
         "/nonexistent/malt-T011-guardrail",
         "payload.bin",
@@ -113,22 +115,22 @@ test "writeResponseBody: createFileAbsolute failure leaves zero leaked allocatio
 // drift apart. These tests pin the twin-detection contract.
 
 fn writeFile(path: []const u8, content: []const u8) !void {
-    const f = try fs_compat.createFileAbsolute(path, .{});
-    defer f.close();
-    try f.writeAll(content);
+    const f = try fs_compat.createFileAbsolute(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, content);
 }
 
 fn makeScratch(allocator: std.mem.Allocator, tag: []const u8) ![]u8 {
     const dir = try std.fmt.allocPrint(allocator, "/tmp/malt_twin_test_{s}", .{tag});
-    fs_compat.deleteTreeAbsolute(dir) catch {};
-    try fs_compat.makeDirAbsolute(dir);
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
     return dir;
 }
 
 test "resolveTwinRegularFile: returns sibling mt when invoked as malt" {
     const dir = try makeScratch(testing.allocator, "malt_to_mt");
     defer {
-        fs_compat.deleteTreeAbsolute(dir) catch {};
+        fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         testing.allocator.free(dir);
     }
 
@@ -140,14 +142,14 @@ test "resolveTwinRegularFile: returns sibling mt when invoked as malt" {
     try writeFile(mt_path, "m");
 
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const twin = updater.resolveTwinRegularFile(malt_path, &buf) orelse return error.ExpectedTwin;
+    const twin = updater.resolveTwinRegularFile(std.Options.debug_io, malt_path, &buf) orelse return error.ExpectedTwin;
     try testing.expectEqualStrings(mt_path, twin);
 }
 
 test "resolveTwinRegularFile: returns sibling malt when invoked as mt" {
     const dir = try makeScratch(testing.allocator, "mt_to_malt");
     defer {
-        fs_compat.deleteTreeAbsolute(dir) catch {};
+        fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         testing.allocator.free(dir);
     }
 
@@ -159,7 +161,7 @@ test "resolveTwinRegularFile: returns sibling malt when invoked as mt" {
     try writeFile(mt_path, "m");
 
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
-    const twin = updater.resolveTwinRegularFile(mt_path, &buf) orelse return error.ExpectedTwin;
+    const twin = updater.resolveTwinRegularFile(std.Options.debug_io, mt_path, &buf) orelse return error.ExpectedTwin;
     try testing.expectEqualStrings(malt_path, twin);
 }
 
@@ -168,7 +170,7 @@ test "resolveTwinRegularFile: returns null when sibling is a symlink" {
     // no second swap required.
     const dir = try makeScratch(testing.allocator, "symlink_twin");
     defer {
-        fs_compat.deleteTreeAbsolute(dir) catch {};
+        fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         testing.allocator.free(dir);
     }
 
@@ -177,16 +179,16 @@ test "resolveTwinRegularFile: returns null when sibling is a symlink" {
     const mt_path = try std.fmt.allocPrint(testing.allocator, "{s}/mt", .{dir});
     defer testing.allocator.free(mt_path);
     try writeFile(malt_path, "m");
-    try fs_compat.symLinkAbsolute(malt_path, mt_path, .{});
+    try fs_compat.symLinkAbsolute(std.Options.debug_io, malt_path, mt_path, .{});
 
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
-    try testing.expect(updater.resolveTwinRegularFile(malt_path, &buf) == null);
+    try testing.expect(updater.resolveTwinRegularFile(std.Options.debug_io, malt_path, &buf) == null);
 }
 
 test "resolveTwinRegularFile: returns null when no sibling exists" {
     const dir = try makeScratch(testing.allocator, "no_twin");
     defer {
-        fs_compat.deleteTreeAbsolute(dir) catch {};
+        fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         testing.allocator.free(dir);
     }
 
@@ -195,13 +197,13 @@ test "resolveTwinRegularFile: returns null when no sibling exists" {
     try writeFile(malt_path, "m");
 
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
-    try testing.expect(updater.resolveTwinRegularFile(malt_path, &buf) == null);
+    try testing.expect(updater.resolveTwinRegularFile(std.Options.debug_io, malt_path, &buf) == null);
 }
 
 test "resolveTwinRegularFile: returns null for unrelated basenames" {
     const dir = try makeScratch(testing.allocator, "other_name");
     defer {
-        fs_compat.deleteTreeAbsolute(dir) catch {};
+        fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         testing.allocator.free(dir);
     }
 
@@ -210,7 +212,7 @@ test "resolveTwinRegularFile: returns null for unrelated basenames" {
     try writeFile(other_path, "x");
 
     var buf: [fs_compat.max_path_bytes]u8 = undefined;
-    try testing.expect(updater.resolveTwinRegularFile(other_path, &buf) == null);
+    try testing.expect(updater.resolveTwinRegularFile(std.Options.debug_io, other_path, &buf) == null);
 }
 
 // --- buildSudoInstallArgv ------------------------------------------------

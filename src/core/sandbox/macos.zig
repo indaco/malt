@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const fs_compat = @import("../../fs/compat.zig");
 const term_sanitize = @import("../../ui/term_sanitize.zig");
 
 pub const SandboxError = error{
@@ -175,6 +174,7 @@ pub fn freeArgv(allocator: std.mem.Allocator, argv: [:null]?[*:0]u8) void {
 /// escapes before forwarding; `MALT_ALLOW_RAW_POST_INSTALL=1` bypasses.
 pub fn runRubySandboxed(
     allocator: std.mem.Allocator,
+    environ: std.process.Environ,
     ruby_path: []const u8,
     script_path: []const u8,
     cellar_path: []const u8,
@@ -196,15 +196,15 @@ pub fn runRubySandboxed(
     const envp = try buildEnvp(allocator, env);
     defer freeEnvp(allocator, envp);
 
-    if (rawPassthroughEnabled()) {
+    if (rawPassthroughEnabled(environ)) {
         return spawnInherit(argv_z, envp, limits);
     }
     return spawnFiltered(argv_z, envp, limits);
 }
 
-fn rawPassthroughEnabled() bool {
-    const v = fs_compat.getenv("MALT_ALLOW_RAW_POST_INSTALL") orelse return false;
-    return std.mem.eql(u8, std.mem.sliceTo(v, 0), "1");
+fn rawPassthroughEnabled(environ: std.process.Environ) bool {
+    const v = std.process.Environ.getPosix(environ, "MALT_ALLOW_RAW_POST_INSTALL") orelse return false;
+    return std.mem.eql(u8, v, "1");
 }
 
 fn spawnInherit(

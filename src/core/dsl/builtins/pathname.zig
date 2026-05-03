@@ -6,7 +6,6 @@
 //! Matches Ruby's non-raising Pathname helpers used by Homebrew formulae.
 
 const std = @import("std");
-const fs_compat = @import("../../../fs/compat.zig");
 const values = @import("../values.zig");
 const sandbox = @import("../sandbox.zig");
 const ast = @import("../ast.zig");
@@ -25,6 +24,8 @@ pub const BuiltinError = error{
 
 pub const ExecCtx = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
+    environ: std.process.Environ,
     cellar_path: []const u8,
     malt_prefix: []const u8,
 };
@@ -33,7 +34,7 @@ pub const ExecCtx = struct {
 pub fn mkpath(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .nil = {} };
-    fs_compat.cwd().makePath(path) catch {};
+    std.Io.Dir.cwd().createDirPath(ctx.io, path) catch {};
     return Value{ .nil = {} };
 }
 
@@ -41,7 +42,7 @@ pub fn mkpath(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Val
 pub fn existQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .bool = false };
-    fs_compat.cwd().access(path, .{}) catch {
+    std.Io.Dir.cwd().access(ctx.io, path, .{}) catch {
         return Value{ .bool = false };
     };
     return Value{ .bool = true };
@@ -51,10 +52,10 @@ pub fn existQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Val
 pub fn directoryQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .bool = false };
-    var dir = fs_compat.openDirAbsolute(path, .{}) catch {
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, path, .{}) catch {
         return Value{ .bool = false };
     };
-    dir.close();
+    dir.close(ctx.io);
     return Value{ .bool = true };
 }
 
@@ -63,7 +64,7 @@ pub fn symlinkQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!V
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .bool = false };
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    _ = fs_compat.cwd().readLink(path, &buf) catch {
+    _ = std.Io.Dir.cwd().readLink(ctx.io, path, &buf) catch {
         return Value{ .bool = false };
     };
     return Value{ .bool = true };
@@ -78,11 +79,11 @@ pub fn write(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!V
 
     const content = if (args.len > 0) try args[0].asString(ctx.allocator) else "";
 
-    const file = fs_compat.createFileAbsolute(path, .{}) catch {
+    const file = std.Io.Dir.createFileAbsolute(ctx.io, path, .{}) catch {
         return Value{ .nil = {} };
     };
-    defer file.close();
-    file.writeAll(content) catch {};
+    defer file.close(ctx.io);
+    file.writeStreamingAll(ctx.io, content) catch {};
     return Value{ .nil = {} };
 }
 
@@ -90,11 +91,7 @@ pub fn write(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!V
 pub fn read(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .string = "" };
-    const file = fs_compat.openFileAbsolute(path, .{}) catch {
-        return Value{ .string = "" };
-    };
-    defer file.close();
-    const content = file.readToEndAlloc(ctx.allocator, 1024 * 1024) catch {
+    const content = readFileAllAbsolute(ctx.io, ctx.allocator, path, 1024 * 1024) catch {
         return Value{ .string = "" };
     };
     return Value{ .string = content };
@@ -104,14 +101,14 @@ pub fn read(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value
 pub fn children(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .array = &.{} };
-    var dir = fs_compat.openDirAbsolute(path, .{ .iterate = true }) catch {
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, path, .{ .iterate = true }) catch {
         return Value{ .array = &.{} };
     };
-    defer dir.close();
+    defer dir.close(ctx.io);
 
     var entries: std.ArrayList(Value) = .empty;
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(ctx.io) catch null) |entry| {
         const child_path = std.fs.path.join(ctx.allocator, &.{ path, entry.name }) catch continue;
         entries.append(ctx.allocator, Value{ .pathname = child_path }) catch continue;
     }
@@ -147,10 +144,10 @@ pub fn toS(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value 
 pub fn realpath(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const resolved = fs_compat.cwd().realpath(path, &buf) catch {
+    const n = std.Io.Dir.cwd().realPathFile(ctx.io, path, &buf) catch {
         return Value{ .pathname = path };
     };
-    const duped = ctx.allocator.dupe(u8, resolved) catch return BuiltinError.OutOfMemory;
+    const duped = ctx.allocator.dupe(u8, buf[0..n]) catch return BuiltinError.OutOfMemory;
     return Value{ .pathname = duped };
 }
 
@@ -158,7 +155,7 @@ pub fn realpath(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!V
 pub fn fileQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .bool = false };
-    const stat = fs_compat.cwd().statFile(path) catch {
+    const stat = std.Io.Dir.cwd().statFile(ctx.io, path, .{}) catch {
         return Value{ .bool = false };
     };
     return Value{ .bool = stat.kind == .file };
@@ -203,7 +200,7 @@ pub fn unlink(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Val
     if (path.len == 0) return Value{ .nil = {} };
     sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
-    fs_compat.cwd().deleteFile(path) catch {};
+    std.Io.Dir.cwd().deleteFile(ctx.io, path) catch {};
     return Value{ .nil = {} };
 }
 
@@ -220,11 +217,11 @@ pub fn installSymlink(ctx: ExecCtx, receiver: ?Value, args: []const Value) Built
 
     // Ensure parent exists
     if (std.fs.path.dirname(target)) |parent| {
-        fs_compat.cwd().makePath(parent) catch {};
+        std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch {};
     }
 
-    fs_compat.cwd().deleteFile(target) catch {};
-    fs_compat.symLinkAbsolute(source, target, .{}) catch {};
+    std.Io.Dir.cwd().deleteFile(ctx.io, target) catch {};
+    std.Io.Dir.symLinkAbsolute(ctx.io, source, target, .{}) catch {};
     return Value{ .nil = {} };
 }
 
@@ -256,14 +253,14 @@ pub fn glob(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Va
     // Guard against empty/relative base_dir
     if (base_dir.len == 0) return Value{ .array = &.{} };
 
-    var dir = fs_compat.openDirAbsolute(base_dir, .{ .iterate = true }) catch {
+    var dir = std.Io.Dir.openDirAbsolute(ctx.io, base_dir, .{ .iterate = true }) catch {
         return Value{ .array = &.{} };
     };
-    defer dir.close();
+    defer dir.close(ctx.io);
 
     var results: std.ArrayList(Value) = .empty;
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(ctx.io) catch null) |entry| {
         if (globMatch(pattern, entry.name)) {
             const child_path = std.fs.path.join(ctx.allocator, &.{ base_dir, entry.name }) catch continue;
             results.append(ctx.allocator, Value{ .pathname = child_path }) catch continue;
@@ -349,4 +346,21 @@ fn receiverPath(allocator: std.mem.Allocator, receiver: ?Value) BuiltinError![]c
         .string => |s| s,
         else => recv.asString(allocator) catch return BuiltinError.OutOfMemory,
     };
+}
+
+/// Read the entire contents of an absolute file path into a caller-owned slice.
+fn readFileAllAbsolute(io: std.Io, allocator: std.mem.Allocator, abs_path: []const u8, max_bytes: usize) ![]u8 {
+    const f = try std.Io.Dir.openFileAbsolute(io, abs_path, .{});
+    defer f.close(io);
+    const st = try f.stat(io);
+    const size = @min(@as(u64, max_bytes), st.size);
+    const buf = try allocator.alloc(u8, @intCast(size));
+    errdefer allocator.free(buf);
+    const n = try f.readPositionalAll(io, buf, 0);
+    if (n == buf.len) return buf;
+    if (allocator.resize(buf, n)) return buf[0..n];
+    const shrunk = try allocator.alloc(u8, n);
+    @memcpy(shrunk, buf[0..n]);
+    allocator.free(buf);
+    return shrunk;
 }

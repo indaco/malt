@@ -249,6 +249,7 @@ test "findFailedDep flags the first dep name that appears in failed_kegs" {
 }
 
 const malt = @import("malt");
+const test_io = @import("test_io");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const formula_mod = malt.formula;
@@ -298,43 +299,47 @@ test "pruneCellarForReinstall wipes an existing Cellar dir so --force can re-mat
     const prefix = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_prune_cellar_{d}",
-        .{malt.fs_compat.nanoTimestamp()},
+        .{test_io.nanoTimestamp(
+            std.Options.debug_io,
+        )},
     );
     defer testing.allocator.free(prefix);
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0/bin", .{prefix});
     defer testing.allocator.free(keg_dir);
-    try malt.fs_compat.cwd().makePath(keg_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
 
     const file = try std.fmt.allocPrint(testing.allocator, "{s}/foo", .{keg_dir});
     defer testing.allocator.free(file);
     {
-        const f = try malt.fs_compat.cwd().createFile(file, .{});
-        defer f.close();
-        try f.writeAll("payload");
+        const f = try test_io.cwd().createFile(std.Options.debug_io, file, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "payload");
     }
 
-    install.pruneCellarForReinstall(prefix, "foo", "1.0");
+    install.pruneCellarForReinstall(&malt.app_ctx.debug_ctx, prefix, "foo", "1.0");
 
     const cellar_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/1.0", .{prefix});
     defer testing.allocator.free(cellar_dir);
-    try testing.expectError(error.FileNotFound, malt.fs_compat.accessAbsolute(cellar_dir, .{}));
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, cellar_dir, .{}));
 }
 
 test "pruneCellarForReinstall is a no-op when the destination is missing" {
     const prefix = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_prune_cellar_missing_{d}",
-        .{malt.fs_compat.nanoTimestamp()},
+        .{test_io.nanoTimestamp(
+            std.Options.debug_io,
+        )},
     );
     defer testing.allocator.free(prefix);
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
     // Never created — pruning must not fault, panic, or leak.
-    install.pruneCellarForReinstall(prefix, "ghost", "1.0");
+    install.pruneCellarForReinstall(&malt.app_ctx.debug_ctx, prefix, "ghost", "1.0");
 }
 
 test "install.recordKeg preserves a prior pinned flag on REPLACE (force-reinstall keeps the hold)" {
@@ -418,20 +423,22 @@ test "ensureDirs creates every required subdirectory under a fresh prefix" {
     const prefix = try std.fmt.allocPrint(
         testing.allocator,
         "/tmp/malt_install_ensure_dirs_{d}",
-        .{malt.fs_compat.nanoTimestamp()},
+        .{test_io.nanoTimestamp(
+            std.Options.debug_io,
+        )},
     );
     defer testing.allocator.free(prefix);
-    malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
-    defer malt.fs_compat.deleteTreeAbsolute(prefix) catch {};
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
-    try install.ensureDirs(prefix);
+    try install.ensureDirs(&malt.app_ctx.debug_ctx, prefix);
 
     const subs = [_][]const u8{ "store", "Cellar", "Caskroom", "opt", "bin", "lib", "include", "share", "sbin", "etc", "tmp", "cache", "db" };
     for (subs) |s| {
         const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ prefix, s });
         defer testing.allocator.free(p);
-        var d = try malt.fs_compat.openDirAbsolute(p, .{});
-        d.close();
+        var d = try test_io.openDirAbsolute(std.Options.debug_io, p, .{});
+        d.close(std.Options.debug_io);
     }
 }
 
@@ -455,7 +462,7 @@ test "findFailedDep returns null when no dep is in the failed set" {
 // ---------------------------------------------------------------------------
 
 const dsl = @import("malt").dsl;
-const io_mod = @import("malt").io_mod;
+const io_mod = @import("malt").output;
 const color_mod = @import("malt").color;
 const output_mod = @import("malt").output;
 
@@ -479,7 +486,7 @@ fn runRoute(
     io_mod.beginStderrCapture(testing.allocator, &buf);
     defer io_mod.endStderrCapture();
 
-    install.routePostInstallOutcome(testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
+    install.routePostInstallOutcome(&malt.app_ctx.debug_ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
 
     return buf.toOwnedSlice(testing.allocator);
 }
@@ -665,7 +672,7 @@ fn runRouteCaptureStdout(
     io_mod.beginStderrCapture(testing.allocator, &stderr_buf);
     defer io_mod.endStderrCapture();
 
-    install.routePostInstallOutcome(testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
+    install.routePostInstallOutcome(&malt.app_ctx.debug_ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
     return stdout_buf.toOwnedSlice(testing.allocator);
 }
 
@@ -726,6 +733,7 @@ test "executeDslPostInstall returns .parse_failed when formula JSON is unparseab
     defer output_mod.setQuiet(prior_quiet);
 
     const outcome = install.executeDslPostInstall(
+        &malt.app_ctx.debug_ctx,
         testing.allocator,
         "bad-json",
         "1.0",
@@ -750,6 +758,7 @@ test "executeDslPostInstall returns .handled when DSL executes against a valid f
         \\{"name":"hello","full_name":"hello","versions":{"stable":"1.0"},"dependencies":[],"oldnames":[]}
     ;
     const outcome = install.executeDslPostInstall(
+        &malt.app_ctx.debug_ctx,
         testing.allocator,
         "hello",
         "1.0",
@@ -784,6 +793,7 @@ test "drive: no DSL source and no scope match emits the unified skip hint" {
     // .rb on disk, no pin manifest entry → fetchPostInstallFromGitHub
     // returns null, so drive lands on the skip leaf.
     install.drive(
+        &malt.app_ctx.debug_ctx,
         testing.allocator,
         "__nonexistent_test_formula_xyz__",
         "1.0",

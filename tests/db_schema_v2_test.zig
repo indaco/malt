@@ -3,6 +3,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 
@@ -12,8 +13,8 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_schema_v2_test_" ++ tag;
-        malt.fs_compat.deleteTreeAbsolute(dir) catch {};
-        try malt.fs_compat.makeDirAbsolute(dir);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+        try test_io.makeDirAbsolute(std.Options.debug_io, dir);
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(db_path);
@@ -23,7 +24,7 @@ const TempDb = struct {
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        malt.fs_compat.deleteTreeAbsolute(self.dir) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
     }
 };
 

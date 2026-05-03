@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const malt = @import("malt");
+const test_io = @import("test_io");
 const testing = std.testing;
 const install = @import("malt").install;
 
@@ -38,20 +39,20 @@ const formula_wget_json =
 fn seedCacheFile(prefix: []const u8, rel: []const u8, body: []const u8) !void {
     const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
     defer testing.allocator.free(cache_api);
-    try malt.fs_compat.cwd().makePath(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
     const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, rel });
     defer testing.allocator.free(path);
-    const f = try malt.fs_compat.cwd().createFile(path, .{});
-    defer f.close();
-    try f.writeAll(body);
+    const f = try test_io.cwd().createFile(std.Options.debug_io, path, .{});
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, body);
 }
 
 test "ambiguity warning fires when both formula and cask are cached" {
     const prefix_z: [:0]const u8 = "/tmp/mamb_b";
-    malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     try seedCacheFile(prefix_z, "formula_wget.json", formula_wget_json);
@@ -70,20 +71,23 @@ test "ambiguity warning fires when both formula and cask are cached" {
 
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
-    malt.io_mod.beginStderrCapture(testing.allocator, &captured);
-    defer malt.io_mod.endStderrCapture();
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
 
-    try install.execute(arena.allocator(), &.{ "--dry-run", "wget" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "wget" });
 
     try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) != null);
 }
 
 test "ambiguity warning is silent when no cask cache is present" {
     const prefix_z: [:0]const u8 = "/tmp/mamb_n";
-    malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
-    try malt.fs_compat.cwd().makePath(prefix_z);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
     _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
-    defer malt.fs_compat.deleteTreeAbsolute(prefix_z) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
     try seedCacheFile(prefix_z, "formula_wget.json", formula_wget_json);
@@ -97,10 +101,13 @@ test "ambiguity warning is silent when no cask cache is present" {
 
     var captured: std.ArrayList(u8) = .empty;
     defer captured.deinit(testing.allocator);
-    malt.io_mod.beginStderrCapture(testing.allocator, &captured);
-    defer malt.io_mod.endStderrCapture();
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
 
-    try install.execute(arena.allocator(), &.{ "--dry-run", "wget" });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "wget" });
 
     try testing.expect(std.mem.indexOf(u8, captured.items, ambiguity_marker) == null);
 }

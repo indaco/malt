@@ -1,4 +1,4 @@
-//! malt — lint-as-test for fs_compat.readAll misuse
+//! malt — lint-as-test for readAll misuse inside loops
 //!
 //! `readAll` is a positional read from offset 0 — safe for single-shot
 //! reads of a whole file, fatal inside a loop (every iteration reads
@@ -10,8 +10,8 @@
 
 const std = @import("std");
 const testing = std.testing;
-const malt = @import("malt");
-const fs = malt.fs_compat;
+const test_io = @import("test_io");
+const fs = test_io;
 
 /// Lines of look-ahead after a `while (` / `for (` header before we
 /// stop counting. Real streaming loops put the `readAll(` within a
@@ -141,7 +141,7 @@ test "findReadAllInLoop allows readAll when openFile opens a fresh handle per it
     // therefore safe regardless of being inside a while loop.
     const ok =
         \\while (walker.next() catch null) |entry| {
-        \\    const file = fs_compat.openFileAbsolute(path, .{}) catch continue;
+        \\    const file = fs_compat.openFileAbsolute(std.Options.debug_io, path, .{}) catch continue;
         \\    var magic: [4]u8 = undefined;
         \\    const n = file.readAll(&magic) catch continue;
         \\    _ = n;
@@ -193,8 +193,9 @@ test "findReadAllInLoop reports the line number of the first offender" {
 // cask fix) re-introduces the bug pattern anywhere under src/.
 
 test "no readAll() inside a loop anywhere under src/" {
-    var dir = try fs.cwd().openDir("src", .{ .iterate = true });
-    defer dir.close();
+    const io = std.Options.debug_io;
+    var dir = try fs.cwd().openDir(io, "src", .{ .iterate = true });
+    defer dir.close(io);
 
     var walker = try dir.walk(testing.allocator);
     defer walker.deinit();
@@ -205,19 +206,21 @@ test "no readAll() inside a loop anywhere under src/" {
         failures.deinit(testing.allocator);
     }
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
 
-        const file = try dir.openFile(entry.path, .{});
-        defer file.close();
-        const content = try file.readToEndAlloc(testing.allocator, 1 << 22);
+        const file = try dir.openFile(io, entry.path, .{});
+        defer file.close(io);
+        const stat = try file.stat(io);
+        const content = try testing.allocator.alloc(u8, @intCast(stat.size));
         defer testing.allocator.free(content);
+        _ = try file.readPositionalAll(io, content, 0);
 
         if (findReadAllInLoop(content)) |line| {
             const msg = try std.fmt.allocPrint(
                 testing.allocator,
-                "src/{s}:{d}: readAll() inside a loop — use readAllAt or fs_compat.streamFile",
+                "src/{s}:{d}: readAll() inside a loop — use readAllAt or stream the file",
                 .{ entry.path, line },
             );
             try failures.append(testing.allocator, msg);

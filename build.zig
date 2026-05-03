@@ -166,9 +166,9 @@ pub fn build(b: *std.Build) void {
         "tests/install_execute_test.zig",
         "tests/install_ambiguity_test.zig",
         "tests/install_idempotent_test.zig",
-        "tests/fs_compat_stream_test.zig",
-        "tests/fs_compat_lint_test.zig",
-        "tests/fs_compat_primitives_test.zig",
+        "tests/no_readall_in_loop_test.zig",
+        "tests/test_io_primitives_test.zig",
+        "tests/no_io_mod_in_src_test.zig",
         "tests/ui_color_theme_test.zig",
         "tests/install_local_test.zig",
         "tests/cask_extra_test.zig",
@@ -273,6 +273,15 @@ pub fn build(b: *std.Build) void {
     });
     test_bin_step.dependOn(&install_lib_tests.step);
 
+    // Shared test-only helpers — single module imported by every integration test.
+    const test_io_mod = b.createModule(.{
+        .root_source_file = b.path("tests/test_io.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    test_io_mod.addImport("malt", malt_lib);
+
     @setEvalBranchQuota(16000);
     inline for (test_modules) |test_file| {
         // e.g. "tests/formula_test.zig" → "formula_test" (so each test binary
@@ -293,6 +302,7 @@ pub fn build(b: *std.Build) void {
         t.root_module.addIncludePath(b.path("c/"));
         t.root_module.addOptions("version_string", version_options);
         t.root_module.addImport("malt", malt_lib);
+        t.root_module.addImport("test_io", test_io_mod);
 
         const run_t = b.addRunArtifact(t);
         test_step.dependOn(&run_t.step);

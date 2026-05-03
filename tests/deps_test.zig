@@ -4,6 +4,7 @@
 const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
+const test_io = @import("test_io");
 const formula_mod = malt.formula;
 const deps_mod = malt.deps;
 const sqlite = malt.sqlite;
@@ -56,7 +57,7 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_deps_test_" ++ tag;
-        malt.fs_compat.makeDirAbsolute(dir) catch {};
+        test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
         var buf: [256]u8 = undefined;
         const path = try std.fmt.bufPrintSentinel(&buf, "{s}/test.db", .{dir}, 0);
         var db = try sqlite.Database.open(path);
@@ -67,7 +68,7 @@ const TempDb = struct {
 
     fn deinit(self: *TempDb) void {
         self.db.close();
-        malt.fs_compat.deleteTreeAbsolute(self.dir) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.dir) catch {};
     }
 };
 
@@ -212,27 +213,27 @@ const TempCacheDir = struct {
 
     fn init(comptime tag: []const u8) !TempCacheDir {
         const p = "/tmp/malt_deps_cache_" ++ tag;
-        malt.fs_compat.deleteTreeAbsolute(p) catch {};
-        try malt.fs_compat.makeDirAbsolute(p);
+        test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
+        try test_io.makeDirAbsolute(std.Options.debug_io, p);
         return .{ .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
-        malt.fs_compat.deleteTreeAbsolute(self.path) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
     }
 
     fn writeFormula(self: *TempCacheDir, name: []const u8, json: []const u8) !void {
         var api_buf: [512]u8 = undefined;
         const api_dir = try std.fmt.bufPrint(&api_buf, "{s}/api", .{self.path});
-        malt.fs_compat.makeDirAbsolute(api_dir) catch |e| switch (e) {
+        test_io.makeDirAbsolute(std.Options.debug_io, api_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
         const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_{s}.json", .{ self.path, name });
-        const f = try malt.fs_compat.cwd().createFile(full, .{});
-        defer f.close();
-        try f.writeAll(json);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, full, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, json);
     }
 };
 
@@ -256,9 +257,9 @@ test "resolve walks a small BFS dep graph and dedups via visited" {
     try dir.writeFormula("beta", "{\"name\":\"beta\",\"dependencies\":[]}");
     try dir.writeFormula("gamma", "{\"name\":\"gamma\",\"dependencies\":[\"beta\"]}");
 
-    var http = client_mod.HttpClient.init(alloc);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
 
     var tdb = try TempDb.init("resolve_bfs");
     defer tdb.deinit();
@@ -266,7 +267,7 @@ test "resolve walks a small BFS dep graph and dedups via visited" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db, &cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "alpha", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     // Expect both beta and gamma to appear, in BFS order.
@@ -289,9 +290,9 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
     try dir.writeFormula("beta", "{\"name\":\"beta\",\"dependencies\":[\"gamma\"]}");
     try dir.writeFormula("gamma", "{\"name\":\"gamma\",\"dependencies\":[]}");
 
-    var http = client_mod.HttpClient.init(alloc);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
 
     var tdb = try TempDb.init("resolve_installed");
     defer tdb.deinit();
@@ -302,13 +303,13 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
     // present and short-circuits before walking gamma.
     const beta_cellar = try std.fmt.allocPrint(alloc, "{s}/Cellar/beta/1.0", .{tdb.dir});
     defer alloc.free(beta_cellar);
-    try malt.fs_compat.cwd().makePath(beta_cellar);
+    try test_io.cwd().createDirPath(std.Options.debug_io, beta_cellar);
     const opt_parent = try std.fmt.allocPrint(alloc, "{s}/opt", .{tdb.dir});
     defer alloc.free(opt_parent);
-    try malt.fs_compat.cwd().makePath(opt_parent);
-    var opt_dir = try malt.fs_compat.openDirAbsolute(opt_parent, .{});
-    defer opt_dir.close();
-    try opt_dir.symLink(beta_cellar, "beta", .{});
+    try test_io.cwd().createDirPath(std.Options.debug_io, opt_parent);
+    var opt_dir = try test_io.openDirAbsolute(std.Options.debug_io, opt_parent, .{});
+    defer opt_dir.close(std.Options.debug_io);
+    try opt_dir.symLink(std.Options.debug_io, beta_cellar, "beta", .{});
 
     _ = try insertKegWithCellar(&tdb.db, "beta", "dependency", beta_cellar);
 
@@ -320,7 +321,7 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db, &cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "alpha", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -338,15 +339,15 @@ test "resolve returns empty when root formula JSON is missing from cache" {
     // touching the network.
     var api_dir_buf: [512]u8 = undefined;
     const api_dir = try std.fmt.bufPrint(&api_dir_buf, "{s}/api", .{dir.path});
-    try malt.fs_compat.makeDirAbsolute(api_dir);
+    try test_io.makeDirAbsolute(std.Options.debug_io, api_dir);
     var marker_buf: [512]u8 = undefined;
     const marker = try std.fmt.bufPrint(&marker_buf, "{s}/api/formula_nope.404", .{dir.path});
-    const f = try malt.fs_compat.cwd().createFile(marker, .{});
-    f.close();
+    const f = try test_io.cwd().createFile(std.Options.debug_io, marker, .{});
+    f.close(std.Options.debug_io);
 
-    var http = client_mod.HttpClient.init(alloc);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
 
     var tdb = try TempDb.init("resolve_missing_root");
     defer tdb.deinit();
@@ -356,7 +357,7 @@ test "resolve returns empty when root formula JSON is missing from cache" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "nope", &api, &tdb.db, &cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "nope", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
     try testing.expectEqual(@as(usize, 0), result.len);
 }
@@ -373,12 +374,12 @@ test "resolve handles a dep whose sub-fetch fails by falling through" {
     try dir.writeFormula("alpha", "{\"name\":\"alpha\",\"dependencies\":[\"missing\"]}");
     var marker_buf: [512]u8 = undefined;
     const marker = try std.fmt.bufPrint(&marker_buf, "{s}/api/formula_missing.404", .{dir.path});
-    const f = try malt.fs_compat.cwd().createFile(marker, .{});
-    f.close();
+    const f = try test_io.cwd().createFile(std.Options.debug_io, marker, .{});
+    f.close(std.Options.debug_io);
 
-    var http = client_mod.HttpClient.init(alloc);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
 
     var tdb = try TempDb.init("resolve_dep_missing");
     defer tdb.deinit();
@@ -386,7 +387,7 @@ test "resolve handles a dep whose sub-fetch fails by falling through" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db, &cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "alpha", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -408,9 +409,9 @@ test "resolve treats a DB keg with a vanished cellar_path as not-installed" {
     try dir.writeFormula("alpha", "{\"name\":\"alpha\",\"dependencies\":[\"beta\"]}");
     try dir.writeFormula("beta", "{\"name\":\"beta\",\"dependencies\":[]}");
 
-    var http = client_mod.HttpClient.init(alloc);
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer http.deinit();
-    var api = api_mod.BrewApi.init(alloc, &http, dir.path);
+    var api = api_mod.BrewApi.init(std.Options.debug_io, alloc, &http, dir.path);
 
     var tdb = try TempDb.init("resolve_missing_cellar");
     defer tdb.deinit();
@@ -420,7 +421,7 @@ test "resolve treats a DB keg with a vanished cellar_path as not-installed" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(alloc, "alpha", &api, &tdb.db, &cache);
+    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "alpha", &api, &tdb.db, &cache);
     defer freeResolved(alloc, result);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -435,9 +436,9 @@ const TempPrefix = struct {
 
     fn init(comptime tag: []const u8) !TempPrefix {
         const root = "/tmp/malt_opt_link_" ++ tag;
-        malt.fs_compat.deleteTreeAbsolute(root) catch {};
-        try malt.fs_compat.makeDirAbsolute(root);
-        errdefer malt.fs_compat.deleteTreeAbsolute(root) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+        try test_io.makeDirAbsolute(std.Options.debug_io, root);
+        errdefer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
 
         var db_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintSentinel(&db_buf, "{s}/malt.db", .{root}, 0);
@@ -449,25 +450,25 @@ const TempPrefix = struct {
 
     fn deinit(self: *TempPrefix) void {
         self.db.close();
-        malt.fs_compat.deleteTreeAbsolute(self.root) catch {};
+        test_io.deleteTreeAbsolute(std.Options.debug_io, self.root) catch {};
     }
 
     fn cellarFor(self: *const TempPrefix, name: []const u8, version: []const u8) ![]const u8 {
         var cellar_root_buf: [512]u8 = undefined;
         const cellar_root = try std.fmt.bufPrint(&cellar_root_buf, "{s}/Cellar", .{self.root});
-        malt.fs_compat.makeDirAbsolute(cellar_root) catch |e| switch (e) {
+        test_io.makeDirAbsolute(std.Options.debug_io, cellar_root) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var name_buf: [512]u8 = undefined;
         const name_dir = try std.fmt.bufPrint(&name_buf, "{s}/{s}", .{ cellar_root, name });
-        malt.fs_compat.makeDirAbsolute(name_dir) catch |e| switch (e) {
+        test_io.makeDirAbsolute(std.Options.debug_io, name_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
         var path_buf: [512]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ name_dir, version });
-        malt.fs_compat.makeDirAbsolute(path) catch |e| switch (e) {
+        test_io.makeDirAbsolute(std.Options.debug_io, path) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
@@ -477,7 +478,7 @@ const TempPrefix = struct {
     fn readOptLink(self: *const TempPrefix, name: []const u8, buf: []u8) ![]u8 {
         var path_buf: [512]u8 = undefined;
         const opt_path = try std.fmt.bufPrint(&path_buf, "{s}/opt/{s}", .{ self.root, name });
-        return malt.fs_compat.readLinkAbsolute(opt_path, buf);
+        return test_io.readLinkAbsolute(std.Options.debug_io, opt_path, buf);
     }
 };
 
@@ -493,7 +494,7 @@ test "ensureOptLink recreates a missing opt/<name> symlink" {
     var miss_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, p.readOptLink("zstd", &miss_buf));
 
-    deps_mod.ensureOptLink(&p.db, p.root, "zstd");
+    deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "zstd");
 
     var got_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target = try p.readOptLink("zstd", &got_buf);
@@ -508,8 +509,8 @@ test "ensureOptLink is idempotent when the symlink is already correct" {
     defer testing.allocator.free(cellar);
     _ = try insertKegWithCellar(&p.db, "zstd", "dependency", cellar);
 
-    deps_mod.ensureOptLink(&p.db, p.root, "zstd"); // first call creates
-    deps_mod.ensureOptLink(&p.db, p.root, "zstd"); // second call must be a no-op
+    deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "zstd"); // first call creates
+    deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "zstd"); // second call must be a no-op
 
     var got_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target = try p.readOptLink("zstd", &got_buf);
@@ -523,17 +524,17 @@ test "ensureOptLink replaces a stale symlink pointing at an old cellar" {
     // Pre-create a symlink to an OLD cellar path that the DB no longer knows.
     var opt_parent_buf: [512]u8 = undefined;
     const opt_parent = try std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{p.root});
-    try malt.fs_compat.makeDirAbsolute(opt_parent);
-    var dir = try malt.fs_compat.openDirAbsolute(opt_parent, .{});
-    defer dir.close();
-    try dir.symLink("/tmp/malt_stale_old_zstd", "zstd", .{});
+    try test_io.makeDirAbsolute(std.Options.debug_io, opt_parent);
+    var dir = try test_io.openDirAbsolute(std.Options.debug_io, opt_parent, .{});
+    defer dir.close(std.Options.debug_io);
+    try dir.symLink(std.Options.debug_io, "/tmp/malt_stale_old_zstd", "zstd", .{});
 
     // DB points at the CURRENT cellar path.
     const cellar = try p.cellarFor("zstd", "1.5.7");
     defer testing.allocator.free(cellar);
     _ = try insertKegWithCellar(&p.db, "zstd", "dependency", cellar);
 
-    deps_mod.ensureOptLink(&p.db, p.root, "zstd");
+    deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "zstd");
 
     var got_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target = try p.readOptLink("zstd", &got_buf);
@@ -545,7 +546,7 @@ test "ensureOptLink silently skips names the DB does not know" {
     defer p.deinit();
 
     // No DB row for 'ghost' → ensureOptLink must be a no-op, not panic.
-    deps_mod.ensureOptLink(&p.db, p.root, "ghost");
+    deps_mod.ensureOptLink(std.Options.debug_io, &p.db, p.root, "ghost");
 
     var miss_buf: [std.fs.max_path_bytes]u8 = undefined;
     try testing.expectError(error.FileNotFound, p.readOptLink("ghost", &miss_buf));
