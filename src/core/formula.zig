@@ -368,3 +368,52 @@ pub fn resolveAlias(allocator: std.mem.Allocator, name: []const u8, json_data: [
 
     return null;
 }
+
+/// Inverse of `pkgVersion`. Returns the upstream version slice (borrowed
+/// from `label`) and the trailing revision integer. Anything that isn't
+/// a strict `<…>_<digits>` suffix is treated as part of the version
+/// (e.g. Homebrew-style `0.1.0_p1`), so the round-trip
+/// `pkgVersion(parsePkgVersion(s)) == s` only holds for labels this
+/// tool actually emits.
+pub const ParsedPkgVersion = struct { version: []const u8, revision: i64 };
+
+pub fn parsePkgVersion(label: []const u8) ParsedPkgVersion {
+    const us = std.mem.lastIndexOfScalar(u8, label, '_') orelse
+        return .{ .version = label, .revision = 0 };
+    const tail = label[us + 1 ..];
+    if (tail.len == 0) return .{ .version = label, .revision = 0 };
+    const rev = std.fmt.parseInt(i64, tail, 10) catch
+        return .{ .version = label, .revision = 0 };
+    if (rev < 0) return .{ .version = label, .revision = 0 };
+    return .{ .version = label[0..us], .revision = rev };
+}
+
+const testing = std.testing;
+
+test "parsePkgVersion splits revision suffix" {
+    const r = parsePkgVersion("1.9.2_2");
+    try testing.expectEqualStrings("1.9.2", r.version);
+    try testing.expectEqual(@as(i64, 2), r.revision);
+}
+
+test "parsePkgVersion treats no-suffix as revision zero" {
+    const r = parsePkgVersion("1.0.0");
+    try testing.expectEqualStrings("1.0.0", r.version);
+    try testing.expectEqual(@as(i64, 0), r.revision);
+}
+
+test "parsePkgVersion preserves non-numeric underscore tails" {
+    // Homebrew patch-level versions like `0.1.0_p1` are part of the
+    // upstream version, not a revision bump.
+    const r = parsePkgVersion("0.1.0_p1");
+    try testing.expectEqualStrings("0.1.0_p1", r.version);
+    try testing.expectEqual(@as(i64, 0), r.revision);
+}
+
+test "parsePkgVersion round-trips with pkgVersion" {
+    var buf: [64]u8 = undefined;
+    const formatted = try pkgVersion(&buf, "3.14.4", 1);
+    const r = parsePkgVersion(formatted);
+    try testing.expectEqualStrings("3.14.4", r.version);
+    try testing.expectEqual(@as(i64, 1), r.revision);
+}
