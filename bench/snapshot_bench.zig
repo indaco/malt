@@ -10,10 +10,9 @@
 const std = @import("std");
 const malt = @import("malt");
 const outdated = malt.cli_outdated;
-const fs_compat = malt.fs_compat;
 
 fn nowNs() u64 {
-    return @intCast(fs_compat.nanoTimestamp());
+    return @intCast(std.Io.Clock.real.now(std.Options.debug_io).toNanoseconds());
 }
 
 /// Realistic upper bound for an active developer machine.
