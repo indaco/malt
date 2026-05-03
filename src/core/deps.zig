@@ -426,7 +426,8 @@ fn seedKegOnDisk(prefix: []const u8, name: []const u8, db: *sqlite.Database) ![]
     try fs_compat.cwd().makePath(cellar_path);
 
     var sql_buf: [512]u8 = undefined;
-    const sql = try std.fmt.bufPrintZ(&sql_buf,
+    const sql = try std.fmt.bufPrintZ(
+        &sql_buf,
         "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('{s}', '{s}', '1.0', 'sha', '{s}');",
         .{ name, name, cellar_path },
     );
