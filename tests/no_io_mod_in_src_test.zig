@@ -1,5 +1,6 @@
-//! Pin test: src/ contains no `fs_compat` references and no `ui/io.zig`
-//! imports. The retired test-shape modules must stay retired.
+//! Pin test: production-shaped trees (src/, bench/) contain no
+//! `fs_compat` references and no `ui/io.zig` imports. The retired
+//! test-shape modules must stay retired.
 
 const std = @import("std");
 const testing = std.testing;
@@ -13,19 +14,33 @@ const forbidden_substrings = [_][]const u8{
     "@import(\"ui/io.zig\")",
 };
 
-test "src/ contains no references to retired test-shape modules" {
-    const io = std.Options.debug_io;
-    var dir = try test_io.cwd().openDir(io, "src", .{ .iterate = true });
-    defer dir.close(io);
+const scanned_roots = [_][]const u8{ "src", "bench" };
 
-    var walker = try dir.walk(testing.allocator);
-    defer walker.deinit();
+test "production trees contain no references to retired test-shape modules" {
+    const io = std.Options.debug_io;
 
     var failures: std.ArrayList([]const u8) = .empty;
     defer {
         for (failures.items) |s| testing.allocator.free(s);
         failures.deinit(testing.allocator);
     }
+
+    for (scanned_roots) |root| {
+        try scanRoot(io, root, &failures);
+    }
+
+    if (failures.items.len != 0) {
+        for (failures.items) |f| std.debug.print("{s}\n", .{f});
+        return error.ForbiddenSubstringFound;
+    }
+}
+
+fn scanRoot(io: std.Io, root: []const u8, failures: *std.ArrayList([]const u8)) !void {
+    var dir = try test_io.cwd().openDir(io, root, .{ .iterate = true });
+    defer dir.close(io);
+
+    var walker = try dir.walk(testing.allocator);
+    defer walker.deinit();
 
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
@@ -42,16 +57,11 @@ test "src/ contains no references to retired test-shape modules" {
             if (std.mem.indexOf(u8, content, needle)) |_| {
                 const msg = try std.fmt.allocPrint(
                     testing.allocator,
-                    "src/{s} contains forbidden substring \"{s}\"",
-                    .{ entry.path, needle },
+                    "{s}/{s} contains forbidden substring \"{s}\"",
+                    .{ root, entry.path, needle },
                 );
                 try failures.append(testing.allocator, msg);
             }
         }
-    }
-
-    if (failures.items.len != 0) {
-        for (failures.items) |f| std.debug.print("{s}\n", .{f});
-        return error.ForbiddenSubstringFound;
     }
 }
