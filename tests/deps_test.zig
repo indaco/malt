@@ -15,6 +15,11 @@ fn testArena() std.heap.ArenaAllocator {
     return std.heap.ArenaAllocator.init(testing.allocator);
 }
 
+const c_env = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+};
+
 test "formula dependencies parsed from JSON" {
     var arena = testArena();
     defer arena.deinit();
@@ -290,7 +295,27 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
 
     var tdb = try TempDb.init("resolve_installed");
     defer tdb.deinit();
-    _ = try insertKeg(&tdb.db, "beta", "dependency");
+
+    // `isInstalled` enforces both Cellar/<keg> and opt/<name> on disk —
+    // the realistic shape of a healthy install. Plant both before
+    // pointing MALT_PREFIX at the sandbox so the resolver sees beta as
+    // present and short-circuits before walking gamma.
+    const beta_cellar = try std.fmt.allocPrint(alloc, "{s}/Cellar/beta/1.0", .{tdb.dir});
+    defer alloc.free(beta_cellar);
+    try malt.fs_compat.cwd().makePath(beta_cellar);
+    const opt_parent = try std.fmt.allocPrint(alloc, "{s}/opt", .{tdb.dir});
+    defer alloc.free(opt_parent);
+    try malt.fs_compat.cwd().makePath(opt_parent);
+    var opt_dir = try malt.fs_compat.openDirAbsolute(opt_parent, .{});
+    defer opt_dir.close();
+    try opt_dir.symLink(beta_cellar, "beta", .{});
+
+    _ = try insertKegWithCellar(&tdb.db, "beta", "dependency", beta_cellar);
+
+    const prefix_z = try std.fmt.allocPrintSentinel(alloc, "{s}", .{tdb.dir}, 0);
+    defer alloc.free(prefix_z);
+    _ = c_env.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer _ = c_env.unsetenv("MALT_PREFIX");
 
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
