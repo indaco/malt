@@ -28,6 +28,7 @@ pub const PrefixError = args_mod.PrefixError;
 pub const checkPrefixSane = args_mod.checkPrefixSane;
 pub const isTapFormula = args_mod.isTapFormula;
 pub const isLocalFormulaPath = args_mod.isLocalFormulaPath;
+pub const isSelfInstall = args_mod.isSelfInstall;
 pub const parseTapName = args_mod.parseTapName;
 pub const isAllowedArchiveUrl = args_mod.isAllowedArchiveUrl;
 pub const interpolateVersion = args_mod.interpolateVersion;
@@ -219,6 +220,17 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (packages.items.len == 0) {
         output.err("No package names specified", .{});
         return InstallError.NoPackages;
+    }
+
+    // Refuse self-install in every shape the dispatcher accepts.
+    // `mt version update` is the supported upgrade channel; letting
+    // install proceed would relink `<prefix>/bin/malt` outside its
+    // rev/origin tracking.
+    for (packages.items) |pkg| {
+        if (isSelfInstall(pkg)) {
+            output.err("Refusing to install malt itself ('{s}'). Use 'mt version update' to upgrade.", .{pkg});
+            return error.Aborted;
+        }
     }
 
     // Bare `--use-system-ruby` only valid for a single formula; otherwise

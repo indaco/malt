@@ -63,6 +63,32 @@ test "parseGhcrUrl returns null for non-GHCR and malformed URLs" {
     try testing.expect(install.parseGhcrUrl("") == null);
 }
 
+test "isSelfInstall catches every shape that would relink malt" {
+    // bare names
+    try testing.expect(install.isSelfInstall("malt"));
+    try testing.expect(install.isSelfInstall("mt"));
+    // tap slugs
+    try testing.expect(install.isSelfInstall("indaco/tap/malt"));
+    try testing.expect(install.isSelfInstall("indaco/homebrew-tap/mt"));
+    // local .rb paths (relative, absolute, tilde)
+    try testing.expect(install.isSelfInstall("./malt.rb"));
+    try testing.expect(install.isSelfInstall("/tmp/malt.rb"));
+    try testing.expect(install.isSelfInstall("~/f/mt.rb"));
+}
+
+test "isSelfInstall lets unrelated names through" {
+    try testing.expect(!install.isSelfInstall("wget"));
+    try testing.expect(!install.isSelfInstall("homebrew/core/wget"));
+    try testing.expect(!install.isSelfInstall("./wget.rb"));
+    // Substring matches must not trip the guard.
+    try testing.expect(!install.isSelfInstall("malted"));
+    try testing.expect(!install.isSelfInstall("mtr"));
+    try testing.expect(!install.isSelfInstall("user/tap/malted"));
+    // Empty and slash-only inputs.
+    try testing.expect(!install.isSelfInstall(""));
+    try testing.expect(!install.isSelfInstall("/"));
+}
+
 test "isTapFormula recognises the 'user/repo/formula' shape" {
     try testing.expect(install.isTapFormula("homebrew/core/wget"));
     try testing.expect(install.isTapFormula("user/tap/myformula"));
