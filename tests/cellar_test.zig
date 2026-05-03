@@ -134,6 +134,61 @@ test "materialize handles version with revision suffix" {
     try testing.expect(!nested_exists);
 }
 
+test "materialize replaces a pre-existing Cellar/{name}/{version} directory (gh#85)" {
+    // Regression: clonefile(2) refuses to write into an existing directory
+    // (EEXIST), so a leftover keg from a SIGKILLed prior run, a partial
+    // warm-path failure, or a drop-in Homebrew prefix would surface as
+    // "CloneFailed (APFS clonefile or copy failed)" on every retry. The
+    // cold path now wipes cellar_path before the clone, mirroring the
+    // warm path's existing pre-wipe.
+    const prefix = try createTestDir(testing.allocator);
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+
+    try setupMaltDirs(testing.allocator, prefix);
+    try createBottleFixture(testing.allocator, prefix, "stale123", "lld@21", "21.1.8_1");
+
+    // Plant a stale keg at the exact destination malt is about to write.
+    const stale_keg = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/Cellar/lld@21/21.1.8_1",
+        .{prefix},
+    );
+    defer testing.allocator.free(stale_keg);
+    try test_io.cwd().createDirPath(std.Options.debug_io, stale_keg);
+    const stale_file = try std.fmt.allocPrint(testing.allocator, "{s}/STALE_FILE", .{stale_keg});
+    defer testing.allocator.free(stale_file);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, stale_file, .{});
+        try f.writeStreamingAll(std.Options.debug_io, "stale\n");
+        f.close(std.Options.debug_io);
+    }
+
+    const old_env = setMaltPrefix(prefix);
+    defer restoreMaltPrefix(old_env);
+
+    const keg = try cellar_mod.materializeWithCellar(
+        std.Options.debug_io,
+        testing.allocator,
+        prefix,
+        "stale123",
+        "lld@21",
+        "21.1.8_1",
+        ":any",
+    );
+    defer testing.allocator.free(keg.path);
+
+    // STALE_FILE must be gone: the cold path wiped the dir before clonefile.
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(std.Options.debug_io, stale_file, .{}));
+
+    // Fresh content from the bottle is in place.
+    var bin_buf: [512]u8 = undefined;
+    const bin_path = try std.fmt.bufPrint(&bin_buf, "{s}/bin/hello", .{keg.path});
+    try test_io.accessAbsolute(std.Options.debug_io, bin_path, .{});
+}
+
 test "materialize handles exact version match (no revision)" {
     const prefix = try createTestDir(testing.allocator);
     defer {

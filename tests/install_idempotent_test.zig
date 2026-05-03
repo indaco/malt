@@ -28,43 +28,6 @@ fn seedCellarKeg(prefix: []const u8, name: []const u8, version: []const u8) !voi
     try test_io.cwd().createDirPath(std.Options.debug_io, dir);
 }
 
-/// Drop a zero-byte 404 marker into the API cache so a subsequent
-/// `BrewApi` lookup short-circuits with `NotFound` without opening a
-/// network connection.
-fn seedNotFound(prefix: []const u8, key: []const u8) !void {
-    const api_dir = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
-    defer testing.allocator.free(api_dir);
-    try test_io.cwd().createDirPath(std.Options.debug_io, api_dir);
-    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/{s}.404", .{ api_dir, key });
-    defer testing.allocator.free(marker);
-    const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, marker, .{});
-    f.close(std.Options.debug_io);
-}
-
-/// Redirect fd 2 to /dev/null and return a saved dup. Subprocess stderr
-/// (e.g. `ditto` complaining about a deliberately-broken cask path)
-/// bypasses `io_mod.beginStderrCapture` since that only catches Zig
-/// writes — silencing fd 2 itself is the only way to keep `just coverage`
-/// output tidy.
-fn silenceStderr() std.c.fd_t {
-    const saved = std.c.dup(2);
-    if (saved < 0) return -1;
-    const dn = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
-    if (dn < 0) {
-        _ = std.c.close(saved);
-        return -1;
-    }
-    _ = std.c.dup2(dn, 2);
-    _ = std.c.close(dn);
-    return saved;
-}
-
-fn restoreStderr(saved: std.c.fd_t) void {
-    if (saved < 0) return;
-    _ = std.c.dup2(saved, 2);
-    _ = std.c.close(saved);
-}
-
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const path = try std.fmt.allocPrintSentinel(
         testing.allocator,
@@ -151,30 +114,20 @@ test "execute falls through when one of several args is missing from the Cellar"
         _ = c.unsetenv("MALT_PREFIX");
     }
 
-    try seedCellarKeg(prefix, "alpha", "1.0");
-    // Pre-seed 404 markers for every API key the fall-through pipeline
-    // touches; with both args resolving from the cache, no TCP connect
-    // is attempted and we sidestep the intermittent BADF abort inside
-    // `Io.Threaded.posixConnect` when group-cancellation closes the
-    // socket fd between `socket(2)` and `connect(2)`.
-    try seedNotFound(prefix, "formula_alpha");
-    try seedNotFound(prefix, "cask_alpha");
-    try seedNotFound(prefix, "formula_missing");
-    try seedNotFound(prefix, "cask_missing");
+    // Uppercase names fail api.validateName synchronously — keeps the
+    // fall-through pipeline off the network. "alpha" is a real Homebrew
+    // cask, so the prior fixture downloaded Alpha.app and crashed.
+    try seedCellarKeg(prefix, "ALPHA_FIXTURE", "1.0");
 
     const db_file = try std.fmt.allocPrint(testing.allocator, "{s}/db/malt.db", .{prefix});
     defer testing.allocator.free(db_file);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    // The fall-through pipeline reaches a deliberately-broken cask
-    // extract; ditto writes its complaint straight to fd 2 — gate it.
-    const saved_stderr = silenceStderr();
-    defer restoreStderr(saved_stderr);
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
-    install.execute(&ctx, arena.allocator(), &.{ "--quiet", "alpha", "missing" }) catch {};
+    install.execute(&ctx, arena.allocator(), &.{ "--quiet", "ALPHA_FIXTURE", "MISSING_FIXTURE" }) catch {};
 
     try testing.expect(pathExists(db_file));
 }

@@ -104,6 +104,7 @@ pub fn migrate(db: *sqlite.Database) sqlite.SqliteError!void {
     if (ver < 2) try migrateV1toV2(db);
     if (ver < 3) try migrateV2toV3(db);
     if (ver < 4) try migrateV3toV4(db);
+    if (ver < 5) try migrateV4toV5(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -205,6 +206,82 @@ fn migrateV3toV4(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
+/// v5 — broaden the kegs UNIQUE from `(name, version)` to
+/// `(name, version, revision)` so a Homebrew revision-bump upgrade
+/// (`1.9.2` → `1.9.2_2`) can transiently coexist with the old row
+/// during `recordKeg`'s "INSERT new, then DELETE old" sequence.
+/// SQLite has no `ALTER TABLE DROP CONSTRAINT`, so the table is
+/// rebuilt per the official recipe.
+fn migrateV4toV5(db: *sqlite.Database) sqlite.SqliteError!void {
+    // Substring-probe the stored CREATE statement: cheaper than a
+    // structural scan, and unique to v5 since this migration is the
+    // only writer of the new UNIQUE shape.
+    var already_migrated = false;
+    {
+        var stmt = try db.prepare(
+            \\SELECT sql FROM sqlite_master
+            \\WHERE type='table' AND name='kegs';
+        );
+        defer stmt.finalize();
+        if (try stmt.step()) {
+            const sql_ptr = stmt.columnText(0) orelse "";
+            const sql = std.mem.sliceTo(sql_ptr, 0);
+            if (std.mem.indexOf(u8, sql, "UNIQUE(name, version, revision)") != null) {
+                already_migrated = true;
+            }
+        }
+    }
+
+    if (already_migrated) {
+        // Schema is current; just bump the version marker for fixtures
+        // that pre-applied the table then reset schema_version.
+        try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (5);");
+        return;
+    }
+
+    // FK toggle must live outside any transaction. Disabling lets us
+    // DROP `kegs` without tripping `dependencies.keg_id` / `links.keg_id`;
+    // the RENAME then rewrites those references at the new table.
+    try db.exec("PRAGMA foreign_keys=OFF;");
+    defer db.exec("PRAGMA foreign_keys=ON;") catch {};
+
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    try db.exec(
+        \\CREATE TABLE kegs_new (
+        \\    id            INTEGER PRIMARY KEY,
+        \\    name          TEXT NOT NULL,
+        \\    full_name     TEXT NOT NULL,
+        \\    version       TEXT NOT NULL,
+        \\    revision      INTEGER NOT NULL DEFAULT 0,
+        \\    tap           TEXT,
+        \\    store_sha256  TEXT NOT NULL,
+        \\    cellar_path   TEXT NOT NULL,
+        \\    installed_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        \\    pinned        INTEGER NOT NULL DEFAULT 0,
+        \\    install_reason TEXT NOT NULL DEFAULT 'direct',
+        \\    UNIQUE(name, version, revision)
+        \\);
+    );
+    try db.exec(
+        \\INSERT INTO kegs_new
+        \\    (id, name, full_name, version, revision, tap, store_sha256,
+        \\     cellar_path, installed_at, pinned, install_reason)
+        \\SELECT id, name, full_name, version, revision, tap, store_sha256,
+        \\       cellar_path, installed_at, pinned, install_reason
+        \\FROM kegs;
+    );
+    try db.exec("DROP TABLE kegs;");
+    try db.exec("ALTER TABLE kegs_new RENAME TO kegs;");
+    try db.exec("CREATE INDEX IF NOT EXISTS idx_kegs_name ON kegs(name);");
+    try db.exec("CREATE INDEX IF NOT EXISTS idx_kegs_store ON kegs(store_sha256);");
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (5);");
+
+    try db.commit();
+}
+
 /// Query the current schema version.
 pub fn currentVersion(db: *sqlite.Database) sqlite.SqliteError!i64 {
     var stmt = try db.prepare("SELECT MAX(version) FROM schema_version;");
@@ -214,4 +291,35 @@ pub fn currentVersion(db: *sqlite.Database) sqlite.SqliteError!i64 {
     if (!has_row) return 0;
 
     return stmt.columnInt(0);
+}
+
+const testing = std.testing;
+
+// Regression: a Homebrew revision-bump upgrade ("1.9.2" → "1.9.2_2")
+// transiently coexists with the old row inside upgradeFormula's
+// "INSERT new, DELETE old" sequence. The kegs UNIQUE shape must
+// permit that pair; only an exact (name, version, revision) duplicate
+// should violate.
+test "kegs UNIQUE permits same name+version across revisions" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES ('libgit2', 'libgit2', '1.9.2', 0, 'sha-old', '/c/libgit2/1.9.2');
+    );
+
+    // Same upstream version, bumped revision: must succeed.
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES ('libgit2', 'libgit2', '1.9.2', 2, 'sha-new', '/c/libgit2/1.9.2_2');
+    );
+
+    // Exact (name, version, revision) duplicate: still rejected.
+    const dup = db.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES ('libgit2', 'libgit2', '1.9.2', 2, 'sha-dup', '/c/libgit2/dup');
+    );
+    try testing.expectError(sqlite.SqliteError.ConstraintViolation, dup);
 }

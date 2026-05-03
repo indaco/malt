@@ -11,6 +11,24 @@ pub const panic = if (@import("builtin").mode == .Debug)
 else
     std.debug.simple_panic;
 
+// Gate `.debug` on the runtime --debug flag so release builds still
+// surface std.log.debug diagnostics in bug reports.
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = maltLogFn,
+};
+
+fn maltLogFn(
+    comptime level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime fmt: []const u8,
+    args: anytype,
+) void {
+    const output = @import("ui/output.zig");
+    if (level == .debug and !output.isDebug()) return;
+    std.log.defaultLog(level, scope, fmt, args);
+}
+
 /// Global interrupt flag — set by SIGINT handler, checked at install step boundaries.
 var interrupted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 

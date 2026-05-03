@@ -65,6 +65,12 @@ changelog:
 
 homebrew_casks:
   - name: malt
+    # The release workflow runs goreleaser with SKIP_CASK_UPLOAD=true so
+    # the .rb is rendered into dist/ but the tap push is deferred to a
+    # downstream job that runs *after* the pre-promote smoke validates
+    # the draft artifacts. The unset default is "false" so a local
+    # `goreleaser release --snapshot` still behaves normally.
+    skip_upload: '{{ envOrDefault "SKIP_CASK_UPLOAD" "false" }}'
     repository:
       owner: indaco
       name: homebrew-tap

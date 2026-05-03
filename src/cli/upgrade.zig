@@ -19,6 +19,7 @@ const linker_mod = @import("../core/linker.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
 const help = @import("help.zig");
 const pin_mod = @import("pin.zig");
+const install_mod = @import("install.zig");
 
 const UpgradeFlag = enum { quiet, cask, formula, dry_run, force, pinned };
 
@@ -241,6 +242,23 @@ fn upgradeFormula(
 
     output.info("Upgrading {s} {s} -> {s}...", .{ name, old_version, formula.pkg_version });
     output.emitNdjsonEvent(allocator, .resolved, name, null);
+
+    // Bottles bake LC_LOAD_DYLIB paths against their own dep set, so a
+    // dep introduced after the previously-installed version must be
+    // materialised before the new bottle relocates / links — otherwise
+    // dyld errors at first use (e.g. curl 8.20 added libngtcp2 that
+    // 8.19 did not have).
+    {
+        const missing = collectMissingDepNames(allocator, db, formula.dependencies) catch &.{};
+        defer if (missing.len > 0) allocator.free(missing);
+        if (missing.len > 0) {
+            output.info("Installing new dep(s) for {s} ({d})...", .{ name, missing.len });
+            install_mod.installAll(ctx, allocator, missing, .{}) catch {
+                output.err("Could not install new dep(s) for {s}", .{name});
+                return error.Aborted;
+            };
+        }
+    }
 
     // Step 3: Resolve bottle for new version
     const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
@@ -657,4 +675,64 @@ fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite
         for (failed_tokens.items) |token| output.err("  - {s}", .{token});
         return error.Aborted;
     }
+}
+
+/// Filter `dep_names` to those not yet recorded in `kegs`. Caller owns
+/// the outer slice; the entries borrow from `dep_names`.
+///
+/// This is the seam upgrade uses to catch transitive deps that the
+/// previously-installed bottle didn't have but the new bottle does
+/// (e.g. curl 8.20 introduces a runtime dep on libngtcp2 that wasn't
+/// part of curl 8.19's dep set).
+pub fn collectMissingDepNames(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    dep_names: []const []const u8,
+) ![][]const u8 {
+    var missing: std.ArrayList([]const u8) = .empty;
+    errdefer missing.deinit(allocator);
+
+    for (dep_names) |n| {
+        if (!isFormulaInstalled(db, n)) try missing.append(allocator, n);
+    }
+    return missing.toOwnedSlice(allocator);
+}
+
+const testing = std.testing;
+
+test "collectMissingDepNames returns deps absent from the DB" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES ('alpha', 'alpha', '1.0', 'sha-a', '/c/alpha/1.0');
+    );
+
+    const deps = [_][]const u8{ "alpha", "beta", "gamma" };
+    const missing = try collectMissingDepNames(testing.allocator, &db, &deps);
+    defer testing.allocator.free(missing);
+
+    try testing.expectEqual(@as(usize, 2), missing.len);
+    try testing.expectEqualStrings("beta", missing[0]);
+    try testing.expectEqualStrings("gamma", missing[1]);
+}
+
+test "collectMissingDepNames returns an empty slice when all deps are installed" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+        \\VALUES ('alpha', 'alpha', '1.0', 'sha-a', '/c/alpha/1.0'),
+        \\       ('beta',  'beta',  '1.0', 'sha-b', '/c/beta/1.0');
+    );
+
+    const deps = [_][]const u8{ "alpha", "beta" };
+    const missing = try collectMissingDepNames(testing.allocator, &db, &deps);
+    defer testing.allocator.free(missing);
+
+    try testing.expectEqual(@as(usize, 0), missing.len);
 }
