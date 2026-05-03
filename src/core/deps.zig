@@ -4,6 +4,7 @@ const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const api_mod = @import("../net/api.zig");
 const fs_compat = @import("../fs/compat.zig");
+const atomic = @import("../fs/atomic.zig");
 const formula_mod = @import("formula.zig");
 
 pub const DepError = error{
@@ -233,6 +234,16 @@ fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
     const cp_raw = stmt.columnText(0) orelse return false;
     const cellar_path = std.mem.sliceTo(cp_raw, 0);
     fs_compat.accessAbsolute(cellar_path, .{}) catch return false;
+
+    // …and the opt/<name> symlink resolves. Bottles bake the opt path
+    // into LC_LOAD_DYLIB, so a missing symlink leaves the keg unusable
+    // even when the Cellar entry is intact — and we'd skip queueing a
+    // re-link if we treated this state as "installed".
+    const prefix = atomic.maltPrefix();
+    var opt_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch return false;
+    fs_compat.accessAbsolute(opt_path, .{}) catch return false;
+
     return true;
 }
 
@@ -401,4 +412,90 @@ test "FormulaCache.entryCount tracks the live entry count" {
     try testing.expectEqual(@as(usize, 1), cache.entryCount());
     _ = try cache.getOrParse("b", testFormulaJson("b"));
     try testing.expectEqual(@as(usize, 2), cache.entryCount());
+}
+
+// --- isInstalled filesystem-presence guard --------------------------------
+
+const c_set = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+};
+
+fn seedKegOnDisk(prefix: []const u8, name: []const u8, db: *sqlite.Database) ![]const u8 {
+    const cellar_path = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/1.0", .{ prefix, name });
+    try fs_compat.cwd().makePath(cellar_path);
+
+    var sql_buf: [512]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(&sql_buf,
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('{s}', '{s}', '1.0', 'sha', '{s}');",
+        .{ name, name, cellar_path },
+    );
+    try db.exec(sql);
+    return cellar_path;
+}
+
+test "isInstalled returns false when opt symlink is missing" {
+    const schema_mod = @import("../db/schema.zig");
+
+    const prefix = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "/tmp/malt_deps_isinstalled_{d}",
+        .{fs_compat.nanoTimestamp()},
+        0,
+    );
+    defer testing.allocator.free(prefix);
+    fs_compat.deleteTreeAbsolute(prefix) catch {};
+    try fs_compat.cwd().makePath(prefix);
+    defer fs_compat.deleteTreeAbsolute(prefix) catch {};
+
+    _ = c_set.setenv("MALT_PREFIX", prefix.ptr, 1);
+    defer _ = c_set.unsetenv("MALT_PREFIX");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema_mod.initSchema(&db);
+
+    const cellar_path = try seedKegOnDisk(prefix, "alpha", &db);
+    defer testing.allocator.free(cellar_path);
+
+    // Cellar dir is on disk and the DB row is present, but the
+    // `<prefix>/opt/alpha` symlink that bottles bake into LC_LOAD_DYLIB
+    // entries was never created → keg is not actually usable.
+    try testing.expect(!isInstalled(&db, "alpha"));
+}
+
+test "isInstalled returns true when both cellar and opt link resolve" {
+    const schema_mod = @import("../db/schema.zig");
+
+    const prefix = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "/tmp/malt_deps_isinstalled_ok_{d}",
+        .{fs_compat.nanoTimestamp()},
+        0,
+    );
+    defer testing.allocator.free(prefix);
+    fs_compat.deleteTreeAbsolute(prefix) catch {};
+    try fs_compat.cwd().makePath(prefix);
+    defer fs_compat.deleteTreeAbsolute(prefix) catch {};
+
+    _ = c_set.setenv("MALT_PREFIX", prefix.ptr, 1);
+    defer _ = c_set.unsetenv("MALT_PREFIX");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema_mod.initSchema(&db);
+
+    const cellar_path = try seedKegOnDisk(prefix, "beta", &db);
+    defer testing.allocator.free(cellar_path);
+
+    // Plant the opt/<name> symlink so the on-disk shape matches a
+    // healthy install.
+    const opt_parent = try std.fmt.allocPrint(testing.allocator, "{s}/opt", .{prefix});
+    defer testing.allocator.free(opt_parent);
+    try fs_compat.cwd().makePath(opt_parent);
+    var parent_dir = try fs_compat.openDirAbsolute(opt_parent, .{});
+    defer parent_dir.close();
+    try parent_dir.symLink(cellar_path, "beta", .{});
+
+    try testing.expect(isInstalled(&db, "beta"));
 }
