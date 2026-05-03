@@ -12,6 +12,7 @@ const store_mod = @import("../core/store.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
+const formula_mod = @import("../core/formula.zig");
 
 /// `error.Aborted` is returned on every user-facing failure. The caller has
 /// already emitted a message via `output.err`; main.zig catches it and exits
@@ -43,7 +44,7 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Find current installed version
     var cur_stmt = db.prepare(
-        "SELECT id, version, store_sha256 FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
+        "SELECT id, version, revision, store_sha256 FROM kegs WHERE name = ?1 ORDER BY installed_at DESC LIMIT 1;",
     ) catch return error.Aborted;
     defer cur_stmt.finalize();
     cur_stmt.bindText(1, name) catch return error.Aborted;
@@ -56,6 +57,14 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const current_id = cur_stmt.columnInt(0);
     const current_ver_ptr = cur_stmt.columnText(1);
     const current_ver = if (current_ver_ptr) |v| std.mem.sliceTo(v, 0) else "unknown";
+    const current_revision = cur_stmt.columnInt(2);
+
+    // pkg_version is what the on-disk Cellar / store dir is named after,
+    // so the store-scan below must compare against this — not the bare
+    // upstream `version` — to correctly skip a current revision-bumped
+    // keg (e.g. version="1.9.2", revision=2 → label "1.9.2_2").
+    var current_pkgver_buf: [128]u8 = undefined;
+    const current_pkg_version = formula_mod.pkgVersion(&current_pkgver_buf, current_ver, current_revision) catch current_ver;
 
     // Look for other store entries that contain this formula
     // by scanning the store directory for entries that have {name}/ subdirectory
@@ -88,8 +97,9 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
         var keg_iter = keg_dir.iterate();
         while (keg_iter.next() catch null) |ver_entry| {
             if (ver_entry.kind != .directory) continue;
-            // Skip current version
-            if (std.mem.eql(u8, ver_entry.name, current_ver)) continue;
+            // Compare against the on-disk pkg_version label so a
+            // revision-bumped current keg is skipped correctly.
+            if (std.mem.eql(u8, ver_entry.name, current_pkg_version)) continue;
 
             const sha = allocator.dupe(u8, entry.name) catch continue;
             const ver = allocator.dupe(u8, ver_entry.name) catch continue;
@@ -148,33 +158,18 @@ pub fn execute(allocator: std.mem.Allocator, args: []const []const u8) !void {
     db.beginTransaction() catch return error.Aborted;
     errdefer db.rollback();
 
-    {
-        var del = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return error.Aborted;
-        defer del.finalize();
-        del.bindInt(1, current_id) catch return error.Aborted;
-        // Step failure inside the txn must trigger rollback, not a silent commit.
-        _ = del.step() catch return error.Aborted;
-    }
-
-    {
-        var ins = db.prepare(
-            "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason, pinned)" ++
-                " VALUES (?1, ?1, ?2, ?3, ?4, 'direct', ?5);",
-        ) catch return error.Aborted;
-        defer ins.finalize();
-        ins.bindText(1, name) catch return error.Aborted;
-        ins.bindText(2, target.version) catch return error.Aborted;
-        ins.bindText(3, target.sha256) catch return error.Aborted;
-        ins.bindText(4, keg.path) catch return error.Aborted;
-        ins.bindInt(5, @intFromBool(old_pinned)) catch return error.Aborted;
-        // Step failure inside the txn must trigger rollback, not a silent commit.
-        _ = ins.step() catch return error.Aborted;
-    }
-
-    // Get new keg_id for linking
-    var id_stmt = db.prepare("SELECT last_insert_rowid();") catch return error.Aborted;
-    defer id_stmt.finalize();
-    const keg_id = if (id_stmt.step() catch false) id_stmt.columnInt(0) else return error.Aborted;
+    // target.version carries the on-disk pkg_version label (the store
+    // dir name), so replaceKegRow can split it back into version +
+    // revision and persist the rolled-back keg's true revision.
+    const keg_id = replaceKegRow(
+        &db,
+        current_id,
+        name,
+        target.version,
+        target.sha256,
+        keg.path,
+        old_pinned,
+    ) catch return error.Aborted;
 
     // Link the old version
     linker.link(keg.path, name, keg_id) catch {
@@ -198,4 +193,113 @@ pub fn capturePinnedById(db: *sqlite.Database, keg_id: i64) bool {
     stmt.bindInt(1, keg_id) catch return false;
     if (!(stmt.step() catch false)) return false;
     return stmt.columnBool(0);
+}
+
+/// Swap the keg row identified by `old_keg_id` for a fresh row pointing
+/// at `pkg_version` (the on-disk label, e.g. "1.9.2_2"). Splits the
+/// label into `version` + `revision` so the new row reflects the
+/// rolled-back keg's true revision instead of silently writing 0.
+/// Returns the new keg row id. Caller owns the surrounding transaction.
+pub fn replaceKegRow(
+    db: *sqlite.Database,
+    old_keg_id: i64,
+    name: []const u8,
+    pkg_version: []const u8,
+    store_sha256: []const u8,
+    cellar_path: []const u8,
+    pinned: bool,
+) !i64 {
+    const parsed = formula_mod.parsePkgVersion(pkg_version);
+
+    {
+        var del = try db.prepare("DELETE FROM kegs WHERE id = ?1;");
+        defer del.finalize();
+        try del.bindInt(1, old_keg_id);
+        _ = try del.step();
+    }
+
+    {
+        var ins = try db.prepare(
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason, pinned)
+            \\VALUES (?1, ?1, ?2, ?3, ?4, ?5, 'direct', ?6);
+        );
+        defer ins.finalize();
+        try ins.bindText(1, name);
+        try ins.bindText(2, parsed.version);
+        try ins.bindInt(3, parsed.revision);
+        try ins.bindText(4, store_sha256);
+        try ins.bindText(5, cellar_path);
+        try ins.bindInt(6, @intFromBool(pinned));
+        _ = try ins.step();
+    }
+
+    var id_stmt = try db.prepare("SELECT last_insert_rowid();");
+    defer id_stmt.finalize();
+    if (!(try id_stmt.step())) return error.RecordFailed;
+    return id_stmt.columnInt(0);
+}
+
+const testing = std.testing;
+
+test "replaceKegRow splits pkg_version into version + revision" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // Current keg at revision=2; rollback target is revision=0 of same upstream version.
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, pinned)
+        \\VALUES ('libgit2', 'libgit2', '1.9.2', 2, 'sha-cur', '/c/libgit2/1.9.2_2', 1);
+    );
+    const old_id = blk: {
+        var s = try db.prepare("SELECT id FROM kegs WHERE name='libgit2';");
+        defer s.finalize();
+        _ = try s.step();
+        break :blk s.columnInt(0);
+    };
+
+    const new_id = try replaceKegRow(&db, old_id, "libgit2", "1.9.2", "sha-old", "/c/libgit2/1.9.2", true);
+
+    var stmt = try db.prepare("SELECT version, revision, pinned FROM kegs WHERE id = ?1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, new_id);
+    _ = try stmt.step();
+    const ver = stmt.columnText(0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("1.9.2", std.mem.sliceTo(ver, 0));
+    try testing.expectEqual(@as(i64, 0), stmt.columnInt(1));
+    try testing.expect(stmt.columnBool(2));
+}
+
+test "replaceKegRow recovers a non-zero revision from pkg_version" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES ('python@3.14', 'python@3.14', '3.14.4', 1, 'sha-cur', '/c/python@3.14/3.14.4_1');
+    );
+    const old_id = blk: {
+        var s = try db.prepare("SELECT id FROM kegs WHERE name='python@3.14';");
+        defer s.finalize();
+        _ = try s.step();
+        break :blk s.columnInt(0);
+    };
+
+    // Rolling back to an earlier revision-2 build.
+    const new_id = try replaceKegRow(&db, old_id, "python@3.14", "3.14.3_2", "sha-old", "/c/python@3.14/3.14.3_2", false);
+
+    var stmt = try db.prepare("SELECT version, revision FROM kegs WHERE id = ?1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, new_id);
+    _ = try stmt.step();
+    const ver = stmt.columnText(0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("3.14.3", std.mem.sliceTo(ver, 0));
+    try testing.expectEqual(@as(i64, 2), stmt.columnInt(1));
+
+    // Old row was deleted in the same swap.
+    var cnt = try db.prepare("SELECT COUNT(*) FROM kegs WHERE name='python@3.14';");
+    defer cnt.finalize();
+    _ = try cnt.step();
+    try testing.expectEqual(@as(i64, 1), cnt.columnInt(0));
 }
