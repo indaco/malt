@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.10.3 - 2026-05-03
+
+### 🩹 Fixes
+
+- **core/deps:** isInstalled also requires the opt/<name> symlink ([54d1ce9](https://github.com/indaco/malt/commit/54d1ce9)) ([#226](https://github.com/indaco/malt/pull/226))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.10.2 - 2026-05-03
 
 ### 🩹 Fixes
