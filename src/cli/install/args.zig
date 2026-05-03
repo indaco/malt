@@ -21,6 +21,16 @@ pub fn checkPrefixSane(prefix: []const u8) PrefixError!void {
     if (prefix.len > max_prefix_sane_len) return error.PrefixAbsurd;
 }
 
+/// True when `arg` resolves to malt itself in any dispatcher-accepted
+/// shape: `malt`/`mt`, `<user>/<repo>/malt`, or `*/malt.rb`. The last
+/// path segment (with optional `.rb` stripped) is matched against the
+/// binary names. `mt update` is the supported upgrade channel.
+pub fn isSelfInstall(arg: []const u8) bool {
+    const tail = if (std.mem.lastIndexOfScalar(u8, arg, '/')) |i| arg[i + 1 ..] else arg;
+    const stem = if (std.mem.endsWith(u8, tail, ".rb")) tail[0 .. tail.len - 3] else tail;
+    return std.mem.eql(u8, stem, "malt") or std.mem.eql(u8, stem, "mt");
+}
+
 /// Check if a package name is a tap formula (user/repo/formula format).
 pub fn isTapFormula(name: []const u8) bool {
     var slash_count: u32 = 0;
