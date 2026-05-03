@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.10.2 - 2026-05-03
+
+### 🩹 Fixes
+
+- **cli:** preserve revision on rollback + pull new transitive deps on upgrade ([a57ee2d](https://github.com/indaco/malt/commit/a57ee2d)) ([#224](https://github.com/indaco/malt/pull/224))
+- **db/schema:** broaden kegs UNIQUE to (name, version, revision) ([d3a08ab](https://github.com/indaco/malt/commit/d3a08ab)) ([#223](https://github.com/indaco/malt/pull/223))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.10.1 - 2026-05-02
 
 ### 🩹 Fixes
