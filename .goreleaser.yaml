@@ -18,13 +18,11 @@ builds:
 universal_binaries:
   - replace: true
     name_template: malt
-    # Drop the `mt` alias next to the universal binary so it ends up
-    # inside the release tarball. Matches what `zig build` produces,
-    # what install.sh creates via symlink, and what the homebrew_casks
-    # stanza below already declares.
+    # `mt` ships as a symlink to `malt` — relative target stays valid
+    # wherever the tarball is extracted. Matches `zig build` + install.sh.
     hooks:
       post:
-        - cmd: cp "{{ .Path }}" "{{ dir .Path }}/mt"
+        - cmd: ln -sfn malt "{{ dir .Path }}/mt"
 
 archives:
   - formats: ["tar.gz"]
@@ -85,7 +83,6 @@ homebrew_casks:
         install: |
           if OS.mac?
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/malt"]
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/mt"]
           end
 
 release:

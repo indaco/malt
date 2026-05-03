@@ -86,11 +86,14 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addIncludePath(b.path("vendor/"));
     exe.root_module.addIncludePath(b.path("c/"));
 
-    b.installArtifact(exe);
+    const malt_install = b.addInstallArtifact(exe, .{});
+    b.getInstallStep().dependOn(&malt_install.step);
 
-    // Install "mt" as a copy of "malt" so both names work out of the box
-    const mt_copy = b.addInstallBinFile(exe.getEmittedBin(), "mt");
-    b.getInstallStep().dependOn(&mt_copy.step);
+    // `mt` is a symlink to `malt` — half the disk, one binary to update.
+    const mt_symlink = b.addSystemCommand(&.{ "ln", "-sfn", "malt", "mt" });
+    mt_symlink.setCwd(.{ .cwd_relative = b.getInstallPath(.bin, "") });
+    mt_symlink.step.dependOn(&malt_install.step);
+    b.getInstallStep().dependOn(&mt_symlink.step);
 
     // --- Run step ---
     const run_cmd = b.addRunArtifact(exe);
@@ -374,9 +377,9 @@ pub fn build(b: *std.Build) void {
     const install_universal = b.addInstallBinFile(universal_output, "malt");
     universal_step.dependOn(&install_universal.step);
 
-    // Ship the `mt` alias alongside the universal binary so the
-    // release tarball contains both names — matches the default
-    // `zig build` install layout and what the README promises.
-    const install_universal_mt = b.addInstallBinFile(universal_output, "mt");
-    universal_step.dependOn(&install_universal_mt.step);
+    // Mirror the default install layout: `mt` is a symlink to `malt`.
+    const universal_mt_symlink = b.addSystemCommand(&.{ "ln", "-sfn", "malt", "mt" });
+    universal_mt_symlink.setCwd(.{ .cwd_relative = b.getInstallPath(.bin, "") });
+    universal_mt_symlink.step.dependOn(&install_universal.step);
+    universal_step.dependOn(&universal_mt_symlink.step);
 }

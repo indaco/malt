@@ -184,13 +184,8 @@ if [ -z "$LATEST" ]; then
   info "Installing to ${INSTALL_DIR}..."
   $SUDO install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/${BINARY}"
 
-  # `zig build` produces both `malt` and `mt`. Install the real `mt`
-  # if it's there; otherwise fall back to a symlink.
-  if [ -f "${BUILD_BIN_DIR}/mt" ]; then
-    $SUDO install -m 755 "${BUILD_BIN_DIR}/mt" "${INSTALL_DIR}/mt"
-  else
-    $SUDO ln -sf "${INSTALL_DIR}/${BINARY}" "${INSTALL_DIR}/mt"
-  fi
+  # `mt` is a symlink to `malt`. Relative target survives prefix moves.
+  $SUDO ln -sfn "${BINARY}" "${INSTALL_DIR}/mt"
 
 else
   VERSION="${LATEST#v}"
@@ -266,24 +261,18 @@ else
   info "Extracting..."
   tar -xzf "$TMPDIR/$ARCHIVE_NAME" -C "$TMPDIR"
 
-  # Find the binaries (may be in a subdirectory). `-perm -u+x` is
+  # Find the binary (may be in a subdirectory). `-perm -u+x` is
   # portable across BSD and GNU find; the old `+111` form is
   # deprecated BSD syntax.
   BINARY_PATH=$(find "$TMPDIR" -name "$BINARY" -type f -perm -u+x | head -1)
   [ -n "$BINARY_PATH" ] || error "Binary '${BINARY}' not found in archive"
-  MT_PATH=$(find "$TMPDIR" -name mt -type f -perm -u+x | head -1)
 
   # ── Install binary ──────────────────────────────────────────────
   info "Installing to ${INSTALL_DIR}..."
   $SUDO install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/${BINARY}"
 
-  # Install `mt` — prefer the real binary shipped in the archive,
-  # fall back to a symlink if it isn't there.
-  if [ -n "$MT_PATH" ]; then
-    $SUDO install -m 755 "$MT_PATH" "${INSTALL_DIR}/mt"
-  else
-    $SUDO ln -sf "${INSTALL_DIR}/${BINARY}" "${INSTALL_DIR}/mt"
-  fi
+  # `mt` is a symlink to `malt`. Relative target survives prefix moves.
+  $SUDO ln -sfn "${BINARY}" "${INSTALL_DIR}/mt"
 fi
 
 # ── Create prefix directory ─────────────────────────────────────────
