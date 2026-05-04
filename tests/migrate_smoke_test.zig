@@ -431,6 +431,7 @@ test "buildSummaryJson emits per-category arrays + counts object" {
         &.{"fancy-keg"},
         &.{},
         &.{"brokenpkg"},
+        &.{},
         0,
     );
 
@@ -455,11 +456,71 @@ test "buildSummaryJson emits per-category arrays + counts object" {
     try testing.expectEqual(@as(i64, 1), counts.get("failed").?.integer);
 }
 
+// Under `--json`, post_install events land inside the summary doc
+// (not as standalone JSONL entries); buffered entries are embedded
+// verbatim, preserving the raw JSON bytes the per-keg path captured.
+test "buildSummaryJson embeds post_install_events when buffer has entries" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    const events = [_][]const u8{
+        "{\"name\":\"ca-certificates\",\"status\":\"completed\",\"entries\":[]}",
+        "{\"name\":\"openssl@3\",\"status\":\"partially_skipped\",\"entries\":[{\"reason\":\"unknown_method\"}]}",
+    };
+
+    try migrate.buildSummaryJson(
+        &aw.writer,
+        "/opt/homebrew",
+        &.{ "ca-certificates", "openssl@3" },
+        &.{},
+        &.{},
+        &.{},
+        &.{},
+        &events,
+        0,
+    );
+
+    const parsed = try parseAndCheck(aw.written());
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    const arr = root.get("post_install_events").?.array;
+    try testing.expectEqual(@as(usize, 2), arr.items.len);
+    try testing.expectEqualStrings("ca-certificates", arr.items[0].object.get("name").?.string);
+    try testing.expectEqualStrings("completed", arr.items[0].object.get("status").?.string);
+    try testing.expectEqualStrings("openssl@3", arr.items[1].object.get("name").?.string);
+    try testing.expectEqualStrings("partially_skipped", arr.items[1].object.get("status").?.string);
+}
+
+// Reverse contract: when no post_install events were buffered (every
+// migrated keg had `post_install_defined == false`), the summary must
+// still expose the array - empty - so consumers can rely on its
+// presence under any non-dry-run `--json` invocation.
+test "buildSummaryJson emits an empty post_install_events array when buffer is empty" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try migrate.buildSummaryJson(
+        &aw.writer,
+        "/opt/homebrew",
+        &.{},
+        &.{},
+        &.{},
+        &.{},
+        &.{},
+        &.{},
+        0,
+    );
+
+    const parsed = try parseAndCheck(aw.written());
+    defer parsed.deinit();
+    const arr = parsed.value.object.get("post_install_events").?.array;
+    try testing.expectEqual(@as(usize, 0), arr.items.len);
+}
+
 test "buildSummaryJson escapes adversarial keg names per RFC 8259" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     const names = [_][]const u8{"weird\"\\keg"};
-    try migrate.buildSummaryJson(&aw.writer, "/opt/homebrew", &names, &.{}, &.{}, &.{}, &.{}, 0);
+    try migrate.buildSummaryJson(&aw.writer, "/opt/homebrew", &names, &.{}, &.{}, &.{}, &.{}, &.{}, 0);
 
     const parsed = try parseAndCheck(aw.written());
     defer parsed.deinit();
@@ -510,7 +571,11 @@ test "dry-run with --json emits a parseable document on stdout" {
     try testing.expectEqual(@as(usize, 2), root.get("kegs").?.array.items.len);
 }
 
-test "--json with empty Cellar emits an empty-kegs document (no human 'No kegs' line)" {
+// An empty Cellar under `--json` (no `--dry-run`) used to emit the
+// dry-run document shape (`.kegs` + `.count`), so consumers had to
+// branch on whether their `--json` invocation hit zero kegs. The
+// post-migration shape is the contract: counts present, all zero.
+test "--json with empty Cellar emits the summary shape with zero counts" {
     resetOutput();
     const brew = try scratchDir("brew_json_empty");
     defer {
@@ -546,7 +611,66 @@ test "--json with empty Cellar emits an empty-kegs document (no human 'No kegs' 
 
     const parsed = try parseAndCheck(buf.items);
     defer parsed.deinit();
-    try testing.expectEqual(@as(i64, 0), parsed.value.object.get("count").?.integer);
+    const root = parsed.value.object;
+    try testing.expect(!root.get("dry_run").?.bool);
+    try testing.expectEqual(@as(usize, 0), root.get("migrated").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), root.get("skipped_installed").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), root.get("skipped_post_install").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), root.get("skipped_no_bottle").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), root.get("failed").?.array.items.len);
+    const counts = root.get("counts").?.object;
+    try testing.expectEqual(@as(i64, 0), counts.get("migrated").?.integer);
+    try testing.expectEqual(@as(i64, 0), counts.get("failed").?.integer);
+    // Stable contract: the dry-run shape's `kegs` / `count` keys must NOT
+    // leak into the summary path. Consumers should see one shape only.
+    try testing.expect(root.get("kegs") == null);
+    try testing.expect(root.get("count") == null);
+}
+
+// `--dry-run` keeps the dry-run document shape regardless of count. An
+// empty Cellar under `--dry-run --json` therefore preserves the
+// `.kegs` + `.count` keys; the summary shape is for non-dry-run only.
+test "--dry-run --json with empty Cellar keeps the dry-run shape" {
+    resetOutput();
+    const brew = try scratchDir("brew_dryjson_empty");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt = try scratchDir("mt_dryjson_empty");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt) catch {};
+        testing.allocator.free(mt);
+    }
+    try seedFakeBrew(brew, &.{});
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"--dry-run"});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expect(root.get("dry_run").?.bool);
+    try testing.expectEqual(@as(i64, 0), root.get("count").?.integer);
+    try testing.expectEqual(@as(usize, 0), root.get("kegs").?.array.items.len);
+    try testing.expect(root.get("counts") == null);
 }
 
 test "--json on an already-installed keg records it under skipped_installed" {
@@ -763,6 +887,87 @@ test "cellar scan ignores stray files and symlinks alongside keg directories" {
     const kegs = root.get("kegs").?.array;
     try testing.expectEqual(@as(usize, 1), kegs.items.len);
     try testing.expectEqualStrings("tree", kegs.items[0].string);
+}
+
+// ── Symlinked keg directories — picked up end-to-end ───────────────
+//
+// On-disk version of the unit-level symlink test: the Cellar contains
+// one regular keg dir plus a symlink whose target is another keg dir
+// living elsewhere on disk. Both must surface in `migrate --dry-run`.
+test "cellar scan picks up a symlink whose target is a real keg directory" {
+    resetOutput();
+    const brew = try scratchDir("brew_symlink_keg");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+    const mt = try scratchDir("mt_symlink_keg");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, mt) catch {};
+        testing.allocator.free(mt);
+    }
+    const target_root = try scratchDir("brew_symlink_target");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, target_root) catch {};
+        testing.allocator.free(target_root);
+    }
+
+    // One real keg in the Cellar plus a real keg dir outside it.
+    try seedFakeBrew(brew, &.{"tree"});
+    const linked_target = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/jq/1.0",
+        .{target_root},
+        0,
+    );
+    defer testing.allocator.free(linked_target);
+    try test_io.cwd().createDirPath(std.Options.debug_io, linked_target);
+
+    // Plant `Cellar/jq -> <target_root>/jq` (a symlink-to-directory).
+    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar", .{brew});
+    defer testing.allocator.free(cellar);
+    const link_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/jq", .{cellar}, 0);
+    defer testing.allocator.free(link_path);
+    const link_target = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/jq", .{target_root}, 0);
+    defer testing.allocator.free(link_target);
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink(link_target.ptr, link_path.ptr));
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{"--dry-run"});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqual(@as(i64, 2), root.get("count").?.integer);
+    const kegs = root.get("kegs").?.array;
+    try testing.expectEqual(@as(usize, 2), kegs.items.len);
+    // Iteration order is filesystem-defined; sort the surfaced names
+    // for a stable comparison.
+    var seen = [_][]const u8{ kegs.items[0].string, kegs.items[1].string };
+    std.mem.sort([]const u8, &seen, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    try testing.expectEqualStrings("jq", seen[0]);
+    try testing.expectEqualStrings("tree", seen[1]);
 }
 
 // ── Multi-keg mixed outcomes (skipped_installed + failed_api, offline) ──
@@ -1051,6 +1256,31 @@ const MockIter = struct {
     }
 };
 
+// Fake `Dir` for unit tests of `scanCellarKegs`'s symlink-target stat.
+// `scanCellarKegs` only reads `.kind` off the returned struct, so a
+// minimal stand-in suffices and keeps the tests free of full `Stat`
+// boilerplate. Names absent from `targets` resolve as `FileNotFound`,
+// mirroring the dangling-symlink case.
+const FakeStat = struct { kind: std.Io.File.Kind };
+
+const MockDir = struct {
+    targets: []const struct { name: []const u8, kind: std.Io.File.Kind } = &.{},
+
+    pub fn statFile(
+        self: MockDir,
+        io: std.Io,
+        name: []const u8,
+        opts: anytype,
+    ) !FakeStat {
+        _ = io;
+        _ = opts;
+        for (self.targets) |t| {
+            if (std.mem.eql(u8, t.name, name)) return .{ .kind = t.kind };
+        }
+        return error.FileNotFound;
+    }
+};
+
 test "scanCellarKegs warns and preserves prior names when iterator errors" {
     resetOutput();
     color.setForTest(false, false);
@@ -1073,7 +1303,9 @@ test "scanCellarKegs warns and preserves prior names when iterator errors" {
     io_mod.beginStderrCapture(testing.allocator, &buf);
     defer io_mod.endStderrCapture();
 
-    try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, &names);
+    // Iterator yields only `.directory` entries here, so the fake dir's
+    // `statFile` is never called - an empty `MockDir{}` is sufficient.
+    try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, MockDir{}, &names);
 
     try testing.expectEqual(@as(usize, 2), names.items.len);
     try testing.expectEqualStrings("tree", names.items[0]);
@@ -1737,9 +1969,84 @@ test "scanCellarKegs skips non-directory entries and survives fail-first iterato
     io_mod.beginStderrCapture(testing.allocator, &buf);
     defer io_mod.endStderrCapture();
 
-    try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, &names);
+    try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, MockDir{}, &names);
     try testing.expectEqual(@as(usize, 0), names.items.len);
     try testing.expect(containsLine(buf.items, "Cellar scan error"));
+}
+
+// ── Symlink-to-directory entries are valid kegs ─────────────────────
+//
+// Real Homebrew Cellars sometimes contain symlinks to keg directories
+// (arch transitions, multi-prefix coexistence, scratch fixtures).
+// `.sym_link` triggers a target stat and is accepted iff the resolved
+// target is itself a directory; everything else falls through.
+
+test "scanCellarKegs accepts a symlink whose target is a directory" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var names: std.ArrayList([]const u8) = .empty;
+    var mock = MockIter{ .entries = &.{
+        .{ .name = "tree", .kind = .directory },
+        .{ .name = "jq-link", .kind = .sym_link },
+    } };
+    const dir = MockDir{ .targets = &.{
+        .{ .name = "jq-link", .kind = .directory },
+    } };
+
+    try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, dir, &names);
+
+    try testing.expectEqual(@as(usize, 2), names.items.len);
+    try testing.expectEqualStrings("tree", names.items[0]);
+    try testing.expectEqualStrings("jq-link", names.items[1]);
+}
+
+test "scanCellarKegs skips a symlink whose target is a regular file" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var names: std.ArrayList([]const u8) = .empty;
+    var mock = MockIter{ .entries = &.{
+        .{ .name = "alias-to-readme", .kind = .sym_link },
+    } };
+    // Target resolves but is `.file`, so it must not be treated as a keg.
+    const dir = MockDir{ .targets = &.{
+        .{ .name = "alias-to-readme", .kind = .file },
+    } };
+
+    try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, dir, &names);
+    try testing.expectEqual(@as(usize, 0), names.items.len);
+}
+
+test "scanCellarKegs skips a dangling symlink (statFile fails)" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var names: std.ArrayList([]const u8) = .empty;
+    var mock = MockIter{ .entries = &.{
+        .{ .name = "dangling", .kind = .sym_link },
+        .{ .name = "wget", .kind = .directory },
+    } };
+    // Empty `targets` so `statFile` returns FileNotFound — same path
+    // a real dangling symlink takes. The directory entry after it must
+    // still be collected; one bad symlink can't poison the whole scan.
+    const dir = MockDir{};
+
+    try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, dir, &names);
+    try testing.expectEqual(@as(usize, 1), names.items.len);
+    try testing.expectEqualStrings("wget", names.items[0]);
 }
 
 // ── Leak discipline: execute must not leak under testing.allocator ──────
