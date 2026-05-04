@@ -360,7 +360,9 @@ pub const zsh_script =
     \\                        '--remove-binary[--wipe only: also unlink /usr/local/bin/{mt,malt}]' \
     \\                        '(--yes -y)'{--yes,-y}'[Skip every typed confirmation]' \
     \\                        '(--dry-run -n)'{--dry-run,-n}'[Preview without removing]' \
-    \\                        '(--verbose -v)'{--verbose,-v}'[Show every per-scope item; no truncation, full SHAs]'
+    \\                        '(--verbose -v)'{--verbose,-v}'[Show every per-scope item; no truncation, full SHAs]' \
+    \\                        '--json[Single summary object on stdout for scripts]' \
+    \\                        '--output-format=ndjson[Stream one event per scope start/complete + purge_complete]'
     \\                    ;;
     \\                version)
     \\                    _values 'subcommand' 'update[Self-update the binary]'

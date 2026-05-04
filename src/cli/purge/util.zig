@@ -51,6 +51,31 @@ pub fn openDb(prefix: []const u8) ?sqlite.Database {
     return sqlite.Database.open(db_path) catch null;
 }
 
+/// Tri-state DB open: distinguishes "fresh prefix, nothing yet" from
+/// "the file is there but cannot be opened" (corruption, permissions).
+/// Callers route the two to different UX paths — soft skip vs loud err.
+pub const DbOutcome = union(enum) {
+    absent,
+    unreadable: sqlite.SqliteError,
+    opened: sqlite.Database,
+};
+
+pub fn openDbTri(io: std.Io, prefix: []const u8) DbOutcome {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return .absent;
+    // Probe for prior existence: SQLite's OPEN_CREATE flag would mask
+    // the difference between "no DB yet" and "file is there but dead".
+    const pre_existed = blk: {
+        std.Io.Dir.accessAbsolute(io, db_path, .{}) catch break :blk false;
+        break :blk true;
+    };
+    if (sqlite.Database.open(db_path)) |db| {
+        return .{ .opened = db };
+    } else |e| {
+        return if (pre_existed) .{ .unreadable = e } else .absent;
+    }
+}
+
 pub fn confirmScope(yes: bool, expected: []const u8, scope_label: []const u8) Error!void {
     if (yes) return;
     var prompt_buf: [128]u8 = undefined;

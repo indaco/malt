@@ -365,6 +365,8 @@ mt purge --wipe --backup ~/snapshot.txt --remove-binary --yes
 
 Shared flags: `--dry-run`/`-n` (preview), `--yes`/`-y` (skip typed-confirm), `--quiet`/`-q`, `--backup`/`-b <path>` (write a `mt restore`-compatible manifest before any deletion). `--wipe`-only flags: `--keep-cache` (preserve downloaded bottles), `--remove-binary` (also unlink `/usr/local/bin/{mt,malt}`).
 
+Structured output for scripts: `mt --json purge --<scope>...` emits a single summary object on stdout (`version`, `dry_run`, `scopes`, `totals`, `time_ms`); `mt --output-format=ndjson purge ...` streams `scope_started` / `scope_completed` / `purge_complete` events, one per line. Stderr stays the human surface in either mode.
+
 `--wipe` cannot combine with any other scope. Every other scope can run together under one lock acquisition. `mt purge` honours `MALT_PREFIX` and `MALT_CACHE`, so pointing those at a throwaway path is the safe way to test the command end-to-end. For per-package removal, use `mt uninstall`.
 
 `mt link <formula>` and `mt unlink <formula>` manage the prefix symlinks. `link` reports conflicts and aborts unless `--overwrite`/`--force`/`-f` is passed. `unlink` removes symlinks from `bin/`, `lib/`, etc. and the `opt/` symlink, but leaves the keg installed.

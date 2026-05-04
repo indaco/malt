@@ -65,6 +65,15 @@ test "purge help documents --verbose for full per-scope listings" {
     try testing.expect(std.mem.indexOf(u8, text, "no truncation") != null);
 }
 
+test "purge help documents structured output for scripts" {
+    // Discoverability guard: the JSON / NDJSON contract is silent on
+    // stdout by default, so users only know to script against it if
+    // --help advertises both modes.
+    const text = help.helpFor("purge");
+    try testing.expect(std.mem.indexOf(u8, text, "--json") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--output-format=ndjson") != null);
+}
+
 test "install help documents --local and its code-exec warning" {
     // Discoverability guard: the flag only meaningfully exists if the
     // help output tells the user about it.

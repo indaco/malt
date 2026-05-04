@@ -132,6 +132,20 @@ test "purge completions expose --verbose with command-specific semantics" {
     try expectContains(completions.zsh_script, "Show every per-scope item");
 }
 
+test "purge completions surface --json and --output-format=ndjson" {
+    // Same shape as --verbose: bash and fish merge global flags into the
+    // per-subcommand list automatically; zsh's per-command _arguments
+    // block has to declare them locally or `mt purge --<TAB>` won't
+    // discover them.
+    try expectContains(completions.zsh_script, "Single summary object on stdout for scripts");
+    try expectContains(completions.zsh_script, "Stream one event per scope start/complete");
+    // Bash global_flags list and fish unconditional completes already
+    // cover both flags; pin them here so a regression in the global slot
+    // surfaces as a purge-specific failure.
+    try expectContains(completions.bash_script, "--output-format=ndjson");
+    try expectContains(completions.fish_script, "output-format=ndjson");
+}
+
 test "all bundle completions expose the cleanup subcommand and its flags" {
     for ([_][]const u8{
         completions.bash_script,

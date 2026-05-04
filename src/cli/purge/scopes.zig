@@ -21,15 +21,26 @@ const TierResult = util.TierResult;
 
 pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
-
-    var db = util.openDb(prefix) orelse {
-        output.err("store-orphans: failed to open database", .{});
-        return result;
-    };
-    defer db.close();
-    schema.initSchema(&db) catch return result;
+    var rep = report.Reporter.init("store-orphans", dry_run);
+    rep.fmt = .short_hash;
 
     const io = ctx.io;
+    var db = switch (util.openDbTri(io, prefix)) {
+        .absent => {
+            rep.empty("no database — nothing to inspect");
+            return result;
+        },
+        .unreadable => |e| {
+            output.err("store-orphans: cannot open database ({s})", .{@errorName(e)});
+            return result;
+        },
+        .opened => |db_val| db_val,
+    };
+    defer db.close();
+    schema.initSchema(&db) catch |e| {
+        output.err("store-orphans: cannot init schema ({s})", .{@errorName(e)});
+        return result;
+    };
 
     var store = store_mod.Store.init(io, allocator, &db, prefix);
     var orphans_list = store.orphans() catch {
@@ -40,9 +51,6 @@ pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix:
         for (orphans_list.items) |item| allocator.free(item);
         orphans_list.deinit(allocator);
     }
-
-    var rep = report.Reporter.init("store-orphans", dry_run);
-    rep.fmt = .short_hash;
 
     if (orphans_list.items.len == 0) {
         rep.empty("no orphaned store entries");
@@ -73,13 +81,24 @@ pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix:
 
 pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
+    var rep = report.Reporter.init("unused-deps", dry_run);
 
-    var db = util.openDb(prefix) orelse {
-        output.err("unused-deps: failed to open database", .{});
-        return result;
+    var db = switch (util.openDbTri(ctx.io, prefix)) {
+        .absent => {
+            rep.empty("no database — nothing to inspect");
+            return result;
+        },
+        .unreadable => |e| {
+            output.err("unused-deps: cannot open database ({s})", .{@errorName(e)});
+            return result;
+        },
+        .opened => |db_val| db_val,
     };
     defer db.close();
-    schema.initSchema(&db) catch return result;
+    schema.initSchema(&db) catch |e| {
+        output.err("unused-deps: cannot init schema ({s})", .{@errorName(e)});
+        return result;
+    };
 
     const orphans = deps_mod.findOrphans(allocator, &db) catch {
         output.err("unused-deps: failed to find orphans", .{});
@@ -89,8 +108,6 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
         for (orphans) |o| allocator.free(o);
         allocator.free(orphans);
     }
-
-    var rep = report.Reporter.init("unused-deps", dry_run);
 
     if (orphans.len == 0) {
         rep.empty("no orphaned dependencies");
@@ -260,9 +277,16 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
 
     var rep = report.Reporter.init("stale-casks", dry_run);
 
-    var db = util.openDb(prefix) orelse {
-        rep.empty("no database — nothing to inspect");
-        return result;
+    var db = switch (util.openDbTri(io, prefix)) {
+        .absent => {
+            rep.empty("no database — nothing to inspect");
+            return result;
+        },
+        .unreadable => |e| {
+            output.err("stale-casks: cannot open database ({s})", .{@errorName(e)});
+            return result;
+        },
+        .opened => |db_val| db_val,
     };
     defer db.close();
 
