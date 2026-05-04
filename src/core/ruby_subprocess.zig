@@ -28,7 +28,7 @@ pub const RubyError = error{
 pub fn describeError(err: RubyError) []const u8 {
     return switch (err) {
         RubyError.RubyNotFound => "no Ruby interpreter found (tried /opt/homebrew, /usr/local, rbenv, asdf, PATH)",
-        RubyError.TapNotFound => "homebrew-core tap not found; run `brew tap --force homebrew/core`",
+        RubyError.TapNotFound => "post_install source unavailable: no local homebrew-core tap and the hash-pinned GitHub fallback did not produce a body (network failure, formula not in the pinned manifest, or hash mismatch)",
         RubyError.FormulaSourceNotFound => "formula .rb source not found in the homebrew-core tap",
         RubyError.PostInstallBodyNotFound => "could not extract post_install body from formula source",
         RubyError.ScriptWriteFailed => "could not write the temporary Ruby wrapper script",
@@ -204,6 +204,25 @@ pub fn extractPostInstallFromSource(allocator: std.mem.Allocator, source: []cons
     out.appendSlice(allocator, source[post_install_span.body_start..post_install_span.body_end]) catch return null;
 
     return out.toOwnedSlice(allocator) catch return null;
+}
+
+/// Resolve a formula's post_install body. Tries the on-disk
+/// homebrew-core tap first; on miss, falls back to the hash-pinned
+/// GitHub fetch so API-only Homebrew installs (no tap clone) still
+/// reach a usable body. Caller owns the returned slice when non-null.
+pub fn resolvePostInstallBody(
+    io: std.Io,
+    environ: std.process.Environ,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+) ?[]const u8 {
+    if (findHomebrewCoreTap(io)) |tap_path| {
+        var rb_buf: [1024]u8 = undefined;
+        if (resolveFormulaRbPath(io, &rb_buf, tap_path, name)) |rb_path| {
+            if (extractPostInstallBody(io, allocator, rb_path)) |body| return body;
+        }
+    }
+    return fetchPostInstallFromGitHub(io, environ, allocator, name);
 }
 
 /// Run the DSL parser over an isolated sibling-def block and report whether
@@ -461,7 +480,10 @@ pub fn generateWrapper(
 ///
 /// Requires:
 /// - A Ruby interpreter available on the system
-/// - The homebrew-core tap cloned locally (for the .rb formula source)
+/// - Either the homebrew-core tap cloned locally OR network reachability
+///   to GitHub's raw content host (the hash-pinned fallback fetches the
+///   `.rb` source from a manifest-authorised commit when the tap is
+///   absent).
 pub fn runPostInstall(
     io: std.Io,
     environ: std.process.Environ,
@@ -485,17 +507,11 @@ pub fn runPostInstall(
     const ruby_path = detectRuby(io, environ, allocator) orelse return RubyError.RubyNotFound;
     defer allocator.free(ruby_path);
 
-    // 2. Find homebrew-core tap
-    const tap_path = findHomebrewCoreTap(io) orelse return RubyError.TapNotFound;
-
-    // 3. Resolve .rb source file
-    var rb_buf: [1024]u8 = undefined;
-    const rb_path = resolveFormulaRbPath(io, &rb_buf, tap_path, name) orelse
-        return RubyError.FormulaSourceNotFound;
-
-    // 4. Extract post_install body
-    const body = extractPostInstallBody(io, allocator, rb_path) orelse
-        return RubyError.PostInstallBodyNotFound;
+    // 2-4. Resolve the post_install body. Local homebrew-core tap is
+    //      preferred; hash-pinned GitHub fetch is the fallback so
+    //      API-only Homebrew installs (no tap clone) still resolve.
+    const body = resolvePostInstallBody(io, environ, allocator, name) orelse
+        return RubyError.TapNotFound;
     defer allocator.free(body);
 
     // 5. Generate wrapper script
