@@ -16,6 +16,7 @@
 #   BENCH_ROUNDS=7 scripts/bench.sh        # samples per tool/pkg, median wins (default 5)
 #   BENCH_SKIP_UPDATE=1 scripts/bench.sh   # don't git-fetch nanobrew/zerobrew (offline)
 #   BENCH_STRESS=20 scripts/bench.sh ffmpeg  # stress mode — see below
+#   BENCH_PER_ROUND=1 scripts/bench.sh wget  # log every (round,tool,pkg,cold,warm) sample
 #
 # Env overrides:
 #   BENCH_WORK_DIR     Where to clone other tools      (default /tmp/malt-bench)
@@ -57,6 +58,10 @@
 #   fetchFormulaWorker allocator race that went undetected by single-sample
 #   runs). Builds nothing else, times nothing else, just pass/fail counts.
 #   Example: `BENCH_STRESS=20 ./scripts/bench.sh ffmpeg`.
+# - `BENCH_PER_ROUND=1` logs every measured (round, tool, pkg, cold, warm)
+#   sample to stderr with a wall-clock timestamp. Off by default so the
+#   published median ± σ summary used by the CI workflow is unchanged.
+#   Use it to identify which round produced an outlier when σ is high.
 # - Compatible with bash 3.2 (macOS default) — no associative arrays.
 
 set -euo pipefail
@@ -87,6 +92,11 @@ BENCH_FAIL_FAST="${BENCH_FAIL_FAST:-0}"
 # catch low-rate races in the parallel install pipeline — single-sample
 # runs missed the fetchFormulaWorker allocator race for weeks.
 BENCH_STRESS="${BENCH_STRESS:-0}"
+# When set to 1, every measured round emits a per-sample line on stderr so
+# the round responsible for an outlier σ is identifiable from the log.
+# Off by default — the published median ± σ summary stays unchanged when
+# the env var is unset, which the CI bench workflow relies on.
+BENCH_PER_ROUND="${BENCH_PER_ROUND:-0}"
 # Samples per tool/package. The reported number is the median, which
 # damps single-run outliers (network jitter, transient launchd hiccups,
 # disk caches warming) without inflating the table the way a mean would.
@@ -186,6 +196,20 @@ emit_output() {
   # Append a key=value line to $GITHUB_OUTPUT if running under Actions.
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     printf '%s\n' "$1" >>"$GITHUB_OUTPUT"
+  fi
+}
+
+# emit_per_round <round> <tool> <pkg> <cold> <warm>
+#
+# Logs one measured sample to stderr, gated on BENCH_PER_ROUND=1. Used to
+# pin down which round produced an outlier σ — the median ± σ summary
+# averages the noise away, so without a per-sample line the offending
+# round is invisible. Wall-clock timestamp helps correlate with system
+# events (Spotlight, cloudd, Time Machine).
+emit_per_round() {
+  if [ "$BENCH_PER_ROUND" = "1" ]; then
+    printf '%s[per-round]%s round=%s tool=%s pkg=%s cold=%s warm=%s @ %s\n' \
+      "$YELLOW" "$RESET" "$1" "$2" "$3" "$4" "$5" "$(date +%H:%M:%S)" >&2
   fi
 }
 
@@ -585,8 +609,8 @@ get_samples() {
 # favours the steady-state install path.
 
 run_one() {
-  # run_one <bin> <install> <uninstall> <pkg> <key> <prep_fn> <record>
-  local bin="$1" install="$2" uninstall="$3" pkg="$4" key="$5" prep="$6" record="$7"
+  # run_one <bin> <install> <uninstall> <pkg> <key> <prep_fn> <record> [<round>]
+  local bin="$1" install="$2" uninstall="$3" pkg="$4" key="$5" prep="$6" record="$7" round="${8:-0}"
   local c w
   if [ -n "$prep" ] && [ "$BENCH_TRUE_COLD" = "1" ]; then "$prep"; fi
   c=$(time_install "$bin" "$install" "$uninstall" "$pkg")
@@ -595,17 +619,19 @@ run_one() {
   if [ "$record" = "1" ]; then
     append_sample cold "$key" "$pkg" "$c"
     append_sample warm "$key" "$pkg" "$w"
+    emit_per_round "$round" "$key" "$pkg" "$c" "$w"
   fi
 }
 
 run_brew_one() {
-  # run_brew_one <pkg> <record>
-  local pkg="$1" record="$2" c
+  # run_brew_one <pkg> <record> [<round>]
+  local pkg="$1" record="$2" round="${3:-0}" c
   if [ "$BENCH_TRUE_COLD" = "1" ]; then prep_cold_brew "$pkg"; fi
   c=$(time_brew_install "$pkg")
   brew uninstall "$pkg" >/dev/null 2>&1 || true
   if [ "$record" = "1" ]; then
     append_sample cold brew "$pkg" "$c"
+    emit_per_round "$round" brew "$pkg" "$c" "n/a"
   fi
 }
 
@@ -623,10 +649,10 @@ run_round() {
   for i in $(seq 0 $((n - 1))); do
     tool=${tools[$(((round + i) % n))]}
     case "$tool" in
-    mt) run_one "$MALT_BIN" install uninstall "$pkg" mt prep_cold_malt "$record" ;;
-    nb) run_one "$NB_BIN" install remove "$pkg" nb prep_cold_nb "$record" ;;
-    zb) run_one "$ZB_BIN" install uninstall "$pkg" zb prep_cold_zb "$record" ;;
-    brew) run_brew_one "$pkg" "$record" ;;
+    mt) run_one "$MALT_BIN" install uninstall "$pkg" mt prep_cold_malt "$record" "$round" ;;
+    nb) run_one "$NB_BIN" install remove "$pkg" nb prep_cold_nb "$record" "$round" ;;
+    zb) run_one "$ZB_BIN" install uninstall "$pkg" zb prep_cold_zb "$record" "$round" ;;
+    brew) run_brew_one "$pkg" "$record" "$round" ;;
     esac
   done
 }
