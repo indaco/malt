@@ -23,19 +23,26 @@ zig build test-bin
 # --include-path takes an absolute path and is more reliable than --include-pattern.
 src_dir="$(pwd)/src"
 
-# Run kcov once per test binary into a shared outdir
+# Run kcov once per test binary into a shared outdir.
+# Tests like purge_json's `confirmTyped` branch detect TTY stdin and would
+# block on `read(STDIN_FILENO)` when kcov inherits the user's terminal.
+# Redirecting from /dev/null forces isTty()=false so those paths take the
+# unattended-abort branch the tests are written against.
 for bin in zig-out/test-bin/*; do
   # Skip .dSYM debug bundles and any non-regular files
   [ -f "$bin" ] || continue
   [ -x "$bin" ] || continue
   echo "→ kcov: $(basename "$bin")"
-  kcov --include-path="$src_dir" coverage "$bin" >/dev/null
+  kcov --include-path="$src_dir" coverage "$bin" </dev/null >/dev/null
 done
 
 # kcov 43 on macOS doesn't reliably auto-merge, so do it explicitly.
 # The per-binary reports are in hash-suffixed dirs (e.g. cellar_test.a934ecd0).
+# Match both `*_test.*` (the per-tests/ binaries) and `lib_tests.*` so the
+# inline `test` blocks compiled into the lib_tests root contribute to the
+# merged report — without this, inline coverage was silently dropped.
 shopt -s nullglob
-per_bin_dirs=(coverage/*_test.*)
+per_bin_dirs=(coverage/*_test.* coverage/lib_tests.*)
 shopt -u nullglob
 if [ ${#per_bin_dirs[@]} -eq 0 ]; then
   echo "error: kcov produced no per-binary reports" >&2
