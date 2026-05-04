@@ -123,6 +123,7 @@ pub const Reporter = struct {
 };
 
 fn writeItem(text: []const u8) void {
+    if (output.isQuiet()) return; // raw stderr writes don't honour --quiet on their own
     const bullet: []const u8 = if (color.isEmojiEnabled()) "    • " else "    - ";
     if (color.isColorEnabled()) {
         output.writeStderrAll(color.SemanticStyle.detail.code());
@@ -136,6 +137,7 @@ fn writeItem(text: []const u8) void {
 }
 
 fn writeMore(remaining: usize) void {
+    if (output.isQuiet()) return;
     var buf: [96]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &buf,
@@ -181,6 +183,7 @@ fn renderTable(rows: []const SummaryRow) void {
 }
 
 fn writeRule() void {
+    if (output.isQuiet()) return;
     var buf: [rule_width]u8 = undefined;
     @memset(buf[0..], '-');
     if (color.isColorEnabled()) output.writeStderrAll(color.SemanticStyle.detail.code());

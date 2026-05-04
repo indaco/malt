@@ -123,6 +123,15 @@ test "all global-flag completions expose --output-format=ndjson" {
     try expectContains(completions.fish_script, "output-format=ndjson");
 }
 
+test "purge completions expose --verbose with command-specific semantics" {
+    // --verbose is a global flag, so bash/fish pick it up automatically;
+    // zsh's per-command _arguments block has to declare it locally so the
+    // help string explains what it means inside `mt purge`.
+    try expectContains(completions.bash_script, "--verbose -v");
+    try expectContains(completions.fish_script, "-l verbose");
+    try expectContains(completions.zsh_script, "Show every per-scope item");
+}
+
 test "all bundle completions expose the cleanup subcommand and its flags" {
     for ([_][]const u8{
         completions.bash_script,

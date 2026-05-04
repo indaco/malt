@@ -20,13 +20,14 @@ const Capture = struct {
         color_on: bool = false,
         emoji_on: bool = false,
         verbose: bool = false,
+        quiet: bool = false,
     }) Capture {
         const prior_quiet = output.isQuiet();
         const prior_verbose = output.isVerbose();
         color.setForTest(opts.color_on, opts.emoji_on);
         color.setBackgroundForTest(color.Background.dark);
         color.setTruecolorForTest(false);
-        output.setQuiet(false);
+        output.setQuiet(opts.quiet);
         output.setVerbose(opts.verbose);
         output.beginStderrCapture(testing.allocator, buf);
         return .{ .buf = buf, .prior_quiet = prior_quiet, .prior_verbose = prior_verbose };
@@ -196,6 +197,37 @@ test "Summary.render emits one row per scope plus a total line" {
         if (std.mem.indexOf(u8, ln, "----------") != null) rules += 1;
     }
     try testing.expectEqual(@as(usize, 2), rules);
+}
+
+// ── --quiet propagation ─────────────────────────────────────────────────────
+
+test "quiet mode silences items, the more-hint, and the summary table" {
+    var buf = newBuf();
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, .{ .quiet = true });
+    defer cap.deinit();
+
+    var rep = report.Reporter.init("store-orphans", false);
+    rep.fmt = .short_hash;
+    var i: usize = 0;
+    while (i < 15) : (i += 1) {
+        var sha: [64]u8 = undefined;
+        @memset(&sha, '0');
+        sha[0] = 'a';
+        sha[1] = '0' + @as(u8, @intCast(i % 10));
+        rep.item(&sha);
+    }
+    rep.done(15);
+
+    var summary = report.Summary{};
+    defer summary.deinit(testing.allocator);
+    try summary.add(testing.allocator, .{ .name = "store-orphans", .removed = 15, .bytes = 1024 });
+    summary.render();
+
+    // Nothing should reach stderr under --quiet — neither the bullets
+    // (writeItem) nor the truncation hint (writeMore) nor the table rules
+    // (writeRule) may bypass the quiet flag.
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
 }
 
 test "Summary.render is a no-op when no rows were added" {
