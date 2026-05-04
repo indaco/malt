@@ -101,14 +101,19 @@ fn unlockBuffer() void {
 
 /// `.embed` requires a long-lived allocator: parallel workers' arenas
 /// die before drain runs, so the buffer copies into its own allocator.
+/// The mode itself is `@atomicStore`d so worker readers don't need the
+/// buffer mutex on every routing decision.
 pub fn setPostInstallEmit(m: PostInstallEmit, allocator: ?std.mem.Allocator) void {
     lockBuffer();
     defer unlockBuffer();
-    post_install_emit = m;
+    @atomicStore(PostInstallEmit, &post_install_emit, m, .release);
     if (m == .embed) post_install_buffer_alloc = allocator;
 }
+/// Hot path — every post_install routing call hits this. Acquire pairs
+/// with the setter's release so the allocator pointer is visible to
+/// any worker that observes `.embed`.
 pub fn postInstallEmit() PostInstallEmit {
-    return post_install_emit;
+    return @atomicLoad(PostInstallEmit, &post_install_emit, .acquire);
 }
 
 /// Copy `inner_json` (a `{...}` body, no trailing newline) into the
@@ -141,7 +146,7 @@ pub fn resetPostInstallEvents() void {
         post_install_buffer = .empty;
         post_install_buffer_alloc = null;
     }
-    post_install_emit = .stream;
+    @atomicStore(PostInstallEmit, &post_install_emit, .stream, .release);
 }
 
 /// Test-only stderr / stdout capture. Tests run sequentially in a binary,
@@ -569,4 +574,21 @@ test "pushPostInstallEvent serialises concurrent producers" {
 
     const drained = drainPostInstallEvents();
     try std.testing.expectEqual(thread_count * Worker.events_per_thread, drained.len);
+}
+
+// Pins the public mode contract so the @atomicLoad/@atomicStore pair
+// can't silently revert to a plain read: workers in routePostInstallOutcome
+// query this on every keg, and a stale read before reset would leak
+// post_install lines into stdout outside the summary doc.
+test "postInstallEmit reflects the most recent setPostInstallEmit value" {
+    resetPostInstallEvents();
+    defer resetPostInstallEvents();
+
+    try std.testing.expectEqual(PostInstallEmit.stream, postInstallEmit());
+
+    setPostInstallEmit(.embed, std.testing.allocator);
+    try std.testing.expectEqual(PostInstallEmit.embed, postInstallEmit());
+
+    resetPostInstallEvents();
+    try std.testing.expectEqual(PostInstallEmit.stream, postInstallEmit());
 }
