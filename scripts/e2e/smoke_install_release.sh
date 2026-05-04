@@ -52,6 +52,23 @@ if [ "${MALT_SKIP_COSIGN:-0}" != "1" ]; then
   [ -n "$COSIGN_PATH" ] || fail "cosign required. Install (\`brew install cosign\`) or set MALT_SKIP_COSIGN=1."
 fi
 
+# Token resolution for GitHub API calls, in priority order:
+#   1. MALT_SMOKE_API_TOKEN (CI passes it from secrets.RELEASE_TOKEN).
+#   2. GITHUB_TOKEN (Actions injects this; some shells export it too).
+#   3. `gh auth token` if gh is on PATH and authenticated.
+# All three may be unset on a fresh local shell — the smoke still runs,
+# just under the 60/hr-per-IP unauthenticated ceiling, which is enough
+# to flake install.sh's API probe behind shared NATs. The propagation
+# wait (release_wait.sh) and install.sh both consume the resolved token.
+if [ -z "${MALT_SMOKE_API_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ] &&
+  command -v gh >/dev/null 2>&1; then
+  if MALT_SMOKE_API_TOKEN=$(gh auth token 2>/dev/null) && [ -n "$MALT_SMOKE_API_TOKEN" ]; then
+    export MALT_SMOKE_API_TOKEN
+  else
+    unset MALT_SMOKE_API_TOKEN
+  fi
+fi
+
 # ── Scratch prefix ────────────────────────────────────────────────────
 # 11-byte path: MALT_PREFIX has a 13-byte hard cap (LC_LOAD_DYLIB
 # patching budget — bottles hard-code `/opt/homebrew`, 13 bytes, and
@@ -82,13 +99,26 @@ fi
 # install.sh hits /releases/latest, so step 2 is the user-facing gate —
 # but separating the two lets the smoke say *which* of the two lagged.
 # Unit coverage for these helpers lives in scripts/test/release_wait_test.sh.
-if [ "${MALT_SMOKE_SKIP_PROPAGATION_WAIT:-0}" != "1" ]; then
-  EXPECTED_TAG="v$(cat "$(dirname "$0")/../../.version")"
+#
+# Source-of-truth for the expected tag, in priority order:
+#   1. EXPECTED_TAG env (CI sets it from ${{ github.ref_name }}).
+#   2. GITHUB_REF_NAME (Actions sets this on tag pushes).
+#   3. (no fallback) — local invocations exercise whatever
+#      /releases/latest currently serves and skip the wait. We deliberately
+#      do NOT read .version: between minor releases, .version on main
+#      points to the next minor while /releases/latest serves the active
+#      patch line cut from release/0.X (see RELEASING.md).
+EXPECTED_TAG="${EXPECTED_TAG:-${GITHUB_REF_NAME:-}}"
+case "$EXPECTED_TAG" in v*) ;; *) EXPECTED_TAG="" ;; esac
+
+if [ -n "$EXPECTED_TAG" ] && [ "${MALT_SMOKE_SKIP_PROPAGATION_WAIT:-0}" != "1" ]; then
   # shellcheck source=/dev/null
   source "$(dirname "$0")/../lib/release_wait.sh"
   step "Waiting up to $((WAIT_BUDGET_SECONDS / 60))m for ${EXPECTED_TAG} to propagate"
   wait_for_release "${EXPECTED_TAG}"
   pass "API /releases/latest reflects ${EXPECTED_TAG}"
+elif [ -z "$EXPECTED_TAG" ]; then
+  step "No EXPECTED_TAG set — verifying whatever /releases/latest currently serves"
 fi
 
 step "Running install.sh from README against the live release"

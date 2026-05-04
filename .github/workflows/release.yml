@@ -348,4 +348,6 @@ jobs:
           # which both the propagation wait and install.sh probe rely
           # on. Contents-read is the only scope consulted.
           MALT_SMOKE_API_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          # Tag being released drives the propagation wait. See RELEASING.md.
+          EXPECTED_TAG: ${{ github.ref_name }}
         run: ./scripts/e2e/smoke_install_release.sh
