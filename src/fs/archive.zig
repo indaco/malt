@@ -142,9 +142,11 @@ const HardLink = struct {
     target: []const u8,
 };
 
-/// Recreate each `target -> name` hard link inside `dest_dir`. zig
-/// 0.16 has no `std.posix.link`; libc extern matches the in-tree
-/// `core/perms.zig` pattern.
+/// Recreate each `target -> name` hard link inside `dest_dir`. Uses
+/// `linkat` with flags=0 (no AT_SYMLINK_FOLLOW) so a hardlink whose
+/// target is itself a symlink shares the symlink inode rather than the
+/// symlink's target inode - macOS `link(2)` follows by default, which
+/// would let an archive craft a hardlink that escapes via a symlink hop.
 fn applyHardLinks(io: std.Io, dest_dir: []const u8, links: []const HardLink) !void {
     _ = io;
     var target_buf: [std.Io.Dir.max_path_bytes * 2]u8 = undefined;
@@ -154,9 +156,9 @@ fn applyHardLinks(io: std.Io, dest_dir: []const u8, links: []const HardLink) !vo
             return error.ExtractionFailed;
         const name_z = std.fmt.bufPrintZ(&name_buf, "{s}/{s}", .{ dest_dir, hl.name }) catch
             return error.ExtractionFailed;
-        // POSIX `link(existing, new)` - existing is the target, new is
-        // the alias. Returns 0 on success, -1 on failure (errno set).
-        if (std.c.link(target_z.ptr, name_z.ptr) != 0) return error.ExtractionFailed;
+        if (std.c.linkat(std.c.AT.FDCWD, target_z.ptr, std.c.AT.FDCWD, name_z.ptr, 0) != 0) {
+            return error.ExtractionFailed;
+        }
     }
 }
 
@@ -188,10 +190,10 @@ fn preScanTarGz(
         const got = r.readSliceShort(&header) catch return error.ExtractionFailed;
         if (got == 0) break;
         if (got < 512) return error.ExtractionFailed;
-        // Two zero blocks mark end-of-archive in the tar spec; one is
-        // enough for our purposes - we'll re-loop and the next read
-        // either returns 0 bytes (clean EOF) or another zero block.
-        if (std.mem.allEqual(u8, &header, 0)) continue;
+        // First zero block ends the scan. Tar formally requires two,
+        // but no valid header lives between them, and parsing further
+        // would let trailing pad/garbage get re-interpreted as headers.
+        if (std.mem.allEqual(u8, &header, 0)) break;
         if (!validChksum(&header)) return error.ExtractionFailed;
 
         const kind_byte = header[156];

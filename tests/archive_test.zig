@@ -226,6 +226,134 @@ test "extractTarGz materialises a tar hard-link entry" {
     try testing.expect(stat_a.nlink >= 2);
 }
 
+// Tar's end-of-archive marker is a zero block. Anything past it - GNU
+// tar pads to record-size with zeros, but homebrew-foreign producers
+// occasionally append non-zero trailers - is not a tar header and must
+// not be re-interpreted as one. Without the fix, the pre-scan would
+// keep reading 512-byte chunks past the marker and fail validChksum on
+// the first non-zero trailer, surfacing ExtractionFailed for archives
+// the stock `tar xzf` would extract cleanly.
+test "extractTarGz stops scanning at end-of-archive and ignores trailing garbage" {
+    const base = "/tmp/malt_archive_targz_eofgarbage";
+    var dir = try resetDir(base);
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+
+    try dir.createDirPath(std.Options.debug_io, "src");
+    {
+        const f = try dir.createFile(std.Options.debug_io, "src/legit.txt", .{});
+        try f.writeStreamingAll(std.Options.debug_io, "ok");
+        f.close(std.Options.debug_io);
+    }
+
+    // Uncompressed tar first - we need to splice garbage past the
+    // end-of-archive zeros before re-compressing.
+    const uncompressed = base ++ "/payload.tar";
+    try runTar(&.{ "tar", "cf", uncompressed, "-C", base, "src" });
+
+    // A single non-zero trailer is enough: the next 512-byte chunk read
+    // by preScanTarGz is no longer all-zero, so a `continue` past the
+    // first zero block would parse it as a header and trip the checksum.
+    try runCmd(&.{ "sh", "-c", "printf 'GARBAGE!' >> '" ++ uncompressed ++ "'" });
+    try runCmd(&.{ "gzip", "-f", uncompressed });
+
+    // Wipe the source tree so observed state can only come from our extractor.
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, base ++ "/src");
+
+    const archive_path = base ++ "/payload.tar.gz";
+    try archive.extractTarGz(std.Options.debug_io, archive_path, base);
+
+    const f = try dir.openFile(std.Options.debug_io, "src/legit.txt", .{});
+    defer f.close(std.Options.debug_io);
+    var out: [8]u8 = undefined;
+    const n = try f.readPositionalAll(std.Options.debug_io, &out, 0);
+    try testing.expectEqualStrings("ok", out[0..n]);
+}
+
+// Hard-link entries are the *only* tar kind outside file/dir/symlink
+// the extractor recovers. Every other unsupported kind (fifo, char/block
+// special, sparse, contiguous) must still surface as ExtractionFailed
+// so the install layer can route to its retry/abort policy. Locks in
+// the diagnostics allow-list against accidental widening.
+// Defensive guard: a tar entry can be a hard link whose target is
+// itself a symbolic link. POSIX `link(2)` on Darwin/Linux does not
+// follow symlinks, so the hard-linked alias must share the SYMLINK's
+// inode (not the symlink's target inode). If this ever regressed,
+// a hostile bottle could craft a hard-link-of-symlink pair to land
+// an inode shared with a file the symlink dereferences to.
+test "extractTarGz hard-link to a symlink shares the symlink inode, not the target" {
+    const base = "/tmp/malt_archive_targz_hardlink_symlink";
+    var dir = try resetDir(base);
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+
+    try dir.createDirPath(std.Options.debug_io, "src");
+    {
+        const f = try dir.createFile(std.Options.debug_io, "src/data.txt", .{});
+        try f.writeStreamingAll(std.Options.debug_io, "data");
+        f.close(std.Options.debug_io);
+    }
+    var src_dir = try dir.openDir(std.Options.debug_io, "src", .{});
+    defer {
+        var sd = src_dir;
+        sd.close(std.Options.debug_io);
+    }
+    try src_dir.symLink(std.Options.debug_io, "data.txt", "linkalias", .{});
+    // `ln -P` forces a hard link to the symlink itself rather than
+    // dereferencing - macOS BSD `ln` follows symlinks by default.
+    try runCmd(&.{ "ln", "-P", base ++ "/src/linkalias", base ++ "/src/link" });
+
+    const archive_path = base ++ "/payload.tar.gz";
+    try runTar(&.{ "tar", "czf", archive_path, "-C", base, "src" });
+
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, base ++ "/src");
+
+    try archive.extractTarGz(std.Options.debug_io, archive_path, base);
+
+    // Both names readlink to the same symlink target. If link() had
+    // dereferenced, one of the two would be a regular file with
+    // 'data' as content - not a symlink at all.
+    var link_buf: [64]u8 = undefined;
+    var alias_buf: [64]u8 = undefined;
+    const link_target_len = try dir.readLink(std.Options.debug_io, "src/link", &link_buf);
+    const alias_target_len = try dir.readLink(std.Options.debug_io, "src/linkalias", &alias_buf);
+    try testing.expectEqualStrings("data.txt", link_buf[0..link_target_len]);
+    try testing.expectEqualStrings("data.txt", alias_buf[0..alias_target_len]);
+
+    // Inode equality (no follow): link and linkalias share the symlink
+    // inode; data.txt has its own. This is the security-relevant check.
+    const link_stat = try dir.statFile(std.Options.debug_io, "src/link", .{ .follow_symlinks = false });
+    const alias_stat = try dir.statFile(std.Options.debug_io, "src/linkalias", .{ .follow_symlinks = false });
+    const data_stat = try dir.statFile(std.Options.debug_io, "src/data.txt", .{ .follow_symlinks = false });
+    try testing.expectEqual(link_stat.inode, alias_stat.inode);
+    try testing.expect(data_stat.inode != link_stat.inode);
+    try testing.expect(link_stat.nlink >= 2);
+}
+
+test "extractTarGz rejects an archive containing a fifo entry" {
+    const base = "/tmp/malt_archive_targz_fifo";
+    var dir = try resetDir(base);
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+
+    try dir.createDirPath(std.Options.debug_io, "src");
+    {
+        const f = try dir.createFile(std.Options.debug_io, "src/regular.txt", .{});
+        try f.writeStreamingAll(std.Options.debug_io, "ok");
+        f.close(std.Options.debug_io);
+    }
+    // mkfifo is what makes tar emit a type-'6' header; nothing in zig's
+    // std lets us synthesise one without invoking the system tool.
+    try runCmd(&.{ "mkfifo", base ++ "/src/pipe" });
+
+    const archive_path = base ++ "/payload.tar.gz";
+    try runTar(&.{ "tar", "czf", archive_path, "-C", base, "src" });
+
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, base ++ "/src");
+
+    try testing.expectError(error.ExtractionFailed, archive.extractTarGz(std.Options.debug_io, archive_path, base));
+}
+
 test "extractTarGz rejects a non-gzip archive" {
     const base = "/tmp/malt_archive_targz_badmagic";
     var dir = try resetDir(base);
