@@ -86,14 +86,23 @@ pub fn routePostInstallOutcome(
         break :blk .partially_skipped;
     };
 
-    // post_install belongs to the 9-step protocol stream, so ndjson
-    // consumers need it even without `--json`.
-    if (output.isJson() or output.isNdjson()) emitPostInstallJson(allocator, name, status, flog);
+    // ndjson always streams; --json picks per-command between streaming
+    // and buffering for embed in a final summary doc.
+    if (output.isNdjson()) {
+        emitPostInstallStreamLine(allocator, name, status, flog);
+        return;
+    }
+    if (output.isJson()) {
+        switch (output.postInstallEmit()) {
+            .stream => emitPostInstallStreamLine(allocator, name, status, flog),
+            .embed => bufferPostInstallEvent(allocator, name, status, flog),
+        }
+    }
 }
 
 /// Write one JSON line per post_install routing decision to stdout. One
 /// line per package keeps the stream pipe-friendly (`jq -c`, line-split).
-fn emitPostInstallJson(
+fn emitPostInstallStreamLine(
     allocator: std.mem.Allocator,
     name: []const u8,
     status: PostInstallStatus,
@@ -102,19 +111,50 @@ fn emitPostInstallJson(
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     const w = &aw.writer;
-    // Sourced from NdjsonEvent so renames propagate, no stale literal.
+    // Event prefix sourced from NdjsonEvent so renames propagate.
     w.writeAll("{\"event\":\"") catch return;
     w.writeAll(@tagName(output.NdjsonEvent.post_install)) catch return;
-    w.writeAll("\",\"name\":") catch return;
-    output.jsonStr(w, name) catch return;
-    w.writeAll(",\"status\":\"") catch return;
-    w.writeAll(@tagName(status)) catch return;
-    w.writeAll("\",\"entries\":") catch return;
-    const entries_json = flog.toJson(allocator) catch return;
-    defer allocator.free(entries_json);
-    w.writeAll(entries_json) catch return;
+    w.writeAll("\",") catch return;
+    writePostInstallBody(w, allocator, name, status, flog) catch return;
     w.writeAll("}\n") catch return;
     output.writeStdoutAll(aw.written());
+}
+
+/// Append `{name,status,entries}` to the accumulator for later embed.
+fn bufferPostInstallEvent(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    status: PostInstallStatus,
+    flog: *const dsl.FallbackLog,
+) void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+    w.writeAll("{") catch return;
+    writePostInstallBody(w, allocator, name, status, flog) catch return;
+    w.writeAll("}") catch return;
+    // Surface push errors loudly so a half-populated summary is obvious.
+    output.pushPostInstallEvent(aw.written()) catch |e|
+        output.warn("post_install event buffering failed for {s}: {s}", .{ name, @errorName(e) });
+}
+
+/// Shared payload writer so the streaming line and buffered embed
+/// stay byte-equivalent at the field level.
+fn writePostInstallBody(
+    w: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    status: PostInstallStatus,
+    flog: *const dsl.FallbackLog,
+) !void {
+    try w.writeAll("\"name\":");
+    try output.jsonStr(w, name);
+    try w.writeAll(",\"status\":\"");
+    try w.writeAll(@tagName(status));
+    try w.writeAll("\",\"entries\":");
+    const entries_json = try flog.toJson(allocator);
+    defer allocator.free(entries_json);
+    try w.writeAll(entries_json);
 }
 
 /// Outcome of a single DSL post_install attempt. `.parse_failed` lets
