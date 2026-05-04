@@ -165,8 +165,9 @@ jobs:
             }" README.md
           done
 
-          # Update date
-          sed -i '' "s/> Benchmarks on Apple Silicon.*/> Benchmarks on Apple Silicon (GitHub Actions macos-14), $DATE. Auto-updated weekly via [benchmark workflow](.github\/workflows\/benchmark.yml)./" README.md
+          # Update date. The anchor pins to the README's actual
+          # line (no `> Benchmarks on` blockquote prefix).
+          sed -i '' "s|^Apple Silicon (GitHub Actions macos-14), .*|Apple Silicon (GitHub Actions macos-14), $DATE. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).|" README.md
 
       - name: Open PR with benchmark results
         # Only publish the README refresh when the workflow runs against
