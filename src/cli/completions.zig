@@ -359,7 +359,8 @@ pub const zsh_script =
     \\                        '--keep-cache[--wipe only: leave the cache directory intact]' \
     \\                        '--remove-binary[--wipe only: also unlink /usr/local/bin/{mt,malt}]' \
     \\                        '(--yes -y)'{--yes,-y}'[Skip every typed confirmation]' \
-    \\                        '(--dry-run -n)'{--dry-run,-n}'[Preview without removing]'
+    \\                        '(--dry-run -n)'{--dry-run,-n}'[Preview without removing]' \
+    \\                        '(--verbose -v)'{--verbose,-v}'[Show every per-scope item; no truncation, full SHAs]'
     \\                    ;;
     \\                version)
     \\                    _values 'subcommand' 'update[Self-update the binary]'

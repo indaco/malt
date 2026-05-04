@@ -1,6 +1,8 @@
 //! malt — per-scope runners driven by the purge orchestrator.  Each
 //! `runX` is an independent bounded context that owns its own database
-//! handle, allocator plumbing, and dry-run branching.
+//! handle, allocator plumbing, and dry-run branching.  Output flows
+//! through a `Reporter`: header → items → footer.  The orchestrator
+//! collects the `TierResult` returned here into a summary table.
 
 const std = @import("std");
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
@@ -11,6 +13,7 @@ const deps_mod = @import("../../core/deps.zig");
 const linker_mod = @import("../../core/linker.zig");
 const cellar_mod = @import("../../core/cellar.zig");
 const util = @import("util.zig");
+const report = @import("report.zig");
 
 const TierResult = util.TierResult;
 
@@ -38,28 +41,31 @@ pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix:
         orphans_list.deinit(allocator);
     }
 
+    var rep = report.Reporter.init("store-orphans", dry_run);
+    rep.fmt = .short_hash;
+
     if (orphans_list.items.len == 0) {
-        output.info("store-orphans: no orphaned store entries", .{});
+        rep.empty("no orphaned store entries");
         return result;
     }
 
-    if (dry_run) {
-        output.info("store-orphans: would remove {d} entry(s):", .{orphans_list.items.len});
-    } else {
-        output.info("store-orphans: removing {d} entry(s):", .{orphans_list.items.len});
-    }
+    rep.header(orphans_list.items.len, "entry", "entries");
 
+    // Stat the entry before remove() so we can credit freed bytes — the
+    // path disappears as soon as `store.remove` returns.
     for (orphans_list.items) |sha| {
-        util.writeStderr("  ");
-        util.writeStderr(sha);
-        util.writeStderr("\n");
+        var path_buf: [512]u8 = undefined;
+        const store_path = std.fmt.bufPrint(&path_buf, "{s}/store/{s}", .{ prefix, sha }) catch continue;
+        const sz = util.pathSize(io, allocator, store_path);
+
+        rep.item(sha);
         if (!dry_run) {
             store.remove(sha) catch continue;
-            result.removed += 1;
-        } else {
-            result.removed += 1;
         }
+        result.removed += 1;
+        result.bytes += sz;
     }
+    rep.done(orphans_list.items.len);
     return result;
 }
 
@@ -84,26 +90,23 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
         allocator.free(orphans);
     }
 
+    var rep = report.Reporter.init("unused-deps", dry_run);
+
     if (orphans.len == 0) {
-        output.info("unused-deps: no orphaned dependencies", .{});
+        rep.empty("no orphaned dependencies");
         return result;
     }
 
+    rep.header(orphans.len, "package", "packages");
+
     if (dry_run) {
-        output.info("unused-deps: would remove {d} package(s):", .{orphans.len});
-        for (orphans) |name| {
-            util.writeStderr("  ");
-            util.writeStderr(name);
-            util.writeStderr("\n");
-        }
+        for (orphans) |name| rep.item(name);
+        rep.done(orphans.len);
         result.removed = @intCast(orphans.len);
         return result;
     }
 
-    output.info("unused-deps: removing {d} package(s):", .{orphans.len});
-
     const io = ctx.io;
-
     var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
     var store = store_mod.Store.init(io, allocator, &db, prefix);
 
@@ -120,6 +123,14 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             const keg_id = stmt.columnInt(0);
             const version_ptr = stmt.columnText(1);
             const sha_ptr = stmt.columnText(2);
+
+            // Credit cellar bytes before unlink: removing the keg deletes
+            // the directory we'd otherwise stat.
+            if (version_ptr) |v| {
+                var path_buf: [512]u8 = undefined;
+                const cellar_path = std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, std.mem.sliceTo(v, 0) }) catch "";
+                if (cellar_path.len > 0) result.bytes += util.pathSize(io, allocator, cellar_path);
+            }
 
             linker.unlink(keg_id) catch {};
             if (version_ptr) |v| {
@@ -139,12 +150,11 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             del.bindInt(1, keg_id) catch continue;
             _ = del.step() catch {};
 
-            util.writeStderr("  ");
-            util.writeStderr(name);
-            util.writeStderr("\n");
+            rep.item(name);
             result.removed += 1;
         }
     }
+    rep.done(orphans.len);
     return result;
 }
 
@@ -153,12 +163,19 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
 pub fn runCache(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8, max_age_days: i64, dry_run: bool) !TierResult {
     _ = allocator;
     var result: TierResult = .{};
-    output.info("cache: pruning entries older than {d} day(s) under {s}", .{ max_age_days, cache_dir });
-    pruneCacheRecursive(ctx.io, cache_dir, max_age_days, dry_run, &result);
+
+    var rep = report.Reporter.init("cache", dry_run);
+    rep.note("pruning entries older than {d} {s} under {s}", .{
+        max_age_days,
+        report.pluralize(@intCast(max_age_days), "day", "days"),
+        cache_dir,
+    });
+    pruneCacheRecursive(ctx.io, cache_dir, max_age_days, dry_run, &result, &rep);
+    rep.done(result.removed);
     return result;
 }
 
-fn pruneCacheRecursive(io: std.Io, cache_dir: []const u8, max_age_days: i64, dry_run: bool, result: *TierResult) void {
+fn pruneCacheRecursive(io: std.Io, cache_dir: []const u8, max_age_days: i64, dry_run: bool, result: *TierResult, rep: *report.Reporter) void {
     var dir = std.Io.Dir.openDirAbsolute(io, cache_dir, .{ .iterate = true }) catch return;
     defer dir.close(io);
 
@@ -170,18 +187,18 @@ fn pruneCacheRecursive(io: std.Io, cache_dir: []const u8, max_age_days: i64, dry
         if (entry.kind == .directory) {
             var sub_buf: [512]u8 = undefined;
             const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ cache_dir, entry.name }) catch continue;
-            pruneCacheRecursive(io, sub_path, max_age_days, dry_run, result);
+            pruneCacheRecursive(io, sub_path, max_age_days, dry_run, result, rep);
             continue;
         }
         const stat = dir.statFile(io, entry.name, .{}) catch continue;
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         if (now - mtime_secs > max_age_secs) {
-            if (dry_run) {
-                output.info("  would prune: {s}/{s}", .{ cache_dir, entry.name });
-            } else {
-                dir.deleteFile(io, entry.name) catch continue;
-                output.info("  pruned: {s}/{s}", .{ cache_dir, entry.name });
-            }
+            if (!dry_run) dir.deleteFile(io, entry.name) catch continue;
+            // Full path so users (and the smoke tests) can see WHERE the
+            // file lived; the leaf alone hides path-of-cleanup hot spots.
+            var label_buf: [768]u8 = undefined;
+            const label = std.fmt.bufPrint(&label_buf, "{s}/{s}", .{ cache_dir, entry.name }) catch entry.name;
+            rep.item(label);
             result.bytes += stat.size;
             result.removed += 1;
         }
@@ -195,34 +212,43 @@ pub fn runDownloads(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir:
     var result: TierResult = .{};
     const io = ctx.io;
 
+    var rep = report.Reporter.init("downloads", dry_run);
+
     var path_buf: [512]u8 = undefined;
     const downloads_path = std.fmt.bufPrint(&path_buf, "{s}/downloads", .{cache_dir}) catch return result;
 
     var dir = std.Io.Dir.openDirAbsolute(io, downloads_path, .{ .iterate = true }) catch {
-        output.info("downloads: nothing to remove ({s} not present)", .{downloads_path});
+        rep.empty("nothing to remove (downloads dir not present)");
         return result;
     };
     defer dir.close(io);
 
-    if (dry_run) {
-        output.info("downloads: would wipe {s}", .{downloads_path});
-    } else {
-        output.info("downloads: wiping {s}", .{downloads_path});
+    // Two-pass: count first so the header reads accurately, then remove.
+    // Cheap because the directory is already cached after the open above.
+    var entries_seen: usize = 0;
+    var ent_iter = dir.iterate();
+    while (ent_iter.next(io) catch null) |entry| {
+        if (entry.kind == .directory) continue;
+        entries_seen += 1;
     }
+
+    if (entries_seen == 0) {
+        rep.empty("nothing to remove");
+        return result;
+    }
+
+    rep.header(entries_seen, "file", "files");
 
     var iter = dir.iterate();
     while (iter.next(io) catch null) |entry| {
         if (entry.kind == .directory) continue;
         const stat = dir.statFile(io, entry.name, .{}) catch continue;
-        if (dry_run) {
-            output.info("  would remove: {s}", .{entry.name});
-        } else {
-            dir.deleteFile(io, entry.name) catch continue;
-            output.info("  removed: {s}", .{entry.name});
-        }
+        if (!dry_run) dir.deleteFile(io, entry.name) catch continue;
+        rep.item(entry.name);
         result.bytes += stat.size;
         result.removed += 1;
     }
+    rep.done(entries_seen);
     return result;
 }
 
@@ -232,11 +258,26 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     var result: TierResult = .{};
     const io = ctx.io;
 
+    var rep = report.Reporter.init("stale-casks", dry_run);
+
     var db = util.openDb(prefix) orelse {
-        output.info("stale-casks: no database — nothing to inspect", .{});
+        rep.empty("no database — nothing to inspect");
         return result;
     };
     defer db.close();
+
+    // Collect candidates first so we can emit a single header line with
+    // an accurate count before printing the per-item bullets.
+    const Candidate = struct {
+        kind: enum { cache_file, caskroom_dir },
+        name: []u8, // owned
+        size: u64,
+    };
+    var candidates: std.ArrayList(Candidate) = .empty;
+    defer {
+        for (candidates.items) |c| allocator.free(c.name);
+        candidates.deinit(allocator);
+    }
 
     // Cask download cache
     var cask_cache_buf: [512]u8 = undefined;
@@ -264,18 +305,14 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             var stmt = db.prepare("SELECT token FROM casks WHERE token = ?1 LIMIT 1;") catch continue;
             defer stmt.finalize();
             stmt.bindText(1, token_z) catch continue;
-
             if (stmt.step() catch false) continue; // still installed
 
             const stat = dir.statFile(io, entry.name, .{}) catch continue;
-            if (dry_run) {
-                output.info("  stale-casks: would remove cache {s}", .{entry.name});
-            } else {
-                dir.deleteFile(io, entry.name) catch continue;
-                output.info("  stale-casks: removed cache {s}", .{entry.name});
-            }
-            result.bytes += stat.size;
-            result.removed += 1;
+            const dup = allocator.dupe(u8, entry.name) catch continue;
+            candidates.append(allocator, .{ .kind = .cache_file, .name = dup, .size = stat.size }) catch {
+                allocator.free(dup);
+                continue;
+            };
         }
     } else |_| {}
 
@@ -296,24 +333,49 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             var stmt = db.prepare("SELECT token FROM casks WHERE token = ?1 LIMIT 1;") catch continue;
             defer stmt.finalize();
             stmt.bindText(1, token_z) catch continue;
-
             if (stmt.step() catch false) continue;
 
             var path_buf: [512]u8 = undefined;
             const full = std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}", .{ prefix, entry.name }) catch continue;
-            if (dry_run) {
-                output.info("  stale-casks: would remove Caskroom/{s}", .{entry.name});
-            } else {
-                std.Io.Dir.cwd().deleteTree(io, full) catch continue;
-                output.info("  stale-casks: removed Caskroom/{s}", .{entry.name});
-            }
-            result.removed += 1;
+            const sz = util.pathSize(io, allocator, full);
+            const dup = allocator.dupe(u8, entry.name) catch continue;
+            candidates.append(allocator, .{ .kind = .caskroom_dir, .name = dup, .size = sz }) catch {
+                allocator.free(dup);
+                continue;
+            };
         }
     } else |_| {}
 
-    if (result.removed == 0) {
-        output.info("stale-casks: nothing to remove", .{});
+    if (candidates.items.len == 0) {
+        rep.empty("nothing to remove");
+        return result;
     }
+
+    rep.header(candidates.items.len, "entry", "entries");
+
+    for (candidates.items) |c| {
+        switch (c.kind) {
+            .cache_file => {
+                if (!dry_run) {
+                    var dir = std.Io.Dir.openDirAbsolute(io, cask_cache_path, .{}) catch continue;
+                    defer dir.close(io);
+                    dir.deleteFile(io, c.name) catch continue;
+                }
+                rep.item(c.name);
+            },
+            .caskroom_dir => {
+                if (!dry_run) {
+                    var path_buf: [512]u8 = undefined;
+                    const full = std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}", .{ prefix, c.name }) catch continue;
+                    std.Io.Dir.cwd().deleteTree(io, full) catch continue;
+                }
+                rep.item(c.name);
+            },
+        }
+        result.removed += 1;
+        result.bytes += c.size;
+    }
+    rep.done(candidates.items.len);
     return result;
 }
 
@@ -323,14 +385,32 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
     var result: TierResult = .{};
     const io = ctx.io;
 
+    var rep = report.Reporter.init("old-versions", dry_run);
+
     var cellar_buf: [512]u8 = undefined;
     const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{prefix}) catch return result;
 
     var cellar_dir = std.Io.Dir.openDirAbsolute(io, cellar_path, .{ .iterate = true }) catch {
-        output.info("old-versions: no Cellar directory at {s}", .{cellar_path});
+        rep.empty("no Cellar directory");
         return result;
     };
     defer cellar_dir.close(io);
+
+    // Two-pass: collect candidates first so the header count matches what
+    // the user is about to see scrolled past.
+    const Candidate = struct {
+        formula: []u8, // owned
+        version: []u8, // owned
+        size: u64,
+    };
+    var candidates: std.ArrayList(Candidate) = .empty;
+    defer {
+        for (candidates.items) |c| {
+            allocator.free(c.formula);
+            allocator.free(c.version);
+        }
+        candidates.deinit(allocator);
+    }
 
     var iter = cellar_dir.iterate();
     while (iter.next(io) catch null) |formula_entry| {
@@ -339,7 +419,6 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
         var formula_dir = cellar_dir.openDir(io, formula_entry.name, .{ .iterate = true }) catch continue;
         defer formula_dir.close(io);
 
-        // Collect (name, mtime) for every version directory.
         const Version = struct { name: []u8, mtime: i128 };
         var versions: std.ArrayList(Version) = .empty;
         defer {
@@ -372,19 +451,39 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
             var path_buf: [512]u8 = undefined;
             const full = std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, formula_entry.name, v.name }) catch continue;
             const sz = util.pathSize(io, allocator, full);
-            if (dry_run) {
-                output.info("  old-versions: would remove {s}/{s}", .{ formula_entry.name, v.name });
-            } else {
-                std.Io.Dir.cwd().deleteTree(io, full) catch continue;
-                output.info("  old-versions: removed {s}/{s}", .{ formula_entry.name, v.name });
-            }
-            result.bytes += sz;
-            result.removed += 1;
+
+            const fdup = allocator.dupe(u8, formula_entry.name) catch continue;
+            const vdup = allocator.dupe(u8, v.name) catch {
+                allocator.free(fdup);
+                continue;
+            };
+            candidates.append(allocator, .{ .formula = fdup, .version = vdup, .size = sz }) catch {
+                allocator.free(fdup);
+                allocator.free(vdup);
+                continue;
+            };
         }
     }
 
-    if (result.removed == 0) {
-        output.info("old-versions: nothing to remove", .{});
+    if (candidates.items.len == 0) {
+        rep.empty("nothing to remove");
+        return result;
     }
+
+    rep.header(candidates.items.len, "version", "versions");
+
+    var label_buf: [256]u8 = undefined;
+    for (candidates.items) |c| {
+        if (!dry_run) {
+            var path_buf: [512]u8 = undefined;
+            const full = std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, c.formula, c.version }) catch continue;
+            std.Io.Dir.cwd().deleteTree(io, full) catch continue;
+        }
+        const label = std.fmt.bufPrint(&label_buf, "{s}/{s}", .{ c.formula, c.version }) catch c.formula;
+        rep.item(label);
+        result.bytes += c.size;
+        result.removed += 1;
+    }
+    rep.done(candidates.items.len);
     return result;
 }
