@@ -592,39 +592,33 @@ For installing malt from a local checkout (the end-user path), see [From source]
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
+### Binary Size
 
-### Binary size
-
-| Tool     | Size   |
-| -------- | ------ |
-| **malt** | 3.2 MB |
+| Tool | Size |
+| ---- | ---- |
+| **malt** | 3.3 MB |
 | nanobrew | 2.6 MB |
 | zerobrew | 8.6 MB |
-
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
+### Cold Install (median ±σ)
 
-### Cold install (median ±σ)
-
-| Package              | malt         | nanobrew     | zerobrew     | Homebrew      |
-| -------------------- | ------------ | ------------ | ------------ | ------------- |
-| **tree** (0 deps)    | 0.730±0.062s | 0.796±0.076s | 1.131±0.038s | 3.338±0.200s  |
-| **wget** (6 deps)    | 2.827±0.201s | 3.074±0.344s | 4.899±0.108s | 3.387±0.110s  |
-| **ffmpeg** (11 deps) | 3.319±0.254s | 2.807±0.364s | 5.494±0.175s | 15.615±0.532s |
-
+| Package | malt | nanobrew | zerobrew | Homebrew |
+| ------- | ---- | -------- | -------- | -------- |
+| **tree** (0 deps) | 0.657±0.049s | 0.758±0.033s | 1.114±0.025s | 3.308±0.221s |
+| **wget** (6 deps) | 2.461±0.180s | 2.748±0.053s | 5.090±0.185s | 3.405±0.164s |
+| **ffmpeg** (11 deps) | 3.719±0.455s | 3.361±0.515s | 6.774±0.600s | 17.384±2.266s |
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+### Warm Install
 
-### Warm install
-
-| Package              | malt   | nanobrew | zerobrew |
-| -------------------- | ------ | -------- | -------- |
-| **tree** (0 deps)    | 0.012s | 0.013s   | 0.235s   |
-| **wget** (6 deps)    | 0.007s | 0.010s   | 0.633s   |
-| **ffmpeg** (11 deps) | 0.024s | 0.015s   | 2.196s   |
-
+| Package | malt | nanobrew | zerobrew |
+| ------- | ---- | -------- | -------- |
+| **tree** (0 deps) | 0.009s | 0.010s | 0.244s |
+| **wget** (6 deps) | 0.007s | 0.011s | 0.627s |
+| **ffmpeg** (11 deps) | 0.034s | 0.019s | 2.816s |
 <!-- BENCH:WARM:END -->
 
 Apple Silicon (GitHub Actions macos-14), 2026-04-28. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
