@@ -167,6 +167,65 @@ test "extractTarGz preserves exec bits, symlinks, and deep paths" {
     try testing.expectEqualStrings("deep", buf[0..n]);
 }
 
+// Bottles for formulae like `libdeflate` ship multi-name CLIs via tar
+// hard-link entries (`bin/libdeflate-gzip` -> `bin/libdeflate-gunzip`).
+// `std.tar.FileKind` has no `.hard_link` variant in zig 0.16, so the
+// stock `pipeToFileSystem` would otherwise fail with the generic
+// "Download failed" surface. Pre-scan + post-pass `link()` recovers
+// the alias without touching the bulk extraction pipeline.
+test "extractTarGz materialises a tar hard-link entry" {
+    const base = "/tmp/malt_archive_targz_hardlink";
+    var dir = try resetDir(base);
+    defer dir.close(std.Options.debug_io);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+
+    // Build payload: src/bin/primary holds 'pri', src/bin/aliased is a
+    // hard link to primary. We use `ln` (not `ln -s`) so tar records a
+    // type-'1' header; with `ln -s` it would be a symlink instead.
+    try dir.createDirPath(std.Options.debug_io, "src/bin");
+    {
+        const f = try dir.createFile(std.Options.debug_io, "src/bin/primary", .{
+            .permissions = std.Io.File.Permissions.fromMode(0o755),
+        });
+        try f.writeStreamingAll(std.Options.debug_io, "pri");
+        f.close(std.Options.debug_io);
+    }
+    try runCmd(&.{ "ln", base ++ "/src/bin/primary", base ++ "/src/bin/aliased" });
+
+    const archive_path = base ++ "/payload.tar.gz";
+    try runTar(&.{ "tar", "czf", archive_path, "-C", base, "src" });
+
+    // Wipe so observed state can only come from our extractor.
+    try test_io.deleteTreeAbsolute(std.Options.debug_io, base ++ "/src");
+
+    try archive.extractTarGz(std.Options.debug_io, archive_path, base);
+
+    // Both names land on disk with the same content; that's necessary
+    // for libdeflate-style multi-binary kegs to actually function.
+    var buf: [8]u8 = undefined;
+    {
+        const f = try dir.openFile(std.Options.debug_io, "src/bin/primary", .{});
+        defer f.close(std.Options.debug_io);
+        const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
+        try testing.expectEqualStrings("pri", buf[0..n]);
+    }
+    {
+        const f = try dir.openFile(std.Options.debug_io, "src/bin/aliased", .{});
+        defer f.close(std.Options.debug_io);
+        const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
+        try testing.expectEqualStrings("pri", buf[0..n]);
+    }
+
+    // Hard link semantics: same inode, link count >= 2. Confirms we did
+    // a `link()` call rather than copying the bytes (which would defeat
+    // the point of hard-link entries in the bottle and double the disk
+    // footprint per multi-binary keg).
+    const stat_a = try dir.statFile(std.Options.debug_io, "src/bin/primary", .{});
+    const stat_b = try dir.statFile(std.Options.debug_io, "src/bin/aliased", .{});
+    try testing.expectEqual(stat_a.inode, stat_b.inode);
+    try testing.expect(stat_a.nlink >= 2);
+}
+
 test "extractTarGz rejects a non-gzip archive" {
     const base = "/tmp/malt_archive_targz_badmagic";
     var dir = try resetDir(base);
