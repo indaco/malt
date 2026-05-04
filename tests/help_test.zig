@@ -57,6 +57,14 @@ test "helpFor returns command-specific text for known commands" {
     try testing.expect(std.mem.indexOf(u8, help.helpFor("purge"), "--housekeeping") != null);
 }
 
+test "purge help documents --verbose for full per-scope listings" {
+    // Discoverability guard: the housekeeping output truncates lists by
+    // default, so the bypass flag only exists if --help mentions it.
+    const text = help.helpFor("purge");
+    try testing.expect(std.mem.indexOf(u8, text, "--verbose") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "no truncation") != null);
+}
+
 test "install help documents --local and its code-exec warning" {
     // Discoverability guard: the flag only meaningfully exists if the
     // help output tells the user about it.

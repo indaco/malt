@@ -352,6 +352,7 @@ const purge_help =
     \\  --dry-run, -n        Preview only
     \\  --yes, -y            Skip every typed confirmation prompt
     \\  --quiet, -q          Suppress per-item output
+    \\  --verbose, -v        Show every per-scope item (no truncation, full SHAs)
     \\  --backup, -b <path>  Write a `mt restore`-compatible manifest first
     \\
     \\--wipe-only flags:
