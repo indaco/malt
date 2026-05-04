@@ -545,12 +545,18 @@ pub fn findFailedDep(
     return null;
 }
 
-/// Result of a parallel materialize worker. `keg_path` is owned via
-/// `std.heap.c_allocator` (thread-safe) and must be freed by the caller.
+/// Result of a parallel materialize worker. The keg path is stored
+/// inline so it survives the worker's per-call arena without needing
+/// a thread-safe heap allocator. macOS PATH_MAX bounds the buffer.
 pub const MaterializeResult = struct {
     ok: bool,
-    keg_path: []const u8,
     err: ?cellar_mod.CellarError,
+    keg_path_buf: [std.fs.max_path_bytes]u8 = undefined,
+    keg_path_len: usize = 0,
+
+    pub fn kegPath(self: *const MaterializeResult) []const u8 {
+        return self.keg_path_buf[0..self.keg_path_len];
+    }
 };
 
 /// Shared state for a bounded work-stealing thread pool that executes
@@ -586,8 +592,9 @@ pub fn materializePoolWorker(pool: *MaterializePool) void {
 /// module's I/O paths never overlap between jobs.
 ///
 /// Uses a per-call arena for short-lived allocations (walker, patcher
-/// buffers, etc.) and `std.heap.c_allocator` for the single long-lived
-/// output — the keg path — so it survives arena teardown.
+/// buffers, etc.). The keg path is copied into the result's inline
+/// buffer so it outlives the arena without crossing thread boundaries
+/// through a global allocator.
 fn materializeOne(
     io: std.Io,
     job: *DownloadJob,
@@ -607,16 +614,27 @@ fn materializeOne(
         job.version_str,
         job.cellar_type,
     ) catch |err| {
-        result.* = .{ .ok = false, .keg_path = &[_]u8{}, .err = err };
+        result.* = .{ .ok = false, .err = err };
         return;
     };
 
-    // Dup keg.path to a long-lived thread-safe allocator because the
-    // arena is about to deinit.
-    const durable_path = std.heap.c_allocator.dupe(u8, keg.path) catch {
-        result.* = .{ .ok = false, .keg_path = &[_]u8{}, .err = cellar_mod.CellarError.OutOfMemory };
-        return;
-    };
+    // Cellar paths are bounded by the OS PATH_MAX; assert the invariant.
+    std.debug.assert(keg.path.len <= result.keg_path_buf.len);
+    @memcpy(result.keg_path_buf[0..keg.path.len], keg.path);
+    result.ok = true;
+    result.err = null;
+    result.keg_path_len = keg.path.len;
+}
 
-    result.* = .{ .ok = true, .keg_path = durable_path, .err = null };
+test "MaterializeResult.kegPath returns empty before write" {
+    const r: MaterializeResult = .{ .ok = false, .err = null };
+    try std.testing.expectEqualStrings("", r.kegPath());
+}
+
+test "MaterializeResult.kegPath reflects keg_path_len after write" {
+    var r: MaterializeResult = .{ .ok = true, .err = null };
+    const path = "/opt/malt/Cellar/wget/1.25.0";
+    @memcpy(r.keg_path_buf[0..path.len], path);
+    r.keg_path_len = path.len;
+    try std.testing.expectEqualStrings(path, r.kegPath());
 }
