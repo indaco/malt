@@ -299,6 +299,34 @@ else
   run_ok t3.purge.house.dry -- "$MT_BIN" purge --housekeeping --dry-run
   run_ok t3.purge.cache.dry -- "$MT_BIN" purge --cache=7 --dry-run
 
+  # Structured-output probes: prove the v1 wire format is parseable. Gated
+  # on jq because not every smoke environment ships it.
+  if command -v jq >/dev/null 2>&1; then
+    out=$("$MT_BIN" --json --quiet purge --housekeeping --dry-run 2>/dev/null)
+    if printf '%s\n' "$out" | jq -e '.version == 1 and .dry_run == true and (.scopes | type == "array")' >/dev/null 2>&1; then
+      printf '  PASS  [t3.purge.house.json.dry] mt --json purge --housekeeping --dry-run\n'
+      PASS=$((PASS + 1))
+    else
+      printf '  FAIL  [t3.purge.house.json.dry] payload not parseable / missing keys\n'
+      printf '%s\n' "$out" | sed 's/^/        | /'
+      FAIL=$((FAIL + 1))
+      FAILURES+=("t3.purge.house.json.dry")
+    fi
+
+    if "$MT_BIN" --output-format=ndjson --quiet purge --housekeeping --dry-run 2>/dev/null |
+      jq -e 'select(.event=="purge_complete") | .dry_run == true' >/dev/null 2>&1; then
+      printf '  PASS  [t3.purge.house.ndjson.dry] mt --output-format=ndjson purge --housekeeping --dry-run\n'
+      PASS=$((PASS + 1))
+    else
+      printf '  FAIL  [t3.purge.house.ndjson.dry] event stream missing purge_complete\n'
+      FAIL=$((FAIL + 1))
+      FAILURES+=("t3.purge.house.ndjson.dry")
+    fi
+  else
+    printf '  SKIP  [t3.purge.house.json.dry] (jq not on PATH)\n'
+    printf '  SKIP  [t3.purge.house.ndjson.dry] (jq not on PATH)\n'
+  fi
+
   # T-060 AC: --keep populates {cache}/run/<sha>/ and a sibling .lock file;
   # `mt purge --cache` must reach both. Pre-populate a stale slot so the
   # mtime-based pruner picks it up, then assert the dry-run sees it.

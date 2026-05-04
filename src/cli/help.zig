@@ -355,6 +355,12 @@ const purge_help =
     \\  --verbose, -v        Show every per-scope item (no truncation, full SHAs)
     \\  --backup, -b <path>  Write a `mt restore`-compatible manifest first
     \\
+    \\Structured output (stdout; stderr stays the human surface):
+    \\  --json                  Single summary object: version, dry_run, scopes,
+    \\                          totals, time_ms.
+    \\  --output-format=ndjson  One {"event":...} line per state transition
+    \\                          (scope_started, scope_completed, purge_complete).
+    \\
     \\--wipe-only flags:
     \\  --keep-cache         Do not delete the cache directory
     \\  --remove-binary      Also unlink /usr/local/bin/{mt,malt}

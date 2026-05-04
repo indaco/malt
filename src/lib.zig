@@ -31,6 +31,7 @@ pub const shellenv = @import("cli/shellenv.zig");
 pub const backup = @import("cli/backup.zig");
 pub const purge = @import("cli/purge.zig");
 pub const purge_report = @import("cli/purge/report.zig");
+pub const purge_json = @import("cli/purge/json.zig");
 pub const install = @import("cli/install.zig");
 pub const upgrade = @import("cli/upgrade.zig");
 pub const doctor = @import("cli/doctor.zig");

@@ -193,7 +193,14 @@ pub fn verifyWipe(io: std.Io, plan: []const Target) void {
     }
 }
 
-pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, prefix: []const u8, cache_dir: []const u8, dry_run: bool) !void {
+/// Same idempotency contract as `accessAbsolute`: a missing path is not
+/// an error, just absent.
+fn pathExists(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.accessAbsolute(io, path, .{}) catch return false;
+    return true;
+}
+
+pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, prefix: []const u8, cache_dir: []const u8, dry_run: bool) !util.TierResult {
     warnBanner();
     output.dimPlain("prefix:  {s}", .{prefix});
     output.dimPlain("cache:   {s}", .{cache_dir});
@@ -205,10 +212,20 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
 
     const io = ctx.io;
 
+    // Pre-flight stat: track which plan entries already hold data so the
+    // JSON `removed` counter reflects paths that would actually be freed.
+    // Without this, deleteTree's idempotent success on missing paths
+    // would inflate the count to plan.len on a half-installed prefix.
+    const existed = try allocator.alloc(bool, plan.len);
+    defer allocator.free(existed);
+
     var total_bytes: u64 = 0;
-    for (plan) |t| {
-        const size = util.pathSize(io, allocator, t.path);
+    var existing_count: u32 = 0;
+    for (plan, 0..) |t, idx| {
+        existed[idx] = pathExists(io, t.path);
+        const size = if (existed[idx]) util.pathSize(io, allocator, t.path) else 0;
         total_bytes += size;
+        if (existed[idx]) existing_count += 1;
         var sz_buf: [32]u8 = undefined;
         const sz = util.formatBytes(size, &sz_buf);
         output.plain("  [{s:<8}] {s} ({s})", .{ t.category.label(), t.path, sz });
@@ -230,17 +247,18 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
 
     if (dry_run) {
         output.info("dry run — nothing was removed", .{});
-        return;
+        return .{ .removed = existing_count, .bytes = total_bytes };
     }
 
     try util.confirmScope(opts.yes, "purge", "wipe");
 
     var lock_path_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
+    const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return .{};
     var lk_maybe: ?lock_mod.LockFile = lock_mod.LockFile.acquire(lock_path, 30_000) catch null;
 
     var removed: usize = 0;
     var skipped: usize = 0;
+    var freed_paths: u32 = 0;
     var db_idx: ?usize = null;
     var prefix_idx: ?usize = null;
 
@@ -256,16 +274,25 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
             },
             else => {},
         }
-        if (deleteTarget(io, t.path)) removed += 1 else skipped += 1;
+        if (deleteTarget(io, t.path)) {
+            removed += 1;
+            if (existed[idx]) freed_paths += 1;
+        } else skipped += 1;
     }
 
     if (lk_maybe) |*lk| lk.release();
 
     if (db_idx) |idx| {
-        if (deleteTarget(io, plan[idx].path)) removed += 1 else skipped += 1;
+        if (deleteTarget(io, plan[idx].path)) {
+            removed += 1;
+            if (existed[idx]) freed_paths += 1;
+        } else skipped += 1;
     }
     if (prefix_idx) |idx| {
-        if (deletePrefixRoot(io, plan[idx].path)) removed += 1 else skipped += 1;
+        if (deletePrefixRoot(io, plan[idx].path)) {
+            removed += 1;
+            if (existed[idx]) freed_paths += 1;
+        } else skipped += 1;
     }
 
     verifyWipe(io, plan);
@@ -273,4 +300,5 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
     var sum_buf: [128]u8 = undefined;
     const sum = std.fmt.bufPrint(&sum_buf, "removed {d} target(s), skipped {d}", .{ removed, skipped }) catch "";
     output.success("{s}", .{sum});
+    return .{ .removed = freed_paths, .bytes = total_bytes };
 }

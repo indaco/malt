@@ -13,6 +13,7 @@ const wipe_mod = @import("purge/wipe.zig");
 const scopes_mod = @import("purge/scopes.zig");
 const util = @import("purge/util.zig");
 const report = @import("purge/report.zig");
+const purge_json = @import("purge/json.zig");
 
 pub const Error = args_mod.Error;
 pub const Scope = args_mod.Scope;
@@ -27,6 +28,41 @@ pub const freePlan = wipe_mod.freePlan;
 pub const formatBytes = util.formatBytes;
 
 const TierResult = util.TierResult;
+
+/// Closed enum of non-wipe scopes. Field names match `Scope` so
+/// `@field(opts.scope, @tagName(k))` checks selection without a
+/// hand-maintained dispatch table.
+const ScopeKey = enum {
+    unused_deps,
+    store_orphans,
+    cache,
+    downloads,
+    stale_casks,
+    old_versions,
+
+    fn label(k: ScopeKey) []const u8 {
+        return switch (k) {
+            .unused_deps => "unused-deps",
+            .store_orphans => "store-orphans",
+            .cache => "cache",
+            .downloads => "downloads",
+            .stale_casks => "stale-casks",
+            .old_versions => "old-versions",
+        };
+    }
+};
+
+/// Run order matters: unused-deps must precede store-orphans because
+/// removing a keg decrements its store ref to 0, and those fresh
+/// orphans only get swept on the second pass.
+const scope_run_order = [_]ScopeKey{
+    .unused_deps,
+    .store_orphans,
+    .cache,
+    .downloads,
+    .stale_casks,
+    .old_versions,
+};
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "purge")) return;
@@ -50,8 +86,34 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
     defer allocator.free(cache_dir);
 
+    const start_ts = std.Io.Clock.real.now(ctx.io).toMilliseconds();
+
     if (opts.scope.wipe) {
-        try wipe_mod.runWipe(ctx, allocator, opts, prefix, cache_dir, dry_run);
+        purge_json.emitScopeStarted("wipe", dry_run);
+        var wipe_result: util.TierResult = .{};
+        // Declare in reverse-of-fire order: LIFO defer flushes
+        // scope_completed → purge_complete → summary even if runWipe
+        // errors (e.g. UserAborted), so consumers can rely on a strict
+        // open/close bracket per command invocation.
+        defer if (output.isJson()) {
+            const elapsed = std.Io.Clock.real.now(ctx.io).toMilliseconds() - start_ts;
+            const wipe_rows = [_]report.SummaryRow{.{
+                .name = "wipe",
+                .removed = @intCast(wipe_result.removed),
+                .bytes = wipe_result.bytes,
+            }};
+            purge_json.emitSummary(
+                allocator,
+                dry_run,
+                &wipe_rows,
+                wipe_result.removed,
+                wipe_result.bytes,
+                elapsed,
+            ) catch {};
+        };
+        defer purge_json.emitPurgeComplete(wipe_result.removed, wipe_result.bytes, dry_run);
+        defer purge_json.emitScopeCompleted("wipe", wipe_result.removed, wipe_result.bytes, dry_run);
+        wipe_result = try wipe_mod.runWipe(ctx, allocator, opts, prefix, cache_dir, dry_run);
         return;
     }
 
@@ -83,44 +145,42 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer summary.deinit(allocator);
     var grand_total: TierResult = .{};
 
-    // unused-deps must run before store-orphans: removing a keg decrements
-    // its store ref to 0, and those fresh orphans only get swept on the
-    // second pass.
-    if (opts.scope.unused_deps) {
-        const r = try scopes_mod.runUnusedDeps(ctx, allocator, prefix, dry_run);
-        try summary.add(allocator, .{ .name = "unused-deps", .removed = r.removed, .bytes = r.bytes });
-        grand_total.removed += r.removed;
-        grand_total.bytes += r.bytes;
-    }
-    if (opts.scope.store_orphans) {
-        const r = try scopes_mod.runStoreOrphans(ctx, allocator, prefix, dry_run);
-        try summary.add(allocator, .{ .name = "store-orphans", .removed = r.removed, .bytes = r.bytes });
-        grand_total.removed += r.removed;
-        grand_total.bytes += r.bytes;
-    }
-    if (opts.scope.cache) {
-        const r = try scopes_mod.runCache(ctx, allocator, cache_dir, opts.cache_days, dry_run);
-        try summary.add(allocator, .{ .name = "cache", .removed = r.removed, .bytes = r.bytes });
-        grand_total.removed += r.removed;
-        grand_total.bytes += r.bytes;
-    }
-    if (opts.scope.downloads) {
-        const r = try scopes_mod.runDownloads(ctx, allocator, cache_dir, dry_run);
-        try summary.add(allocator, .{ .name = "downloads", .removed = r.removed, .bytes = r.bytes });
-        grand_total.removed += r.removed;
-        grand_total.bytes += r.bytes;
-    }
-    if (opts.scope.stale_casks) {
-        const r = try scopes_mod.runStaleCasks(ctx, allocator, prefix, dry_run);
-        try summary.add(allocator, .{ .name = "stale-casks", .removed = r.removed, .bytes = r.bytes });
-        grand_total.removed += r.removed;
-        grand_total.bytes += r.bytes;
-    }
-    if (opts.scope.old_versions) {
-        const r = try scopes_mod.runOldVersions(ctx, allocator, prefix, dry_run);
-        try summary.add(allocator, .{ .name = "old-versions", .removed = r.removed, .bytes = r.bytes });
-        grand_total.removed += r.removed;
-        grand_total.bytes += r.bytes;
+    // Strict ndjson bracketing: scope_started lines always pair with a
+    // scope_completed (handled per scope below) and purge_complete /
+    // summary always close the stream, even if a scope errors mid-flight.
+    // Declare in reverse-of-fire order: LIFO drains purge_complete first,
+    // then summary.
+    defer if (output.isJson()) {
+        const elapsed = std.Io.Clock.real.now(ctx.io).toMilliseconds() - start_ts;
+        purge_json.emitSummary(
+            allocator,
+            dry_run,
+            summary.rows.items,
+            grand_total.removed,
+            grand_total.bytes,
+            elapsed,
+        ) catch {};
+    };
+    defer purge_json.emitPurgeComplete(grand_total.removed, grand_total.bytes, dry_run);
+
+    inline for (scope_run_order) |k| {
+        if (@field(opts.scope, @tagName(k))) {
+            const name = comptime k.label();
+            purge_json.emitScopeStarted(name, dry_run);
+            var r: TierResult = .{};
+            defer purge_json.emitScopeCompleted(name, r.removed, r.bytes, dry_run);
+            r = try switch (k) {
+                .unused_deps => scopes_mod.runUnusedDeps(ctx, allocator, prefix, dry_run),
+                .store_orphans => scopes_mod.runStoreOrphans(ctx, allocator, prefix, dry_run),
+                .cache => scopes_mod.runCache(ctx, allocator, cache_dir, opts.cache_days, dry_run),
+                .downloads => scopes_mod.runDownloads(ctx, allocator, cache_dir, dry_run),
+                .stale_casks => scopes_mod.runStaleCasks(ctx, allocator, prefix, dry_run),
+                .old_versions => scopes_mod.runOldVersions(ctx, allocator, prefix, dry_run),
+            };
+            try summary.add(allocator, .{ .name = name, .removed = r.removed, .bytes = r.bytes });
+            grand_total.removed += r.removed;
+            grand_total.bytes += r.bytes;
+        }
     }
 
     // Skip the table when only one scope ran — the per-scope footer is
