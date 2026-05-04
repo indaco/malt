@@ -286,6 +286,27 @@ test "interpreter: raise causes PostInstallFailed" {
     try testing.expectEqual(dsl.DslError.PostInstallFailed, err.?);
 }
 
+test "interpreter: raise message is captured by the output module seam" {
+    // Pins the routing fix: `raise` emits via output.writeStderrAll so
+    // beginStderrCapture intercepts the line and `zig build test` stays
+    // quiet. A regression to direct fd-2 writes would let the message
+    // leak past the capture and the assertion below would fail.
+    var arena = testArena();
+    defer arena.deinit();
+
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &buf);
+    defer malt.output.endStderrCapture();
+
+    const err = try runSnippet(&arena, "raise \"boom\"", prefix);
+    try testing.expect(err != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "boom") != null);
+}
+
 test "interpreter: begin rescue handles error" {
     var arena = testArena();
     defer arena.deinit();
