@@ -80,6 +80,40 @@ test "duplicate commit is idempotent" {
     try testing.expect(ctx.store.exists("dup_sha"));
 }
 
+test "remove also drops the store_refs row so the orphan does not return" {
+    var ctx = try setupTestStore(testing.allocator);
+    defer {
+        ctx.db.close();
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
+        testing.allocator.free(ctx.prefix);
+    }
+    ctx.store.db = &ctx.db;
+
+    try ctx.store.incrementRef("orphan_sha");
+    try ctx.store.decrementRef("orphan_sha"); // refcount → 0
+
+    // Pre-condition: enumerate sees the orphan.
+    {
+        var orphans = try ctx.store.orphans();
+        defer {
+            for (orphans.items) |o| testing.allocator.free(o);
+            orphans.deinit(testing.allocator);
+        }
+        try testing.expectEqual(@as(usize, 1), orphans.items.len);
+    }
+
+    // remove() with no on-disk path must still clear the DB row — otherwise
+    // the same row keeps reappearing on every purge run.
+    try ctx.store.remove("orphan_sha");
+
+    var orphans = try ctx.store.orphans();
+    defer {
+        for (orphans.items) |o| testing.allocator.free(o);
+        orphans.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 0), orphans.items.len);
+}
+
 test "incrementRef and decrementRef update refcount" {
     var ctx = try setupTestStore(testing.allocator);
     defer {
