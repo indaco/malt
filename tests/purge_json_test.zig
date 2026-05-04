@@ -314,6 +314,44 @@ test "wipe dry-run removed count matches the live freed-path semantic" {
     try testing.expect(removed < 14);
 }
 
+test "corrupt database surfaces a real error, not the soft no-db skip" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "corrupt_db");
+    defer prefix.deinit(allocator);
+
+    // Pre-populate {prefix}/db/malt.db with random bytes so SQLite's
+    // header check rejects it. This must take the .unreadable branch
+    // and log a loud err, not the soft "no database" path.
+    const db_path = try std.fmt.allocPrint(allocator, "{s}/db/malt.db", .{prefix.path});
+    defer allocator.free(db_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "this is not a valid sqlite header, just garbage to trip the open path");
+    }
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(true);
+    output.setNdjson(false);
+    output.setQuiet(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    const ctx = makeCtx();
+    try purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"});
+
+    // Must NOT take the soft skip path.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "no database — nothing to inspect") == null);
+    // Must surface the real error so the user can investigate.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "cannot open database") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "store-orphans") != null);
+}
+
 test "ndjson scope_completed carries removed/bytes counters" {
     const allocator = testing.allocator;
     var prefix = try ScratchPrefix.init(allocator, "counters");
