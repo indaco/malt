@@ -590,12 +590,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // warm ffmpeg via page-cache + codesign contention.
     const mats = allocator.alloc(MaterializeResult, all_jobs.items.len) catch
         return InstallError.CellarFailed;
-    // LIFO defers: keg paths freed first (c_allocator), outer slice last.
     defer allocator.free(mats);
-    defer for (mats) |m| {
-        if (m.keg_path.len > 0) std.heap.c_allocator.free(m.keg_path);
-    };
-    for (mats) |*m| m.* = .{ .ok = false, .keg_path = &[_]u8{}, .err = null };
+    for (mats) |*m| m.* = .{ .ok = false, .err = null };
 
     {
         const max_workers: usize = 4;
@@ -677,7 +673,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             continue;
         }
 
-        linkAndRecord(ctx.io, allocator, job, mats[i].keg_path, &db, &linker, prefix, &formula_cache) catch {
+        linkAndRecord(ctx.io, allocator, job, mats[i].kegPath(), &db, &linker, prefix, &formula_cache) catch {
             // The underlying error was already logged with a tag by
             // linkAndRecord — just record that this job failed so its
             // dependents in the rest of the loop get skipped above.
