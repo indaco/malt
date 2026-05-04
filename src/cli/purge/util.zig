@@ -93,3 +93,97 @@ pub fn confirmScope(yes: bool, expected: []const u8, scope_label: []const u8) Er
 pub fn writeStderr(s: []const u8) void {
     output.writeStderrAll(s);
 }
+
+// ── inline unit tests ──────────────────────────────────────────────────────
+//
+// `openDbTri` is the routing seam between "fresh prefix, no DB yet" (soft
+// skip — the user just hasn't installed anything) and "the file is there
+// but cannot be opened" (loud err — corruption / perms). Drift here would
+// hide a real fault behind a misleading "no database" message.
+
+const testing = std.testing;
+const fs_test_io = std.Options.debug_io;
+
+fn rmrf(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(fs_test_io, path) catch {};
+}
+
+test "openDbTri returns .absent when the db dir does not exist" {
+    // SQLite open would otherwise CREATE a fresh file. The .absent
+    // branch only fires when the parent dir is missing AND the file
+    // never pre-existed — that's the "fresh prefix" UX contract.
+    const prefix = "/tmp/malt_openDbTri_absent";
+    rmrf(prefix);
+    defer rmrf(prefix);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
+    // Deliberately do NOT create the db/ subdir.
+
+    var outcome = openDbTri(fs_test_io, prefix);
+    switch (outcome) {
+        .absent => {},
+        .opened => |*db| {
+            db.close();
+            return error.UnexpectedOpened;
+        },
+        .unreadable => return error.UnexpectedUnreadable,
+    }
+}
+
+test "openDbTri returns .unreadable when malt.db is not a valid sqlite file" {
+    const prefix = "/tmp/malt_openDbTri_corrupt";
+    rmrf(prefix);
+    defer rmrf(prefix);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
+    const db_dir = prefix ++ "/db";
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, db_dir);
+
+    // Plant a non-sqlite blob at db/malt.db so the open path fails AFTER
+    // the file has been observed to exist — that's the .unreadable branch.
+    const db_path = prefix ++ "/db/malt.db";
+    const f = try std.Io.Dir.createFileAbsolute(fs_test_io, db_path, .{ .truncate = true });
+    defer f.close(fs_test_io);
+    try f.writeStreamingAll(fs_test_io, "this is not a valid sqlite header");
+
+    var outcome = openDbTri(fs_test_io, prefix);
+    switch (outcome) {
+        .unreadable => {},
+        .opened => |*db| {
+            db.close();
+            return error.UnexpectedOpened;
+        },
+        .absent => return error.UnexpectedAbsent,
+    }
+}
+
+test "openDbTri opens a freshly created sqlite file" {
+    const prefix = "/tmp/malt_openDbTri_ok";
+    rmrf(prefix);
+    defer rmrf(prefix);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
+    const db_dir = prefix ++ "/db";
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, db_dir);
+
+    // Pre-create a real sqlite file so the open path succeeds.
+    {
+        var db_path_buf: [256]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+        var db = try sqlite.Database.open(db_path);
+        db.close();
+    }
+
+    var outcome = openDbTri(fs_test_io, prefix);
+    switch (outcome) {
+        .opened => |*db| db.close(),
+        .absent => return error.UnexpectedAbsent,
+        .unreadable => return error.UnexpectedUnreadable,
+    }
+}
+
+test "formatBytes scales B/KB/MB and caps at TB" {
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("0.0 B", formatBytes(0, &buf));
+    try testing.expectEqualStrings("1.0 KB", formatBytes(1024, &buf));
+    try testing.expectEqualStrings("1.0 MB", formatBytes(1024 * 1024, &buf));
+    const huge: u64 = 5 * 1024 * 1024 * 1024 * 1024;
+    try testing.expect(std.mem.endsWith(u8, formatBytes(huge, &buf), "TB"));
+}
