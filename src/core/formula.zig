@@ -46,11 +46,10 @@ pub fn pkgVersion(buf: []u8, version: []const u8, revision: i64) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}_{d}", .{ version, revision });
 }
 
-/// Parsed Homebrew formula. Unless otherwise noted, every `[]const u8` and
-/// `[]const []const u8` field borrows from `_parsed`; valid only until
-/// `deinit()`. The exception is `pkg_version`, which is allocated on the
-/// caller's allocator so it can outlive revision-zero callers that reuse
-/// `version`.
+/// Parsed Homebrew formula. Every `[]const u8` and `[]const []const u8`
+/// field is owned by `_parsed` (either borrowed from the JSON source
+/// buffer or allocated through the parse arena); valid only until
+/// `deinit()`.
 pub const Formula = struct {
     /// Borrowed from `_parsed`.
     name: []const u8,
@@ -63,17 +62,17 @@ pub const Formula = struct {
     /// Borrowed from `_parsed`.
     version: []const u8,
     /// Canonical on-disk version name: equals `version` when
-    /// `revision == 0` (borrowed from `_parsed`), else
-    /// `<version>_<revision>` allocated on the caller's allocator.
-    /// Use this for every Cellar/opt/receipt path — never raw `version`.
+    /// `revision == 0`, else `<version>_<revision>` formatted into the
+    /// parse arena. Use this for every Cellar/opt/receipt path — never
+    /// raw `version`.
     pkg_version: []const u8,
     revision: i64,
     /// Borrowed from `_parsed` when present.
     license: ?[]const u8,
     /// Borrowed from `_parsed`.
     homepage: []const u8,
-    /// Outer slice allocated on the caller's allocator; element strings
-    /// borrow from `_parsed`.
+    /// Outer slice owned by `_parsed`; element strings borrow from the
+    /// JSON source buffer.
     dependencies: []const []const u8,
     keg_only: bool,
     post_install_defined: bool,
@@ -81,8 +80,8 @@ pub const Formula = struct {
     bottle_files: ?std.json.ArrayHashMap(BottleFile),
     /// Borrowed from `_parsed`.
     bottle_root_url: ?[]const u8,
-    /// Outer slice allocated on the caller's allocator; element strings
-    /// borrow from `_parsed`.
+    /// Outer slice owned by `_parsed`; element strings borrow from the
+    /// JSON source buffer.
     oldnames: []const []const u8,
     /// Optional launchd service block. Populated when the upstream formula
     /// JSON contains a `service` object with at least a `run` array.
@@ -159,6 +158,10 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         json_data,
         .{},
     ) catch return FormulaError.InvalidJson;
+    errdefer parsed.deinit();
+    // Funnel auxiliary slices through the parse arena so one
+    // `_parsed.deinit()` reclaims them; otherwise the outer arrays leak.
+    const arena = parsed.arena.allocator();
 
     const root = switch (parsed.value) {
         .object => |o| o,
@@ -187,10 +190,10 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
     };
 
     // dependencies
-    const dependencies = try getStringArray(allocator, root, "dependencies");
+    const dependencies = try getStringArray(arena, root, "dependencies");
 
     // oldnames (may be absent)
-    const oldnames = try getStringArray(allocator, root, "oldnames");
+    const oldnames = try getStringArray(arena, root, "oldnames");
 
     // service block (optional — Homebrew formulas opt in)
     var service_def: ?ServiceDef = null;
@@ -202,14 +205,14 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
                 const items: ?[]std.json.Value = switch (rv) {
                     .array => |a| a.items,
                     .string => |s| blk: {
-                        const one = try allocator.alloc(std.json.Value, 1);
+                        const one = try arena.alloc(std.json.Value, 1);
                         one[0] = .{ .string = s };
                         break :blk one;
                     },
                     else => null,
                 };
                 if (items) |arr| if (arr.len > 0) {
-                    const run = try allocator.alloc([]const u8, arr.len);
+                    const run = try arena.alloc([]const u8, arr.len);
                     for (arr, 0..) |item, i| {
                         run[i] = switch (item) {
                             .string => |s| s,
@@ -262,7 +265,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
                                     .url = getString(file_obj, "url") orelse continue,
                                     .sha256 = getString(file_obj, "sha256") orelse "",
                                 };
-                                map.map.put(allocator, platform_name, bf) catch continue;
+                                map.map.put(arena, platform_name, bf) catch continue;
                             }
                             bottle_files = map;
                         }
@@ -272,12 +275,12 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
         }
     }
 
-    // Pre-compute the revision-aware path label once. Single-allocator
-    // dupe into the caller's arena so every downstream consumer can
-    // borrow a stable slice instead of re-formatting per call site.
+    // Pre-compute the revision-aware path label once into the parse
+    // arena so every downstream consumer can borrow a stable slice
+    // instead of re-formatting per call site.
     const pkg_version_str = blk: {
         if (revision <= 0) break :blk version_str;
-        break :blk try std.fmt.allocPrint(allocator, "{s}_{d}", .{ version_str, revision });
+        break :blk try std.fmt.allocPrint(arena, "{s}_{d}", .{ version_str, revision });
     };
 
     return Formula{
@@ -416,4 +419,20 @@ test "parsePkgVersion round-trips with pkgVersion" {
     const r = parsePkgVersion(formatted);
     try testing.expectEqualStrings("3.14.4", r.version);
     try testing.expectEqual(@as(i64, 1), r.revision);
+}
+
+test "parseFormula releases every auxiliary allocation through deinit" {
+    // testing.allocator (no arena wrapper) trips on any auxiliary slice
+    // that escapes _parsed: dependencies, oldnames, service.run,
+    // bottle_files map storage, and the revision-bumped pkg_version.
+    const json =
+        \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":2,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.0"},"dependencies":["beta","gamma"],"oldnames":["alpha-old"],"service":{"run":["/usr/bin/alpha","--daemon"]},"bottle":{"stable":{"root_url":"https://example.test","files":{"arm64_sequoia":{"cellar":"/opt","url":"https://example.test/a","sha256":"deadbeef"}}}}}
+    ;
+    var formula = try parseFormula(testing.allocator, json);
+    defer formula.deinit();
+    try testing.expectEqualStrings("1.0_2", formula.pkg_version);
+    try testing.expectEqual(@as(usize, 2), formula.dependencies.len);
+    try testing.expectEqual(@as(usize, 1), formula.oldnames.len);
+    try testing.expect(formula.service != null);
+    try testing.expect(formula.bottle_files != null);
 }
