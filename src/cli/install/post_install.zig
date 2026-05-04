@@ -22,6 +22,22 @@ pub fn useSystemRubyForFormula(scope: []const []const u8, formula_name: []const 
     return false;
 }
 
+/// `ruby` and its versioned aliases (`ruby@3`, `ruby@3.4`, ...) carry their
+/// own `post_install` hook. Without auto-inclusion the user has to write
+/// `--use-system-ruby=ruby` to install ruby — recursive nonsense, since
+/// the trust boundary is whatever `mt migrate ruby` already implies.
+pub fn isSelfHostingRubyKeg(name: []const u8) bool {
+    if (std.mem.eql(u8, name, "ruby")) return true;
+    if (!std.mem.startsWith(u8, name, "ruby@")) return false;
+    const tail = name["ruby@".len..];
+    if (tail.len == 0) return false;
+    for (tail) |c| switch (c) {
+        '0'...'9', '.' => {},
+        else => return false,
+    };
+    return true;
+}
+
 /// Post_install outcome status — surfaced to users as human text and
 /// to scripted consumers as JSON when `--json` is set.
 pub const PostInstallStatus = enum {
@@ -67,7 +83,7 @@ pub fn routePostInstallOutcome(
             output.info("post_install completed for {s}", .{name});
             break :blk .completed;
         }
-        if (useSystemRubyForFormula(use_system_ruby_list, name)) {
+        if (useSystemRubyForFormula(use_system_ruby_list, name) or isSelfHostingRubyKeg(name)) {
             output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{name});
             if (output.isVerbose()) flog.printUnknown(name);
             if (output.isDebug()) flog.printFatal(name);
@@ -250,7 +266,7 @@ pub fn drive(
         }
     }
 
-    if (useSystemRubyForFormula(use_system_ruby_list, name)) {
+    if (useSystemRubyForFormula(use_system_ruby_list, name) or isSelfHostingRubyKeg(name)) {
         output.warn("Running post_install for {s} via system Ruby...", .{name});
         ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix) catch |e| {
             output.warn("post_install failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
@@ -258,4 +274,24 @@ pub fn drive(
     } else {
         output.warn("{s}: post_install skipped (use --use-system-ruby={s} or brew install {s})", .{ name, name, name });
     }
+}
+
+test "isSelfHostingRubyKeg: bare ruby and versioned aliases match" {
+    try std.testing.expect(isSelfHostingRubyKeg("ruby"));
+    try std.testing.expect(isSelfHostingRubyKeg("ruby@3"));
+    try std.testing.expect(isSelfHostingRubyKeg("ruby@3.4"));
+    try std.testing.expect(isSelfHostingRubyKeg("ruby@4.0.3"));
+}
+
+test "isSelfHostingRubyKeg: non-ruby kegs and lookalikes are rejected" {
+    try std.testing.expect(!isSelfHostingRubyKeg(""));
+    try std.testing.expect(!isSelfHostingRubyKeg("rubygems"));
+    try std.testing.expect(!isSelfHostingRubyKeg("iruby"));
+    try std.testing.expect(!isSelfHostingRubyKeg("jruby"));
+    try std.testing.expect(!isSelfHostingRubyKeg("ruby-build"));
+    // Empty/garbage version tail must not auto-include — keeps the
+    // pattern tight to canonical Homebrew interpreter kegs.
+    try std.testing.expect(!isSelfHostingRubyKeg("ruby@"));
+    try std.testing.expect(!isSelfHostingRubyKeg("ruby@stable"));
+    try std.testing.expect(!isSelfHostingRubyKeg("ruby@3-rc1"));
 }
