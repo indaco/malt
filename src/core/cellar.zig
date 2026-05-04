@@ -257,8 +257,12 @@ pub fn materializeWithCellar(
     // homebrew path references (tree, etc.), the modified list is empty
     // and the ~15 ms codesign subprocess is skipped entirely.
     if (codesign.isArm64() and modified_macho_paths.items.len > 0) {
-        codesign.adHocSignAll(io, allocator, modified_macho_paths.items) catch |e| {
-            std.log.warn("codesigning failed for {s}: {s}", .{ cellar_path, @errorName(e) });
+        codesign.adHocSignAll(io, allocator, modified_macho_paths.items) catch |e| switch (e) {
+            // Spawn failure means the io can't run subprocesses (the
+            // debug_io used by tests). Real codesign(1) errors land in
+            // CodesignFailed / CodesignNotFound and still get warned.
+            error.SpawnFailed => {},
+            else => std.log.warn("codesigning failed for {s}: {s}", .{ cellar_path, @errorName(e) }),
         };
     }
 

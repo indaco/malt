@@ -10,6 +10,10 @@ const sandbox = @import("sandbox.zig");
 const fallback_log = @import("fallback_log.zig");
 const builtins_root = @import("builtins/root.zig");
 const context = @import("context.zig");
+// Same UI seam used by `odie` and the fallback log; routing through
+// the output module keeps test stderr capture working instead of
+// punching directly to fd 2.
+const output = @import("../../ui/output.zig");
 
 const Node = ast.Node;
 const SourceLoc = ast.SourceLoc;
@@ -563,8 +567,7 @@ pub const Interpreter = struct {
             // assembly OOM and the stream failure are tolerated.
             if (std.fmt.allocPrint(self.allocator, "  x {s}\n", .{msg_str})) |line| {
                 defer self.allocator.free(line);
-                const stderr: std.Io.File = .{ .handle = std.posix.STDERR_FILENO, .flags = .{ .nonblocking = false } };
-                stderr.writeStreamingAll(self.ctx.io, line) catch {};
+                output.writeStderrAll(line);
             } else |_| {}
         }
         return DslError.PostInstallFailed;

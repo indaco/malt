@@ -189,15 +189,18 @@ test "copyTreeFallback errors when source directory does not exist" {
 // MALT_TEST_NON_APFS_DIR. On the common macOS dev box every visible mount
 // is APFS, so we skip with a clear message instead of inventing one.
 test "cloneTree falls back to copyTree on a non-APFS volume" {
+    // Skip notes use std.log.debug so default `zig build test` output stays
+    // quiet; run with `-Dlog-level=debug` (or set MALT_TEST_NON_APFS_DIR)
+    // when actively wiring up the non-APFS path.
     const non_apfs_dir = test_io.getenv("MALT_TEST_NON_APFS_DIR") orelse {
-        std.log.warn(
+        std.log.debug(
             "skipping non-APFS fallback test: set MALT_TEST_NON_APFS_DIR to a writable non-APFS mount to enable",
             .{},
         );
         return error.SkipZigTest;
     };
     if (clonefile.isApfs(non_apfs_dir)) {
-        std.log.warn(
+        std.log.debug(
             "skipping non-APFS fallback test: MALT_TEST_NON_APFS_DIR={s} is APFS",
             .{non_apfs_dir},
         );
