@@ -12,6 +12,7 @@ const args_mod = @import("purge/args.zig");
 const wipe_mod = @import("purge/wipe.zig");
 const scopes_mod = @import("purge/scopes.zig");
 const util = @import("purge/util.zig");
+const report = @import("purge/report.zig");
 
 pub const Error = args_mod.Error;
 pub const Scope = args_mod.Scope;
@@ -78,6 +79,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var lk_maybe: ?lock_mod.LockFile = lock_mod.LockFile.acquire(lock_path, 30_000) catch null;
     defer if (lk_maybe) |*lk| lk.release();
 
+    var summary = report.Summary{};
+    defer summary.deinit(allocator);
     var grand_total: TierResult = .{};
 
     // unused-deps must run before store-orphans: removing a keg decrements
@@ -85,40 +88,51 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // second pass.
     if (opts.scope.unused_deps) {
         const r = try scopes_mod.runUnusedDeps(ctx, allocator, prefix, dry_run);
+        try summary.add(allocator, .{ .name = "unused-deps", .removed = r.removed, .bytes = r.bytes });
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
     if (opts.scope.store_orphans) {
         const r = try scopes_mod.runStoreOrphans(ctx, allocator, prefix, dry_run);
+        try summary.add(allocator, .{ .name = "store-orphans", .removed = r.removed, .bytes = r.bytes });
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
     if (opts.scope.cache) {
         const r = try scopes_mod.runCache(ctx, allocator, cache_dir, opts.cache_days, dry_run);
+        try summary.add(allocator, .{ .name = "cache", .removed = r.removed, .bytes = r.bytes });
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
     if (opts.scope.downloads) {
         const r = try scopes_mod.runDownloads(ctx, allocator, cache_dir, dry_run);
+        try summary.add(allocator, .{ .name = "downloads", .removed = r.removed, .bytes = r.bytes });
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
     if (opts.scope.stale_casks) {
         const r = try scopes_mod.runStaleCasks(ctx, allocator, prefix, dry_run);
+        try summary.add(allocator, .{ .name = "stale-casks", .removed = r.removed, .bytes = r.bytes });
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
     if (opts.scope.old_versions) {
         const r = try scopes_mod.runOldVersions(ctx, allocator, prefix, dry_run);
+        try summary.add(allocator, .{ .name = "old-versions", .removed = r.removed, .bytes = r.bytes });
         grand_total.removed += r.removed;
         grand_total.bytes += r.bytes;
     }
 
+    // Skip the table when only one scope ran — the per-scope footer is
+    // already enough and the table would just repeat it.
+    if (summary.rows.items.len > 1) summary.render();
+
+    const item_noun = report.pluralize(grand_total.removed, "item", "items");
     var sz_buf: [32]u8 = undefined;
     const sz = formatBytes(grand_total.bytes, &sz_buf);
     if (dry_run) {
-        output.info("dry run: would remove {d} item(s), ~{s}", .{ grand_total.removed, sz });
+        output.info("dry run: would remove {d} {s}, ~{s}", .{ grand_total.removed, item_noun, sz });
     } else {
-        output.success("removed {d} item(s), freed ~{s}", .{ grand_total.removed, sz });
+        output.success("removed {d} {s}, freed ~{s}", .{ grand_total.removed, item_noun, sz });
     }
 }
