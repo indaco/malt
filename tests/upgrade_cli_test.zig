@@ -161,6 +161,52 @@ test "execute upgrades a single named keg, surfaces error.Aborted on cached-404 
     );
 }
 
+test "execute --pinned --dry-run audits without leaking the parsed Formula" {
+    // Plant a cached formula JSON so the audit reaches parseFormula;
+    // testing.allocator is the leak gate.
+    var s = try Scratch.init(testing.allocator, "audit_leak");
+    defer s.deinit(testing.allocator);
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{s.path});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+
+    const cache_json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_jq.json", .{cache_api});
+    defer testing.allocator.free(cache_json);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, cache_json, .{ .truncate = true });
+    // Both arrays populated so dependencies + oldnames exercise the
+    // outer-slice alloc path inside parseFormula.
+    const body =
+        \\{"name":"jq","full_name":"jq","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.7.1"},"dependencies":["oniguruma"],"oldnames":["jq-old"],"bottle":{}}
+    ;
+    try f.writeStreamingAll(std.Options.debug_io, body);
+    f.close(std.Options.debug_io);
+
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        var stmt = try db.prepare(
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, pinned)
+            \\VALUES ('jq', 'jq', '1.7', 0, '', '/c/jq/1.7', 1);
+        );
+        defer stmt.finalize();
+        _ = try stmt.step();
+    }
+
+    output.setDryRun(true);
+    quiet();
+    defer {
+        output.setDryRun(false);
+        unquiet();
+    }
+
+    // Errors along the audit walker are tolerated; the leak check is what matters.
+    upgrade.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--pinned"}) catch {};
+}
+
 test "execute --dry-run on a fresh prefix without db dir exits silently" {
     // No db/ subdir — lock acquire fails, dry-run takes the silent
     // exit branch instead of surfacing it as contention.
