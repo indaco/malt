@@ -63,6 +63,16 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
     // Check for conflicts unless --overwrite
     if (!overwrite) {
         const conflicts = linker.checkConflicts(cellar_path) catch &.{};
+        defer {
+            // checkConflicts hands back an owned slice plus dupe'd
+            // link_path / existing_keg strings; the empty-slice fallback
+            // costs nothing to "free", so the loop is unconditional.
+            for (conflicts) |c| {
+                allocator.free(c.link_path);
+                allocator.free(c.existing_keg);
+            }
+            if (conflicts.len > 0) allocator.free(conflicts);
+        }
         if (conflicts.len > 0) {
             output.err("{s}: {d} symlink conflict(s):", .{ name, conflicts.len });
             for (conflicts) |c| {

@@ -56,8 +56,9 @@ pub const Tally = struct {
 };
 
 // Single source of truth for the health walk — append one entry to add
-// a check.
-const checks = [_]Check{
+// a check. Exposed `pub` so tests can run the production walker against
+// a scratch prefix without re-listing the table.
+pub const checks = [_]Check{
     .{ .name = "MALT_PREFIX", .run = checkMaltPrefix },
     .{ .name = "SQLite integrity", .run = checkSqliteIntegrity },
     .{ .name = "Directory structure", .run = checkDirectoryStructure },

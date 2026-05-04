@@ -74,9 +74,17 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // ── Split into formula / cask arg lists ──────────────────────────────
     var formulae: std.ArrayList([]const u8) = .empty;
-    defer formulae.deinit(allocator);
+    defer {
+        // Each item is an owned `<name>` or `<name>@<version>` slice.
+        // Free the items first, then the list backing store.
+        for (formulae.items) |item| allocator.free(item);
+        formulae.deinit(allocator);
+    }
     var casks: std.ArrayList([]const u8) = .empty;
-    defer casks.deinit(allocator);
+    defer {
+        for (casks.items) |item| allocator.free(item);
+        casks.deinit(allocator);
+    }
 
     for (entries) |e| {
         // Reconstruct the install-style argument: `<name>` or `<name>@<version>`

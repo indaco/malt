@@ -195,6 +195,21 @@ pub fn build(b: *std.Build) void {
         "tests/pin_test.zig",
         "tests/shellenv_test.zig",
         "tests/outdated_test.zig",
+        "tests/uninstall_test.zig",
+        "tests/purge_scopes_test.zig",
+        "tests/link_cli_test.zig",
+        "tests/restore_cli_test.zig",
+        "tests/search_cli_test.zig",
+        "tests/doctor_dispatch_test.zig",
+        "tests/info_cli_test.zig",
+        "tests/backup_cli_test.zig",
+        "tests/run_cli_test.zig",
+        "tests/bundle_cli_test.zig",
+        "tests/version_update_cli_test.zig",
+        "tests/upgrade_cli_test.zig",
+        "tests/list_cli_test.zig",
+        "tests/tap_cli_test.zig",
+        "tests/uses_cli_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");
