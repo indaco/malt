@@ -30,7 +30,7 @@ if [[ ! -x zig-out/bin/malt ]]; then
 fi
 
 # Throwaway prefix. 7 bytes, safely under malt's 13-byte Mach-O patch budget
-# (see src/cli/install.zig:24 and scripts/e2e/test_smoke_install.sh).
+# (see src/cli/install.zig:24 and scripts/smokes/test_smoke_install.sh).
 PREFIX=/tmp/mt
 
 export MALT_PREFIX="$PREFIX"

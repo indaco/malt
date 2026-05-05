@@ -55,14 +55,14 @@ jobs:
       - name: CLI smoke (offline tiers)
         env:
           SMOKE_SKIP_NETWORK: "1"
-        run: ./scripts/e2e/smoke_test.sh
+        run: ./scripts/smokes/smoke_test.sh
 
       # Security smoke: flag-scope enforcement, argv-only lint,
       # pins-manifest shape, install.sh fail-closed regression suite.
       # Subsumes the individual install.sh step that used to live in
       # the Lint job.
       - name: Security smoke
-        run: ./scripts/e2e/smoke_security.sh
+        run: ./scripts/smokes/smoke_security.sh
 
       - name: Build universal binary
         run: zig build universal -Doptimize=ReleaseSafe
@@ -86,8 +86,8 @@ jobs:
 
       - name: Lint shell scripts (shellcheck + shfmt)
         run: |
-          shellcheck scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
-          shfmt -i 2 -d scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh
+          shellcheck scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/smokes/*.sh
+          shfmt -i 2 -d scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/smokes/*.sh
 
   # Drift guard: re-run gen-pins.sh against the committed pin on every PR
   # and fail on any diff. Catches "bumped pins.zig, forgot to regenerate

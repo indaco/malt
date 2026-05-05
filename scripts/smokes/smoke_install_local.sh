@@ -6,12 +6,12 @@
 # dry-run, autodetection, and negative paths. Hermetic — every run
 # uses a throwaway MALT_PREFIX and no download ever executes.
 #
-# Usage: scripts/smoke_install_local.sh
+# Usage: scripts/smokes/smoke_install_local.sh
 # Requirements: built `malt` binary at $MALT_BIN or zig-out/bin/malt.
 
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
 [[ -x "$BIN" ]] || {
   echo "build malt first: zig build" >&2

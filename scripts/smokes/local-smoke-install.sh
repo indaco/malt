@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/local-smoke-install.sh — heavy install regression guard
+# scripts/smokes/local-smoke-install.sh — heavy install regression guard
 #
 # Runs real installs against an isolated MALT_PREFIX/MALT_CACHE to catch
 # regressions in the bottle download → SHA verify → extract pipeline that
@@ -52,8 +52,8 @@
 # Binary casks land under $MALT_PREFIX/bin so they never need that guard.
 #
 # Usage:
-#   ./scripts/local-smoke-install.sh
-#   MT_BIN=./zig-out/bin/mt ./scripts/local-smoke-install.sh
+#   ./scripts/smokes/local-smoke-install.sh
+#   MT_BIN=./zig-out/bin/mt ./scripts/smokes/local-smoke-install.sh
 
 set -uo pipefail
 

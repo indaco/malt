@@ -6,7 +6,7 @@
 # touch the real installation. Safe to run on a developer machine; do not
 # run in CI (touches the user's launchd domain).
 #
-# Usage: scripts/smoke_services.sh
+# Usage: scripts/smokes/smoke_services.sh
 # Requirements: built `malt` binary in zig-out/bin, macOS.
 
 set -euo pipefail
@@ -16,7 +16,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 2
 fi
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BIN="$ROOT/zig-out/bin/malt"
 [[ -x "$BIN" ]] || {
   echo "build malt first: zig build" >&2

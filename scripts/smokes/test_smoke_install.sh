@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/e2e/test_smoke_install.sh
+# scripts/smokes/test_smoke_install.sh
 #
 # End-to-end smoke test for `mt install`. Runs an isolated install of the
 # three packages that P1 regressed (zig, curl, rust), each of which ships as
@@ -18,9 +18,9 @@
 #   4. otool -L on each binary shows no remaining `@@HOMEBREW_` tokens.
 #
 # Usage:
-#   ./scripts/e2e/test_smoke_install.sh           # default
-#   MT_BIN=./zig-out/bin/malt ./scripts/e2e/test_smoke_install.sh
-#   SKIP_BUILD=1 ./scripts/e2e/test_smoke_install.sh   # reuse an existing build
+#   ./scripts/smokes/test_smoke_install.sh           # default
+#   MT_BIN=./zig-out/bin/malt ./scripts/smokes/test_smoke_install.sh
+#   SKIP_BUILD=1 ./scripts/smokes/test_smoke_install.sh   # reuse an existing build
 #
 # Exit codes:
 #   0 — all assertions passed

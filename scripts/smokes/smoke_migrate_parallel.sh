@@ -14,11 +14,11 @@
 # `just clean` (clean.sh /tmp/mt_* + /tmp/mt-* globs) reaps them.
 #
 # Usage:
-#   scripts/smoke_migrate_parallel.sh
-#   MALT_BIN=zig-out/bin/malt scripts/smoke_migrate_parallel.sh
-#   MIGRATE_KEGS="hello jq tree" scripts/smoke_migrate_parallel.sh
-#   MALT_MIGRATE_PARALLEL_WORKERS=8 scripts/smoke_migrate_parallel.sh
-#   SKIP_NDJSON_PASS=1 scripts/smoke_migrate_parallel.sh
+#   scripts/smokes/smoke_migrate_parallel.sh
+#   MALT_BIN=zig-out/bin/malt scripts/smokes/smoke_migrate_parallel.sh
+#   MIGRATE_KEGS="hello jq tree" scripts/smokes/smoke_migrate_parallel.sh
+#   MALT_MIGRATE_PARALLEL_WORKERS=8 scripts/smokes/smoke_migrate_parallel.sh
+#   SKIP_NDJSON_PASS=1 scripts/smokes/smoke_migrate_parallel.sh
 #
 # Requires: built malt binary, jq, network access to formulae.brew.sh
 # and ghcr.io. Not for CI - touches the user's brew Cellar (read-only)
@@ -26,7 +26,7 @@
 
 set -uo pipefail
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
 # Always invoke `zig build` so a smoke run after a code edit picks up
 # the latest binary - the previous "skip if exists" gate left stale

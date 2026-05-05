@@ -7,12 +7,12 @@
 # API, so it requires network; safe to run locally (no install side
 # effects).
 #
-# Usage: scripts/smoke_search.sh
+# Usage: scripts/smokes/smoke_search.sh
 # Requirements: built `malt` binary in zig-out/bin or $MALT_BIN.
 
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BIN="${MALT_BIN:-$ROOT/zig-out/bin/malt}"
 [[ -x "$BIN" ]] || {
   echo "build malt first: zig build" >&2
