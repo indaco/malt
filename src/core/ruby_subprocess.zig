@@ -467,11 +467,32 @@ pub fn generateWrapper(
         \\
     );
 
-    // Instantiate and run
+    // Instantiate and run. The body is wrapped in a soft-fail rescue:
+    // bodies that reach for Homebrew helpers we don't ship in
+    // `FormulaStub` (`MachO`, `Pathname#dylib_id`, `rubygems_bindir`,
+    // `OS.mac?`, `Hardware::CPU.arm?`, ...) bail cleanly with the
+    // missing helper on stderr instead of failing the whole migration.
+    // Net effect for kegs whose post_install is mostly Homebrew-tooling
+    // glue (e.g. ruby's dylib-id rewrite, which malt's own Mach-O path
+    // patcher already handles): the script exits 0, malt reports
+    // `ran_via_ruby`, and the partial line tells the user *why* the
+    // body bailed so they can verify nothing critical was skipped.
     try writer.print("stub = FormulaStub.new('{s}', '{s}', '{s}')\n", .{ name, version, prefix });
-    try writer.writeAll("stub.instance_eval do\n");
+    try writer.writeAll(
+        \\begin
+        \\  stub.instance_eval do
+        \\
+    );
     try writer.writeAll(post_install_body);
-    try writer.writeAll("\nend\n");
+    try writer.writeAll(
+        \\
+        \\  end
+        \\rescue NoMethodError, NameError, NotImplementedError => e
+        \\  $stderr.puts "post_install: partial - #{e.class.name.split('::').last}: #{e.message}"
+        \\  exit 0
+        \\end
+        \\
+    );
 
     return aw.toOwnedSlice();
 }

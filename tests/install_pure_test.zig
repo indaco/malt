@@ -565,9 +565,12 @@ test "routePostInstallOutcome: --use-system-ruby=NAME in scope triggers the Ruby
 
     // The fallback banner leads the warning so users know the Ruby
     // subprocess is about to run — not the "partially skipped" hint.
+    // The script's soft-fail rescue catches undefined-helper errors
+    // and exits 0, so the route reports `ran_via_ruby` with the
+    // "(via system Ruby)" suffix on the completion line.
     try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") != null);
     try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
-    try testing.expect(std.mem.indexOf(u8, out, "post_install completed") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "post_install completed for openssl@3 (via system Ruby)") != null);
 }
 
 test "routePostInstallOutcome: fatal entry wins over hasErrors heuristic" {

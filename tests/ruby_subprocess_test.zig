@@ -148,6 +148,26 @@ test "generateWrapper emits a Ruby script containing the post_install body and p
     try testing.expect(std.mem.indexOf(u8, script, "2.3") != null);
 }
 
+// Bodies that reach for Homebrew helpers we don't ship in FormulaStub
+// (MachO, Pathname#dylib_id, rubygems_bindir, OS.mac?, ...) must not
+// fail the whole migration. The wrapper rescues NoMethodError /
+// NameError / NotImplementedError, prints a partial-line on stderr,
+// and exits 0 so malt's outcome stays `ran_via_ruby`.
+test "generateWrapper wraps the body in a soft-fail rescue" {
+    const script = try ruby.generateWrapper(
+        testing.allocator,
+        "ruby",
+        "4.0.3",
+        "/opt/malt",
+        "  raise NoMethodError\n",
+    );
+    defer testing.allocator.free(script);
+    try testing.expect(std.mem.indexOf(u8, script, "begin\n") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "rescue NoMethodError, NameError, NotImplementedError") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "post_install: partial -") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "exit 0") != null);
+}
+
 // Injection regression — every disallowed byte in any of prefix /
 // name / version must be rejected by generateWrapper, not silently
 // interpolated into the single-quoted Ruby literal.
