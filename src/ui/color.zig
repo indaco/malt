@@ -3,6 +3,10 @@
 //! awareness so load-bearing lines render on both palettes.
 
 const std = @import("std");
+/// Process-wide io + environ seeded once from `main` via `setRuntime`.
+/// Defaults stay benign so tests that don't seed see deterministic
+/// "no env vars, no terminal probe" output.
+var pkg_io: std.Io = std.Options.debug_io;
 const builtin = @import("builtin");
 
 /// Literal-colour styles for the few sites that need a specific hue
@@ -47,6 +51,9 @@ pub const SemanticStyle = enum {
     success,
     err,
     detail,
+    /// softer than warn, distinct from info.
+    /// Used by passive notices (e.g. an available self-update).
+    notice,
 
     /// ANSI escape for the current cached palette cell.
     pub fn code(self: SemanticStyle) []const u8 {
@@ -66,10 +73,6 @@ var emoji_enabled: ?bool = null;
 var background_cached: ?Background = null;
 var truecolor_cached: ?bool = null;
 
-/// Process-wide io + environ seeded once from `main` via `setRuntime`.
-/// Defaults stay benign so tests that don't seed see deterministic
-/// "no env vars, no terminal probe" output.
-var pkg_io: std.Io = std.Options.debug_io;
 var pkg_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } };
 
 /// Seed the io/environ used by env reads and TTY probes. Called by
@@ -275,48 +278,57 @@ const Palette = struct {
     success: []const u8,
     err: []const u8,
     detail: []const u8,
+    notice: []const u8,
 };
 
-// Dark + truecolor — Tailwind sky-300 / amber-400 / green-400 / red-400 / slate-400.
+// Dark + truecolor — Tailwind sky-300 / amber-400 / green-400 / red-400 / slate-400 / violet-400.
 const dark_truecolor: Palette = .{
     .info = "\x1b[38;2;125;211;252m",
     .warn = "\x1b[38;2;251;191;36m",
     .success = "\x1b[38;2;74;222;128m",
     .err = "\x1b[38;2;248;113;113m",
     .detail = "\x1b[38;2;148;163;184m",
+    .notice = "\x1b[38;2;167;139;250m",
 };
 
-// Light + truecolor — Tailwind sky-600 / amber-700 / green-700 / red-700 / slate-400.
+// Light + truecolor — Tailwind sky-600 / amber-700 / green-700 / red-700 / slate-400 / violet-700.
 // Yellow shifts to orange (amber-700) because only orange hits AA on white.
 // Detail uses slate-400 like the dark palette so meta info recedes under the
 // default-foreground body text instead of upstaging it in dark slate.
+// Notice uses violet-700 — darker step keeps WCAG AA contrast.
 const light_truecolor: Palette = .{
     .info = "\x1b[38;2;2;132;199m",
     .warn = "\x1b[38;2;180;83;9m",
     .success = "\x1b[38;2;21;128;61m",
     .err = "\x1b[38;2;185;28;28m",
     .detail = "\x1b[38;2;148;163;184m",
+    .notice = "\x1b[38;2;109;40;217m",
 };
 
 // Dark + basic — legacy ANSI 8-colour palette malt has always used.
+// Notice picks magenta — distinct from yellow warn here.
 const dark_basic: Palette = .{
     .info = "\x1b[36m",
     .warn = "\x1b[33m",
     .success = "\x1b[32m",
     .err = "\x1b[31m",
     .detail = "\x1b[2m",
+    .notice = "\x1b[35m",
 };
 
 // Light + basic — swap hues that wash out on white: cyan→blue,
 // yellow→magenta. Detail reuses the dark-basic faint code so both basic
 // palettes render meta info identically — dropping into the default
 // foreground on terminals that ignore SGR 2.
+// Notice collides with warn here (both magenta); the two never co-appear
+// and truecolor terminals (the common case) carry the visual distinction.
 const light_basic: Palette = .{
     .info = "\x1b[34m",
     .warn = "\x1b[35m",
     .success = "\x1b[32m",
     .err = "\x1b[31m",
     .detail = "\x1b[2m",
+    .notice = "\x1b[35m",
 };
 
 /// Pure palette lookup. Exposed so tests pin every cell.
@@ -332,6 +344,7 @@ pub fn paletteCode(role: SemanticStyle, bg: Background, truecolor: bool) []const
         .success => p.success,
         .err => p.err,
         .detail => p.detail,
+        .notice => p.notice,
     };
 }
 
@@ -347,4 +360,32 @@ pub fn truecolorSupported() bool {
     const result = truecolorFromEnv(lookupEnv("COLORTERM"));
     truecolor_cached = result;
     return result;
+}
+
+// Pin every notice cell across the (bg, truecolor) matrix. Sister tests for
+// the existing roles live in tests/ui_color_theme_test.zig — kept there so
+// changes to the broader palette stay reviewable as one diff.
+test "paletteCode: notice — dark + truecolor is violet-400" {
+    try std.testing.expectEqualStrings(
+        "\x1b[38;2;167;139;250m",
+        paletteCode(.notice, .dark, true),
+    );
+}
+
+test "paletteCode: notice — light + truecolor is violet-700 (WCAG AA on white)" {
+    try std.testing.expectEqualStrings(
+        "\x1b[38;2;109;40;217m",
+        paletteCode(.notice, .light, true),
+    );
+}
+
+test "paletteCode: notice — dark + basic is magenta (distinct from yellow warn)" {
+    try std.testing.expectEqualStrings("\x1b[35m", paletteCode(.notice, .dark, false));
+}
+
+// Light + basic shares the magenta escape with warn — the two never
+// co-appear and truecolor terminals carry the visual distinction via
+// violet-700. Pinned so the choice stays a deliberate, reviewable diff.
+test "paletteCode: notice — light + basic reuses magenta (intentional warn collision)" {
+    try std.testing.expectEqualStrings("\x1b[35m", paletteCode(.notice, .light, false));
 }
