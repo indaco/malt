@@ -182,89 +182,7 @@ pub fn materializeWithCellar(
         return CellarError.CloneFailed;
     };
 
-    const new_prefix = atomic.maltPrefix();
-
-    // Build cellar replacement for @@HOMEBREW_CELLAR@@
-    var new_cellar_buf: [256]u8 = undefined;
-    const new_cellar = std.fmt.bufPrint(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;
-
-    // Build the full Mach-O replacement list in one shot. `@@HOMEBREW_*@@`
-    // placeholders are patched for every bottle (they appear even in `:any`
-    // bottles — zig, curl, rust, llvm@* all use them in LC_LOAD_DYLIB /
-    // LC_RPATH load commands). The absolute-path rewrites are skipped for
-    // `:any` and `:any_skip_relocation` bottles, where Homebrew guarantees
-    // only `@rpath` / `@loader_path` + placeholder tokens.
-    //
-    // Passing all the replacements in one call means the walker visits
-    // each file exactly once and opens it exactly once per active
-    // replacement, instead of walking the cellar twice.
-    const skip_absolute_rewrite = std.mem.eql(u8, cellar_type, ":any") or
-        std.mem.eql(u8, cellar_type, ":any_skip_relocation");
-
-    var macho_reps_buf: [4]Replacement = undefined;
-    macho_reps_buf[0] = .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix };
-    macho_reps_buf[1] = .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar };
-    var macho_reps_len: usize = 2;
-    if (!skip_absolute_rewrite) {
-        macho_reps_buf[2] = .{ .old = "/opt/homebrew", .new = new_prefix };
-        macho_reps_buf[3] = .{ .old = "/usr/local", .new = new_prefix };
-        macho_reps_len = 4;
-    }
-
-    // `walkMachOAndPatch` collects the full paths of every Mach-O file
-    // it actually modified (i.e. where at least one replacement rewrote
-    // bytes). Those are the only files whose ad-hoc signature got
-    // invalidated, so they are the only files we need to re-sign. For a
-    // bottle whose binaries don't reference `/opt/homebrew` at all
-    // (e.g. `tree`), this list comes back empty and the expensive
-    // codesign subprocess is skipped entirely.
-    var modified_macho_paths: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (modified_macho_paths.items) |p| allocator.free(p);
-        modified_macho_paths.deinit(allocator);
-    }
-
-    walkMachOAndPatch(
-        io,
-        allocator,
-        cellar_path,
-        macho_reps_buf[0..macho_reps_len],
-        &modified_macho_paths,
-    ) catch |e| switch (e) {
-        CellarError.PathTooLong => return CellarError.PathTooLong,
-        CellarError.InsufficientHeaderPad => return CellarError.InsufficientHeaderPad,
-        CellarError.InstallNameToolMissing => return CellarError.InstallNameToolMissing,
-        else => return CellarError.PatchFailed,
-    };
-
-    // Always patch text files — @@HOMEBREW_PREFIX@@ and @@HOMEBREW_CELLAR@@
-    // placeholders appear in scripts, .pc files, and configs regardless of
-    // whether the bottle is relocatable. Text files don't carry code
-    // signatures so they don't feed back into the codesign list.
-    const text_replacements = [_]text_patcher.Replacement{
-        .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix },
-        .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar },
-        .{ .old = "/opt/homebrew", .new = new_prefix },
-        .{ .old = "/usr/local", .new = new_prefix },
-    };
-    _ = text_patcher.patchTextFiles(io, allocator, cellar_path, &text_replacements) catch |e| {
-        std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
-    };
-
-    // Ad-hoc codesign on arm64. We only sign the Mach-O files we actually
-    // modified above — unpatched binaries keep their original ad-hoc
-    // signature, so re-signing them is pure waste. For bottles without any
-    // homebrew path references (tree, etc.), the modified list is empty
-    // and the ~15 ms codesign subprocess is skipped entirely.
-    if (codesign.isArm64() and modified_macho_paths.items.len > 0) {
-        codesign.adHocSignAll(io, allocator, modified_macho_paths.items) catch |e| switch (e) {
-            // Spawn failure means the io can't run subprocesses (the
-            // debug_io used by tests). Real codesign(1) errors land in
-            // CodesignFailed / CodesignNotFound and still get warned.
-            error.SpawnFailed => {},
-            else => std.log.warn("codesigning failed for {s}: {s}", .{ cellar_path, @errorName(e) }),
-        };
-    }
+    try relocateKegTree(io, allocator, cellar_path, cellar_type);
 
     // Write INSTALL_RECEIPT.json for brew compatibility
     writeInstallReceipt(io, cellar_path, name, version, store_sha256);
@@ -382,6 +300,146 @@ fn walkMachOAndPatch(
 
 /// Write a brew-compatible INSTALL_RECEIPT.json to the keg directory.
 /// This allows Homebrew to recognize malt-installed packages.
+/// Relocate a freshly-cloned keg tree at `cellar_path` so its embedded
+/// path references point at the live malt prefix: patch Mach-O load
+/// commands, substitute `@@HOMEBREW_*@@` placeholders in text files,
+/// ad-hoc-codesign every Mach-O the patcher actually mutated. Shared
+/// by both the bottle materialize path (`materializeWithCellar`) and
+/// the local-Cellar copy fallback (`materializeFromLocalCellar`) so
+/// every keg lands on disk with byte-identical relocation regardless
+/// of whether it came from the store or a sibling brew install.
+fn relocateKegTree(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    cellar_path: []const u8,
+    cellar_type: []const u8,
+) CellarError!void {
+    const new_prefix = atomic.maltPrefix();
+
+    var new_cellar_buf: [256]u8 = undefined;
+    const new_cellar = std.fmt.bufPrint(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;
+
+    // `@@HOMEBREW_*@@` placeholders are patched for every bottle (they
+    // appear even in `:any` bottles — zig, curl, rust, llvm@* all use
+    // them in LC_LOAD_DYLIB / LC_RPATH). Absolute-path rewrites are
+    // skipped for `:any` / `:any_skip_relocation`, where Homebrew
+    // guarantees only `@rpath` / `@loader_path` + placeholder tokens.
+    const skip_absolute_rewrite = std.mem.eql(u8, cellar_type, ":any") or
+        std.mem.eql(u8, cellar_type, ":any_skip_relocation");
+
+    var macho_reps_buf: [4]Replacement = undefined;
+    macho_reps_buf[0] = .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix };
+    macho_reps_buf[1] = .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar };
+    var macho_reps_len: usize = 2;
+    if (!skip_absolute_rewrite) {
+        macho_reps_buf[2] = .{ .old = "/opt/homebrew", .new = new_prefix };
+        macho_reps_buf[3] = .{ .old = "/usr/local", .new = new_prefix };
+        macho_reps_len = 4;
+    }
+
+    // `walkMachOAndPatch` collects every file it actually mutated; only
+    // those need re-signing. Bottles with no `/opt/homebrew` references
+    // (`tree`, ...) come back with an empty list and skip the codesign
+    // subprocess entirely.
+    var modified_macho_paths: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (modified_macho_paths.items) |p| allocator.free(p);
+        modified_macho_paths.deinit(allocator);
+    }
+
+    walkMachOAndPatch(
+        io,
+        allocator,
+        cellar_path,
+        macho_reps_buf[0..macho_reps_len],
+        &modified_macho_paths,
+    ) catch |e| switch (e) {
+        CellarError.PathTooLong => return CellarError.PathTooLong,
+        CellarError.InsufficientHeaderPad => return CellarError.InsufficientHeaderPad,
+        CellarError.InstallNameToolMissing => return CellarError.InstallNameToolMissing,
+        else => return CellarError.PatchFailed,
+    };
+
+    const text_replacements = [_]text_patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix },
+        .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar },
+        .{ .old = "/opt/homebrew", .new = new_prefix },
+        .{ .old = "/usr/local", .new = new_prefix },
+    };
+    _ = text_patcher.patchTextFiles(io, allocator, cellar_path, &text_replacements) catch |e| {
+        std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
+    };
+
+    if (codesign.isArm64() and modified_macho_paths.items.len > 0) {
+        codesign.adHocSignAll(io, allocator, modified_macho_paths.items) catch |e| switch (e) {
+            error.SpawnFailed => {},
+            else => std.log.warn("codesigning failed for {s}: {s}", .{ cellar_path, @errorName(e) }),
+        };
+    }
+}
+
+/// Copy a keg tree from a sibling Homebrew install at `src_keg_path`
+/// (typically `$HOMEBREW_PREFIX/Cellar/<name>/<version>/`) into malt's
+/// Cellar and run the same relocation pipeline as the bottle path.
+/// Used when a private/third-party tap keg isn't resolvable through the
+/// brew API but is already present on disk in the user's Homebrew
+/// install — the bytes have been vetted by the user, we just relocate
+/// them. The caller-supplied `tap` is recorded in the malt-side
+/// `INSTALL_RECEIPT.json`. No store entry is created (no sha256 to
+/// key on); a fresh install of the same keg will copy from the source
+/// Cellar again rather than hitting the relocated-store cache.
+pub fn materializeFromLocalCellar(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    src_keg_path: []const u8,
+    name: []const u8,
+    version: []const u8,
+    tap: []const u8,
+    cellar_type: []const u8,
+) CellarError!Keg {
+    var cellar_buf: [512]u8 = undefined;
+    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
+        return CellarError.OutOfMemory;
+
+    var parent_buf: [512]u8 = undefined;
+    const parent = std.fmt.bufPrint(&parent_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch
+        return CellarError.OutOfMemory;
+    std.Io.Dir.createDirAbsolute(io, parent, .default_dir) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => {
+            std.log.debug("cellar parent mkdir {s}: {s}", .{ parent, @errorName(e) });
+            return CellarError.CloneFailed;
+        },
+    };
+
+    // On any patching failure below, wipe the partial keg and the
+    // empty parent dir so the caller can retry without state drift.
+    errdefer {
+        std.Io.Dir.cwd().deleteTree(io, cellar_path) catch {};
+        std.Io.Dir.deleteDirAbsolute(io, parent) catch {};
+    }
+
+    // Pre-wipe matches the bottle path: clonefile(2) returns EEXIST on
+    // a populated dst, and a SIGKILLed prior run can leave stale state.
+    std.Io.Dir.cwd().deleteTree(io, cellar_path) catch {};
+
+    clonefile.cloneTree(io, allocator, src_keg_path, cellar_path) catch |e| {
+        std.log.debug("cellar clonefile {s} -> {s}: {s}", .{ src_keg_path, cellar_path, @errorName(e) });
+        return CellarError.CloneFailed;
+    };
+
+    try relocateKegTree(io, allocator, cellar_path, cellar_type);
+
+    // Tap-aware receipt: the source-of-truth tap is the sibling
+    // brew install's, not "homebrew/core". `mt list` and friends use
+    // this to surface where a keg originally came from.
+    writeInstallReceiptFull(io, cellar_path, name, version, "", tap, true);
+
+    const owned_path = allocator.dupe(u8, cellar_path) catch return CellarError.OutOfMemory;
+    return .{ .name = name, .version = version, .path = owned_path };
+}
+
 fn writeInstallReceipt(io: std.Io, cellar_path: []const u8, name: []const u8, version: []const u8, store_sha256: []const u8) void {
     writeInstallReceiptFull(io, cellar_path, name, version, store_sha256, null, true);
 }

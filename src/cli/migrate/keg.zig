@@ -17,6 +17,7 @@ const api_mod = @import("../../net/api.zig");
 const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
 const post_install_mod = @import("../install/post_install.zig");
+const install_receipt_mod = @import("../../core/install_receipt.zig");
 
 /// Result of migrating a single keg.
 pub const KegResult = enum {
@@ -39,6 +40,11 @@ pub const MigrateDeps = struct {
     linker: *linker_mod.Linker,
     db: *sqlite.Database,
     prefix: []const u8,
+    /// Source Homebrew install root — used as the read-only fallback
+    /// when the brew API has no record of a keg (private/third-party
+    /// taps); INSTALL_RECEIPT.json under each keg supplies the version
+    /// + tap so we can copy + relocate the on-disk tree.
+    homebrew_prefix: []const u8,
     use_system_ruby_scope: []const []const u8,
     /// Set by the parallel runner; null on the serial path so the
     /// default flow pays no lock cost.
@@ -58,9 +64,18 @@ pub fn migrateKeg(
     }
 
     // Two `defer`s below collapse six per-branch cleanups.
-    const formula_json = deps.api.fetchFormula(keg_name) catch {
-        output.err("  {s}: not found in Homebrew API", .{keg_name});
-        return .failed_api;
+    const formula_json = deps.api.fetchFormula(keg_name) catch |e| switch (e) {
+        // `NotFound` is the only API outcome that triggers the
+        // private-tap copy-from-Cellar fallback: the keg simply doesn't
+        // exist in formulae.brew.sh because it lives in a third-party
+        // tap. Network / response-shape / cache failures bypass the
+        // fallback so a transient brew-api outage doesn't silently
+        // shadow the canonical bottle path.
+        error.NotFound => return migrateFromLocalCellar(ctx, allocator, keg_name, deps),
+        else => {
+            output.err("  {s}: Homebrew API fetch failed ({s})", .{ keg_name, @errorName(e) });
+            return .failed_api;
+        },
     };
     defer allocator.free(formula_json);
 
@@ -163,6 +178,164 @@ pub fn migrateKeg(
     return .migrated;
 }
 
+/// Copy-from-Cellar fallback for kegs the brew API can't resolve
+/// (private/third-party taps). Locates `<homebrew_prefix>/Cellar/<name>/`,
+/// picks the version subdir whose `INSTALL_RECEIPT.json` mtime is
+/// newest (matches brew's "current" version when multiples are present),
+/// reads the receipt, and — if the recorded tap is non-core — copies
+/// the keg tree into malt's Cellar via the same relocation pipeline
+/// the bottle path uses. A `homebrew/core` keg that's missing from
+/// the API is treated as a real API problem, not a fallback case:
+/// returning `.failed_api` keeps the user's attention on the brew side
+/// instead of papering over an upstream outage with a stale local copy.
+fn migrateFromLocalCellar(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    keg_name: []const u8,
+    deps: MigrateDeps,
+) KegResult {
+    const src_keg_path = findInstalledKegPath(ctx.io, allocator, deps.homebrew_prefix, keg_name) catch null orelse {
+        output.err("  {s}: not found in Homebrew API and no local Cellar copy available", .{keg_name});
+        return .failed_api;
+    };
+    defer allocator.free(src_keg_path);
+
+    const receipt_text = readInstallReceipt(ctx.io, allocator, src_keg_path) catch {
+        output.err("  {s}: local Cellar copy lacks a readable INSTALL_RECEIPT.json", .{keg_name});
+        return .failed_api;
+    };
+    defer allocator.free(receipt_text);
+
+    var receipt = install_receipt_mod.parseInstallReceipt(allocator, receipt_text) catch {
+        output.err("  {s}: INSTALL_RECEIPT.json malformed", .{keg_name});
+        return .failed_api;
+    };
+    defer receipt.deinit();
+
+    if (install_receipt_mod.isCoreTap(receipt.tap)) {
+        output.err("  {s}: not found in Homebrew API (homebrew/core keg — refusing local-Cellar fallback)", .{keg_name});
+        return .failed_api;
+    }
+    if (receipt.version.len == 0) {
+        output.err("  {s}: INSTALL_RECEIPT.json has no source.versions.stable", .{keg_name});
+        return .failed_api;
+    }
+
+    output.info("  Migrating {s} {s} (from {s} tap)...", .{ keg_name, receipt.version, receipt.tap });
+
+    const keg = cellar_mod.materializeFromLocalCellar(
+        ctx.io,
+        allocator,
+        deps.prefix,
+        src_keg_path,
+        keg_name,
+        receipt.version,
+        receipt.tap,
+        // Tap kegs don't carry a Homebrew bottle cellar_type tag here;
+        // pass empty so the relocation pipeline treats it as a normal
+        // bottle (full absolute-path rewrite + placeholder substitution).
+        "",
+    ) catch |e| {
+        output.err("    {s}: failed to materialize from local Cellar ({s})", .{ keg_name, @errorName(e) });
+        return .failed_install;
+    };
+
+    if (deps.db_mu) |m| m.lockUncancelable(ctx.io);
+    defer if (deps.db_mu) |m| m.unlock(ctx.io);
+
+    var full_name_buf: [256]u8 = undefined;
+    const full_name = std.fmt.bufPrint(&full_name_buf, "{s}/{s}", .{ receipt.tap, keg_name }) catch keg_name;
+
+    const keg_id = recordKegFields(deps.db, .{
+        .name = keg_name,
+        .full_name = full_name,
+        .version = receipt.version,
+        .revision = 0,
+        .tap = receipt.tap,
+        .store_sha256 = "",
+        .cellar_path = keg.path,
+        .install_reason = "direct",
+    }) catch {
+        output.err("    {s}: failed to record in database", .{keg_name});
+        cellar_mod.remove(ctx.io, deps.prefix, keg_name, receipt.version) catch {};
+        return .failed_install;
+    };
+
+    deps.linker.link(keg.path, keg_name, keg_id) catch {
+        output.warn("    {s}: some links could not be created", .{keg_name});
+        deps.linker.unlink(keg_id) catch {};
+        deleteKeg(deps.db, keg_id) catch {};
+        cellar_mod.remove(ctx.io, deps.prefix, keg_name, receipt.version) catch {};
+        return .failed_install;
+    };
+    deps.linker.linkOpt(keg_name, receipt.version) catch {};
+    recordDepsFromList(deps.db, keg_id, receipt.runtime_deps);
+
+    output.success("  {s} {s} migrated (from {s} tap)", .{ keg_name, receipt.version, receipt.tap });
+    return .migrated;
+}
+
+/// Locate the most recently-installed version subdir for `name` under
+/// the source brew Cellar. Picks the one whose INSTALL_RECEIPT.json
+/// mtime is highest so an upgrade-then-uninstall sequence still
+/// migrates the version brew currently considers active. Returns the
+/// caller-owned absolute path or null when no version dir carries a
+/// receipt.
+fn findInstalledKegPath(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    homebrew_prefix: []const u8,
+    name: []const u8,
+) !?[]const u8 {
+    var cellar_buf: [512]u8 = undefined;
+    const cellar_name_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}", .{ homebrew_prefix, name }) catch return null;
+
+    var dir = std.Io.Dir.openDirAbsolute(io, cellar_name_path, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+
+    var best_path: ?[]const u8 = null;
+    var best_mtime_ns: i96 = std.math.minInt(i96);
+    errdefer if (best_path) |p| allocator.free(p);
+
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (entry.kind != .directory) continue;
+        var receipt_buf: [512]u8 = undefined;
+        const receipt_rel = std.fmt.bufPrint(&receipt_buf, "{s}/INSTALL_RECEIPT.json", .{entry.name}) catch continue;
+        const stat = dir.statFile(io, receipt_rel, .{}) catch continue;
+        if (stat.kind != .file) continue;
+        const mtime_ns = stat.mtime.toNanoseconds();
+        if (mtime_ns > best_mtime_ns) {
+            const new_full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cellar_name_path, entry.name });
+            if (best_path) |old| allocator.free(old);
+            best_path = new_full;
+            best_mtime_ns = mtime_ns;
+        }
+    }
+    return best_path;
+}
+
+/// Slurp `INSTALL_RECEIPT.json` from a keg directory. Caller owns.
+/// Receipts are small (well under 1 MiB even for python with hundreds
+/// of runtime deps); cap defensively to refuse a hostile/runaway file.
+fn readInstallReceipt(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    keg_path: []const u8,
+) ![]u8 {
+    var path_buf: [512]u8 = undefined;
+    const receipt_path = try std.fmt.bufPrint(&path_buf, "{s}/INSTALL_RECEIPT.json", .{keg_path});
+    const file = try std.Io.Dir.openFileAbsolute(io, receipt_path, .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    const max_bytes: u64 = 1024 * 1024;
+    if (stat.size > max_bytes) return error.ReceiptTooLarge;
+    const buf = try allocator.alloc(u8, stat.size);
+    errdefer allocator.free(buf);
+    const n = try file.readPositionalAll(io, buf, 0);
+    return buf[0..n];
+}
+
 /// Download a bottle from GHCR and commit to the store.
 fn downloadBottle(
     ctx: *const AppCtx,
@@ -215,6 +388,21 @@ fn downloadBottle(
 
 // ── DB helpers (same pattern as install.zig) ────────────────────────
 
+/// Field bundle accepted by both the formula path (extracted from
+/// `Formula`) and the local-Cellar fallback (extracted from
+/// `INSTALL_RECEIPT.json`). Keeping the DB write surface flat means
+/// the two callers exercise byte-identical SQL.
+const KegFields = struct {
+    name: []const u8,
+    full_name: []const u8,
+    version: []const u8,
+    revision: i64,
+    tap: []const u8,
+    store_sha256: []const u8,
+    cellar_path: []const u8,
+    install_reason: []const u8,
+};
+
 fn recordKeg(
     db: *sqlite.Database,
     formula: *const formula_mod.Formula,
@@ -222,6 +410,19 @@ fn recordKeg(
     cellar_path: []const u8,
     install_reason: []const u8,
 ) !i64 {
+    return recordKegFields(db, .{
+        .name = formula.name,
+        .full_name = formula.full_name,
+        .version = formula.version,
+        .revision = formula.revision,
+        .tap = formula.tap,
+        .store_sha256 = store_sha256,
+        .cellar_path = cellar_path,
+        .install_reason = install_reason,
+    });
+}
+
+fn recordKegFields(db: *sqlite.Database, f: KegFields) !i64 {
     db.beginTransaction() catch return error.RecordFailed;
     errdefer db.rollback();
 
@@ -233,14 +434,14 @@ fn recordKeg(
     ) catch return error.RecordFailed;
     defer stmt.finalize();
 
-    stmt.bindText(1, formula.name) catch return error.RecordFailed;
-    stmt.bindText(2, formula.full_name) catch return error.RecordFailed;
-    stmt.bindText(3, formula.version) catch return error.RecordFailed;
-    stmt.bindInt(4, formula.revision) catch return error.RecordFailed;
-    stmt.bindText(5, formula.tap) catch return error.RecordFailed;
-    stmt.bindText(6, store_sha256) catch return error.RecordFailed;
-    stmt.bindText(7, cellar_path) catch return error.RecordFailed;
-    stmt.bindText(8, install_reason) catch return error.RecordFailed;
+    stmt.bindText(1, f.name) catch return error.RecordFailed;
+    stmt.bindText(2, f.full_name) catch return error.RecordFailed;
+    stmt.bindText(3, f.version) catch return error.RecordFailed;
+    stmt.bindInt(4, f.revision) catch return error.RecordFailed;
+    stmt.bindText(5, f.tap) catch return error.RecordFailed;
+    stmt.bindText(6, f.store_sha256) catch return error.RecordFailed;
+    stmt.bindText(7, f.cellar_path) catch return error.RecordFailed;
+    stmt.bindText(8, f.install_reason) catch return error.RecordFailed;
 
     _ = stmt.step() catch return error.RecordFailed;
 
@@ -260,7 +461,14 @@ fn deleteKeg(db: *sqlite.Database, keg_id: i64) sqlite.SqliteError!void {
 /// Each row is independent; skip on per-row failure so a partial dep
 /// table is preferred to aborting a migration wholesale.
 fn recordDeps(db: *sqlite.Database, keg_id: i64, formula: *const formula_mod.Formula) void {
-    for (formula.dependencies) |dep_name| {
+    recordDepsFromList(db, keg_id, formula.dependencies);
+}
+
+/// Same SQL as `recordDeps` but takes a pre-extracted list — used by
+/// the local-Cellar fallback whose dependency names come straight off
+/// `INSTALL_RECEIPT.json` rather than a parsed Formula.
+fn recordDepsFromList(db: *sqlite.Database, keg_id: i64, dep_names: []const []const u8) void {
+    for (dep_names) |dep_name| {
         var stmt = db.prepare(
             "INSERT OR IGNORE INTO dependencies (keg_id, dep_name, dep_type) VALUES (?1, ?2, 'runtime');",
         ) catch continue;
