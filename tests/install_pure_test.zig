@@ -590,6 +590,60 @@ test "routePostInstallOutcome: fatal entry wins over hasErrors heuristic" {
     try testing.expect(std.mem.indexOf(u8, out, "post_install completed") == null);
 }
 
+// `mt migrate ruby` shouldn't require `--use-system-ruby=ruby` — the
+// recursion is nonsensical. Self-hosting interpreter kegs (ruby,
+// ruby@N) are auto-included in the system-Ruby allow-list so the
+// hook routes to the same fallback path with no flag from the user.
+test "routePostInstallOutcome: ruby keg auto-routes to system Ruby with no flag" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{
+        .formula = "ruby",
+        .reason = .unknown_method,
+        .detail = "rubygems_helper",
+        .loc = null,
+    });
+
+    const out = try runRoute(&flog, "ruby", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "use --use-system-ruby=ruby") == null);
+}
+
+test "routePostInstallOutcome: ruby@N keg also auto-routes to system Ruby" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{
+        .formula = "ruby@3.4",
+        .reason = .unsupported_node,
+        .detail = "default_args",
+        .loc = null,
+    });
+
+    const out = try runRoute(&flog, "ruby@3.4", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
+}
+
+// Negative: lookalikes must NOT inherit the auto-include — only the
+// canonical interpreter kegs. Regression guard against widening the
+// trust boundary by accident.
+test "routePostInstallOutcome: ruby-lookalike kegs still need the explicit flag" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "rubygems", .reason = .unknown_method, .detail = "x", .loc = null });
+
+    const out = try runRoute(&flog, "rubygems", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "partially skipped (use --use-system-ruby=rubygems") != null);
+}
+
 test "routePostInstallOutcome: scope with unrelated names is ignored" {
     var flog = dsl.FallbackLog.init(testing.allocator);
     defer flog.deinit();
