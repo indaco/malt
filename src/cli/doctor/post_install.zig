@@ -98,7 +98,7 @@ pub fn checkPostInstallStatus(ctx: *const AppCtx, allocator: std.mem.Allocator, 
         }
     }
 
-    output.info("", .{});
+    output.plain("", .{});
     output.info("Installed: {d} total, {d} without post_install, {d} with post_install", .{ total, no_pi_count, native_count + partial_count });
     if (native_count + partial_count > 0) {
         output.info("DSL parseable: {d}/{d} ({d}%)", .{ native_count, native_count + partial_count, if (native_count + partial_count > 0) 100 * native_count / (native_count + partial_count) else 0 });

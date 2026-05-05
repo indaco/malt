@@ -50,22 +50,27 @@ const spinner_chars = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "
 /// Reserves N lines upfront, then uses ANSI cursor movement so each
 /// bar updates its own line without interfering with others.
 pub const MultiProgress = struct {
-    total_lines: u8,
+    total_lines: u16,
     mutex: std.Io.Mutex,
     is_tty: bool,
 
-    pub fn init(count: u8) MultiProgress {
+    pub fn init(count: u16) MultiProgress {
         const tty = supportsAnsi();
 
         // Hide cursor, disable autowrap, reserve lines by printing empty placeholders.
         // Autowrap disabled so an over-width bar clips instead of wrapping —
         // wrapping would break the ESC[NA cursor-up math each bar relies on.
         if (tty and !output.isQuiet()) {
-            var buf: [multi_init_max_bytes]u8 = undefined;
-            const prefix = "\x1b[?25l\x1b[?7l"; // hide cursor + disable autowrap
-            @memcpy(buf[0..prefix.len], prefix);
-            @memset(buf[prefix.len .. prefix.len + count], '\n');
-            writeStderrAll(buf[0 .. prefix.len + count]);
+            // 11-byte prefix; newlines emitted in 256-byte chunks so a u16-max
+            // line count doesn't blow the stack frame.
+            writeStderrAll("\x1b[?25l\x1b[?7l");
+            const newline_chunk: [256]u8 = @splat('\n');
+            var remaining: u16 = count;
+            while (remaining > 0) {
+                const n = @min(remaining, newline_chunk.len);
+                writeStderrAll(newline_chunk[0..n]);
+                remaining -= n;
+            }
         }
 
         return .{
@@ -83,9 +88,6 @@ pub const MultiProgress = struct {
             writeStderrAll("\x1b[?7h\x1b[?25h\r");
         }
     }
-
-    /// "\x1b[?25l" (6) + "\x1b[?7l" (5) + up to u8-max newlines.
-    const multi_init_max_bytes: usize = 6 + 5 + std.math.maxInt(u8);
 };
 
 pub const ProgressBar = struct {
@@ -99,7 +101,7 @@ pub const ProgressBar = struct {
     /// Minimum label column width for alignment across multiple bars.
     label_width: u8,
     /// Line index within a MultiProgress group (0 = topmost bar).
-    line_index: u8,
+    line_index: u16,
     /// Shared multi-progress state (null for standalone bars).
     multi: ?*MultiProgress,
 
@@ -242,14 +244,14 @@ pub const ProgressBar = struct {
     }
 
     /// Write ANSI escape to move cursor up `n` lines.
-    fn writeCursorUp(buf: []u8, pos: usize, n: u8) usize {
+    fn writeCursorUp(buf: []u8, pos: usize, n: u16) usize {
         if (n == 0) return pos;
         const seq = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{n}) catch return pos;
         return pos + seq.len;
     }
 
     /// Write ANSI escape to move cursor down `n` lines.
-    fn writeCursorDown(buf: []u8, pos: usize, n: u8) usize {
+    fn writeCursorDown(buf: []u8, pos: usize, n: u16) usize {
         if (n == 0) return pos;
         const seq = std.fmt.bufPrint(buf[pos..], "\x1b[{d}B", .{n}) catch return pos;
         return pos + seq.len;
@@ -268,7 +270,7 @@ pub const ProgressBar = struct {
         var pos: usize = 0;
 
         // For multi-progress: move cursor up to our line
-        const move_up: u8 = if (self.multi) |mp| mp.total_lines - self.line_index else 0;
+        const move_up: u16 = if (self.multi) |mp| mp.total_lines - self.line_index else 0;
         pos = writeCursorUp(&buf, pos, move_up);
 
         // Carriage return
@@ -395,7 +397,7 @@ pub const ProgressBar = struct {
         var buf: [512]u8 = undefined;
         var pos: usize = 0;
 
-        const move_up: u8 = if (self.multi) |mp| mp.total_lines - self.line_index else 0;
+        const move_up: u16 = if (self.multi) |mp| mp.total_lines - self.line_index else 0;
         pos = writeCursorUp(&buf, pos, move_up);
 
         buf[pos] = '\r';
@@ -606,3 +608,31 @@ pub const Spinner = struct {
         writeStderrAll(buf[0..pos]);
     }
 };
+
+test "MultiProgress accepts a line count beyond u8 without truncation" {
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+
+    const big: u16 = 300;
+    var mp = MultiProgress.init(big);
+    defer mp.finish();
+    try std.testing.expectEqual(big, mp.total_lines);
+}
+
+test "ProgressBar.line_index past u8 round-trips through MultiProgress render" {
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+
+    var mp = MultiProgress.init(400);
+    defer mp.finish();
+    mp.is_tty = true;
+
+    var bar = ProgressBar.init("late", 100);
+    bar.is_tty = true;
+    bar.multi = &mp;
+    bar.line_index = 350; // would silently wrap to 94 under u8
+    bar.update(50);
+    bar.finish();
+
+    try std.testing.expectEqual(@as(u16, 350), bar.line_index);
+}

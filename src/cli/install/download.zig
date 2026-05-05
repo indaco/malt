@@ -55,7 +55,7 @@ pub const DownloadJob = struct {
     /// Alignment width for progress bar labels (max name length across all jobs).
     label_width: u8,
     /// Line index within the multi-progress group.
-    line_index: u8,
+    line_index: u16,
     /// Shared multi-progress state for coordinated rendering.
     multi: ?*progress_mod.MultiProgress,
     /// Progress bar owned by the main thread. Created before workers are spawned

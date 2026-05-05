@@ -829,7 +829,7 @@ test "pre-set SIGINT flag short-circuits the per-keg loop before any API call" {
     try testing.expect(containsLine(buf.items, "Interrupted before migration"));
     // Early-return must skip both per-keg success and final summary block.
     try testing.expect(!containsLine(buf.items, "willbeskipped migrated"));
-    try testing.expect(!containsLine(buf.items, "Migration complete:"));
+    try testing.expect(!containsLine(buf.items, "Migration completed."));
 }
 
 // ── Cellar-entry filter ─────────────────────────────────────────────────
@@ -1097,7 +1097,7 @@ test "lock contention returns error.Aborted when db/malt.lock is already held" {
     );
 }
 
-test "already-installed stderr pins the 'Migration complete' + 'Skipped (installed): 1' lines" {
+test "already-installed stderr pins the 'Migration completed.' + 'Skipped (installed): 1' lines" {
     resetOutput();
     color.setForTest(false, false);
     defer color.setForTest(null, null);
@@ -1153,9 +1153,9 @@ test "already-installed stderr pins the 'Migration complete' + 'Skipped (install
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
     try migrate.execute(&ctx, arena.allocator(), &.{});
 
-    try testing.expect(containsLine(buf.items, "Migration complete:"));
-    try testing.expect(containsLine(buf.items, "Migrated:              0"));
-    try testing.expect(containsLine(buf.items, "Skipped (installed):   1"));
+    try testing.expect(containsLine(buf.items, "Migration completed."));
+    try testing.expect(containsLine(buf.items, "Migrated: 0"));
+    try testing.expect(containsLine(buf.items, "Skipped (installed): 1"));
 }
 
 // ── Parsed-formula lifecycle pinning ────────────────────────────────────
