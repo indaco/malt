@@ -95,19 +95,31 @@ pub fn renderRubyProfile(
     return aw.toOwnedSlice() catch SandboxError.ProfileBuildFailed;
 }
 
+/// Clamp a setrlimit request to the kernel's current hard cap so a
+/// requested ceiling above the system limit doesn't trip `LimitTooBig`.
+/// `max` higher than `current.max` requires CAP_SYS_RESOURCE and
+/// otherwise fails fork→exec with exit 127.
+fn setrlimitClamped(resource: std.posix.rlimit_resource, requested: std.posix.rlim_t) SandboxError!void {
+    const current = std.posix.getrlimit(resource) catch return SandboxError.RlimitFailed;
+    const cap = @min(requested, current.max);
+    std.posix.setrlimit(resource, .{ .cur = cap, .max = cap }) catch
+        return SandboxError.RlimitFailed;
+}
+
 fn applyRlimits(limits: Limits) SandboxError!void {
-    const as_max: std.posix.rlim_t = @intCast(limits.address_space_bytes);
     const fs_max: std.posix.rlim_t = @intCast(limits.file_size_bytes);
     const cpu_max: std.posix.rlim_t = @intCast(limits.cpu_seconds);
 
-    // On macOS `.AS` is a `pub const` alias for `.RSS` inside the
-    // rlimit_resource namespace — same BSD lineage as RLIMIT_AS == RLIMIT_RSS.
-    std.posix.setrlimit(.CPU, .{ .cur = cpu_max, .max = cpu_max }) catch
-        return SandboxError.RlimitFailed;
-    std.posix.setrlimit(.FSIZE, .{ .cur = fs_max, .max = fs_max }) catch
-        return SandboxError.RlimitFailed;
-    std.posix.setrlimit(.AS, .{ .cur = as_max, .max = as_max }) catch
-        return SandboxError.RlimitFailed;
+    try setrlimitClamped(.CPU, cpu_max);
+    try setrlimitClamped(.FSIZE, fs_max);
+
+    // RLIMIT_AS/RSS is intentionally NOT applied on Darwin: XNU stopped
+    // enforcing RSS many releases ago, AND `setrlimit` rejects any
+    // value below an undocumented system minimum (observed ~512 GB)
+    // with EINVAL — which would fail fork→exec for any reasonable
+    // memory cap. The sandbox-exec profile + macOS memory-pressure
+    // handling is the actual abuse boundary on this platform.
+    _ = limits.address_space_bytes;
 }
 
 /// Build a null-terminated envp from the allowlist; everything else dropped.
