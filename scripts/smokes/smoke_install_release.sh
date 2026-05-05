@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/e2e/smoke_install_release.sh
+# scripts/smokes/smoke_install_release.sh
 #
 # Post-release smoke: runs the README's one-liner against the live
 # GitHub release and exercises the full trust path end-to-end.
@@ -19,7 +19,7 @@
 # wire into a release-verification workflow.
 #
 # Usage:
-#   ./scripts/e2e/smoke_install_release.sh
+#   ./scripts/smokes/smoke_install_release.sh
 #
 # Requirements:
 #   - curl, bash, tar

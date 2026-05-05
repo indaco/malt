@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/e2e/smoke_test.sh
+# scripts/smokes/smoke_test.sh
 #
 # Comprehensive CLI smoke test for malt. Exercises every command and subcommand
 # documented in README.md under an isolated MALT_PREFIX / MALT_CACHE, so the
@@ -15,9 +15,9 @@
 # summary is emitted. Exit code 0 iff every test passes.
 #
 # Usage:
-#   ./scripts/e2e/smoke_test.sh                      # full run
-#   SMOKE_SKIP_NETWORK=1 ./scripts/e2e/smoke_test.sh # tiers 1+2 only
-#   MT_BIN=./zig-out/bin/mt ./scripts/e2e/smoke_test.sh
+#   ./scripts/smokes/smoke_test.sh                      # full run
+#   SMOKE_SKIP_NETWORK=1 ./scripts/smokes/smoke_test.sh # tiers 1+2 only
+#   MT_BIN=./zig-out/bin/mt ./scripts/smokes/smoke_test.sh
 
 set -uo pipefail
 

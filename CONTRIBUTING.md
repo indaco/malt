@@ -37,7 +37,7 @@ zig build test                                   # unit tests
 ```
 
 > [!IMPORTANT]
-> If your change touches anything in [Security invariants](#security-invariants) below - sandbox, pins, plist validator, `install.sh`, `--use-system-ruby`, or argv-only spawn - also run `./scripts/e2e/smoke_security.sh` (~10 seconds, fully offline) before opening the PR. This is the single entry point that exercises every protection end-to-end - flag scoping, argv-only lint, pins-manifest shape, `install.sh` fail-closed suite - and it's the gate that catches regressions before they reach CI.
+> If your change touches anything in [Security invariants](#security-invariants) below - sandbox, pins, plist validator, `install.sh`, `--use-system-ruby`, or argv-only spawn - also run `./scripts/smokes/smoke_security.sh` (~10 seconds, fully offline) before opening the PR. This is the single entry point that exercises every protection end-to-end - flag scoping, argv-only lint, pins-manifest shape, `install.sh` fail-closed suite - and it's the gate that catches regressions before they reach CI.
 
 If your change touches `scripts/install.sh` specifically, also run `./scripts/test/install_sh_test.sh`.
 
@@ -84,8 +84,8 @@ zig build test                                   # unit tests
 ./scripts/lint-spawn-invariants.sh               # argv-only lint
 ./scripts/test/install_sh_test.sh                # install.sh regression
 ./scripts/local-bench.sh                         # full bench suite (slow)
-./scripts/e2e/smoke_test.sh                      # CLI smoke coverage
-./scripts/e2e/smoke_security.sh                  # security-surface smoke
+./scripts/smokes/smoke_test.sh                   # CLI smoke coverage
+./scripts/smokes/smoke_security.sh               # security-surface smoke
 ```
 
 For the pre-PR subset, see [Before you submit](#before-you-submit).

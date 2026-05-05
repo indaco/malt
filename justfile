@@ -66,13 +66,13 @@ fmt:
 # Lint shell scripts with shellcheck + shfmt.
 [group('lint')]
 shell-lint:
-    shellcheck scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh
-    shfmt -i 2 -d scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh
+    shellcheck scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh
+    shfmt -i 2 -d scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh
 
 # Apply shfmt formatting in place. Run after a failing `shell-lint`.
 [group('lint')]
 shell-fmt:
-    shfmt -i 2 -w scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh
+    shfmt -i 2 -w scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh
 
 # Lint: format check + build + test
 [group('lint')]
@@ -129,9 +129,9 @@ pre-push: fmt-check test shell-lint
         echo "▸ MALT_SKIP_SMOKE=1 — skipping install smoke"
     elif git rev-parse --verify origin/main >/dev/null 2>&1 \
         && git diff --name-only origin/main...HEAD 2>/dev/null \
-        | grep -qE '^(src/cli/install\.zig|src/core/bottle\.zig|src/core/cask\.zig|src/fs/archive\.zig|src/fs/atomic\.zig|src/net/client\.zig|src/net/ghcr\.zig|scripts/local-smoke-install\.sh)$'; then
+        | grep -qE '^(src/cli/install\.zig|src/core/bottle\.zig|src/core/cask\.zig|src/fs/archive\.zig|src/fs/atomic\.zig|src/net/client\.zig|src/net/ghcr\.zig|scripts/smokes/local-smoke-install\.sh)$'; then
         echo "▸ Install/extract/download surface touched — running install smoke"
-        ./scripts/local-smoke-install.sh
+        ./scripts/smokes/local-smoke-install.sh
     else
         echo "▸ Install/extract/download surface untouched — skipping install smoke"
     fi
@@ -143,7 +143,7 @@ pre-push: fmt-check test shell-lint
 # Auto-runs from `pre-push` when install/extract/download paths change.
 [group('test')]
 smoke-install: build
-    @./scripts/local-smoke-install.sh
+    @./scripts/smokes/local-smoke-install.sh
 
 # Install git hooks (pre-commit + pre-push)
 [group('hooks')]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/e2e/smoke_security.sh
+# scripts/smokes/smoke_security.sh
 #
 # End-to-end smoke coverage for malt's security-critical surfaces.
 # Each check is a thin exercise of one protection added in the
@@ -16,8 +16,8 @@
 # Cleans up its tmp prefix on exit.
 #
 # Usage:
-#   ./scripts/e2e/smoke_security.sh
-#   MT_BIN=./zig-out/bin/mt ./scripts/e2e/smoke_security.sh
+#   ./scripts/smokes/smoke_security.sh
+#   MT_BIN=./zig-out/bin/mt ./scripts/smokes/smoke_security.sh
 
 set -uo pipefail
 
