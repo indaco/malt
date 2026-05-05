@@ -259,10 +259,12 @@ fn suppressed(io: std.Io, environ: std.process.Environ, cmd_str: []const u8) boo
     return false;
 }
 
-/// Dim so it recedes next to the command's own info/success lines.
+/// Headline goes through `notice` (violet `!`) so an available update reads
+/// as a heads-up, not a warning. The action hint stays dim — it's reference
+/// material, not the message.
 fn printNotice(latest_tag: []const u8, current_version: []const u8) void {
     const latest_no_v = release.stripVPrefix(latest_tag);
-    output.dim("A newer malt is available: {s} (you're on {s}).", .{ latest_no_v, current_version });
+    output.notice("A newer malt is available: {s} (you're on {s}).", .{ latest_no_v, current_version });
     output.dim("Run 'mt version update' to upgrade, or set MALT_NO_VERSION_NOTIFIER=1 to silence this.", .{});
 }
 

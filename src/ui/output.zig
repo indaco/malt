@@ -262,6 +262,15 @@ pub fn err(comptime fmt: []const u8, args: anytype) void {
     writePrefixedLine(msg, .err, "  ✗ ", "  x ");
 }
 
+/// "FYI / explanation" line — a passive heads-up that is neither a warning
+/// nor a failure. Purple/violet glyph so it reads distinctly from `warn`.
+pub fn notice(comptime fmt: []const u8, args: anytype) void {
+    if (quiet) return;
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    writePrefixedLine(msg, .notice, "  ! ", "  ! ");
+}
+
 /// Print a confirmation prompt: info-coloured `?` icon, bold message,
 /// no trailing newline so the user's typed answer continues the line.
 /// Bypasses `--quiet` — a silent prompt would deadlock interactive flows.
@@ -528,6 +537,67 @@ pub fn emitNdjsonEvent(
     }
     w.writeAll("}\n") catch return;
     writeStdout(w.buffered());
+}
+
+// `notice` is the "FYI / explanation" role — the prefix-only ANSI wrap
+// matches info/warn/etc., the glyph is `!` (purple/violet via .notice),
+// and `--quiet` suppresses it like every other informational line.
+// Sister tests for the other prefix-line helpers live alongside the public
+// API surface in tests/output_test.zig; these are kept inline because the
+// helper is a thin wrapper over the already-tested writePrefixedLine.
+test "notice wraps the magenta prefix and uses the bang glyph (dark + basic)" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const prior_quiet = isQuiet();
+    color.setForTest(true, true);
+    color.setBackgroundForTest(color.Background.dark);
+    color.setTruecolorForTest(false);
+    setQuiet(false);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer {
+        endStderrCapture();
+        color.setForTest(null, null);
+        color.setBackgroundForTest(null);
+        color.setTruecolorForTest(null);
+        setQuiet(prior_quiet);
+    }
+
+    notice("heads up", .{});
+    try std.testing.expectEqualStrings("\x1b[35m  ! \x1b[0mheads up\n", buf.items);
+}
+
+test "notice falls back to ASCII bang prefix when emoji and color are off" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const prior_quiet = isQuiet();
+    color.setForTest(false, false);
+    setQuiet(false);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer {
+        endStderrCapture();
+        color.setForTest(null, null);
+        setQuiet(prior_quiet);
+    }
+
+    notice("plain notice", .{});
+    try std.testing.expectEqualStrings("  ! plain notice\n", buf.items);
+}
+
+test "notice is suppressed by --quiet" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const prior_quiet = isQuiet();
+    color.setForTest(true, true);
+    setQuiet(true);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer {
+        endStderrCapture();
+        color.setForTest(null, null);
+        setQuiet(prior_quiet);
+    }
+
+    notice("hidden", .{});
+    try std.testing.expectEqualStrings("", buf.items);
 }
 
 test "isNdjson defaults to false and setNdjson toggles it" {
