@@ -53,6 +53,40 @@ pub fn scaledTimeoutNs(content_length: ?u64) u64 {
     return @max(floor_ns, transfer_ns);
 }
 
+/// Idle-timeout default + clamp range. The whole-transfer deadline
+/// (`scaledTimeoutNs`) only fires when the projected transfer time
+/// elapses, so a 0 B/s mid-transfer stall waits ~13 min for a 50 MB
+/// bottle, ~2 h for a 500 MB one. The idle watchdog is the fail-fast
+/// counterpart: bytes haven't advanced in `idle_timeout_ns` → kill.
+const default_idle_timeout_ns: u64 = 30 * std.time.ns_per_s;
+const min_idle_timeout_secs: u32 = 5;
+const max_idle_timeout_secs: u32 = 600;
+
+/// Parse `MALT_HTTP_IDLE_TIMEOUT_SECS`. Empty/garbage/null falls back
+/// to the default; the clamp keeps a typo from disabling the watchdog
+/// (`0`) or from setting it absurdly long.
+pub fn idleTimeoutNsFromEnv(raw: ?[]const u8) u64 {
+    const r = raw orelse return default_idle_timeout_ns;
+    const trimmed = std.mem.trim(u8, r, " \t");
+    if (trimmed.len == 0) return default_idle_timeout_ns;
+    const parsed = std.fmt.parseInt(u32, trimmed, 10) catch return default_idle_timeout_ns;
+    const clamped = std.math.clamp(parsed, min_idle_timeout_secs, max_idle_timeout_secs);
+    return @as(u64, clamped) * std.time.ns_per_s;
+}
+
+/// Watchdog fires when *either* deadline is breached: idle (no bytes
+/// in `idle_limit_ns`) or whole-transfer (running longer than
+/// `total_limit_ns`). Pure so the policy is unit-testable without
+/// real sockets / threads.
+pub fn shouldFireIdleWatchdog(
+    idle_elapsed_ns: u64,
+    total_elapsed_ns: u64,
+    idle_limit_ns: u64,
+    total_limit_ns: u64,
+) bool {
+    return idle_elapsed_ns >= idle_limit_ns or total_elapsed_ns >= total_limit_ns;
+}
+
 /// Optional progress callback for long downloads (post-decompression bytes).
 pub const ProgressCallback = struct {
     context: *anyopaque,
@@ -254,9 +288,11 @@ pub const HttpClient = struct {
     /// Counts written bytes, enforces an upper bound mid-stream, and reports
     /// progress. On overflow `drain`/`sendFile` return `error.WriteFailed`
     /// and callers distinguish via `bytes_written` vs `limit_exceeded`.
+    /// `bytes_written` is atomic so the idle watchdog (a separate thread)
+    /// can sample it on each tick without a lock.
     const CountingWriter = struct {
         inner: *std.Io.Writer.Allocating,
-        bytes_written: u64,
+        bytes_written: std.atomic.Value(u64),
         max_bytes: u64,
         limit_exceeded: bool,
         progress: ?ProgressCallback,
@@ -271,17 +307,17 @@ pub const HttpClient = struct {
             },
         },
 
-        fn report(self: *CountingWriter) void {
-            if (self.progress) |p| p.report(self.bytes_written, self.content_length);
+        fn report(self: *CountingWriter, total: u64) void {
+            if (self.progress) |p| p.report(total, self.content_length);
         }
 
         fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
             const self: *CountingWriter = @fieldParentPtr("writer", w);
             const n = self.inner.writer.vtable.drain(&self.inner.writer, data, splat) catch
                 return error.WriteFailed;
-            self.bytes_written += n;
-            self.report();
-            if (self.bytes_written > self.max_bytes) {
+            const total = self.bytes_written.fetchAdd(n, .release) + n;
+            self.report(total);
+            if (total > self.max_bytes) {
                 self.limit_exceeded = true;
                 return error.WriteFailed;
             }
@@ -291,9 +327,9 @@ pub const HttpClient = struct {
         fn sendFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
             const self: *CountingWriter = @fieldParentPtr("writer", w);
             const n = self.inner.writer.vtable.sendFile(&self.inner.writer, file_reader, limit) catch |e| return e;
-            self.bytes_written += n;
-            self.report();
-            if (self.bytes_written > self.max_bytes) {
+            const total = self.bytes_written.fetchAdd(n, .release) + n;
+            self.report(total);
+            if (total > self.max_bytes) {
                 self.limit_exceeded = true;
                 return error.WriteFailed;
             }
@@ -401,35 +437,44 @@ pub const HttpClient = struct {
         var decompress: std.http.Decompress = undefined;
         var body_reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
 
-        // Watchdog closes the socket on stall; one-shot `request_done`
-        // wakes it immediately on success (previous 1 s polling stalled
-        // `join()` and dominated the warm-install floor).
-        const effective_timeout = if (max_bytes > max_metadata_bytes)
+        // `CountingWriter` enforces `max_bytes` per-write so oversized bodies
+        // are rejected mid-stream, not after buffering. Created before the
+        // watchdog spawns so its atomic byte counter is the watchdog's
+        // progress signal.
+        var counting = CountingWriter{
+            .inner = &body_writer,
+            .bytes_written = std.atomic.Value(u64).init(0),
+            .max_bytes = max_bytes,
+            .limit_exceeded = false,
+            .progress = progress,
+            .content_length = content_length,
+        };
+
+        // Two-deadline watchdog: idle (no bytes in `idle_timeout_ns`) +
+        // whole-transfer (`scaledTimeoutNs` backstop). Idle is the
+        // fail-fast for genuine 0 B/s stalls; total catches a slow
+        // trickle that would otherwise sit forever under just the
+        // idle clock if the server dribbles a byte every few seconds.
+        const total_timeout = if (max_bytes > max_metadata_bytes)
             @max(blob_timeout_ns, scaledTimeoutNs(content_length))
         else
             self.timeout_ns;
+        const idle_timeout = idleTimeoutNsFromEnv(
+            std.process.Environ.getPosix(self.environ, "MALT_HTTP_IDLE_TIMEOUT_SECS"),
+        );
         var request_done: std.Io.Event = .unset;
         const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
             self.io,
             &request_done,
-            effective_timeout,
+            &counting.bytes_written,
+            idle_timeout,
+            total_timeout,
             &req,
         }) catch null;
         defer {
             request_done.set(self.io);
             if (watchdog) |w| w.join();
         }
-
-        // `CountingWriter` enforces `max_bytes` per-write so oversized bodies
-        // are rejected mid-stream, not after buffering.
-        var counting = CountingWriter{
-            .inner = &body_writer,
-            .bytes_written = 0,
-            .max_bytes = max_bytes,
-            .limit_exceeded = false,
-            .progress = progress,
-            .content_length = content_length,
-        };
         _ = body_reader.streamRemaining(&counting.writer) catch |e| switch (e) {
             error.WriteFailed => {
                 request_done.set(self.io);
@@ -454,29 +499,56 @@ pub const HttpClient = struct {
         };
     }
 
-    /// On timeout, both flag the connection and `shutdown(.both)` the fd —
-    /// setting `conn.closing` alone does not wake a `readv` already parked
-    /// in the kernel, which hung malt for minutes on stalled TLS reads.
+    /// Polls `bytes_progress` on a tick; fires (shuts down the socket)
+    /// when either the idle or whole-transfer deadline is breached. Both
+    /// flag `conn.closing` AND `shutdown(.both)` because setting closing
+    /// alone does not wake a `readv` already parked in the kernel —
+    /// stalled TLS reads hung the previous single-deadline implementation.
     fn watchdogFn(
         io: std.Io,
         request_done: *std.Io.Event,
-        timeout_ns: u64,
+        bytes_progress: *std.atomic.Value(u64),
+        idle_timeout_ns: u64,
+        total_timeout_ns: u64,
         req: *std.http.Client.Request,
     ) void {
-        const timeout: std.Io.Timeout = .{ .duration = .{
-            .raw = std.Io.Duration.fromNanoseconds(@intCast(timeout_ns)),
-            .clock = .awake,
-        } };
-        request_done.waitTimeout(io, timeout) catch |err| switch (err) {
-            error.Timeout => {
-                if (req.connection) |conn| {
-                    conn.closing = true;
-                    const fd = conn.stream_reader.stream.socket.handle;
-                    _ = std.c.shutdown(fd, 2); // SHUT_RDWR
-                }
-            },
-            else => {},
-        };
+        const start_ns: u64 = @intCast(std.Io.Clock.real.now(io).toNanoseconds());
+        var last_seen_bytes: u64 = bytes_progress.load(.acquire);
+        var last_progress_ns: u64 = start_ns;
+        // Tick small enough to be responsive, large enough to avoid
+        // spinning. Quarter of the idle window, capped at 5 s.
+        const tick_ns: u64 = @min(idle_timeout_ns / 4, 5 * std.time.ns_per_s);
+
+        while (true) {
+            const tick: std.Io.Timeout = .{ .duration = .{
+                .raw = std.Io.Duration.fromNanoseconds(@intCast(tick_ns)),
+                .clock = .awake,
+            } };
+            request_done.waitTimeout(io, tick) catch |err| switch (err) {
+                error.Timeout => {
+                    const cur_bytes = bytes_progress.load(.acquire);
+                    const now_ns: u64 = @intCast(std.Io.Clock.real.now(io).toNanoseconds());
+                    if (cur_bytes > last_seen_bytes) {
+                        last_seen_bytes = cur_bytes;
+                        last_progress_ns = now_ns;
+                    }
+                    const idle_elapsed = now_ns - last_progress_ns;
+                    const total_elapsed = now_ns - start_ns;
+                    if (shouldFireIdleWatchdog(idle_elapsed, total_elapsed, idle_timeout_ns, total_timeout_ns)) {
+                        if (req.connection) |conn| {
+                            conn.closing = true;
+                            const fd = conn.stream_reader.stream.socket.handle;
+                            _ = std.c.shutdown(fd, std.posix.SHUT.RDWR);
+                        }
+                        return;
+                    }
+                    continue;
+                },
+                else => return,
+            };
+            // request_done was set → success path, stop watching.
+            return;
+        }
     }
 };
 
@@ -573,3 +645,48 @@ pub const HttpClientPool = struct {
         self.cond.signal(self.io);
     }
 };
+
+test "idleTimeoutNsFromEnv: null falls back to default" {
+    try std.testing.expectEqual(default_idle_timeout_ns, idleTimeoutNsFromEnv(null));
+}
+
+test "idleTimeoutNsFromEnv: empty / whitespace falls back to default" {
+    try std.testing.expectEqual(default_idle_timeout_ns, idleTimeoutNsFromEnv(""));
+    try std.testing.expectEqual(default_idle_timeout_ns, idleTimeoutNsFromEnv("   "));
+    try std.testing.expectEqual(default_idle_timeout_ns, idleTimeoutNsFromEnv("\t"));
+}
+
+test "idleTimeoutNsFromEnv: garbage falls back to default (typo can't disable watchdog)" {
+    try std.testing.expectEqual(default_idle_timeout_ns, idleTimeoutNsFromEnv("nope"));
+    try std.testing.expectEqual(default_idle_timeout_ns, idleTimeoutNsFromEnv("-1"));
+    try std.testing.expectEqual(default_idle_timeout_ns, idleTimeoutNsFromEnv("9999999999999"));
+}
+
+test "idleTimeoutNsFromEnv: parses an in-range value" {
+    try std.testing.expectEqual(@as(u64, 60) * std.time.ns_per_s, idleTimeoutNsFromEnv("60"));
+    try std.testing.expectEqual(@as(u64, 120) * std.time.ns_per_s, idleTimeoutNsFromEnv("120"));
+}
+
+test "idleTimeoutNsFromEnv: clamps below floor (zero would silently disable)" {
+    try std.testing.expectEqual(@as(u64, min_idle_timeout_secs) * std.time.ns_per_s, idleTimeoutNsFromEnv("0"));
+    try std.testing.expectEqual(@as(u64, min_idle_timeout_secs) * std.time.ns_per_s, idleTimeoutNsFromEnv("1"));
+}
+
+test "idleTimeoutNsFromEnv: clamps above ceiling" {
+    try std.testing.expectEqual(@as(u64, max_idle_timeout_secs) * std.time.ns_per_s, idleTimeoutNsFromEnv("99999"));
+}
+
+test "shouldFireIdleWatchdog: false when both elapsed below their limits" {
+    try std.testing.expect(!shouldFireIdleWatchdog(10, 100, 30, 600));
+    try std.testing.expect(!shouldFireIdleWatchdog(0, 0, 30, 600));
+}
+
+test "shouldFireIdleWatchdog: true when idle elapsed >= idle limit (mid-transfer stall)" {
+    try std.testing.expect(shouldFireIdleWatchdog(30, 100, 30, 600));
+    try std.testing.expect(shouldFireIdleWatchdog(31, 100, 30, 600));
+}
+
+test "shouldFireIdleWatchdog: true when total elapsed >= total limit (slow trickle backstop)" {
+    try std.testing.expect(shouldFireIdleWatchdog(0, 600, 30, 600));
+    try std.testing.expect(shouldFireIdleWatchdog(0, 9999, 30, 600));
+}

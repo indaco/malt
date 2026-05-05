@@ -485,6 +485,7 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 | `MALT_THEME`                    | Force the output palette: `light`, `dark`, or `auto` (detects via OSC 11)         | `auto`           |
 | `HOMEBREW_GITHUB_API_TOKEN`     | GitHub token for higher API rate limits                                           | unset            |
 | `MALT_GITHUB_TOKEN`             | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only    | unset            |
+| `MALT_HTTP_IDLE_TIMEOUT_SECS`   | HTTP idle (no-progress) read timeout in seconds (clamped to `[5, 600]`)           | `30`             |
 | `MALT_MIGRATE_PARALLEL_WORKERS` | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                   | `4`              |
 | `MALT_OUTDATED_MAX_AGE`         | TTL in hours for the `outdated.json` snapshot                                     | `24`             |
 | `MALT_ALLOW_RAW_POST_INSTALL`   | Disable terminal escape filter on ruby `post_install` output                      | unset            |

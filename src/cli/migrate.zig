@@ -51,11 +51,14 @@ fn lockTimeoutMs(ctx: *const AppCtx) u32 {
 
 /// Arena-own Cellar names and log iterator errors instead of silently
 /// truncating the scan — `iter.next() catch null` used to hide every
-/// later keg behind the first bad entry. `anytype` for mock iterators.
+/// later keg behind the first bad entry. `anytype` for mock iterators
+/// and a duck-typed `dir` so symlink-target lookups go through the same
+/// `Dir.statFile` shape in production and in tests.
 pub fn scanCellarKegs(
     io: std.Io,
     arena: std.mem.Allocator,
     iter: anytype,
+    dir: anytype,
     names: *std.ArrayList([]const u8),
 ) !void {
     while (true) {
@@ -63,7 +66,18 @@ pub fn scanCellarKegs(
             output.warn("Cellar scan error: {s}; keeping {d} entries already found", .{ @errorName(err), names.items.len });
             break;
         } orelse break;
-        if (entry.kind != .directory) continue;
+        const accept = switch (entry.kind) {
+            .directory => true,
+            // Resolve the symlink target; dangling or non-dir links
+            // fall through the silent-skip path the rest of the scan uses.
+            .sym_link => blk: {
+                const stat = dir.statFile(io, entry.name, .{ .follow_symlinks = true }) catch
+                    break :blk false;
+                break :blk stat.kind == .directory;
+            },
+            else => false,
+        };
+        if (!accept) continue;
         try names.append(arena, try arena.dupe(u8, entry.name));
     }
 }
@@ -75,6 +89,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     const start_ts = std.Io.Clock.real.now(ctx.io).toMilliseconds();
     const json_mode = output.isJson();
+    // Under `--json`, embed per-keg post_install events in the summary
+    // doc rather than streaming each as a JSONL line.
+    if (json_mode) output.setPostInstallEmit(.embed, allocator);
+    defer output.resetPostInstallEvents();
     var dry_run = output.isDryRun();
     // Ruby is opt-in per keg only. A bare --use-system-ruby across a
     // whole `migrate` would widen the trust boundary to every
@@ -129,11 +147,27 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var keg_names: std.ArrayList([]const u8) = .empty;
 
     var iter = dir.iterate();
-    try scanCellarKegs(ctx.io, scan_arena.allocator(), &iter, &keg_names);
+    try scanCellarKegs(ctx.io, scan_arena.allocator(), &iter, &dir, &keg_names);
 
     if (keg_names.items.len == 0) {
         if (json_mode) {
-            try emitDryRunJson(allocator, brew_prefix, &.{}, dry_run, start_ts);
+            // One document shape per mode, regardless of count: dry-run
+            // keeps the `kegs`/`count` payload, real run emits the
+            // summary shape with empty arrays.
+            if (dry_run) {
+                try emitDryRunJson(allocator, brew_prefix, &.{}, true, start_ts);
+            } else {
+                try emitSummaryJson(
+                    allocator,
+                    brew_prefix,
+                    &.{},
+                    &.{},
+                    &.{},
+                    &.{},
+                    &.{},
+                    start_ts,
+                );
+            }
         } else {
             output.info("No kegs found in Homebrew Cellar", .{});
         }
@@ -425,7 +459,8 @@ fn emitDryRunJson(
     output.writeStdoutAll(aw.written());
 }
 
-/// Build + flush the final-summary JSON document to stdout.
+/// Build + flush the final-summary JSON to stdout. Drains the
+/// post_install accumulator so per-keg events embed in the summary.
 fn emitSummaryJson(
     allocator: std.mem.Allocator,
     brew_prefix: []const u8,
@@ -446,6 +481,7 @@ fn emitSummaryJson(
         skipped_post_install_names,
         skipped_no_bottle_names,
         failed_names,
+        output.drainPostInstallEvents(),
         start_ts,
     );
     output.writeStdoutAll(aw.written());
@@ -472,7 +508,10 @@ pub fn buildDryRunJson(
     try w.writeAll("}\n");
 }
 
-/// Final-summary JSON: per-category arrays + counts + time_ms; `pub` for direct test assertions.
+/// Final-summary JSON: per-category arrays + counts + time_ms; `pub`
+/// for direct test assertions. `post_install_events` is embedded
+/// verbatim so the per-keg shape stays byte-equivalent to the
+/// `--ndjson` line each keg would have streamed.
 pub fn buildSummaryJson(
     w: *std.Io.Writer,
     brew_prefix: []const u8,
@@ -481,6 +520,7 @@ pub fn buildSummaryJson(
     skipped_post_install_names: []const []const u8,
     skipped_no_bottle_names: []const []const u8,
     failed_names: []const []const u8,
+    post_install_events: []const []const u8,
     start_ts: i64,
 ) !void {
     try w.writeAll("{\"dry_run\":false,\"brew_prefix\":");
@@ -495,6 +535,12 @@ pub fn buildSummaryJson(
     try output.jsonStringArray(w, skipped_no_bottle_names);
     try w.writeAll(",\"failed\":");
     try output.jsonStringArray(w, failed_names);
+    try w.writeAll(",\"post_install_events\":[");
+    for (post_install_events, 0..) |entry, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll(entry);
+    }
+    try w.writeAll("]");
     var counts_buf: [256]u8 = undefined;
     const counts = try std.fmt.bufPrint(
         &counts_buf,

@@ -80,6 +80,75 @@ pub fn isNdjson() bool {
     return ndjson;
 }
 
+/// `.embed` lets a `--json` command collect per-keg post_install
+/// events and embed them in its final summary doc instead of
+/// streaming each as a JSONL line. `--ndjson` always streams.
+pub const PostInstallEmit = enum { stream, embed };
+var post_install_emit: PostInstallEmit = .stream;
+var post_install_buffer: std.ArrayList([]const u8) = .empty;
+var post_install_buffer_alloc: ?std.mem.Allocator = null;
+/// Parallel workers call `pushPostInstallEvent` concurrently; without
+/// serialisation the ArrayList append races and crashes. `std.Io.Mutex`
+/// would drag an io context through this io-free module.
+var post_install_mutex: std.atomic.Mutex = .unlocked;
+
+fn lockBuffer() void {
+    while (!post_install_mutex.tryLock()) std.Thread.yield() catch {};
+}
+fn unlockBuffer() void {
+    post_install_mutex.unlock();
+}
+
+/// `.embed` requires a long-lived allocator: parallel workers' arenas
+/// die before drain runs, so the buffer copies into its own allocator.
+/// The mode itself is `@atomicStore`d so worker readers don't need the
+/// buffer mutex on every routing decision.
+pub fn setPostInstallEmit(m: PostInstallEmit, allocator: ?std.mem.Allocator) void {
+    lockBuffer();
+    defer unlockBuffer();
+    @atomicStore(PostInstallEmit, &post_install_emit, m, .release);
+    if (m == .embed) post_install_buffer_alloc = allocator;
+}
+/// Hot path — every post_install routing call hits this. Acquire pairs
+/// with the setter's release so the allocator pointer is visible to
+/// any worker that observes `.embed`.
+pub fn postInstallEmit() PostInstallEmit {
+    return @atomicLoad(PostInstallEmit, &post_install_emit, .acquire);
+}
+
+/// Copy `inner_json` (a `{...}` body, no trailing newline) into the
+/// buffer's owning allocator. Safe under concurrent producers.
+pub fn pushPostInstallEvent(inner_json: []const u8) !void {
+    lockBuffer();
+    defer unlockBuffer();
+    const a = post_install_buffer_alloc orelse return error.PostInstallBufferNotInitialised;
+    const owned = try a.dupe(u8, inner_json);
+    errdefer a.free(owned);
+    try post_install_buffer.append(a, owned);
+}
+
+/// Borrows the buffered slice; valid until the next reset/push.
+/// Callers must drain after all workers have joined.
+pub fn drainPostInstallEvents() []const []const u8 {
+    lockBuffer();
+    defer unlockBuffer();
+    return post_install_buffer.items;
+}
+
+/// Free every buffered entry and reset the list. Safe to call when the
+/// buffer is empty (no allocator was ever set).
+pub fn resetPostInstallEvents() void {
+    lockBuffer();
+    defer unlockBuffer();
+    if (post_install_buffer_alloc) |a| {
+        for (post_install_buffer.items) |item| a.free(item);
+        post_install_buffer.deinit(a);
+        post_install_buffer = .empty;
+        post_install_buffer_alloc = null;
+    }
+    @atomicStore(PostInstallEmit, &post_install_emit, .stream, .release);
+}
+
 /// Test-only stderr / stdout capture. Tests run sequentially in a binary,
 /// so no lock; elided from release via `builtin.is_test` guards.
 var capture_list: ?*std.ArrayList(u8) = null;
@@ -469,4 +538,57 @@ test "isNdjson defaults to false and setNdjson toggles it" {
     try std.testing.expect(!isNdjson());
     setNdjson(true);
     try std.testing.expect(isNdjson());
+}
+
+// Concurrent producers stress: a missing lock around the buffer's
+// `ArrayList.append` raced two simultaneous workers and tripped an
+// allocator assertion. 8 threads × 64 events is enough to surface
+// it on plain x86/arm64 within microseconds.
+test "pushPostInstallEvent serialises concurrent producers" {
+    resetPostInstallEvents();
+    setPostInstallEmit(.embed, std.testing.allocator);
+    defer resetPostInstallEvents();
+
+    const Worker = struct {
+        const events_per_thread: usize = 64;
+        fn run(thread_id: usize) void {
+            var buf: [64]u8 = undefined;
+            var i: usize = 0;
+            while (i < events_per_thread) : (i += 1) {
+                const json = std.fmt.bufPrint(
+                    &buf,
+                    "{{\"name\":\"t{d}-{d}\",\"status\":\"completed\",\"entries\":[]}}",
+                    .{ thread_id, i },
+                ) catch return;
+                pushPostInstallEvent(json) catch return;
+            }
+        }
+    };
+
+    const thread_count: usize = 8;
+    var threads: [8]std.Thread = undefined;
+    for (&threads, 0..) |*th, idx| {
+        th.* = try std.Thread.spawn(.{}, Worker.run, .{idx});
+    }
+    for (&threads) |th| th.join();
+
+    const drained = drainPostInstallEvents();
+    try std.testing.expectEqual(thread_count * Worker.events_per_thread, drained.len);
+}
+
+// Pins the public mode contract so the @atomicLoad/@atomicStore pair
+// can't silently revert to a plain read: workers in routePostInstallOutcome
+// query this on every keg, and a stale read before reset would leak
+// post_install lines into stdout outside the summary doc.
+test "postInstallEmit reflects the most recent setPostInstallEmit value" {
+    resetPostInstallEvents();
+    defer resetPostInstallEvents();
+
+    try std.testing.expectEqual(PostInstallEmit.stream, postInstallEmit());
+
+    setPostInstallEmit(.embed, std.testing.allocator);
+    try std.testing.expectEqual(PostInstallEmit.embed, postInstallEmit());
+
+    resetPostInstallEvents();
+    try std.testing.expectEqual(PostInstallEmit.stream, postInstallEmit());
 }
