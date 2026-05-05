@@ -7,6 +7,7 @@ pub const hash = @import("core/hash.zig");
 pub const cellar = @import("core/cellar.zig");
 pub const deps = @import("core/deps.zig");
 pub const formula = @import("core/formula.zig");
+pub const install_receipt = @import("core/install_receipt.zig");
 pub const linker = @import("core/linker.zig");
 pub const store = @import("core/store.zig");
 pub const relocated_store = @import("core/relocated_store.zig");

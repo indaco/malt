@@ -307,6 +307,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             .outcomes = outcomes,
             .cache_dir = cache_dir,
             .prefix = prefix,
+            .homebrew_prefix = brew_prefix,
             .use_system_ruby_scope = use_system_ruby_scope.items,
             .http_pool = &http_pool,
             .store = &store,
@@ -357,6 +358,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             .linker = &linker,
             .db = &db,
             .prefix = prefix,
+            .homebrew_prefix = brew_prefix,
             .use_system_ruby_scope = use_system_ruby_scope.items,
         });
 

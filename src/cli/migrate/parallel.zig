@@ -61,6 +61,7 @@ pub const Pool = struct {
 
     cache_dir: []const u8,
     prefix: []const u8,
+    homebrew_prefix: []const u8,
     use_system_ruby_scope: []const []const u8,
 
     http_pool: *client_mod.HttpClientPool,
@@ -118,6 +119,7 @@ fn worker(pool: *Pool) void {
             .linker = pool.linker,
             .db = pool.db,
             .prefix = pool.prefix,
+            .homebrew_prefix = pool.homebrew_prefix,
             .use_system_ruby_scope = pool.use_system_ruby_scope,
             .db_mu = pool.db_mu,
         });
