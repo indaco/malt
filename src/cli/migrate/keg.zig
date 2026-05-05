@@ -17,6 +17,7 @@ const api_mod = @import("../../net/api.zig");
 const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
 const post_install_mod = @import("../install/post_install.zig");
+const post_install_queue_mod = @import("post_install_queue.zig");
 const install_receipt_mod = @import("../../core/install_receipt.zig");
 
 /// Result of migrating a single keg.
@@ -49,6 +50,10 @@ pub const MigrateDeps = struct {
     /// Set by the parallel runner; null on the serial path so the
     /// default flow pays no lock cost.
     db_mu: ?*std.Io.Mutex = null,
+    /// Defer post_install hooks here so they all run after every keg
+    /// is materialised and linked under `opt/`; null falls back to
+    /// inline drive (legacy / single-keg paths).
+    post_install_queue: ?*post_install_queue_mod.Queue = null,
 };
 
 /// Migrate a single keg from Homebrew into malt.
@@ -162,15 +167,32 @@ pub fn migrateKeg(
     }
 
     if (formula.post_install_defined) {
-        post_install_mod.drive(
-            ctx,
-            allocator,
-            formula.name,
-            formula.pkg_version,
-            formula_json,
-            deps.prefix,
-            deps.use_system_ruby_scope,
-        );
+        if (deps.post_install_queue) |q| {
+            // Queue dupes the strings so the worker's per-iteration
+            // arena is free to die before drain runs.
+            q.add(ctx.io, formula.name, formula.pkg_version, formula_json) catch |e| {
+                output.warn("    {s}: failed to queue post_install ({s}); running inline", .{ formula.name, @errorName(e) });
+                post_install_mod.drive(
+                    ctx,
+                    allocator,
+                    formula.name,
+                    formula.pkg_version,
+                    formula_json,
+                    deps.prefix,
+                    deps.use_system_ruby_scope,
+                );
+            };
+        } else {
+            post_install_mod.drive(
+                ctx,
+                allocator,
+                formula.name,
+                formula.pkg_version,
+                formula_json,
+                deps.prefix,
+                deps.use_system_ruby_scope,
+            );
+        }
     }
 
     const keg_only_suffix: []const u8 = if (formula.keg_only) " (keg-only — dependency only)" else "";

@@ -4,6 +4,7 @@
 const std = @import("std");
 const values = @import("../values.zig");
 const pathname = @import("pathname.zig");
+const output = @import("../../../ui/output.zig");
 
 const Value = values.Value;
 const BuiltinError = pathname.BuiltinError;
@@ -23,7 +24,15 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
 
     if (argv_slice.len == 0) return Value{ .nil = {} };
 
-    var child = std.process.spawn(ctx.io, .{ .argv = argv_slice }) catch return BuiltinError.SystemCommandFailed;
+    // Subprocess stdout shares the FD with malt's `--json` / `--ndjson`
+    // document, so verbose tools like fc-cache would corrupt it. Stderr
+    // stays inherited so warnings still surface for the user.
+    const child_stdout: std.process.SpawnOptions.StdIo =
+        if (output.isJson() or output.isNdjson()) .ignore else .inherit;
+    var child = std.process.spawn(ctx.io, .{
+        .argv = argv_slice,
+        .stdout = child_stdout,
+    }) catch return BuiltinError.SystemCommandFailed;
     const term = child.wait(ctx.io) catch return BuiltinError.SystemCommandFailed;
 
     return switch (term) {
