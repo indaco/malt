@@ -14,6 +14,7 @@ const output = @import("../../ui/output.zig");
 const main_mod = @import("../../main.zig");
 const keg_mod = @import("keg.zig");
 const manifest_mod = @import("manifest.zig");
+const post_install_queue_mod = @import("post_install_queue.zig");
 
 /// 4 matches the install-side HTTP client pool; higher just queues on TLS contexts.
 pub const default_workers: u32 = 4;
@@ -74,6 +75,8 @@ pub const Pool = struct {
     manifest_mu: *std.Io.Mutex,
     manifest_path: []const u8,
     manifest_allocator: std.mem.Allocator,
+
+    post_install_queue: *post_install_queue_mod.Queue,
 };
 
 /// Per-iteration arena + borrowed http client matches the per-worker
@@ -122,6 +125,7 @@ fn worker(pool: *Pool) void {
             .homebrew_prefix = pool.homebrew_prefix,
             .use_system_ruby_scope = pool.use_system_ruby_scope,
             .db_mu = pool.db_mu,
+            .post_install_queue = pool.post_install_queue,
         });
         pool.outcomes[idx] = .{ .name = keg_name, .result = result };
 

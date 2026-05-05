@@ -21,6 +21,7 @@ const help = @import("help.zig");
 const keg_mod = @import("migrate/keg.zig");
 const manifest_mod = @import("migrate/manifest.zig");
 const parallel_mod = @import("migrate/parallel.zig");
+const post_install_queue_mod = @import("migrate/post_install_queue.zig");
 
 const KegResult = keg_mod.KegResult;
 const MigrateDeps = keg_mod.MigrateDeps;
@@ -276,6 +277,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return;
     }
 
+    // Defer every keg's post_install until all kegs are materialised
+    // and `linkOpt`'d, so a hook subprocess (e.g. fc-cache) can
+    // resolve dep dylibs through `opt/<dep>` without racing the
+    // worker that links them.
+    var post_install_queue = post_install_queue_mod.Queue.init(allocator);
+    defer post_install_queue.deinit();
+
     if (parallel_flag) {
         last_run_parallel = true;
 
@@ -318,6 +326,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             .manifest_mu = &manifest_mu,
             .manifest_path = manifest_path,
             .manifest_allocator = allocator,
+            .post_install_queue = &post_install_queue,
         };
         try parallel_mod.run(allocator, &pool, worker_count);
         // Mirror the serial loop's interrupt UX so users running with
@@ -360,6 +369,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             .prefix = prefix,
             .homebrew_prefix = brew_prefix,
             .use_system_ruby_scope = use_system_ruby_scope.items,
+            .post_install_queue = &post_install_queue,
         });
 
         // OOM on per-category bookkeeping must not be swallowed: the summary
@@ -400,6 +410,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.warn("Resume manifest self-heal write failed: {s}", .{@errorName(e)});
         };
     }
+
+    // Run post_install in enqueue order now that every dep is on disk
+    // and linked under `opt/`, so dyld in any spawned subprocess sees a
+    // complete tree.
+    post_install_queue.drain(ctx, prefix, use_system_ruby_scope.items);
 
     // ── Step 5: Report ──────────────────────────────────────────────
     if (json_mode) {
