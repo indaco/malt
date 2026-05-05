@@ -16,6 +16,7 @@ const ghcr_mod = @import("../../net/ghcr.zig");
 const api_mod = @import("../../net/api.zig");
 const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
+const progress_mod = @import("../../ui/progress.zig");
 const post_install_mod = @import("../install/post_install.zig");
 const post_install_queue_mod = @import("post_install_queue.zig");
 const install_receipt_mod = @import("../../core/install_receipt.zig");
@@ -54,7 +55,26 @@ pub const MigrateDeps = struct {
     /// is materialised and linked under `opt/`; null falls back to
     /// inline drive (legacy / single-keg paths).
     post_install_queue: ?*post_install_queue_mod.Queue = null,
+    /// When non-null, download progress streams into this bar (matching
+    /// the install-side TUI) and the per-keg "Migrating…"/"migrated"
+    /// info/success lines are suppressed so the bar isn't mangled by
+    /// interleaved stderr writes. Caller owns lifetime + finish().
+    bar: ?*progress_mod.ProgressBar = null,
 };
+
+/// `progressBridge`-compatible callback for `bottle_mod.download`. Same
+/// shape as the install-side bridge in `cli/install/download.zig`: first
+/// report seeds `total` from Content-Length, subsequent reports clamp
+/// `current` so a compressed-vs-uncompressed length drift doesn't push
+/// the bar past 100%.
+fn migrateBarBridge(ctx: *anyopaque, bytes_so_far: u64, content_length: ?u64) void {
+    const bar: *progress_mod.ProgressBar = @ptrCast(@alignCast(ctx));
+    if (content_length) |total| {
+        if (bar.total == 0) bar.total = total;
+    }
+    const clamped = if (bar.total > 0) @min(bytes_so_far, bar.total) else bytes_so_far;
+    bar.update(clamped);
+}
 
 /// Migrate a single keg from Homebrew into malt.
 pub fn migrateKeg(
@@ -63,8 +83,14 @@ pub fn migrateKeg(
     keg_name: []const u8,
     deps: MigrateDeps,
 ) KegResult {
+    // Suppress per-keg info/success only when the bar is *actually*
+    // drawing (TTY) — otherwise CI / piped-output users would lose
+    // every per-keg signal between the initial scan and the final
+    // summary. `is_tty` is captured at bar init via `supportsAnsi`.
+    const has_bar = if (deps.bar) |b| b.is_tty else false;
+
     if (isInstalled(deps.db, keg_name)) {
-        output.info("  {s}: already installed, skipping", .{keg_name});
+        if (!has_bar) output.info("  {s}: already installed, skipping", .{keg_name});
         return .skipped_installed;
     }
 
@@ -96,13 +122,13 @@ pub fn migrateKeg(
     };
     output.emitNdjsonEvent(allocator, .resolved, keg_name, null);
 
-    output.info("  Migrating {s} {s}...", .{ formula.name, formula.version });
+    if (!has_bar) output.info("  Migrating {s} {s}...", .{ formula.name, formula.version });
 
     if (!deps.store.exists(bottle.sha256)) {
-        if (!downloadBottle(ctx, allocator, deps.ghcr, deps.http, deps.store, bottle.url, bottle.sha256, keg_name)) {
+        if (!downloadBottle(ctx, allocator, deps.ghcr, deps.http, deps.store, bottle.url, bottle.sha256, keg_name, deps.bar)) {
             return .failed_download;
         }
-    } else {
+    } else if (!has_bar) {
         output.info("    {s} (cached in store)", .{keg_name});
     }
     if (output.isNdjson()) {
@@ -195,8 +221,10 @@ pub fn migrateKeg(
         }
     }
 
-    const keg_only_suffix: []const u8 = if (formula.keg_only) " (keg-only — dependency only)" else "";
-    output.success("  {s} {s} migrated{s}", .{ formula.name, formula.version, keg_only_suffix });
+    if (!has_bar) {
+        const keg_only_suffix: []const u8 = if (formula.keg_only) " (keg-only — dependency only)" else "";
+        output.success("  {s} {s} migrated{s}", .{ formula.name, formula.version, keg_only_suffix });
+    }
     return .migrated;
 }
 
@@ -216,6 +244,7 @@ fn migrateFromLocalCellar(
     keg_name: []const u8,
     deps: MigrateDeps,
 ) KegResult {
+    const has_bar = if (deps.bar) |b| b.is_tty else false;
     const src_keg_path = findInstalledKegPath(ctx.io, allocator, deps.homebrew_prefix, keg_name) catch null orelse {
         output.err("  {s}: not found in Homebrew API and no local Cellar copy available", .{keg_name});
         return .failed_api;
@@ -243,7 +272,7 @@ fn migrateFromLocalCellar(
         return .failed_api;
     }
 
-    output.info("  Migrating {s} {s} (from {s} tap)...", .{ keg_name, receipt.version, receipt.tap });
+    if (!has_bar) output.info("  Migrating {s} {s} (from {s} tap)...", .{ keg_name, receipt.version, receipt.tap });
 
     const keg = cellar_mod.materializeFromLocalCellar(
         ctx.io,
@@ -293,7 +322,7 @@ fn migrateFromLocalCellar(
     deps.linker.linkOpt(keg_name, receipt.version) catch {};
     recordDepsFromList(deps.db, keg_id, receipt.runtime_deps);
 
-    output.success("  {s} {s} migrated (from {s} tap)", .{ keg_name, receipt.version, receipt.tap });
+    if (!has_bar) output.success("  {s} {s} migrated (from {s} tap)", .{ keg_name, receipt.version, receipt.tap });
     return .migrated;
 }
 
@@ -368,6 +397,7 @@ fn downloadBottle(
     bottle_url: []const u8,
     sha256: []const u8,
     name: []const u8,
+    bar: ?*progress_mod.ProgressBar,
 ) bool {
     const ghcr_prefix_str = "https://ghcr.io/v2/";
     var repo_buf: [256]u8 = undefined;
@@ -389,9 +419,14 @@ fn downloadBottle(
 
     const tmp_dir = atomic.createTempDir(ctx.io, allocator, name) catch return false;
 
-    output.info("    Downloading {s}...", .{name});
+    if (bar == null) output.info("    Downloading {s}...", .{name});
 
-    _ = bottle_mod.download(ctx.io, allocator, ghcr, http, repo, digest, sha256, tmp_dir, null) catch {
+    const progress_cb: ?client_mod.ProgressCallback = if (bar) |b| .{
+        .context = @ptrCast(b),
+        .func = &migrateBarBridge,
+    } else null;
+
+    _ = bottle_mod.download(ctx.io, allocator, ghcr, http, repo, digest, sha256, tmp_dir, progress_cb) catch {
         output.err("    Download failed: {s}", .{name});
         atomic.cleanupTempDir(ctx.io, tmp_dir);
         allocator.free(tmp_dir);

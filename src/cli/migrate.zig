@@ -15,7 +15,9 @@ const client_mod = @import("../net/client.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
 const api_mod = @import("../net/api.zig");
 const atomic = @import("../fs/atomic.zig");
+const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
+const progress_mod = @import("../ui/progress.zig");
 const codesign = @import("../macho/codesign.zig");
 const help = @import("help.zig");
 const keg_mod = @import("migrate/keg.zig");
@@ -308,6 +310,47 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // Pre-populated so an interrupted/short-circuited slot still has a defined outcome.
         for (outcomes, 0..) |*o, i| o.* = .{ .name = keg_names.items[i], .result = .skipped_installed };
 
+        // Pre-filter manifest+DB-confirmed skips so the multi-progress
+        // line count matches actual work — drawing a "✓" for kegs that
+        // never ran would be misleading. The serial path already does
+        // this inline; for parallel we hoist it ahead of bar allocation.
+        const bar_for_keg = try allocator.alloc(?*progress_mod.ProgressBar, keg_names.items.len);
+        defer allocator.free(bar_for_keg);
+        @memset(bar_for_keg, null);
+
+        var work_indices: std.ArrayList(usize) = .empty;
+        defer work_indices.deinit(allocator);
+        try work_indices.ensureTotalCapacity(allocator, keg_names.items.len);
+        var max_name_len: u8 = 0;
+        for (keg_names.items, 0..) |name, i| {
+            if (manifest.contains(name) and keg_mod.isInstalled(&db, name)) {
+                outcomes[i] = .{ .name = name, .result = .skipped_installed };
+                continue;
+            }
+            work_indices.appendAssumeCapacity(i);
+            const len: u8 = @intCast(@min(name.len, 255));
+            if (len > max_name_len) max_name_len = len;
+        }
+
+        const work_count: u16 = @intCast(@min(work_indices.items.len, std.math.maxInt(u16)));
+        var multi = progress_mod.MultiProgress.init(work_count);
+        defer multi.finish();
+
+        const bars = try allocator.alloc(progress_mod.ProgressBar, work_count);
+        defer allocator.free(bars);
+
+        for (work_indices.items[0..work_count], 0..) |keg_idx, slot| {
+            const slot_u16: u16 = @intCast(slot);
+            bars[slot] = progress_mod.ProgressBar.init(keg_names.items[keg_idx], 0);
+            bars[slot].label_width = max_name_len;
+            bars[slot].line_index = slot_u16;
+            bars[slot].multi = &multi;
+            // Initial frame so each reserved row has visible content
+            // before its worker is scheduled.
+            bars[slot].update(0);
+            bar_for_keg[keg_idx] = &bars[slot];
+        }
+
         var pool: parallel_mod.Pool = .{
             .app_ctx = ctx,
             .next_idx = std.atomic.Value(usize).init(0),
@@ -327,6 +370,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             .manifest_path = manifest_path,
             .manifest_allocator = allocator,
             .post_install_queue = &post_install_queue,
+            .bar_for_keg = bar_for_keg,
         };
         try parallel_mod.run(allocator, &pool, worker_count);
         // Mirror the serial loop's interrupt UX so users running with
@@ -344,53 +388,73 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 .failed_api, .failed_download, .failed_install => try failed_names.append(allocator, o.name),
             }
         }
-    } else for (keg_names.items) |keg_name| {
-        // Stop at the next keg boundary when the user hits Ctrl-C.
-        if (main_mod.isInterrupted()) {
-            output.warn("Interrupted — skipping remaining kegs.", .{});
-            break;
+    } else {
+        // Width of the widest keg name so per-keg bars line up vertically
+        // with each other (and with `install`'s download phase).
+        var max_name_len: u8 = 0;
+        for (keg_names.items) |n| {
+            const len: u8 = @intCast(@min(n.len, 255));
+            if (len > max_name_len) max_name_len = len;
         }
-        // Resume short-circuit before any API/network work — bounds
-        // re-runs by the remaining kegs, not the full set. The DB
-        // cross-check guards against a stale manifest after `mt
-        // uninstall`: manifest=yes / DB=no falls through to a real
-        // re-migrate instead of silently skipping a missing keg.
-        if (manifest.contains(keg_name) and keg_mod.isInstalled(&db, keg_name)) {
-            try skipped_installed_names.append(allocator, keg_name);
-            continue;
-        }
-        const result = migrateKeg(ctx, allocator, keg_name, .{
-            .api = &api,
-            .ghcr = &ghcr,
-            .http = &http,
-            .store = &store,
-            .linker = &linker,
-            .db = &db,
-            .prefix = prefix,
-            .homebrew_prefix = brew_prefix,
-            .use_system_ruby_scope = use_system_ruby_scope.items,
-            .post_install_queue = &post_install_queue,
-        });
 
-        // OOM on per-category bookkeeping must not be swallowed: the summary
-        // counts and JSON arrays come from these lists, and a silent drop
-        // reports fewer failures than actually occurred.
-        switch (result) {
-            .migrated => {
-                try migrated_names.append(allocator, keg_name);
-                // Persist after each success so a crash leaves the next
-                // run with the smallest possible to-do list.
-                manifest.add(keg_name) catch |e| {
-                    output.warn("Resume manifest update failed for {s}: {s}", .{ keg_name, @errorName(e) });
-                };
-                manifest.writeAtomic(ctx.io, allocator, manifest_path) catch |e| {
-                    output.warn("Resume manifest write failed: {s}", .{@errorName(e)});
-                };
-            },
-            .skipped_installed => try skipped_installed_names.append(allocator, keg_name),
-            .skipped_post_install => try skipped_post_install_names.append(allocator, keg_name),
-            .skipped_no_bottle => try skipped_no_bottle_names.append(allocator, keg_name),
-            .failed_api, .failed_download, .failed_install => try failed_names.append(allocator, keg_name),
+        for (keg_names.items) |keg_name| {
+            // Stop at the next keg boundary when the user hits Ctrl-C.
+            if (main_mod.isInterrupted()) {
+                output.warn("Interrupted — skipping remaining kegs.", .{});
+                break;
+            }
+            // Resume short-circuit before any API/network work — bounds
+            // re-runs by the remaining kegs, not the full set. The DB
+            // cross-check guards against a stale manifest after `mt
+            // uninstall`: manifest=yes / DB=no falls through to a real
+            // re-migrate instead of silently skipping a missing keg.
+            if (manifest.contains(keg_name) and keg_mod.isInstalled(&db, keg_name)) {
+                try skipped_installed_names.append(allocator, keg_name);
+                continue;
+            }
+
+            // Standalone bar (no MultiProgress) — same shape as install.zig's
+            // cask path. Initial frame so the row isn't blank before the
+            // first progress callback fires.
+            var bar = progress_mod.ProgressBar.init(keg_name, 0);
+            bar.label_width = max_name_len;
+            bar.update(0);
+
+            const result = migrateKeg(ctx, allocator, keg_name, .{
+                .api = &api,
+                .ghcr = &ghcr,
+                .http = &http,
+                .store = &store,
+                .linker = &linker,
+                .db = &db,
+                .prefix = prefix,
+                .homebrew_prefix = brew_prefix,
+                .use_system_ruby_scope = use_system_ruby_scope.items,
+                .post_install_queue = &post_install_queue,
+                .bar = &bar,
+            });
+            bar.finish();
+
+            // OOM on per-category bookkeeping must not be swallowed: the summary
+            // counts and JSON arrays come from these lists, and a silent drop
+            // reports fewer failures than actually occurred.
+            switch (result) {
+                .migrated => {
+                    try migrated_names.append(allocator, keg_name);
+                    // Persist after each success so a crash leaves the next
+                    // run with the smallest possible to-do list.
+                    manifest.add(keg_name) catch |e| {
+                        output.warn("Resume manifest update failed for {s}: {s}", .{ keg_name, @errorName(e) });
+                    };
+                    manifest.writeAtomic(ctx.io, allocator, manifest_path) catch |e| {
+                        output.warn("Resume manifest write failed: {s}", .{@errorName(e)});
+                    };
+                },
+                .skipped_installed => try skipped_installed_names.append(allocator, keg_name),
+                .skipped_post_install => try skipped_post_install_names.append(allocator, keg_name),
+                .skipped_no_bottle => try skipped_no_bottle_names.append(allocator, keg_name),
+                .failed_api, .failed_download, .failed_install => try failed_names.append(allocator, keg_name),
+            }
         }
     }
 
@@ -437,27 +501,66 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const skipped_post_install: u32 = @intCast(skipped_post_install_names.items.len);
     const failed: u32 = @intCast(failed_names.items.len);
 
-    output.info("", .{});
-    output.info("Migration complete:", .{});
-    output.info("  Migrated:              {d}", .{migrated});
+    output.plain("", .{});
+    if (failed == 0) {
+        output.success("Migration completed.", .{});
+    } else {
+        output.info("Migration completed.", .{});
+    }
+    output.info("Migrated: {d}", .{migrated});
     if (skipped > 0)
-        output.info("  Skipped (installed):   {d}", .{skipped});
+        output.info("Skipped (installed): {d}", .{skipped});
     if (skipped_post_install > 0) {
-        output.warn("  Skipped (post_install): {d}", .{skipped_post_install});
+        output.warn("Skipped (post_install): {d}", .{skipped_post_install});
         for (skipped_post_install_names.items) |name| {
-            output.warn("    - {s} (needs post_install — use: brew install {s})", .{ name, name });
+            output.warn("  - {s} (needs post_install — use: brew install {s})", .{ name, name });
         }
         // Preserved legacy: no-bottle entries printed under the post_install warning.
         for (skipped_no_bottle_names.items) |name| {
-            output.warn("    - {s} (needs post_install — use: brew install {s})", .{ name, name });
+            output.warn("  - {s} (needs post_install — use: brew install {s})", .{ name, name });
         }
     }
     if (failed > 0) {
-        output.err("  Failed:                {d}", .{failed});
+        output.err("Failed: {d}", .{failed});
         for (failed_names.items) |name| {
-            output.err("    - {s}", .{name});
+            output.err("  - {s}", .{name});
         }
     }
+
+    if (migrated > 0 and !output.isQuiet()) {
+        try emitBrewUninstallHint(allocator, migrated_names.items);
+    }
+}
+
+/// Emit a follow-up hint listing every successfully migrated keg as a
+/// single `brew uninstall …` line. Both lines use the same `  ▸ `
+/// prefix + dim color as the version notifier so the trailing block
+/// reads as one consistent footer. The body is built manually because
+/// the joined name list can exceed `output.dim`'s 4 KiB internal
+/// buffer on installs with hundreds of kegs.
+fn emitBrewUninstallHint(
+    allocator: std.mem.Allocator,
+    migrated_names: []const []const u8,
+) !void {
+    output.plain("", .{});
+    output.dim("You can remove the migrated packages from Homebrew with:", .{});
+
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(allocator);
+
+    const use_color = color.isColorEnabled();
+    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ▸ " else "  > ";
+    if (use_color) try line.appendSlice(allocator, color.SemanticStyle.detail.code());
+    try line.appendSlice(allocator, prefix);
+    try line.appendSlice(allocator, "brew uninstall");
+    for (migrated_names) |name| {
+        try line.append(allocator, ' ');
+        try line.appendSlice(allocator, name);
+    }
+    if (use_color) try line.appendSlice(allocator, color.Style.reset.code());
+    try line.append(allocator, '\n');
+
+    output.writeStderrAll(line.items);
 }
 
 // ── JSON output ─────────────────────────────────────────────────────

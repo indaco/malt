@@ -11,6 +11,7 @@ const client_mod = @import("../../net/client.zig");
 const ghcr_mod = @import("../../net/ghcr.zig");
 const api_mod = @import("../../net/api.zig");
 const output = @import("../../ui/output.zig");
+const progress_mod = @import("../../ui/progress.zig");
 const main_mod = @import("../../main.zig");
 const keg_mod = @import("keg.zig");
 const manifest_mod = @import("manifest.zig");
@@ -77,6 +78,13 @@ pub const Pool = struct {
     manifest_allocator: std.mem.Allocator,
 
     post_install_queue: *post_install_queue_mod.Queue,
+
+    /// Per-keg bar pointer. Length matches `keg_names`; an entry is null
+    /// when the orchestrator pre-filtered that keg (already installed
+    /// per manifest+DB at run start) and didn't reserve a multi-progress
+    /// line for it. Non-null entries point into a bars slice owned by
+    /// the orchestrator; that slice outlives every worker.
+    bar_for_keg: []const ?*progress_mod.ProgressBar = &.{},
 };
 
 /// Per-iteration arena + borrowed http client matches the per-worker
@@ -88,6 +96,11 @@ fn worker(pool: *Pool) void {
         const idx = pool.next_idx.fetchAdd(1, .acq_rel);
         if (idx >= pool.keg_names.len) return;
         const keg_name = pool.keg_names[idx];
+
+        const bar: ?*progress_mod.ProgressBar = if (idx < pool.bar_for_keg.len)
+            pool.bar_for_keg[idx]
+        else
+            null;
 
         if (main_mod.isInterrupted()) {
             pool.outcomes[idx] = .{ .name = keg_name, .result = .skipped_installed };
@@ -126,7 +139,9 @@ fn worker(pool: *Pool) void {
             .use_system_ruby_scope = pool.use_system_ruby_scope,
             .db_mu = pool.db_mu,
             .post_install_queue = pool.post_install_queue,
+            .bar = bar,
         });
+        if (bar) |b| b.finish();
         pool.outcomes[idx] = .{ .name = keg_name, .result = result };
 
         if (result == .migrated) {
