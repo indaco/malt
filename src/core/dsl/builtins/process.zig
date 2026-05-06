@@ -124,7 +124,7 @@ pub fn macosVersion(ctx: ExecCtx, _: ?Value, _: []const Value) BuiltinError!Valu
         .stderr = .ignore,
     }) catch return Value{ .string = "15.0" };
     const stdout = child.stdout orelse return Value{ .string = "15.0" };
-    const ver = readPipeAll(ctx.io, stdout, ctx.allocator, 256) catch return Value{ .string = "15.0" };
+    const ver = readPipeAll(stdout, ctx.allocator, 256) catch return Value{ .string = "15.0" };
     // Already captured stdout; wait is just for reaping the zombie.
     _ = child.wait(ctx.io) catch {};
     const trimmed = std.mem.trimEnd(u8, ver, "\n\r ");
@@ -206,7 +206,7 @@ pub fn safePopenRead(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!
     }) catch return Value{ .string = "" };
 
     const stdout = child.stdout orelse return Value{ .string = "" };
-    const content = readPipeAll(ctx.io, stdout, ctx.allocator, 1024 * 1024) catch return Value{ .string = "" };
+    const content = readPipeAll(stdout, ctx.allocator, 1024 * 1024) catch return Value{ .string = "" };
     // Already captured stdout; wait is just for reaping the zombie.
     _ = child.wait(ctx.io) catch {};
 
@@ -215,12 +215,11 @@ pub fn safePopenRead(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!
     return Value{ .string = trimmed };
 }
 
-/// Stream a child stdout pipe into a caller-owned slice. Builds an
-/// independent `Threaded` for the read step because the caller's `io`
-/// may be `debug_io` (failing allocator) which cannot wait on a
+/// Stream a child stdout pipe into a caller-owned slice. Always builds
+/// a private `Threaded` for blocking pipe reads — the caller's runtime
+/// `io` may be `debug_io` (failing allocator) which cannot wait on a
 /// blocking child pipe.
-fn readPipeAll(io: std.Io, file: std.Io.File, allocator: std.mem.Allocator, max_bytes: usize) ![]u8 {
-    _ = io;
+fn readPipeAll(file: std.Io.File, allocator: std.mem.Allocator, max_bytes: usize) ![]u8 {
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
     var buf: [4096]u8 = undefined;
