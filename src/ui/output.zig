@@ -263,13 +263,14 @@ pub fn err(comptime fmt: []const u8, args: anytype) void {
 }
 
 /// "FYI / explanation" line — a passive heads-up that is neither a warning
-/// nor a failure. Plain mode picks `i` (info-glyph) so a NO_COLOR /
-/// MALT_NO_EMOJI line reads distinctly from `warn`'s `!`.
+/// nor a failure. Each tier picks an info-shaped glyph (`ⓘ` / `i`) so the
+/// line reads distinctly from `warn`'s `⚠`/`!` on every (color, emoji)
+/// combination, including NO_COLOR + MALT_NO_EMOJI.
 pub fn notice(comptime fmt: []const u8, args: anytype) void {
     if (quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writePrefixedLine(msg, .notice, "  ! ", "  i ");
+    writePrefixedLine(msg, .notice, "  ⓘ ", "  i ");
 }
 
 /// Print a confirmation prompt: info-coloured `?` icon, bold message,
@@ -546,7 +547,7 @@ pub fn emitNdjsonEvent(
 // Sister tests for the other prefix-line helpers live alongside the public
 // API surface in tests/output_test.zig; these are kept inline because the
 // helper is a thin wrapper over the already-tested writePrefixedLine.
-test "notice wraps the magenta prefix and uses the bang glyph (dark + basic)" {
+test "notice wraps the magenta prefix and uses the circled-i glyph (dark + basic)" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const prior_quiet = isQuiet();
@@ -564,7 +565,7 @@ test "notice wraps the magenta prefix and uses the bang glyph (dark + basic)" {
     }
 
     notice("heads up", .{});
-    try std.testing.expectEqualStrings("\x1b[35m  ! \x1b[0mheads up\n", buf.items);
+    try std.testing.expectEqualStrings("\x1b[35m  ⓘ \x1b[0mheads up\n", buf.items);
 }
 
 test "notice falls back to an info-style ASCII glyph when emoji and color are off" {
