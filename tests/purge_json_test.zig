@@ -387,3 +387,201 @@ test "ndjson scope_completed carries removed/bytes counters" {
     }
     try testing.expect(saw_completed_with_counters);
 }
+
+// ── status field on ndjson + --json events ─────────────────────────────────
+//
+// Without a status discriminator, scope_completed for a corrupt/locked DB
+// is bytewise indistinguishable from a clean "nothing to do" run: both
+// emit `removed:0,bytes:0`. These tests pin the contract that consumers
+// can rely on `status` to disambiguate.
+
+test "ndjson scope_completed reports status:ok on a clean no-op run" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "ok_status");
+    defer prefix.deinit(allocator);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(true);
+    output.setNdjson(true);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    output.beginStdoutCapture(allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    const ctx = makeCtx();
+    try purge.execute(&ctx, allocator, &[_][]const u8{"--housekeeping"});
+
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, stdout_buf.items, "\n"), '\n');
+    var saw_completed_with_status = false;
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "\"event\":\"scope_completed\"") == null) continue;
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        try testing.expectEqualStrings("ok", obj.get("status").?.string);
+        saw_completed_with_status = true;
+    }
+    try testing.expect(saw_completed_with_status);
+}
+
+test "ndjson purge_complete carries status:ok when no scope errored" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "purge_ok_status");
+    defer prefix.deinit(allocator);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(true);
+    output.setNdjson(true);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    output.beginStdoutCapture(allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    const ctx = makeCtx();
+    try purge.execute(&ctx, allocator, &[_][]const u8{"--housekeeping"});
+
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, stdout_buf.items, "\n"), '\n');
+    var saw_purge_complete = false;
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "\"event\":\"purge_complete\"") == null) continue;
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings("ok", parsed.value.object.get("status").?.string);
+        saw_purge_complete = true;
+    }
+    try testing.expect(saw_purge_complete);
+}
+
+test "ndjson scope_completed reports status:error and error_kind on corrupt DB" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "err_status");
+    defer prefix.deinit(allocator);
+
+    const db_path = try std.fmt.allocPrint(allocator, "{s}/db/malt.db", .{prefix.path});
+    defer allocator.free(db_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "this is not a valid sqlite header, just garbage to trip the open path");
+    }
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(true);
+    output.setNdjson(true);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    output.beginStdoutCapture(allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    const ctx = makeCtx();
+    try purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"});
+
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, stdout_buf.items, "\n"), '\n');
+    var saw_error_completion = false;
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "\"event\":\"scope_completed\"") == null) continue;
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        try testing.expectEqualStrings("store-orphans", obj.get("scope").?.string);
+        try testing.expectEqualStrings("error", obj.get("status").?.string);
+        // error_kind is a stable lowercase token so scripts can branch
+        // without parsing free-form errno strings.
+        try testing.expect(obj.get("error_kind") != null);
+        try testing.expect(obj.get("error_kind").?.string.len > 0);
+        saw_error_completion = true;
+    }
+    try testing.expect(saw_error_completion);
+}
+
+test "ndjson purge_complete carries status:error when any scope errored" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "purge_err");
+    defer prefix.deinit(allocator);
+
+    const db_path = try std.fmt.allocPrint(allocator, "{s}/db/malt.db", .{prefix.path});
+    defer allocator.free(db_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "garbage header");
+    }
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(true);
+    output.setNdjson(true);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    output.beginStdoutCapture(allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    const ctx = makeCtx();
+    try purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"});
+
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, stdout_buf.items, "\n"), '\n');
+    var saw_purge_complete_error = false;
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "\"event\":\"purge_complete\"") == null) continue;
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings("error", parsed.value.object.get("status").?.string);
+        saw_purge_complete_error = true;
+    }
+    try testing.expect(saw_purge_complete_error);
+}
+
+test "--json summary marks errored scopes with status:error and bumps schema version" {
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "summary_err");
+    defer prefix.deinit(allocator);
+
+    const db_path = try std.fmt.allocPrint(allocator, "{s}/db/malt.db", .{prefix.path});
+    defer allocator.free(db_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, db_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "garbage");
+    }
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.json);
+    output.setDryRun(true);
+    output.setNdjson(false);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(allocator);
+    output.beginStdoutCapture(allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    const ctx = makeCtx();
+    try purge.execute(&ctx, allocator, &[_][]const u8{"--store-orphans"});
+
+    const trimmed = std.mem.trim(u8, stdout_buf.items, " \r\n\t");
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+
+    // schema_version bump signals the wire-format contract change.
+    try testing.expectEqual(@as(i64, 2), obj.get("version").?.integer);
+
+    const scopes = obj.get("scopes").?.array.items;
+    try testing.expectEqual(@as(usize, 1), scopes.len);
+    const scope_obj = scopes[0].object;
+    try testing.expectEqualStrings("store-orphans", scope_obj.get("name").?.string);
+    try testing.expectEqualStrings("error", scope_obj.get("status").?.string);
+    try testing.expect(scope_obj.get("error_kind") != null);
+    try testing.expectEqualStrings("error", obj.get("status").?.string);
+}

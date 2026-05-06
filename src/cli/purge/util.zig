@@ -8,9 +8,18 @@ const args_mod = @import("args.zig");
 
 pub const Error = args_mod.Error;
 
+/// Outcome discriminator for a scope run. `.ok` is the silent default;
+/// `.err` signals an internal failure that the orchestrator surfaced
+/// via stderr but did not propagate as a Zig error — the wire format
+/// needs a positive marker so consumers can distinguish a clean no-op
+/// from a swallowed fault.
+pub const ScopeStatus = enum { ok, err };
+
 pub const TierResult = struct {
     removed: u32 = 0,
     bytes: u64 = 0,
+    status: ScopeStatus = .ok,
+    error_kind: ?[]const u8 = null,
 };
 
 pub fn formatBytes(bytes: u64, buf: []u8) []const u8 {

@@ -32,6 +32,8 @@ pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix:
         },
         .unreadable => |e| {
             output.err("store-orphans: cannot open database ({s})", .{@errorName(e)});
+            result.status = .err;
+            result.error_kind = "db_unreadable";
             return result;
         },
         .opened => |db_val| db_val,
@@ -39,12 +41,16 @@ pub fn runStoreOrphans(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix:
     defer db.close();
     schema.initSchema(&db) catch |e| {
         output.err("store-orphans: cannot init schema ({s})", .{@errorName(e)});
+        result.status = .err;
+        result.error_kind = "schema_init";
         return result;
     };
 
     var store = store_mod.Store.init(io, allocator, &db, prefix);
     var orphans_list = store.orphans() catch {
         output.err("store-orphans: failed to enumerate orphans", .{});
+        result.status = .err;
+        result.error_kind = "enumerate_orphans";
         return result;
     };
     defer {
@@ -90,6 +96,8 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
         },
         .unreadable => |e| {
             output.err("unused-deps: cannot open database ({s})", .{@errorName(e)});
+            result.status = .err;
+            result.error_kind = "db_unreadable";
             return result;
         },
         .opened => |db_val| db_val,
@@ -97,11 +105,15 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     defer db.close();
     schema.initSchema(&db) catch |e| {
         output.err("unused-deps: cannot init schema ({s})", .{@errorName(e)});
+        result.status = .err;
+        result.error_kind = "schema_init";
         return result;
     };
 
     const orphans = deps_mod.findOrphans(allocator, &db) catch {
         output.err("unused-deps: failed to find orphans", .{});
+        result.status = .err;
+        result.error_kind = "find_orphans";
         return result;
     };
     defer {
@@ -284,6 +296,8 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
         },
         .unreadable => |e| {
             output.err("stale-casks: cannot open database ({s})", .{@errorName(e)});
+            result.status = .err;
+            result.error_kind = "db_unreadable";
             return result;
         },
         .opened => |db_val| db_val,

@@ -101,6 +101,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 .name = "wipe",
                 .removed = @intCast(wipe_result.removed),
                 .bytes = wipe_result.bytes,
+                .status = wipe_result.status,
+                .error_kind = wipe_result.error_kind,
             }};
             purge_json.emitSummary(
                 allocator,
@@ -111,8 +113,21 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 elapsed,
             ) catch {};
         };
-        defer purge_json.emitPurgeComplete(wipe_result.removed, wipe_result.bytes, dry_run);
-        defer purge_json.emitScopeCompleted("wipe", wipe_result.removed, wipe_result.bytes, dry_run);
+        defer purge_json.emitPurgeComplete(
+            wipe_result.removed,
+            wipe_result.bytes,
+            dry_run,
+            wipe_result.status,
+            wipe_result.error_kind,
+        );
+        defer purge_json.emitScopeCompleted(
+            "wipe",
+            wipe_result.removed,
+            wipe_result.bytes,
+            dry_run,
+            wipe_result.status,
+            wipe_result.error_kind,
+        );
         wipe_result = try wipe_mod.runWipe(ctx, allocator, opts, prefix, cache_dir, dry_run);
         return;
     }
@@ -161,14 +176,27 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             elapsed,
         ) catch {};
     };
-    defer purge_json.emitPurgeComplete(grand_total.removed, grand_total.bytes, dry_run);
+    defer purge_json.emitPurgeComplete(
+        grand_total.removed,
+        grand_total.bytes,
+        dry_run,
+        grand_total.status,
+        grand_total.error_kind,
+    );
 
     inline for (scope_run_order) |k| {
         if (@field(opts.scope, @tagName(k))) {
             const name = comptime k.label();
             purge_json.emitScopeStarted(name, dry_run);
             var r: TierResult = .{};
-            defer purge_json.emitScopeCompleted(name, r.removed, r.bytes, dry_run);
+            defer purge_json.emitScopeCompleted(
+                name,
+                r.removed,
+                r.bytes,
+                dry_run,
+                r.status,
+                r.error_kind,
+            );
             r = try switch (k) {
                 .unused_deps => scopes_mod.runUnusedDeps(ctx, allocator, prefix, dry_run),
                 .store_orphans => scopes_mod.runStoreOrphans(ctx, allocator, prefix, dry_run),
@@ -177,9 +205,21 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 .stale_casks => scopes_mod.runStaleCasks(ctx, allocator, prefix, dry_run),
                 .old_versions => scopes_mod.runOldVersions(ctx, allocator, prefix, dry_run),
             };
-            try summary.add(allocator, .{ .name = name, .removed = r.removed, .bytes = r.bytes });
+            try summary.add(allocator, .{
+                .name = name,
+                .removed = r.removed,
+                .bytes = r.bytes,
+                .status = r.status,
+                .error_kind = r.error_kind,
+            });
             grand_total.removed += r.removed;
             grand_total.bytes += r.bytes;
+            // First failure wins as the surfaced error_kind; subsequent
+            // scope errors still flip status and stay in their own row.
+            if (r.status == .err and grand_total.status == .ok) {
+                grand_total.status = .err;
+                grand_total.error_kind = r.error_kind;
+            }
         }
     }
 

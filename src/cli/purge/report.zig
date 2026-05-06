@@ -21,6 +21,8 @@ pub const SummaryRow = struct {
     name: []const u8,
     removed: u32,
     bytes: u64,
+    status: util.ScopeStatus = .ok,
+    error_kind: ?[]const u8 = null,
 };
 
 pub const Summary = struct {

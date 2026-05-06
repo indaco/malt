@@ -6,19 +6,20 @@
 //! ndjson` for the streaming mode. Stderr remains the human path in
 //! either mode so interactive runs keep their existing TTY layout.
 //!
-//! ## Wire format (v1)
+//! ## Wire format (v2)
 //!
 //! ### `--json` summary (one object on stdout, trailing `\n`)
 //!
 //! ```json
 //! {
-//!   "version": 1,
+//!   "version": 2,
 //!   "dry_run": false,
 //!   "scopes": [
-//!     {"name": "store-orphans", "removed": 5, "bytes": 4096},
-//!     {"name": "unused-deps",   "removed": 1, "bytes": 0}
+//!     {"name": "store-orphans", "removed": 5, "bytes": 4096, "status": "ok"},
+//!     {"name": "unused-deps",   "removed": 0, "bytes": 0,    "status": "error", "error_kind": "db_unreadable"}
 //!   ],
-//!   "totals": {"removed": 6, "bytes": 4096},
+//!   "totals": {"removed": 5, "bytes": 4096},
+//!   "status": "error",
 //!   "time_ms": 12
 //! }
 //! ```
@@ -27,8 +28,8 @@
 //!
 //! ```ndjson
 //! {"event":"scope_started","scope":"store-orphans","dry_run":false}
-//! {"event":"scope_completed","scope":"store-orphans","removed":5,"bytes":4096,"dry_run":false}
-//! {"event":"purge_complete","removed":5,"bytes":4096,"dry_run":false}
+//! {"event":"scope_completed","scope":"store-orphans","removed":5,"bytes":4096,"dry_run":false,"status":"ok"}
+//! {"event":"purge_complete","removed":5,"bytes":4096,"dry_run":false,"status":"ok"}
 //! ```
 //!
 //! Field guarantees:
@@ -44,12 +45,24 @@
 //! - `scope_started` always pairs with a `scope_completed`, even on
 //!   error paths (UserAborted, OOM). `purge_complete` always closes
 //!   the stream. Consumers can rely on strict open/close brackets.
+//! - `status` is `"ok"` or `"error"` on every `scope_completed` and
+//!   `purge_complete` event (and on every summary scope row + the
+//!   summary itself). Distinguishes a clean no-op from a swallowed
+//!   internal failure that the human stderr path already surfaced.
+//! - `error_kind` is a stable lowercase token included only when
+//!   `status == "error"` so scripts can branch without parsing
+//!   free-form errno strings.
 
 const std = @import("std");
 const output = @import("../../ui/output.zig");
 const report = @import("report.zig");
+const util = @import("util.zig");
 
-pub const schema_version: u32 = 1;
+pub const ScopeStatus = util.ScopeStatus;
+
+/// v2 added `status` (and optional `error_kind`) so consumers can tell
+/// a clean no-op apart from a swallowed scope failure.
+pub const schema_version: u32 = 2;
 
 /// Wire-format event names. Mirrors the closed-vocabulary pattern in
 /// `output.NdjsonEvent`: a typo at a call site fails to compile rather
@@ -75,16 +88,36 @@ pub fn buildSummary(
         "{{\"version\":{d},\"dry_run\":{s},\"scopes\":[",
         .{ schema_version, if (dry_run) "true" else "false" },
     );
+    var any_error = false;
     for (rows, 0..) |row, i| {
         if (i != 0) try w.writeAll(",");
         try w.writeAll("{\"name\":");
         try output.jsonStr(w, row.name);
-        try w.print(",\"removed\":{d},\"bytes\":{d}}}", .{ row.removed, row.bytes });
+        try w.print(",\"removed\":{d},\"bytes\":{d},\"status\":\"{s}\"", .{
+            row.removed,
+            row.bytes,
+            statusTag(row.status),
+        });
+        if (row.status == .err) {
+            any_error = true;
+            if (row.error_kind) |kind| {
+                try w.writeAll(",\"error_kind\":");
+                try output.jsonStr(w, kind);
+            }
+        }
+        try w.writeAll("}");
     }
     try w.print(
-        "],\"totals\":{{\"removed\":{d},\"bytes\":{d}}},\"time_ms\":{d}}}\n",
-        .{ total_removed, total_bytes, time_ms },
+        "],\"totals\":{{\"removed\":{d},\"bytes\":{d}}},\"status\":\"{s}\",\"time_ms\":{d}}}\n",
+        .{ total_removed, total_bytes, statusTag(if (any_error) .err else .ok), time_ms },
     );
+}
+
+fn statusTag(s: ScopeStatus) []const u8 {
+    return switch (s) {
+        .ok => "ok",
+        .err => "error",
+    };
 }
 
 /// Shared ndjson event emitter for purge events. Mirrors the silent-drop
@@ -92,7 +125,15 @@ pub fn buildSummary(
 /// the fixed buffer (adversarial scope name, pathological counts) is
 /// dropped rather than failing the command — the human stderr path is
 /// still authoritative.
-fn emitEvent(event: PurgeEvent, scope: ?[]const u8, removed: ?u64, bytes: ?u64, dry_run: bool) void {
+fn emitEvent(
+    event: PurgeEvent,
+    scope: ?[]const u8,
+    removed: ?u64,
+    bytes: ?u64,
+    dry_run: bool,
+    status: ?ScopeStatus,
+    error_kind: ?[]const u8,
+) void {
     if (!output.isNdjson()) return;
     var buf: [512]u8 = undefined;
     var w = std.Io.Writer.fixed(buf[0..]);
@@ -106,6 +147,15 @@ fn emitEvent(event: PurgeEvent, scope: ?[]const u8, removed: ?u64, bytes: ?u64, 
     if (bytes) |b| w.print(",\"bytes\":{d}", .{b}) catch return;
     w.writeAll(",\"dry_run\":") catch return;
     w.writeAll(if (dry_run) "true" else "false") catch return;
+    if (status) |s| {
+        w.print(",\"status\":\"{s}\"", .{statusTag(s)}) catch return;
+        if (s == .err) {
+            if (error_kind) |kind| {
+                w.writeAll(",\"error_kind\":") catch return;
+                output.jsonStr(&w, kind) catch return;
+            }
+        }
+    }
     w.writeAll("}\n") catch return;
     output.writeStdoutAll(w.buffered());
 }
@@ -114,17 +164,32 @@ fn emitEvent(event: PurgeEvent, scope: ?[]const u8, removed: ?u64, bytes: ?u64, 
 /// when ndjson mode is on; no-op otherwise. Per-scope ndjson is one
 /// summary line, not one line per item — call sites stay unchanged.
 pub fn emitScopeStarted(scope: []const u8, dry_run: bool) void {
-    emitEvent(.scope_started, scope, null, null, dry_run);
+    emitEvent(.scope_started, scope, null, null, dry_run, null, null);
 }
 
-/// Emit `{"event":"scope_completed","scope":...,"removed":N,"bytes":B,"dry_run":<bool>}\n`.
-pub fn emitScopeCompleted(scope: []const u8, removed: u64, bytes: u64, dry_run: bool) void {
-    emitEvent(.scope_completed, scope, removed, bytes, dry_run);
+/// Emit `{"event":"scope_completed","scope":...,"removed":N,"bytes":B,"dry_run":<bool>,"status":...}\n`.
+/// `error_kind` is only included on `.err` so consumers don't branch on
+/// `null` vs missing.
+pub fn emitScopeCompleted(
+    scope: []const u8,
+    removed: u64,
+    bytes: u64,
+    dry_run: bool,
+    status: ScopeStatus,
+    error_kind: ?[]const u8,
+) void {
+    emitEvent(.scope_completed, scope, removed, bytes, dry_run, status, error_kind);
 }
 
-/// Emit `{"event":"purge_complete","removed":N,"bytes":B,"dry_run":<bool>}\n`.
-pub fn emitPurgeComplete(removed: u64, bytes: u64, dry_run: bool) void {
-    emitEvent(.purge_complete, null, removed, bytes, dry_run);
+/// Emit `{"event":"purge_complete","removed":N,"bytes":B,"dry_run":<bool>,"status":...}\n`.
+pub fn emitPurgeComplete(
+    removed: u64,
+    bytes: u64,
+    dry_run: bool,
+    status: ScopeStatus,
+    error_kind: ?[]const u8,
+) void {
+    emitEvent(.purge_complete, null, removed, bytes, dry_run, status, error_kind);
 }
 
 /// Build + flush the `--json` summary to stdout. Allocates a transient
@@ -221,8 +286,8 @@ test "emit helpers no-op when ndjson mode is off" {
     defer output.endStdoutCapture();
 
     emitScopeStarted("cache", false);
-    emitScopeCompleted("cache", 1, 2, false);
-    emitPurgeComplete(1, 2, false);
+    emitScopeCompleted("cache", 1, 2, false, .ok, null);
+    emitPurgeComplete(1, 2, false, .ok, null);
 
     try testing.expectEqual(@as(usize, 0), buf.items.len);
 }
@@ -258,7 +323,7 @@ test "emitScopeCompleted carries removed/bytes counters" {
     output.beginStdoutCapture(testing.allocator, &buf);
     defer output.endStdoutCapture();
 
-    emitScopeCompleted("cache", 7, 8192, false);
+    emitScopeCompleted("cache", 7, 8192, false, .ok, null);
 
     const line = std.mem.trimEnd(u8, buf.items, "\n");
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, line, .{});
@@ -281,7 +346,7 @@ test "emitPurgeComplete brackets the stream" {
     output.beginStdoutCapture(testing.allocator, &buf);
     defer output.endStdoutCapture();
 
-    emitPurgeComplete(42, 1_048_576, false);
+    emitPurgeComplete(42, 1_048_576, false, .ok, null);
 
     const line = std.mem.trimEnd(u8, buf.items, "\n");
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, line, .{});
@@ -290,4 +355,44 @@ test "emitPurgeComplete brackets the stream" {
     try testing.expectEqualStrings("purge_complete", obj.get("event").?.string);
     try testing.expectEqual(@as(i64, 42), obj.get("removed").?.integer);
     try testing.expectEqual(@as(i64, 1_048_576), obj.get("bytes").?.integer);
+}
+
+test "emitScopeCompleted carries status and optional error_kind on errors" {
+    const prior = output.isNdjson();
+    defer output.setNdjson(prior);
+    output.setNdjson(true);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &buf);
+    defer output.endStdoutCapture();
+
+    emitScopeCompleted("store-orphans", 0, 0, false, .err, "open_failed");
+
+    const line = std.mem.trimEnd(u8, buf.items, "\n");
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, line, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqualStrings("error", obj.get("status").?.string);
+    try testing.expectEqualStrings("open_failed", obj.get("error_kind").?.string);
+}
+
+test "emitScopeCompleted reports status:ok and omits error_kind on success" {
+    const prior = output.isNdjson();
+    defer output.setNdjson(prior);
+    output.setNdjson(true);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &buf);
+    defer output.endStdoutCapture();
+
+    emitScopeCompleted("cache", 5, 1024, false, .ok, null);
+
+    const line = std.mem.trimEnd(u8, buf.items, "\n");
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, line, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqualStrings("ok", obj.get("status").?.string);
+    try testing.expect(obj.get("error_kind") == null);
 }
