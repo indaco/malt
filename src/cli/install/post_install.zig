@@ -10,6 +10,7 @@ const deps_mod = @import("../../core/deps.zig");
 const formula_mod = @import("../../core/formula.zig");
 const dsl = @import("../../core/dsl/root.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
+const sandbox = @import("../../core/sandbox/macos.zig");
 const output = @import("../../ui/output.zig");
 
 const download = @import("download.zig");
@@ -140,10 +141,11 @@ pub fn routePostInstallOutcomeWithBody(
             output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{name});
             if (output.isVerbose()) flog.printUnknown(name);
             if (output.isDebug()) flog.printFatal(name);
+            const ruby_stdio: sandbox.Stdio = .{ .out = ctx.stdout.handle, .err = ctx.stderr.handle };
             const ruby_result: anyerror!void = if (pre_resolved_body) |body|
-                ruby_sub.runPostInstallWithBody(ctx.io, ctx.environ, allocator, name, version_str, prefix, body)
+                ruby_sub.runPostInstallWithBody(ctx.io, ctx.environ, allocator, name, version_str, prefix, body, ruby_stdio)
             else
-                ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix);
+                ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix, ruby_stdio);
             ruby_result catch |e| {
                 const err: ruby_sub.RubyError = @errorCast(e);
                 output.warn("post_install subprocess failed for {s}: {s}", .{ name, ruby_sub.describeError(err) });
@@ -389,7 +391,8 @@ pub fn drive(
 
     if (useSystemRubyForFormula(use_system_ruby_list, name) or isSelfHostingRubyKeg(name)) {
         output.warn("Running post_install for {s} via system Ruby...", .{name});
-        ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix) catch |e| {
+        const ruby_stdio: sandbox.Stdio = .{ .out = ctx.stdout.handle, .err = ctx.stderr.handle };
+        ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix, ruby_stdio) catch |e| {
             output.warn("post_install failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
         };
     } else {
