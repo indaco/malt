@@ -505,10 +505,22 @@ fn readInstallReceipt(
     const stat = try file.stat(io);
     const max_bytes: u64 = 1024 * 1024;
     if (stat.size > max_bytes) return error.ReceiptTooLarge;
-    const buf = try allocator.alloc(u8, stat.size);
+    return readFileToOwnedSlice(io, allocator, file, @intCast(stat.size));
+}
+
+/// `realloc` keeps the returned slice's length in sync with its
+/// allocation when `expected_size` over-estimates — covers the
+/// stat-vs-read race so the result is safe to free under any allocator.
+fn readFileToOwnedSlice(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    file: std.Io.File,
+    expected_size: usize,
+) ![]u8 {
+    const buf = try allocator.alloc(u8, expected_size);
     errdefer allocator.free(buf);
     const n = try file.readPositionalAll(io, buf, 0);
-    return buf[0..n];
+    return allocator.realloc(buf, n);
 }
 
 /// Download a bottle from GHCR and commit to the store.
@@ -797,6 +809,70 @@ test "findTapFormulaRb refuses a malformed tap (missing slash) instead of guessi
         "glow",
         "",
     ) == null);
+}
+
+test "readFileToOwnedSlice trims allocation when expected_size exceeds bytes read" {
+    const dir = "/tmp/malt_receipt_short_read";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+
+    const path = dir ++ "/short.json";
+    {
+        const w = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+        defer w.close(std.Options.debug_io);
+        try w.writeStreamingAll(std.Options.debug_io, "hello");
+    }
+
+    const r = try std.Io.Dir.openFileAbsolute(std.Options.debug_io, path, .{});
+    defer r.close(std.Options.debug_io);
+
+    // Overshoot is the stat-vs-read shortfall — the result must still
+    // be safe to free under DebugAllocator.
+    const text = try readFileToOwnedSlice(std.Options.debug_io, std.testing.allocator, r, 100);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("hello", text);
+}
+
+test "readFileToOwnedSlice returns the full buffer when expected_size matches bytes read" {
+    const dir = "/tmp/malt_receipt_exact_read";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+
+    const path = dir ++ "/exact.json";
+    const payload = "{\"version\":1}";
+    {
+        const w = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+        defer w.close(std.Options.debug_io);
+        try w.writeStreamingAll(std.Options.debug_io, payload);
+    }
+
+    const r = try std.Io.Dir.openFileAbsolute(std.Options.debug_io, path, .{});
+    defer r.close(std.Options.debug_io);
+
+    const text = try readFileToOwnedSlice(std.Options.debug_io, std.testing.allocator, r, payload.len);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(payload, text);
+}
+
+test "readInstallReceipt round-trips a real INSTALL_RECEIPT.json under DebugAllocator" {
+    const dir = "/tmp/malt_install_receipt_roundtrip";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+
+    const payload = "{\"source\":{\"versions\":{\"stable\":\"1.0\"}},\"tap\":\"u/t\"}";
+    const path = dir ++ "/INSTALL_RECEIPT.json";
+    {
+        const w = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
+        defer w.close(std.Options.debug_io);
+        try w.writeStreamingAll(std.Options.debug_io, payload);
+    }
+
+    const text = try readInstallReceipt(std.Options.debug_io, std.testing.allocator, dir);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(payload, text);
 }
 
 test "full_name buffer fits realistic long tap+keg combinations" {
