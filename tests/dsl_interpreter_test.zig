@@ -642,6 +642,55 @@ test "interpreter: inreplace replaces content in file" {
     try testing.expectEqualStrings("setting=NEW_VALUE\n", buf[0..n]);
 }
 
+// Regression: the atomic-write fallback warning previously bypassed the
+// output module by writing to STDERR_FILENO directly, which let the line
+// leak past `beginStderrCapture` and interleave with `zig test` output.
+test "interpreter: inreplace fallback warning is captured by output stderr seam" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const target_dir = try std.fs.path.join(
+        testing.allocator,
+        &.{ prefix, "Cellar", "testpkg", "1.0" },
+    );
+    defer testing.allocator.free(target_dir);
+
+    const config_path = try std.fs.path.join(
+        testing.allocator,
+        &.{ target_dir, "config.txt" },
+    );
+    defer testing.allocator.free(config_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, config_path, .{});
+        _ = try f.writeStreamingAll(std.Options.debug_io, "setting=OLD_VALUE\n");
+        f.close(std.Options.debug_io);
+    }
+
+    // Strip write on the parent so writeAtomic's tmp-file create returns
+    // EACCES, which trips the warn+fallback branch under test.
+    const target_dir_z = try testing.allocator.dupeZ(u8, target_dir);
+    defer testing.allocator.free(target_dir_z);
+    const c = struct {
+        extern "c" fn chmod(path: [*:0]const u8, mode: u16) c_int;
+    };
+    if (c.chmod(target_dir_z, 0o555) != 0) return error.TestUnexpectedResult;
+    defer _ = c.chmod(target_dir_z, 0o755);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer malt.output.endStderrCapture();
+
+    const src = "inreplace prefix/\"config.txt\", \"OLD_VALUE\", \"NEW_VALUE\"";
+    _ = try runSnippet(&arena, src, prefix);
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "inreplace atomic write failed") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "TempCreateFailed") != null);
+}
+
 // ---------------------------------------------------------------------------
 // Extended tests — Logical operators
 // ---------------------------------------------------------------------------

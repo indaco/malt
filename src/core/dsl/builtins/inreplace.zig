@@ -6,6 +6,7 @@ const std = @import("std");
 const values = @import("../values.zig");
 const sandbox = @import("../sandbox.zig");
 const pathname = @import("pathname.zig");
+const output = @import("../../../ui/output.zig");
 
 const Value = values.Value;
 const BuiltinError = pathname.BuiltinError;
@@ -52,12 +53,12 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
     // did *not* use the atomic path.
     var underlying_name: ?[]const u8 = null;
     writeAtomic(ctx.io, path, new_content, &underlying_name) catch |e| {
-        const stderr: std.Io.File = .{ .handle = std.posix.STDERR_FILENO, .flags = .{ .nonblocking = false } };
         var buf: [512]u8 = undefined;
         const underlying = underlying_name orelse @errorName(e);
         const msg = formatAtomicWriteFailureMessage(&buf, e, underlying) catch return Value{ .nil = {} };
-        // Warning is advisory; fallback write is the load-bearing step.
-        stderr.writeStreamingAll(ctx.io, msg) catch {};
+        // Route through the capture-aware seam so tests see the warning
+        // and CI logs do not interleave with raw-fd writes.
+        output.writeStderrAll(msg);
         writeDirectly(ctx.io, path, new_content);
     };
 
