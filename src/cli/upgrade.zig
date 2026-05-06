@@ -20,6 +20,10 @@ const ghcr_mod = @import("../net/ghcr.zig");
 const help = @import("help.zig");
 const pin_mod = @import("pin.zig");
 const install_mod = @import("install.zig");
+const install_local_mod = @import("install/local.zig");
+const install_args_mod = @import("install/args.zig");
+const tap_mod = @import("../core/tap.zig");
+const deps_mod = @import("../core/deps.zig");
 
 const UpgradeFlag = enum { quiet, cask, formula, dry_run, force, pinned };
 
@@ -188,7 +192,7 @@ fn upgradeFormula(
 
     // Step 1: Look up installed version from DB
     var find_stmt = db.prepare(
-        "SELECT id, version, revision, store_sha256, cellar_path FROM kegs WHERE name = ?1 LIMIT 1;",
+        "SELECT id, version, revision, store_sha256, cellar_path, tap FROM kegs WHERE name = ?1 LIMIT 1;",
     ) catch return;
     defer find_stmt.finalize();
     find_stmt.bindText(1, name) catch return;
@@ -204,9 +208,21 @@ fn upgradeFormula(
     const old_revision = find_stmt.columnInt(2);
     const old_sha_ptr = find_stmt.columnText(3);
     const old_cellar_ptr = find_stmt.columnText(4);
+    const tap_ptr = find_stmt.columnText(5);
     const old_version = if (old_ver_ptr) |v| std.mem.sliceTo(v, 0) else "unknown";
     const old_sha256 = if (old_sha_ptr) |s| std.mem.sliceTo(s, 0) else "";
     const old_cellar_path = if (old_cellar_ptr) |c| std.mem.sliceTo(c, 0) else "";
+    const tap_label = if (tap_ptr) |t| std.mem.sliceTo(t, 0) else "";
+
+    // Tap-installed formulas come from `<user>/<repo>` repos, not the
+    // homebrew/core API. Route them through the tap-aware upgrade path
+    // before touching `formulae.brew.sh`. Dupe the tap label so the
+    // slice survives across statements that reuse the SQLite buffer.
+    if (!install_args_mod.isCoreTap(tap_label)) {
+        const tap_owned = allocator.dupe(u8, tap_label) catch return error.Aborted;
+        defer allocator.free(tap_owned);
+        return upgradeTapFormula(ctx, allocator, name, tap_owned, db, prefix, dry_run, force, audit_mode);
+    }
 
     // Reconstruct the revision-aware path label for the old keg so
     // cellar_mod.remove / linker calls target the actual on-disk dir.
@@ -248,8 +264,18 @@ fn upgradeFormula(
     // materialised before the new bottle relocates / links — otherwise
     // dyld errors at first use (e.g. curl 8.20 added libngtcp2 that
     // 8.19 did not have).
+    //
+    // Self-heal `opt/<dep>` for every transitive dep before the BFS
+    // probe: the install fast-path treats a present Cellar dir as
+    // "already installed" and would otherwise short-circuit a re-link
+    // when only the symlink was wiped. After this loop, the strict
+    // probe in `collectMissingDepNames` only flags genuinely
+    // cellar-missing deps for re-fetching.
+    for (formula.dependencies) |dep_name| {
+        deps_mod.ensureOptLink(ctx.io, db, prefix, dep_name);
+    }
     {
-        const missing = collectMissingDepNames(allocator, db, formula.dependencies) catch &.{};
+        const missing = collectMissingDepNames(ctx.io, allocator, db, formula.dependencies) catch &.{};
         defer if (missing.len > 0) allocator.free(missing);
         if (missing.len > 0) {
             output.info("Installing new dep(s) for {s} ({d})...", .{ name, missing.len });
@@ -398,6 +424,136 @@ fn upgradeFormula(
     }
 
     output.success("{s} upgraded to {s}", .{ name, formula.pkg_version });
+}
+
+/// Upgrade a tap-installed formula. The reported `tap_label` is
+/// `<user>/<repo>` (the value `kegs.tap` carries for everything that did
+/// not come from `homebrew/core`). We re-resolve the tap's HEAD commit,
+/// short-circuit when the pin already points there, and otherwise bump
+/// the pin and re-enter `installTapFormula` with `force = true` so the
+/// shared materialise/link path picks up the new revision. Tap casks
+/// reach the same delegate via `upgradeTapCaskFallback`.
+fn upgradeTapFormula(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    tap_label: []const u8,
+    db: *sqlite.Database,
+    prefix: [:0]const u8,
+    dry_run: bool,
+    force: bool,
+    audit_mode: bool,
+) !void {
+    if (pinSkip(db, name, force, audit_mode)) {
+        output.dim("{s} is pinned, skipped", .{name});
+        output.emitNdjsonEvent(allocator, .pinned, name, null);
+        return;
+    }
+
+    const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse {
+        output.err("Cannot parse tap '{s}' for {s}", .{ tap_label, name });
+        return error.Aborted;
+    };
+    const user = tap_label[0..slash];
+    const repo = tap_label[slash + 1 ..];
+    if (user.len == 0 or repo.len == 0) {
+        output.err("Cannot parse tap '{s}' for {s}", .{ tap_label, name });
+        return error.Aborted;
+    }
+
+    // The whole point of `mt upgrade` is "give me the latest", so we
+    // ignore any cached pin and force-resolve HEAD.
+    const fresh_sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, user, repo) catch |e| {
+        output.err("Could not resolve {s} HEAD: {s}", .{ tap_label, tap_mod.describeResolveError(e) });
+        return error.Aborted;
+    };
+    defer allocator.free(fresh_sha);
+
+    const cached_sha_opt = tap_mod.getCommitSha(allocator, db, tap_label) catch null;
+    defer if (cached_sha_opt) |s| allocator.free(s);
+    const same_commit = if (cached_sha_opt) |c| std.mem.eql(u8, c, fresh_sha) else false;
+
+    if (!force and same_commit) {
+        output.skip("{s} is already at latest tap commit", .{name});
+        output.emitNdjsonEvent(allocator, .up_to_date, name, null);
+        return;
+    }
+
+    if (dry_run) {
+        const short_len = @min(@as(usize, 8), fresh_sha.len);
+        output.info("Dry run: would refresh tap {s} to {s} for {s}", .{ tap_label, fresh_sha[0..short_len], name });
+        output.emitNdjsonEvent(allocator, .would_install, name, null);
+        return;
+    }
+
+    // Persist the new pin BEFORE installTapFormula reads it. Use add()
+    // so a missing tap row (legacy install) is created instead of erroring.
+    var tap_url_buf: [256]u8 = undefined;
+    const tap_url = std.fmt.bufPrint(&tap_url_buf, "https://github.com/{s}", .{tap_label}) catch return error.Aborted;
+    tap_mod.add(db, tap_label, tap_url, fresh_sha) catch {
+        output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
+        return error.Aborted;
+    };
+
+    const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap_label, name }) catch return error.Aborted;
+    defer allocator.free(full_name);
+
+    var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
+    install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true) catch {
+        output.err("Failed to upgrade tap formula {s}", .{full_name});
+        return error.Aborted;
+    };
+}
+
+/// Probe registered taps for a cask token whose row in `casks` has no
+/// tap origin column to consult. Returns true if a tap claimed the
+/// token and the upgrade went through; returns false if no third-party
+/// tap had `Casks/<token>.rb` so the caller can surface the original
+/// "removed upstream" error.
+fn upgradeTapCaskFallback(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    token: []const u8,
+    db: *sqlite.Database,
+    prefix: [:0]const u8,
+    dry_run: bool,
+) bool {
+    const taps = tap_mod.list(allocator, db) catch return false;
+    defer {
+        for (taps) |t| {
+            allocator.free(t.name);
+            allocator.free(t.url);
+            if (t.commit_sha) |s| allocator.free(s);
+        }
+        allocator.free(taps);
+    }
+
+    for (taps) |t| {
+        if (install_args_mod.isCoreTap(t.name)) continue;
+
+        const slash = std.mem.indexOfScalar(u8, t.name, '/') orelse continue;
+        const user = t.name[0..slash];
+        const repo = t.name[slash + 1 ..];
+        if (user.len == 0 or repo.len == 0) continue;
+
+        // Resolve fresh HEAD per-tap. Failures are non-fatal — try the next.
+        const fresh_sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, user, repo) catch continue;
+        defer allocator.free(fresh_sha);
+
+        var tap_url_buf: [256]u8 = undefined;
+        const tap_url = std.fmt.bufPrint(&tap_url_buf, "https://github.com/{s}", .{t.name}) catch continue;
+        tap_mod.add(db, t.name, tap_url, fresh_sha) catch continue;
+
+        const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ t.name, token }) catch continue;
+        defer allocator.free(full_name);
+
+        var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
+        install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true) catch continue;
+
+        return true;
+    }
+
+    return false;
 }
 
 /// Re-link old version during rollback.
@@ -570,8 +726,11 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return error.Aborted;
     };
 
-    // Fetch latest version
+    // Fetch latest version. Casks have no `tap` column on the table, so
+    // we can't pre-route the way the formula path does — fall back to
+    // probing every registered third-party tap if the core API 404s.
     const cask_json = api.fetchCask(token) catch {
+        if (upgradeTapCaskFallback(ctx, allocator, token, db, prefix, dry_run)) return;
         output.err("Could not fetch cask info for {s}", .{token});
         return error.Aborted;
     };
@@ -689,6 +848,7 @@ fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite
 /// (e.g. curl 8.20 introduces a runtime dep on libngtcp2 that wasn't
 /// part of curl 8.19's dep set).
 pub fn collectMissingDepNames(
+    io: std.Io,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     dep_names: []const []const u8,
@@ -696,47 +856,16 @@ pub fn collectMissingDepNames(
     var missing: std.ArrayList([]const u8) = .empty;
     errdefer missing.deinit(allocator);
 
+    // Strict check: a DB row alone does not count - the cellar dir and
+    // opt symlink must also resolve. The install path's BFS uses the
+    // same predicate, so an opt-link nuked under a previously-installed
+    // dep self-heals through both `mt install` and `mt upgrade`.
     for (dep_names) |n| {
-        if (!isFormulaInstalled(db, n)) try missing.append(allocator, n);
+        if (!deps_mod.isInstalled(io, db, n)) try missing.append(allocator, n);
     }
     return missing.toOwnedSlice(allocator);
 }
 
-const testing = std.testing;
-
-test "collectMissingDepNames returns deps absent from the DB" {
-    var db = try sqlite.Database.open(":memory:");
-    defer db.close();
-    try schema.initSchema(&db);
-
-    try db.exec(
-        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
-        \\VALUES ('alpha', 'alpha', '1.0', 'sha-a', '/c/alpha/1.0');
-    );
-
-    const deps = [_][]const u8{ "alpha", "beta", "gamma" };
-    const missing = try collectMissingDepNames(testing.allocator, &db, &deps);
-    defer testing.allocator.free(missing);
-
-    try testing.expectEqual(@as(usize, 2), missing.len);
-    try testing.expectEqualStrings("beta", missing[0]);
-    try testing.expectEqualStrings("gamma", missing[1]);
-}
-
-test "collectMissingDepNames returns an empty slice when all deps are installed" {
-    var db = try sqlite.Database.open(":memory:");
-    defer db.close();
-    try schema.initSchema(&db);
-
-    try db.exec(
-        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
-        \\VALUES ('alpha', 'alpha', '1.0', 'sha-a', '/c/alpha/1.0'),
-        \\       ('beta',  'beta',  '1.0', 'sha-b', '/c/beta/1.0');
-    );
-
-    const deps = [_][]const u8{ "alpha", "beta" };
-    const missing = try collectMissingDepNames(testing.allocator, &db, &deps);
-    defer testing.allocator.free(missing);
-
-    try testing.expectEqual(@as(usize, 0), missing.len);
-}
+// `collectMissingDepNames` now consults the filesystem (cellar_path +
+// opt symlink), so coverage lives in `tests/upgrade_test.zig` where a
+// real MALT_PREFIX fixture is available.

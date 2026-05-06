@@ -224,7 +224,7 @@ pub fn findOrphans(allocator: std.mem.Allocator, db: *sqlite.Database) ![]const 
 
 // --- helpers ---
 
-fn isInstalled(io: std.Io, db: *sqlite.Database, name: []const u8) bool {
+pub fn isInstalled(io: std.Io, db: *sqlite.Database, name: []const u8) bool {
     var stmt = db.prepare("SELECT cellar_path FROM kegs WHERE name = ?1 LIMIT 1;") catch return false;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return false;
