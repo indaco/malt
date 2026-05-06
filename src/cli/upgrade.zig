@@ -23,6 +23,7 @@ const install_mod = @import("install.zig");
 const install_local_mod = @import("install/local.zig");
 const install_args_mod = @import("install/args.zig");
 const tap_mod = @import("../core/tap.zig");
+const deps_mod = @import("../core/deps.zig");
 
 const UpgradeFlag = enum { quiet, cask, formula, dry_run, force, pinned };
 
@@ -263,8 +264,18 @@ fn upgradeFormula(
     // materialised before the new bottle relocates / links — otherwise
     // dyld errors at first use (e.g. curl 8.20 added libngtcp2 that
     // 8.19 did not have).
+    //
+    // Self-heal `opt/<dep>` for every transitive dep before the BFS
+    // probe: the install fast-path treats a present Cellar dir as
+    // "already installed" and would otherwise short-circuit a re-link
+    // when only the symlink was wiped. After this loop, the strict
+    // probe in `collectMissingDepNames` only flags genuinely
+    // cellar-missing deps for re-fetching.
+    for (formula.dependencies) |dep_name| {
+        deps_mod.ensureOptLink(ctx.io, db, prefix, dep_name);
+    }
     {
-        const missing = collectMissingDepNames(allocator, db, formula.dependencies) catch &.{};
+        const missing = collectMissingDepNames(ctx.io, allocator, db, formula.dependencies) catch &.{};
         defer if (missing.len > 0) allocator.free(missing);
         if (missing.len > 0) {
             output.info("Installing new dep(s) for {s} ({d})...", .{ name, missing.len });
@@ -837,6 +848,7 @@ fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite
 /// (e.g. curl 8.20 introduces a runtime dep on libngtcp2 that wasn't
 /// part of curl 8.19's dep set).
 pub fn collectMissingDepNames(
+    io: std.Io,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     dep_names: []const []const u8,
@@ -844,47 +856,16 @@ pub fn collectMissingDepNames(
     var missing: std.ArrayList([]const u8) = .empty;
     errdefer missing.deinit(allocator);
 
+    // Strict check: a DB row alone does not count - the cellar dir and
+    // opt symlink must also resolve. The install path's BFS uses the
+    // same predicate, so an opt-link nuked under a previously-installed
+    // dep self-heals through both `mt install` and `mt upgrade`.
     for (dep_names) |n| {
-        if (!isFormulaInstalled(db, n)) try missing.append(allocator, n);
+        if (!deps_mod.isInstalled(io, db, n)) try missing.append(allocator, n);
     }
     return missing.toOwnedSlice(allocator);
 }
 
-const testing = std.testing;
-
-test "collectMissingDepNames returns deps absent from the DB" {
-    var db = try sqlite.Database.open(":memory:");
-    defer db.close();
-    try schema.initSchema(&db);
-
-    try db.exec(
-        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
-        \\VALUES ('alpha', 'alpha', '1.0', 'sha-a', '/c/alpha/1.0');
-    );
-
-    const deps = [_][]const u8{ "alpha", "beta", "gamma" };
-    const missing = try collectMissingDepNames(testing.allocator, &db, &deps);
-    defer testing.allocator.free(missing);
-
-    try testing.expectEqual(@as(usize, 2), missing.len);
-    try testing.expectEqualStrings("beta", missing[0]);
-    try testing.expectEqualStrings("gamma", missing[1]);
-}
-
-test "collectMissingDepNames returns an empty slice when all deps are installed" {
-    var db = try sqlite.Database.open(":memory:");
-    defer db.close();
-    try schema.initSchema(&db);
-
-    try db.exec(
-        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
-        \\VALUES ('alpha', 'alpha', '1.0', 'sha-a', '/c/alpha/1.0'),
-        \\       ('beta',  'beta',  '1.0', 'sha-b', '/c/beta/1.0');
-    );
-
-    const deps = [_][]const u8{ "alpha", "beta" };
-    const missing = try collectMissingDepNames(testing.allocator, &db, &deps);
-    defer testing.allocator.free(missing);
-
-    try testing.expectEqual(@as(usize, 0), missing.len);
-}
+// `collectMissingDepNames` now consults the filesystem (cellar_path +
+// opt symlink), so coverage lives in `tests/upgrade_test.zig` where a
+// real MALT_PREFIX fixture is available.

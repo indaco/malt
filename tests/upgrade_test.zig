@@ -573,6 +573,113 @@ test "upgrade routes tap-installed kegs away from the core formula API" {
 
 // A pinned tap-installed keg short-circuits in pinSkip before any network
 // activity - same contract as a pinned core keg, just on the tap branch.
+// Materialise `<prefix>/Cellar/<name>/<version>` on disk and (optionally)
+// the matching `<prefix>/opt/<name>` symlink, then insert the matching
+// keg row. Mirrors what the install path leaves behind so
+// `deps.isInstalled`'s opt-link + cellar-path probe sees a healthy keg.
+fn seedInstalledKeg(
+    db: *sqlite.Database,
+    prefix: []const u8,
+    name: []const u8,
+    version: []const u8,
+    create_opt_link: bool,
+) !void {
+    var cellar_buf: [512]u8 = undefined;
+    const cellar_root = try std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar_root);
+
+    var insert_buf: [512]u8 = undefined;
+    const insert = try std.fmt.bufPrintZ(
+        &insert_buf,
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('{s}', '{s}', '{s}', 'sha-{s}', '{s}');",
+        .{ name, name, version, name, cellar_root },
+    );
+    try db.exec(insert);
+
+    if (!create_opt_link) return;
+
+    var opt_dir_buf: [512]u8 = undefined;
+    const opt_dir = try std.fmt.bufPrint(&opt_dir_buf, "{s}/opt", .{prefix});
+    try test_io.cwd().createDirPath(std.Options.debug_io, opt_dir);
+
+    var opt_path_buf: [512]u8 = undefined;
+    const opt_path = try std.fmt.bufPrint(&opt_path_buf, "{s}/{s}", .{ opt_dir, name });
+    var parent = try test_io.openDirAbsolute(std.Options.debug_io, opt_dir, .{});
+    defer parent.close(std.Options.debug_io);
+    parent.deleteFile(std.Options.debug_io, name) catch {};
+    try parent.symLink(std.Options.debug_io, cellar_root, name, .{});
+    _ = opt_path;
+}
+
+test "collectMissingDepNames returns names absent from the DB" {
+    const path = try setupPrefix("missing_deps_absent");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try seedInstalledKeg(&db, path, "alpha", "1.0", true);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const deps = [_][]const u8{ "alpha", "beta", "gamma" };
+    const missing = try upgrade.collectMissingDepNames(threaded.io(), testing.allocator, &db, &deps);
+    defer testing.allocator.free(missing);
+
+    try testing.expectEqual(@as(usize, 2), missing.len);
+    try testing.expectEqualStrings("beta", missing[0]);
+    try testing.expectEqualStrings("gamma", missing[1]);
+}
+
+test "collectMissingDepNames returns empty when every dep is fully installed" {
+    const path = try setupPrefix("missing_deps_all_present");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try seedInstalledKeg(&db, path, "alpha", "1.0", true);
+    try seedInstalledKeg(&db, path, "beta", "1.0", true);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const deps = [_][]const u8{ "alpha", "beta" };
+    const missing = try upgrade.collectMissingDepNames(threaded.io(), testing.allocator, &db, &deps);
+    defer testing.allocator.free(missing);
+
+    try testing.expectEqual(@as(usize, 0), missing.len);
+}
+
+// Pre-fix, `collectMissingDepNames` only consulted the DB. A dep whose
+// `opt/<name>` link had been wiped (Cellar move, manual cleanup, broken
+// install) was treated as installed and the upgrade walked past it -
+// while `deps.resolve`'s strict probe would have queued a re-link from
+// the install path. The asymmetry meant a tap upgrade against a
+// nuked-opt dep would silently leave the link dead. Coupling the
+// upgrade probe to `deps.isInstalled` brings parity, so the reinstall
+// trigger fires under either entry point.
+test "collectMissingDepNames flags a keg whose opt link has been nuked" {
+    const path = try setupPrefix("missing_deps_opt_link_nuked");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try seedInstalledKeg(&db, path, "alpha", "1.0", false); // cellar yes, opt link no
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const deps = [_][]const u8{"alpha"};
+    const missing = try upgrade.collectMissingDepNames(threaded.io(), testing.allocator, &db, &deps);
+    defer testing.allocator.free(missing);
+
+    try testing.expectEqual(@as(usize, 1), missing.len);
+    try testing.expectEqualStrings("alpha", missing[0]);
+}
+
 test "upgrade <pinned-tap-keg> short-circuits without resolving HEAD" {
     const path = try setupPrefix("upgrade_tap_pinned");
     defer testing.allocator.free(path);
