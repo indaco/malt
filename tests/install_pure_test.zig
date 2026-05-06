@@ -661,6 +661,69 @@ test "routePostInstallOutcome: scope with unrelated names is ignored" {
     try testing.expect(std.mem.indexOf(u8, out, "partially skipped (use --use-system-ruby=foo") != null);
 }
 
+// Auto-included Ruby-interpreter kegs (`ruby`, `ruby@N`) gate the re-run
+// on whether the DSL handled anything: their effects often land at brew
+// install time, so re-running the hook end-to-end via Ruby would double-
+// stamp non-idempotent steps (counters, timestamps, version caches).
+// Explicit `--use-system-ruby=NAME` is a user opt-in and unaffected.
+test "routePostInstallOutcome: auto-included ruby keg skips re-run when DSL did work" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{
+        .formula = "ruby@3.4",
+        .reason = .unsupported_node,
+        .detail = "default_args",
+        .loc = null,
+    });
+    flog.total_top_level = 3;
+    flog.handled_top_level = 2;
+
+    const out = try runRoute(&flog, "ruby@3.4", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "(via system Ruby)") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") != null);
+}
+
+// Negative pin on the same axis: when the DSL handled none of the body,
+// the auto-include must still fall back so a fresh `mt migrate ruby`
+// (or any zero-coverage scenario) still runs the hook via system Ruby.
+test "routePostInstallOutcome: auto-included ruby keg falls back when DSL did nothing" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{
+        .formula = "ruby@3.4",
+        .reason = .unsupported_node,
+        .detail = "default_args",
+        .loc = null,
+    });
+    flog.total_top_level = 3;
+    flog.handled_top_level = 0;
+
+    const out = try runRoute(&flog, "ruby@3.4", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "falling back to system Ruby") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
+}
+
+// JSON mirror for the auto-include skip path: status is partially_skipped,
+// never ran_via_ruby, when the DSL handled some work.
+test "routePostInstallOutcome: --json reports partially_skipped for ruby keg with work" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "ruby@3.4", .reason = .unknown_method, .detail = "h", .loc = null });
+    flog.total_top_level = 4;
+    flog.handled_top_level = 3;
+
+    const out = try runRouteCaptureStdout(&flog, "ruby@3.4", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "\"status\":\"partially_skipped\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"status\":\"ran_via_ruby\"") == null);
+}
+
 // ---------------------------------------------------------------------------
 // routePostInstallOutcome under --verbose / --debug — the diagnostic dump
 // is what lets users (and bug reports) see WHICH helpers the DSL skipped.
