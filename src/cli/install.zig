@@ -102,6 +102,11 @@ pub const constantTimeEql = record_mod.constantTimeEql;
 pub const InstallAllOpts = struct {
     /// Treat every package as a cask; equivalent to `--cask`.
     cask: bool = false,
+    /// Caller already owns `malt.lock` on a separate fd. BSD `flock` is
+    /// per-fd, so re-entering `execute` from the same process would
+    /// otherwise EAGAIN-loop against its own hold and 30 s-timeout with
+    /// the misleading "another mt process is running" error.
+    skip_lock: bool = false,
 };
 
 /// Non-argv primitive used by `core/bundle/runner.zig` via its injected
@@ -117,8 +122,15 @@ pub fn installAll(
     defer argv.deinit(allocator);
     if (opts.cask) try argv.append(allocator, "--cask");
     for (packages) |p| try argv.append(allocator, p);
-    return execute(ctx, allocator, argv.items);
+    return executeWithOpts(ctx, allocator, argv.items, .{ .skip_lock = opts.skip_lock });
 }
+
+/// Internal options that don't have an argv form. Kept private so the
+/// non-argv flags (currently just lock ownership) stay an in-process
+/// contract instead of leaking into the user-visible flag surface.
+const ExecuteOpts = struct {
+    skip_lock: bool = false,
+};
 
 const InstallFlag = enum {
     cask,
@@ -146,6 +158,15 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
 });
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    return executeWithOpts(ctx, allocator, args, .{});
+}
+
+fn executeWithOpts(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    exec_opts: ExecuteOpts,
+) !void {
     if (help.showIfRequested(ctx, args, "install")) return;
 
     // Parse flags
@@ -303,19 +324,25 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return InstallError.DatabaseError;
     };
 
-    // Acquire lock (Step 1)
-    var lock_path_buf: [512]u8 = undefined;
-    const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch
-        return InstallError.LockError;
-    var lk = lock_mod.LockFile.acquire(lock_path, 30000) catch {
-        output.err("Another mt process is running. Wait or run mt doctor.", .{});
-        return InstallError.LockError;
-    };
-    defer lk.release();
-    // LIFO: install_complete fires before lk.release. Inline gate keeps
-    // the deferred call out of the default paths.
-    defer if (output.isNdjson()) output.emitNdjsonEvent(allocator, .install_complete, "", null);
-    output.emitNdjsonEvent(allocator, .lock_acquired, "", null);
+    // Acquire lock (Step 1) — skipped when the caller already owns it.
+    // BSD `flock` is per-fd, so a re-entry from the same process (e.g.
+    // upgrade -> installAll for missing transitive deps) would
+    // EAGAIN-loop against its own hold and time out as fake contention.
+    var lk: ?lock_mod.LockFile = null;
+    if (!exec_opts.skip_lock) {
+        var lock_path_buf: [512]u8 = undefined;
+        const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch
+            return InstallError.LockError;
+        lk = lock_mod.LockFile.acquire(lock_path, 30000) catch {
+            output.err("Another mt process is running. Wait or run mt doctor.", .{});
+            return InstallError.LockError;
+        };
+        output.emitNdjsonEvent(allocator, .lock_acquired, "", null);
+    }
+    defer if (lk) |*l| l.release();
+    // LIFO: install_complete must precede release in the deferred chain,
+    // and the outer holder owns the matching pair when we skipped here.
+    defer if (lk != null and output.isNdjson()) output.emitNdjsonEvent(allocator, .install_complete, "", null);
 
     // Main-thread HTTP client; workers borrow from `http_pool` instead.
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
