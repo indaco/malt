@@ -12,7 +12,6 @@
 # Lines starting with '#' and blank lines are ignored.
 
 abricate 4dc614ecc38fde228a23e1b7931abe8dca961eaeb9e032baf98f31362533a23e
-apache-archiva a93e103e695c1bef68ad4565762ec0cd1ad806a9afd5ddecaac51698307861f1
 aravis 4bb2aa92b0674e1992b707c36b5f69a50aa73c77e91975b8302dc4e5e1914744
 arcadedb bd3a83f0511926c2cb2851a37bf61887666c38dfb16de550ebaa9e368b8c2242
 baobab a4a026f49ace311c15343bdb6fcf17bbdad568dbd428b50e02cadd04fca0a057
