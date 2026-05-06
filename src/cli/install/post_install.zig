@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
+const deps_mod = @import("../../core/deps.zig");
 const formula_mod = @import("../../core/formula.zig");
 const dsl = @import("../../core/dsl/root.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
@@ -229,6 +230,11 @@ pub const DslPostInstallOutcome = enum {
 ///
 /// Narrow inputs (name + version + json bytes) keep migrate decoupled
 /// from install's `DownloadJob` shape.
+///
+/// `cache`, when non-null, is the install pipeline's per-run
+/// `FormulaCache`: routes through it so the parse-once invariant the
+/// dep resolver and `linkAndRecord` rely on extends to post_install.
+/// Null callers (migrate, tests) keep a private parse arena.
 pub fn executeDslPostInstall(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -238,19 +244,33 @@ pub fn executeDslPostInstall(
     post_install_src: []const u8,
     prefix: []const u8,
     use_system_ruby_list: []const []const u8,
+    cache: ?*deps_mod.FormulaCache,
 ) DslPostInstallOutcome {
-    var formula = formula_mod.parseFormula(allocator, formula_json) catch {
-        output.warn("post_install: failed to parse formula for {s}", .{name});
-        return .parse_failed;
+    var owned: ?formula_mod.Formula = null;
+    defer if (owned) |*f| f.deinit();
+
+    const dsl_version: []const u8, const pkg_version: []const u8 = blk: {
+        if (cache) |c| {
+            const f = c.getOrParse(name, formula_json) catch {
+                output.warn("post_install: failed to parse formula for {s}", .{name});
+                return .parse_failed;
+            };
+            break :blk .{ f.version, f.pkg_version };
+        }
+        owned = formula_mod.parseFormula(allocator, formula_json) catch {
+            output.warn("post_install: failed to parse formula for {s}", .{name});
+            return .parse_failed;
+        };
+        break :blk .{ owned.?.version, owned.?.pkg_version };
     };
-    defer formula.deinit();
+
     executeDslPostInstallFields(
         ctx,
         allocator,
         name,
         version_str,
-        formula.version,
-        formula.pkg_version,
+        dsl_version,
+        pkg_version,
         post_install_src,
         prefix,
         use_system_ruby_list,
@@ -318,6 +338,10 @@ fn locateDslSource(ctx: *const AppCtx, allocator: std.mem.Allocator, name: []con
 /// outcome, or fall back to a system-Ruby subprocess (when the formula
 /// is in `--use-system-ruby` scope) or the unified skip hint. Both
 /// commands route through here so human + JSON envelopes match exactly.
+///
+/// `cache` is forwarded to `executeDslPostInstall`; pass non-null from
+/// the install path to share the parse-once cache, null from migrate
+/// (its own per-keg parse already owns the lifetime).
 pub fn drive(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -326,6 +350,7 @@ pub fn drive(
     formula_json: []const u8,
     prefix: []const u8,
     use_system_ruby_list: []const []const u8,
+    cache: ?*deps_mod.FormulaCache,
 ) void {
     if (locateDslSource(ctx, allocator, name)) |src| {
         defer allocator.free(src);
@@ -338,6 +363,7 @@ pub fn drive(
             src,
             prefix,
             use_system_ruby_list,
+            cache,
         )) {
             .handled => return,
             // parse_failed leaves the DSL path unusable — fall through so

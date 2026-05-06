@@ -824,6 +824,7 @@ test "executeDslPostInstall returns .parse_failed when formula JSON is unparseab
         "# empty body",
         "/tmp/irrelevant",
         &.{},
+        null,
     );
     try testing.expectEqual(install.DslPostInstallOutcome.parse_failed, outcome);
 }
@@ -849,8 +850,86 @@ test "executeDslPostInstall returns .handled when DSL executes against a valid f
         "# empty",
         "/tmp/irrelevant",
         &.{},
+        null,
     );
     try testing.expectEqual(install.DslPostInstallOutcome.handled, outcome);
+}
+
+test "executeDslPostInstall routes through the shared FormulaCache once per name" {
+    // Pins the parse-once invariant the dep resolver and linkAndRecord
+    // already enforce: with a shared cache, repeated post_install calls
+    // for the same formula across an installAll run must not re-parse.
+    color_mod.setForTest(false, false);
+    defer color_mod.setForTest(null, null);
+    const prior_quiet = output_mod.isQuiet();
+    output_mod.setQuiet(true);
+    defer output_mod.setQuiet(prior_quiet);
+
+    const json =
+        \\{"name":"hello","full_name":"hello","versions":{"stable":"1.0"},"dependencies":[],"oldnames":[]}
+    ;
+    var cache = malt.deps.FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+
+    const first = install.executeDslPostInstall(
+        &malt.app_ctx.debug_ctx,
+        testing.allocator,
+        "hello",
+        "1.0",
+        json,
+        "# empty",
+        "/tmp/irrelevant",
+        &.{},
+        &cache,
+    );
+    try testing.expectEqual(install.DslPostInstallOutcome.handled, first);
+    try testing.expectEqual(@as(usize, 1), cache.parse_count);
+
+    const second = install.executeDslPostInstall(
+        &malt.app_ctx.debug_ctx,
+        testing.allocator,
+        "hello",
+        "1.0",
+        json,
+        "# empty",
+        "/tmp/irrelevant",
+        &.{},
+        &cache,
+    );
+    try testing.expectEqual(install.DslPostInstallOutcome.handled, second);
+    try testing.expectEqual(@as(usize, 1), cache.parse_count);
+}
+
+test "executeDslPostInstall reuses an entry the install pipeline already parsed" {
+    // Mirrors the install loop's order: linkAndRecord parses + caches,
+    // then drive() runs post_install. The second parse must be a no-op.
+    color_mod.setForTest(false, false);
+    defer color_mod.setForTest(null, null);
+    const prior_quiet = output_mod.isQuiet();
+    output_mod.setQuiet(true);
+    defer output_mod.setQuiet(prior_quiet);
+
+    const json =
+        \\{"name":"hello","full_name":"hello","versions":{"stable":"1.0"},"dependencies":[],"oldnames":[]}
+    ;
+    var cache = malt.deps.FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+    _ = try cache.getOrParse("hello", json);
+    try testing.expectEqual(@as(usize, 1), cache.parse_count);
+
+    const outcome = install.executeDslPostInstall(
+        &malt.app_ctx.debug_ctx,
+        testing.allocator,
+        "hello",
+        "1.0",
+        json,
+        "# empty",
+        "/tmp/irrelevant",
+        &.{},
+        &cache,
+    );
+    try testing.expectEqual(install.DslPostInstallOutcome.handled, outcome);
+    try testing.expectEqual(@as(usize, 1), cache.parse_count);
 }
 
 // ---------------------------------------------------------------------------
@@ -883,6 +962,7 @@ test "drive: no DSL source and no scope match emits the unified skip hint" {
         "{}",
         "/tmp/irrelevant",
         &.{},
+        null,
     );
 
     // The skip hint is the byte-for-byte string both install and migrate

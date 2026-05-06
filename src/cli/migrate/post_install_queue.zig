@@ -140,6 +140,7 @@ pub const Queue = struct {
                 b.formula_json,
                 prefix,
                 use_system_ruby_scope,
+                null,
             ),
             .tap => |tp| post_install_mod.driveTap(
                 ctx,

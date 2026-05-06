@@ -710,7 +710,7 @@ fn executeWithOpts(
         };
 
         if (job.post_install_defined) {
-            drive(ctx, allocator, job.name, job.version_str, job.formula_json, prefix, use_system_ruby_list);
+            drive(ctx, allocator, job.name, job.version_str, job.formula_json, prefix, use_system_ruby_list, &formula_cache);
         }
     }
 
