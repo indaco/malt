@@ -228,10 +228,6 @@ pub fn writeStdoutAll(bytes: []const u8) void {
     pkg_stdout.writeStreamingAll(pkg_io, bytes) catch return;
 }
 
-fn writeStderr(bytes: []const u8) void {
-    writeStderrAll(bytes);
-}
-
 fn writeStdout(bytes: []const u8) void {
     writeStdoutAll(bytes);
 }
@@ -307,16 +303,19 @@ pub fn question(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const prefix: []const u8 = if (color.isEmojiEnabled()) "  ? " else "  ? ";
-    if (color.isColorEnabled()) {
-        writeStderr(color.SemanticStyle.info.code());
-        writeStderr(prefix);
-        writeStderr(color.Style.reset.code());
-        writeStderr(color.Style.bold.code());
-        writeStderr(msg);
-        writeStderr(color.Style.reset.code());
+    const colorize = color.isColorEnabled();
+    lockStderr();
+    defer unlockStderr();
+    if (colorize) {
+        writeStderrUnlocked(color.SemanticStyle.info.code());
+        writeStderrUnlocked(prefix);
+        writeStderrUnlocked(color.Style.reset.code());
+        writeStderrUnlocked(color.Style.bold.code());
+        writeStderrUnlocked(msg);
+        writeStderrUnlocked(color.Style.reset.code());
     } else {
-        writeStderr(prefix);
-        writeStderr(msg);
+        writeStderrUnlocked(prefix);
+        writeStderrUnlocked(msg);
     }
 }
 
@@ -326,18 +325,21 @@ fn lineStyled(style_code: ?[]const u8, comptime fmt: []const u8, args: anytype) 
     if (quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    const colorize = color.isColorEnabled();
+    lockStderr();
+    defer unlockStderr();
     if (style_code) |code| {
-        if (color.isColorEnabled()) {
-            writeStderr(code);
-            writeStderr(msg);
-            writeStderr(color.Style.reset.code());
+        if (colorize) {
+            writeStderrUnlocked(code);
+            writeStderrUnlocked(msg);
+            writeStderrUnlocked(color.Style.reset.code());
         } else {
-            writeStderr(msg);
+            writeStderrUnlocked(msg);
         }
     } else {
-        writeStderr(msg);
+        writeStderrUnlocked(msg);
     }
-    writeStderr("\n");
+    writeStderrUnlocked("\n");
 }
 
 /// Warn-coloured line with no icon — for multi-line warning blocks.
@@ -366,16 +368,19 @@ pub fn dim(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const prefix: []const u8 = if (color.isEmojiEnabled()) "  ▸ " else "  > ";
-    if (color.isColorEnabled()) {
-        writeStderr(color.SemanticStyle.detail.code());
-        writeStderr(prefix);
-        writeStderr(msg);
-        writeStderr(color.Style.reset.code());
+    const colorize = color.isColorEnabled();
+    lockStderr();
+    defer unlockStderr();
+    if (colorize) {
+        writeStderrUnlocked(color.SemanticStyle.detail.code());
+        writeStderrUnlocked(prefix);
+        writeStderrUnlocked(msg);
+        writeStderrUnlocked(color.Style.reset.code());
     } else {
-        writeStderr(prefix);
-        writeStderr(msg);
+        writeStderrUnlocked(prefix);
+        writeStderrUnlocked(msg);
     }
-    writeStderr("\n");
+    writeStderrUnlocked("\n");
 }
 
 /// Dim "nothing to do" status line (e.g. already-at-latest). The bullet
@@ -385,16 +390,19 @@ pub fn skip(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     const prefix: []const u8 = if (color.isEmojiEnabled()) "  · " else "  . ";
-    if (color.isColorEnabled()) {
-        writeStderr(color.SemanticStyle.detail.code());
-        writeStderr(prefix);
-        writeStderr(msg);
-        writeStderr(color.Style.reset.code());
+    const colorize = color.isColorEnabled();
+    lockStderr();
+    defer unlockStderr();
+    if (colorize) {
+        writeStderrUnlocked(color.SemanticStyle.detail.code());
+        writeStderrUnlocked(prefix);
+        writeStderrUnlocked(msg);
+        writeStderrUnlocked(color.Style.reset.code());
     } else {
-        writeStderr(prefix);
-        writeStderr(msg);
+        writeStderrUnlocked(prefix);
+        writeStderrUnlocked(msg);
     }
-    writeStderr("\n");
+    writeStderrUnlocked("\n");
 }
 
 /// Read a single line from stdin and return true iff the trimmed input
@@ -749,6 +757,59 @@ test "writePrefixedLine serialises concurrent prefix+msg writes" {
         if (line.len == 0) continue;
         line_count += 1;
         try std.testing.expect(std.mem.startsWith(u8, line, expected_prefix));
+    }
+    try std.testing.expectEqual(thread_count * Worker.events_per_thread, line_count);
+}
+
+// Sister coverage for the prefix-then-msg-then-reset shape that `dim`
+// and `skip` (and via `lineStyled` the `*Plain` family) emit. A racing
+// `appendSlice` on the test capture or a torn ANSI wrap was the same
+// failure mode the prefixed-line test pins; this one exercises a
+// different write order so an asymmetric regression can't slip past.
+test "dim serialises concurrent prefix+msg+reset writes" {
+    const prior_quiet = isQuiet();
+    color.setForTest(true, true);
+    color.setBackgroundForTest(color.Background.dark);
+    color.setTruecolorForTest(false);
+    setQuiet(false);
+    defer {
+        color.setForTest(null, null);
+        color.setBackgroundForTest(null);
+        color.setTruecolorForTest(null);
+        setQuiet(prior_quiet);
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    const Worker = struct {
+        const events_per_thread: usize = 64;
+        fn run(thread_id: usize) void {
+            var i: usize = 0;
+            while (i < events_per_thread) : (i += 1) {
+                dim("t{d}-i{d}", .{ thread_id, i });
+            }
+        }
+    };
+
+    const thread_count: usize = 8;
+    var threads: [8]std.Thread = undefined;
+    for (&threads, 0..) |*th, idx| {
+        th.* = try std.Thread.spawn(.{}, Worker.run, .{idx});
+    }
+    for (&threads) |th| th.join();
+
+    const expected_open = "\x1b[2m  ▸ t";
+    const expected_close = "\x1b[0m";
+    var line_count: usize = 0;
+    var it = std.mem.splitScalar(u8, buf.items, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        line_count += 1;
+        try std.testing.expect(std.mem.startsWith(u8, line, expected_open));
+        try std.testing.expect(std.mem.endsWith(u8, line, expected_close));
     }
     try std.testing.expectEqual(thread_count * Worker.events_per_thread, line_count);
 }
