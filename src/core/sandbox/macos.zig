@@ -39,6 +39,16 @@ pub const ScrubbedEnv = struct {
 /// Minimal PATH — keeps a hostile formula off user-owned bin prefixes.
 pub const SANDBOX_PATH: []const u8 = "/usr/bin:/bin:/usr/sbin:/sbin";
 
+/// Where the sandboxed child's stdout/stderr land. Production passes the
+/// process's real fd 1/2; tests redirect to `/dev/null` so subprocess
+/// chatter doesn't leak past `output.beginStderrCapture` into the build
+/// runner's `result_error_msgs` (which would print a misleading
+/// `failed command:` against a passing test).
+pub const Stdio = struct {
+    out: c_int = std.posix.STDOUT_FILENO,
+    err: c_int = std.posix.STDERR_FILENO,
+};
+
 /// Reject any byte that could break out of a `(subpath "...")` token.
 pub fn validatePathForProfile(p: []const u8) SandboxError!void {
     if (p.len == 0 or p[0] != '/') return SandboxError.UnsafePath;
@@ -183,7 +193,9 @@ pub fn freeArgv(allocator: std.mem.Allocator, argv: [:null]?[*:0]u8) void {
 
 /// Spawn `ruby tmp_script` under `sandbox-exec` with scrubbed env and limits.
 /// Child stdout/stderr are run through `term_sanitize` to strip OSC/DCS/cursor
-/// escapes before forwarding; `MALT_ALLOW_RAW_POST_INSTALL=1` bypasses.
+/// escapes before forwarding to `stdio.out`/`stdio.err`;
+/// `MALT_ALLOW_RAW_POST_INSTALL=1` bypasses the sanitizer but still honours
+/// the configured fds.
 pub fn runRubySandboxed(
     allocator: std.mem.Allocator,
     environ: std.process.Environ,
@@ -193,6 +205,7 @@ pub fn runRubySandboxed(
     malt_prefix: []const u8,
     env: ScrubbedEnv,
     limits: Limits,
+    stdio: Stdio,
 ) SandboxError!u8 {
     if (builtin.os.tag != .macos) return SandboxError.SandboxUnsupported;
 
@@ -209,9 +222,9 @@ pub fn runRubySandboxed(
     defer freeEnvp(allocator, envp);
 
     if (rawPassthroughEnabled(environ)) {
-        return spawnInherit(argv_z, envp, limits);
+        return spawnInherit(argv_z, envp, limits, stdio);
     }
-    return spawnFiltered(argv_z, envp, limits);
+    return spawnFiltered(argv_z, envp, limits, stdio);
 }
 
 fn rawPassthroughEnabled(environ: std.process.Environ) bool {
@@ -223,10 +236,16 @@ fn spawnInherit(
     argv_z: [:null]?[*:0]u8,
     envp: [:null]?[*:0]u8,
     limits: Limits,
+    stdio: Stdio,
 ) SandboxError!u8 {
     const pid = std.c.fork();
     if (pid < 0) return SandboxError.ForkFailed;
     if (pid == 0) {
+        // dup2 is a no-op when source equals destination, so unconditional
+        // redirection keeps the production path identical to the old
+        // inherited-stdio behaviour while letting tests sink to /dev/null.
+        _ = std.c.dup2(stdio.out, std.posix.STDOUT_FILENO);
+        _ = std.c.dup2(stdio.err, std.posix.STDERR_FILENO);
         applyRlimits(limits) catch std.c._exit(127);
         _ = std.c.execve(argv_z[0].?, argv_z.ptr, envp.ptr);
         std.c._exit(127);
@@ -272,8 +291,9 @@ fn spawnFiltered(
     argv_z: [:null]?[*:0]u8,
     envp: [:null]?[*:0]u8,
     limits: Limits,
+    stdio: Stdio,
 ) SandboxError!u8 {
-    return spawnFilteredWithHooks(argv_z, envp, limits, .{});
+    return spawnFilteredWithHooks(argv_z, envp, limits, stdio, .{});
 }
 
 fn maybeSpawnFilter(
@@ -298,6 +318,7 @@ pub fn spawnFilteredWithHooks(
     argv_z: [:null]?[*:0]u8,
     envp: [:null]?[*:0]u8,
     limits: Limits,
+    stdio: Stdio,
     hooks: SpawnHooks,
 ) SandboxError!u8 {
     var out_r: Fd = .{};
@@ -345,12 +366,12 @@ pub fn spawnFilteredWithHooks(
         if (err_thread) |t| t.join();
     }
 
-    out_thread = maybeSpawnFilter(hooks, 0, out_r.value, 1) catch
+    out_thread = maybeSpawnFilter(hooks, 0, out_r.value, stdio.out) catch
         return SandboxError.ForkFailed;
     // Thread owns the read end now; its own `defer close` releases it.
     out_r.value = -1;
 
-    err_thread = maybeSpawnFilter(hooks, 1, err_r.value, 2) catch
+    err_thread = maybeSpawnFilter(hooks, 1, err_r.value, stdio.err) catch
         return SandboxError.ForkFailed;
     err_r.value = -1;
 

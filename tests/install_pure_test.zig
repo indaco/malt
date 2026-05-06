@@ -492,6 +492,32 @@ const io_mod = @import("malt").output;
 const color_mod = @import("malt").color;
 const output_mod = @import("malt").output;
 
+/// Construct an `AppCtx` whose `stdout`/`stderr` point at `/dev/null`.
+/// The `routePostInstallOutcome` Ruby fallback path forwards the
+/// sandboxed child's fd 1/2 to `ctx.stdout.handle`/`ctx.stderr.handle`;
+/// without this redirect, child stderr lands on the test runner's real
+/// fd 2 and the build-runner promotes the bytes to `result_error_msgs`,
+/// printing a misleading `failed command:` against a passing test.
+/// Caller closes the returned fd via `closeDevnullCtx`.
+fn devnullCtx() !struct { ctx: malt.app_ctx.AppCtx, fd: std.c.fd_t } {
+    const fd = std.c.open("/dev/null", .{ .ACCMODE = .RDWR }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.DevnullOpenFailed;
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    return .{
+        .ctx = .{
+            .io = malt.app_ctx.debug_ctx.io,
+            .environ = malt.app_ctx.debug_ctx.environ,
+            .stdout = file,
+            .stderr = file,
+        },
+        .fd = fd,
+    };
+}
+
+fn closeDevnullCtx(fd: std.c.fd_t) void {
+    _ = std.c.close(fd);
+}
+
 /// Capture stderr output from a single router call and return the raw
 /// bytes. Caller owns the buffer. Deterministic state (no color / no
 /// emoji / not quiet) so the assertions pin plain ASCII prefixes.
@@ -512,7 +538,10 @@ fn runRoute(
     io_mod.beginStderrCapture(testing.allocator, &buf);
     defer io_mod.endStderrCapture();
 
-    install.routePostInstallOutcome(&malt.app_ctx.debug_ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
+    const dn = try devnullCtx();
+    defer closeDevnullCtx(dn.fd);
+
+    install.routePostInstallOutcome(&dn.ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
 
     return buf.toOwnedSlice(testing.allocator);
 }
@@ -818,7 +847,10 @@ fn runRouteCaptureStdout(
     io_mod.beginStderrCapture(testing.allocator, &stderr_buf);
     defer io_mod.endStderrCapture();
 
-    install.routePostInstallOutcome(&malt.app_ctx.debug_ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
+    const dn = try devnullCtx();
+    defer closeDevnullCtx(dn.fd);
+
+    install.routePostInstallOutcome(&dn.ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
     return stdout_buf.toOwnedSlice(testing.allocator);
 }
 

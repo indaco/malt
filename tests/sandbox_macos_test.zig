@@ -121,7 +121,7 @@ test "spawnFilteredWithHooks reaps child when first reader-thread spawn fails" {
     defer sandbox.freeEnvp(testing.allocator, envp);
 
     var obs: ReapObserver = .{};
-    const result = sandbox.spawnFilteredWithHooks(argv_z, envp, .{}, .{
+    const result = sandbox.spawnFilteredWithHooks(argv_z, envp, .{}, .{}, .{
         .fail_thread_spawn_on = 0,
         .on_child_reaped = ReapObserver.cb,
         .ctx = &obs,
@@ -148,7 +148,7 @@ test "spawnFilteredWithHooks reaps child and joins out-thread when second spawn 
     defer sandbox.freeEnvp(testing.allocator, envp);
 
     var obs: ReapObserver = .{};
-    const result = sandbox.spawnFilteredWithHooks(argv_z, envp, .{}, .{
+    const result = sandbox.spawnFilteredWithHooks(argv_z, envp, .{}, .{}, .{
         .fail_thread_spawn_on = 1,
         .on_child_reaped = ReapObserver.cb,
         .ctx = &obs,
@@ -157,4 +157,46 @@ test "spawnFilteredWithHooks reaps child and joins out-thread when second spawn 
     try testing.expectError(error.ForkFailed, result);
     try testing.expectEqual(@as(u32, 1), obs.call_count);
     try testing.expect(obs.reaped_pid > 0);
+}
+
+// Pin the Stdio seam: the filter loop must route child stderr to
+// `stdio.err` rather than the parent's hardcoded fd 2 — tests rely on
+// that to keep subprocess chatter out of the build runner's
+// `result_error_msgs` (which would otherwise print a misleading
+// `failed command:` against a passing test).
+test "spawnFilteredWithHooks routes child stderr to the configured fd" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const argv = [_][]const u8{ "/bin/sh", "-c", "printf %s err-via-fd >&2" };
+    const argv_z = try sandbox.buildArgv(testing.allocator, argv[0..]);
+    defer sandbox.freeArgv(testing.allocator, argv_z);
+
+    const envp = try sandbox.buildEnvp(testing.allocator, .{
+        .home = "/tmp",
+        .path = sandbox.SANDBOX_PATH,
+        .malt_prefix = "/tmp",
+        .tmpdir = "/tmp",
+    });
+    defer sandbox.freeEnvp(testing.allocator, envp);
+
+    var pipe_fds: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&pipe_fds) != 0) return error.PipeFailed;
+    defer _ = std.c.close(pipe_fds[0]);
+
+    const exit = try sandbox.spawnFilteredWithHooks(
+        argv_z,
+        envp,
+        .{},
+        .{ .out = std.posix.STDOUT_FILENO, .err = pipe_fds[1] },
+        .{},
+    );
+    // Drop the parent's write end so the read end sees EOF after the
+    // filter thread closes its dup'd copy.
+    _ = std.c.close(pipe_fds[1]);
+    try testing.expectEqual(@as(u8, 0), exit);
+
+    var buf: [128]u8 = undefined;
+    const n = std.c.read(pipe_fds[0], &buf, buf.len);
+    try testing.expect(n > 0);
+    try testing.expectEqualStrings("err-via-fd", buf[0..@intCast(n)]);
 }
