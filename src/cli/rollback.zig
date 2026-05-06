@@ -139,9 +139,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.warn("Could not unlink current {s} — links may be stale", .{name});
     };
 
-    // Remove current cellar entry
-    cellar.remove(ctx.io, prefix, name, current_ver) catch {
-        output.warn("Could not remove cellar entry for {s} {s}", .{ name, current_ver });
+    // Remove current cellar entry — pkg_version-aware so a revision-bumped
+    // current keg dir (e.g. "1.9.2_2") doesn't get left on disk.
+    removeCurrentCellarDir(ctx.io, prefix, name, current_ver, current_revision) catch {
+        output.warn("Could not remove cellar entry for {s} {s}", .{ name, current_pkg_version });
     };
 
     // Materialize the old version from store
@@ -182,6 +183,22 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     db.commit() catch return error.Aborted;
 
     output.info("{s} rolled back to {s}", .{ name, target.version });
+}
+
+/// Wipe the on-disk Cellar dir for a keg currently at `version`/`revision`.
+/// The dir is named after the pkg_version label (e.g. "1.9.2_2"), so the
+/// suffix has to be reconstructed here — handing `cellar.remove` the bare
+/// upstream `version` would orphan a revision-bumped keg.
+pub fn removeCurrentCellarDir(
+    io: std.Io,
+    prefix: []const u8,
+    name: []const u8,
+    version: []const u8,
+    revision: i64,
+) cellar.CellarError!void {
+    var pkgver_buf: [128]u8 = undefined;
+    const pkg_version = formula_mod.pkgVersion(&pkgver_buf, version, revision) catch version;
+    return cellar.remove(io, prefix, name, pkg_version);
 }
 
 /// Returns the `pinned` flag of the keg row identified by `keg_id`, or
@@ -302,4 +319,70 @@ test "replaceKegRow recovers a non-zero revision from pkg_version" {
     defer cnt.finalize();
     _ = try cnt.step();
     try testing.expectEqual(@as(i64, 1), cnt.columnInt(0));
+}
+
+test "removeCurrentCellarDir wipes the revision-bumped on-disk dir" {
+    const io = std.Options.debug_io;
+
+    const prefix = try std.fmt.allocPrint(
+        testing.allocator,
+        "/tmp/malt_rollback_cellar_{d}",
+        .{std.Io.Clock.real.now(io).toNanoseconds()},
+    );
+    defer testing.allocator.free(prefix);
+    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+
+    // Cellar dirs are named after pkg_version, e.g. "1.9.2_2", not the
+    // bare upstream "1.9.2" — passing the latter at rollback time orphans
+    // the keg on disk.
+    const name = "libgit2";
+    const version = "1.9.2";
+    const revision: i64 = 2;
+
+    const keg_dir = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/Cellar/{s}/{s}_{d}",
+        .{ prefix, name, version, revision },
+    );
+    defer testing.allocator.free(keg_dir);
+    try std.Io.Dir.cwd().createDirPath(io, keg_dir);
+
+    const sentinel = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    defer testing.allocator.free(sentinel);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, sentinel, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "{}");
+    }
+
+    try removeCurrentCellarDir(io, prefix, name, version, revision);
+
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, keg_dir, .{}));
+}
+
+test "removeCurrentCellarDir wipes a plain version dir when revision is zero" {
+    const io = std.Options.debug_io;
+
+    const prefix = try std.fmt.allocPrint(
+        testing.allocator,
+        "/tmp/malt_rollback_cellar_norev_{d}",
+        .{std.Io.Clock.real.now(io).toNanoseconds()},
+    );
+    defer testing.allocator.free(prefix);
+    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+
+    const name = "tree";
+    const version = "2.2.1";
+
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    defer testing.allocator.free(keg_dir);
+    try std.Io.Dir.cwd().createDirPath(io, keg_dir);
+
+    try removeCurrentCellarDir(io, prefix, name, version, 0);
+
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, keg_dir, .{}));
 }
