@@ -11,9 +11,10 @@ pub const FormulaError = error{
     NoBottleAvailable,
 };
 
-/// Bottle descriptor for one platform. All three strings borrow from the
-/// JSON source that backs the parent `Formula._parsed`; callers that hold
-/// a `BottleFile` beyond `Formula.deinit()` must dupe first.
+/// Bottle descriptor for one platform. All three strings live in the
+/// parent `Formula._parsed` (either source-borrowed or arena-allocated
+/// by the JSON parser); callers that hold a `BottleFile` beyond
+/// `Formula.deinit()` must dupe first.
 pub const BottleFile = struct {
     cellar: []const u8,
     url: []const u8,
@@ -71,17 +72,18 @@ pub const Formula = struct {
     license: ?[]const u8,
     /// Borrowed from `_parsed`.
     homepage: []const u8,
-    /// Outer slice owned by `_parsed`; element strings borrow from the
-    /// JSON source buffer.
+    /// Outer slice allocated through `_parsed.arena`; element strings
+    /// live in `_parsed`.
     dependencies: []const []const u8,
     keg_only: bool,
     post_install_defined: bool,
-    /// Map keys and `BottleFile` string fields borrow from `_parsed`.
+    /// Map storage is allocated through `_parsed.arena`; map keys and
+    /// `BottleFile` string fields live in `_parsed`.
     bottle_files: ?std.json.ArrayHashMap(BottleFile),
     /// Borrowed from `_parsed`.
     bottle_root_url: ?[]const u8,
-    /// Outer slice owned by `_parsed`; element strings borrow from the
-    /// JSON source buffer.
+    /// Outer slice allocated through `_parsed.arena`; element strings
+    /// live in `_parsed`.
     oldnames: []const []const u8,
     /// Optional launchd service block. Populated when the upstream formula
     /// JSON contains a `service` object with at least a `run` array.
