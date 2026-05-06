@@ -25,6 +25,16 @@ pub const FallbackEntry = struct {
 pub const FallbackLog = struct {
     entries: std.ArrayList(FallbackEntry),
     allocator: std.mem.Allocator,
+    /// Top-level statements the interpreter attempted to evaluate. Bumped
+    /// per-node by `Interpreter.execute`; tests construct synthetic logs by
+    /// setting this directly.
+    total_top_level: usize = 0,
+    /// Top-level statements that completed without logging any new entry.
+    /// `dslDidWork()` reads this so the post_install router can tell
+    /// "DSL handled the body and warned" from "DSL handled none of it" —
+    /// re-running a partially-applied body via Ruby double-stamps any
+    /// non-idempotent side effect (counters, timestamps, version caches).
+    handled_top_level: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) FallbackLog {
         return .{
@@ -46,6 +56,15 @@ pub const FallbackLog = struct {
 
     pub fn hasErrors(self: *const FallbackLog) bool {
         return self.entries.items.len > 0;
+    }
+
+    /// True when at least one top-level statement evaluated without a new
+    /// fall-through being logged during it. The router uses this to gate
+    /// the system-Ruby re-run: re-executing a body whose effects already
+    /// landed double-stamps non-idempotent steps (counters, timestamps,
+    /// version-stamped caches), so we accept the partial result instead.
+    pub fn dslDidWork(self: *const FallbackLog) bool {
+        return self.handled_top_level > 0;
     }
 
     pub fn hasFatal(self: *const FallbackLog) bool {
@@ -133,3 +152,30 @@ pub const FallbackLog = struct {
         return aw.toOwnedSlice();
     }
 };
+
+test "dslDidWork: empty log reports no work done" {
+    var flog = FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+    try std.testing.expect(!flog.dslDidWork());
+}
+
+test "dslDidWork: entries alone do not imply work was done" {
+    // A synthetic log with only logged entries (no successful statement
+    // counted) reflects "DSL handled none of the body" — the router must
+    // still treat this as a fall-back-eligible state.
+    var flog = FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "x", .reason = .unknown_method, .detail = "h", .loc = null });
+    try std.testing.expect(flog.hasErrors());
+    try std.testing.expect(!flog.dslDidWork());
+}
+
+test "dslDidWork: at least one handled statement flips the signal" {
+    var flog = FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+    flog.total_top_level = 5;
+    flog.handled_top_level = 4;
+    flog.log(.{ .formula = "x", .reason = .unknown_method, .detail = "h", .loc = null });
+    try std.testing.expect(flog.hasErrors());
+    try std.testing.expect(flog.dslDidWork());
+}

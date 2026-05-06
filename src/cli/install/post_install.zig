@@ -66,6 +66,13 @@ pub const PostInstallStatus = enum {
 /// `--use-system-ruby` suggestion we show on execute-time failures so
 /// users never see "completed" when statements were silently skipped.
 ///
+/// Auto-included Ruby-interpreter kegs (`ruby`, `ruby@N`) only fall
+/// through to the system-Ruby re-run when the DSL handled none of the
+/// body. Their effects often already landed at brew-install time, so a
+/// blanket re-run would double-stamp non-idempotent steps (counters,
+/// timestamps, version caches). Explicit `--use-system-ruby=NAME` is
+/// a user opt-in and falls through unconditionally.
+///
 /// Under `--verbose`, the skipped entries are dumped so users can tell
 /// WHICH helpers fell through. Under `--json`, a single status line is
 /// emitted to stdout for scripted pipelines.
@@ -121,7 +128,15 @@ pub fn routePostInstallOutcomeWithBody(
             output.info("post_install completed for {s}", .{name});
             break :blk .completed;
         }
-        if (useSystemRubyForFormula(use_system_ruby_list, name) or isSelfHostingRubyKeg(name)) {
+        // Auto-included Ruby-interpreter kegs (`ruby`, `ruby@N`) skip the
+        // re-run when the DSL handled any top-level statement: their
+        // post_install effects often already landed (e.g. `mt migrate ruby`
+        // after brew installed it), so a Ruby-side re-run would double-stamp
+        // non-idempotent steps. Explicit `--use-system-ruby=NAME` honors the
+        // user's opt-in unconditionally.
+        const explicit_opt_in = useSystemRubyForFormula(use_system_ruby_list, name);
+        const auto_self_hosting = isSelfHostingRubyKeg(name);
+        if (explicit_opt_in or (auto_self_hosting and !flog.dslDidWork())) {
             output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{name});
             if (output.isVerbose()) flog.printUnknown(name);
             if (output.isDebug()) flog.printFatal(name);

@@ -60,6 +60,11 @@ pub const Interpreter = struct {
 
     pub fn execute(self: *Interpreter, nodes: []const *const Node) DslError!void {
         for (nodes) |node| {
+            self.ctx.fallback_log_writer.total_top_level += 1;
+            // A statement counts as "handled" only if its eval threw nothing
+            // and logged nothing — the router uses that signal to gate the
+            // system-Ruby fallback away from already-applied bodies.
+            const before_entries = self.ctx.fallback_log_writer.entries.items.len;
             // Exhaustive: new DslError tags must be classified, not dropped.
             _ = self.eval(node) catch |e| switch (e) {
                 DslError.PostInstallFailed => return e,
@@ -77,6 +82,9 @@ pub const Interpreter = struct {
                 // value is discarded because there's no caller.
                 DslError.ReturnSignal => {
                     self.ctx.return_value = Value{ .nil = {} };
+                    if (self.ctx.fallback_log_writer.entries.items.len == before_entries) {
+                        self.ctx.fallback_log_writer.handled_top_level += 1;
+                    }
                     return;
                 },
                 // Per-statement diagnostics — log upstream, keep going.
@@ -87,6 +95,9 @@ pub const Interpreter = struct {
                 DslError.OutOfMemory,
                 => continue,
             };
+            if (self.ctx.fallback_log_writer.entries.items.len == before_entries) {
+                self.ctx.fallback_log_writer.handled_top_level += 1;
+            }
         }
     }
 

@@ -2661,3 +2661,85 @@ test "executePostInstall accepts FormulaRef and binds formula_name" {
     );
     try testing.expect(!flog.hasErrors());
 }
+
+// The router gates the system-Ruby re-run on this counter pair: a clean
+// run must leave `handled_top_level == total_top_level` so `dslDidWork()`
+// matches reality, otherwise a fully-applied body could be re-executed
+// and double-stamp non-idempotent steps.
+test "executePostInstall: clean body bumps handled and total top-level counters" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var flog = dsl.FallbackLog.init(a);
+    defer flog.deinit();
+
+    try dsl.executePostInstall(
+        std.Options.debug_io,
+        malt.app_ctx.processEnviron(),
+        a,
+        .{ .name = "acme", .version = "9.9.9", .pkg_version = "9.9.9" },
+        "_ = pkgshare\n_ = bin\n",
+        "/opt/testmalt",
+        &flog,
+    );
+    try testing.expect(!flog.hasErrors());
+    try testing.expectEqual(@as(usize, 2), flog.total_top_level);
+    try testing.expectEqual(@as(usize, 2), flog.handled_top_level);
+    try testing.expect(flog.dslDidWork());
+}
+
+// A statement whose evaluation logs a fall-through (unknown helper) must
+// NOT count as handled — `dslDidWork()` would be a lie. With a mix of
+// clean + skipped statements, only the clean ones bump `handled`.
+test "executePostInstall: per-statement fall-through suppresses the handled bump" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var flog = dsl.FallbackLog.init(a);
+    defer flog.deinit();
+
+    // First statement is a pure binding read (handled). Second invokes an
+    // unknown identifier, which logs `unknown_method` — this top-level
+    // statement must NOT be counted as handled.
+    try dsl.executePostInstall(
+        std.Options.debug_io,
+        malt.app_ctx.processEnviron(),
+        a,
+        .{ .name = "acme", .version = "9.9.9", .pkg_version = "9.9.9" },
+        "_ = pkgshare\nunknown_helper_xyz\n",
+        "/opt/testmalt",
+        &flog,
+    );
+    try testing.expect(flog.hasErrors());
+    try testing.expectEqual(@as(usize, 2), flog.total_top_level);
+    try testing.expectEqual(@as(usize, 1), flog.handled_top_level);
+    try testing.expect(flog.dslDidWork());
+}
+
+// All-unhandled body: every top-level statement logs a fall-through. The
+// counter signals "DSL did nothing useful" so the router still falls back
+// to system Ruby for users who opted in.
+test "executePostInstall: all-unhandled body leaves dslDidWork false" {
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var flog = dsl.FallbackLog.init(a);
+    defer flog.deinit();
+
+    try dsl.executePostInstall(
+        std.Options.debug_io,
+        malt.app_ctx.processEnviron(),
+        a,
+        .{ .name = "acme", .version = "9.9.9", .pkg_version = "9.9.9" },
+        "first_unknown\nsecond_unknown\n",
+        "/opt/testmalt",
+        &flog,
+    );
+    try testing.expect(flog.hasErrors());
+    try testing.expectEqual(@as(usize, 2), flog.total_top_level);
+    try testing.expectEqual(@as(usize, 0), flog.handled_top_level);
+    try testing.expect(!flog.dslDidWork());
+}
