@@ -168,6 +168,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                     &.{},
                     &.{},
                     &.{},
+                    &.{},
                     start_ts,
                 );
             }
@@ -271,6 +272,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer skipped_no_bottle_names.deinit(allocator);
     var failed_names: std.ArrayList([]const u8) = .empty;
     defer failed_names.deinit(allocator);
+    var cancelled_names: std.ArrayList([]const u8) = .empty;
+    defer cancelled_names.deinit(allocator);
 
     // Honour Ctrl-C raised during setup, before any network work starts.
     const main_mod = @import("../main.zig");
@@ -307,8 +310,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
         const outcomes = try allocator.alloc(parallel_mod.KegOutcome, keg_names.items.len);
         defer allocator.free(outcomes);
-        // Pre-populated so an interrupted/short-circuited slot still has a defined outcome.
-        for (outcomes, 0..) |*o, i| o.* = .{ .name = keg_names.items[i], .result = .skipped_installed };
+        // Pre-populated so an interrupted/short-circuited slot still has a
+        // defined outcome — `.cancelled` so untouched kegs surface as
+        // "you cancelled before I touched it" rather than "I had it already".
+        for (outcomes, 0..) |*o, i| o.* = .{ .name = keg_names.items[i], .result = .cancelled };
 
         // Pre-filter manifest+DB-confirmed skips so the multi-progress
         // line count matches actual work — drawing a "✓" for kegs that
@@ -386,6 +391,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 .skipped_post_install => try skipped_post_install_names.append(allocator, o.name),
                 .skipped_no_bottle => try skipped_no_bottle_names.append(allocator, o.name),
                 .failed_api, .failed_download, .failed_install => try failed_names.append(allocator, o.name),
+                .cancelled => try cancelled_names.append(allocator, o.name),
             }
         }
     } else {
@@ -454,6 +460,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 .skipped_post_install => try skipped_post_install_names.append(allocator, keg_name),
                 .skipped_no_bottle => try skipped_no_bottle_names.append(allocator, keg_name),
                 .failed_api, .failed_download, .failed_install => try failed_names.append(allocator, keg_name),
+                // The serial loop exits on Ctrl-C before migrateKeg ever
+                // returns; this arm exists only so the switch stays exhaustive.
+                .cancelled => try cancelled_names.append(allocator, keg_name),
             }
         }
     }
@@ -490,6 +499,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             skipped_post_install_names.items,
             skipped_no_bottle_names.items,
             failed_names.items,
+            cancelled_names.items,
             start_ts,
         );
         return;
@@ -500,6 +510,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const skipped: u32 = @intCast(skipped_installed_names.items.len + skipped_no_bottle_names.items.len);
     const skipped_post_install: u32 = @intCast(skipped_post_install_names.items.len);
     const failed: u32 = @intCast(failed_names.items.len);
+    const cancelled: u32 = @intCast(cancelled_names.items.len);
 
     output.plain("", .{});
     if (failed == 0) {
@@ -510,6 +521,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     output.info("Migrated: {d}", .{migrated});
     if (skipped > 0)
         output.info("Skipped (installed): {d}", .{skipped});
+    if (cancelled > 0)
+        output.info("Cancelled: {d}", .{cancelled});
     if (skipped_post_install > 0) {
         output.warn("Skipped (post_install): {d}", .{skipped_post_install});
         for (skipped_post_install_names.items) |name| {
@@ -589,6 +602,7 @@ fn emitSummaryJson(
     skipped_post_install_names: []const []const u8,
     skipped_no_bottle_names: []const []const u8,
     failed_names: []const []const u8,
+    cancelled_names: []const []const u8,
     start_ts: i64,
 ) !void {
     var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -601,6 +615,7 @@ fn emitSummaryJson(
         skipped_post_install_names,
         skipped_no_bottle_names,
         failed_names,
+        cancelled_names,
         output.drainPostInstallEvents(),
         start_ts,
     );
@@ -640,6 +655,7 @@ pub fn buildSummaryJson(
     skipped_post_install_names: []const []const u8,
     skipped_no_bottle_names: []const []const u8,
     failed_names: []const []const u8,
+    cancelled_names: []const []const u8,
     post_install_events: []const []const u8,
     start_ts: i64,
 ) !void {
@@ -655,22 +671,25 @@ pub fn buildSummaryJson(
     try output.jsonStringArray(w, skipped_no_bottle_names);
     try w.writeAll(",\"failed\":");
     try output.jsonStringArray(w, failed_names);
+    try w.writeAll(",\"cancelled\":");
+    try output.jsonStringArray(w, cancelled_names);
     try w.writeAll(",\"post_install_events\":[");
     for (post_install_events, 0..) |entry, i| {
         if (i > 0) try w.writeAll(",");
         try w.writeAll(entry);
     }
     try w.writeAll("]");
-    var counts_buf: [256]u8 = undefined;
+    var counts_buf: [320]u8 = undefined;
     const counts = try std.fmt.bufPrint(
         &counts_buf,
-        ",\"counts\":{{\"migrated\":{d},\"skipped_installed\":{d},\"skipped_post_install\":{d},\"skipped_no_bottle\":{d},\"failed\":{d}}}",
+        ",\"counts\":{{\"migrated\":{d},\"skipped_installed\":{d},\"skipped_post_install\":{d},\"skipped_no_bottle\":{d},\"failed\":{d},\"cancelled\":{d}}}",
         .{
             migrated_names.len,
             skipped_installed_names.len,
             skipped_post_install_names.len,
             skipped_no_bottle_names.len,
             failed_names.len,
+            cancelled_names.len,
         },
     );
     try w.writeAll(counts);

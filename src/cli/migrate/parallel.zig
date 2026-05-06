@@ -102,11 +102,10 @@ fn worker(pool: *Pool) void {
         else
             null;
 
-        if (main_mod.isInterrupted()) {
-            pool.outcomes[idx] = .{ .name = keg_name, .result = .skipped_installed };
-            continue;
-        }
-
+        // Manifest+DB check runs before the interrupt check so a keg that
+        // was already installed surfaces as `.skipped_installed` even when
+        // Ctrl-C fires mid-run; reversing the order would demote real
+        // skips to `.cancelled` and lie about on-disk state.
         pool.manifest_mu.lockUncancelable(io);
         const in_manifest = pool.manifest.contains(keg_name);
         pool.manifest_mu.unlock(io);
@@ -114,6 +113,11 @@ fn worker(pool: *Pool) void {
         // uninstall` — see the matching note in cli/migrate.zig.
         if (in_manifest and keg_mod.isInstalled(pool.db, keg_name)) {
             pool.outcomes[idx] = .{ .name = keg_name, .result = .skipped_installed };
+            continue;
+        }
+
+        if (main_mod.isInterrupted()) {
+            pool.outcomes[idx] = .{ .name = keg_name, .result = .cancelled };
             continue;
         }
 
@@ -215,4 +219,48 @@ test "boundWorkerCount caps by job count" {
     try std.testing.expectEqual(@as(u32, 2), boundWorkerCount(4, 2));
     try std.testing.expectEqual(@as(u32, 4), boundWorkerCount(4, 10));
     try std.testing.expectEqual(@as(u32, 0), boundWorkerCount(4, 0));
+}
+
+// Pre-set SIGINT with an empty manifest: every slot falls through the
+// manifest+DB short-circuit and lands on the interrupt arm, so the
+// summary can tell "you cancelled before I touched it" from "I had it
+// already." The DB pointer stays `undefined` because the empty manifest
+// short-circuits the `and` before any DB query runs.
+test "worker interrupt branch routes untouched kegs to .cancelled" {
+    main_mod.setInterruptedForTest(true);
+    defer main_mod.setInterruptedForTest(false);
+
+    const app_ctx_mod = @import("../../app_ctx.zig");
+    const names = [_][]const u8{ "a", "b", "c" };
+    var outcomes: [names.len]KegOutcome = undefined;
+    for (&outcomes, 0..) |*o, i| o.* = .{ .name = names[i], .result = .cancelled };
+
+    var manifest = manifest_mod.Manifest.init(std.testing.allocator);
+    defer manifest.deinit();
+    var manifest_mu: std.Io.Mutex = .init;
+    var db_mu: std.Io.Mutex = .init;
+
+    var pool: Pool = .{
+        .app_ctx = &app_ctx_mod.debug_ctx,
+        .next_idx = std.atomic.Value(usize).init(0),
+        .keg_names = &names,
+        .outcomes = &outcomes,
+        .cache_dir = "",
+        .prefix = "",
+        .homebrew_prefix = "",
+        .use_system_ruby_scope = &.{},
+        .http_pool = undefined,
+        .store = undefined,
+        .linker = undefined,
+        .db = undefined,
+        .db_mu = &db_mu,
+        .manifest = &manifest,
+        .manifest_mu = &manifest_mu,
+        .manifest_path = "",
+        .manifest_allocator = std.testing.allocator,
+        .post_install_queue = undefined,
+    };
+    try run(std.testing.allocator, &pool, 2);
+
+    for (outcomes) |o| try std.testing.expectEqual(keg_mod.KegResult.cancelled, o.result);
 }
