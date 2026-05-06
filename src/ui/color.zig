@@ -320,15 +320,15 @@ const dark_basic: Palette = .{
 // yellow→magenta. Detail reuses the dark-basic faint code so both basic
 // palettes render meta info identically — dropping into the default
 // foreground on terminals that ignore SGR 2.
-// Notice collides with warn here (both magenta); the two never co-appear
-// and truecolor terminals (the common case) carry the visual distinction.
+// Notice picks cyan so it stays distinct from warn's magenta on the one
+// palette where the same hue would otherwise collapse the two roles.
 const light_basic: Palette = .{
     .info = "\x1b[34m",
     .warn = "\x1b[35m",
     .success = "\x1b[32m",
     .err = "\x1b[31m",
     .detail = "\x1b[2m",
-    .notice = "\x1b[35m",
+    .notice = "\x1b[36m",
 };
 
 /// Pure palette lookup. Exposed so tests pin every cell.
@@ -383,9 +383,14 @@ test "paletteCode: notice — dark + basic is magenta (distinct from yellow warn
     try std.testing.expectEqualStrings("\x1b[35m", paletteCode(.notice, .dark, false));
 }
 
-// Light + basic shares the magenta escape with warn — the two never
-// co-appear and truecolor terminals carry the visual distinction via
-// violet-700. Pinned so the choice stays a deliberate, reviewable diff.
-test "paletteCode: notice — light + basic reuses magenta (intentional warn collision)" {
-    try std.testing.expectEqualStrings("\x1b[35m", paletteCode(.notice, .light, false));
+// Light + basic must avoid warn's magenta — on a NO_COLOR-y / no-emoji
+// terminal the glyph alone already carries the distinction, but as soon
+// as basic colour is on the two lines have to land on different hues.
+test "paletteCode: notice — light + basic uses cyan, distinct from warn-magenta" {
+    try std.testing.expectEqualStrings("\x1b[36m", paletteCode(.notice, .light, false));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        paletteCode(.notice, .light, false),
+        paletteCode(.warn, .light, false),
+    ));
 }

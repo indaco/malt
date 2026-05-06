@@ -263,12 +263,14 @@ pub fn err(comptime fmt: []const u8, args: anytype) void {
 }
 
 /// "FYI / explanation" line — a passive heads-up that is neither a warning
-/// nor a failure. Purple/violet glyph so it reads distinctly from `warn`.
+/// nor a failure. Each tier picks an info-shaped glyph (`ⓘ` / `i`) so the
+/// line reads distinctly from `warn`'s `⚠`/`!` on every (color, emoji)
+/// combination, including NO_COLOR + MALT_NO_EMOJI.
 pub fn notice(comptime fmt: []const u8, args: anytype) void {
     if (quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writePrefixedLine(msg, .notice, "  ! ", "  ! ");
+    writePrefixedLine(msg, .notice, "  ⓘ ", "  i ");
 }
 
 /// Print a confirmation prompt: info-coloured `?` icon, bold message,
@@ -545,7 +547,7 @@ pub fn emitNdjsonEvent(
 // Sister tests for the other prefix-line helpers live alongside the public
 // API surface in tests/output_test.zig; these are kept inline because the
 // helper is a thin wrapper over the already-tested writePrefixedLine.
-test "notice wraps the magenta prefix and uses the bang glyph (dark + basic)" {
+test "notice wraps the magenta prefix and uses the circled-i glyph (dark + basic)" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const prior_quiet = isQuiet();
@@ -563,10 +565,10 @@ test "notice wraps the magenta prefix and uses the bang glyph (dark + basic)" {
     }
 
     notice("heads up", .{});
-    try std.testing.expectEqualStrings("\x1b[35m  ! \x1b[0mheads up\n", buf.items);
+    try std.testing.expectEqualStrings("\x1b[35m  ⓘ \x1b[0mheads up\n", buf.items);
 }
 
-test "notice falls back to ASCII bang prefix when emoji and color are off" {
+test "notice falls back to an info-style ASCII glyph when emoji and color are off" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     const prior_quiet = isQuiet();
@@ -580,7 +582,34 @@ test "notice falls back to ASCII bang prefix when emoji and color are off" {
     }
 
     notice("plain notice", .{});
-    try std.testing.expectEqualStrings("  ! plain notice\n", buf.items);
+    try std.testing.expectEqualStrings("  i plain notice\n", buf.items);
+}
+
+// Regression: with NO_COLOR + MALT_NO_EMOJI both lines used to render
+// bytewise-identical `  ! <msg>` — pinning the divergence keeps CI logs
+// and minimalist terminals able to tell a passive notice from a warning.
+test "notice and warn render bytewise-distinct lines with color and emoji off" {
+    const prior_quiet = isQuiet();
+    color.setForTest(false, false);
+    setQuiet(false);
+    defer {
+        color.setForTest(null, null);
+        setQuiet(prior_quiet);
+    }
+
+    var notice_buf: std.ArrayList(u8) = .empty;
+    defer notice_buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &notice_buf);
+    notice("same message", .{});
+    endStderrCapture();
+
+    var warn_buf: std.ArrayList(u8) = .empty;
+    defer warn_buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &warn_buf);
+    warn("same message", .{});
+    endStderrCapture();
+
+    try std.testing.expect(!std.mem.eql(u8, notice_buf.items, warn_buf.items));
 }
 
 test "notice is suppressed by --quiet" {
