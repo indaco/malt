@@ -6,6 +6,7 @@ const std = @import("std");
 const archive = @import("../fs/archive.zig");
 const client_mod = @import("../net/client.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
+const hash_mod = @import("hash.zig");
 const install_cmd = @import("../cli/install.zig");
 
 pub const BottleError = error{
@@ -103,20 +104,13 @@ pub fn download(
 }
 
 /// Verify SHA256 of a file on disk.
-pub fn verify(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8, expected_sha256: []const u8) !bool {
-    const file = std.Io.Dir.openFileAbsolute(io, file_path, .{}) catch return false;
-    defer file.close(io);
-
-    const stat = file.stat(io) catch return false;
-    const data = allocator.alloc(u8, stat.size) catch return false;
-    defer allocator.free(data);
-
-    const bytes_read = file.readPositionalAll(io, data, 0) catch return false;
-    if (bytes_read < data.len) return false;
-
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(data, &hash, .{});
-    const computed_hex = std.fmt.bytesToHex(hash, .lower);
+///
+/// Streams the file through the centralised SHA256 helper so peak RSS
+/// stays bounded by the 64 KiB read chunk, not the bottle size (200-400
+/// MB for ffmpeg/llvm).
+pub fn verify(io: std.Io, file_path: []const u8, expected_sha256: []const u8) !bool {
+    const raw = hash_mod.hashFileSha256Raw(io, file_path) catch return false;
+    const computed_hex = std.fmt.bytesToHex(raw, .lower);
 
     // Constant-time SHA compare — denies a byte-by-byte timing oracle on
     // re-verify-on-disk paths reachable with a remote-controllable hash.
@@ -138,7 +132,7 @@ test "verify returns true when sha256 matches on-disk content" {
 
     // SHA256("hello")
     const expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
-    try testing.expect(try verify(io, testing.allocator, path, expected));
+    try testing.expect(try verify(io, path, expected));
 }
 
 test "verify returns false for a mismatching sha256" {
@@ -154,12 +148,12 @@ test "verify returns false for a mismatching sha256" {
     try f.writeStreamingAll(io, "hello");
     f.close(io);
 
-    try testing.expect(!try verify(io, testing.allocator, path, "00" ** 32));
+    try testing.expect(!try verify(io, path, "00" ** 32));
 }
 
 test "verify returns false when the file does not exist" {
     const testing = std.testing;
-    try testing.expect(!try verify(std.Options.debug_io, testing.allocator, "/tmp/malt_bottle_verify_missing_xyz", "00" ** 32));
+    try testing.expect(!try verify(std.Options.debug_io, "/tmp/malt_bottle_verify_missing_xyz", "00" ** 32));
 }
 
 test "verify rejects mismatches in any position (constant-time-equivalent)" {
@@ -181,10 +175,10 @@ test "verify rejects mismatches in any position (constant-time-equivalent)" {
     const mid_diff = "2cf24dba5fb0a30e26e83b2ac5b9e29f1b161e5c1fa7425e73043362938b9824";
     const tail_diff = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9825";
 
-    try testing.expect(try verify(io, testing.allocator, path, correct));
-    try testing.expect(!try verify(io, testing.allocator, path, head_diff));
-    try testing.expect(!try verify(io, testing.allocator, path, mid_diff));
-    try testing.expect(!try verify(io, testing.allocator, path, tail_diff));
+    try testing.expect(try verify(io, path, correct));
+    try testing.expect(!try verify(io, path, head_diff));
+    try testing.expect(!try verify(io, path, mid_diff));
+    try testing.expect(!try verify(io, path, tail_diff));
 }
 
 test "verify rejects expected_sha256 of wrong length" {
@@ -200,8 +194,40 @@ test "verify rejects expected_sha256 of wrong length" {
     try f.writeStreamingAll(io, "hello");
     f.close(io);
 
-    try testing.expect(!try verify(io, testing.allocator, path, "2c"));
-    try testing.expect(!try verify(io, testing.allocator, path, "00" ** 32 ++ "00"));
+    try testing.expect(!try verify(io, path, "2c"));
+    try testing.expect(!try verify(io, path, "00" ** 32 ++ "00"));
+}
+
+test "verify hashes payloads larger than the streaming chunk without buffering" {
+    // 192 KiB > 64 KiB read chunk: forces the streaming hasher across
+    // multiple positional reads, exercising the path that real bottles
+    // (200-400 MB) hit. RSS stays bounded by the chunk size.
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    const base = "/tmp/malt_bottle_verify_chunked";
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const size: usize = 192 * 1024;
+    const payload = try testing.allocator.alloc(u8, size);
+    defer testing.allocator.free(payload);
+    for (payload, 0..) |*b, i| b.* = @truncate(i);
+
+    const path = base ++ "/payload.bin";
+    const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+    try f.writeStreamingAll(io, payload);
+    f.close(io);
+
+    var raw: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(payload, &raw, .{});
+    const expected = std.fmt.bytesToHex(raw, .lower);
+
+    try testing.expect(try verify(io, path, &expected));
+
+    var bad = expected;
+    bad[0] = if (bad[0] == '0') '1' else '0';
+    try testing.expect(!try verify(io, path, &bad));
 }
 
 test "buildTmpArchivePath returns PathTooLong for an oversized dest_dir" {
