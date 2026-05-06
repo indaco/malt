@@ -515,3 +515,82 @@ test "upgrade with a missing transitive dep does not error with lock contention"
 
     try testing.expect(std.mem.indexOf(u8, captured.items, "Another mt process is running") == null);
 }
+
+// Pre-fix, every keg row went through `formulae.brew.sh/api/formula/<name>.json`,
+// so a tap-installed package surfaced as `Could not fetch formula info for X` and
+// error.Aborted - even though the package never lived on the core API. The new
+// upgrade path consults `kegs.tap` and routes anything off `homebrew/core` through
+// the tap-aware branch instead. The malformed-label case below pins the routing:
+// the old API error must NOT appear, because we exit on the tap-side parse check.
+test "upgrade routes tap-installed kegs away from the core formula API" {
+    const path = try setupPrefix("upgrade_tap_routing");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openSeededDb(path);
+        defer db.close();
+        // Tap label is intentionally malformed (no slash) so the tap-side
+        // parser rejects it before any network call and we never touch the
+        // core API regardless of cache state.
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, tap, store_sha256, cellar_path)
+            \\VALUES ('baguette', 'tap-only/repo/baguette', '0.1', 'tap-only-no-slash', 'sha-old', '/cellar/baguette/0.1');
+        );
+    }
+
+    // Seed a 404 marker for the core API so the OLD codepath would have
+    // surfaced "Could not fetch formula info" without touching the network.
+    // The NEW codepath must never read this marker.
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{path});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_baguette.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    const mf = try test_io.createFileAbsolute(std.Options.debug_io, marker, .{ .truncate = true });
+    mf.close(std.Options.debug_io);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try testing.expectError(
+        error.Aborted,
+        upgrade.execute(&ctx, testing.allocator, &.{"baguette"}),
+    );
+
+    // Routing guard: the OLD core-API error must never appear for a tap keg.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Could not fetch formula info") == null);
+    // Positive signal: the tap-side parser rejected the malformed label.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Cannot parse tap") != null);
+}
+
+// A pinned tap-installed keg short-circuits in pinSkip before any network
+// activity - same contract as a pinned core keg, just on the tap branch.
+test "upgrade <pinned-tap-keg> short-circuits without resolving HEAD" {
+    const path = try setupPrefix("upgrade_tap_pinned");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openSeededDb(path);
+        defer db.close();
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, tap, store_sha256, cellar_path, pinned)
+            \\VALUES ('frozen-tap', 'user/repo/frozen-tap', '1.0', 'user/repo', 'sha', '/cellar/frozen-tap/1.0', 1);
+        );
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    // Pinned + non-force = quiet skip on the tap branch too.
+    try upgrade.execute(&ctx, testing.allocator, &.{"frozen-tap"});
+}

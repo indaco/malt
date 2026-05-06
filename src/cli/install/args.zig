@@ -40,6 +40,16 @@ pub fn isTapFormula(name: []const u8) bool {
     return slash_count == 2;
 }
 
+/// True when `tap_label` represents one of Homebrew's core taps. Empty
+/// or NULL labels also count as core so legacy keg rows that predate
+/// the tap-tracking column don't get mis-routed through the tap path.
+pub fn isCoreTap(tap_label: []const u8) bool {
+    if (tap_label.len == 0) return true;
+    if (std.mem.eql(u8, tap_label, "homebrew/core")) return true;
+    if (std.mem.eql(u8, tap_label, "homebrew/cask")) return true;
+    return false;
+}
+
 /// Shape-based detection for a local `.rb` path argument (e.g.
 /// `./wget.rb`, `/tmp/wget.rb`, `~/f/wget.rb`, `a/b/c/d.rb`). Pure:
 /// no filesystem access, no allocation.
@@ -108,4 +118,27 @@ pub fn expandTildePath(ctx: *const AppCtx, buf: []u8, arg: []const u8) ?[]const 
     if (arg.len < 2 or arg[0] != '~' or arg[1] != '/') return arg;
     const home = std.process.Environ.getPosix(ctx.environ, "HOME") orelse return null;
     return std.fmt.bufPrint(buf, "{s}{s}", .{ home, arg[1..] }) catch null;
+}
+
+test "isCoreTap recognises homebrew/core and homebrew/cask" {
+    try std.testing.expect(isCoreTap("homebrew/core"));
+    try std.testing.expect(isCoreTap("homebrew/cask"));
+}
+
+test "isCoreTap treats empty string as core (legacy rows)" {
+    // Pre-tap-tracking kegs have NULL/empty `tap`; they must keep
+    // routing through the core API path.
+    try std.testing.expect(isCoreTap(""));
+}
+
+test "isCoreTap rejects third-party tap labels" {
+    try std.testing.expect(!isCoreTap("user/repo"));
+    try std.testing.expect(!isCoreTap("acme/tools"));
+    try std.testing.expect(!isCoreTap("homebrew/services"));
+}
+
+test "isCoreTap is exact-match (not prefix)" {
+    // `homebrew/core-staging` is a hypothetical fork; treat it as third-party.
+    try std.testing.expect(!isCoreTap("homebrew/core-staging"));
+    try std.testing.expect(!isCoreTap("homebrew/cask-fonts"));
 }

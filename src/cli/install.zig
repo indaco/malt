@@ -27,6 +27,7 @@ pub const max_prefix_sane_len = args_mod.max_prefix_sane_len;
 pub const PrefixError = args_mod.PrefixError;
 pub const checkPrefixSane = args_mod.checkPrefixSane;
 pub const isTapFormula = args_mod.isTapFormula;
+pub const isCoreTap = args_mod.isCoreTap;
 pub const isLocalFormulaPath = args_mod.isLocalFormulaPath;
 pub const isSelfInstall = args_mod.isSelfInstall;
 pub const parseTapName = args_mod.parseTapName;
