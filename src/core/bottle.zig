@@ -116,14 +116,11 @@ pub fn verify(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8, e
 
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(data, &hash, .{});
-    var hex_buf: [64]u8 = undefined;
-    const hex_chars = "0123456789abcdef";
-    for (hash, 0..) |byte, i| {
-        hex_buf[i * 2] = hex_chars[byte >> 4];
-        hex_buf[i * 2 + 1] = hex_chars[byte & 0x0f];
-    }
+    const computed_hex = std.fmt.bytesToHex(hash, .lower);
 
-    return std.mem.eql(u8, &hex_buf, expected_sha256);
+    // Constant-time SHA compare — denies a byte-by-byte timing oracle on
+    // re-verify-on-disk paths reachable with a remote-controllable hash.
+    return install_cmd.constantTimeEql(u8, &computed_hex, expected_sha256);
 }
 
 test "verify returns true when sha256 matches on-disk content" {
@@ -163,6 +160,48 @@ test "verify returns false for a mismatching sha256" {
 test "verify returns false when the file does not exist" {
     const testing = std.testing;
     try testing.expect(!try verify(std.Options.debug_io, testing.allocator, "/tmp/malt_bottle_verify_missing_xyz", "00" ** 32));
+}
+
+test "verify rejects mismatches in any position (constant-time-equivalent)" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    const base = "/tmp/malt_bottle_verify_positions";
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const path = base ++ "/payload.bin";
+    const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+    try f.writeStreamingAll(io, "hello");
+    f.close(io);
+
+    // SHA256("hello"); flip the first, middle, and last hex char in turn.
+    const correct = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    const head_diff = "3cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    const mid_diff = "2cf24dba5fb0a30e26e83b2ac5b9e29f1b161e5c1fa7425e73043362938b9824";
+    const tail_diff = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9825";
+
+    try testing.expect(try verify(io, testing.allocator, path, correct));
+    try testing.expect(!try verify(io, testing.allocator, path, head_diff));
+    try testing.expect(!try verify(io, testing.allocator, path, mid_diff));
+    try testing.expect(!try verify(io, testing.allocator, path, tail_diff));
+}
+
+test "verify rejects expected_sha256 of wrong length" {
+    const testing = std.testing;
+    const io = std.Options.debug_io;
+    const base = "/tmp/malt_bottle_verify_length";
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    std.Io.Dir.createDirAbsolute(io, base, .default_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+
+    const path = base ++ "/payload.bin";
+    const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
+    try f.writeStreamingAll(io, "hello");
+    f.close(io);
+
+    try testing.expect(!try verify(io, testing.allocator, path, "2c"));
+    try testing.expect(!try verify(io, testing.allocator, path, "00" ** 32 ++ "00"));
 }
 
 test "buildTmpArchivePath returns PathTooLong for an oversized dest_dir" {
