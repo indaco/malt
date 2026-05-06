@@ -11,6 +11,16 @@ const Value = values.Value;
 const BuiltinError = pathname.BuiltinError;
 const ExecCtx = pathname.ExecCtx;
 
+/// Categorises the step that failed during a temp-file + rename atomic write.
+/// The original underlying error is surfaced separately so triage gets both
+/// "which step" and "why" rather than a collapsed AccessDenied.
+const AtomicWriteError = error{
+    TempCreateFailed,
+    WriteFailed,
+    RenameFailed,
+    NameTooLong,
+};
+
 /// inreplace(path, from_string, to_string)
 /// Reads the file at `path`, replaces all occurrences of `from_string` with
 /// `to_string`, and writes the result back atomically.
@@ -40,10 +50,12 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
     // fails (e.g. ENOSPC in the target directory), fall back to a direct
     // overwrite and log the fallback so the user is aware that the write
     // did *not* use the atomic path.
-    writeAtomic(ctx.io, path, new_content) catch |e| {
+    var underlying_name: ?[]const u8 = null;
+    writeAtomic(ctx.io, path, new_content, &underlying_name) catch |e| {
         const stderr: std.Io.File = .{ .handle = std.posix.STDERR_FILENO, .flags = .{ .nonblocking = false } };
         var buf: [512]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "malt: inreplace atomic write failed ({s}); falling back to direct overwrite\n", .{@errorName(e)}) catch return Value{ .nil = {} };
+        const underlying = underlying_name orelse @errorName(e);
+        const msg = formatAtomicWriteFailureMessage(&buf, e, underlying) catch return Value{ .nil = {} };
         // Warning is advisory; fallback write is the load-bearing step.
         stderr.writeStreamingAll(ctx.io, msg) catch {};
         writeDirectly(ctx.io, path, new_content);
@@ -93,10 +105,16 @@ fn replaceAll(allocator: std.mem.Allocator, haystack: []const u8, needle: []cons
 }
 
 /// Write content atomically: write to temp file then rename over original.
-fn writeAtomic(io: std.Io, path: []const u8, content: []const u8) !void {
+/// Returns one of `AtomicWriteError` to identify the failing step; the
+/// underlying error name is written to `underlying_name_out` so the caller
+/// can surface the real cause (e.g. NoSpaceLeft) instead of a generic label.
+fn writeAtomic(io: std.Io, path: []const u8, content: []const u8, underlying_name_out: *?[]const u8) AtomicWriteError!void {
     const dir_path = std.fs.path.dirname(path) orelse "/";
 
-    var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{}) catch |e| {
+        underlying_name_out.* = @errorName(e);
+        return error.TempCreateFailed;
+    };
     defer dir.close(io);
 
     // Create a temp file in the same directory
@@ -105,21 +123,37 @@ fn writeAtomic(io: std.Io, path: []const u8, content: []const u8) !void {
     const tmp_name = std.fmt.bufPrint(&tmp_name_buf, ".{s}.malt.tmp", .{basename}) catch return error.NameTooLong;
 
     // Write temp file
-    const tmp_file = dir.createFile(io, tmp_name, .{}) catch return error.AccessDenied;
-    tmp_file.writeStreamingAll(io, content) catch {
+    const tmp_file = dir.createFile(io, tmp_name, .{}) catch |e| {
+        underlying_name_out.* = @errorName(e);
+        return error.TempCreateFailed;
+    };
+    tmp_file.writeStreamingAll(io, content) catch |e| {
         tmp_file.close(io);
         // Cleanup of the partial tmp file; the write error is what we return.
         dir.deleteFile(io, tmp_name) catch {};
-        return error.AccessDenied;
+        underlying_name_out.* = @errorName(e);
+        return error.WriteFailed;
     };
     tmp_file.close(io);
 
     // Rename over original
-    dir.rename(tmp_name, dir, basename, io) catch {
+    dir.rename(tmp_name, dir, basename, io) catch |e| {
         // Cleanup of the orphaned tmp file; the rename error is what we return.
         dir.deleteFile(io, tmp_name) catch {};
-        return error.AccessDenied;
+        underlying_name_out.* = @errorName(e);
+        return error.RenameFailed;
     };
+}
+
+/// Render the user-visible warning that precedes the direct-overwrite fallback.
+/// Surfaces both the failing step (e.g. WriteFailed) and the underlying cause
+/// (e.g. NoSpaceLeft) so operators can triage without reading the source.
+fn formatAtomicWriteFailureMessage(buf: []u8, kind: AtomicWriteError, underlying: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "malt: inreplace atomic write failed ({s}: {s}); falling back to direct overwrite\n",
+        .{ @errorName(kind), underlying },
+    );
 }
 
 /// Fallback: direct overwrite (no atomicity guarantee).
@@ -145,4 +179,23 @@ fn readFileAllAbsolute(io: std.Io, allocator: std.mem.Allocator, abs_path: []con
     @memcpy(shrunk, buf[0..n]);
     allocator.free(buf);
     return shrunk;
+}
+
+test "atomic-write failure message preserves the underlying error name" {
+    var buf: [256]u8 = undefined;
+    const msg = try formatAtomicWriteFailureMessage(&buf, error.WriteFailed, "NoSpaceLeft");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "WriteFailed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "NoSpaceLeft") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "AccessDenied") == null);
+}
+
+test "atomic-write failure message names the failing step" {
+    var buf: [256]u8 = undefined;
+    const create_msg = try formatAtomicWriteFailureMessage(&buf, error.TempCreateFailed, "ReadOnlyFileSystem");
+    try std.testing.expect(std.mem.indexOf(u8, create_msg, "TempCreateFailed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, create_msg, "ReadOnlyFileSystem") != null);
+
+    const rename_msg = try formatAtomicWriteFailureMessage(&buf, error.RenameFailed, "CrossDeviceLink");
+    try std.testing.expect(std.mem.indexOf(u8, rename_msg, "RenameFailed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rename_msg, "CrossDeviceLink") != null);
 }
