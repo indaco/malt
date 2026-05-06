@@ -431,6 +431,7 @@ test "buildSummaryJson emits per-category arrays + counts object" {
         &.{"fancy-keg"},
         &.{},
         &.{"brokenpkg"},
+        &.{"untouched"},
         &.{},
         0,
     );
@@ -447,6 +448,8 @@ test "buildSummaryJson emits per-category arrays + counts object" {
     try testing.expectEqual(@as(usize, 0), root.get("skipped_no_bottle").?.array.items.len);
     try testing.expectEqual(@as(usize, 1), root.get("failed").?.array.items.len);
     try testing.expectEqualStrings("brokenpkg", root.get("failed").?.array.items[0].string);
+    try testing.expectEqual(@as(usize, 1), root.get("cancelled").?.array.items.len);
+    try testing.expectEqualStrings("untouched", root.get("cancelled").?.array.items[0].string);
 
     const counts = root.get("counts").?.object;
     try testing.expectEqual(@as(i64, 2), counts.get("migrated").?.integer);
@@ -454,6 +457,7 @@ test "buildSummaryJson emits per-category arrays + counts object" {
     try testing.expectEqual(@as(i64, 1), counts.get("skipped_post_install").?.integer);
     try testing.expectEqual(@as(i64, 0), counts.get("skipped_no_bottle").?.integer);
     try testing.expectEqual(@as(i64, 1), counts.get("failed").?.integer);
+    try testing.expectEqual(@as(i64, 1), counts.get("cancelled").?.integer);
 }
 
 // Under `--json`, post_install events land inside the summary doc
@@ -472,6 +476,7 @@ test "buildSummaryJson embeds post_install_events when buffer has entries" {
         &aw.writer,
         "/opt/homebrew",
         &.{ "ca-certificates", "openssl@3" },
+        &.{},
         &.{},
         &.{},
         &.{},
@@ -507,6 +512,7 @@ test "buildSummaryJson emits an empty post_install_events array when buffer is e
         &.{},
         &.{},
         &.{},
+        &.{},
         0,
     );
 
@@ -520,7 +526,7 @@ test "buildSummaryJson escapes adversarial keg names per RFC 8259" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     const names = [_][]const u8{"weird\"\\keg"};
-    try migrate.buildSummaryJson(&aw.writer, "/opt/homebrew", &names, &.{}, &.{}, &.{}, &.{}, &.{}, 0);
+    try migrate.buildSummaryJson(&aw.writer, "/opt/homebrew", &names, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, 0);
 
     const parsed = try parseAndCheck(aw.written());
     defer parsed.deinit();

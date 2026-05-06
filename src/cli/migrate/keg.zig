@@ -21,7 +21,9 @@ const post_install_mod = @import("../install/post_install.zig");
 const post_install_queue_mod = @import("post_install_queue.zig");
 const install_receipt_mod = @import("../../core/install_receipt.zig");
 
-/// Result of migrating a single keg.
+/// Result of migrating a single keg. `cancelled` marks slots a worker
+/// never reached because SIGINT raced ahead — distinct from
+/// `skipped_installed` (the keg was already migrated).
 pub const KegResult = enum {
     migrated,
     skipped_installed,
@@ -30,6 +32,7 @@ pub const KegResult = enum {
     failed_api,
     failed_download,
     failed_install,
+    cancelled,
 };
 
 /// Named-field bundle for the shared state `migrateKeg` threads across
