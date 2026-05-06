@@ -2080,3 +2080,268 @@ test "dry-run with 4 kegs under testing.allocator shows zero leaks" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
     try migrate.execute(&ctx, testing.allocator, &.{ "--dry-run", "--quiet" });
 }
+
+// ── Tap-fallback post_install execution ─────────────────────────────────
+//
+// migrateFromLocalCellar runs when the brew API has no record of a keg
+// (private/third-party tap). Tap kegs aren't reachable from the bottle
+// DSL pipeline's locator, so the fallback resolves the body straight
+// off the tap's `<name>.rb` and feeds it to the same DSL +
+// FallbackLog → outcome routing the install path uses. A trivially-
+// empty body should land on the "completed" branch.
+
+test "tap fallback runs the DSL post_install body and reports completion" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    const brew = try scratchDir("brew_tap_pi");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    // ≤13 bytes — same Mach-O patching budget the sister tests rely on.
+    const mt_z: [:0]const u8 = "/tmp/mt_tpi";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Source Cellar keg dir + receipt with non-core tap so the fallback
+    // accepts the local copy and source.path so we exercise the receipt
+    // branch in findTapFormulaRb. Body is a no-op so the DSL run lands
+    // cleanly on the "completed" branch.
+    const tap_rb = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/Library/Taps/owner/homebrew-tap/Formula/g/glow.rb",
+        .{brew},
+    );
+    defer testing.allocator.free(tap_rb);
+    const tap_dir = std.fs.path.dirname(tap_rb).?;
+    try test_io.cwd().createDirPath(std.Options.debug_io, tap_dir);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, tap_rb, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\class Glow < Formula
+            \\  url "x"
+            \\  def post_install
+            \\    # no-op; pins the completed-DSL outcome path
+            \\  end
+            \\end
+            \\
+        );
+    }
+
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/glow/0.2.2", .{brew});
+    defer testing.allocator.free(keg_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
+    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    defer testing.allocator.free(receipt_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        const body = try std.fmt.allocPrint(
+            testing.allocator,
+            "{{\"source\":{{\"tap\":\"owner/tap\",\"path\":\"{s}\",\"versions\":{{\"stable\":\"0.2.2\"}}}}}}",
+            .{tap_rb},
+        );
+        defer testing.allocator.free(body);
+        try f.writeStreamingAll(std.Options.debug_io, body);
+    }
+
+    // 404 marker forces fetchFormula → error.NotFound, routing the keg
+    // into the local-Cellar fallback offline.
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_glow.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer io_mod.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
+
+    try testing.expect(containsLine(stderr_buf.items, "post_install completed for glow"));
+    try testing.expect(!containsLine(stderr_buf.items, "post_install partially skipped"));
+}
+
+test "tap fallback partial-DSL emits the --use-system-ruby hint same as install" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    const brew = try scratchDir("brew_tap_partial");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    const mt_z: [:0]const u8 = "/tmp/mt_tpp";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Body calls a helper the DSL doesn't speak — FallbackLog records
+    // unknown_method, router downgrades to "partially skipped".
+    const tap_rb = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/Library/Taps/owner/homebrew-tap/Formula/g/gizmo.rb",
+        .{brew},
+    );
+    defer testing.allocator.free(tap_rb);
+    const tap_dir = std.fs.path.dirname(tap_rb).?;
+    try test_io.cwd().createDirPath(std.Options.debug_io, tap_dir);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, tap_rb, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\class Gizmo < Formula
+            \\  url "x"
+            \\  def post_install
+            \\    not_a_dsl_helper(prefix)
+            \\  end
+            \\end
+            \\
+        );
+    }
+
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/gizmo/1.0", .{brew});
+    defer testing.allocator.free(keg_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
+    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    defer testing.allocator.free(receipt_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        const body = try std.fmt.allocPrint(
+            testing.allocator,
+            "{{\"source\":{{\"tap\":\"owner/tap\",\"path\":\"{s}\",\"versions\":{{\"stable\":\"1.0\"}}}}}}",
+            .{tap_rb},
+        );
+        defer testing.allocator.free(body);
+        try f.writeStreamingAll(std.Options.debug_io, body);
+    }
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_gizmo.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer io_mod.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
+
+    try testing.expect(containsLine(stderr_buf.items, "post_install partially skipped"));
+    try testing.expect(containsLine(stderr_buf.items, "use --use-system-ruby=gizmo"));
+}
+
+test "tap fallback stays silent when the tap formula has no post_install" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    const brew = try scratchDir("brew_tap_no_pi");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    const mt_z: [:0]const u8 = "/tmp/mt_tnp";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const tap_rb = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/Library/Taps/owner/homebrew-tap/Formula/q/quiet.rb",
+        .{brew},
+    );
+    defer testing.allocator.free(tap_rb);
+    const tap_dir = std.fs.path.dirname(tap_rb).?;
+    try test_io.cwd().createDirPath(std.Options.debug_io, tap_dir);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, tap_rb, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\class Quiet < Formula
+            \\  url "x"
+            \\end
+            \\
+        );
+    }
+
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/quiet/1.0", .{brew});
+    defer testing.allocator.free(keg_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
+    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    defer testing.allocator.free(receipt_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        const body = try std.fmt.allocPrint(
+            testing.allocator,
+            "{{\"source\":{{\"tap\":\"owner/tap\",\"path\":\"{s}\",\"versions\":{{\"stable\":\"1.0\"}}}}}}",
+            .{tap_rb},
+        );
+        defer testing.allocator.free(body);
+        try f.writeStreamingAll(std.Options.debug_io, body);
+    }
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_quiet.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer io_mod.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
+
+    // No body in the .rb means no DSL run and no router output for this
+    // keg — the absence of every post_install line is the contract.
+    try testing.expect(!containsLine(stderr_buf.items, "post_install"));
+}
