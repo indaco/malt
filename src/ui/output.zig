@@ -182,9 +182,23 @@ pub fn endStdoutCapture() void {
     stdout_capture_list = null;
 }
 
-/// Capture-aware stderr write. Tests that have set up a capture buffer
-/// see writes there; everything else goes to the seeded `pkg_stderr`.
-pub fn writeStderrAll(bytes: []const u8) void {
+/// Serialises stderr writes so parallel migrate workers can't tear an
+/// ANSI prefix across a sibling's message body. Held over each
+/// `writeStderrAll` call individually and over the full multi-write
+/// `writePrefixedLine` sequence (via `writeStderrUnlocked`).
+var stderr_mutex: std.atomic.Mutex = .unlocked;
+
+fn lockStderr() void {
+    while (!stderr_mutex.tryLock()) std.Thread.yield() catch {};
+}
+fn unlockStderr() void {
+    stderr_mutex.unlock();
+}
+
+/// Lock-free body of `writeStderrAll`. Helpers that already hold
+/// `stderr_mutex` for a multi-write sequence call this directly to
+/// avoid a self-deadlock on the outer lock.
+fn writeStderrUnlocked(bytes: []const u8) void {
     if (builtin.is_test) {
         if (capture_list) |list| {
             list.appendSlice(capture_allocator, bytes) catch {};
@@ -192,6 +206,14 @@ pub fn writeStderrAll(bytes: []const u8) void {
         }
     }
     pkg_stderr.writeStreamingAll(pkg_io, bytes) catch return;
+}
+
+/// Capture-aware stderr write. Tests that have set up a capture buffer
+/// see writes there; everything else goes to the seeded `pkg_stderr`.
+pub fn writeStderrAll(bytes: []const u8) void {
+    lockStderr();
+    defer unlockStderr();
+    writeStderrUnlocked(bytes);
 }
 
 /// Capture-aware stdout write. Tests with a stdout capture buffer see
@@ -216,7 +238,9 @@ fn writeStdout(bytes: []const u8) void {
 
 /// Shared implementation for info/warn/success/err. One concrete
 /// function so the binary carries a single copy regardless of how
-/// many call sites route through it.
+/// many call sites route through it. Locks once around the whole
+/// 4-write sequence so a concurrent worker can't slot its own prefix
+/// between this line's prefix and message.
 fn writePrefixedLine(
     msg: []const u8,
     role: color.SemanticStyle,
@@ -224,15 +248,18 @@ fn writePrefixedLine(
     plain_prefix: []const u8,
 ) void {
     const prefix: []const u8 = if (color.isEmojiEnabled()) emoji_prefix else plain_prefix;
-    if (color.isColorEnabled()) {
-        writeStderr(role.code());
-        writeStderr(prefix);
-        writeStderr(color.Style.reset.code());
+    const colorize = color.isColorEnabled();
+    lockStderr();
+    defer unlockStderr();
+    if (colorize) {
+        writeStderrUnlocked(role.code());
+        writeStderrUnlocked(prefix);
+        writeStderrUnlocked(color.Style.reset.code());
     } else {
-        writeStderr(prefix);
+        writeStderrUnlocked(prefix);
     }
-    writeStderr(msg);
-    writeStderr("\n");
+    writeStderrUnlocked(msg);
+    writeStderrUnlocked("\n");
 }
 
 pub fn info(comptime fmt: []const u8, args: anytype) void {
@@ -673,6 +700,57 @@ test "pushPostInstallEvent serialises concurrent producers" {
 
     const drained = drainPostInstallEvents();
     try std.testing.expectEqual(thread_count * Worker.events_per_thread, drained.len);
+}
+
+// Concurrent emit stress for `writePrefixedLine`. Without serialisation
+// the helper's 4-write sequence (ANSI prefix, glyph, reset, msg, newline)
+// races the test capture's `appendSlice` and tears another worker's line
+// in two — exactly the parallel-migrate symptom. 8 threads × 64 lines
+// surfaces it on plain x86/arm64 within microseconds.
+test "writePrefixedLine serialises concurrent prefix+msg writes" {
+    const prior_quiet = isQuiet();
+    color.setForTest(true, true);
+    color.setBackgroundForTest(color.Background.dark);
+    color.setTruecolorForTest(false);
+    setQuiet(false);
+    defer {
+        color.setForTest(null, null);
+        color.setBackgroundForTest(null);
+        color.setTruecolorForTest(null);
+        setQuiet(prior_quiet);
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    const Worker = struct {
+        const events_per_thread: usize = 64;
+        fn run(thread_id: usize) void {
+            var i: usize = 0;
+            while (i < events_per_thread) : (i += 1) {
+                warn("t{d}-i{d}", .{ thread_id, i });
+            }
+        }
+    };
+
+    const thread_count: usize = 8;
+    var threads: [8]std.Thread = undefined;
+    for (&threads, 0..) |*th, idx| {
+        th.* = try std.Thread.spawn(.{}, Worker.run, .{idx});
+    }
+    for (&threads) |th| th.join();
+
+    const expected_prefix = "\x1b[33m  ⚠ \x1b[0mt";
+    var line_count: usize = 0;
+    var it = std.mem.splitScalar(u8, buf.items, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        line_count += 1;
+        try std.testing.expect(std.mem.startsWith(u8, line, expected_prefix));
+    }
+    try std.testing.expectEqual(thread_count * Worker.events_per_thread, line_count);
 }
 
 // Pins the public mode contract so the @atomicLoad/@atomicStore pair
