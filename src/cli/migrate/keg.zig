@@ -166,9 +166,13 @@ pub fn migrateKeg(
     output.emitNdjsonEvent(allocator, .materialized, keg_name, "ok");
 
     // Workers serialise on `db_mu` so transactions can't interleave;
-    // serial callers leave `db_mu` null and pay no lock cost.
+    // serial callers leave `db_mu` null and pay no lock cost. The
+    // `db_mu_unlocked` flag lets the OOM-fallback path release the
+    // lock early (so the inline Ruby subprocess doesn't stall every
+    // other worker) without the deferred unlock double-firing.
+    var db_mu_unlocked = false;
     if (deps.db_mu) |m| m.lockUncancelable(ctx.io);
-    defer if (deps.db_mu) |m| m.unlock(ctx.io);
+    defer if (deps.db_mu) |m| if (!db_mu_unlocked) m.unlock(ctx.io);
 
     if (!formula.keg_only) {
         const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
@@ -208,6 +212,7 @@ pub fn migrateKeg(
             // arena is free to die before drain runs.
             q.add(ctx.io, formula.name, formula.pkg_version, formula_json) catch |e| {
                 output.warn("    {s}: failed to queue post_install ({s}); running inline", .{ formula.name, @errorName(e) });
+                db_mu_unlocked = releaseDbMuForOomFallback(ctx.io, deps.db_mu);
                 post_install_mod.drive(
                     ctx,
                     allocator,
@@ -579,6 +584,18 @@ fn downloadBottle(
     return true;
 }
 
+/// Release `db_mu` before the OOM-fallback Ruby subprocess so other
+/// parallel workers don't stall on it for the duration of the spawn.
+/// `drive()` is read-only against the keg row, so no reacquire is
+/// needed — caller suppresses the deferred unlock via the returned bool.
+fn releaseDbMuForOomFallback(io: std.Io, db_mu: ?*std.Io.Mutex) bool {
+    if (db_mu) |m| {
+        m.unlock(io);
+        return true;
+    }
+    return false;
+}
+
 // ── DB helpers (same pattern as install.zig) ────────────────────────
 
 /// Field bundle accepted by both the formula path (extracted from
@@ -892,4 +909,22 @@ test "full_name buffer fits realistic long tap+keg combinations" {
     try std.testing.expect(std.mem.startsWith(u8, got, tap));
     try std.testing.expect(std.mem.endsWith(u8, got, keg_name));
     try std.testing.expect(got[tap.len] == '/');
+}
+
+test "releaseDbMuForOomFallback hands db_mu back so peers don't stall on the inline subprocess" {
+    // Worker holds db_mu, q.add OOMs, fallback runs inline drive(): the
+    // mutex must be observably released before drive starts so other
+    // parallel workers can make progress. tryLock from the same thread
+    // succeeds iff the mutex is currently free (cmpxchg on the atomic
+    // state, no thread-ownership tracking).
+    var m: std.Io.Mutex = .init;
+    m.lockUncancelable(std.Options.debug_io);
+
+    try std.testing.expect(releaseDbMuForOomFallback(std.Options.debug_io, &m));
+    try std.testing.expect(m.tryLock());
+    m.unlock(std.Options.debug_io);
+}
+
+test "releaseDbMuForOomFallback is a no-op on the serial path (db_mu null)" {
+    try std.testing.expect(!releaseDbMuForOomFallback(std.Options.debug_io, null));
 }
