@@ -21,6 +21,13 @@ const post_install_mod = @import("../install/post_install.zig");
 const post_install_queue_mod = @import("post_install_queue.zig");
 const install_receipt_mod = @import("../../core/install_receipt.zig");
 
+/// Width budget for the "<tap>/<keg_name>" qualifier we record in
+/// `kegs.full_name`. Long org/tap pairs in private taps push past
+/// 256 bytes; silently dropping the qualifier on overflow breaks
+/// later `mt info <tap>/<name>` and uninstall-by-full-name lookups.
+/// Sized like every other path buffer in this module.
+const full_name_buf_len = 512;
+
 /// Result of migrating a single keg. `cancelled` marks slots a worker
 /// never reached because SIGINT raced ahead — distinct from
 /// `skipped_installed` (the keg was already migrated).
@@ -297,7 +304,7 @@ fn migrateFromLocalCellar(
     if (deps.db_mu) |m| m.lockUncancelable(ctx.io);
     defer if (deps.db_mu) |m| m.unlock(ctx.io);
 
-    var full_name_buf: [256]u8 = undefined;
+    var full_name_buf: [full_name_buf_len]u8 = undefined;
     const full_name = std.fmt.bufPrint(&full_name_buf, "{s}/{s}", .{ receipt.tap, keg_name }) catch keg_name;
 
     const keg_id = recordKegFields(deps.db, .{
@@ -788,4 +795,23 @@ test "findTapFormulaRb refuses a malformed tap (missing slash) instead of guessi
         "glow",
         "",
     ) == null);
+}
+
+test "full_name buffer fits realistic long tap+keg combinations" {
+    // Long org/tap pairs in private taps plus long formula names push
+    // the qualified `<tap>/<keg_name>` past 256 bytes; the qualifier
+    // must still land in the DB row, otherwise `mt info <tap>/<name>`
+    // and uninstall-by-full-name silently miss it.
+    const tap = "someorg-with-an-unusually-long-organisation-name/private-platform-libs-very-deeply-namespaced-and-extra-padded-tap-name";
+    const keg_name = "very-long-formula-name-that-stretches-the-qualified-path-comfortably-beyond-the-old-256-byte-buffer-with-padding-for-the-slash-separator-and-then-still-more-padding-yet-more";
+    const need = tap.len + 1 + keg_name.len;
+    comptime std.debug.assert(need > 256);
+
+    try std.testing.expect(need <= full_name_buf_len);
+
+    var buf: [full_name_buf_len]u8 = undefined;
+    const got = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ tap, keg_name });
+    try std.testing.expect(std.mem.startsWith(u8, got, tap));
+    try std.testing.expect(std.mem.endsWith(u8, got, keg_name));
+    try std.testing.expect(got[tap.len] == '/');
 }
