@@ -461,7 +461,7 @@ test "ca-certificates-shape: dispatcher with unparseable siblings leaves flog cl
 fn runPostInstallTest(name: []const u8, version: []const u8, prefix: []const u8) ruby.RubyError!void {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    return ruby.runPostInstall(threaded.io(), testEnviron(), testing.allocator, name, version, prefix);
+    return ruby.runPostInstall(threaded.io(), testEnviron(), testing.allocator, name, version, prefix, .{});
 }
 
 test "runPostInstall rejects single-quote in name with InvalidInput" {

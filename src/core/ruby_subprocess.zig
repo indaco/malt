@@ -512,6 +512,7 @@ pub fn runPostInstall(
     name: []const u8,
     version: []const u8,
     prefix: []const u8,
+    stdio: sandbox.Stdio,
 ) RubyError!void {
     // 0. Boundary validation — must run before body resolution so a
     //    hostile name can't reach `fetchPostInstallFromGitHub` (which
@@ -524,7 +525,7 @@ pub fn runPostInstall(
     const body = resolvePostInstallBody(io, environ, allocator, name) orelse
         return RubyError.TapNotFound;
     defer allocator.free(body);
-    return runPostInstallWithBody(io, environ, allocator, name, version, prefix, body);
+    return runPostInstallWithBody(io, environ, allocator, name, version, prefix, body, stdio);
 }
 
 fn validateRunPostInstallInputs(name: []const u8, version: []const u8, prefix: []const u8) RubyError!void {
@@ -547,6 +548,7 @@ pub fn runPostInstallWithBody(
     version: []const u8,
     prefix: []const u8,
     body: []const u8,
+    stdio: sandbox.Stdio,
 ) RubyError!void {
     // 0. Validate inputs at the boundary. A hostile Cellar dir name (the
     //    on-disk source of `name` on the runPostInstall path) must die
@@ -626,6 +628,7 @@ pub fn runPostInstallWithBody(
         prefix,
         env,
         .{},
+        stdio,
     ) catch return RubyError.PostInstallFailed;
     if (exit_code != 0) return RubyError.PostInstallFailed;
 }
