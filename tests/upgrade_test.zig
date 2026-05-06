@@ -9,9 +9,12 @@ const malt = @import("malt");
 const test_io = @import("test_io");
 const testing = std.testing;
 const upgrade = malt.upgrade;
+const install = malt.install;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const formula_mod = malt.formula;
+const lock_mod = malt.lock;
+const output = malt.output;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -403,4 +406,112 @@ test "recordKeg succeeds on a same-version revision-bump upgrade" {
     try rev_stmt.bindInt(1, new_keg_id);
     _ = try rev_stmt.step();
     try testing.expectEqual(@as(i64, 2), rev_stmt.columnInt(0));
+}
+
+// Regression: upgrade.execute holds malt.lock on its own fd, then re-enters
+// install.execute via installAll for missing transitive deps. BSD flock is
+// per-fd, so the inner acquire EAGAIN-loops 30 s on the outer process's own
+// hold and aborts with the misleading "Another mt process is running" error.
+// installAll exposes `skip_lock = true` for callers that already own the
+// lock; this test pins that contract from the install side and the upgrade
+// side asserts the same path completes without a lock-contention message.
+test "installAll honours skip_lock so an outer holder can re-enter without a self-deadlock" {
+    const path = try setupPrefix("installall_skip_lock");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{path});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+
+    // Plant 404 markers for both formula and cask kinds so resolution
+    // exits before the network is reached and no jobs queue up.
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{path});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    inline for (.{ "formula_zzghost.404", "cask_zzghost.404" }) |name| {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        defer testing.allocator.free(p);
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
+        f.close(std.Options.debug_io);
+    }
+
+    // Mimic the outer hold that upgrade.execute already owns.
+    var lock_path_buf: [512]u8 = undefined;
+    const lock_path = try std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{path});
+    var outer = try lock_mod.LockFile.acquire(lock_path, 1000);
+    defer outer.release();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+
+    // skip_lock=true must bypass the per-fd flock entirely. The 404
+    // markers drain the resolution queue, so a clean return proves we
+    // never blocked on the lock.
+    try install.installAll(&ctx, testing.allocator, &.{"zzghost"}, .{ .skip_lock = true });
+}
+
+// Regression: when the new bottle of an installed formula introduces a dep
+// that isn't on disk yet, upgrade.execute reaches into installAll to fetch
+// the missing dep. The path used to deadlock against its own malt.lock and
+// surface as "Another mt process is running"; the user-facing fix is that
+// the dep install branch exits via its own diagnostic instead.
+test "upgrade with a missing transitive dep does not error with lock contention" {
+    const path = try setupPrefix("upgrade_missing_dep");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openSeededDb(path);
+        defer db.close();
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path)
+            \\VALUES ('curl', 'curl', '8.19', 'sha-old', '/cellar/curl/8.19');
+        );
+    }
+
+    // Cache-seed the new curl JSON with a dep on a name that 404s, so the
+    // dep installAll exits via "fetchFormula failed" rather than network.
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{path});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+
+    const cache_json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_curl.json", .{cache_api});
+    defer testing.allocator.free(cache_json);
+    const cf = try test_io.createFileAbsolute(std.Options.debug_io, cache_json, .{ .truncate = true });
+    const body =
+        \\{"name":"curl","full_name":"curl","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"8.20"},"dependencies":["zzngtcp2"],"oldnames":[],"bottle":{"stable":{"root_url":"","files":{}}}}
+    ;
+    try cf.writeStreamingAll(std.Options.debug_io, body);
+    cf.close(std.Options.debug_io);
+
+    inline for (.{ "formula_zzngtcp2.404", "cask_zzngtcp2.404" }) |name| {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        defer testing.allocator.free(p);
+        const m = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
+        m.close(std.Options.debug_io);
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    // The bottle slot is empty so resolveBottle aborts after the dep
+    // install path runs — both branches surface error.Aborted today, but
+    // the load-bearing observation is the *reason*: the error must not be
+    // the lock-contention message that masks the real cause.
+    upgrade.execute(&ctx, testing.allocator, &.{"curl"}) catch {};
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Another mt process is running") == null);
 }

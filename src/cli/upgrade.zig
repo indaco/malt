@@ -253,7 +253,11 @@ fn upgradeFormula(
         defer if (missing.len > 0) allocator.free(missing);
         if (missing.len > 0) {
             output.info("Installing new dep(s) for {s} ({d})...", .{ name, missing.len });
-            install_mod.installAll(ctx, allocator, missing, .{}) catch {
+            // Re-enter installAll while we already own malt.lock above:
+            // BSD flock is per-fd, so without skip_lock the inner acquire
+            // would EAGAIN-loop on our own hold and 30 s-timeout as
+            // misleading "Another mt process is running" contention.
+            install_mod.installAll(ctx, allocator, missing, .{ .skip_lock = true }) catch {
                 output.err("Could not install new dep(s) for {s}", .{name});
                 return error.Aborted;
             };
