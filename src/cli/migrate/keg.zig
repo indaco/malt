@@ -216,6 +216,7 @@ pub fn migrateKeg(
                     formula_json,
                     deps.prefix,
                     deps.use_system_ruby_scope,
+                    null,
                 );
             };
         } else {
@@ -227,6 +228,7 @@ pub fn migrateKeg(
                 formula_json,
                 deps.prefix,
                 deps.use_system_ruby_scope,
+                null,
             );
         }
     }
