@@ -15,6 +15,10 @@ pub const Receipt = struct {
     /// `source.versions.stable`. Authoritative version for routing
     /// + DB recording. Empty when absent.
     version: []const u8,
+    /// `source.path` — for tap formulae this is the absolute on-disk
+    /// path to the `<name>.rb` source; for `homebrew/core` modern brew
+    /// stores the API JWS cache path here instead. Empty when absent.
+    source_path: []const u8,
     /// `runtime_dependencies[*].full_name`. Order preserved.
     runtime_deps: []const []const u8,
 
@@ -85,6 +89,16 @@ pub fn parseInstallReceipt(parent: std.mem.Allocator, json_text: []const u8) Par
         }
     };
 
+    const source_path = blk: {
+        const src = source_obj orelse break :blk "";
+        const v = src.get("path") orelse break :blk "";
+        switch (v) {
+            .string => |s| break :blk a.dupe(u8, s) catch return ParseError.OutOfMemory,
+            .null => break :blk "",
+            else => break :blk "",
+        }
+    };
+
     const deps = blk: {
         const v = root.get("runtime_dependencies") orelse break :blk &[_][]const u8{};
         const arr = switch (v) {
@@ -111,6 +125,7 @@ pub fn parseInstallReceipt(parent: std.mem.Allocator, json_text: []const u8) Par
     return .{
         .tap = tap,
         .version = version,
+        .source_path = source_path,
         .runtime_deps = deps,
         .arena = arena,
     };
@@ -159,12 +174,31 @@ test "parseInstallReceipt extracts tap, stable version, and runtime_dependencies
     try std.testing.expectEqualStrings("zlib", r.runtime_deps[1]);
 }
 
+test "parseInstallReceipt extracts source.path so the migrate fallback can find the tap's .rb" {
+    const src =
+        \\{
+        \\  "source": {
+        \\    "tap": "charmbracelet/tap",
+        \\    "path": "/opt/homebrew/Library/Taps/charmbracelet/homebrew-tap/Formula/glow.rb",
+        \\    "versions": {"stable": "0.2.2"}
+        \\  }
+        \\}
+    ;
+    var r = try parseInstallReceipt(std.testing.allocator, src);
+    defer r.deinit();
+    try std.testing.expectEqualStrings(
+        "/opt/homebrew/Library/Taps/charmbracelet/homebrew-tap/Formula/glow.rb",
+        r.source_path,
+    );
+}
+
 test "parseInstallReceipt tolerates missing optional fields" {
     const src = "{\"source\": {}}";
     var r = try parseInstallReceipt(std.testing.allocator, src);
     defer r.deinit();
     try std.testing.expectEqualStrings("", r.tap);
     try std.testing.expectEqualStrings("", r.version);
+    try std.testing.expectEqualStrings("", r.source_path);
     try std.testing.expectEqual(@as(usize, 0), r.runtime_deps.len);
 }
 

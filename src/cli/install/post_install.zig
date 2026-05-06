@@ -13,6 +13,17 @@ const output = @import("../../ui/output.zig");
 
 const download = @import("download.zig");
 
+/// Extract the post_install body from a tap's `<name>.rb`. Tap kegs
+/// aren't reachable from the bottle DSL pipeline (the locator only
+/// knows homebrew-core), so the migrate fallback resolves the body
+/// here and feeds it to `driveTap`. Returns null when no `def
+/// post_install` block is present, the file is missing, or the parser
+/// can't extract a clean body — caller's contract is "run iff
+/// non-null."
+pub fn extractRbPostInstallBody(io: std.Io, allocator: std.mem.Allocator, rb_path: []const u8) ?[]const u8 {
+    return ruby_sub.extractPostInstallBody(io, allocator, rb_path);
+}
+
 pub const DownloadJob = download.DownloadJob;
 
 /// Whether --use-system-ruby opts the named formula into the Ruby
@@ -69,6 +80,32 @@ pub fn routePostInstallOutcome(
     flog: *const dsl.FallbackLog,
     use_system_ruby_list: []const []const u8,
 ) void {
+    routePostInstallOutcomeWithBody(
+        ctx,
+        allocator,
+        name,
+        version_str,
+        prefix,
+        flog,
+        use_system_ruby_list,
+        null,
+    );
+}
+
+/// Variant that takes a pre-resolved post_install body so the system-
+/// Ruby fallback works for tap kegs (whose `.rb` source isn't reachable
+/// through homebrew-core's locator). When `pre_resolved_body` is null
+/// the routing matches the bottle path byte-for-byte.
+pub fn routePostInstallOutcomeWithBody(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    version_str: []const u8,
+    prefix: []const u8,
+    flog: *const dsl.FallbackLog,
+    use_system_ruby_list: []const []const u8,
+    pre_resolved_body: ?[]const u8,
+) void {
     const status: PostInstallStatus = blk: {
         if (flog.hasFatal()) {
             output.warn("post_install DSL failed for {s} (fatal)", .{name});
@@ -87,8 +124,13 @@ pub fn routePostInstallOutcome(
             output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{name});
             if (output.isVerbose()) flog.printUnknown(name);
             if (output.isDebug()) flog.printFatal(name);
-            ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix) catch |e| {
-                output.warn("post_install subprocess failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
+            const ruby_result: anyerror!void = if (pre_resolved_body) |body|
+                ruby_sub.runPostInstallWithBody(ctx.io, ctx.environ, allocator, name, version_str, prefix, body)
+            else
+                ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix);
+            ruby_result catch |e| {
+                const err: ruby_sub.RubyError = @errorCast(e);
+                output.warn("post_install subprocess failed for {s}: {s}", .{ name, ruby_sub.describeError(err) });
                 break :blk .ruby_fallback_failed;
             };
             // Symmetric with the native "completed" info so scripted users
@@ -202,19 +244,57 @@ pub fn executeDslPostInstall(
         return .parse_failed;
     };
     defer formula.deinit();
+    executeDslPostInstallFields(
+        ctx,
+        allocator,
+        name,
+        version_str,
+        formula.version,
+        formula.pkg_version,
+        post_install_src,
+        prefix,
+        use_system_ruby_list,
+    );
+    return .handled;
+}
 
+/// Fields-based variant: bypass formula JSON entirely. Used by the
+/// migrate tap-fallback path where we already have name/version from
+/// the receipt and the post_install body extracted from the tap's .rb.
+/// Forwards the body through to the router so a `--use-system-ruby`
+/// fallback for a tap keg targets the same body the DSL was run with —
+/// homebrew-core's locator can't reach non-core taps.
+pub fn executeDslPostInstallFields(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    version_str: []const u8,
+    dsl_version: []const u8,
+    pkg_version: []const u8,
+    post_install_src: []const u8,
+    prefix: []const u8,
+    use_system_ruby_list: []const []const u8,
+) void {
     var flog = dsl.FallbackLog.init(allocator);
     defer flog.deinit();
 
     // DSL errors reflect in `flog`; the router reads the log as the source
     // of truth so silent skips downgrade the same as hard failures.
     dsl.executePostInstall(ctx.io, ctx.environ, allocator, .{
-        .name = formula.name,
-        .version = formula.version,
-        .pkg_version = formula.pkg_version,
+        .name = name,
+        .version = dsl_version,
+        .pkg_version = pkg_version,
     }, post_install_src, prefix, &flog) catch {};
-    routePostInstallOutcome(ctx, allocator, name, version_str, prefix, &flog, use_system_ruby_list);
-    return .handled;
+    routePostInstallOutcomeWithBody(
+        ctx,
+        allocator,
+        name,
+        version_str,
+        prefix,
+        &flog,
+        use_system_ruby_list,
+        post_install_src,
+    );
 }
 
 /// Locate a DSL post_install body for `name`: prefer a locally cloned
@@ -274,6 +354,90 @@ pub fn drive(
     } else {
         output.warn("{s}: post_install skipped (use --use-system-ruby={s} or brew install {s})", .{ name, name, name });
     }
+}
+
+/// Tap-fallback analog of `drive`: the post_install body has already
+/// been resolved off the tap's `<name>.rb`, so we skip the homebrew-core
+/// locator and feed it straight to the DSL. The router still emits the
+/// same `completed` / `partially skipped` / `--use-system-ruby` lines —
+/// this is the install path's user-facing contract, just sourced from
+/// a tap receipt instead of a parsed formula.
+///
+/// Tap kegs migrated through the fallback carry no revision suffix
+/// (the receipt's `source.versions.stable` is the whole version), so a
+/// single `version` string covers both the user-facing message and the
+/// DSL's `formula.version` / `formula.pkg_version` slots.
+pub fn driveTap(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    version: []const u8,
+    post_install_src: []const u8,
+    prefix: []const u8,
+    use_system_ruby_list: []const []const u8,
+) void {
+    executeDslPostInstallFields(
+        ctx,
+        allocator,
+        name,
+        version,
+        version,
+        version,
+        post_install_src,
+        prefix,
+        use_system_ruby_list,
+    );
+}
+
+test "extractRbPostInstallBody: returns the body when the .rb defines post_install" {
+    const dir = "/tmp/malt_pi_decl_yes";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+
+    const rb = dir ++ "/glow.rb";
+    const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, rb, .{ .truncate = true });
+    try f.writeStreamingAll(std.Options.debug_io,
+        \\class Glow < Formula
+        \\  def post_install
+        \\    bin.install "glow"
+        \\  end
+        \\end
+        \\
+    );
+    f.close(std.Options.debug_io);
+
+    const body = extractRbPostInstallBody(std.Options.debug_io, std.testing.allocator, rb);
+    try std.testing.expect(body != null);
+    defer std.testing.allocator.free(body.?);
+    try std.testing.expect(std.mem.indexOf(u8, body.?, "bin.install") != null);
+}
+
+test "extractRbPostInstallBody: null when the .rb has no post_install block" {
+    const dir = "/tmp/malt_pi_decl_no";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+
+    const rb = dir ++ "/quiet.rb";
+    const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, rb, .{ .truncate = true });
+    try f.writeStreamingAll(std.Options.debug_io,
+        \\class Quiet < Formula
+        \\  url "x"
+        \\end
+        \\
+    );
+    f.close(std.Options.debug_io);
+
+    try std.testing.expect(extractRbPostInstallBody(std.Options.debug_io, std.testing.allocator, rb) == null);
+}
+
+test "extractRbPostInstallBody: null when the .rb is missing entirely" {
+    try std.testing.expect(extractRbPostInstallBody(
+        std.Options.debug_io,
+        std.testing.allocator,
+        "/tmp/malt_pi_decl_missing/never.rb",
+    ) == null);
 }
 
 test "isSelfHostingRubyKeg: bare ruby and versioned aliases match" {

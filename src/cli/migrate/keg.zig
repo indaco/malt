@@ -322,8 +322,120 @@ fn migrateFromLocalCellar(
     deps.linker.linkOpt(keg_name, receipt.version) catch {};
     recordDepsFromList(deps.db, keg_id, receipt.runtime_deps);
 
+    // Tap kegs aren't reachable from the bottle DSL pipeline (its body
+    // locator only knows homebrew-core), so a `def post_install` in the
+    // tap's .rb is resolved here and either deferred onto the queue
+    // (parallel path, drained after every keg's `linkOpt`) or driven
+    // inline. Outcome routing matches the install path byte-for-byte:
+    // "completed" / "partially skipped — use --use-system-ruby" / fatal.
+    runTapPostInstallIfDefined(
+        ctx,
+        allocator,
+        deps,
+        keg_name,
+        receipt.tap,
+        receipt.version,
+        receipt.source_path,
+    );
+
     if (!has_bar) output.success("  {s} {s} migrated (from {s} tap)", .{ keg_name, receipt.version, receipt.tap });
     return .migrated;
+}
+
+/// Resolve the tap's post_install body and either queue it (so it
+/// runs after every keg's `opt/<name>/` symlink is in place) or drive
+/// it inline on the legacy single-keg path. Silent when no body is
+/// found — the formula simply has no hook.
+fn runTapPostInstallIfDefined(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    deps: MigrateDeps,
+    name: []const u8,
+    tap: []const u8,
+    version_str: []const u8,
+    receipt_source_path: []const u8,
+) void {
+    const rb_path = findTapFormulaRb(ctx.io, allocator, deps.homebrew_prefix, tap, name, receipt_source_path) orelse return;
+    defer allocator.free(rb_path);
+    const body = post_install_mod.extractRbPostInstallBody(ctx.io, allocator, rb_path) orelse return;
+    defer allocator.free(body);
+
+    if (deps.post_install_queue) |q| {
+        q.addTap(ctx.io, name, version_str, body) catch |e| {
+            output.warn("    {s}: failed to queue post_install ({s}); running inline", .{ name, @errorName(e) });
+            post_install_mod.driveTap(
+                ctx,
+                allocator,
+                name,
+                version_str,
+                body,
+                deps.prefix,
+                deps.use_system_ruby_scope,
+            );
+        };
+    } else {
+        post_install_mod.driveTap(
+            ctx,
+            allocator,
+            name,
+            version_str,
+            body,
+            deps.prefix,
+            deps.use_system_ruby_scope,
+        );
+    }
+}
+
+/// Resolve the `<name>.rb` source for a tap keg. Prefers the receipt's
+/// `source.path` (modern brew populates it for tap formulae), falling
+/// back to the canonical `Library/Taps/<user>/homebrew-<repo>/Formula/`
+/// layout — sharded first, then flat — so older receipts still hit a
+/// real file. Returns a caller-owned absolute path or null.
+pub fn findTapFormulaRb(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    homebrew_prefix: []const u8,
+    tap: []const u8,
+    name: []const u8,
+    receipt_source_path: []const u8,
+) ?[]const u8 {
+    if (receipt_source_path.len > 0 and std.mem.endsWith(u8, receipt_source_path, ".rb")) {
+        if (std.Io.Dir.accessAbsolute(io, receipt_source_path, .{})) |_| {
+            return allocator.dupe(u8, receipt_source_path) catch null;
+        } else |_| {
+            // Receipt path stale (tap moved/uninstalled) — fall through.
+        }
+    }
+
+    const slash = std.mem.indexOfScalar(u8, tap, '/') orelse return null;
+    const user = tap[0..slash];
+    const raw_repo = tap[slash + 1 ..];
+    if (user.len == 0 or raw_repo.len == 0) return null;
+    const repo = if (std.mem.startsWith(u8, raw_repo, "homebrew-"))
+        raw_repo["homebrew-".len..]
+    else
+        raw_repo;
+    if (repo.len == 0) return null;
+
+    var tap_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tap_path = std.fmt.bufPrint(&tap_buf, "{s}/Library/Taps/{s}/homebrew-{s}", .{
+        homebrew_prefix, user, repo,
+    }) catch return null;
+
+    var rb_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sharded = std.fmt.bufPrint(&rb_buf, "{s}/Formula/{c}/{s}.rb", .{
+        tap_path, name[0], name,
+    }) catch return null;
+    if (std.Io.Dir.accessAbsolute(io, sharded, .{})) |_| {
+        return allocator.dupe(u8, sharded) catch null;
+    } else |_| {}
+
+    const flat = std.fmt.bufPrint(&rb_buf, "{s}/Formula/{s}.rb", .{ tap_path, name }) catch return null;
+    if (std.Io.Dir.accessAbsolute(io, flat, .{})) |_| {
+        return allocator.dupe(u8, flat) catch null;
+    } else |_| {}
+
+    return null;
 }
 
 /// Locate the most recently-installed version subdir for `name` under
@@ -550,4 +662,127 @@ pub fn isInstalled(db: *sqlite.Database, name: []const u8) bool {
     defer stmt.finalize();
     stmt.bindText(1, name) catch return false;
     return stmt.step() catch false;
+}
+
+test "findTapFormulaRb prefers the receipt's source.path when it exists and ends in .rb" {
+    const dir = "/tmp/malt_taprb_src";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+
+    const rb = dir ++ "/glow.rb";
+    const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, rb, .{ .truncate = true });
+    f.close(std.Options.debug_io);
+
+    const got = findTapFormulaRb(
+        std.Options.debug_io,
+        std.testing.allocator,
+        "/nonexistent/brew",
+        "charmbracelet/tap",
+        "glow",
+        rb,
+    );
+    try std.testing.expect(got != null);
+    defer std.testing.allocator.free(got.?);
+    try std.testing.expectEqualStrings(rb, got.?);
+}
+
+test "findTapFormulaRb falls back to the canonical sharded tap layout when source.path is stale" {
+    const dir = "/tmp/malt_taprb_sharded";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+
+    const formula_dir = dir ++ "/Library/Taps/charmbracelet/homebrew-tap/Formula/g";
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, formula_dir);
+    const rb = formula_dir ++ "/glow.rb";
+    (try std.Io.Dir.createFileAbsolute(std.Options.debug_io, rb, .{ .truncate = true }))
+        .close(std.Options.debug_io);
+
+    const got = findTapFormulaRb(
+        std.Options.debug_io,
+        std.testing.allocator,
+        dir,
+        "charmbracelet/tap",
+        "glow",
+        "/missing/path.rb",
+    );
+    try std.testing.expect(got != null);
+    defer std.testing.allocator.free(got.?);
+    try std.testing.expect(std.mem.endsWith(u8, got.?, "/Formula/g/glow.rb"));
+}
+
+test "findTapFormulaRb falls back to the flat tap layout when sharded is absent" {
+    const dir = "/tmp/malt_taprb_flat";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+
+    const formula_dir = dir ++ "/Library/Taps/user/homebrew-private/Formula";
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, formula_dir);
+    const rb = formula_dir ++ "/widget.rb";
+    (try std.Io.Dir.createFileAbsolute(std.Options.debug_io, rb, .{ .truncate = true }))
+        .close(std.Options.debug_io);
+
+    const got = findTapFormulaRb(
+        std.Options.debug_io,
+        std.testing.allocator,
+        dir,
+        "user/private",
+        "widget",
+        "",
+    );
+    try std.testing.expect(got != null);
+    defer std.testing.allocator.free(got.?);
+    try std.testing.expect(std.mem.endsWith(u8, got.?, "/Formula/widget.rb"));
+}
+
+test "findTapFormulaRb does not double-prefix when the tap repo already starts with homebrew-" {
+    const dir = "/tmp/malt_taprb_no_double";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+
+    const formula_dir = dir ++ "/Library/Taps/user/homebrew-foo/Formula/w";
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, formula_dir);
+    const rb = formula_dir ++ "/widget.rb";
+    (try std.Io.Dir.createFileAbsolute(std.Options.debug_io, rb, .{ .truncate = true }))
+        .close(std.Options.debug_io);
+
+    const got = findTapFormulaRb(
+        std.Options.debug_io,
+        std.testing.allocator,
+        dir,
+        "user/homebrew-foo",
+        "widget",
+        "",
+    );
+    try std.testing.expect(got != null);
+    defer std.testing.allocator.free(got.?);
+    try std.testing.expect(std.mem.indexOf(u8, got.?, "/homebrew-foo/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got.?, "/homebrew-homebrew-") == null);
+}
+
+test "findTapFormulaRb returns null when neither the receipt path nor the canonical layout exists" {
+    const dir = "/tmp/malt_taprb_none";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(std.Options.debug_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
+
+    try std.testing.expect(findTapFormulaRb(
+        std.Options.debug_io,
+        std.testing.allocator,
+        dir,
+        "charmbracelet/tap",
+        "glow",
+        "",
+    ) == null);
+}
+
+test "findTapFormulaRb refuses a malformed tap (missing slash) instead of guessing a path" {
+    try std.testing.expect(findTapFormulaRb(
+        std.Options.debug_io,
+        std.testing.allocator,
+        "/tmp/malt_taprb_bad",
+        "noslash",
+        "glow",
+        "",
+    ) == null);
 }

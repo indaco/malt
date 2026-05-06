@@ -513,20 +513,10 @@ pub fn runPostInstall(
     version: []const u8,
     prefix: []const u8,
 ) RubyError!void {
-    // 0. Validate inputs at the boundary. A hostile Cellar dir name (the
-    //    on-disk source of `name` on the runPostInstall path) must die
-    //    here, not deeper in script generation or the sandbox spawn.
-    if (prefix.len == 0 or name.len == 0 or version.len == 0) return RubyError.InvalidInput;
-    for (prefix) |b| if (!fs_atomic.isAllowedPrefixByte(b)) return RubyError.InvalidInput;
-    for (name) |b| if (!fs_atomic.isAllowedNameByte(b)) return RubyError.InvalidInput;
-    for (version) |b| if (!fs_atomic.isAllowedNameByte(b)) return RubyError.InvalidInput;
-
-    // Core returns outcomes; UI renders at the boundary — the CLI caller
-    // maps each RubyError variant to user-facing text.
-
-    // 1. Find Ruby (caller-owned heap slice — see detectRuby contract).
-    const ruby_path = detectRuby(io, environ, allocator) orelse return RubyError.RubyNotFound;
-    defer allocator.free(ruby_path);
+    // 0. Boundary validation — must run before body resolution so a
+    //    hostile name can't reach `fetchPostInstallFromGitHub` (which
+    //    performs its own check but only after a network round-trip).
+    try validateRunPostInstallInputs(name, version, prefix);
 
     // 2-4. Resolve the post_install body. Local homebrew-core tap is
     //      preferred; hash-pinned GitHub fetch is the fallback so
@@ -534,6 +524,41 @@ pub fn runPostInstall(
     const body = resolvePostInstallBody(io, environ, allocator, name) orelse
         return RubyError.TapNotFound;
     defer allocator.free(body);
+    return runPostInstallWithBody(io, environ, allocator, name, version, prefix, body);
+}
+
+fn validateRunPostInstallInputs(name: []const u8, version: []const u8, prefix: []const u8) RubyError!void {
+    if (prefix.len == 0 or name.len == 0 or version.len == 0) return RubyError.InvalidInput;
+    for (prefix) |b| if (!fs_atomic.isAllowedPrefixByte(b)) return RubyError.InvalidInput;
+    for (name) |b| if (!fs_atomic.isAllowedNameByte(b)) return RubyError.InvalidInput;
+    for (version) |b| if (!fs_atomic.isAllowedNameByte(b)) return RubyError.InvalidInput;
+}
+
+/// Tap-aware variant: caller has already extracted the post_install
+/// body from the tap's `<name>.rb` (homebrew-core's locator can't reach
+/// non-core taps). Skips body resolution; everything else mirrors
+/// `runPostInstall` exactly so the sandbox + script-write contract
+/// stays a single source of truth.
+pub fn runPostInstallWithBody(
+    io: std.Io,
+    environ: std.process.Environ,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    version: []const u8,
+    prefix: []const u8,
+    body: []const u8,
+) RubyError!void {
+    // 0. Validate inputs at the boundary. A hostile Cellar dir name (the
+    //    on-disk source of `name` on the runPostInstall path) must die
+    //    here, not deeper in script generation or the sandbox spawn.
+    try validateRunPostInstallInputs(name, version, prefix);
+
+    // Core returns outcomes; UI renders at the boundary — the CLI caller
+    // maps each RubyError variant to user-facing text.
+
+    // 1. Find Ruby (caller-owned heap slice — see detectRuby contract).
+    const ruby_path = detectRuby(io, environ, allocator) orelse return RubyError.RubyNotFound;
+    defer allocator.free(ruby_path);
 
     // 5. Generate wrapper script
     const script = generateWrapper(allocator, name, version, prefix, body) catch
