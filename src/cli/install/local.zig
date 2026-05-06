@@ -337,6 +337,19 @@ fn fstatRisk(f: std.Io.File) ?LocalPermissionRisk {
     return describeLocalPermissionRisk(@intCast(raw.mode), @intCast(raw.uid), @intCast(effective));
 }
 
+/// Compose the staging-archive path used by the tap/local install
+/// flow. The pid suffix prevents two concurrent invocations from
+/// racing on a shared `tap_download.<ext>` filename — without it,
+/// one install would overwrite the other's in-flight download.
+pub fn formatTapDownloadName(
+    buf: []u8,
+    prefix: []const u8,
+    ext: []const u8,
+    pid: i32,
+) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}/tmp/tap_download.{d}{s}", .{ prefix, pid, ext });
+}
+
 /// Shared "from parsed `.rb` to linked keg" path, used by the tap and
 /// local installers. Does the network fetch for the archive, SHA256
 /// verification, cellar materialisation, and DB + linker commit.
@@ -462,7 +475,7 @@ fn materializeRubyFormula(
         .zip => ".zip",
     };
     var tmp_buf: [512]u8 = undefined;
-    const tmp_archive = std.fmt.bufPrint(&tmp_buf, "{s}/tmp/tap_download{s}", .{ prefix, ext }) catch
+    const tmp_archive = formatTapDownloadName(&tmp_buf, prefix, ext, std.c.getpid()) catch
         return InstallError.DownloadFailed;
 
     const tmp_file = std.Io.Dir.createFileAbsolute(ctx.io, tmp_archive, .{}) catch return InstallError.DownloadFailed;
@@ -471,7 +484,8 @@ fn materializeRubyFormula(
         return InstallError.DownloadFailed;
     };
     tmp_file.close(ctx.io);
-    // Temp archive cleanup; leaks to tmp/ are reaped by the next install.
+    // Best-effort cleanup; the per-pid name keeps a leak (panic / SIGKILL)
+    // from colliding with the next install's archive.
     defer std.Io.Dir.cwd().deleteFile(ctx.io, tmp_archive) catch {};
 
     const archive_mod = @import("../../fs/archive.zig");
@@ -504,11 +518,14 @@ fn materializeRubyFormula(
         var walker = cellar_dir.walk(allocator) catch return InstallError.CellarFailed;
         defer walker.deinit();
 
+        // Separate buffer: writing into `tmp_buf` here would corrupt the
+        // `tmp_archive` slice that the deferred cleanup still holds.
+        var dest_buf: [512]u8 = undefined;
         while (walker.next(ctx.io) catch null) |entry| {
             if (entry.kind != .file) continue;
             const basename = std.fs.path.basename(entry.path);
             if (std.mem.eql(u8, basename, target_binary)) {
-                const dest_name = std.fmt.bufPrint(&tmp_buf, "bin/{s}", .{basename}) catch continue;
+                const dest_name = std.fmt.bufPrint(&dest_buf, "bin/{s}", .{basename}) catch continue;
                 std.Io.Dir.copyFile(cellar_dir, entry.path, cellar_dir, dest_name, ctx.io, .{}) catch continue;
                 const bin_file = cellar_dir.openFile(ctx.io, dest_name, .{ .mode = .read_write }) catch continue;
                 defer bin_file.close(ctx.io);
@@ -847,4 +864,26 @@ fn writeJsonString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []c
         }
     }
     try out.append(allocator, '"');
+}
+
+test "formatTapDownloadName encodes pid + extension into tmp/ path" {
+    var buf: [128]u8 = undefined;
+    const got = try formatTapDownloadName(&buf, "/opt/h", ".tar.gz", 4242);
+    try std.testing.expectEqualStrings("/opt/h/tmp/tap_download.4242.tar.gz", got);
+}
+
+test "formatTapDownloadName distinct pids produce distinct paths" {
+    // Two concurrent `mt install <user>/<tap>/<formula>` invocations
+    // must not race on a shared filename — the returned path carries
+    // the live process id so each install streams into its own archive.
+    var a: [128]u8 = undefined;
+    var b: [128]u8 = undefined;
+    const path_a = try formatTapDownloadName(&a, "/opt/h", ".zip", 1);
+    const path_b = try formatTapDownloadName(&b, "/opt/h", ".zip", 2);
+    try std.testing.expect(!std.mem.eql(u8, path_a, path_b));
+}
+
+test "formatTapDownloadName surfaces NoSpaceLeft instead of truncating" {
+    var buf: [4]u8 = undefined;
+    try std.testing.expectError(error.NoSpaceLeft, formatTapDownloadName(&buf, "/opt/h", ".tar.gz", 4242));
 }
