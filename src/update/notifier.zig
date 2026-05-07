@@ -8,6 +8,7 @@
 const std = @import("std");
 const output = @import("../ui/output.zig");
 const client_mod = @import("../net/client.zig");
+const atomic = @import("../fs/atomic.zig");
 const release = @import("release.zig");
 const origin_mod = @import("origin.zig");
 const AppCtx = @import("../app_ctx.zig").AppCtx;
@@ -180,17 +181,16 @@ pub fn readCache(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !?S
     return decodeState(allocator, bytes);
 }
 
-/// Creates the parent directory if missing. A torn write surfaces as
-/// `error.InvalidPayload` on the next read and is treated as no cache.
+/// Creates the parent directory if missing. Routed through
+/// `atomicWriteFile` so a SIGKILL or concurrent writer can never publish
+/// a torn JSON — readers see either the old cache or the new one.
 pub fn writeCache(io: std.Io, path: []const u8, state: State) !void {
     if (std.fs.path.dirname(path)) |dir| {
         std.Io.Dir.cwd().createDirPath(io, dir) catch {};
     }
     var buf: [1024]u8 = undefined;
     const encoded = try encodeState(&buf, state);
-    const f = try std.Io.Dir.createFileAbsolute(io, path, .{});
-    defer f.close(io);
-    try f.writeStreamingAll(io, encoded);
+    try atomic.atomicWriteFile(io, path, encoded);
 }
 
 fn fetchLatestTag(ctx: *const AppCtx, allocator: std.mem.Allocator) ![]u8 {
@@ -532,6 +532,59 @@ test "writeCache + readCache round-trip on a real file" {
     try std.testing.expectEqual(@as(i64, 1714400000), got.checked_at);
     try std.testing.expectEqualStrings("v0.10.1", got.latest_tag);
     try std.testing.expectEqualStrings("0.10.0", got.current_seen);
+}
+
+test "writeCache replaces an existing cache atomically (rename, not in-place truncate)" {
+    // A torn write reaches disk only when the writer truncates `path` and
+    // streams into it. Rename-publish gives the destination a fresh inode,
+    // so a stable inode after overwrite is the visible truncate signature.
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notifier_atomic_{d}", .{std.Io.Clock.real.now(io).toNanoseconds()});
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+
+    try writeCache(io, path, .{
+        .checked_at = 1714400000,
+        .latest_tag = "v0.10.1",
+        .current_seen = "0.10.0",
+    });
+    const before = blk: {
+        const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+        defer f.close(io);
+        break :blk try f.stat(io);
+    };
+
+    try writeCache(io, path, .{
+        .checked_at = 1714500000,
+        .latest_tag = "v0.10.2",
+        .current_seen = "0.10.0",
+    });
+    const after = blk: {
+        const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+        defer f.close(io);
+        break :blk try f.stat(io);
+    };
+
+    try std.testing.expect(before.inode != after.inode);
+
+    // No stale `.tmp` siblings — the rename must publish the new file.
+    var d = try std.Io.Dir.openDirAbsolute(io, dir, .{ .iterate = true });
+    defer d.close(io);
+    var iter = d.iterate();
+    var count: usize = 0;
+    while (try iter.next(io)) |entry| {
+        try std.testing.expectEqualStrings("version-notify.json", entry.name);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
 }
 
 test "readCache: missing file is null, not an error" {
