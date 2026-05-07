@@ -10,7 +10,6 @@ const output = @import("../ui/output.zig");
 const lock_mod = @import("../db/lock.zig");
 const linker = @import("../core/linker.zig");
 const cellar = @import("../core/cellar.zig");
-const store = @import("../core/store.zig");
 const cask_mod = @import("../core/cask.zig");
 const formula_mod = @import("../core/formula.zig");
 const supervisor_mod = @import("../core/services/supervisor.zig");
@@ -121,6 +120,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.warn("Could not remove all symlinks for {s}", .{name});
     };
 
+    // Land the DB writes before any Cellar teardown so a SIGKILL
+    // between filesystem and database steps can't strand a refcount
+    // above the on-disk reality. CASCADE drops deps/links rows.
+    finalizeDbRemoval(&db, sha256, keg_id) catch {
+        output.warn("Could not finalize uninstall for {s}", .{name});
+    };
+
     // Remove Cellar directory (dir name carries the _<revision> suffix
     // when the keg was installed with revision > 0).
     cellar.remove(ctx.io, prefix, name, pkg_version) catch {
@@ -139,23 +145,109 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         if (opt_path.len > 0) std.Io.Dir.cwd().deleteFile(ctx.io, opt_path) catch {}; // opt/ link absent on never-linked kegs.
     }
 
-    // Decrement store ref
+    output.success("{s} uninstalled", .{name});
+}
+
+// Atomic DB-side teardown for an uninstall: the store-ref decrement and
+// the kegs delete must commit together so a SIGKILL between them can't
+// leave a refcount bumped above the on-disk Cellar reality.
+fn finalizeDbRemoval(db: *sqlite.Database, sha256: []const u8, keg_id: i64) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
     if (sha256.len > 0) {
-        var st = store.Store.init(ctx.io, allocator, &db, prefix);
-        st.decrementRef(sha256) catch {
-            output.warn("Could not decrement store ref for {s}", .{name});
-        };
+        var dec = try db.prepare(
+            "UPDATE store_refs SET refcount = refcount - 1 WHERE store_sha256 = ?1 AND refcount > 0;",
+        );
+        defer dec.finalize();
+        try dec.bindText(1, sha256);
+        _ = try dec.step();
     }
 
-    // Delete from DB (CASCADE handles deps/links)
-    var del_stmt = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return;
-    defer del_stmt.finalize();
-    del_stmt.bindInt(1, keg_id) catch return;
-    _ = del_stmt.step() catch {
-        output.warn("Could not delete DB record for {s}", .{name});
-    };
+    var del = try db.prepare("DELETE FROM kegs WHERE id = ?1;");
+    defer del.finalize();
+    try del.bindInt(1, keg_id);
+    _ = try del.step();
 
-    output.success("{s} uninstalled", .{name});
+    try db.commit();
+}
+
+const testing = std.testing;
+
+fn testSeedKeg(db: *sqlite.Database, name: []const u8, sha256: []const u8) !i64 {
+    var ins = try db.prepare(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES (?1, ?1, '1.0', 0, ?2, 'Cellar/x/1.0');
+    );
+    defer ins.finalize();
+    try ins.bindText(1, name);
+    try ins.bindText(2, sha256);
+    _ = try ins.step();
+
+    var sel = try db.prepare("SELECT id FROM kegs WHERE name = ?1;");
+    defer sel.finalize();
+    try sel.bindText(1, name);
+    _ = try sel.step();
+    return sel.columnInt(0);
+}
+
+fn testRefcount(db: *sqlite.Database, sha256: []const u8) !?i64 {
+    var sel = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;");
+    defer sel.finalize();
+    try sel.bindText(1, sha256);
+    if (!try sel.step()) return null;
+    return sel.columnInt(0);
+}
+
+fn testKegPresent(db: *sqlite.Database, keg_id: i64) !bool {
+    var sel = try db.prepare("SELECT 1 FROM kegs WHERE id = ?1;");
+    defer sel.finalize();
+    try sel.bindInt(1, keg_id);
+    return try sel.step();
+}
+
+test "finalizeDbRemoval bundles the ref decrement with the kegs delete" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const sha = "abc123";
+    var ins_ref = try db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES (?1, 2);");
+    try ins_ref.bindText(1, sha);
+    _ = try ins_ref.step();
+    ins_ref.finalize();
+
+    const keg_id = try testSeedKeg(&db, "foo", sha);
+    try finalizeDbRemoval(&db, sha, keg_id);
+
+    try testing.expect(!try testKegPresent(&db, keg_id));
+    try testing.expectEqual(@as(?i64, 1), try testRefcount(&db, sha));
+}
+
+test "finalizeDbRemoval rolls the ref decrement back when the delete is blocked" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const sha = "abc123";
+    var ins_ref = try db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES (?1, 2);");
+    try ins_ref.bindText(1, sha);
+    _ = try ins_ref.step();
+    ins_ref.finalize();
+
+    const keg_id = try testSeedKeg(&db, "foo", sha);
+
+    // Trip the DELETE so atomicity is observable: after the failure,
+    // refcount must be untouched and the kegs row must still be there.
+    try db.exec(
+        \\CREATE TRIGGER block_keg_delete BEFORE DELETE ON kegs
+        \\BEGIN SELECT RAISE(ABORT, 'blocked'); END;
+    );
+
+    try testing.expectError(sqlite.SqliteError.ConstraintViolation, finalizeDbRemoval(&db, sha, keg_id));
+
+    try testing.expect(try testKegPresent(&db, keg_id));
+    try testing.expectEqual(@as(?i64, 2), try testRefcount(&db, sha));
 }
 
 /// Uninstall a cask by token.
