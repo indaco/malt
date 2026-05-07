@@ -54,7 +54,9 @@ pub fn atomicReplace(io: std.Io, target_path: []const u8, new_path: []const u8) 
         error.AccessDenied => return error.PermissionDenied,
         else => return error.StagingFailed,
     };
-    // Errdefer cleanup: stage leaks get reaped by the next update's pre-copy delete above.
+    // Drop the stage on any error path after this point — chmod, sync,
+    // either rename. Pairs with the rollback errdefer below; on a late
+    // failure both fire (LIFO) so target is restored and stage is gone.
     errdefer std.Io.Dir.deleteFileAbsolute(io, staged_path) catch {};
 
     // Set mode on the staged file so we never leave a non-executable
@@ -80,11 +82,16 @@ pub fn atomicReplace(io: std.Io, target_path: []const u8, new_path: []const u8) 
         error.AccessDenied, error.PermissionDenied => return error.PermissionDenied,
         else => return error.SwapFailed,
     };
-    // Rollback rename; if this also fails the caller already has RollbackFailed surfaced.
-    errdefer std.Io.Dir.renameAbsolute(old_path, target_path, io) catch {};
+    // Rollback on late failure: restore target from .old and drop the
+    // never-installed stage in one explicit block so the unwind reads
+    // top-to-bottom. The stage errdefer above also fires after this and
+    // is a no-op once the file is gone.
+    errdefer {
+        std.Io.Dir.renameAbsolute(old_path, target_path, io) catch {};
+        std.Io.Dir.deleteFileAbsolute(io, staged_path) catch {};
+    }
 
-    // Atomic rename #2: staged -> target. If this fails the errdefers
-    // above restore .old to target and delete the stage.
+    // Atomic rename #2: staged -> target.
     std.Io.Dir.renameAbsolute(staged_path, target_path, io) catch return error.RollbackFailed;
 
     // Flush the parent so both rename dirents are durable. Swallowing
