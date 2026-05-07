@@ -335,7 +335,7 @@ fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
     try populateFromInstalled(&manifest, &db);
-    try writeManifest(ctx, allocator, manifest, out_path, format);
+    try writeManifest(ctx, manifest, out_path, format);
     output.success("wrote {s}", .{out_path});
 }
 
@@ -467,12 +467,10 @@ fn readManifest(
 
 fn writeManifest(
     ctx: *const AppCtx,
-    allocator: std.mem.Allocator,
     manifest: manifest_mod.Manifest,
     path: []const u8,
     format: Format,
 ) !void {
-    _ = allocator;
     const file = if (std.fs.path.isAbsolute(path))
         std.Io.Dir.createFileAbsolute(ctx.io, path, .{ .truncate = true }) catch return BundleError.WriteFailed
     else

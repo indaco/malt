@@ -218,7 +218,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 
     output.info("Replacing {s}...", .{self_exe});
-    const mode_after_self = replaceBinary(ctx, allocator, new_binary, self_exe, .user) catch |e| switch (e) {
+    const mode_after_self = replaceBinary(ctx, new_binary, self_exe, .user) catch |e| switch (e) {
         error.SudoSpawnFailed, error.SudoFailed => {
             output.err("sudo elevation failed for {s}.", .{self_exe});
             output.info("Manual update: sudo install -m 0755 -b -B .old {s} {s}", .{ new_binary, self_exe });
@@ -245,7 +245,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.info("Replacing {s}...", .{tp});
         // Pass the post-self mode so the twin re-uses the elevation
         // decision instead of paying a second sudo prompt.
-        _ = replaceBinary(ctx, allocator, new_binary, tp, mode_after_self) catch |e| {
+        _ = replaceBinary(ctx, new_binary, tp, mode_after_self) catch |e| {
             // Don't roll back self: one updated binary beats a forced
             // downgrade on the one the user just invoked. Surface the
             // manual fix so they can close the gap.
@@ -283,19 +283,18 @@ pub const ReplaceMode = enum { user, sudo };
 /// can short-circuit a known-unwritable directory after the first prompt.
 fn replaceBinary(
     ctx: *const AppCtx,
-    allocator: std.mem.Allocator,
     new_binary: []const u8,
     target: []const u8,
     mode: ReplaceMode,
 ) !ReplaceMode {
     if (mode == .sudo) {
-        try installBinaryViaSudo(ctx, allocator, new_binary, target);
+        try installBinaryViaSudo(ctx, new_binary, target);
         return .sudo;
     }
     swap.atomicReplace(ctx.io, target, new_binary) catch |e| switch (e) {
         error.PermissionDenied => {
             output.warn("Cannot write to {s}; escalating with sudo.", .{std.fs.path.dirname(target) orelse target});
-            try installBinaryViaSudo(ctx, allocator, new_binary, target);
+            try installBinaryViaSudo(ctx, new_binary, target);
             return .sudo;
         },
         else => return e,
@@ -313,8 +312,7 @@ pub fn buildSudoInstallArgv(new_binary: []const u8, target: []const u8) [9][]con
 
 /// Spawn `sudo install` with the user's TTY inherited. Sudo prompts for
 /// the password on its own; we just propagate the exit status.
-fn installBinaryViaSudo(ctx: *const AppCtx, allocator: std.mem.Allocator, new_binary: []const u8, target: []const u8) !void {
-    _ = allocator;
+fn installBinaryViaSudo(ctx: *const AppCtx, new_binary: []const u8, target: []const u8) !void {
     const argv = buildSudoInstallArgv(new_binary, target);
     var child = std.process.spawn(ctx.io, .{ .argv = &argv }) catch return error.SudoSpawnFailed;
     const term = child.wait(ctx.io) catch return error.SudoSpawnFailed;

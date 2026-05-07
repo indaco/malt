@@ -195,7 +195,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // human/--json blob to pre-flight a migration.
         if (output.isNdjson()) {
             for (keg_names.items) |kn| {
-                output.emitNdjsonEvent(allocator, .would_install, kn, null);
+                output.emitNdjsonEvent(.would_install, kn, null);
             }
         }
         return;
@@ -229,8 +229,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer lk.release();
     // LIFO: install_complete fires before lk.release. Inline gate keeps
     // the deferred call out of the default paths.
-    defer if (output.isNdjson()) output.emitNdjsonEvent(allocator, .install_complete, "", null);
-    output.emitNdjsonEvent(allocator, .lock_acquired, "", null);
+    defer if (output.isNdjson()) output.emitNdjsonEvent(.install_complete, "", null);
+    output.emitNdjsonEvent(.lock_acquired, "", null);
 
     // Set up HTTP + API + GHCR + store + linker
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);

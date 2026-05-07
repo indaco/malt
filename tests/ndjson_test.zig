@@ -66,15 +66,15 @@ test "9-step install protocol emits one ndjson line per step" {
 
     // Drive each protocol step through the same helper the real
     // commands use so the line shape is the one consumers will see.
-    output.emitNdjsonEvent(testing.allocator, .lock_acquired, "", null);
-    output.emitNdjsonEvent(testing.allocator, .resolved, "wget", null);
-    output.emitNdjsonEvent(testing.allocator, .downloaded, "wget", "ok");
-    output.emitNdjsonEvent(testing.allocator, .extracted, "wget", "ok");
-    output.emitNdjsonEvent(testing.allocator, .stored, "wget", "ok");
-    output.emitNdjsonEvent(testing.allocator, .materialized, "wget", "ok");
-    output.emitNdjsonEvent(testing.allocator, .linked, "wget", "ok");
-    output.emitNdjsonEvent(testing.allocator, .recorded, "wget", "ok");
-    output.emitNdjsonEvent(testing.allocator, .install_complete, "", null);
+    output.emitNdjsonEvent(.lock_acquired, "", null);
+    output.emitNdjsonEvent(.resolved, "wget", null);
+    output.emitNdjsonEvent(.downloaded, "wget", "ok");
+    output.emitNdjsonEvent(.extracted, "wget", "ok");
+    output.emitNdjsonEvent(.stored, "wget", "ok");
+    output.emitNdjsonEvent(.materialized, "wget", "ok");
+    output.emitNdjsonEvent(.linked, "wget", "ok");
+    output.emitNdjsonEvent(.recorded, "wget", "ok");
+    output.emitNdjsonEvent(.install_complete, "", null);
 
     // Exactly one line per step — no fan-out, no dropped events.
     try testing.expectEqual(install_step_events.len, std.mem.count(u8, buf.items, "\n"));
@@ -103,7 +103,7 @@ test "ndjson off emits zero events for the same call sequence" {
     defer io_mod.endStdoutCapture();
 
     for (install_step_events) |ev| {
-        output.emitNdjsonEvent(testing.allocator, ev, "wget", "ok");
+        output.emitNdjsonEvent(ev, "wget", "ok");
     }
     try testing.expectEqualStrings("", buf.items);
 }
@@ -120,7 +120,7 @@ test "every NdjsonEvent variant emits a parser-clean line" {
     defer io_mod.endStdoutCapture();
 
     inline for (std.meta.tags(output.NdjsonEvent)) |ev| {
-        output.emitNdjsonEvent(testing.allocator, ev, "wget", null);
+        output.emitNdjsonEvent(ev, "wget", null);
     }
 
     const total: usize = std.meta.tags(output.NdjsonEvent).len;
@@ -145,7 +145,7 @@ test "no-op skip event names are stable across mutating commands" {
     io_mod.beginStdoutCapture(testing.allocator, &buf);
     defer io_mod.endStdoutCapture();
 
-    for (skip_events) |ev| output.emitNdjsonEvent(testing.allocator, ev, "wget", null);
+    for (skip_events) |ev| output.emitNdjsonEvent(ev, "wget", null);
 
     try testing.expectEqual(skip_events.len, std.mem.count(u8, buf.items, "\n"));
     // No status field on any of them — these are no-transition events.
@@ -171,8 +171,8 @@ test "would_install and already_installed are stable side-channel event names" {
     io_mod.beginStdoutCapture(testing.allocator, &buf);
     defer io_mod.endStdoutCapture();
 
-    output.emitNdjsonEvent(testing.allocator, .would_install, "wget", null);
-    output.emitNdjsonEvent(testing.allocator, .already_installed, "tree", null);
+    output.emitNdjsonEvent(.would_install, "wget", null);
+    output.emitNdjsonEvent(.already_installed, "tree", null);
 
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, buf.items, "\n"));
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"event\":\"would_install\"") != null);

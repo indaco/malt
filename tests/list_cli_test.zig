@@ -91,7 +91,7 @@ test "execute --help short-circuits" {
     defer s.deinit(testing.allocator);
     quiet();
     defer unquiet();
-    try list.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--help"});
+    try list.execute(&malt.app_ctx.debug_ctx, &.{"--help"});
 }
 
 test "execute on a fresh prefix with no db is a clean no-op" {
@@ -105,7 +105,7 @@ test "execute on a fresh prefix with no db is a clean no-op" {
 
     quiet();
     defer unquiet();
-    try list.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
+    try list.execute(&malt.app_ctx.debug_ctx, &.{});
 }
 
 // --- happy paths ------------------------------------------------------
@@ -118,7 +118,7 @@ test "execute with no flags lists both kegs and casks" {
     const ctx = ctxWithSink();
     quiet();
     defer unquiet();
-    try list.execute(&ctx, testing.allocator, &.{});
+    try list.execute(&ctx, &.{});
 }
 
 test "execute --formula scopes the dump to kegs only" {
@@ -129,7 +129,7 @@ test "execute --formula scopes the dump to kegs only" {
     const ctx = ctxWithSink();
     quiet();
     defer unquiet();
-    try list.execute(&ctx, testing.allocator, &.{"--formula"});
+    try list.execute(&ctx, &.{"--formula"});
 }
 
 test "execute --cask scopes the dump to casks only" {
@@ -140,7 +140,7 @@ test "execute --cask scopes the dump to casks only" {
     const ctx = ctxWithSink();
     quiet();
     defer unquiet();
-    try list.execute(&ctx, testing.allocator, &.{"--cask"});
+    try list.execute(&ctx, &.{"--cask"});
 }
 
 test "execute --versions includes version strings in the human dump" {
@@ -151,7 +151,7 @@ test "execute --versions includes version strings in the human dump" {
     const ctx = ctxWithSink();
     quiet();
     defer unquiet();
-    try list.execute(&ctx, testing.allocator, &.{"--versions"});
+    try list.execute(&ctx, &.{"--versions"});
 }
 
 test "execute --pinned scopes the dump to pinned rows only" {
@@ -162,7 +162,7 @@ test "execute --pinned scopes the dump to pinned rows only" {
     const ctx = ctxWithSink();
     quiet();
     defer unquiet();
-    try list.execute(&ctx, testing.allocator, &.{"--pinned"});
+    try list.execute(&ctx, &.{"--pinned"});
 }
 
 test "execute --json emits a JSON dump" {
@@ -178,5 +178,5 @@ test "execute --json emits a JSON dump" {
         unquiet();
     }
     const ctx = ctxWithSink();
-    try list.execute(&ctx, testing.allocator, &.{});
+    try list.execute(&ctx, &.{});
 }

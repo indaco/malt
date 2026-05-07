@@ -102,7 +102,7 @@ pub const VerifyInputs = struct {
 /// Pure file I/O + subprocess — the caller is responsible for placing
 /// the three input files on disk. Testable without HTTP.
 pub fn verifyAll(io: std.Io, allocator: std.mem.Allocator, in: VerifyInputs) VerifyError!void {
-    verifyCosignBlob(io, allocator, .{
+    verifyCosignBlob(io, .{
         .cosign_bin = in.cosign_bin,
         .blob_path = in.checksums_path,
         .bundle_path = in.sigstore_path,
@@ -126,8 +126,7 @@ pub fn verifyAll(io: std.Io, allocator: std.mem.Allocator, in: VerifyInputs) Ver
 
 /// Shell out to `cosign verify-blob` with the same flags `install.sh` uses.
 /// Exit 0 = verified. Any other outcome maps to a CosignError.
-pub fn verifyCosignBlob(io: std.Io, allocator: std.mem.Allocator, args: CosignBlob) CosignError!void {
-    _ = allocator;
+pub fn verifyCosignBlob(io: std.Io, args: CosignBlob) CosignError!void {
     const argv = [_][]const u8{
         args.cosign_bin,
         "verify-blob",

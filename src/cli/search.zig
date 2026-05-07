@@ -113,7 +113,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};
     if (json_mode) {
-        try emitJson(allocator, stdout, search_formula, search_cask, formula, cask, search_query);
+        try emitJson(stdout, search_formula, search_cask, formula, cask, search_query);
     } else {
         emitHuman(stdout, formula, cask, search_query);
     }
@@ -193,7 +193,6 @@ fn writeHuman(
 }
 
 fn emitJson(
-    allocator: std.mem.Allocator,
     stdout: *std.Io.Writer,
     search_formula: bool,
     search_cask: bool,
@@ -201,7 +200,6 @@ fn emitJson(
     cask: KindResults,
     query: []const u8,
 ) !void {
-    _ = allocator;
     try stdout.writeAll("{");
     if (search_formula) {
         try stdout.writeAll("\"formulae\":[");

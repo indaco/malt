@@ -328,9 +328,7 @@ const macos_x86_platforms = [_][]const u8{
 };
 
 /// Select the best matching bottle for the current platform.
-pub fn resolveBottle(allocator: std.mem.Allocator, formula: *const Formula) !BottleFile {
-    _ = allocator;
-
+pub fn resolveBottle(formula: *const Formula) !BottleFile {
     const files = formula.bottle_files orelse return FormulaError.NoBottleAvailable;
 
     const candidates: []const []const u8 = switch (builtin.cpu.arch) {

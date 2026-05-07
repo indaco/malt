@@ -135,7 +135,7 @@ test "verifyCosignBlob returns CosignNotFound when the binary is missing" {
     defer lio.deinit();
     var args = fake_args;
     args.cosign_bin = "/tmp/malt_nonexistent_cosign_xyz_99";
-    try testing.expectError(error.CosignNotFound, verify.verifyCosignBlob(lio.io(), testing.allocator, args));
+    try testing.expectError(error.CosignNotFound, verify.verifyCosignBlob(lio.io(), args));
 }
 
 test "verifyCosignBlob accepts a cosign that exits 0" {
@@ -147,7 +147,7 @@ test "verifyCosignBlob accepts a cosign that exits 0" {
 
     var args = fake_args;
     args.cosign_bin = path;
-    try verify.verifyCosignBlob(lio.io(), testing.allocator, args);
+    try verify.verifyCosignBlob(lio.io(), args);
 }
 
 // libc env mutators: Zig 0.16 has no std wrapper for these and the
@@ -186,7 +186,7 @@ test "verifyCosignBlob finds a bare 'cosign' via PATH (regression: gh#151)" {
     args.cosign_bin = "cosign";
     var lio = LiveIo.init();
     defer lio.deinit();
-    try verify.verifyCosignBlob(lio.io(), testing.allocator, args);
+    try verify.verifyCosignBlob(lio.io(), args);
 }
 
 // --- verifyAll (end-to-end, local fixtures) ------------------------------
@@ -450,5 +450,5 @@ test "verifyCosignBlob errors when cosign exits non-zero" {
 
     var args = fake_args;
     args.cosign_bin = path;
-    try testing.expectError(error.CosignVerifyFailed, verify.verifyCosignBlob(lio.io(), testing.allocator, args));
+    try testing.expectError(error.CosignVerifyFailed, verify.verifyCosignBlob(lio.io(), args));
 }

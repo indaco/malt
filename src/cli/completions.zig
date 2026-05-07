@@ -24,8 +24,7 @@ pub fn scriptFor(shell: Shell) []const u8 {
     };
 }
 
-pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
-    _ = allocator;
+pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "completions")) return;
 
     if (args.len == 0) {

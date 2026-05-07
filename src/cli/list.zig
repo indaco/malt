@@ -10,7 +10,7 @@ const output = @import("../ui/output.zig");
 const color = @import("../ui/color.zig");
 const help = @import("help.zig");
 
-pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "list")) return;
 
     // Parse per-command flags. `--json`, `--quiet`/`-q`, `--verbose`/`-v`,
@@ -59,7 +59,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer stdout.flush() catch {};
 
     if (json_mode) {
-        try writeJsonOutput(ctx, allocator, &db, show_formula, show_cask, show_pinned, stdout);
+        try writeJsonOutput(ctx, &db, show_formula, show_cask, show_pinned, stdout);
     } else {
         try writeHumanOutput(&db, show_formula, show_cask, show_versions, show_pinned, stdout);
     }
@@ -229,14 +229,12 @@ fn writeStyledSpan(
 
 fn writeJsonOutput(
     ctx: *const AppCtx,
-    allocator: std.mem.Allocator,
     db: *sqlite.Database,
     show_formula: bool,
     show_cask: bool,
     show_pinned: bool,
     stdout: *std.Io.Writer,
 ) !void {
-    _ = allocator;
     const start_ts = std.Io.Clock.real.now(ctx.io).toMilliseconds();
     try buildListJson(db, stdout, show_formula, show_cask, show_pinned, start_ts);
 }
