@@ -10,6 +10,10 @@ pub const OutputMode = enum {
     json,
 };
 
+/// Seeded by argv parsing in `main` before any worker thread spawns and
+/// not flipped afterwards, so plain reads/writes stay race-free. Mutators
+/// that need a runtime flip must migrate the flag (and every reader) to
+/// `@atomicLoad`/`@atomicStore`, matching `post_install_emit` below.
 var quiet: bool = false;
 var verbose: bool = false;
 var debug: bool = false;
