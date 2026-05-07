@@ -206,6 +206,20 @@ fn migrateV3toV4(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
+/// Best-effort restore of FK enforcement after the v5 rebuild window.
+/// `defer` cannot return an error, so a silent `catch {}` would leave
+/// the connection running without FKs for the rest of its lifetime if
+/// the re-enable hit a transient SQLITE_BUSY. One retry covers that
+/// case; surfacing remaining failures via `std.log.warn` is the only
+/// recourse left.
+fn reenableForeignKeys(db: *sqlite.Database) void {
+    db.exec("PRAGMA foreign_keys=ON;") catch {
+        db.exec("PRAGMA foreign_keys=ON;") catch |err| {
+            std.log.warn("foreign_keys re-enable failed: {s}", .{@errorName(err)});
+        };
+    };
+}
+
 /// v5 — broaden the kegs UNIQUE from `(name, version)` to
 /// `(name, version, revision)` so a Homebrew revision-bump upgrade
 /// (`1.9.2` → `1.9.2_2`) can transiently coexist with the old row
@@ -243,7 +257,7 @@ fn migrateV4toV5(db: *sqlite.Database) sqlite.SqliteError!void {
     // DROP `kegs` without tripping `dependencies.keg_id` / `links.keg_id`;
     // the RENAME then rewrites those references at the new table.
     try db.exec("PRAGMA foreign_keys=OFF;");
-    defer db.exec("PRAGMA foreign_keys=ON;") catch {};
+    defer reenableForeignKeys(db);
 
     try db.beginTransaction();
     errdefer db.rollback();
