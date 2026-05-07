@@ -98,8 +98,10 @@ pub const Reporter = struct {
 
     /// Status line for sections that work without per-item trace
     /// (cache pruning announces its window before it walks).
+    /// Buffer matches `output.info`'s 4096B so a long `cache_dir`
+    /// passed by `runCache` doesn't silently drop the header.
     pub fn note(self: *const Reporter, comptime fmt: []const u8, args: anytype) void {
-        var buf: [320]u8 = undefined;
+        var buf: [4096]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
         output.info("{s}: {s}", .{ self.scope, msg });
     }
@@ -238,4 +240,27 @@ test "shortHash leaves a 12-char input untouched (boundary)" {
     const exact = "0123456789ab";
     const got = shortHash(exact, &buf);
     try testing.expectEqualStrings(exact, got);
+}
+
+test "note prints messages whose formatted length exceeds the legacy 320-byte cap" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const prior_quiet = output.isQuiet();
+    color.setForTest(false, false);
+    output.setQuiet(false);
+    output.beginStderrCapture(testing.allocator, &buf);
+    defer {
+        output.endStderrCapture();
+        color.setForTest(null, null);
+        output.setQuiet(prior_quiet);
+    }
+
+    var path_buf: [600]u8 = undefined;
+    @memset(path_buf[0..], 'a');
+    const long_path: []const u8 = path_buf[0..];
+
+    const rep = Reporter.init("cache", true);
+    rep.note("under {s}", .{long_path});
+
+    try testing.expect(std.mem.indexOf(u8, buf.items, long_path) != null);
 }
