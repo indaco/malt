@@ -407,7 +407,12 @@ pub fn followLog(
     while (!interrupted()) {
         const n = f.readPositionalAll(io, &buf, offset) catch return SupervisorError.IoFailed;
         if (n == 0) {
-            std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(poll_ns)), .awake) catch {};
+            // Cancelled sleep means SIGINT (or another stop signal) reached
+            // the io subsystem before `interrupted()` flipped; bail rather
+            // than busy-spin until the flag catches up.
+            std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(poll_ns)), .awake) catch |e| switch (e) {
+                error.Canceled => break,
+            };
             continue;
         }
         writer.writeAll(buf[0..n]) catch return SupervisorError.IoFailed;
@@ -517,4 +522,55 @@ test "followLog flushes appended bytes between polls" {
 
     try testing.expect(std.mem.indexOf(u8, aw.written(), "appended\n") != null);
     try testing.expectEqual(@as(usize, 3), FollowProbe.calls);
+}
+
+// Patches an inner Io's vtable so `sleep` always reports cancellation;
+// every other operation still flows to the real backend.
+const CancelSleepProbe = struct {
+    var vtable: std.Io.VTable = undefined;
+    var sleep_calls: usize = 0;
+
+    fn wrap(inner: std.Io) std.Io {
+        vtable = inner.vtable.*;
+        vtable.sleep = sleepCanceled;
+        sleep_calls = 0;
+        return .{ .userdata = inner.userdata, .vtable = &vtable };
+    }
+
+    fn sleepCanceled(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
+        sleep_calls += 1;
+        return error.Canceled;
+    }
+};
+
+test "followLog breaks when sleep reports cancellation" {
+    testIoInit();
+    defer testIoDeinit();
+
+    const dir = "/tmp/malt_supervisor_follow_cancel";
+    std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(test_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+
+    const log_path = dir ++ "/sample.log";
+    {
+        const f = try std.Io.Dir.createFileAbsolute(test_io, log_path, .{ .truncate = true });
+        defer f.close(test_io);
+        try f.writeStreamingAll(test_io, "seed\n");
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    const cancel_io = CancelSleepProbe.wrap(test_io);
+
+    FollowProbe.reset();
+    // High stop_at: only sleep cancellation should end the loop. If the loop
+    // ever spins past Canceled, FollowProbe.calls will exceed 1.
+    FollowProbe.stop_at = 16;
+
+    try followLog(cancel_io, testing.allocator, log_path, 0, &aw.writer, FollowProbe.cb);
+
+    try testing.expectEqual(@as(usize, 1), CancelSleepProbe.sleep_calls);
+    try testing.expectEqual(@as(usize, 1), FollowProbe.calls);
 }
