@@ -171,6 +171,15 @@ pub fn freeState(allocator: std.mem.Allocator, state: State) void {
     allocator.free(state.current_seen);
 }
 
+/// Install `new_value` first, then free the prior — single statement so a
+/// caller's `defer if (state) |s| freeState(...)` can never observe a freed
+/// pair, even if a future edit slips a fallible call in between.
+fn replaceState(state: *?State, allocator: std.mem.Allocator, new_value: State) void {
+    const prior = state.*;
+    state.* = new_value;
+    if (prior) |p| freeState(allocator, p);
+}
+
 /// Returns null when the file is absent (a torn or first run).
 pub fn readCache(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !?State {
     const bytes = readFileAllAbsolute(io, allocator, path, 64 * 1024) catch |e| switch (e) {
@@ -349,8 +358,7 @@ fn refreshOnce(
 
     writeCache(ctx.io, path, .{ .checked_at = now, .latest_tag = tag, .current_seen = prior_seen }) catch {};
 
-    if (state.*) |old| freeState(allocator, old);
-    state.* = .{ .checked_at = now, .latest_tag = tag, .current_seen = seen_dup };
+    replaceState(state, allocator, .{ .checked_at = now, .latest_tag = tag, .current_seen = seen_dup });
 }
 
 /// Read the entire contents of an absolute file path into a caller-owned slice.
@@ -589,6 +597,40 @@ test "writeCache replaces an existing cache atomically (rename, not in-place tru
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "replaceState: prior null installs new without freeing" {
+    const allocator = std.testing.allocator;
+    var state: ?State = null;
+    const new_state: State = .{
+        .checked_at = 1,
+        .latest_tag = try allocator.dupe(u8, "v0.10.1"),
+        .current_seen = try allocator.dupe(u8, "0.10.0"),
+    };
+    replaceState(&state, allocator, new_state);
+    defer if (state) |s| freeState(allocator, s);
+    try std.testing.expect(state != null);
+    try std.testing.expectEqualStrings("v0.10.1", state.?.latest_tag);
+}
+
+test "replaceState: prior non-null is freed; caller's deferred free of new is single-owner" {
+    const allocator = std.testing.allocator;
+    var state: ?State = .{
+        .checked_at = 0,
+        .latest_tag = try allocator.dupe(u8, "v0.9.0"),
+        .current_seen = try allocator.dupe(u8, "0.8.0"),
+    };
+    const new_state: State = .{
+        .checked_at = 1,
+        .latest_tag = try allocator.dupe(u8, "v0.10.0"),
+        .current_seen = try allocator.dupe(u8, "0.9.0"),
+    };
+    replaceState(&state, allocator, new_state);
+    // Mirrors `runNotify`'s scope-exit pattern; testing.allocator catches a
+    // double-free of the prior pair or a leak of the prior pair.
+    defer if (state) |s| freeState(allocator, s);
+    try std.testing.expectEqual(@as(i64, 1), state.?.checked_at);
+    try std.testing.expectEqualStrings("v0.10.0", state.?.latest_tag);
 }
 
 test "readCache: missing file is null, not an error" {
