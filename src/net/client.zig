@@ -74,16 +74,18 @@ pub fn idleTimeoutNsFromEnv(raw: ?[]const u8) u64 {
     return @as(u64, clamped) * std.time.ns_per_s;
 }
 
-/// Watchdog fires when *either* deadline is breached: idle (no bytes
-/// in `idle_limit_ns`) or whole-transfer (running longer than
-/// `total_limit_ns`). Pure so the policy is unit-testable without
-/// real sockets / threads.
+/// Watchdog fires when *either* deadline is breached, or when an
+/// external `cancelled` signal asks us to give up early — e.g. SIGINT
+/// during the post-dispatch update probe. Pure so the policy is
+/// unit-testable without real sockets / threads.
 pub fn shouldFireIdleWatchdog(
     idle_elapsed_ns: u64,
     total_elapsed_ns: u64,
     idle_limit_ns: u64,
     total_limit_ns: u64,
+    cancelled: bool,
 ) bool {
+    if (cancelled) return true;
     return idle_elapsed_ns >= idle_limit_ns or total_elapsed_ns >= total_limit_ns;
 }
 
@@ -120,6 +122,12 @@ pub const HttpClient = struct {
 
     /// Per-request timeout in nanoseconds. Default: 30 seconds.
     timeout_ns: u64 = default_timeout_ns,
+
+    /// Optional cancellation predicate polled on every watchdog tick.
+    /// Lets best-effort callers (e.g. the post-dispatch update probe)
+    /// short-circuit a blackholed read on Ctrl-C without coupling
+    /// `net/client` to the SIGINT mechanism the caller chose.
+    cancel: ?*const fn () bool = null,
 
     /// Reused across requests; each HttpClient is borrowed single-threaded
     /// from a pool, so no concurrent access.
@@ -470,6 +478,7 @@ pub const HttpClient = struct {
             idle_timeout,
             total_timeout,
             &req,
+            self.cancel,
         }) catch null;
         defer {
             request_done.set(self.io);
@@ -500,7 +509,7 @@ pub const HttpClient = struct {
     }
 
     /// Polls `bytes_progress` on a tick; fires (shuts down the socket)
-    /// when either the idle or whole-transfer deadline is breached. Both
+    /// when either deadline is breached or `cancel()` returns true. Both
     /// flag `conn.closing` AND `shutdown(.both)` because setting closing
     /// alone does not wake a `readv` already parked in the kernel —
     /// stalled TLS reads hung the previous single-deadline implementation.
@@ -511,13 +520,18 @@ pub const HttpClient = struct {
         idle_timeout_ns: u64,
         total_timeout_ns: u64,
         req: *std.http.Client.Request,
+        cancel: ?*const fn () bool,
     ) void {
         const start_ns: u64 = @intCast(std.Io.Clock.real.now(io).toNanoseconds());
         var last_seen_bytes: u64 = bytes_progress.load(.acquire);
         var last_progress_ns: u64 = start_ns;
-        // Tick small enough to be responsive, large enough to avoid
-        // spinning. Quarter of the idle window, capped at 5 s.
-        const tick_ns: u64 = @min(idle_timeout_ns / 4, 5 * std.time.ns_per_s);
+        // Quarter of the smallest deadline, capped at 5 s, floored at
+        // 100 ms — keeps Ctrl-C snappy on a sub-second probe without
+        // spinning on a multi-minute blob download.
+        const tick_ns: u64 = @max(
+            @min(@min(idle_timeout_ns, total_timeout_ns) / 4, 5 * std.time.ns_per_s),
+            100 * std.time.ns_per_ms,
+        );
 
         while (true) {
             const tick: std.Io.Timeout = .{ .duration = .{
@@ -534,7 +548,8 @@ pub const HttpClient = struct {
                     }
                     const idle_elapsed = now_ns - last_progress_ns;
                     const total_elapsed = now_ns - start_ns;
-                    if (shouldFireIdleWatchdog(idle_elapsed, total_elapsed, idle_timeout_ns, total_timeout_ns)) {
+                    const cancelled = if (cancel) |fp| fp() else false;
+                    if (shouldFireIdleWatchdog(idle_elapsed, total_elapsed, idle_timeout_ns, total_timeout_ns, cancelled)) {
                         if (req.connection) |conn| {
                             conn.closing = true;
                             const fd = conn.stream_reader.stream.socket.handle;
@@ -676,17 +691,24 @@ test "idleTimeoutNsFromEnv: clamps above ceiling" {
     try std.testing.expectEqual(@as(u64, max_idle_timeout_secs) * std.time.ns_per_s, idleTimeoutNsFromEnv("99999"));
 }
 
-test "shouldFireIdleWatchdog: false when both elapsed below their limits" {
-    try std.testing.expect(!shouldFireIdleWatchdog(10, 100, 30, 600));
-    try std.testing.expect(!shouldFireIdleWatchdog(0, 0, 30, 600));
+test "shouldFireIdleWatchdog: false when both elapsed below their limits and not cancelled" {
+    try std.testing.expect(!shouldFireIdleWatchdog(10, 100, 30, 600, false));
+    try std.testing.expect(!shouldFireIdleWatchdog(0, 0, 30, 600, false));
 }
 
 test "shouldFireIdleWatchdog: true when idle elapsed >= idle limit (mid-transfer stall)" {
-    try std.testing.expect(shouldFireIdleWatchdog(30, 100, 30, 600));
-    try std.testing.expect(shouldFireIdleWatchdog(31, 100, 30, 600));
+    try std.testing.expect(shouldFireIdleWatchdog(30, 100, 30, 600, false));
+    try std.testing.expect(shouldFireIdleWatchdog(31, 100, 30, 600, false));
 }
 
 test "shouldFireIdleWatchdog: true when total elapsed >= total limit (slow trickle backstop)" {
-    try std.testing.expect(shouldFireIdleWatchdog(0, 600, 30, 600));
-    try std.testing.expect(shouldFireIdleWatchdog(0, 9999, 30, 600));
+    try std.testing.expect(shouldFireIdleWatchdog(0, 600, 30, 600, false));
+    try std.testing.expect(shouldFireIdleWatchdog(0, 9999, 30, 600, false));
+}
+
+test "shouldFireIdleWatchdog: cancellation fires regardless of elapsed time" {
+    // SIGINT during a best-effort probe must short-circuit even when no
+    // deadline has elapsed yet — otherwise Ctrl-C waits out the read.
+    try std.testing.expect(shouldFireIdleWatchdog(0, 0, 30, 600, true));
+    try std.testing.expect(shouldFireIdleWatchdog(1, 1, 999_999, 999_999, true));
 }
