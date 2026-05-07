@@ -4,6 +4,7 @@
 const std = @import("std");
 const values = @import("../values.zig");
 const pathname = @import("pathname.zig");
+const text_replace = @import("../../../text_replace.zig");
 
 const Value = values.Value;
 const BuiltinError = pathname.BuiltinError;
@@ -21,48 +22,6 @@ fn receiverStr(allocator: std.mem.Allocator, receiver: ?Value) BuiltinError![]co
         .pathname => |p| p,
         else => recv.asString(allocator) catch return BuiltinError.OutOfMemory,
     };
-}
-
-/// Replace all occurrences of `needle` with `replacement` in `haystack`.
-fn replaceAll(allocator: std.mem.Allocator, haystack: []const u8, needle: []const u8, replacement: []const u8) BuiltinError![]const u8 {
-    if (needle.len == 0) return allocator.dupe(u8, haystack) catch return BuiltinError.OutOfMemory;
-
-    // Count occurrences to compute result size.
-    var count: usize = 0;
-    var pos: usize = 0;
-    while (pos <= haystack.len -| needle.len) {
-        if (std.mem.startsWith(u8, haystack[pos..], needle)) {
-            count += 1;
-            pos += needle.len;
-        } else {
-            pos += 1;
-        }
-    }
-
-    if (count == 0) return allocator.dupe(u8, haystack) catch return BuiltinError.OutOfMemory;
-
-    const new_len = haystack.len - (count * needle.len) + (count * replacement.len);
-    const buf = allocator.alloc(u8, new_len) catch return BuiltinError.OutOfMemory;
-
-    var src: usize = 0;
-    var dst: usize = 0;
-    while (src <= haystack.len -| needle.len) {
-        if (std.mem.startsWith(u8, haystack[src..], needle)) {
-            @memcpy(buf[dst..][0..replacement.len], replacement);
-            dst += replacement.len;
-            src += needle.len;
-        } else {
-            buf[dst] = haystack[src];
-            dst += 1;
-            src += 1;
-        }
-    }
-    // Copy remaining tail bytes (less than needle.len).
-    if (src < haystack.len) {
-        @memcpy(buf[dst..][0 .. haystack.len - src], haystack[src..]);
-    }
-
-    return buf;
 }
 
 /// Replace only the first occurrence of `needle` with `replacement`.
@@ -91,7 +50,10 @@ pub fn gsub(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Va
     if (args.len < 2) return Value{ .string = s };
     const pattern = try args[0].asString(ctx.allocator);
     const replacement = try args[1].asString(ctx.allocator);
-    return Value{ .string = try replaceAll(ctx.allocator, s, pattern, replacement) };
+    return Value{
+        .string = text_replace.replaceAll(ctx.allocator, s, pattern, replacement) catch
+            return BuiltinError.OutOfMemory,
+    };
 }
 
 /// gsub!(pattern, replacement) — in-place gsub (same as gsub for immutable strings)
@@ -320,4 +282,50 @@ fn parseLeadingInt(s: []const u8) i64 {
         saw_digit = true;
     }
     return if (saw_digit) n else 0;
+}
+
+// ---------------------------------------------------------------------------
+// Inline tests
+// ---------------------------------------------------------------------------
+
+fn testCtx(allocator: std.mem.Allocator) ExecCtx {
+    return .{
+        .allocator = allocator,
+        // The string builtins only touch `allocator`; remaining fields are
+        // structurally required by ExecCtx but never read on these paths.
+        .io = undefined,
+        .environ = undefined,
+        .cellar_path = "",
+        .malt_prefix = "",
+    };
+}
+
+test "gsub rewrites every occurrence and routes through the shared replacer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx = testCtx(arena.allocator());
+
+    const args = [_]Value{ .{ .string = "AAA" }, .{ .string = "X" } };
+    const out = try gsub(ctx, .{ .string = "headAAAmidAAAtail" }, &args);
+    try std.testing.expectEqualStrings("headXmidXtail", out.string);
+}
+
+test "gsub with no match returns the receiver bytes unchanged" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx = testCtx(arena.allocator());
+
+    const args = [_]Value{ .{ .string = "absent" }, .{ .string = "Z" } };
+    const out = try gsub(ctx, .{ .string = "no needles here" }, &args);
+    try std.testing.expectEqualStrings("no needles here", out.string);
+}
+
+test "gsub with empty replacement deletes every match" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx = testCtx(arena.allocator());
+
+    const args = [_]Value{ .{ .string = "X-" }, .{ .string = "" } };
+    const out = try gsub(ctx, .{ .string = "remove-X-and-X-everything" }, &args);
+    try std.testing.expectEqualStrings("remove-and-everything", out.string);
 }

@@ -7,6 +7,7 @@ const values = @import("../values.zig");
 const sandbox = @import("../sandbox.zig");
 const pathname = @import("pathname.zig");
 const output = @import("../../../ui/output.zig");
+const text_replace = @import("../../../text_replace.zig");
 
 const Value = values.Value;
 const BuiltinError = pathname.BuiltinError;
@@ -43,7 +44,7 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
 
     // Replace all occurrences
     if (from.len == 0) return Value{ .nil = {} };
-    const new_content = replaceAll(ctx.allocator, content, from, to) catch {
+    const new_content = text_replace.replaceAll(ctx.allocator, content, from, to) catch {
         return Value{ .nil = {} };
     };
 
@@ -63,46 +64,6 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
     };
 
     return Value{ .nil = {} };
-}
-
-/// Replace all occurrences of `needle` with `replacement` in `haystack`.
-fn replaceAll(allocator: std.mem.Allocator, haystack: []const u8, needle: []const u8, replacement: []const u8) ![]const u8 {
-    // Count occurrences
-    var count: usize = 0;
-    var pos: usize = 0;
-    while (pos <= haystack.len -| needle.len) {
-        if (std.mem.startsWith(u8, haystack[pos..], needle)) {
-            count += 1;
-            pos += needle.len;
-        } else {
-            pos += 1;
-        }
-    }
-
-    if (count == 0) return try allocator.dupe(u8, haystack);
-
-    const new_len = haystack.len - (count * needle.len) + (count * replacement.len);
-    const buf = try allocator.alloc(u8, new_len);
-
-    var src: usize = 0;
-    var dst: usize = 0;
-    while (src <= haystack.len -| needle.len) {
-        if (std.mem.startsWith(u8, haystack[src..], needle)) {
-            @memcpy(buf[dst..][0..replacement.len], replacement);
-            dst += replacement.len;
-            src += needle.len;
-        } else {
-            buf[dst] = haystack[src];
-            dst += 1;
-            src += 1;
-        }
-    }
-    // Copy remaining tail
-    if (src < haystack.len) {
-        @memcpy(buf[dst..][0 .. haystack.len - src], haystack[src..]);
-    }
-
-    return buf;
 }
 
 /// Write content atomically: write to temp file then rename over original.
