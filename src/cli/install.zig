@@ -521,10 +521,10 @@ fn executeWithOpts(
             var it = repo_set.keyIterator();
             while (it.next()) |k| try repos.append(allocator, k.*);
             const pre_http = http_pool.acquire();
+            defer http_pool.release(pre_http);
             // Best-effort cache warm — any failure (OOM or network) is
             // absorbed so workers fall back to per-repo fetchToken calls.
             ghcr.prefetchTokens(pre_http, repos.items) catch {};
-            http_pool.release(pre_http);
         }
 
         // Set up multi-progress: assign line indices and create coordinator
