@@ -416,9 +416,15 @@ pub fn confirmTyped(expected: []const u8, prompt: []const u8) bool {
     if (!is_tty) return false;
 
     question("{s}", .{prompt});
+    return readMatchingLine(stdin_file, pkg_io, expected);
+}
 
+/// Helper kept separate so tests can drive the read path against a pipe
+/// without needing a real TTY; routing the read through `io` matches the
+/// `isTty` probe and lets `AppCtx.io` redirection observe stdin.
+fn readMatchingLine(stdin_file: std.Io.File, io: std.Io, expected: []const u8) bool {
     var buf: [128]u8 = undefined;
-    const n = std.posix.read(std.posix.STDIN_FILENO, &buf) catch return false;
+    const n = stdin_file.readStreaming(io, &.{buf[0..]}) catch return false;
     if (n == 0) return false;
     const input = std.mem.trim(u8, buf[0..n], " \t\r\n");
     return std.mem.eql(u8, input, expected);
@@ -829,4 +835,47 @@ test "postInstallEmit reflects the most recent setPostInstallEmit value" {
 
     resetPostInstallEvents();
     try std.testing.expectEqual(PostInstallEmit.stream, postInstallEmit());
+}
+
+// Drives the read path through the seeded io against a pipe so the
+// `confirmTyped` accept/reject contract — including EOF — is pinned
+// without relying on a real TTY.
+fn pipeForTest() ![2]std.c.fd_t {
+    var fds: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&fds) != 0) return error.PipeFailed;
+    return fds;
+}
+
+test "readMatchingLine accepts trimmed input that matches expected" {
+    const fds = try pipeForTest();
+    defer _ = std.c.close(fds[0]);
+
+    const msg = "yes\n";
+    const written = std.c.write(fds[1], msg.ptr, msg.len);
+    try std.testing.expectEqual(@as(isize, msg.len), written);
+    _ = std.c.close(fds[1]);
+
+    const stdin_file: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+    try std.testing.expect(readMatchingLine(stdin_file, std.Options.debug_io, "yes"));
+}
+
+test "readMatchingLine rejects mismatched input" {
+    const fds = try pipeForTest();
+    defer _ = std.c.close(fds[0]);
+
+    const msg = "no\n";
+    _ = std.c.write(fds[1], msg.ptr, msg.len);
+    _ = std.c.close(fds[1]);
+
+    const stdin_file: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+    try std.testing.expect(!readMatchingLine(stdin_file, std.Options.debug_io, "yes"));
+}
+
+test "readMatchingLine returns false when stdin is at EOF" {
+    const fds = try pipeForTest();
+    defer _ = std.c.close(fds[0]);
+    _ = std.c.close(fds[1]);
+
+    const stdin_file: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+    try std.testing.expect(!readMatchingLine(stdin_file, std.Options.debug_io, "yes"));
 }
