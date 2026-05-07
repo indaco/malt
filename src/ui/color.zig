@@ -259,7 +259,8 @@ fn queryOsc11Background() ?Background {
     if (ready == 0) return null;
 
     var buf: [64]u8 = undefined;
-    const n = std.posix.read(stdin_fd, &buf) catch return null;
+    const stdin_file: std.Io.File = .{ .handle = stdin_fd, .flags = .{ .nonblocking = false } };
+    const n = stdin_file.readStreaming(pkg_io, &.{buf[0..]}) catch return null;
     if (n == 0) return null;
     const rgb = parseOsc11Response(buf[0..n]) orelse return null;
     return classifyLuminance(rgb);
