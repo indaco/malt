@@ -32,6 +32,11 @@ fn maltLogFn(
 /// Global interrupt flag — set by SIGINT handler, checked at install step boundaries.
 var interrupted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
+/// Tracks whether `main` has wired SIGINT to `sigintHandler`. Lets `dispatch`
+/// distinguish a real production run (preserve any flag the handler set) from
+/// a test runner re-entering with stale state from a prior case.
+var signal_handler_installed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
 pub fn isInterrupted() bool {
     return interrupted.load(.acquire);
 }
@@ -39,6 +44,12 @@ pub fn isInterrupted() bool {
 /// Test-only flag override — raising real SIGINT would race the test runner.
 pub fn setInterruptedForTest(v: bool) void {
     interrupted.store(v, .release);
+}
+
+/// Test-only override so the production-mode preservation branch is reachable
+/// from inline tests without actually installing a process-wide signal handler.
+pub fn setSignalHandlerInstalledForTest(v: bool) void {
+    signal_handler_installed.store(v, .release);
 }
 
 fn sigintHandler(_: std.posix.SIG) callconv(.c) void {
@@ -243,6 +254,28 @@ test "dispatch accepts AppCtx and routes help without panic" {
     try dispatch(std.testing.allocator, &ctx, .help, &.{});
 }
 
+test "dispatch clears stale interrupt under the test runner" {
+    setInterruptedForTest(true);
+    defer setInterruptedForTest(false);
+
+    const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
+    try dispatch(std.testing.allocator, &ctx, .help, &.{});
+
+    try std.testing.expect(!isInterrupted());
+}
+
+test "dispatch preserves interrupt once the signal handler is installed" {
+    setSignalHandlerInstalledForTest(true);
+    defer setSignalHandlerInstalledForTest(false);
+    setInterruptedForTest(true);
+    defer setInterruptedForTest(false);
+
+    const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
+    try dispatch(std.testing.allocator, &ctx, .help, &.{});
+
+    try std.testing.expect(isInterrupted());
+}
+
 test "applyGlobalFlag --output-format=ndjson does not flip --quiet" {
     // Compose with --quiet explicitly when needed; the streams are
     // already split (ndjson on stdout, human on stderr), so users
@@ -285,6 +318,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .flags = 0,
     };
     std.posix.sigaction(std.posix.SIG.INT, &act, null);
+    signal_handler_installed.store(true, .release);
 
     // Run terminal-background detection once, up front, before any
     // output.* call can trigger a lazy OSC 11 probe mid-stream (the
@@ -378,6 +412,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_args: []const []const u8) !void {
+    // No SIGINT handler means we're under the test runner (or some other
+    // non-`main` entry); clear any flag a prior test left behind so it
+    // can't bleed into this dispatch.
+    if (!signal_handler_installed.load(.acquire)) {
+        interrupted.store(false, .release);
+    }
     switch (cmd) {
         .install => try install.execute(ctx, allocator, cmd_args),
         .uninstall => try uninstall.execute(ctx, allocator, cmd_args),
