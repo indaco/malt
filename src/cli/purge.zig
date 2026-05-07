@@ -105,13 +105,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 .error_kind = wipe_result.error_kind,
             }};
             purge_json.emitSummary(
-                allocator,
                 dry_run,
                 &wipe_rows,
                 wipe_result.removed,
                 wipe_result.bytes,
                 elapsed,
-            ) catch {};
+            );
         };
         defer purge_json.emitPurgeComplete(
             wipe_result.removed,
@@ -168,13 +167,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer if (output.isJson()) {
         const elapsed = std.Io.Clock.real.now(ctx.io).toMilliseconds() - start_ts;
         purge_json.emitSummary(
-            allocator,
             dry_run,
             summary.rows.items,
             grand_total.removed,
             grand_total.bytes,
             elapsed,
-        ) catch {};
+        );
     };
     defer purge_json.emitPurgeComplete(
         grand_total.removed,

@@ -52,6 +52,19 @@
 //! - `error_kind` is a stable lowercase token included only when
 //!   `status == "error"` so scripts can branch without parsing
 //!   free-form errno strings.
+//!
+//! ## Emit atomicity
+//!
+//! Both modes share one shape: build into a fixed stack buffer, then
+//! write the buffered bytes to stdout in a single call. An overflow
+//! is dropped silently rather than streamed half-formed, so consumers
+//! always see a complete JSON object (or no bytes) - never a torn
+//! document. The buffer is sized for the closed schema (7 scopes, a
+//! closed `error_kind` vocabulary, u64 counters), so overflow is a
+//! schema-growth bug, not a runtime condition. The regression tests
+//! in this file pin both the at-budget success path and the overflow
+//! drop, so a future schema bump that breaks the budget trips a unit
+//! test instead of silently truncating output.
 
 const std = @import("std");
 const output = @import("../../ui/output.zig");
@@ -135,7 +148,10 @@ fn emitEvent(
     error_kind: ?[]const u8,
 ) void {
     if (!output.isNdjson()) return;
-    var buf: [512]u8 = undefined;
+    // Matches output.emitNdjsonEvent: 1 KiB swallows worst-case
+    // adversarial-escape names so silent-drop is reachable only on
+    // genuinely pathological input, never on the closed scope set.
+    var buf: [1024]u8 = undefined;
     var w = std.Io.Writer.fixed(buf[0..]);
     w.writeAll("{\"event\":") catch return;
     output.jsonStr(&w, @tagName(event)) catch return;
@@ -192,20 +208,28 @@ pub fn emitPurgeComplete(
     emitEvent(.purge_complete, null, removed, bytes, dry_run, status, error_kind);
 }
 
-/// Build + flush the `--json` summary to stdout. Allocates a transient
-/// buffer because the document is unbounded in `rows.len`.
+/// Stack buffer for the `--json` summary. Sized for the closed schema
+/// (7 scopes max, longest scope name 13 chars, longest `error_kind`
+/// token 17 chars, u64 counters): worst-case payload is ~1.1KB; 2KB
+/// gives headroom for schema growth before the overflow-drop tests
+/// flip red.
+const summary_buffer_size: usize = 2048;
+
+/// Build + flush the `--json` summary to stdout in a single write.
+/// Builds into a fixed stack buffer so the emit is structurally
+/// all-or-nothing: an oversized document is dropped silently rather
+/// than written half-formed, mirroring the ndjson silent-drop policy.
 pub fn emitSummary(
-    allocator: std.mem.Allocator,
     dry_run: bool,
     rows: []const report.SummaryRow,
     total_removed: u64,
     total_bytes: u64,
     time_ms: i64,
-) !void {
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    try buildSummary(&aw.writer, dry_run, rows, total_removed, total_bytes, time_ms);
-    output.writeStdoutAll(aw.written());
+) void {
+    var buf: [summary_buffer_size]u8 = undefined;
+    var w = std.Io.Writer.fixed(buf[0..]);
+    buildSummary(&w, dry_run, rows, total_removed, total_bytes, time_ms) catch return;
+    output.writeStdoutAll(w.buffered());
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -395,4 +419,76 @@ test "emitScopeCompleted reports status:ok and omits error_kind on success" {
     const obj = parsed.value.object;
     try testing.expectEqualStrings("ok", obj.get("status").?.string);
     try testing.expect(obj.get("error_kind") == null);
+}
+
+test "ndjson emit drops cleanly when a scope name overflows the line buffer" {
+    // Pins the silent-drop fallback for the per-event line buffer:
+    // an adversarial scope name that doesn't fit must drop without
+    // crashing or emitting a torn line. Mirrors the same guarantee
+    // output.emitNdjsonEvent makes for install-side events.
+    const prior = output.isNdjson();
+    defer output.setNdjson(prior);
+    output.setNdjson(true);
+
+    var huge_name: [2048]u8 = undefined;
+    @memset(huge_name[0..], 'x');
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &buf);
+    defer output.endStdoutCapture();
+
+    emitScopeStarted(huge_name[0..], false);
+
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
+}
+
+test "emitSummary writes the full closed-schema worst case in one go" {
+    // Pins the buffer budget: the worst-case payload for the closed
+    // schema (7 scopes, longest names + error_kind tokens, max u64
+    // counters) must fit in the fixed stack buffer. A schema bump
+    // that breaks the budget flips this test red before users see
+    // truncated output.
+    const longest_scope_name = "store-orphans";
+    const longest_error_kind = "enumerate_orphans";
+    const rows = [_]report.SummaryRow{
+        .{ .name = longest_scope_name, .removed = std.math.maxInt(u32), .bytes = std.math.maxInt(u64), .status = .err, .error_kind = longest_error_kind },
+        .{ .name = "unused-deps", .removed = std.math.maxInt(u32), .bytes = std.math.maxInt(u64), .status = .err, .error_kind = longest_error_kind },
+        .{ .name = "cache", .removed = std.math.maxInt(u32), .bytes = std.math.maxInt(u64), .status = .err, .error_kind = longest_error_kind },
+        .{ .name = "downloads", .removed = std.math.maxInt(u32), .bytes = std.math.maxInt(u64), .status = .err, .error_kind = longest_error_kind },
+        .{ .name = "stale-casks", .removed = std.math.maxInt(u32), .bytes = std.math.maxInt(u64), .status = .err, .error_kind = longest_error_kind },
+        .{ .name = "old-versions", .removed = std.math.maxInt(u32), .bytes = std.math.maxInt(u64), .status = .err, .error_kind = longest_error_kind },
+        .{ .name = "wipe", .removed = std.math.maxInt(u32), .bytes = std.math.maxInt(u64), .status = .err, .error_kind = longest_error_kind },
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &buf);
+    defer output.endStdoutCapture();
+
+    emitSummary(false, &rows, std.math.maxInt(u64), std.math.maxInt(u64), std.math.maxInt(i64));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 7), parsed.value.object.get("scopes").?.array.items.len);
+}
+
+test "emitSummary drops cleanly when the document overflows the stack buffer" {
+    // Pins the silent-drop fallback so an oversized document - only
+    // reachable today via a synthesised over-long scope name - never
+    // surfaces a half-written object on stdout.
+    var huge_name: [summary_buffer_size]u8 = undefined;
+    @memset(huge_name[0..], 'x');
+    const rows = [_]report.SummaryRow{
+        .{ .name = huge_name[0..], .removed = 0, .bytes = 0 },
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &buf);
+    defer output.endStdoutCapture();
+
+    emitSummary(false, &rows, 0, 0, 0);
+
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
 }
