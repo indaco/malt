@@ -206,6 +206,20 @@ fn migrateV3toV4(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
+/// Best-effort restore of FK enforcement after the v5 rebuild window.
+/// `defer` cannot return an error, so a silent `catch {}` would leave
+/// the connection running without FKs for the rest of its lifetime if
+/// the re-enable hit a transient SQLITE_BUSY. One retry covers that
+/// case; surfacing remaining failures via `std.log.warn` is the only
+/// recourse left.
+fn reenableForeignKeys(db: *sqlite.Database) void {
+    db.exec("PRAGMA foreign_keys=ON;") catch {
+        db.exec("PRAGMA foreign_keys=ON;") catch |err| {
+            std.log.warn("foreign_keys re-enable failed: {s}", .{@errorName(err)});
+        };
+    };
+}
+
 /// v5 — broaden the kegs UNIQUE from `(name, version)` to
 /// `(name, version, revision)` so a Homebrew revision-bump upgrade
 /// (`1.9.2` → `1.9.2_2`) can transiently coexist with the old row
@@ -243,7 +257,7 @@ fn migrateV4toV5(db: *sqlite.Database) sqlite.SqliteError!void {
     // DROP `kegs` without tripping `dependencies.keg_id` / `links.keg_id`;
     // the RENAME then rewrites those references at the new table.
     try db.exec("PRAGMA foreign_keys=OFF;");
-    defer db.exec("PRAGMA foreign_keys=ON;") catch {};
+    defer reenableForeignKeys(db);
 
     try db.beginTransaction();
     errdefer db.rollback();
@@ -278,6 +292,15 @@ fn migrateV4toV5(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.exec("CREATE INDEX IF NOT EXISTS idx_kegs_store ON kegs(store_sha256);");
 
     try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (5);");
+
+    // SQLite recipe step 7: with FKs disabled around the rebuild, a
+    // dangling child row would silently survive the commit. The pragma
+    // emits one row per violation; presence of any row aborts.
+    {
+        var stmt = try db.prepare("PRAGMA foreign_key_check;");
+        defer stmt.finalize();
+        if (try stmt.step()) return sqlite.SqliteError.ConstraintViolation;
+    }
 
     try db.commit();
 }
@@ -322,4 +345,58 @@ test "kegs UNIQUE permits same name+version across revisions" {
         \\VALUES ('libgit2', 'libgit2', '1.9.2', 2, 'sha-dup', '/c/libgit2/dup');
     );
     try testing.expectError(sqlite.SqliteError.ConstraintViolation, dup);
+}
+
+// The v4→v5 rebuild runs with foreign_keys=OFF so the DROP can succeed,
+// which means an orphaned child row would silently survive the commit
+// without the SQLite recipe's foreign_key_check safety net.
+test "v4→v5 migration aborts when foreign_key_check finds a violation" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    // Build the v4-shape subset directly: substring probe must miss
+    // (forces the rebuild path) and the FK target name must resolve.
+    try db.exec(
+        \\CREATE TABLE schema_version (
+        \\    version INTEGER PRIMARY KEY,
+        \\    applied TEXT NOT NULL DEFAULT (datetime('now'))
+        \\);
+    );
+    try db.exec(
+        \\CREATE TABLE kegs (
+        \\    id            INTEGER PRIMARY KEY,
+        \\    name          TEXT NOT NULL,
+        \\    full_name     TEXT NOT NULL,
+        \\    version       TEXT NOT NULL,
+        \\    revision      INTEGER NOT NULL DEFAULT 0,
+        \\    tap           TEXT,
+        \\    store_sha256  TEXT NOT NULL,
+        \\    cellar_path   TEXT NOT NULL,
+        \\    installed_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        \\    pinned        INTEGER NOT NULL DEFAULT 0,
+        \\    install_reason TEXT NOT NULL DEFAULT 'direct',
+        \\    UNIQUE(name, version)
+        \\);
+    );
+    try db.exec(
+        \\CREATE TABLE dependencies (
+        \\    keg_id     INTEGER NOT NULL REFERENCES kegs(id) ON DELETE CASCADE,
+        \\    dep_name   TEXT NOT NULL,
+        \\    dep_type   TEXT NOT NULL DEFAULT 'runtime',
+        \\    PRIMARY KEY (keg_id, dep_name)
+        \\);
+    );
+
+    // Seed an orphan dependency with FKs disabled. The migration's
+    // ID-preserving rebuild keeps it dangling until the FK check runs.
+    try db.exec("PRAGMA foreign_keys=OFF;");
+    try db.exec("INSERT INTO dependencies(keg_id, dep_name) VALUES (42, 'orphan');");
+    try db.exec("PRAGMA foreign_keys=ON;");
+
+    try db.exec("INSERT INTO schema_version (version) VALUES (4);");
+
+    try testing.expectError(sqlite.SqliteError.ConstraintViolation, migrate(&db));
+
+    // Rollback must leave the schema at v4 so a future run can retry.
+    try testing.expectEqual(@as(i64, 4), try currentVersion(&db));
 }
