@@ -560,14 +560,11 @@ pub const NdjsonEvent = enum {
 /// `name` is omitted when empty (lock_acquired et al. are command-level);
 /// `status` is omitted when null so consumers skip a `null` vs `missing`
 /// branch. Overflowing events drop silently rather than fail the install.
-/// `allocator` is unused — kept for parity with the other JSON helpers.
 pub fn emitNdjsonEvent(
-    allocator: std.mem.Allocator,
     event: NdjsonEvent,
     name: []const u8,
     status: ?[]const u8,
 ) void {
-    _ = allocator;
     if (!ndjson) return;
     // Worst-case adversarial-escape name still fits in 1 KiB.
     var buf: [1024]u8 = undefined;

@@ -190,8 +190,7 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
 
 // ── Tier: --cache[=DAYS] (was `cleanup --prune=`) ───────────────────────────
 
-pub fn runCache(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8, max_age_days: i64, dry_run: bool) !TierResult {
-    _ = allocator;
+pub fn runCache(ctx: *const AppCtx, cache_dir: []const u8, max_age_days: i64, dry_run: bool) !TierResult {
     var result: TierResult = .{};
 
     var rep = report.Reporter.init("cache", dry_run);
@@ -237,8 +236,7 @@ fn pruneCacheRecursive(io: std.Io, cache_dir: []const u8, max_age_days: i64, dry
 
 // ── Tier: --downloads (was `cleanup -s`) ────────────────────────────────────
 
-pub fn runDownloads(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8, dry_run: bool) !TierResult {
-    _ = allocator;
+pub fn runDownloads(ctx: *const AppCtx, cache_dir: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
     const io = ctx.io;
 

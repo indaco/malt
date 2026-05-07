@@ -65,7 +65,7 @@ test "resolve bottle for current platform" {
     var formula = try formula_mod.parseFormula(alloc, minimal_json);
     defer formula.deinit();
 
-    const bottle = try formula_mod.resolveBottle(alloc, &formula);
+    const bottle = try formula_mod.resolveBottle(&formula);
     try testing.expect(bottle.sha256.len > 0);
     try testing.expect(bottle.url.len > 0);
 }
@@ -112,7 +112,7 @@ test "handle missing bottle for platform" {
     var formula = try formula_mod.parseFormula(alloc, json);
     defer formula.deinit();
 
-    const result = formula_mod.resolveBottle(alloc, &formula);
+    const result = formula_mod.resolveBottle(&formula);
     try testing.expectError(formula_mod.FormulaError.NoBottleAvailable, result);
 }
 
@@ -153,7 +153,7 @@ test "resolveBottle prefers tahoe over sequoia on current arch" {
     var formula = try formula_mod.parseFormula(alloc, json);
     defer formula.deinit();
 
-    const bottle = try formula_mod.resolveBottle(alloc, &formula);
+    const bottle = try formula_mod.resolveBottle(&formula);
 
     const expected_sha = switch (builtin.cpu.arch) {
         .aarch64 => "arm64_tahoe_sha",

@@ -302,7 +302,7 @@ fn executeWithOpts(
             output.info("{s} is already installed", .{pkg});
             // Fast-path skips the protocol; positive signal so consumers
             // can tell idempotent success from "command never ran".
-            output.emitNdjsonEvent(allocator, .already_installed, pkg, null);
+            output.emitNdjsonEvent(.already_installed, pkg, null);
         }
         return;
     }
@@ -339,12 +339,12 @@ fn executeWithOpts(
             output.err("Another mt process is running. Wait or run mt doctor.", .{});
             return InstallError.LockError;
         };
-        output.emitNdjsonEvent(allocator, .lock_acquired, "", null);
+        output.emitNdjsonEvent(.lock_acquired, "", null);
     }
     defer if (lk) |*l| l.release();
     // LIFO: install_complete must precede release in the deferred chain,
     // and the outer holder owns the matching pair when we skipped here.
-    defer if (lk != null and output.isNdjson()) output.emitNdjsonEvent(allocator, .install_complete, "", null);
+    defer if (lk != null and output.isNdjson()) output.emitNdjsonEvent(.install_complete, "", null);
 
     // Main-thread HTTP client; workers borrow from `http_pool` instead.
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
@@ -449,7 +449,7 @@ fn executeWithOpts(
                 output.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
                 continue;
             };
-            output.emitNdjsonEvent(allocator, .resolved, pkg_name, null);
+            output.emitNdjsonEvent(.resolved, pkg_name, null);
         } else {
             installCask(ctx, allocator, pkg_name, &db, &api, dry_run) catch |e| {
                 output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
@@ -470,7 +470,7 @@ fn executeWithOpts(
             const tag: []const u8 = if (job.is_dep) " (dependency)" else "";
             output.info("  {s} {s}{s}", .{ job.name, job.version_str, tag });
             // No transition outcome to report on a plan-only run.
-            output.emitNdjsonEvent(allocator, .would_install, job.name, null);
+            output.emitNdjsonEvent(.would_install, job.name, null);
         }
         return;
     }
@@ -586,9 +586,9 @@ fn executeWithOpts(
     if (output.isNdjson()) {
         for (all_jobs.items) |job| {
             if (!job.succeeded) continue;
-            output.emitNdjsonEvent(allocator, .downloaded, job.name, "ok");
-            output.emitNdjsonEvent(allocator, .extracted, job.name, "ok");
-            output.emitNdjsonEvent(allocator, .stored, job.name, "ok");
+            output.emitNdjsonEvent(.downloaded, job.name, "ok");
+            output.emitNdjsonEvent(.extracted, job.name, "ok");
+            output.emitNdjsonEvent(.stored, job.name, "ok");
         }
     }
 
@@ -677,12 +677,12 @@ fn executeWithOpts(
                 "Failed to materialize {s}: {s} ({s})",
                 .{ job.name, @errorName(err), cellar_mod.describeError(err) },
             );
-            output.emitNdjsonEvent(allocator, .materialized, job.name, "failed");
+            output.emitNdjsonEvent(.materialized, job.name, "failed");
             try failed_kegs.put(job.name, {});
             failed_count += 1;
             continue;
         }
-        output.emitNdjsonEvent(allocator, .materialized, job.name, "ok");
+        output.emitNdjsonEvent(.materialized, job.name, "ok");
 
         // Failed-dep → skip: installing on a broken graph yields a dyld-unresolvable
         // keg. Remove the already-materialised keg so orphans don't linger.
@@ -770,7 +770,7 @@ fn linkAndRecord(
 
         linker.link(keg_path, job.name, keg_id) catch |err| {
             output.err("Failed to link {s}: {s}", .{ job.name, @errorName(err) });
-            output.emitNdjsonEvent(allocator, .linked, job.name, "failed");
+            output.emitNdjsonEvent(.linked, job.name, "failed");
             // Rollback: unlink what was partially created + remove DB record + cellar.
             linker.unlink(keg_id) catch {};
             deleteKeg(db, keg_id);
@@ -779,8 +779,8 @@ fn linkAndRecord(
         };
         // `recorded` after both succeed — link rollback undoes the keg
         // row, so an early emit would lie if `linked:failed` follows.
-        output.emitNdjsonEvent(allocator, .linked, job.name, "ok");
-        output.emitNdjsonEvent(allocator, .recorded, job.name, "ok");
+        output.emitNdjsonEvent(.linked, job.name, "ok");
+        output.emitNdjsonEvent(.recorded, job.name, "ok");
         linker.linkOpt(job.name, job.version_str) catch {};
         recordDeps(db, keg_id, formula);
     } else {
@@ -790,7 +790,7 @@ fn linkAndRecord(
             return InstallError.RecordFailed;
         };
         // keg-only has no public link phase to roll back.
-        output.emitNdjsonEvent(allocator, .recorded, job.name, "ok");
+        output.emitNdjsonEvent(.recorded, job.name, "ok");
         linker.linkOpt(job.name, job.version_str) catch {};
         recordDeps(db, keg_id, formula);
     }

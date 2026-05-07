@@ -126,11 +126,11 @@ pub fn migrateKeg(
     };
     defer formula.deinit();
 
-    const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
+    const bottle = formula_mod.resolveBottle(&formula) catch {
         output.warn("  {s}: no bottle available for this platform", .{keg_name});
         return .skipped_no_bottle;
     };
-    output.emitNdjsonEvent(allocator, .resolved, keg_name, null);
+    output.emitNdjsonEvent(.resolved, keg_name, null);
 
     if (!has_bar) output.info("  Migrating {s} {s}...", .{ formula.name, formula.version });
 
@@ -142,9 +142,9 @@ pub fn migrateKeg(
         output.info("    {s} (cached in store)", .{keg_name});
     }
     if (output.isNdjson()) {
-        output.emitNdjsonEvent(allocator, .downloaded, keg_name, "ok");
-        output.emitNdjsonEvent(allocator, .extracted, keg_name, "ok");
-        output.emitNdjsonEvent(allocator, .stored, keg_name, "ok");
+        output.emitNdjsonEvent(.downloaded, keg_name, "ok");
+        output.emitNdjsonEvent(.extracted, keg_name, "ok");
+        output.emitNdjsonEvent(.stored, keg_name, "ok");
     }
 
     deps.store.incrementRef(bottle.sha256) catch |e| {
@@ -160,10 +160,10 @@ pub fn migrateKeg(
         formula.pkg_version,
     ) catch {
         output.err("    {s}: failed to materialize", .{keg_name});
-        output.emitNdjsonEvent(allocator, .materialized, keg_name, "failed");
+        output.emitNdjsonEvent(.materialized, keg_name, "failed");
         return .failed_install;
     };
-    output.emitNdjsonEvent(allocator, .materialized, keg_name, "ok");
+    output.emitNdjsonEvent(.materialized, keg_name, "ok");
 
     // Workers serialise on `db_mu` so transactions can't interleave;
     // serial callers leave `db_mu` null and pay no lock cost. The
@@ -183,7 +183,7 @@ pub fn migrateKeg(
 
         deps.linker.link(keg.path, formula.name, keg_id) catch {
             output.warn("    {s}: some links could not be created", .{keg_name});
-            output.emitNdjsonEvent(allocator, .linked, keg_name, "failed");
+            output.emitNdjsonEvent(.linked, keg_name, "failed");
             // Rollback: unlink partial links and delete keg row; user already warned above.
             deps.linker.unlink(keg_id) catch {};
             deleteKeg(deps.db, keg_id) catch {};
@@ -192,8 +192,8 @@ pub fn migrateKeg(
         };
         // `recorded` after both succeed — link rollback above undoes
         // the keg row, so an early emit would lie if link fails.
-        output.emitNdjsonEvent(allocator, .linked, keg_name, "ok");
-        output.emitNdjsonEvent(allocator, .recorded, keg_name, "ok");
+        output.emitNdjsonEvent(.linked, keg_name, "ok");
+        output.emitNdjsonEvent(.recorded, keg_name, "ok");
         deps.linker.linkOpt(formula.name, formula.pkg_version) catch {};
         recordDeps(deps.db, keg_id, &formula);
     } else {
@@ -201,7 +201,7 @@ pub fn migrateKeg(
             cellar_mod.remove(ctx.io, deps.prefix, formula.name, formula.pkg_version) catch {};
             return .failed_install;
         };
-        output.emitNdjsonEvent(allocator, .recorded, keg_name, "ok");
+        output.emitNdjsonEvent(.recorded, keg_name, "ok");
         deps.linker.linkOpt(formula.name, formula.pkg_version) catch {};
         recordDeps(deps.db, keg_id, &formula);
     }

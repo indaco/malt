@@ -562,7 +562,7 @@ fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {
     };
     defer db.close();
 
-    const missing = countMissingLocalSources(ctx.io, ctx.allocator, &db);
+    const missing = countMissingLocalSources(ctx.io, &db);
     if (missing.total == 0 or missing.stale == 0) {
         printCheck(name, .ok, null);
         return .ok;
@@ -655,10 +655,8 @@ pub const LocalSourceCensus = struct {
 /// reported by the separate SQLite-integrity check above.
 pub fn countMissingLocalSources(
     io: std.Io,
-    allocator: std.mem.Allocator,
     db: *sqlite.Database,
 ) LocalSourceCensus {
-    _ = allocator;
     var census: LocalSourceCensus = .{ .total = 0, .stale = 0 };
     var stmt = db.prepare("SELECT full_name FROM kegs WHERE tap = 'local';") catch return census;
     defer stmt.finalize();

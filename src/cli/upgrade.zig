@@ -97,8 +97,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer lk.release();
     // LIFO: install_complete fires before lk.release. Inline gate keeps
     // the deferred call out of the default paths.
-    defer if (output.isNdjson()) output.emitNdjsonEvent(allocator, .install_complete, "", null);
-    output.emitNdjsonEvent(allocator, .lock_acquired, "", null);
+    defer if (output.isNdjson()) output.emitNdjsonEvent(.install_complete, "", null);
+    output.emitNdjsonEvent(.lock_acquired, "", null);
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
@@ -186,7 +186,7 @@ fn upgradeFormula(
     if (pinSkip(db, name, force, audit_mode)) {
         output.dim("{s} is pinned, skipped", .{name});
         // Distinguishes "skipped by policy" from "command never ran".
-        output.emitNdjsonEvent(allocator, .pinned, name, null);
+        output.emitNdjsonEvent(.pinned, name, null);
         return;
     }
 
@@ -245,19 +245,19 @@ fn upgradeFormula(
     // Compare versions
     if (std.mem.eql(u8, old_pkg_version, formula.pkg_version)) {
         output.skip("{s} is already at latest version {s}", .{ name, formula.pkg_version });
-        output.emitNdjsonEvent(allocator, .up_to_date, name, null);
+        output.emitNdjsonEvent(.up_to_date, name, null);
         return;
     }
 
     if (dry_run) {
         output.info("Dry run: would upgrade {s} {s} -> {s}", .{ name, old_version, formula.pkg_version });
         // Same vocabulary across install/upgrade/migrate — one parser fits all.
-        output.emitNdjsonEvent(allocator, .would_install, name, null);
+        output.emitNdjsonEvent(.would_install, name, null);
         return;
     }
 
     output.info("Upgrading {s} {s} -> {s}...", .{ name, old_version, formula.pkg_version });
-    output.emitNdjsonEvent(allocator, .resolved, name, null);
+    output.emitNdjsonEvent(.resolved, name, null);
 
     // Bottles bake LC_LOAD_DYLIB paths against their own dep set, so a
     // dep introduced after the previously-installed version must be
@@ -291,7 +291,7 @@ fn upgradeFormula(
     }
 
     // Step 3: Resolve bottle for new version
-    const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
+    const bottle = formula_mod.resolveBottle(&formula) catch {
         output.err("No bottle available for {s} on this platform", .{name});
         return error.Aborted;
     };
@@ -346,9 +346,9 @@ fn upgradeFormula(
     }
     // Emit even on warm-cache so the cold/warm event sequence matches.
     if (output.isNdjson()) {
-        output.emitNdjsonEvent(allocator, .downloaded, name, "ok");
-        output.emitNdjsonEvent(allocator, .extracted, name, "ok");
-        output.emitNdjsonEvent(allocator, .stored, name, "ok");
+        output.emitNdjsonEvent(.downloaded, name, "ok");
+        output.emitNdjsonEvent(.extracted, name, "ok");
+        output.emitNdjsonEvent(.stored, name, "ok");
     }
 
     // Step 5: Materialize new version to Cellar
@@ -362,10 +362,10 @@ fn upgradeFormula(
         formula.pkg_version,
     ) catch {
         output.err("Failed to materialize {s}", .{name});
-        output.emitNdjsonEvent(allocator, .materialized, name, "failed");
+        output.emitNdjsonEvent(.materialized, name, "failed");
         return error.Aborted;
     };
-    output.emitNdjsonEvent(allocator, .materialized, name, "ok");
+    output.emitNdjsonEvent(.materialized, name, "ok");
 
     // Step 6: Unlink old symlinks
     var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
@@ -385,7 +385,7 @@ fn upgradeFormula(
 
     linker.link(new_keg.path, formula.name, new_keg_id) catch {
         output.err("Failed to link new version of {s}", .{name});
-        output.emitNdjsonEvent(allocator, .linked, name, "failed");
+        output.emitNdjsonEvent(.linked, name, "failed");
         // Rollback: remove partial new links, restore old
         // partial link cleanup in a rollback path.
         linker.unlink(new_keg_id) catch {};
@@ -397,8 +397,8 @@ fn upgradeFormula(
     };
     // `recorded` after both succeed — link rollback above undoes the
     // keg row, so an early emit would lie if `linked:failed` follows.
-    output.emitNdjsonEvent(allocator, .linked, name, "ok");
-    output.emitNdjsonEvent(allocator, .recorded, name, "ok");
+    output.emitNdjsonEvent(.linked, name, "ok");
+    output.emitNdjsonEvent(.recorded, name, "ok");
 
     // opt symlink is convenience; install is already functional via versioned link.
     linker.linkOpt(formula.name, formula.pkg_version) catch {};
@@ -446,7 +446,7 @@ fn upgradeTapFormula(
 ) !void {
     if (pinSkip(db, name, force, audit_mode)) {
         output.dim("{s} is pinned, skipped", .{name});
-        output.emitNdjsonEvent(allocator, .pinned, name, null);
+        output.emitNdjsonEvent(.pinned, name, null);
         return;
     }
 
@@ -475,14 +475,14 @@ fn upgradeTapFormula(
 
     if (!force and same_commit) {
         output.skip("{s} is already at latest tap commit", .{name});
-        output.emitNdjsonEvent(allocator, .up_to_date, name, null);
+        output.emitNdjsonEvent(.up_to_date, name, null);
         return;
     }
 
     if (dry_run) {
         const short_len = @min(@as(usize, 8), fresh_sha.len);
         output.info("Dry run: would refresh tap {s} to {s} for {s}", .{ tap_label, fresh_sha[0..short_len], name });
-        output.emitNdjsonEvent(allocator, .would_install, name, null);
+        output.emitNdjsonEvent(.would_install, name, null);
         return;
     }
 
@@ -717,7 +717,7 @@ fn upgradeAllFormulas(
 fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, audit_mode: bool) !void {
     if (pinSkip(db, token, force, audit_mode)) {
         output.dim("{s} is pinned, skipped", .{token});
-        output.emitNdjsonEvent(allocator, .pinned, token, null);
+        output.emitNdjsonEvent(.pinned, token, null);
         return;
     }
 
@@ -745,13 +745,13 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     const installed_version = installed.version();
     if (std.mem.eql(u8, installed_version, parsed_cask.version)) {
         output.skip("{s} is already at latest version {s}", .{ token, parsed_cask.version });
-        output.emitNdjsonEvent(allocator, .up_to_date, token, null);
+        output.emitNdjsonEvent(.up_to_date, token, null);
         return;
     }
 
     if (dry_run) {
         output.info("Dry run: would upgrade cask {s} {s} -> {s}", .{ token, installed_version, parsed_cask.version });
-        output.emitNdjsonEvent(allocator, .would_install, token, null);
+        output.emitNdjsonEvent(.would_install, token, null);
         return;
     }
 

@@ -64,8 +64,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (db_opt) |*db| {
         // Schema is idempotent; info's API fallback handles a broken DB gracefully.
         schema.initSchema(db) catch {};
-        if (!force_cask and try emitInstalledFormula(allocator, db, name, prefix, stdout, json_mode, colorize)) return;
-        if (!force_formula and try emitInstalledCask(allocator, db, name, stdout, json_mode, colorize)) return;
+        if (!force_cask and try emitInstalledFormula(db, name, prefix, stdout, json_mode, colorize)) return;
+        if (!force_formula and try emitInstalledCask(db, name, stdout, json_mode, colorize)) return;
     }
 
     // Not locally installed — fall back to Homebrew API metadata so
@@ -75,14 +75,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // missed or the DB was absent entirely.
     if (try emitApiMetadata(ctx, allocator, name, stdout, json_mode, colorize, force_cask, force_formula)) return;
 
-    try emitNotFound(allocator, name, stdout, json_mode);
+    try emitNotFound(name, stdout, json_mode);
 }
 
 /// If `name` is an installed formula, write its info row and return
 /// true (caller stops). Returns false when the lookup misses so the
 /// caller can try the cask path.
 fn emitInstalledFormula(
-    allocator: std.mem.Allocator,
     db: *sqlite.Database,
     name: []const u8,
     prefix: []const u8,
@@ -100,7 +99,7 @@ fn emitInstalledFormula(
     if (!installed) return false;
 
     if (json_mode) {
-        try writeJsonInfo(allocator, db, name, true, &stmt, stdout);
+        try writeJsonInfo(name, true, &stmt, stdout);
     } else {
         try writeHumanInfo(name, true, &stmt, prefix, stdout, colorize);
     }
@@ -109,7 +108,6 @@ fn emitInstalledFormula(
 
 /// Cask counterpart to `emitInstalledFormula`.
 fn emitInstalledCask(
-    allocator: std.mem.Allocator,
     db: *sqlite.Database,
     name: []const u8,
     stdout: *std.Io.Writer,
@@ -118,7 +116,7 @@ fn emitInstalledCask(
 ) !bool {
     if (cask_mod.lookupInstalled(db, name) == null) return false;
     if (json_mode) {
-        try writeJsonCaskInfo(allocator, db, name, stdout);
+        try writeJsonCaskInfo(db, name, stdout);
     } else {
         try writeHumanCaskInfo(db, name, stdout, colorize);
     }
@@ -128,13 +126,12 @@ fn emitInstalledCask(
 /// Terminal output for a package the user asked about that is
 /// neither installed locally nor known to the Homebrew API.
 fn emitNotFound(
-    allocator: std.mem.Allocator,
     name: []const u8,
     stdout: *std.Io.Writer,
     json_mode: bool,
 ) !void {
     if (json_mode) {
-        try writeJsonNotInstalled(allocator, name, stdout);
+        try writeJsonNotInstalled(name, stdout);
         return;
     }
     var buf: [4096]u8 = undefined;
@@ -187,7 +184,7 @@ fn emitApiFormula(
     var f = formula_mod.parseFormula(allocator, body) catch return false;
     defer f.deinit();
 
-    if (json_mode) try writeApiFormulaJson(allocator, &f, stdout) else try writeApiFormulaHuman(&f, stdout, colorize);
+    if (json_mode) try writeApiFormulaJson(&f, stdout) else try writeApiFormulaHuman(&f, stdout, colorize);
     return true;
 }
 
@@ -205,7 +202,7 @@ fn emitApiCask(
     var c = cask_mod.parseCask(allocator, body) catch return false;
     defer c.deinit();
 
-    if (json_mode) try writeApiCaskJson(allocator, &c, stdout) else try writeApiCaskHuman(&c, stdout, colorize);
+    if (json_mode) try writeApiCaskJson(&c, stdout) else try writeApiCaskHuman(&c, stdout, colorize);
     return true;
 }
 
@@ -220,20 +217,16 @@ fn writeApiCaskHuman(c: *const cask_mod.Cask, stdout: *std.Io.Writer, colorize: 
 }
 
 fn writeApiFormulaJson(
-    allocator: std.mem.Allocator,
     f: *const formula_mod.Formula,
     stdout: *std.Io.Writer,
 ) !void {
-    _ = allocator;
     try encodeApiFormulaJson(stdout, f);
 }
 
 fn writeApiCaskJson(
-    allocator: std.mem.Allocator,
     c: *const cask_mod.Cask,
     stdout: *std.Io.Writer,
 ) !void {
-    _ = allocator;
     try encodeApiCaskJson(stdout, c);
 }
 
@@ -402,11 +395,9 @@ pub fn openDb(prefix: []const u8) ?sqlite.Database {
 /// sqlite statement — used when the DB is missing or the package has
 /// simply never been installed.
 fn writeJsonNotInstalled(
-    allocator: std.mem.Allocator,
     name: []const u8,
     stdout: *std.Io.Writer,
 ) !void {
-    _ = allocator;
     try stdout.writeAll("{\"name\":");
     try output.jsonStr(stdout, name);
     try stdout.writeAll(",\"type\":\"formula\",\"installed\":false}\n");
@@ -450,16 +441,11 @@ fn writeHumanInfo(
 }
 
 fn writeJsonInfo(
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
     name: []const u8,
     installed: bool,
     stmt: *sqlite.Statement,
     stdout: *std.Io.Writer,
 ) !void {
-    _ = db;
-    _ = allocator;
-
     try stdout.writeAll("{\"name\":");
     try output.jsonStr(stdout, name);
     try stdout.writeAll(",\"type\":\"formula\",\"installed\":");
@@ -520,7 +506,6 @@ fn writeHumanCaskInfo(
 }
 
 fn writeJsonCaskInfo(
-    allocator: std.mem.Allocator,
     db: *sqlite.Database,
     name: []const u8,
     stdout: *std.Io.Writer,
@@ -533,8 +518,6 @@ fn writeJsonCaskInfo(
 
     const found = stmt.step() catch false;
     if (!found) return;
-
-    _ = allocator;
 
     const token = if (stmt.columnText(0)) |t| std.mem.sliceTo(t, 0) else name;
     const cask_name = if (stmt.columnText(1)) |n| std.mem.sliceTo(n, 0) else name;

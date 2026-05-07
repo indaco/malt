@@ -168,7 +168,7 @@ pub fn run(
     var db_record_error: ?[]const u8 = null;
     // 5. Record bundle and members in DB (even on partial failure). Skipped
     //    in dry-run so the preview path stays read-only.
-    if (!opts.dry_run) recordBundle(io, allocator, db, manifest) catch |e| {
+    if (!opts.dry_run) recordBundle(io, db, manifest) catch |e| {
         db_record_error = @errorName(e);
     };
 
@@ -283,11 +283,9 @@ fn runSubprocess(io: std.Io, allocator: std.mem.Allocator, bin: []const u8, call
 
 fn recordBundle(
     io: std.Io,
-    allocator: std.mem.Allocator,
     db: *sqlite.Database,
     manifest: manifest_mod.Manifest,
 ) !void {
-    _ = allocator;
     try schema.migrate(db);
 
     try db.beginTransaction();

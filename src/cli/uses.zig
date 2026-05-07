@@ -57,7 +57,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 
     if (json_mode) {
-        try writeJson(allocator, stdout, name, dependents);
+        try writeJson(stdout, name, dependents);
     } else {
         try writeHuman(stdout, name, dependents);
     }
@@ -164,12 +164,10 @@ pub fn writeHuman(stdout: *std.Io.Writer, target: []const u8, dependents: [][]co
 }
 
 pub fn writeJson(
-    allocator: std.mem.Allocator,
     stdout: *std.Io.Writer,
     target: []const u8,
     dependents: [][]const u8,
 ) !void {
-    _ = allocator;
     try encodeJson(stdout, target, dependents);
 }
 

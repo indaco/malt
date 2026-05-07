@@ -427,7 +427,7 @@ pub fn collectFormulaJobs(
         defer if (!dep_json_consumed) allocator.free(dep_json);
 
         const dep_formula = cache.getOrParse(dep.name, dep_json) catch continue;
-        const dep_bottle = formula_mod.resolveBottle(allocator, dep_formula) catch continue;
+        const dep_bottle = formula_mod.resolveBottle(dep_formula) catch continue;
 
         // Check for duplicate (another top-level pkg may share a dep)
         var is_dup = false;
@@ -468,7 +468,7 @@ pub fn collectFormulaJobs(
     }
 
     // Add main formula
-    const bottle = formula_mod.resolveBottle(allocator, formula) catch {
+    const bottle = formula_mod.resolveBottle(formula) catch {
         output.err("No bottle available for {s} on this platform", .{formula.name});
         return InstallError.NoBottle;
     };

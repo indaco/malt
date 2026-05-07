@@ -142,7 +142,7 @@ fn ephemeralRun(
     };
     defer formula.deinit();
 
-    const bottle = formula_mod.resolveBottle(allocator, &formula) catch {
+    const bottle = formula_mod.resolveBottle(&formula) catch {
         output.err("No bottle available for {s} on this platform", .{pkg_name});
         return error.Aborted;
     };

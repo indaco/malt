@@ -349,7 +349,7 @@ pub const CaskInstaller = struct {
             const app_path = std.mem.sliceTo(p, 0);
 
             // Check if the app is running (best-effort)
-            if (isAppRunning(self.io, self.allocator, app_path)) return CaskError.UninstallFailed;
+            if (isAppRunning(self.io, app_path)) return CaskError.UninstallFailed;
 
             // app may already be gone (manual delete); continue to DB cleanup.
             std.Io.Dir.cwd().deleteTree(self.io, app_path) catch {};
@@ -633,8 +633,8 @@ pub const CaskInstaller = struct {
     }
 
     /// Public wrapper for isAppRunning (used by uninstall.zig).
-    pub fn isAppRunningPub(io: std.Io, allocator: std.mem.Allocator, app_path: []const u8) bool {
-        return isAppRunning(io, allocator, app_path);
+    pub fn isAppRunningPub(io: std.Io, app_path: []const u8) bool {
+        return isAppRunning(io, app_path);
     }
 
     fn recordCaskroom(self: *CaskInstaller, cask: *const Cask) !void {
@@ -713,8 +713,7 @@ pub fn verifyFileSha256(io: std.Io, file_path: []const u8, expected: ?[]const u8
 }
 
 /// Check if an application is currently running by its path.
-fn isAppRunning(io: std.Io, allocator: std.mem.Allocator, app_path: []const u8) bool {
-    _ = allocator;
+fn isAppRunning(io: std.Io, app_path: []const u8) bool {
     const argv = [_][]const u8{ "pgrep", "-f", app_path };
     var child = std.process.spawn(io, .{
         .argv = &argv,

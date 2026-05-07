@@ -207,7 +207,7 @@ test "countMissingLocalSources ignores non-local kegs" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const got = doctor.countMissingLocalSources(io, testing.allocator, &db);
+    const got = doctor.countMissingLocalSources(io, &db);
     try testing.expectEqual(@as(u32, 0), got.total);
     try testing.expectEqual(@as(u32, 0), got.stale);
 }
@@ -223,7 +223,7 @@ test "countMissingLocalSources flags kegs whose .rb no longer exists" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const got = doctor.countMissingLocalSources(io, testing.allocator, &db);
+    const got = doctor.countMissingLocalSources(io, &db);
     try testing.expectEqual(@as(u32, 1), got.total);
     try testing.expectEqual(@as(u32, 1), got.stale);
 }
@@ -247,7 +247,7 @@ test "countMissingLocalSources does not flag kegs whose .rb still exists" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const got = doctor.countMissingLocalSources(io, testing.allocator, &db);
+    const got = doctor.countMissingLocalSources(io, &db);
     try testing.expectEqual(@as(u32, 1), got.total);
     try testing.expectEqual(@as(u32, 0), got.stale);
 }
@@ -271,7 +271,7 @@ test "countMissingLocalSources mixes stale and present rows correctly" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const got = doctor.countMissingLocalSources(io, testing.allocator, &db);
+    const got = doctor.countMissingLocalSources(io, &db);
     try testing.expectEqual(@as(u32, 3), got.total);
     try testing.expectEqual(@as(u32, 2), got.stale);
 }
