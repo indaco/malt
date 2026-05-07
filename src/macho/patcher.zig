@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const parser = @import("parser.zig");
+const text_replace = @import("../text_replace.zig");
 
 pub const PatchError = error{
     PathTooLong,
@@ -403,60 +404,4 @@ fn hasPrefix(path: []const u8, prefix: []const u8) bool {
     return std.mem.eql(u8, path[0..prefix.len], prefix);
 }
 
-/// Replace all occurrences of `needle` with `replacement` in `haystack`.
-/// Returns the original slice (same pointer) if there were no matches, or
-/// a caller-owned allocation with the substitution applied. Uses
-/// `std.mem.findPos` which is memchr-based and significantly faster
-/// than a naive byte-by-byte `mem.eql` loop for small needles — the old
-/// implementation showed up as ~60 samples on `mem.eqlBytes` in the
-/// warm-ffmpeg profile.
-fn replaceAll(allocator: std.mem.Allocator, haystack: []const u8, needle: []const u8, replacement: []const u8) ![]const u8 {
-    if (needle.len == 0) return haystack;
-
-    // Fast path: no matches at all → return the original slice unchanged.
-    const first = std.mem.indexOf(u8, haystack, needle) orelse return haystack;
-
-    // Count the remaining matches so we can preallocate exactly.
-    // (indexOfPos is O(n) per call; the total work is one linear pass.)
-    var match_count: usize = 1;
-    var probe = first + needle.len;
-    while (std.mem.findPos(u8, haystack, probe, needle)) |p| {
-        match_count += 1;
-        probe = p + needle.len;
-    }
-
-    const rep_len = replacement.len;
-    const ndl_len = needle.len;
-    const new_len = haystack.len + match_count * rep_len - match_count * ndl_len;
-    const buf = try allocator.alloc(u8, new_len);
-    errdefer allocator.free(buf);
-
-    // Second pass: copy segments between matches and write the replacement
-    // at each match position. Uses indexOfPos for the fast scan.
-    var src: usize = 0;
-    var dst: usize = 0;
-    var match = first;
-    while (true) {
-        // Copy the segment leading up to `match`.
-        const segment_len = match - src;
-        if (segment_len > 0) {
-            @memcpy(buf[dst .. dst + segment_len], haystack[src..match]);
-            dst += segment_len;
-        }
-        // Emit replacement.
-        @memcpy(buf[dst .. dst + rep_len], replacement);
-        dst += rep_len;
-        src = match + ndl_len;
-
-        match = std.mem.findPos(u8, haystack, src, needle) orelse break;
-    }
-
-    // Tail: everything after the last match.
-    if (src < haystack.len) {
-        @memcpy(buf[dst .. dst + (haystack.len - src)], haystack[src..]);
-        dst += haystack.len - src;
-    }
-
-    std.debug.assert(dst == new_len);
-    return buf;
-}
+const replaceAll = text_replace.replaceAll;
