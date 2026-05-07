@@ -48,10 +48,12 @@ pub const FallbackLog = struct {
     }
 
     pub fn log(self: *FallbackLog, entry: FallbackEntry) void {
-        // Silent drop on OOM: parent allocator failures surface elsewhere
-        // and threading ctx through every call site just for a warning
-        // would be more noise than signal.
-        self.entries.append(self.allocator, entry) catch {};
+        self.entries.append(self.allocator, entry) catch {
+            // OOM still drops the entry, but stay loud about it: this log
+            // is the only signal the user has for "post_install was
+            // partially skipped" during a large `mt migrate`.
+            output.writeStderrAll("malt: fallback log dropped an entry due to OOM\n");
+        };
     }
 
     pub fn hasErrors(self: *const FallbackLog) bool {
@@ -178,4 +180,24 @@ test "dslDidWork: at least one handled statement flips the signal" {
     flog.log(.{ .formula = "x", .reason = .unknown_method, .detail = "h", .loc = null });
     try std.testing.expect(flog.hasErrors());
     try std.testing.expect(flog.dslDidWork());
+}
+
+// Under memory pressure the diagnostic log itself can fail to grow.
+// A silent drop hides the only signal the user has for "post_install
+// was partially skipped"; surface a one-line warning instead.
+test "log surfaces a warning when the entry append OOMs" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var flog = FallbackLog.init(failing.allocator());
+    defer flog.deinit();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    flog.log(.{ .formula = "demo", .reason = .unknown_method, .detail = "boom", .loc = null });
+
+    try std.testing.expectEqual(@as(usize, 0), flog.entries.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "fallback log dropped") != null);
+    try std.testing.expect(std.mem.endsWith(u8, buf.items, "\n"));
 }
