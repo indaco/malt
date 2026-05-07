@@ -530,6 +530,9 @@ fn executeWithOpts(
         // Set up multi-progress: assign line indices and create coordinator
         const download_index = assignDownloadLineIndices(all_jobs.items);
         var multi = progress_mod.MultiProgress.init(download_index);
+        // Anchor the DECSET pair to scope exit so an early return between
+        // here and the worker join doesn't leave the terminal in DECRESET.
+        defer multi.finish();
 
         // Main-thread bar allocation — draw an initial frame on every line
         // before workers spawn, and keep pointers stable for them.
@@ -576,7 +579,6 @@ fn executeWithOpts(
         }
 
         for (threads.items) |t| t.join();
-        multi.finish();
     }
 
     // Emit from the main thread so ndjson order is deterministic
