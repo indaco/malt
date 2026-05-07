@@ -98,6 +98,60 @@ fn kegRowExists(prefix: []const u8, name: []const u8) !bool {
     return stmt.step() catch false;
 }
 
+// Seed a keg whose store_sha256 is populated and a matching store_refs row.
+// Lets the test inspect the post-uninstall refcount, which seedKeg above
+// deliberately sidesteps by leaving sha empty.
+fn seedKegWithStoreRef(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    name: []const u8,
+    version: []const u8,
+    sha256: []const u8,
+    refcount: i64,
+) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const cellar_rel = try std.fmt.allocPrint(allocator, "Cellar/{s}/{s}", .{ name, version });
+    defer allocator.free(cellar_rel);
+
+    var ins_keg = try db.prepare(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES (?1, ?1, ?2, 0, ?3, ?4);
+    );
+    defer ins_keg.finalize();
+    try ins_keg.bindText(1, name);
+    try ins_keg.bindText(2, version);
+    try ins_keg.bindText(3, sha256);
+    try ins_keg.bindText(4, cellar_rel);
+    _ = try ins_keg.step();
+
+    var ins_ref = try db.prepare("INSERT INTO store_refs (store_sha256, refcount) VALUES (?1, ?2);");
+    defer ins_ref.finalize();
+    try ins_ref.bindText(1, sha256);
+    try ins_ref.bindInt(2, refcount);
+    _ = try ins_ref.step();
+
+    const cellar_dir = try std.fmt.allocPrint(allocator, "{s}/Cellar/{s}/{s}", .{ prefix, name, version });
+    defer allocator.free(cellar_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar_dir);
+}
+
+fn refcountFor(prefix: []const u8, sha256: []const u8) !?i64 {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, sha256);
+    if (!try stmt.step()) return null;
+    return stmt.columnInt(0);
+}
+
 // --- early-return branches ----------------------------------------------
 
 test "execute --help short-circuits before opening the database" {
@@ -231,4 +285,23 @@ test "execute --force bypasses the dependents check" {
     // --force breaks through the guard.
     try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--force", "foo" });
     try testing.expect(!try kegRowExists(prefix.path, "foo"));
+}
+
+test "execute drops the kegs row and decrements the store ref together" {
+    // Pre-fix the FS teardown ran before the ref decrement, so a SIGKILL
+    // mid-uninstall could leave the store row inflated above the on-disk
+    // state. Asserting both writes land guards the bundled-transaction shape.
+    var prefix = try ScratchPrefix.init(testing.allocator, "storeref");
+    defer prefix.deinit(testing.allocator);
+
+    const sha = "abc123";
+    try seedKegWithStoreRef(testing.allocator, prefix.path, "foo", "1.0", sha, 2);
+
+    quiet();
+    defer unquiet();
+
+    try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"foo"});
+
+    try testing.expect(!try kegRowExists(prefix.path, "foo"));
+    try testing.expectEqual(@as(?i64, 1), try refcountFor(prefix.path, sha));
 }
