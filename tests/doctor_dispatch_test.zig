@@ -223,7 +223,7 @@ test "countMissingLocalSources tallies missing source paths against tap='local' 
         _ = try stmt.step();
     }
 
-    const census = doctor.countMissingLocalSources(std.Options.debug_io, testing.allocator, &db);
+    const census = doctor.countMissingLocalSources(std.Options.debug_io, &db);
     try testing.expectEqual(@as(u32, 2), census.total);
     try testing.expectEqual(@as(u32, 1), census.stale);
 }

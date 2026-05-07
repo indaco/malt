@@ -260,7 +260,7 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
     // Check if running (unless --force)
     if (!force) {
         if (info.appPath()) |app_path| {
-            if (cask_mod.CaskInstaller.isAppRunningPub(ctx.io, allocator, app_path)) {
+            if (cask_mod.CaskInstaller.isAppRunningPub(ctx.io, app_path)) {
                 output.err("{s} appears to be running. Quit the app first, or use --force.", .{token});
                 return error.Aborted;
             }

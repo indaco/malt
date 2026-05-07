@@ -23,7 +23,7 @@ test "isAppRunningPub returns false for a path no pgrep match can cover" {
     // exits non-zero and the wrapper returns false.
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
-    try testing.expect(!cask.CaskInstaller.isAppRunningPub(threaded.io(), testing.allocator, "/nonexistent/Sentinel-path-never-running.app"));
+    try testing.expect(!cask.CaskInstaller.isAppRunningPub(threaded.io(), "/nonexistent/Sentinel-path-never-running.app"));
 }
 
 test "CaskInstaller.uninstall on a missing token returns UninstallFailed" {

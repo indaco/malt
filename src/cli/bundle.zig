@@ -113,8 +113,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (std.mem.eql(u8, sub, "install")) return cmdInstall(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "cleanup")) return cmdCleanup(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "create")) return cmdCreate(ctx, allocator, rest);
-    if (std.mem.eql(u8, sub, "list")) return cmdList(ctx, allocator);
-    if (std.mem.eql(u8, sub, "remove")) return cmdRemove(ctx, allocator, rest);
+    if (std.mem.eql(u8, sub, "list")) return cmdList(ctx);
+    if (std.mem.eql(u8, sub, "remove")) return cmdRemove(ctx, rest);
     if (std.mem.eql(u8, sub, "export")) return cmdExport(ctx, allocator, rest);
     if (std.mem.eql(u8, sub, "import")) return cmdImport(ctx, allocator, rest);
 
@@ -279,8 +279,7 @@ fn cmdCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     output.success("bundle cleanup complete", .{});
 }
 
-fn cmdList(ctx: *const AppCtx, allocator: std.mem.Allocator) !void {
-    _ = allocator;
+fn cmdList(ctx: *const AppCtx) !void {
     var db = try openDb(ctx);
     defer db.close();
 
@@ -298,8 +297,7 @@ fn cmdList(ctx: *const AppCtx, allocator: std.mem.Allocator) !void {
     if (!any) output.info("no bundles registered", .{});
 }
 
-fn cmdRemove(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
-    _ = allocator;
+fn cmdRemove(ctx: *const AppCtx, rest: []const []const u8) !void {
     if (rest.len != 1) {
         output.err("bundle remove: expected <name>", .{});
         return BundleError.InvalidArgs;
