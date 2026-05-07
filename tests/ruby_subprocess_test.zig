@@ -498,6 +498,62 @@ test "describeError covers every RubyError variant with a user hint" {
     }
 }
 
+test "describeError distinguishes the four post_install source-resolution failure modes" {
+    // Operators triage by the variant. Pre-fix all four cases collapsed
+    // onto TapNotFound; the tags must now read distinctly so a hash
+    // mismatch isn't filed under "no local tap".
+    const tap = ruby.describeError(ruby.RubyError.TapNotFound);
+    const formula_src = ruby.describeError(ruby.RubyError.FormulaSourceNotFound);
+    const fetch = ruby.describeError(ruby.RubyError.FetchFailed);
+    const body = ruby.describeError(ruby.RubyError.PostInstallBodyNotFound);
+
+    try testing.expect(!std.mem.eql(u8, tap, formula_src));
+    try testing.expect(!std.mem.eql(u8, tap, fetch));
+    try testing.expect(!std.mem.eql(u8, tap, body));
+    try testing.expect(!std.mem.eql(u8, formula_src, fetch));
+    try testing.expect(!std.mem.eql(u8, formula_src, body));
+    try testing.expect(!std.mem.eql(u8, fetch, body));
+}
+
+test "resolvePostInstallBody surfaces a distinguishing tag instead of collapsing onto TapNotFound" {
+    // CI hosts have no homebrew-core clone; an obviously-bogus name has
+    // no pinned manifest entry, so the fetch refuses fail-closed without
+    // a network round-trip. On a brew-equipped dev box the local tap is
+    // present but won't carry this name, so the resolver routes to
+    // FetchFailed instead. Pre-fix both paths returned TapNotFound.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    const result = ruby.resolvePostInstallBody(
+        threaded.io(),
+        testEnviron(),
+        testing.allocator,
+        "__malt_d10_unknown_formula__",
+    );
+    if (result) |_| {
+        return error.TestUnexpectedResult;
+    } else |err| {
+        const expected = if (ruby.findHomebrewCoreTap(testIo()) == null)
+            ruby.RubyError.TapNotFound
+        else
+            ruby.RubyError.FetchFailed;
+        try testing.expectEqual(expected, err);
+    }
+}
+
+test "fetchPostInstallFromGitHub keeps its ?[]const u8 contract for CLI callers" {
+    // doctor + install rely on the optional-slice signature; the tagged
+    // variant is internal. An unknown name short-circuits before any
+    // network I/O via the manifest miss.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    try testing.expect(ruby.fetchPostInstallFromGitHub(
+        threaded.io(),
+        testEnviron(),
+        testing.allocator,
+        "__malt_d10_unknown_formula__",
+    ) == null);
+}
+
 test "detectRuby returns a heap-owned slice that the caller can free" {
     // On any machine that has Ruby available, the contract requires the
     // returned slice to be allocator-owned so the call site can pair it
