@@ -111,3 +111,34 @@ test "replaceAll on adjacent matches walks past each one cleanly" {
     defer if (out.ptr != haystack.ptr) std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("ZZZZZZZZ", out);
 }
+
+test "replaceAll on a single match copies prefix, replacement, and tail" {
+    const haystack = "before/OLD/after";
+    const out = try replaceAll(std.testing.allocator, haystack, "/OLD/", "/N/");
+    defer if (out.ptr != haystack.ptr) std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("before/N/after", out);
+}
+
+test "replaceAll on an empty haystack hands the empty slice back" {
+    const haystack: []const u8 = "";
+    const out = try replaceAll(std.testing.allocator, haystack, "x", "y");
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "replaceAll does not re-scan replacement text for further matches" {
+    // "a"->"aa" must produce one expansion per original "a", not run away
+    // by re-matching the expansion itself.
+    const haystack = "aXa";
+    const out = try replaceAll(std.testing.allocator, haystack, "a", "aa");
+    defer if (out.ptr != haystack.ptr) std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("aaXaa", out);
+}
+
+test "replaceAll preserves length when replacement is the same size as needle" {
+    // Representative shape of a macho path swap: "/A/" -> "/B/".
+    const haystack = "lib/A/x.dylib /A/y.dylib";
+    const out = try replaceAll(std.testing.allocator, haystack, "/A/", "/B/");
+    defer if (out.ptr != haystack.ptr) std.testing.allocator.free(out);
+    try std.testing.expectEqual(haystack.len, out.len);
+    try std.testing.expectEqualStrings("lib/B/x.dylib /B/y.dylib", out);
+}
