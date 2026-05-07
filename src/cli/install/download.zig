@@ -500,6 +500,20 @@ pub fn collectFormulaJobs(
     output.info("Resolved {s} {s} ({d} {s})", .{ formula.name, formula.version, jobs.items.len, pkg_word });
 }
 
+/// Stamp a contiguous `line_index` on every job that still needs to download,
+/// returning the count so the caller can size `MultiProgress`. Widened to
+/// match `DownloadJob.line_index` so deep dep graphs (qt + gcc + texlive)
+/// don't truncate or panic past 255 pending jobs.
+pub fn assignDownloadLineIndices(jobs: []DownloadJob) u16 {
+    var idx: u16 = 0;
+    for (jobs) |*job| {
+        if (job.succeeded) continue;
+        job.line_index = idx;
+        idx += 1;
+    }
+    return idx;
+}
+
 /// Drop top-level (`is_dep == false`) jobs from `jobs` so `--only-dependencies`
 /// can bail before the requested package is materialised. Frees the same five
 /// strings `dupeJobStrings` allocated; `formula_json` on top-level jobs is
@@ -624,6 +638,46 @@ fn materializeOne(
     result.ok = true;
     result.err = null;
     result.keg_path_len = keg.path.len;
+}
+
+fn testJob(succeeded: bool) DownloadJob {
+    return .{
+        .name = "",
+        .version_str = "",
+        .sha256 = "",
+        .bottle_url = "",
+        .is_dep = false,
+        .keg_only = false,
+        .post_install_defined = false,
+        .formula_json = "",
+        .cellar_type = "",
+        .label_width = 0,
+        .line_index = 0,
+        .multi = null,
+        .bar = null,
+        .store_sha256 = "",
+        .succeeded = succeeded,
+    };
+}
+
+test "assignDownloadLineIndices skips already-cached jobs" {
+    var jobs = [_]DownloadJob{ testJob(false), testJob(true), testJob(false) };
+    const count = assignDownloadLineIndices(&jobs);
+    try std.testing.expectEqual(@as(u16, 2), count);
+    try std.testing.expectEqual(@as(u16, 0), jobs[0].line_index);
+    try std.testing.expectEqual(@as(u16, 1), jobs[2].line_index);
+}
+
+test "assignDownloadLineIndices handles >255 pending jobs without overflow" {
+    const N = 300;
+    var jobs: [N]DownloadJob = undefined;
+    for (&jobs) |*j| j.* = testJob(false);
+
+    const count = assignDownloadLineIndices(&jobs);
+    try std.testing.expectEqual(@as(u16, N), count);
+    try std.testing.expectEqual(@as(u16, 0), jobs[0].line_index);
+    try std.testing.expectEqual(@as(u16, 255), jobs[255].line_index);
+    try std.testing.expectEqual(@as(u16, N - 1), jobs[N - 1].line_index);
 }
 
 test "MaterializeResult.kegPath returns empty before write" {
