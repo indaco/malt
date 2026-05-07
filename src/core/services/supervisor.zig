@@ -407,7 +407,12 @@ pub fn followLog(
     while (!interrupted()) {
         const n = f.readPositionalAll(io, &buf, offset) catch return SupervisorError.IoFailed;
         if (n == 0) {
-            std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(poll_ns)), .awake) catch {};
+            // Cancelled sleep means SIGINT (or another stop signal) reached
+            // the io subsystem before `interrupted()` flipped; bail rather
+            // than busy-spin until the flag catches up.
+            std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(poll_ns)), .awake) catch |e| switch (e) {
+                error.Canceled => break,
+            };
             continue;
         }
         writer.writeAll(buf[0..n]) catch return SupervisorError.IoFailed;
@@ -517,4 +522,127 @@ test "followLog flushes appended bytes between polls" {
 
     try testing.expect(std.mem.indexOf(u8, aw.written(), "appended\n") != null);
     try testing.expectEqual(@as(usize, 3), FollowProbe.calls);
+}
+
+// Patches an inner Io's vtable so `sleep` reports cancellation on the
+// configured call index; non-canceled sleeps return immediately so the
+// 200 ms poll cadence doesn't pad the test runtime.
+const CancelSleepProbe = struct {
+    var vtable: std.Io.VTable = undefined;
+    var sleep_calls: usize = 0;
+    var cancel_at: usize = 1;
+
+    fn wrap(inner: std.Io, cancel_at_call: usize) std.Io {
+        vtable = inner.vtable.*;
+        vtable.sleep = sleepMaybeCanceled;
+        sleep_calls = 0;
+        cancel_at = cancel_at_call;
+        return .{ .userdata = inner.userdata, .vtable = &vtable };
+    }
+
+    fn sleepMaybeCanceled(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
+        sleep_calls += 1;
+        if (sleep_calls >= cancel_at) return error.Canceled;
+    }
+};
+
+test "followLog breaks when sleep reports cancellation on the first poll" {
+    testIoInit();
+    defer testIoDeinit();
+
+    const dir = "/tmp/malt_supervisor_follow_cancel";
+    std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(test_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+
+    const log_path = dir ++ "/sample.log";
+    {
+        const f = try std.Io.Dir.createFileAbsolute(test_io, log_path, .{ .truncate = true });
+        defer f.close(test_io);
+        try f.writeStreamingAll(test_io, "seed\n");
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    const cancel_io = CancelSleepProbe.wrap(test_io, 1);
+
+    FollowProbe.reset();
+    // High stop_at: only sleep cancellation should end the loop. If the loop
+    // ever spins past Canceled, FollowProbe.calls will exceed 1.
+    FollowProbe.stop_at = 16;
+
+    try followLog(cancel_io, testing.allocator, log_path, 0, &aw.writer, FollowProbe.cb);
+
+    try testing.expectEqual(@as(usize, 1), CancelSleepProbe.sleep_calls);
+    try testing.expectEqual(@as(usize, 1), FollowProbe.calls);
+}
+
+test "followLog breaks when sleep reports cancellation after several idle polls" {
+    testIoInit();
+    defer testIoDeinit();
+
+    const dir = "/tmp/malt_supervisor_follow_cancel_late";
+    std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(test_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+
+    const log_path = dir ++ "/sample.log";
+    {
+        const f = try std.Io.Dir.createFileAbsolute(test_io, log_path, .{ .truncate = true });
+        defer f.close(test_io);
+        try f.writeStreamingAll(test_io, "seed\n");
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    // Cancel the fourth sleep — three idle polls happen first, pinning that
+    // the catch arm fires regardless of how many normal sleeps preceded it
+    // and that the loop doesn't latch on the prior non-cancelled returns.
+    const cancel_io = CancelSleepProbe.wrap(test_io, 4);
+
+    FollowProbe.reset();
+    FollowProbe.stop_at = 16;
+
+    try followLog(cancel_io, testing.allocator, log_path, 0, &aw.writer, FollowProbe.cb);
+
+    try testing.expectEqual(@as(usize, 4), CancelSleepProbe.sleep_calls);
+    try testing.expectEqual(@as(usize, 4), FollowProbe.calls);
+}
+
+test "followLog flushes data appended before sleep cancellation lands" {
+    testIoInit();
+    defer testIoDeinit();
+
+    const dir = "/tmp/malt_supervisor_follow_cancel_flush";
+    std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+    try std.Io.Dir.createDirAbsolute(test_io, dir, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(test_io, dir) catch {};
+
+    const log_path = dir ++ "/sample.log";
+    {
+        const f = try std.Io.Dir.createFileAbsolute(test_io, log_path, .{ .truncate = true });
+        defer f.close(test_io);
+        try f.writeStreamingAll(test_io, "seed\n");
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    // Append data on the first interrupt-check, then cancel the second
+    // sleep so the flushed bytes must already be in the writer when the
+    // loop bails.
+    FollowProbe.reset();
+    FollowProbe.append_path = log_path;
+    FollowProbe.append_bytes = "tail-bytes\n";
+    FollowProbe.append_at = 1;
+    FollowProbe.stop_at = 16;
+
+    const cancel_io = CancelSleepProbe.wrap(test_io, 2);
+
+    try followLog(cancel_io, testing.allocator, log_path, 0, &aw.writer, FollowProbe.cb);
+
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "tail-bytes\n") != null);
+    try testing.expectEqual(@as(usize, 2), CancelSleepProbe.sleep_calls);
 }

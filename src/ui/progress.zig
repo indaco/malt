@@ -39,8 +39,14 @@ fn nowNs() i128 {
     return std.Io.Clock.real.now(pkg_io).toNanoseconds();
 }
 
-fn sleepNs(ns: u64) void {
-    std.Io.sleep(pkg_io, std.Io.Duration.fromNanoseconds(@intCast(ns)), .awake) catch {};
+/// Sleeps for `ns` nanoseconds against the package io. Returns false when
+/// a cancellation request reached the io subsystem before the sleep
+/// finished, so spin/poll callers can bail rather than swallow the signal.
+fn sleepNs(ns: u64) bool {
+    std.Io.sleep(pkg_io, std.Io.Duration.fromNanoseconds(@intCast(ns)), .awake) catch |e| switch (e) {
+        error.Canceled => return false,
+    };
+    return true;
 }
 
 /// Braille-based spinner frames, shared by ProgressBar and Spinner.
@@ -561,7 +567,7 @@ pub const Spinner = struct {
         while (!self.stop_flag.load(.acquire)) {
             self.drawFrame(frame);
             frame +%= 1;
-            sleepNs(100 * std.time.ns_per_ms);
+            if (!sleepNs(100 * std.time.ns_per_ms)) break;
         }
     }
 
@@ -671,4 +677,63 @@ test "restoreTerminal is callable without an active MultiProgress" {
     // re-entrant, and idempotent.
     restoreTerminal();
     restoreTerminal();
+}
+
+// Patches an inner Io's vtable so `sleep` reports cancellation on the
+// configured call index; non-canceled sleeps return immediately so the
+// 100 ms spinner cadence doesn't pad the test runtime.
+const CancelSleepProbe = struct {
+    var vtable: std.Io.VTable = undefined;
+    var sleep_calls: usize = 0;
+    var cancel_at: usize = 1;
+
+    fn wrap(inner: std.Io, cancel_at_call: usize) std.Io {
+        vtable = inner.vtable.*;
+        vtable.sleep = sleepMaybeCanceled;
+        sleep_calls = 0;
+        cancel_at = cancel_at_call;
+        return .{ .userdata = inner.userdata, .vtable = &vtable };
+    }
+
+    fn sleepMaybeCanceled(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
+        sleep_calls += 1;
+        if (sleep_calls >= cancel_at) return error.Canceled;
+    }
+};
+
+test "sleepNs returns true when the sleep completes normally" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const prev_io = pkg_io;
+    pkg_io = threaded.io();
+    defer pkg_io = prev_io;
+
+    try std.testing.expect(sleepNs(0));
+}
+
+test "sleepNs returns false when sleep is cancelled" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const prev_io = pkg_io;
+    pkg_io = CancelSleepProbe.wrap(threaded.io(), 1);
+    defer pkg_io = prev_io;
+
+    try std.testing.expect(!sleepNs(100));
+    try std.testing.expectEqual(@as(usize, 1), CancelSleepProbe.sleep_calls);
+}
+
+test "sleepNs propagates cancellation when called repeatedly" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const prev_io = pkg_io;
+    pkg_io = CancelSleepProbe.wrap(threaded.io(), 3);
+    defer pkg_io = prev_io;
+
+    // Two normal sleeps complete and report true; the third trips Canceled,
+    // pinning that the helper isn't latched after the first non-cancelled
+    // return and matches the spin-loop's per-tick break contract.
+    try std.testing.expect(sleepNs(0));
+    try std.testing.expect(sleepNs(0));
+    try std.testing.expect(!sleepNs(0));
+    try std.testing.expectEqual(@as(usize, 3), CancelSleepProbe.sleep_calls);
 }

@@ -78,6 +78,17 @@ pub fn progressBridge(ctx: *anyopaque, bytes_so_far: u64, content_length: ?u64) 
     bar.update(clamped);
 }
 
+/// Sleeps for `ms` between retries. Returns false when the caller's
+/// stop signal cancels the sleep, true otherwise. std.Io cancellation
+/// is single-shot per task, so a swallowed Canceled would silently
+/// consume the request and the loop would keep retrying.
+fn cancellableBackoff(io: std.Io, ms: u64) bool {
+    std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(ms * std.time.ns_per_ms)), .awake) catch |e| switch (e) {
+        error.Canceled => return false,
+    };
+    return true;
+}
+
 /// Download a bottle and commit to store. Runs in a worker thread.
 /// `http_pool` is shared across all download workers — each worker
 /// borrows a client for the duration of a single blob download and
@@ -152,7 +163,7 @@ pub fn downloadWorker(
                 break;
             }
             if (dl_attempt + 1 < max_attempts) {
-                std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[dl_attempt] * std.time.ns_per_ms)), .awake) catch {};
+                if (!cancellableBackoff(io, retry_delays_ms[dl_attempt])) break;
             }
         }
     }
@@ -691,4 +702,56 @@ test "MaterializeResult.kegPath reflects keg_path_len after write" {
     @memcpy(r.keg_path_buf[0..path.len], path);
     r.keg_path_len = path.len;
     try std.testing.expectEqualStrings(path, r.kegPath());
+}
+
+// Patches an inner Io's vtable so `sleep` reports cancellation on the
+// configured call index; non-canceled sleeps return immediately so the
+// retry-table delays don't pad the test runtime.
+const CancelSleepProbe = struct {
+    var vtable: std.Io.VTable = undefined;
+    var sleep_calls: usize = 0;
+    var cancel_at: usize = 1;
+
+    fn wrap(inner: std.Io, cancel_at_call: usize) std.Io {
+        vtable = inner.vtable.*;
+        vtable.sleep = sleepMaybeCanceled;
+        sleep_calls = 0;
+        cancel_at = cancel_at_call;
+        return .{ .userdata = inner.userdata, .vtable = &vtable };
+    }
+
+    fn sleepMaybeCanceled(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
+        sleep_calls += 1;
+        if (sleep_calls >= cancel_at) return error.Canceled;
+    }
+};
+
+test "cancellableBackoff returns true when sleep completes normally" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    // Zero-ms request keeps the test deterministic without exercising the
+    // real clock; a successful sleep must report true so the retry loop
+    // moves on to the next attempt.
+    try std.testing.expect(cancellableBackoff(threaded.io(), 0));
+}
+
+test "cancellableBackoff returns false when sleep is cancelled" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const cancel_io = CancelSleepProbe.wrap(threaded.io(), 1);
+    try std.testing.expect(!cancellableBackoff(cancel_io, 100));
+    try std.testing.expectEqual(@as(usize, 1), CancelSleepProbe.sleep_calls);
+}
+
+test "cancellableBackoff propagates cancellation when called repeatedly" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    // Cancel the third call: the prior two complete and report true,
+    // pinning that the helper isn't inadvertently latched after the
+    // first non-cancelled sleep.
+    const cancel_io = CancelSleepProbe.wrap(threaded.io(), 3);
+    try std.testing.expect(cancellableBackoff(cancel_io, 0));
+    try std.testing.expect(cancellableBackoff(cancel_io, 0));
+    try std.testing.expect(!cancellableBackoff(cancel_io, 0));
+    try std.testing.expectEqual(@as(usize, 3), CancelSleepProbe.sleep_calls);
 }

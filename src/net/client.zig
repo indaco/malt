@@ -377,8 +377,13 @@ pub const HttpClient = struct {
                 if (classifyStatus(resp.status)) |dl_err| {
                     if (isTransientError(dl_err) and attempt < max_retries) {
                         resp.allocator.free(resp.body);
-                        // Sleep is backoff jitter; interruption just retries sooner.
-                        std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch {};
+                        // Cancellation is single-shot per task in std.Io —
+                        // swallowing it here means the caller's stop signal
+                        // is consumed by the backoff and never reaches the
+                        // next request, so propagate it as the result.
+                        std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch |e| switch (e) {
+                            error.Canceled => return error.Canceled,
+                        };
                         attempt += 1;
                         continue;
                     }
@@ -386,8 +391,9 @@ pub const HttpClient = struct {
                 return resp;
             } else |err| {
                 if (attempt < max_retries) {
-                    // Sleep is backoff jitter; interruption just retries sooner.
-                    std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch {};
+                    std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)), .awake) catch |e| switch (e) {
+                        error.Canceled => return error.Canceled,
+                    };
                     attempt += 1;
                     continue;
                 }
@@ -711,4 +717,60 @@ test "shouldFireIdleWatchdog: cancellation fires regardless of elapsed time" {
     // deadline has elapsed yet — otherwise Ctrl-C waits out the read.
     try std.testing.expect(shouldFireIdleWatchdog(0, 0, 30, 600, true));
     try std.testing.expect(shouldFireIdleWatchdog(1, 1, 999_999, 999_999, true));
+}
+
+// Patches an inner Io's vtable so `sleep` reports cancellation on the
+// configured call index; non-canceled sleeps return immediately so the
+// retry-table delays don't pad the test runtime. `cancel_at = 1` cancels
+// the first sleep, `cancel_at = N` returns from the prior N-1 sleeps and
+// trips the Nth.
+const CancelSleepProbe = struct {
+    var vtable: std.Io.VTable = undefined;
+    var sleep_calls: usize = 0;
+    var cancel_at: usize = 1;
+
+    fn wrap(inner: std.Io, cancel_at_call: usize) std.Io {
+        vtable = inner.vtable.*;
+        vtable.sleep = sleepMaybeCanceled;
+        sleep_calls = 0;
+        cancel_at = cancel_at_call;
+        return .{ .userdata = inner.userdata, .vtable = &vtable };
+    }
+
+    fn sleepMaybeCanceled(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
+        sleep_calls += 1;
+        if (sleep_calls >= cancel_at) return error.Canceled;
+    }
+};
+
+test "doGetWithRetry surfaces sleep cancellation on the first backoff" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const cancel_io = CancelSleepProbe.wrap(threaded.io(), 1);
+
+    var http = HttpClient.init(cancel_io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    // 127.0.0.1:1 fast-fails with ECONNREFUSED so the retry-sleep is reached
+    // on the first attempt; without the fix, every backoff swallows Canceled
+    // and the call resolves with the connect error after burning all retries.
+    const result = http.get("http://127.0.0.1:1/nothing-listens-here");
+    try std.testing.expectError(error.Canceled, result);
+    try std.testing.expectEqual(@as(usize, 1), CancelSleepProbe.sleep_calls);
+}
+
+test "doGetWithRetry surfaces sleep cancellation on a later backoff" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    // Cancel the third sleep — the prior two return normally, exercising
+    // the retry counter alongside the catch arm so we know the propagation
+    // isn't tied to attempt 0 only.
+    const cancel_io = CancelSleepProbe.wrap(threaded.io(), 3);
+
+    var http = HttpClient.init(cancel_io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    const result = http.get("http://127.0.0.1:1/nothing-listens-here");
+    try std.testing.expectError(error.Canceled, result);
+    try std.testing.expectEqual(@as(usize, 3), CancelSleepProbe.sleep_calls);
 }
