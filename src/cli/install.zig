@@ -42,6 +42,7 @@ pub const collectFormulaJobs = download_mod.collectFormulaJobs;
 pub const InstallJobDeps = download_mod.InstallJobDeps;
 pub const findFailedDep = download_mod.findFailedDep;
 pub const dropTopLevelJobs = download_mod.dropTopLevelJobs;
+pub const assignDownloadLineIndices = download_mod.assignDownloadLineIndices;
 const progressBridge = download_mod.progressBridge;
 const downloadWorker = download_mod.downloadWorker;
 const MaterializeResult = download_mod.MaterializeResult;
@@ -527,13 +528,7 @@ fn executeWithOpts(
         }
 
         // Set up multi-progress: assign line indices and create coordinator
-        var download_index: u8 = 0;
-        for (all_jobs.items) |*job| {
-            if (!job.succeeded) {
-                job.line_index = download_index;
-                download_index += 1;
-            }
-        }
+        const download_index = assignDownloadLineIndices(all_jobs.items);
         var multi = progress_mod.MultiProgress.init(download_index);
 
         // Main-thread bar allocation — draw an initial frame on every line
