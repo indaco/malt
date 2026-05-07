@@ -46,6 +46,14 @@ fn sleepNs(ns: u64) void {
 /// Braille-based spinner frames, shared by ProgressBar and Spinner.
 const spinner_chars = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
 
+/// Best-effort restore of terminal state mutated by `MultiProgress.init`
+/// or `Spinner.start`: re-enable autowrap, show the cursor, return to
+/// column 0. Safe to call from a panic / signal handler — the bytes are
+/// idempotent, and writes silently drop when stderr is unconfigured.
+pub fn restoreTerminal() void {
+    writeStderrAll("\x1b[?7h\x1b[?25h\r");
+}
+
 /// Coordinates multiple progress bars on separate terminal lines.
 /// Reserves N lines upfront, then uses ANSI cursor movement so each
 /// bar updates its own line without interfering with others.
@@ -84,8 +92,7 @@ pub const MultiProgress = struct {
     /// Must be called after all download threads have joined.
     pub fn finish(self: *MultiProgress) void {
         if (self.is_tty and !output.isQuiet()) {
-            // Re-enable autowrap, show cursor, return to col 0.
-            writeStderrAll("\x1b[?7h\x1b[?25h\r");
+            restoreTerminal();
         }
     }
 };
@@ -656,4 +663,12 @@ test "ProgressBar render survives label larger than the draw buffer" {
     var indet = ProgressBar.init(&label, 0);
     indet.is_tty = true;
     indet.update(0);
+}
+
+test "restoreTerminal is callable without an active MultiProgress" {
+    // Panic / signal handlers may emit the restore sequence without ever
+    // having paired it to an init: the call must be allocation-free,
+    // re-entrant, and idempotent.
+    restoreTerminal();
+    restoreTerminal();
 }

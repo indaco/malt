@@ -3,13 +3,27 @@
 
 const std = @import("std");
 const color_mod = @import("ui/color.zig");
+const progress_mod = @import("ui/progress.zig");
 const AppCtx = @import("app_ctx.zig").AppCtx;
 
-// Release uses simple_panic so debug.Dwarf stays unreachable (~30 KB smaller).
-pub const panic = if (@import("builtin").mode == .Debug)
-    std.debug.FullPanic(std.debug.defaultPanic)
-else
-    std.debug.simple_panic;
+// Wrap the panic path so the cursor + autowrap state owned by
+// MultiProgress / Spinner is restored before abort. Defers don't run
+// on panic, so this is the only way to leave the terminal usable when
+// install/migrate trips a safety check.
+pub const panic = std.debug.FullPanic(maltPanic);
+
+fn maltPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    progress_mod.restoreTerminal();
+    if (@import("builtin").mode == .Debug) {
+        std.debug.defaultPanic(msg, first_trace_addr);
+    } else {
+        // Release mirror of std.debug.simple_panic.call: emit the
+        // message and trap, keeping debug.Dwarf out of the binary.
+        const stderr_writer = &std.debug.lockStderr(&.{}).file_writer.interface;
+        stderr_writer.writeAll(msg) catch {};
+        @trap();
+    }
+}
 
 // Gate `.debug` on the runtime --debug flag so release builds still
 // surface std.log.debug diagnostics in bug reports.
@@ -343,7 +357,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Seed the ui package state once so output/progress/color stop
     // pulling io/environ/stdio from module-level globals.
     const output_mod = @import("ui/output.zig");
-    const progress_mod = @import("ui/progress.zig");
     output_mod.setRuntime(ctx.io, ctx.environ, ctx.stdout, ctx.stderr);
     progress_mod.setRuntime(ctx.io, ctx.stderr);
     color_mod.setRuntime(ctx.io, ctx.environ);
