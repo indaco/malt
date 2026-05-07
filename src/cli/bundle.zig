@@ -52,10 +52,12 @@ fn cliUninstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []cons
 }
 
 /// Cast the dispatcher's opaque `ctx` slot back to a borrowed AppCtx pointer.
-/// All call paths set the slot via `runDispatcher` / `cleanupDispatcher`
-/// before invoking the runner, so the expect-non-null read is sound.
+/// The slot is `?*anyopaque` for ABI symmetry with the runner's Dispatcher;
+/// every cli call path sets it via `runDispatcher` / `cleanupDispatcher`,
+/// so a null here is a wiring bug — name it instead of UB-panicking.
 fn appCtxFromOpaque(ctx: ?*anyopaque) *const AppCtx {
-    return @ptrCast(@alignCast(ctx.?));
+    const non_null = ctx orelse @panic("bundle: dispatcher invoked without AppCtx — wire via runDispatcher/cleanupDispatcher");
+    return @ptrCast(@alignCast(non_null));
 }
 
 fn runDispatcher(ctx: *const AppCtx) runner_mod.Dispatcher {
