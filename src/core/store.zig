@@ -60,18 +60,26 @@ pub const Store = struct {
     /// row delete, refcount-0 rows keep returning from `orphans()` on every
     /// purge run — the bug `doctor --fix` already worked around.  deleteTree
     /// is a no-op on a missing path, so phantom rows still trigger DB cleanup.
+    /// The DB delete runs inside an immediate transaction so concurrent
+    /// readers never observe a half-resolved store_refs state.
     pub fn remove(self: *Store, sha256: []const u8) StoreError!void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
         var buf: [512]u8 = undefined;
         const p = std.fmt.bufPrint(&buf, "{s}/store/{s}", .{ self.prefix, sha256 }) catch return StoreError.OutOfMemory;
+
+        self.db.beginTransaction() catch return StoreError.RefCountError;
+        errdefer self.db.rollback();
+
         std.Io.Dir.cwd().deleteTree(self.io, p) catch return StoreError.RemoveFailed;
 
         var stmt = self.db.prepare("DELETE FROM store_refs WHERE store_sha256 = ?1;") catch return StoreError.RefCountError;
         defer stmt.finalize();
         stmt.bindText(1, sha256) catch return StoreError.RefCountError;
         _ = stmt.step() catch return StoreError.RefCountError;
+
+        self.db.commit() catch return StoreError.RefCountError;
     }
 
     pub fn incrementRef(self: *Store, sha256: []const u8) StoreError!void {
