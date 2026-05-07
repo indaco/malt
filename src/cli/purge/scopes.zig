@@ -7,6 +7,7 @@
 const std = @import("std");
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const schema = @import("../../db/schema.zig");
+const sqlite = @import("../../db/sqlite.zig");
 const output = @import("../../ui/output.zig");
 const store_mod = @import("../../core/store.zig");
 const deps_mod = @import("../../core/deps.zig");
@@ -303,6 +304,23 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
         .opened => |db_val| db_val,
     };
     defer db.close();
+    schema.initSchema(&db) catch |e| {
+        output.err("stale-casks: cannot init schema ({s})", .{@errorName(e)});
+        result.status = .err;
+        result.error_kind = "schema_init";
+        return result;
+    };
+
+    // Single reusable lookup for both passes — they ask the same
+    // question. A persistent prepare failure (schema drift, lock held)
+    // would otherwise empty the candidate set silently.
+    var lookup = db.prepare("SELECT token FROM casks WHERE token = ?1 LIMIT 1;") catch |e| {
+        output.err("stale-casks: cannot prepare cask lookup ({s})", .{@errorName(e)});
+        result.status = .err;
+        result.error_kind = "db_prepare";
+        return result;
+    };
+    defer lookup.finalize();
 
     // Collect candidates first so we can emit a single header line with
     // an accurate count before printing the per-item bullets.
@@ -340,10 +358,12 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             const token_z = allocator.dupeZ(u8, token) catch continue;
             defer allocator.free(token_z);
 
-            var stmt = db.prepare("SELECT token FROM casks WHERE token = ?1 LIMIT 1;") catch continue;
-            defer stmt.finalize();
-            stmt.bindText(1, token_z) catch continue;
-            if (stmt.step() catch false) continue; // still installed
+            lookup.reset() catch {};
+            lookup.bindText(1, token_z) catch |e| {
+                output.warn("stale-casks: skipping {s}: bind failed ({s})", .{ token, @errorName(e) });
+                continue;
+            };
+            if (lookup.step() catch false) continue; // still installed
 
             const stat = dir.statFile(io, entry.name, .{}) catch continue;
             const dup = allocator.dupe(u8, entry.name) catch continue;
@@ -368,10 +388,12 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             const token_z = allocator.dupeZ(u8, entry.name) catch continue;
             defer allocator.free(token_z);
 
-            var stmt = db.prepare("SELECT token FROM casks WHERE token = ?1 LIMIT 1;") catch continue;
-            defer stmt.finalize();
-            stmt.bindText(1, token_z) catch continue;
-            if (stmt.step() catch false) continue;
+            lookup.reset() catch {};
+            lookup.bindText(1, token_z) catch |e| {
+                output.warn("stale-casks: skipping {s}: bind failed ({s})", .{ entry.name, @errorName(e) });
+                continue;
+            };
+            if (lookup.step() catch false) continue;
 
             var path_buf: [512]u8 = undefined;
             const full = std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}", .{ prefix, entry.name }) catch continue;
@@ -524,4 +546,77 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
     }
     rep.done(candidates.items.len);
     return result;
+}
+
+// ── inline unit tests ──────────────────────────────────────────────────────
+
+const testing = std.testing;
+const fs_test_io = std.Options.debug_io;
+
+test "runStaleCasks surfaces db prepare failure when the casks table shape is wrong" {
+    // Pre-existing `casks` table with the wrong shape: `initSchema`'s
+    // CREATE IF NOT EXISTS is a no-op, the lookup statement cannot
+    // prepare, and the silent `catch continue` would have emptied the
+    // candidate set and reported a clean no-op. Pin the loud signal.
+    const allocator = testing.allocator;
+
+    const prefix = "/tmp/malt_runStaleCasks_prepare_err";
+    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/cache/Cask");
+
+    {
+        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        defer db.close();
+        try db.exec("CREATE TABLE casks (id INTEGER);");
+    }
+    {
+        const f = try std.Io.Dir.createFileAbsolute(fs_test_io, prefix ++ "/cache/Cask/ghost.dmg", .{ .truncate = true });
+        defer f.close(fs_test_io);
+        try f.writeStreamingAll(fs_test_io, "x");
+    }
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runStaleCasks(&ctx, allocator, prefix, true);
+
+    try testing.expectEqual(util.ScopeStatus.err, result.status);
+    try testing.expectEqualStrings("db_prepare", result.error_kind orelse "");
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "stale-casks") != null);
+}
+
+test "runStaleCasks self-heals a schema-less db rather than reporting it as a fault" {
+    // A bare DB file with no schema must not surface as a `db_prepare`
+    // fault — the function self-heals via `schema.initSchema`, matching
+    // its sibling scopes (`runStoreOrphans`, `runUnusedDeps`).
+    const allocator = testing.allocator;
+
+    const prefix = "/tmp/malt_runStaleCasks_self_heal";
+    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
+
+    {
+        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        db.close();
+    }
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runStaleCasks(&ctx, allocator, prefix, true);
+
+    try testing.expectEqual(util.ScopeStatus.ok, result.status);
+    try testing.expect(result.error_kind == null);
+    try testing.expectEqual(@as(u32, 0), result.removed);
 }
