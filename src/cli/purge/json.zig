@@ -148,7 +148,10 @@ fn emitEvent(
     error_kind: ?[]const u8,
 ) void {
     if (!output.isNdjson()) return;
-    var buf: [512]u8 = undefined;
+    // Matches output.emitNdjsonEvent: 1 KiB swallows worst-case
+    // adversarial-escape names so silent-drop is reachable only on
+    // genuinely pathological input, never on the closed scope set.
+    var buf: [1024]u8 = undefined;
     var w = std.Io.Writer.fixed(buf[0..]);
     w.writeAll("{\"event\":") catch return;
     output.jsonStr(&w, @tagName(event)) catch return;
@@ -416,6 +419,28 @@ test "emitScopeCompleted reports status:ok and omits error_kind on success" {
     const obj = parsed.value.object;
     try testing.expectEqualStrings("ok", obj.get("status").?.string);
     try testing.expect(obj.get("error_kind") == null);
+}
+
+test "ndjson emit drops cleanly when a scope name overflows the line buffer" {
+    // Pins the silent-drop fallback for the per-event line buffer:
+    // an adversarial scope name that doesn't fit must drop without
+    // crashing or emitting a torn line. Mirrors the same guarantee
+    // output.emitNdjsonEvent makes for install-side events.
+    const prior = output.isNdjson();
+    defer output.setNdjson(prior);
+    output.setNdjson(true);
+
+    var huge_name: [2048]u8 = undefined;
+    @memset(huge_name[0..], 'x');
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &buf);
+    defer output.endStdoutCapture();
+
+    emitScopeStarted(huge_name[0..], false);
+
+    try testing.expectEqual(@as(usize, 0), buf.items.len);
 }
 
 test "emitSummary writes the full closed-schema worst case in one go" {
