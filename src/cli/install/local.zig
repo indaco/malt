@@ -114,14 +114,19 @@ pub fn installTapFormula(
         parts.formula,
     }) catch return InstallError.FormulaNotFound;
 
-    var resp = http.get(rb_url) catch {
+    var rb_resp = http.get(rb_url) catch {
         output.err("Cannot fetch tap from GitHub", .{});
         return InstallError.FormulaNotFound;
     };
+    defer rb_resp.deinit();
 
-    if (resp.status != 200) {
-        resp.deinit();
-        // Try Casks/ directory
+    // Distinct handle for the Casks/ retry: each http.get() pairs with
+    // its own defer, so a future reorder cannot turn the previous
+    // single-`resp` reuse into a double-free or use-after-free.
+    var cask_resp: ?client_mod.Response = null;
+    defer if (cask_resp) |*c| c.deinit();
+
+    const resp: *const client_mod.Response = if (rb_resp.status == 200) &rb_resp else blk: {
         const cask_url = std.fmt.bufPrint(&url_buf, "https://raw.githubusercontent.com/{s}/homebrew-{s}/{s}/Casks/{s}.rb", .{
             parts.user,
             parts.repo,
@@ -129,12 +134,12 @@ pub fn installTapFormula(
             parts.formula,
         }) catch return InstallError.FormulaNotFound;
 
-        resp = http.get(cask_url) catch {
+        cask_resp = http.get(cask_url) catch {
             output.err("Cannot fetch tap from GitHub", .{});
             return InstallError.FormulaNotFound;
         };
-    }
-    defer resp.deinit();
+        break :blk &cask_resp.?;
+    };
 
     if (resp.status != 200) {
         output.err("Tap formula/cask not found: {s}", .{pkg_name});
