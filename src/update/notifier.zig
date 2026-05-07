@@ -196,6 +196,10 @@ pub fn writeCache(io: std.Io, path: []const u8, state: State) !void {
 fn fetchLatestTag(ctx: *const AppCtx, allocator: std.mem.Allocator) ![]u8 {
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     http.timeout_ns = network_timeout_ns;
+    // SIGINT on the prompt-after-success window collapses the probe
+    // instead of stalling the user behind the 1.5 s deadline.
+    const main_mod = @import("../main.zig");
+    http.cancel = main_mod.isInterrupted;
     defer http.deinit();
     var resp = try http.get(release.releases_latest_url);
     defer resp.deinit();
