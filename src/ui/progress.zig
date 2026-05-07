@@ -226,13 +226,19 @@ pub const ProgressBar = struct {
         buf[pos] = ' ';
         pos += 1;
 
-        // Label
-        const label_len = self.label.len;
-        @memcpy(buf[pos .. pos + label_len], self.label);
+        // Label — clip to leave headroom for label_width padding, the
+        // trailing space, and the bar/percent/details/erase/cursor that the
+        // caller appends next. Mirrors the Spinner.drawFrame clamp pattern.
+        const tail_reserve: usize = 320;
+        const remaining = if (buf.len > pos + tail_reserve) buf.len - pos - tail_reserve else 0;
+        const label_len = @min(self.label.len, remaining);
+        @memcpy(buf[pos .. pos + label_len], self.label[0..label_len]);
         pos += label_len;
 
         if (self.label_width > 0 and label_len < self.label_width) {
-            const pad = self.label_width - @as(u8, @intCast(@min(label_len, 255)));
+            const desired_pad: usize = self.label_width - label_len;
+            const pad_room: usize = if (buf.len > pos + 1) buf.len - pos - 1 else 0;
+            const pad = @min(desired_pad, pad_room);
             @memset(buf[pos .. pos + pad], ' ');
             pos += pad;
         }
@@ -635,4 +641,19 @@ test "ProgressBar.line_index past u8 round-trips through MultiProgress render" {
     bar.finish();
 
     try std.testing.expectEqual(@as(u16, 350), bar.line_index);
+}
+
+test "ProgressBar render survives label larger than the draw buffer" {
+    // Long custom-tap labels must clip, not panic the @memcpy bound check
+    // in safe builds (buf is 768 determinate / 512 indeterminate).
+    const label: [600]u8 = @splat('x');
+
+    var det = ProgressBar.init(&label, 100);
+    det.is_tty = true;
+    det.update(50);
+    det.finish();
+
+    var indet = ProgressBar.init(&label, 0);
+    indet.is_tty = true;
+    indet.update(0);
 }
