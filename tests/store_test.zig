@@ -114,6 +114,38 @@ test "remove also drops the store_refs row so the orphan does not return" {
     try testing.expectEqual(@as(usize, 0), orphans.items.len);
 }
 
+test "remove drops FS path and store_refs row in one transactional pass" {
+    var ctx = try setupTestStore(testing.allocator);
+    defer {
+        ctx.db.close();
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
+        testing.allocator.free(ctx.prefix);
+    }
+    ctx.store.db = &ctx.db;
+
+    const sha = "txn_sha";
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ ctx.prefix, sha });
+    defer testing.allocator.free(dir);
+    test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
+    try ctx.store.incrementRef(sha);
+    try testing.expect(ctx.store.exists(sha));
+
+    try ctx.store.remove(sha);
+
+    try testing.expect(!ctx.store.exists(sha));
+
+    var orphans = try ctx.store.orphans();
+    defer {
+        for (orphans.items) |o| testing.allocator.free(o);
+        orphans.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 0), orphans.items.len);
+
+    // A leaked open transaction would make the next BEGIN IMMEDIATE error.
+    try ctx.db.beginTransaction();
+    try ctx.db.commit();
+}
+
 test "incrementRef and decrementRef update refcount" {
     var ctx = try setupTestStore(testing.allocator);
     defer {
