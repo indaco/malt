@@ -17,6 +17,7 @@ pub const RubyError = error{
     TapNotFound,
     FormulaSourceNotFound,
     PostInstallBodyNotFound,
+    FetchFailed,
     ScriptWriteFailed,
     PostInstallFailed,
     OutOfMemory,
@@ -28,9 +29,10 @@ pub const RubyError = error{
 pub fn describeError(err: RubyError) []const u8 {
     return switch (err) {
         RubyError.RubyNotFound => "no Ruby interpreter found (tried /opt/homebrew, /usr/local, rbenv, asdf, PATH)",
-        RubyError.TapNotFound => "post_install source unavailable: no local homebrew-core tap and the hash-pinned GitHub fallback did not produce a body (network failure, formula not in the pinned manifest, or hash mismatch)",
-        RubyError.FormulaSourceNotFound => "formula .rb source not found in the homebrew-core tap",
-        RubyError.PostInstallBodyNotFound => "could not extract post_install body from formula source",
+        RubyError.TapNotFound => "no local homebrew-core tap clone, and the hash-pinned GitHub fallback was not viable for this formula",
+        RubyError.FormulaSourceNotFound => "formula .rb source not found in the homebrew-core tap, and the hash-pinned GitHub fallback could not recover it",
+        RubyError.PostInstallBodyNotFound => "could not extract a post_install body from the formula source",
+        RubyError.FetchFailed => "hash-pinned GitHub fallback fetch failed (network error, HTTP status, hash mismatch, or formula absent from the pinned manifest)",
         RubyError.ScriptWriteFailed => "could not write the temporary Ruby wrapper script",
         RubyError.PostInstallFailed => "post_install script failed to run or exited non-zero",
         RubyError.OutOfMemory => "out of memory running post_install",
@@ -125,6 +127,59 @@ pub fn resolveFormulaRbPath(io: std.Io, buf: *[1024]u8, tap_path: []const u8, na
     return new_path;
 }
 
+/// Outcome of the GitHub fallback fetch. Distinguishing `body_not_found`
+/// (we got source, no parseable post_install) from `fetch_failed`
+/// (network, HTTP, hash, or manifest miss) is what lets the resolver
+/// surface an actionable tag instead of collapsing onto TapNotFound.
+const FetchOutcome = union(enum) {
+    body: []const u8,
+    body_not_found,
+    fetch_failed,
+};
+
+/// Tagged variant of `fetchPostInstallFromGitHub` that preserves the
+/// distinction between a fetch arm that failed and one that succeeded
+/// but yielded no extractable body. Internal: the public optional-slice
+/// wrapper is what CLI call sites consume.
+fn fetchPostInstallFromGitHubTagged(
+    io: std.Io,
+    environ: std.process.Environ,
+    allocator: std.mem.Allocator,
+    name: []const u8,
+) FetchOutcome {
+    // Reject anything that wouldn't pass the API name allowlist
+    // ([a-z0-9@._+-]) — the URL path substitutes the name directly.
+    api_mod.validateName(name) catch return .fetch_failed;
+
+    // Fail-closed: no manifest entry, no fetch. The caller decides whether
+    // to warn — core stays headless.
+    const expected_hash = pins.expectedSha256(name) orelse return .fetch_failed;
+
+    var url_buf: [512]u8 = undefined;
+    const url = std.fmt.bufPrint(
+        &url_buf,
+        "https://raw.githubusercontent.com/Homebrew/homebrew-core/{s}/Formula/{c}/{s}.rb",
+        .{ &pins.homebrew_core_commit_sha, name[0], name },
+    ) catch return .fetch_failed;
+
+    var http = http_client.HttpClient.init(io, environ, allocator);
+    defer http.deinit();
+
+    var resp = http.get(url) catch return .fetch_failed;
+    defer resp.deinit();
+    if (resp.status != 200) return .fetch_failed;
+    if (resp.body.len == 0 or resp.body.len > max_formula_rb_bytes) return .fetch_failed;
+
+    var actual_hex: [pins.SHA256_HEX_LEN]u8 = undefined;
+    pins.sha256Hex(resp.body, &actual_hex);
+    if (!std.mem.eql(u8, actual_hex[0..], expected_hash)) return .fetch_failed;
+
+    if (extractPostInstallFromSource(allocator, resp.body)) |body| {
+        return .{ .body = body };
+    }
+    return .body_not_found;
+}
+
 /// Fetch a formula's .rb source from the pinned homebrew-core commit,
 /// verify its SHA256 against the embedded manifest, and extract the
 /// post_install body.
@@ -140,34 +195,10 @@ pub fn resolveFormulaRbPath(io: std.Io, buf: *[1024]u8, tap_path: []const u8, na
 /// failure. All failures are silent-to-caller; the caller decides
 /// whether to warn.
 pub fn fetchPostInstallFromGitHub(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
-    // Reject anything that wouldn't pass the API name allowlist
-    // ([a-z0-9@._+-]) — the URL path substitutes the name directly.
-    api_mod.validateName(name) catch return null;
-
-    // Fail-closed: no manifest entry, no fetch. The caller decides whether
-    // to warn — core stays headless.
-    const expected_hash = pins.expectedSha256(name) orelse return null;
-
-    var url_buf: [512]u8 = undefined;
-    const url = std.fmt.bufPrint(
-        &url_buf,
-        "https://raw.githubusercontent.com/Homebrew/homebrew-core/{s}/Formula/{c}/{s}.rb",
-        .{ &pins.homebrew_core_commit_sha, name[0], name },
-    ) catch return null;
-
-    var http = http_client.HttpClient.init(io, environ, allocator);
-    defer http.deinit();
-
-    var resp = http.get(url) catch return null;
-    defer resp.deinit();
-    if (resp.status != 200) return null;
-    if (resp.body.len == 0 or resp.body.len > max_formula_rb_bytes) return null;
-
-    var actual_hex: [pins.SHA256_HEX_LEN]u8 = undefined;
-    pins.sha256Hex(resp.body, &actual_hex);
-    if (!std.mem.eql(u8, actual_hex[0..], expected_hash)) return null;
-
-    return extractPostInstallFromSource(allocator, resp.body);
+    return switch (fetchPostInstallFromGitHubTagged(io, environ, allocator, name)) {
+        .body => |b| b,
+        .body_not_found, .fetch_failed => null,
+    };
 }
 
 /// Extract post_install body + any sibling `def` blocks at the same indent,
@@ -206,23 +237,65 @@ pub fn extractPostInstallFromSource(allocator: std.mem.Allocator, source: []cons
     return out.toOwnedSlice(allocator) catch return null;
 }
 
+/// Which arm of the local-tap path was the last one to fail. Carried
+/// from `resolvePostInstallBody` into the failure classifier so the
+/// returned RubyError reflects the deepest-known reason rather than a
+/// blanket TapNotFound.
+const LocalArmFailure = enum {
+    /// `findHomebrewCoreTap` returned null — no clone on disk.
+    no_tap,
+    /// Tap clone exists but no `.rb` for this formula in either layout.
+    no_rb,
+    /// Tap + `.rb` exist but the body extractor returned null.
+    body_not_extracted,
+};
+
+/// Pure decision: pick the most actionable RubyError given the local
+/// arm's failure mode and the fetch arm's outcome. Operators triage by
+/// the variant, so we surface the deepest-known reason — e.g. a hash
+/// mismatch becomes `FetchFailed`, not `TapNotFound`.
+fn classifyResolveFailure(local: LocalArmFailure, fetch_failure: FetchOutcome) RubyError {
+    return switch (fetch_failure) {
+        .body => unreachable, // success isn't a failure to classify
+        .body_not_found => RubyError.PostInstallBodyNotFound,
+        .fetch_failed => switch (local) {
+            .no_tap => RubyError.TapNotFound,
+            .no_rb => RubyError.FetchFailed,
+            .body_not_extracted => RubyError.PostInstallBodyNotFound,
+        },
+    };
+}
+
 /// Resolve a formula's post_install body. Tries the on-disk
 /// homebrew-core tap first; on miss, falls back to the hash-pinned
 /// GitHub fetch so API-only Homebrew installs (no tap clone) still
-/// reach a usable body. Caller owns the returned slice when non-null.
+/// reach a usable body. Caller owns the returned slice on success.
+///
+/// Failure surfaces a distinguishing RubyError — TapNotFound,
+/// FetchFailed, or PostInstallBodyNotFound — so operators triaging an
+/// install crash see the actual cause rather than a single catch-all.
 pub fn resolvePostInstallBody(
     io: std.Io,
     environ: std.process.Environ,
     allocator: std.mem.Allocator,
     name: []const u8,
-) ?[]const u8 {
+) RubyError![]const u8 {
+    var local: LocalArmFailure = .no_tap;
     if (findHomebrewCoreTap(io)) |tap_path| {
         var rb_buf: [1024]u8 = undefined;
         if (resolveFormulaRbPath(io, &rb_buf, tap_path, name)) |rb_path| {
             if (extractPostInstallBody(io, allocator, rb_path)) |body| return body;
+            local = .body_not_extracted;
+        } else {
+            local = .no_rb;
         }
     }
-    return fetchPostInstallFromGitHub(io, environ, allocator, name);
+
+    const fetch = fetchPostInstallFromGitHubTagged(io, environ, allocator, name);
+    return switch (fetch) {
+        .body => |b| b,
+        else => classifyResolveFailure(local, fetch),
+    };
 }
 
 /// Run the DSL parser over an isolated sibling-def block and report whether
@@ -522,8 +595,9 @@ pub fn runPostInstall(
     // 2-4. Resolve the post_install body. Local homebrew-core tap is
     //      preferred; hash-pinned GitHub fetch is the fallback so
     //      API-only Homebrew installs (no tap clone) still resolve.
-    const body = resolvePostInstallBody(io, environ, allocator, name) orelse
-        return RubyError.TapNotFound;
+    //      The resolver returns a distinguishing tag so a hash mismatch
+    //      doesn't get filed under "no local tap".
+    const body = try resolvePostInstallBody(io, environ, allocator, name);
     defer allocator.free(body);
     return runPostInstallWithBody(io, environ, allocator, name, version, prefix, body, stdio);
 }
@@ -631,4 +705,32 @@ pub fn runPostInstallWithBody(
         stdio,
     ) catch return RubyError.PostInstallFailed;
     if (exit_code != 0) return RubyError.PostInstallFailed;
+}
+
+test "classifyResolveFailure: fetch returned source but no body folds onto PostInstallBodyNotFound" {
+    // body_not_found is fetch-arm-only — local arm doesn't matter.
+    const cases = [_]LocalArmFailure{ .no_tap, .no_rb, .body_not_extracted };
+    for (cases) |local| {
+        try std.testing.expectEqual(
+            RubyError.PostInstallBodyNotFound,
+            classifyResolveFailure(local, .body_not_found),
+        );
+    }
+}
+
+test "classifyResolveFailure: fetch_failed maps to the deepest local-arm reason" {
+    // The whole point of the split: hash mismatch under a populated tap
+    // surfaces FetchFailed, not TapNotFound.
+    try std.testing.expectEqual(
+        RubyError.TapNotFound,
+        classifyResolveFailure(.no_tap, .fetch_failed),
+    );
+    try std.testing.expectEqual(
+        RubyError.FetchFailed,
+        classifyResolveFailure(.no_rb, .fetch_failed),
+    );
+    try std.testing.expectEqual(
+        RubyError.PostInstallBodyNotFound,
+        classifyResolveFailure(.body_not_extracted, .fetch_failed),
+    );
 }
