@@ -4,6 +4,197 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.11.0 - 2026-05-08
+
+### Highlights
+
+v0.11.0 lands the strategic features deferred from the brew-parity push - parallel migration with resume, machine-readable output across the mutating commands, and a passive update notifier - and folds in a broad fix-pass that paid down the regressions and rough edges introduced over the v0.10 cycle.
+
+- **Parallel migrate that survives interruption.** `mt migrate --parallel` works through the Homebrew Cellar concurrently and persists progress, so a run that's interrupted picks up where it stopped instead of restarting. Kegs that no longer resolve through the Homebrew API still migrate via a Cellar-side fallback - including third-party taps, whose `post_install` hook now runs end-to-end on that path.
+- **Scriptable output for the commands that change state.** Install, migrate, purge, uninstall, and upgrade now emit NDJSON on demand via `--output-format=ndjson`, with `mt purge` additionally producing a structured JSON summary alongside its sectioned text report. Automation can consume exactly what each step did - and tell a real scope failure apart from a clean no-op - instead of scraping prose.
+- **Update checks that stay out of your way.** The post-command "is there a new malt?" probe runs in the background, never delays the command from returning, exits cleanly on Ctrl-C, and can no longer leave its cache in a half-written state.
+- **Correctness fix-pass.** Three headline bugs that v0.10 users could trip into are fixed: `mt upgrade` no longer hangs on its own lock when pulling in a new transitive dep, `mt rollback` no longer leaves an orphaned cellar directory after a revision bump, and tap installs no longer leak a staging archive on every successful run. The broader sweep that lands alongside tightens migrate (accurate cancelled-vs-skipped accounting on Ctrl-C, deferred `post_install` ordering), uninstall and the on-disk store (transactional removal, no stranded refcount rows), the schema migration window, the update notifier, and the terminal UI - cursor and autowrap are restored after an aborted install, oversize labels can't crash the progress bar, and notice/warn stay distinguishable with colour and emoji disabled.
+- **Quieter foundation under the hood.** `mt` is now a symlink to a single `malt` binary instead of two near-identical copies. The cycle's standard-library migration is wound up, bottle verification streams instead of buffering whole bottles into memory, and SHA comparisons run in constant time. None of this is user-visible on its own - it's the seam the next feature wave plugs into.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🚀 Enhancements
+
+- **cli/purge:** distinguish swallowed scope failures from clean no-ops in ndjson ([82227e6](https://github.com/indaco/malt/commit/82227e6)) ([#262](https://github.com/indaco/malt/pull/262))
+- **migrate:** copy-from-Cellar fallback for kegs not in the Homebrew API ([2e5f917](https://github.com/indaco/malt/commit/2e5f917)) ([#247](https://github.com/indaco/malt/pull/247))
+- **cli/purge:** emit structured JSON and NDJSON for purge ([fa4c765](https://github.com/indaco/malt/commit/fa4c765)) ([#235](https://github.com/indaco/malt/pull/235))
+- passive version-notify after dispatch ([0fbee72](https://github.com/indaco/malt/commit/0fbee72)) ([#214](https://github.com/indaco/malt/pull/214))
+- **cli/migrate:** --parallel with resume manifest ([227dc30](https://github.com/indaco/malt/commit/227dc30)) ([#213](https://github.com/indaco/malt/pull/213))
+- **cli:** --output-format=ndjson for mutating commands ([badb83a](https://github.com/indaco/malt/commit/badb83a)) ([#212](https://github.com/indaco/malt/pull/212))
+
+### 🩹 Fixes
+
+- **coverage:** skip subprocess tests under kcov ([10caa4c](https://github.com/indaco/malt/commit/10caa4c)) ([#303](https://github.com/indaco/malt/pull/303))
+- **net/client:** make idle watchdog fire on TLS read stalls ([50c89f2](https://github.com/indaco/malt/commit/50c89f2)) ([#302](https://github.com/indaco/malt/pull/302))
+- edge-case hardening ([47c8762](https://github.com/indaco/malt/commit/47c8762)) ([#298](https://github.com/indaco/malt/pull/298))
+- propagate std.Io sleep cancellation through poll and retry loops ([e222c31](https://github.com/indaco/malt/commit/e222c31)) ([#296](https://github.com/indaco/malt/pull/296))
+- **core/ruby_subprocess:** split TapNotFound into actionable failure modes ([0678220](https://github.com/indaco/malt/commit/0678220)) ([#293](https://github.com/indaco/malt/pull/293))
+- **dsl/fallback_log:** warn when an OOM drops a fallback entry ([80cebac](https://github.com/indaco/malt/commit/80cebac)) ([#291](https://github.com/indaco/malt/pull/291))
+- **ui:** restore cursor and autowrap when install/migrate aborts ([1a3a990](https://github.com/indaco/malt/commit/1a3a990)) ([#290](https://github.com/indaco/malt/pull/290))
+- **cli/purge/scopes:** surface DB prepare failures in runStaleCasks ([9c39f2b](https://github.com/indaco/malt/commit/9c39f2b)) ([#289](https://github.com/indaco/malt/pull/289))
+- **ui/progress:** clip oversize labels so long taps don't crash the bar ([51513c9](https://github.com/indaco/malt/commit/51513c9)) ([#286](https://github.com/indaco/malt/pull/286))
+- **cli/purge/report:** print cache-pruning header for long cache paths ([e8bf57d](https://github.com/indaco/malt/commit/e8bf57d)) ([#285](https://github.com/indaco/malt/pull/285))
+- **cli/uninstall:** decrement store ref atomically with DB delete ([b4272b2](https://github.com/indaco/malt/commit/b4272b2)) ([#282](https://github.com/indaco/malt/pull/282))
+- **core/store:** wrap remove in a transaction to keep DB consistent ([ecd78ef](https://github.com/indaco/malt/commit/ecd78ef)) ([#281](https://github.com/indaco/malt/pull/281))
+- **db/schema:** harden the v5 FK-off rebuild window ([976daaf](https://github.com/indaco/malt/commit/976daaf)) ([#280](https://github.com/indaco/malt/pull/280))
+- **update/notifier:** honour SIGINT during the post-dispatch update probe ([fe2da30](https://github.com/indaco/malt/commit/fe2da30)) ([#279](https://github.com/indaco/malt/pull/279))
+- **update/notifier:** atomic cache write to avoid torn states ([2f8b812](https://github.com/indaco/malt/commit/2f8b812)) ([#278](https://github.com/indaco/malt/pull/278))
+- **install:** widen download_index to u16 ([388dae6](https://github.com/indaco/malt/commit/388dae6)) ([#274](https://github.com/indaco/malt/pull/274))
+- **ui:** serialise concurrent stderr emit windows ([de71dca](https://github.com/indaco/malt/commit/de71dca)) ([#272](https://github.com/indaco/malt/pull/272))
+- **core:** route post_install subprocess stdio via AppCtx ([1b7abb9](https://github.com/indaco/malt/commit/1b7abb9)) ([#273](https://github.com/indaco/malt/pull/273))
+- **migrate/keg:** keep parallel workers moving when OOM forces inline post_install ([0eb1bd7](https://github.com/indaco/malt/commit/0eb1bd7)) ([#271](https://github.com/indaco/malt/pull/271))
+- **migrate/keg:** shrink readInstallReceipt buffer to actual read length ([9b1412f](https://github.com/indaco/malt/commit/9b1412f)) ([#270](https://github.com/indaco/malt/pull/270))
+- **cli/upgrade:** refresh tap-installed packages and self-heal dep opt links ([da2e3a0](https://github.com/indaco/malt/commit/da2e3a0)) ([#269](https://github.com/indaco/malt/pull/269))
+- **core/bottle:** constant-time SHA compare on disk re-verify ([6057a85](https://github.com/indaco/malt/commit/6057a85)) ([#267](https://github.com/indaco/malt/pull/267))
+- **dsl/inreplace:** preserve the real underlying error in atomic-write failures ([8ba2320](https://github.com/indaco/malt/commit/8ba2320)) ([#265](https://github.com/indaco/malt/pull/265))
+- **ui:** keep notice and warn distinguishable in NO_COLOR / no-emoji mode ([34bd16c](https://github.com/indaco/malt/commit/34bd16c)) ([#263](https://github.com/indaco/malt/pull/263))
+- **install/post_install:** only fall back to Ruby when the DSL actually skipped work ([b1d0351](https://github.com/indaco/malt/commit/b1d0351)) ([#261](https://github.com/indaco/malt/pull/261))
+- **migrate/keg:** preserve full_name for tap+keg paths over 256 bytes ([e715e85](https://github.com/indaco/malt/commit/e715e85)) ([#258](https://github.com/indaco/malt/pull/258))
+- **migrate/parallel:** distinguish cancelled kegs from already-installed ones ([e66fdc7](https://github.com/indaco/malt/commit/e66fdc7)) ([#256](https://github.com/indaco/malt/pull/256))
+- **migrate:** run post_install for tap kegs migrated from the Cellar fallback ([48c0728](https://github.com/indaco/malt/commit/48c0728)) ([#255](https://github.com/indaco/malt/pull/255))
+- **install/local:** stop tap installs leaking their staging archive ([efd5447](https://github.com/indaco/malt/commit/efd5447)) ([#254](https://github.com/indaco/malt/pull/254))
+- **cli/rollback:** keep revision-bumped cellar dirs from being orphaned ([73c74f4](https://github.com/indaco/malt/commit/73c74f4)) ([#253](https://github.com/indaco/malt/pull/253))
+- **cli/upgrade:** share malt.lock with installAll to avoid self-deadlock ([e733569](https://github.com/indaco/malt/commit/e733569)) ([#252](https://github.com/indaco/malt/pull/252))
+- **migrate:** defer post_install hooks until every keg is linked ([88afd10](https://github.com/indaco/malt/commit/88afd10)) ([#248](https://github.com/indaco/malt/pull/248))
+- **core/ruby_subprocess+sandbox:** make --use-system-ruby work end-to-end on macOS ([1a18ea4](https://github.com/indaco/malt/commit/1a18ea4)) ([#246](https://github.com/indaco/malt/pull/246))
+- **install/post_install:** auto-include ruby keg in system-Ruby fallback ([3deb61e](https://github.com/indaco/malt/commit/3deb61e)) ([#245](https://github.com/indaco/malt/pull/245))
+- **migrate:** hardening for parallel migration ([170408e](https://github.com/indaco/malt/commit/170408e)) ([#244](https://github.com/indaco/malt/pull/244))
+- **core/formula:** route parseFormula allocs through parse arena ([42b79f9](https://github.com/indaco/malt/commit/42b79f9)) ([#241](https://github.com/indaco/malt/pull/241))
+- **core/store:** drop the store_refs row when removing an orphan ([a0d6537](https://github.com/indaco/malt/commit/a0d6537)) ([#233](https://github.com/indaco/malt/pull/233))
+- **cli/install:** refuse to install malt itself ([0d0f14b](https://github.com/indaco/malt/commit/0d0f14b)) ([#231](https://github.com/indaco/malt/pull/231))
+
+### 💅 Refactors
+
+- drop unused allocator params left over from fs_compat retirement ([ac0bd28](https://github.com/indaco/malt/commit/ac0bd28)) ([#294](https://github.com/indaco/malt/pull/294))
+- **ui:** route stdin probes and prompt reads through pkg_io ([e0a6cd0](https://github.com/indaco/malt/commit/e0a6cd0)) ([#288](https://github.com/indaco/malt/pull/288))
+- **cli/purge:** firm up --json and --ndjson emit semantics ([b2d065c](https://github.com/indaco/malt/commit/b2d065c)) ([#287](https://github.com/indaco/malt/pull/287))
+- **update/notifier:** swap state through a single atomic helper ([b119186](https://github.com/indaco/malt/commit/b119186)) ([#284](https://github.com/indaco/malt/pull/284))
+- **install:** defer-release the token-prefetch HTTP client ([0cea630](https://github.com/indaco/malt/commit/0cea630)) ([#276](https://github.com/indaco/malt/pull/276))
+- **install/local:** split rb/cask retry into separate response handles ([85db885](https://github.com/indaco/malt/commit/85db885)) ([#275](https://github.com/indaco/malt/pull/275))
+- **dsl/inreplace:** route stderr warning through output module ([cf0668b](https://github.com/indaco/malt/commit/cf0668b)) ([#266](https://github.com/indaco/malt/pull/266))
+- **dsl/process:** drop unused io parameter from readPipeAll ([da8d4b6](https://github.com/indaco/malt/commit/da8d4b6)) ([#264](https://github.com/indaco/malt/pull/264))
+- **migrate:** match install's progress bar TUI in serial and parallel ([d850931](https://github.com/indaco/malt/commit/d850931)) ([#249](https://github.com/indaco/malt/pull/249))
+- **install:** inline keg path in MaterializeResult ([489c2ec](https://github.com/indaco/malt/commit/489c2ec)) ([#242](https://github.com/indaco/malt/pull/242))
+- **cli/purge:** sectioned housekeeping output, summary table, --verbose ([216e8b0](https://github.com/indaco/malt/commit/216e8b0)) ([#232](https://github.com/indaco/malt/pull/232))
+- ship single binary; mt is a symlink to malt ([5e4d87b](https://github.com/indaco/malt/commit/5e4d87b)) ([#230](https://github.com/indaco/malt/pull/230))
+- retire fs/compat shim in favour of std.Io and AppCtx ([333bb94](https://github.com/indaco/malt/commit/333bb94)) ([#228](https://github.com/indaco/malt/pull/228))
+
+### 📖 Documentation
+
+- **benchmark:** update results 2026-05-08 ([3c35e42](https://github.com/indaco/malt/commit/3c35e42)) ([#304](https://github.com/indaco/malt/pull/304))
+- update readme and code coverage badde ([84b4703](https://github.com/indaco/malt/commit/84b4703)) ([#305](https://github.com/indaco/malt/pull/305))
+- **core/formula:** clarify bottle_files lifetime after parse-arena migration ([9f6c69d](https://github.com/indaco/malt/commit/9f6c69d)) ([#260](https://github.com/indaco/malt/pull/260))
+- **benchmark:** update results 2026-05-04 ([735d1db](https://github.com/indaco/malt/commit/735d1db)) ([#234](https://github.com/indaco/malt/pull/234))
+
+### ⚡ Performance
+
+- **text-replace:** share the optimised byte-replace across DSL and macho ([ed41f3c](https://github.com/indaco/malt/commit/ed41f3c)) ([#295](https://github.com/indaco/malt/pull/295))
+- **core/bottle:** stream-hash bottles instead of buffering whole file ([e664364](https://github.com/indaco/malt/commit/e664364)) ([#268](https://github.com/indaco/malt/pull/268))
+- **install/post_install:** reuse the install path's FormulaCache ([45f2586](https://github.com/indaco/malt/commit/45f2586)) ([#259](https://github.com/indaco/malt/pull/259))
+
+### ✅ Tests
+
+- **smoke:** keep network smokes honest ([3429415](https://github.com/indaco/malt/commit/3429415)) ([#301](https://github.com/indaco/malt/pull/301))
+- **install-parse-cache:** wipe TempDb dir before reopen ([e2f427c](https://github.com/indaco/malt/commit/e2f427c)) ([#300](https://github.com/indaco/malt/pull/300))
+- **migrate:** pin post_install drain ordering vs linkOpt ([e36da02](https://github.com/indaco/malt/commit/e36da02)) ([#299](https://github.com/indaco/malt/pull/299))
+- **cli:** expand dispatch coverage and fix kcov merge/hang ([da95097](https://github.com/indaco/malt/commit/da95097)) ([#240](https://github.com/indaco/malt/pull/240))
+- **install:** kill flaky idempotent fall-through by skipping the network ([a2df415](https://github.com/indaco/malt/commit/a2df415)) ([#219](https://github.com/indaco/malt/pull/219))
+
+### 🏡 Chores
+
+- post-audit hygiene sweep ([5af8b69](https://github.com/indaco/malt/commit/5af8b69)) ([#297](https://github.com/indaco/malt/pull/297))
+- **cli/bundle:** make null-ctx dispatcher panic explicit ([f9c0fde](https://github.com/indaco/malt/commit/f9c0fde)) ([#292](https://github.com/indaco/malt/pull/292))
+- **update/swap:** make rollback delete the staged file explicitly ([717d6bc](https://github.com/indaco/malt/commit/717d6bc)) ([#283](https://github.com/indaco/malt/pull/283))
+- **main:** isolate the interrupt flag across test cases ([222136e](https://github.com/indaco/malt/commit/222136e)) ([#277](https://github.com/indaco/malt/pull/277))
+- **ui:** distinguish update-available notices from warnings ([a40916f](https://github.com/indaco/malt/commit/a40916f)) ([#251](https://github.com/indaco/malt/pull/251))
+- **scripts:** group smoke tests under scripts/smokes/ ([c8dc0e6](https://github.com/indaco/malt/commit/c8dc0e6)) ([#250](https://github.com/indaco/malt/pull/250))
+- **bench:** instrument warm-install variance source ([0d3cf16](https://github.com/indaco/malt/commit/0d3cf16)) ([#238](https://github.com/indaco/malt/pull/238))
+- silence environmental noise from `zig build test` ([8619258](https://github.com/indaco/malt/commit/8619258)) ([#236](https://github.com/indaco/malt/pull/236))
+- **devbox:** pin zig to 0.16.x ([d045b1e](https://github.com/indaco/malt/commit/d045b1e)) ([#229](https://github.com/indaco/malt/pull/229))
+- **pins:** bump homebrew-core pin to 1292ccec7219 ([b255407](https://github.com/indaco/malt/commit/b255407)) ([#216](https://github.com/indaco/malt/pull/216))
+- add just release-branch recipe ([49b6f28](https://github.com/indaco/malt/commit/49b6f28)) ([#211](https://github.com/indaco/malt/pull/211))
+- add release-branch + patch workflow ([9e5cf9f](https://github.com/indaco/malt/commit/9e5cf9f)) ([#210](https://github.com/indaco/malt/pull/210))
+
+### 🤖 CI
+
+- **smoke:** align expected tag with released ref, add gh-auth fallback ([4d72979](https://github.com/indaco/malt/commit/4d72979)) ([#243](https://github.com/indaco/malt/pull/243))
+- **bench:** fix README date refresh in benchmark workflow ([41d3268](https://github.com/indaco/malt/commit/41d3268)) ([#239](https://github.com/indaco/malt/pull/239))
+- **bench:** update the PR title to follow conventional commits ([f2f7eea](https://github.com/indaco/malt/commit/f2f7eea)) ([#237](https://github.com/indaco/malt/pull/237))
+- **release:** smoke-then-promote, pre-flight gate, rollback playbook ([4d3cdad](https://github.com/indaco/malt/commit/4d3cdad)) ([#222](https://github.com/indaco/malt/pull/222))
+- bump actions/upload-artifact from 5 to 7 ([bcdf7e9](https://github.com/indaco/malt/commit/bcdf7e9)) ([#218](https://github.com/indaco/malt/pull/218))
+- bump peter-evans/create-pull-request from 7 to 8 ([c47ea56](https://github.com/indaco/malt/commit/c47ea56)) ([#217](https://github.com/indaco/malt/pull/217))
+
+### 🎉 New Contributors
+
+- [@dependabot[bot]](https://github.com/dependabot[bot]) made their first contribution in [#218](https://github.com/indaco/malt/pull/218)
+
+### ❤️ Contributors
+
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+- [@indaco](https://github.com/indaco)
+- [@dependabot[bot]](https://github.com/dependabot[bot])
+
+## v0.10.3 - 2026-05-03
+
+### 🩹 Fixes
+
+- **core/deps:** isInstalled also requires the opt/<name> symlink ([54d1ce9](https://github.com/indaco/malt/commit/54d1ce9)) ([#226](https://github.com/indaco/malt/pull/226))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.10.2 - 2026-05-03
+
+### 🩹 Fixes
+
+- **cli:** preserve revision on rollback + pull new transitive deps on upgrade ([a57ee2d](https://github.com/indaco/malt/commit/a57ee2d)) ([#224](https://github.com/indaco/malt/pull/224))
+- **db/schema:** broaden kegs UNIQUE to (name, version, revision) ([d3a08ab](https://github.com/indaco/malt/commit/d3a08ab)) ([#223](https://github.com/indaco/malt/pull/223))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.10.1 - 2026-05-02
+
+### 🩹 Fixes
+
+- **cli/install:** pre-wipe cellar dst so clonefile survives stale kegs ([af4e0f7](https://github.com/indaco/malt/commit/af4e0f7)) ([#220](https://github.com/indaco/malt/pull/220))
+- **fs/atomic:** fsync tempfile + parent dir before/after rename ([b38854c](https://github.com/indaco/malt/commit/b38854c)) ([#215](https://github.com/indaco/malt/pull/215))
+
+### ✅ Tests
+
+- **install:** kill flaky idempotent fall-through by skipping the network ([0a0e6f8](https://github.com/indaco/malt/commit/0a0e6f8)) ([#219](https://github.com/indaco/malt/pull/219))
+
+### 🏡 Chores
+
+- **pins:** bump homebrew-core pin to 1292ccec7219 ([c041b20](https://github.com/indaco/malt/commit/c041b20)) ([#216](https://github.com/indaco/malt/pull/216))
+- add just release-branch recipe ([66011db](https://github.com/indaco/malt/commit/66011db)) ([#211](https://github.com/indaco/malt/pull/211))
+- add release-branch + patch workflow ([5eb5aec](https://github.com/indaco/malt/commit/5eb5aec)) ([#210](https://github.com/indaco/malt/pull/210))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+
 ## v0.10.0 - 2026-04-28
 
 ### Highlights
