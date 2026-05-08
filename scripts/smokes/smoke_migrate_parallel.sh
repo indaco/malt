@@ -439,7 +439,11 @@ SKIPPED_INSTALLED=$(jq -r '.counts.skipped_installed // 0' "$SUMMARY_JSON")
 SKIPPED_POST=$(jq -r '.counts.skipped_post_install // 0' "$SUMMARY_JSON")
 SKIPPED_NB=$(jq -r '.counts.skipped_no_bottle // 0' "$SUMMARY_JSON")
 TOTAL=$((MIGRATED + SKIPPED_INSTALLED + SKIPPED_POST + SKIPPED_NB + FAILED))
-BROKEN=$(grep -c '^BIN_BROKEN' "$USABILITY_TSV" 2>/dev/null || echo 0)
+# grep -c writes "0" to stdout on no-match AND exits 1, so `|| echo 0` would
+# concatenate to "0\n0" and trip `[[ -gt 0 ]]`. Swallow the exit only and
+# default to 0 when the file is missing entirely (no stdout at all).
+BROKEN=$(grep -c '^BIN_BROKEN' "$USABILITY_TSV" 2>/dev/null || true)
+BROKEN=${BROKEN:-0}
 
 if [[ "$EXIT" -ne 0 ]]; then
   printf '\n✗ malt migrate --parallel exited %d - see %s\n' "$EXIT" "$REPORT" >&2
