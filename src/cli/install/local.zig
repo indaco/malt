@@ -148,13 +148,14 @@ pub fn installTapFormula(
 
     // Parse the Ruby formula to extract name, version, URL, SHA256 for current arch
     const rb = parseRubyFormula(resp.body) orelse {
-        output.err("Cannot parse tap formula (Ruby format). Use: brew install {s}", .{pkg_name});
+        output.err("Cannot parse tap formula (unsupported Ruby DSL shape). Use: brew install {s}", .{pkg_name});
         return InstallError.FormulaNotFound;
     };
 
-    // Interpolate #{version} in URL if present
+    // Substitute #{version} and #{arch} so the SHA-verified fetch
+    // hits the right per-platform asset.
     var final_url_buf: [512]u8 = undefined;
-    const final_url = args.interpolateVersion(&final_url_buf, rb.url, rb.version);
+    const final_url = args.interpolateUrl(&final_url_buf, rb.url, rb.version, rb.arch_token);
 
     var tap_buf: [128]u8 = undefined;
     const tap_name = std.fmt.bufPrint(&tap_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
@@ -281,7 +282,7 @@ pub fn installLocalFormula(
 
     // Parse the Ruby formula to extract name, version, URL, SHA256 for current arch
     const rb = parseRubyFormula(body) orelse {
-        output.err("Cannot parse local formula (missing version/url/sha256): {s}", .{realpath});
+        output.err("Cannot parse local formula (missing version/url/sha256 or unsupported DSL shape): {s}", .{realpath});
         return InstallError.FormulaNotFound;
     };
 
@@ -296,7 +297,7 @@ pub fn installLocalFormula(
     const name = base[0 .. base.len - 3];
 
     var final_url_buf: [512]u8 = undefined;
-    const final_url = args.interpolateVersion(&final_url_buf, rb.url, rb.version);
+    const final_url = args.interpolateUrl(&final_url_buf, rb.url, rb.version, rb.arch_token);
 
     const resolved = ResolvedRubyFormula{
         .name = name,
@@ -588,12 +589,18 @@ fn materializeRubyFormula(
     output.success("{s} {s} installed", .{ resolved.name, resolved.version });
 }
 
-/// Minimal Ruby formula parser for GoReleaser-style formulas.
-/// Extracts version, URL, and SHA256 for the current platform.
+/// Minimal Ruby formula parser for GoReleaser-style formulas plus the
+/// modern Homebrew cask DSL. Extracts version, URL, SHA256 — and, for
+/// casks that interpolate `#{arch}` into the URL, the per-platform arch
+/// suffix captured from the `arch arm: "...", intel: "..."` directive.
 pub const RubyFormulaInfo = struct {
     version: []const u8,
     url: []const u8,
     sha256: []const u8,
+    /// Empty by default. Populated only when the cask DSL set `arch`
+    /// keyword-argument values for the current platform (typically a
+    /// short suffix like `-aarch64` for arm and `""` for intel).
+    arch_token: []const u8 = "",
 };
 
 pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
@@ -602,10 +609,18 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     var version: ?[]const u8 = null;
     var url: ?[]const u8 = null;
     var sha256: ?[]const u8 = null;
+    var arch_token: []const u8 = "";
 
-    // State machine: look for the right CPU section
+    // The state machine recognises two layouts:
+    //   * Classic: each platform has its own `Hardware::CPU.*` /
+    //     `on_arm` / `on_intel` block carrying url + sha256 lines.
+    //   * Cask DSL multi-arch: a single `on_macos` block holds
+    //     keyword-arg directives — `arch arm: "...", intel: "..."`,
+    //     `sha256 arm: "...", intel: "..."`, and a url that
+    //     interpolates `#{arch}`.
     var in_correct_section = false;
     var in_macos = false;
+    var prev_in_kwarg_sha256 = false;
 
     var line_start: usize = 0;
     for (rb_content, 0..) |ch, idx| {
@@ -621,9 +636,12 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
                 }
             }
 
-            // Track on_macos block
+            // Track on_macos block. The cask DSL uses this as the only
+            // platform gate, so being inside it is enough to consume
+            // url + arch + multi-arch sha256 directives.
             if (std.mem.indexOf(u8, line, "on_macos") != null) {
                 in_macos = true;
+                in_correct_section = true;
             }
 
             // Track CPU section (Formula style: Hardware::CPU, Cask style: on_arm/on_intel)
@@ -638,6 +656,31 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
                     in_correct_section = true;
                 }
             }
+
+            // arch directive — only meaningful inside on_macos.
+            if (in_macos and arch_token.len == 0 and std.mem.startsWith(u8, line, "arch ")) {
+                arch_token = pickKwArg(line["arch ".len..], is_arm) orelse arch_token;
+            }
+
+            // Multi-arch sha256: the directive may span two lines
+            // (`sha256 arm: "...", \n  intel: "..."`). Track whether the
+            // previous trimmed line opened a `sha256` directive so the
+            // continuation line can still pick the platform value.
+            if (in_macos and sha256 == null) {
+                if (std.mem.startsWith(u8, line, "sha256 ")) {
+                    const body = line["sha256 ".len..];
+                    if (lineStartsWithKwArg(body)) {
+                        if (pickKwArg(body, is_arm)) |s| sha256 = s;
+                        prev_in_kwarg_sha256 = sha256 == null;
+                    }
+                } else if (prev_in_kwarg_sha256) {
+                    if (pickKwArg(line, is_arm)) |s| sha256 = s;
+                    // Continuation lines never re-open the directive — a
+                    // missed match means the second arg is the one we
+                    // didn't want, so stop hunting for more.
+                    prev_in_kwarg_sha256 = false;
+                } else prev_in_kwarg_sha256 = false;
+            } else prev_in_kwarg_sha256 = false;
 
             // Extract URL and SHA256 within the correct section
             if (in_correct_section) {
@@ -678,7 +721,48 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     }
 
     if (version != null and url != null and sha256 != null) {
-        return .{ .version = version.?, .url = url.?, .sha256 = sha256.? };
+        return .{
+            .version = version.?,
+            .url = url.?,
+            .sha256 = sha256.?,
+            .arch_token = arch_token,
+        };
+    }
+    return null;
+}
+
+/// True when the trimmed line body starts with a keyword argument the
+/// cask DSL uses for per-arch dispatch (`arm:` or `intel:`, possibly
+/// with whitespace before the value). The trailing whitespace check
+/// avoids matching a key prefix like `armadillo:`.
+fn lineStartsWithKwArg(body: []const u8) bool {
+    if (std.mem.startsWith(u8, body, "arm:")) return true;
+    if (std.mem.startsWith(u8, body, "intel:")) return true;
+    return false;
+}
+
+/// Pick the per-platform value out of a cask DSL keyword-arg body.
+/// Accepts both spellings (`arm:` / `intel:`) on either side of a comma
+/// and tolerates the variable run of whitespace casks use to align the
+/// values vertically. Returns null when the platform's key is absent.
+fn pickKwArg(body: []const u8, is_arm: bool) ?[]const u8 {
+    const key = if (is_arm) "arm:" else "intel:";
+    var rest = body;
+    while (std.mem.indexOf(u8, rest, key)) |pos| {
+        // Anchor on a word boundary so `arm:` does not match inside
+        // `armadillo:` (hypothetical, but cheap to defend against).
+        const before_ok = pos == 0 or rest[pos - 1] == ' ' or rest[pos - 1] == '\t' or rest[pos - 1] == ',';
+        if (!before_ok) {
+            rest = rest[pos + key.len ..];
+            continue;
+        }
+        var after = rest[pos + key.len ..];
+        // Skip the spaces casks insert between key and value for
+        // vertical alignment.
+        while (after.len > 0 and (after[0] == ' ' or after[0] == '\t')) after = after[1..];
+        if (after.len == 0 or after[0] != '"') return null;
+        const value, _ = std.mem.cut(u8, after[1..], "\"") orelse return null;
+        return value;
     }
     return null;
 }

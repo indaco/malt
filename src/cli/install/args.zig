@@ -111,6 +111,54 @@ pub fn interpolateVersion(buf: []u8, url: []const u8, version: []const u8) []con
     return url;
 }
 
+/// Interpolate both `#{version}` and `#{arch}` inside a URL. The arch
+/// substitution is what cask DSL multi-arch downloads need — without
+/// it, the SHA-verified fetch would 404 because the server never sees
+/// a real per-arch suffix. Empty `arch_token` is valid (intel rows in
+/// real casks routinely set `intel: ""`); the needle is replaced with
+/// nothing rather than skipped. Falls back to the raw URL on any
+/// bufPrint overflow so the caller's SHA check fails fast on truncation.
+pub fn interpolateUrl(
+    buf: []u8,
+    url: []const u8,
+    version: []const u8,
+    arch_token: []const u8,
+) []const u8 {
+    const version_needle = "#" ++ "{version}";
+    const arch_needle = "#" ++ "{arch}";
+    const has_version = std.mem.indexOf(u8, url, version_needle) != null;
+    const has_arch = std.mem.indexOf(u8, url, arch_needle) != null;
+    if (!has_version and !has_arch) return url;
+
+    // Walk the URL once and copy verbatim, expanding either needle at
+    // its position. A single pass keeps the API allocation-free and
+    // immune to nested substitutions (e.g. an arch token that happens
+    // to contain `#{version}` literally is left alone).
+    var written: usize = 0;
+    var i: usize = 0;
+    while (i < url.len) {
+        if (has_version and std.mem.startsWith(u8, url[i..], version_needle)) {
+            if (written + version.len > buf.len) return url;
+            @memcpy(buf[written..][0..version.len], version);
+            written += version.len;
+            i += version_needle.len;
+            continue;
+        }
+        if (has_arch and std.mem.startsWith(u8, url[i..], arch_needle)) {
+            if (written + arch_token.len > buf.len) return url;
+            @memcpy(buf[written..][0..arch_token.len], arch_token);
+            written += arch_token.len;
+            i += arch_needle.len;
+            continue;
+        }
+        if (written + 1 > buf.len) return url;
+        buf[written] = url[i];
+        written += 1;
+        i += 1;
+    }
+    return buf[0..written];
+}
+
 /// Expand a leading `~/` to `$HOME/...`. Returns the input unchanged
 /// when no tilde prefix is present. Returns null when `$HOME` is
 /// needed but unset.
