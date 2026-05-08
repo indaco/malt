@@ -25,6 +25,11 @@ Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosyste
   <img src="https://raw.githubusercontent.com/indaco/gh-assets/main/malt/demo.gif" alt="malt install jq tree ripgrep - demo" width="800">
 </p>
 
+> [!IMPORTANT]
+> **malt is under active development.** The CLI surface is mostly settled and significant breaking changes are unlikely - but bugs are still likely.
+>
+> If you hit one, please [open an issue](https://github.com/indaco/malt/issues/new). User-reported bugs jump ahead of everything else I'm working on and ship in patch releases per [`RELEASING.md`](RELEASING.md).
+
 ## Why malt exists
 
 Three observations shape malt.
@@ -595,33 +600,39 @@ For installing malt from a local checkout (the end-user path), see [From source]
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size   |
+| -------- | ------ |
 | **malt** | 3.3 MB |
 | nanobrew | 2.6 MB |
 | zerobrew | 8.6 MB |
+
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install (median ±σ)
 
-| Package | malt | nanobrew | zerobrew | Homebrew |
-| ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.657±0.049s | 0.758±0.033s | 1.114±0.025s | 3.308±0.221s |
-| **wget** (6 deps) | 2.461±0.180s | 2.748±0.053s | 5.090±0.185s | 3.405±0.164s |
+| Package              | malt         | nanobrew     | zerobrew     | Homebrew      |
+| -------------------- | ------------ | ------------ | ------------ | ------------- |
+| **tree** (0 deps)    | 0.657±0.049s | 0.758±0.033s | 1.114±0.025s | 3.308±0.221s  |
+| **wget** (6 deps)    | 2.461±0.180s | 2.748±0.053s | 5.090±0.185s | 3.405±0.164s  |
 | **ffmpeg** (11 deps) | 3.719±0.455s | 3.361±0.515s | 6.774±0.600s | 17.384±2.266s |
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew |
-| ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.009s | 0.010s | 0.244s |
-| **wget** (6 deps) | 0.007s | 0.011s | 0.627s |
-| **ffmpeg** (11 deps) | 0.034s | 0.019s | 2.816s |
+| Package              | malt   | nanobrew | zerobrew |
+| -------------------- | ------ | -------- | -------- |
+| **tree** (0 deps)    | 0.009s | 0.010s   | 0.244s   |
+| **wget** (6 deps)    | 0.007s | 0.011s   | 0.627s   |
+| **ffmpeg** (11 deps) | 0.034s | 0.019s   | 2.816s   |
+
 <!-- BENCH:WARM:END -->
 
 Apple Silicon (GitHub Actions macos-14), 2026-04-28. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
@@ -657,7 +668,7 @@ bru previously appeared in this table but was dropped: upstream pins Zig 0.15.2 
 
 ## Contributing
 
-Contributions are welcome. Please open an issue to discuss before submitting large changes.
+Contributions are welcome. Please open an issue to discuss before submitting large changes. See [CONTRIBUTING](CONTRIBUTING.md).
 
 ## License
 
