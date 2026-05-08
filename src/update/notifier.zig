@@ -18,6 +18,11 @@ const cache_filename = "version-notify.json";
 /// Match gh, npm, pnpm — smaller TTLs nag, larger lose freshness.
 pub const cache_ttl_secs: i64 = 24 * 60 * 60;
 
+/// Cooldown after a failed probe so a GitHub outage does not re-fire the
+/// 1.5 s timeout on every malt invocation. Short enough that a recovered
+/// network is picked up the next time the user runs anything.
+pub const failure_backoff_secs: i64 = 5 * 60;
+
 /// Bounded so a cache miss can't drag the user's hot path. Fires after
 /// dispatch, so the command's output is already on screen.
 pub const network_timeout_ns: u64 = 1_500 * std.time.ns_per_ms;
@@ -30,6 +35,10 @@ pub const State = struct {
     latest_tag: []const u8,
     /// Lets a fresh cache skip notices for users who've just updated.
     current_seen: []const u8,
+    /// Wall-clock of the most recent probe attempt (success or failure).
+    /// `last_attempt > checked_at` is the failure-marker shape: the next
+    /// invocation backs off until `failure_backoff_secs` has elapsed.
+    last_attempt: i64 = 0,
 };
 
 /// The `current == seen == latest_no_v` clause silences the notice for
@@ -46,6 +55,15 @@ pub fn cacheStale(now_secs: i64, checked_at: i64, ttl: i64) bool {
     // Cache from the future (clock skew) — treat as fresh, never re-fetch.
     if (now_secs <= checked_at) return false;
     return (now_secs - checked_at) >= ttl;
+}
+
+/// True when the previous probe failed recently and the caller should
+/// skip the network. `last_attempt > checked_at` is the failure shape:
+/// success bumps both fields together so they stay equal.
+pub fn inFailureBackoff(now_secs: i64, last_attempt: i64, checked_at: i64, backoff: i64) bool {
+    if (last_attempt <= checked_at) return false;
+    if (now_secs <= last_attempt) return false; // clock skew
+    return (now_secs - last_attempt) < backoff;
 }
 
 const ci_env_vars = [_][]const u8{
@@ -128,6 +146,9 @@ pub fn encodeState(buf: []u8, state: State) ![]u8 {
     try output.jsonStr(&w, state.latest_tag);
     try w.writeAll(",\"current_seen\":");
     try output.jsonStr(&w, state.current_seen);
+    try w.writeAll(",\"last_attempt\":");
+    const att = try std.fmt.bufPrint(&num_buf, "{d}", .{state.last_attempt});
+    try w.writeAll(att);
     try w.writeAll("}\n");
     return w.buffered();
 }
@@ -163,7 +184,17 @@ pub fn decodeState(allocator: std.mem.Allocator, bytes: []const u8) !?State {
     const tag_dup = try allocator.dupe(u8, latest_tag_s);
     errdefer allocator.free(tag_dup);
     const seen_dup = try allocator.dupe(u8, current_seen_s);
-    return .{ .checked_at = checked_at_i, .latest_tag = tag_dup, .current_seen = seen_dup };
+    // Optional, default 0 so caches written by older malt still decode.
+    const last_attempt_i: i64 = if (obj.get("last_attempt")) |v| switch (v) {
+        .integer => |i| i,
+        else => 0,
+    } else 0;
+    return .{
+        .checked_at = checked_at_i,
+        .latest_tag = tag_dup,
+        .current_seen = seen_dup,
+        .last_attempt = last_attempt_i,
+    };
 }
 
 pub fn freeState(allocator: std.mem.Allocator, state: State) void {
@@ -308,7 +339,10 @@ fn runNotify(ctx: *const AppCtx, allocator: std.mem.Allocator, current_version: 
     defer if (state) |s| freeState(allocator, s);
 
     const now = std.Io.Clock.real.now(ctx.io).toSeconds();
-    const need_refresh = if (state) |s| cacheStale(now, s.checked_at, cache_ttl_secs) else true;
+    const need_refresh = if (state) |s| blk: {
+        if (!cacheStale(now, s.checked_at, cache_ttl_secs)) break :blk false;
+        break :blk !inFailureBackoff(now, s.last_attempt, s.checked_at, failure_backoff_secs);
+    } else true;
 
     // The 33%-savings clause: cache fresh + no notice due → return without
     // touching `executablePath`/`realpath`. The dominant path on a healthy
@@ -338,7 +372,9 @@ fn runNotify(ctx: *const AppCtx, allocator: std.mem.Allocator, current_version: 
 }
 
 /// On network failure `state` is left untouched so the caller's old
-/// cache view survives a flaky GitHub API.
+/// cache view survives a flaky GitHub API. The failure path persists a
+/// `last_attempt` marker so the next invocation skips the probe until
+/// `failure_backoff_secs` has elapsed.
 fn refreshOnce(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -347,7 +383,10 @@ fn refreshOnce(
     now: i64,
     current_version: []const u8,
 ) !void {
-    const tag = try fetchLatestTag(ctx, allocator);
+    const tag = fetchLatestTag(ctx, allocator) catch |err| {
+        writeFailureMarker(ctx.io, path, state.*, now, current_version);
+        return err;
+    };
     errdefer allocator.free(tag);
 
     // Preserve a previously-recorded `current_seen` if any; else start at
@@ -356,9 +395,34 @@ fn refreshOnce(
     const seen_dup = try allocator.dupe(u8, prior_seen);
     errdefer allocator.free(seen_dup);
 
-    writeCache(ctx.io, path, .{ .checked_at = now, .latest_tag = tag, .current_seen = prior_seen }) catch {};
+    writeCache(ctx.io, path, .{
+        .checked_at = now,
+        .latest_tag = tag,
+        .current_seen = prior_seen,
+        .last_attempt = now,
+    }) catch {};
 
-    replaceState(state, allocator, .{ .checked_at = now, .latest_tag = tag, .current_seen = seen_dup });
+    replaceState(state, allocator, .{
+        .checked_at = now,
+        .latest_tag = tag,
+        .current_seen = seen_dup,
+        .last_attempt = now,
+    });
+}
+
+/// Persist a failure marker so the next invocation backs off instead of
+/// re-probing through a network outage. Best-effort: a write error here
+/// just defers to the next probe, which is the same as today.
+pub fn writeFailureMarker(io: std.Io, path: []const u8, prior: ?State, now: i64, current_version: []const u8) void {
+    const checked_at: i64 = if (prior) |p| p.checked_at else 0;
+    const tag: []const u8 = if (prior) |p| p.latest_tag else "";
+    const seen: []const u8 = if (prior) |p| p.current_seen else current_version;
+    writeCache(io, path, .{
+        .checked_at = checked_at,
+        .latest_tag = tag,
+        .current_seen = seen,
+        .last_attempt = now,
+    }) catch {};
 }
 
 /// Read the entire contents of an absolute file path into a caller-owned slice.
