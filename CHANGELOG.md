@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.11.1 - 2026-05-09
+
+### 🩹 Fixes
+
+- **bottle:** retry transient SHA256 mismatches and surface diagnostics ([16b1718](https://github.com/indaco/malt/commit/16b1718)) ([#310](https://github.com/indaco/malt/pull/310))
+- **install/local:** parse cask DSL multi-arch sha256 and arch-token URLs ([a585b05](https://github.com/indaco/malt/commit/a585b05)) ([#308](https://github.com/indaco/malt/pull/308))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.11.0 - 2026-05-08
 
 ### Highlights
