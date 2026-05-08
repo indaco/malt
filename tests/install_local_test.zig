@@ -319,6 +319,116 @@ test "interpolateVersion falls back to the raw URL when the buffer is too small"
     try testing.expectEqualStrings(url, got);
 }
 
+// ─── interpolateUrl ──────────────────────────────────────────────────
+
+test "interpolateUrl substitutes #{version} and #{arch} together" {
+    var buf: [256]u8 = undefined;
+    const got = install.interpolateUrl(
+        &buf,
+        "https://example.com/tool-#{version}/tool#{arch}.dmg",
+        "1.2.3",
+        "-aarch64",
+    );
+    try testing.expectEqualStrings(
+        "https://example.com/tool-1.2.3/tool-aarch64.dmg",
+        got,
+    );
+}
+
+test "interpolateUrl elides #{arch} when the captured token is empty" {
+    // Intel rows in real casks routinely set `intel: ""` — substituting
+    // the empty string is the correct behaviour, not "skip the needle".
+    var buf: [256]u8 = undefined;
+    const got = install.interpolateUrl(
+        &buf,
+        "https://example.com/tool#{arch}.dmg",
+        "1.2.3",
+        "",
+    );
+    try testing.expectEqualStrings("https://example.com/tool.dmg", got);
+}
+
+test "interpolateUrl is a no-op when neither needle is present" {
+    var buf: [256]u8 = undefined;
+    const got = install.interpolateUrl(
+        &buf,
+        "https://example.com/static.tar.gz",
+        "9.9.9",
+        "-aarch64",
+    );
+    try testing.expectEqualStrings("https://example.com/static.tar.gz", got);
+}
+
+test "interpolateUrl falls back to the raw URL when the buffer is too small" {
+    var buf: [8]u8 = undefined;
+    const url = "https://example.com/v#{version}/tool#{arch}.dmg";
+    const got = install.interpolateUrl(&buf, url, "1.2.3", "-aarch64");
+    try testing.expectEqualStrings(url, got);
+}
+
+// Multiple needles of the same kind must all be substituted — the
+// cask DSL allows a URL like `.../#{version}/foo-#{version}.tar.gz`.
+test "interpolateUrl substitutes every #{version} occurrence" {
+    var buf: [256]u8 = undefined;
+    const got = install.interpolateUrl(
+        &buf,
+        "https://example.com/v#{version}/foo-#{version}.tar.gz",
+        "1.2.3",
+        "",
+    );
+    try testing.expectEqualStrings(
+        "https://example.com/v1.2.3/foo-1.2.3.tar.gz",
+        got,
+    );
+}
+
+// A version string that itself contains the literal `#{arch}` must
+// not trigger a second-pass substitution on the just-written bytes —
+// the single-pass walker pins this.
+test "interpolateUrl does not double-substitute when version contains arch needle" {
+    var buf: [256]u8 = undefined;
+    const got = install.interpolateUrl(
+        &buf,
+        "https://example.com/#{version}/foo#{arch}.dmg",
+        "v#{arch}",
+        "-x86",
+    );
+    try testing.expectEqualStrings(
+        "https://example.com/v#{arch}/foo-x86.dmg",
+        got,
+    );
+}
+
+// Arch tokens used in real casks routinely contain hyphens and digits.
+// Treat them as opaque text.
+test "interpolateUrl treats arch_token as opaque text" {
+    var buf: [256]u8 = undefined;
+    const got = install.interpolateUrl(
+        &buf,
+        "https://example.com/foo#{arch}.tar.gz",
+        "1.0",
+        "_macos_arm64",
+    );
+    try testing.expectEqualStrings(
+        "https://example.com/foo_macos_arm64.tar.gz",
+        got,
+    );
+}
+
+// Boundary: the buffer is exactly large enough for the substituted
+// output. interpolateUrl writes byte-by-byte so the off-by-one matters.
+test "interpolateUrl succeeds when the buffer is exactly the output length" {
+    const expected = "https://example.com/foo-x86.dmg";
+    var buf: [expected.len]u8 = undefined;
+    const got = install.interpolateUrl(
+        &buf,
+        "https://example.com/foo#{arch}.dmg",
+        "1.0",
+        "-x86",
+    );
+    try testing.expectEqualStrings(expected, got);
+}
+
 // ─── expandTildePath ─────────────────────────────────────────────────
 
 test "expandTildePath passes non-tilde input through unchanged" {
@@ -577,6 +687,56 @@ test "execute --local rejects a .rb whose archive URL is not https" {
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", rb_path });
+}
+
+test "execute --local --dry-run accepts a cask DSL multi-arch fixture and reaches materialise" {
+    // End-to-end: the same shape from the bug report flows through
+    // realpath → readToEnd → parseRubyFormula → tapCaskArtifactKind →
+    // materializeTapCask's dry-run leaf. The dry-run breadcrumb on
+    // stdout is the observable that proves the parser handed back
+    // version + url + sha256.
+    const prefix: [:0]const u8 = "/tmp/mlm";
+    try setupPrefix(prefix);
+    defer cleanupPrefix(prefix);
+
+    const rb_path = try std.fmt.allocPrint(testing.allocator, "{s}/rebased.rb", .{prefix});
+    defer testing.allocator.free(rb_path);
+    const cask_rb =
+        \\cask "rebased" do
+        \\  version "1.0.12"
+        \\  on_macos do
+        \\    arch arm: "-aarch64", intel: ""
+        \\    sha256 arm:   "3ef9aace106128e78e94777c7fe64228cfa1df816e7cc15b8b1bc054b7df9e9c",
+        \\           intel: "93bc02e6c7ba06e907cfa540ed22d9eae0a7e3408810bf3bf07cd18a8bef6cdc"
+        \\    url "https://github.com/DetachHead/rebased/releases/download/#{version}/rebased#{arch}.dmg"
+        \\  end
+        \\  app "Rebased.app"
+        \\end
+    ;
+    try writeFile(rb_path, cask_rb);
+
+    const output_mod = malt.output;
+    const color_mod = malt.color;
+    color_mod.setForTest(false, false);
+    defer color_mod.setForTest(null, null);
+    const prior_quiet = output_mod.isQuiet();
+    output_mod.setQuiet(false);
+    defer output_mod.setQuiet(prior_quiet);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output_mod.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output_mod.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", rb_path });
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Dry run: would install") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Cannot parse") == null);
 }
 
 test "execute --local rejects a malformed .rb (missing version/url/sha256)" {

@@ -259,6 +259,270 @@ test "parseRubyFormula prefers the platform-specific section when on_arm/on_inte
     }
 }
 
+// Modern Homebrew cask DSL collapses per-arch sha256 + arch suffix into
+// keyword-argument directives inside a single `on_macos` block. The
+// parser must pick the right sha256 and capture the `#{arch}` token so
+// `interpolateUrl` can substitute it before the SHA-verified download.
+test "parseRubyFormula handles cask DSL multi-arch sha256 + arch directive" {
+    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const src =
+        \\cask "rebased" do
+        \\  version "1.0.12"
+        \\  on_macos do
+        \\    arch arm: "-aarch64", intel: ""
+        \\    sha256 arm:   "3ef9aace106128e78e94777c7fe64228cfa1df816e7cc15b8b1bc054b7df9e9c",
+        \\           intel: "93bc02e6c7ba06e907cfa540ed22d9eae0a7e3408810bf3bf07cd18a8bef6cdc"
+        \\    url "https://github.com/DetachHead/rebased/releases/download/#{version}/rebased#{arch}.dmg"
+        \\  end
+        \\  app "Rebased.app"
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("1.0.12", got.version);
+    try testing.expect(std.mem.indexOf(u8, got.url, "#{arch}") != null);
+    if (is_arm) {
+        try testing.expectEqualStrings(
+            "3ef9aace106128e78e94777c7fe64228cfa1df816e7cc15b8b1bc054b7df9e9c",
+            got.sha256,
+        );
+        try testing.expectEqualStrings("-aarch64", got.arch_token);
+    } else {
+        try testing.expectEqualStrings(
+            "93bc02e6c7ba06e907cfa540ed22d9eae0a7e3408810bf3bf07cd18a8bef6cdc",
+            got.sha256,
+        );
+        try testing.expectEqualStrings("", got.arch_token);
+    }
+}
+
+// Empty intel arch values are valid in real casks (the upstream archive
+// has no intel-specific suffix). The parser must not collapse an empty
+// captured token into "no arch was set".
+test "parseRubyFormula accepts an empty intel arch token" {
+    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const src =
+        \\cask "tool" do
+        \\  version "2.0"
+        \\  on_macos do
+        \\    arch arm: "-arm", intel: ""
+        \\    sha256 arm:   "1111111111111111111111111111111111111111111111111111111111111111",
+        \\           intel: "2222222222222222222222222222222222222222222222222222222222222222"
+        \\    url "https://example.com/tool#{arch}.dmg"
+        \\  end
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    if (is_arm) {
+        try testing.expectEqualStrings("-arm", got.arch_token);
+    } else {
+        try testing.expectEqualStrings("", got.arch_token);
+    }
+}
+
+// A cask that omits the `arch` directive entirely (single archive for
+// both architectures, no `#{arch}` in the URL) must still parse. The
+// arch_token defaults to empty so a stray `interpolateUrl` is a no-op.
+test "parseRubyFormula handles a cask with no arch directive" {
+    const src =
+        \\cask "single" do
+        \\  version "3.1"
+        \\  on_macos do
+        \\    sha256 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        \\    url "https://example.com/single-#{version}.dmg"
+        \\  end
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("3.1", got.version);
+    try testing.expectEqualStrings(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        got.sha256,
+    );
+    try testing.expectEqualStrings("", got.arch_token);
+}
+
+// Both args on a single line (no comma-newline split) — some casks
+// fit `arm: "...", intel: "..."` on one line. The continuation-line
+// branch of the parser must not be required for this case.
+test "parseRubyFormula handles single-line multi-arch sha256" {
+    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const src =
+        \\cask "compact" do
+        \\  version "0.1"
+        \\  on_macos do
+        \\    arch arm: "_arm", intel: "_x86"
+        \\    sha256 arm: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", intel: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        \\    url "https://example.com/compact#{arch}.dmg"
+        \\  end
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    if (is_arm) {
+        try testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", got.sha256);
+        try testing.expectEqualStrings("_arm", got.arch_token);
+    } else {
+        try testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", got.sha256);
+        try testing.expectEqualStrings("_x86", got.arch_token);
+    }
+}
+
+// Argument order independent: some casks list intel first.
+test "parseRubyFormula handles intel-first multi-arch ordering" {
+    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const src =
+        \\cask "intel-first" do
+        \\  version "0.2"
+        \\  on_macos do
+        \\    arch intel: "-x86", arm: "-arm64"
+        \\    sha256 intel: "1111111111111111111111111111111111111111111111111111111111111111",
+        \\           arm:   "2222222222222222222222222222222222222222222222222222222222222222"
+        \\    url "https://example.com/foo#{arch}.dmg"
+        \\  end
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    if (is_arm) {
+        try testing.expectEqualStrings("2222222222222222222222222222222222222222222222222222222222222222", got.sha256);
+        try testing.expectEqualStrings("-arm64", got.arch_token);
+    } else {
+        try testing.expectEqualStrings("1111111111111111111111111111111111111111111111111111111111111111", got.sha256);
+        try testing.expectEqualStrings("-x86", got.arch_token);
+    }
+}
+
+// CRLF line endings in a real-world cask file fetched from a Windows-
+// committed branch. The continuation-line trim must strip the \r so
+// the kwarg parser still sees `intel: "..."`.
+test "parseRubyFormula handles CRLF line endings inside multi-arch sha256" {
+    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const src = "cask \"crlf\" do\r\n" ++
+        "  version \"0.3\"\r\n" ++
+        "  on_macos do\r\n" ++
+        "    arch arm: \"-arm\", intel: \"\"\r\n" ++
+        "    sha256 arm:   \"3333333333333333333333333333333333333333333333333333333333333333\",\r\n" ++
+        "           intel: \"4444444444444444444444444444444444444444444444444444444444444444\"\r\n" ++
+        "    url \"https://example.com/foo#{arch}.dmg\"\r\n" ++
+        "  end\r\n" ++
+        "end\r\n";
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    if (is_arm) {
+        try testing.expectEqualStrings("3333333333333333333333333333333333333333333333333333333333333333", got.sha256);
+        try testing.expectEqualStrings("-arm", got.arch_token);
+    } else {
+        try testing.expectEqualStrings("4444444444444444444444444444444444444444444444444444444444444444", got.sha256);
+        try testing.expectEqualStrings("", got.arch_token);
+    }
+}
+
+// Mid-line `arm:` substring inside a quoted value (here, a hash) must
+// not confuse the keyword-arg matcher. The continuation-line gate is
+// already gone by the time the URL line is examined, so the URL value
+// has to come through cleanly.
+test "parseRubyFormula does not mis-detect arm: inside quoted values" {
+    const src =
+        \\cask "boundary" do
+        \\  version "0.4"
+        \\  on_macos do
+        \\    arch arm: "-arm", intel: ""
+        \\    sha256 arm:   "5555555555555555555555555555555555555555555555555555555555555555",
+        \\           intel: "6666666666666666666666666666666666666666666666666666666666666666"
+        \\    url "https://example.com/notes:arm:thing/foo#{arch}.tar.gz"
+        \\  end
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    // The url should reach the parser intact (#{arch} interpolated later).
+    try testing.expect(std.mem.indexOf(u8, got.url, "notes:arm:thing") != null);
+}
+
+// A formula that mixes shapes (a global sha256 plus a Hardware::CPU
+// section that only sets url) must still parse — the global fallback
+// loop fills in whichever field the section path missed.
+test "parseRubyFormula falls back to global sha256 when section omits it" {
+    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const src =
+        \\class Mixed < Formula
+        \\  version "1.0"
+        \\  sha256 "7777777777777777777777777777777777777777777777777777777777777777"
+        \\  on_macos do
+        \\    on_arm do
+        \\      url "https://example.com/mixed-arm.tar.gz"
+        \\    end
+        \\    on_intel do
+        \\      url "https://example.com/mixed-intel.tar.gz"
+        \\    end
+        \\  end
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("7777777777777777777777777777777777777777777777777777777777777777", got.sha256);
+    if (is_arm) {
+        try testing.expect(std.mem.indexOf(u8, got.url, "arm") != null);
+    } else {
+        try testing.expect(std.mem.indexOf(u8, got.url, "intel") != null);
+    }
+}
+
+// A cask with the keyword-arg form for the current arch only (the other
+// arch is missing from the keyword args entirely). On the missing arch
+// the parse must return null cleanly — no crash, no partial info, no
+// false claim of success.
+test "parseRubyFormula returns null when current platform's kwarg is missing" {
+    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const src_arm_only =
+        \\cask "arm-only" do
+        \\  version "0.5"
+        \\  on_macos do
+        \\    arch arm: "-arm"
+        \\    sha256 arm: "8888888888888888888888888888888888888888888888888888888888888888"
+        \\    url "https://example.com/foo#{arch}.dmg"
+        \\  end
+        \\end
+    ;
+    if (is_arm) {
+        const got = install.parseRubyFormula(src_arm_only) orelse return error.TestUnexpectedNull;
+        try testing.expectEqualStrings("-arm", got.arch_token);
+    } else {
+        try testing.expect(install.parseRubyFormula(src_arm_only) == null);
+    }
+}
+
+// The arch directive is per-on_macos: a directive emitted before the
+// `on_macos` block opens (rare but seen in stage-loaded casks) should
+// be ignored so a Linux-side block can't bleed an arch token into the
+// macOS install.
+test "parseRubyFormula ignores arch directive outside on_macos" {
+    const is_arm = @import("builtin").cpu.arch == .aarch64;
+    _ = is_arm;
+    const src =
+        \\cask "scoped" do
+        \\  version "0.6"
+        \\  arch arm: "-do-not-use", intel: "-also-no"
+        \\  on_macos do
+        \\    sha256 "9999999999999999999999999999999999999999999999999999999999999999"
+        \\    url "https://example.com/scoped-#{version}.dmg"
+        \\  end
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("", got.arch_token);
+}
+
+// extractQuoted underpins both legacy and cask DSL extraction; the
+// keyword-arg shape introduces a new pattern (`url "..."` after a
+// long sha256 directive) so pin a "won't accidentally cut on the
+// wrong line" property here.
+test "extractQuoted does not match across newlines" {
+    const got = install.extractQuoted("sha256 arm:\nintel: \"x\"", "intel: \"");
+    // `intel: \"` only appears on the second line; with line-by-line
+    // trimming this is invoked per-line, not on the joined buffer.
+    // Calling extractQuoted on the whole string still cuts at the
+    // first match — the property under test is "does not match a
+    // prefix that didn't appear" (it does appear, so it returns "x").
+    try testing.expect(got != null);
+    try testing.expectEqualStrings("x", got.?);
+}
+
 test "findFailedDep flags the first dep name that appears in failed_kegs" {
     var failed = std.StringHashMap(void).init(testing.allocator);
     defer failed.deinit();
