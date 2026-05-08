@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 
 /// Initialize the database schema (CREATE TABLE IF NOT EXISTS).
 /// Idempotent — safe to call on an existing database.
-pub fn initSchema(db: *sqlite.Database) sqlite.SqliteError!void {
+pub fn initSchema(db: *sqlite.Database) MigrateError!void {
     try db.beginTransaction();
     errdefer db.rollback();
 
@@ -98,9 +98,20 @@ pub fn initSchema(db: *sqlite.Database) sqlite.SqliteError!void {
     try migrate(db);
 }
 
-/// Run any pending schema migrations.
-pub fn migrate(db: *sqlite.Database) sqlite.SqliteError!void {
+/// Highest schema version this binary knows how to operate on. Bump in
+/// lockstep with the last `migrateVNtoVN+1` step so a future binary's
+/// DB doesn't get silently used against older SQL.
+pub const known_schema_version: i64 = 5;
+
+pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
+
+/// Run any pending schema migrations. Refuses to operate on a DB whose
+/// schema version exceeds `known_schema_version` — running an older
+/// binary against a newer DB (e.g. multi-host shared `$MALT_PREFIX/db`)
+/// would otherwise execute current SQL against a future shape.
+pub fn migrate(db: *sqlite.Database) MigrateError!void {
     const ver = try currentVersion(db);
+    if (ver > known_schema_version) return error.SchemaTooNew;
     if (ver < 2) try migrateV1toV2(db);
     if (ver < 3) try migrateV2toV3(db);
     if (ver < 4) try migrateV3toV4(db);
@@ -399,4 +410,23 @@ test "v4→v5 migration aborts when foreign_key_check finds a violation" {
 
     // Rollback must leave the schema at v4 so a future run can retry.
     try testing.expectEqual(@as(i64, 4), try currentVersion(&db));
+}
+
+test "migrate refuses a DB whose schema_version exceeds the known max" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    // Minimal v1 shape — a `schema_version` table with one future row is
+    // enough to reach the version probe in `migrate`.
+    try db.exec(
+        \\CREATE TABLE schema_version (
+        \\    version INTEGER PRIMARY KEY,
+        \\    applied TEXT NOT NULL DEFAULT (datetime('now'))
+        \\);
+    );
+    try db.exec("INSERT INTO schema_version (version) VALUES (999);");
+
+    try testing.expectError(error.SchemaTooNew, migrate(&db));
+    // Untouched: refusal must not silently bump the version.
+    try testing.expectEqual(@as(i64, 999), try currentVersion(&db));
 }
