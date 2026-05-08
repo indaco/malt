@@ -22,6 +22,9 @@ const TempDb = struct {
 
     fn init(comptime tag: []const u8) !TempDb {
         const dir = "/tmp/malt_parse_cache_test_" ++ tag;
+        // Wipe leftover test.db / test.db-wal / test.db-shm from a prior
+        // run; a stale SHM makes the WAL pragma flake on re-open.
+        test_io.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
         test_io.makeDirAbsolute(std.Options.debug_io, dir) catch {};
         var db_path_buf: [256]u8 = undefined;
         const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/test.db", .{dir}, 0);
