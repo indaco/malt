@@ -161,6 +161,10 @@ test "isTransientError: TlsDowngradeRefused is permanent" {
     try testing.expect(!client.isTransientError(error.TlsDowngradeRefused));
 }
 
+test "isTransientError: WatchdogSpawnFailed is transient (resource pressure may abate)" {
+    try testing.expect(client.isTransientError(error.WatchdogSpawnFailed));
+}
+
 test "DownloadDiagnostic.isPermanent: 404 is permanent" {
     const d = client.DownloadDiagnostic{
         .status = 404,
