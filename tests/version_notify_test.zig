@@ -10,7 +10,13 @@ const testing = std.testing;
 const malt = @import("malt");
 const test_io = @import("test_io");
 const notifier = malt.update_notifier;
+const app_ctx = malt.app_ctx;
 const fs_compat = test_io;
+
+const c_env = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+};
 
 test "shouldNotify: full table — equal/newer/post-update" {
     const Case = struct {
@@ -208,6 +214,47 @@ test "writeFailureMarker preserves prior cache and bumps last_attempt" {
     try testing.expectEqual(@as(i64, 250), after.last_attempt);
     try testing.expectEqualStrings("v0.10.1", after.latest_tag);
     try testing.expectEqualStrings("0.10.0", after.current_seen);
+}
+
+test "markUpdatedTo bumps current_seen so a manual --check stops the nag" {
+    // Pin the N-10 contract: a manual `mt version update --check` that
+    // confirms `latest == current` must update `current_seen` so
+    // `shouldNotify` flips to false on the next invocation.
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/malt_notify_check_{d}", .{fs_compat.nanoTimestamp(
+        std.Options.debug_io,
+    )});
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+
+    _ = c_env.setenv("MALT_CACHE", dir.ptr, 1);
+    defer _ = c_env.unsetenv("MALT_CACHE");
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+
+    // Pre-seed a stale cache: notifier observed v0.10.1 long ago and the
+    // user has since installed it elsewhere, so current_seen drifted.
+    try notifier.writeCache(io, path, .{
+        .checked_at = 1,
+        .latest_tag = "v0.10.1",
+        .current_seen = "0.10.0",
+        .last_attempt = 1,
+    });
+
+    // Snapshot the live env so cachePath sees MALT_CACHE.
+    const ctx: app_ctx.AppCtx = .{ .io = io, .environ = app_ctx.processEnviron() };
+    notifier.markUpdatedTo(&ctx, "v0.10.1", "0.10.1");
+
+    const got = (try notifier.readCache(io, allocator, path)) orelse return error.TestExpectedNonNull;
+    defer notifier.freeState(allocator, got);
+    try testing.expectEqualStrings("v0.10.1", got.latest_tag);
+    try testing.expectEqualStrings("0.10.1", got.current_seen);
+    try testing.expect(!notifier.shouldNotify("0.10.1", got.latest_tag, got.current_seen));
 }
 
 test "writeFailureMarker on a first-ever run records only the failed attempt" {
