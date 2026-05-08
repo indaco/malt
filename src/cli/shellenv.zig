@@ -66,7 +66,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     const shell = resolveShell(ctx, args) orelse std.process.exit(2);
 
-    const out = try render(allocator, shell, atomic.maltPrefix());
+    const out = try render(allocator, shell, atomic.maltPrefixOrAbort());
     defer allocator.free(out);
     output.writeStdoutAll(out);
 }

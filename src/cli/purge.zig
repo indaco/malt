@@ -79,7 +79,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 
     const dry_run = output.isDryRun();
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
     const cache_dir = atomic.maltCacheDir(allocator) catch {
         output.err("failed to determine cache directory", .{});
         return Error.OpenFileFailed;

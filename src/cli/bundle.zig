@@ -550,7 +550,7 @@ fn populateFromBundle(manifest: *manifest_mod.Manifest, db: *sqlite.Database, na
 }
 
 fn openDb(ctx: *const AppCtx) !sqlite.Database {
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
     var db_dir_buf: [512]u8 = undefined;
     const db_dir = std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix}) catch
         return BundleError.DatabaseError;

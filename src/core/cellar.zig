@@ -314,7 +314,7 @@ fn relocateKegTree(
     cellar_path: []const u8,
     cellar_type: []const u8,
 ) CellarError!void {
-    const new_prefix = atomic.maltPrefix();
+    const new_prefix = atomic.maltPrefixOrAbort();
 
     var new_cellar_buf: [256]u8 = undefined;
     const new_cellar = std.fmt.bufPrint(&new_cellar_buf, "{s}/Cellar", .{new_prefix}) catch new_prefix;

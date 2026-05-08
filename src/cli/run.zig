@@ -101,7 +101,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return error.Aborted;
     };
 
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
 
     var bin_buf: [512]u8 = undefined;
     const installed_bin = std.fmt.bufPrint(&bin_buf, "{s}/bin/{s}", .{ prefix, parsed.pkg_name }) catch return;

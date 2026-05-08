@@ -347,7 +347,7 @@ pub fn collectFormulaJobs(
     }
 
     // Keep each already-installed dep's opt/ symlink pointing at its Cellar.
-    const heal_prefix = atomic.maltPrefix();
+    const heal_prefix = atomic.maltPrefixOrAbort();
     for (deps) |dep| {
         if (!dep.already_installed) continue;
         deps_mod.ensureOptLink(ctx.io, db, heal_prefix, dep.name);

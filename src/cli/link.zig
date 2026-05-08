@@ -25,7 +25,7 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
         if (std.mem.eql(u8, arg, "--overwrite") or std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) overwrite = true;
     }
 
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
@@ -113,7 +113,7 @@ pub fn executeUnlink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []c
     }
 
     const name = args[0];
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
 
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;

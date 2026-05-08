@@ -202,7 +202,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 
     // ── Step 3: Initialize malt infrastructure ──────────────────────
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
     ensureDirs(ctx, prefix) catch return error.Aborted;
 
     // Open database

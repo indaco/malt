@@ -276,7 +276,7 @@ fn executeWithOpts(
     const use_system_ruby_list: []const []const u8 = use_system_ruby_scope.items;
 
     // Initialize infrastructure
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
 
     // Absurdly long prefixes overflow install_name_tool's load-command slots.
     checkPrefixSane(prefix) catch |err| switch (err) {
@@ -925,7 +925,7 @@ fn installCask(
 
     output.info("Installing cask {s} {s}...", .{ cask.token, cask.version });
 
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
 
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
     installer.artifact_type_override = artifact_type;

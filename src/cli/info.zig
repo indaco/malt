@@ -49,7 +49,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // we fall through to the "not installed" output rather than
     // erroring, which matches what a populated DB would report for
     // a package that has never been installed.
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
     var db_opt: ?sqlite.Database = openDb(prefix);
     defer if (db_opt) |*d| d.close();
 

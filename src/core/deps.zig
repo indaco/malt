@@ -239,7 +239,7 @@ pub fn isInstalled(io: std.Io, db: *sqlite.Database, name: []const u8) bool {
     // into LC_LOAD_DYLIB, so a missing symlink leaves the keg unusable
     // even when the Cellar entry is intact — and we'd skip queueing a
     // re-link if we treated this state as "installed".
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
     var opt_buf: [std.fs.max_path_bytes]u8 = undefined;
     const opt_path = std.fmt.bufPrint(&opt_buf, "{s}/opt/{s}", .{ prefix, name }) catch return false;
     std.Io.Dir.accessAbsolute(io, opt_path, .{}) catch return false;

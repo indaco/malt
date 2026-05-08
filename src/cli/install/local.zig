@@ -769,7 +769,7 @@ fn materializeTapCask(
     // Sentinel-terminated copy of the active prefix; the cask installer
     // expects [:0]const u8 because it threads the value into bufPrint
     // formats that share the buffer with C-string consumers.
-    const prefix_z = atomic.maltPrefix();
+    const prefix_z = atomic.maltPrefixOrAbort();
 
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(allocator);
