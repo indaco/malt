@@ -44,6 +44,7 @@ pub const InstallJobDeps = download_mod.InstallJobDeps;
 pub const findFailedDep = download_mod.findFailedDep;
 pub const dropTopLevelJobs = download_mod.dropTopLevelJobs;
 pub const assignDownloadLineIndices = download_mod.assignDownloadLineIndices;
+pub const isDeterministicDownloadError = download_mod.isDeterministicDownloadError;
 const progressBridge = download_mod.progressBridge;
 const downloadWorker = download_mod.downloadWorker;
 const MaterializeResult = download_mod.MaterializeResult;
