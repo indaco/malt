@@ -10,7 +10,13 @@ const testing = std.testing;
 const malt = @import("malt");
 const test_io = @import("test_io");
 const notifier = malt.update_notifier;
+const app_ctx = malt.app_ctx;
 const fs_compat = test_io;
+
+const c_env = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+};
 
 test "shouldNotify: full table — equal/newer/post-update" {
     const Case = struct {
@@ -143,12 +149,135 @@ test "encodeState/decodeState round-trip preserves every field" {
         .checked_at = 1714400000,
         .latest_tag = "v0.10.1",
         .current_seen = "0.10.0",
+        .last_attempt = 1714400500,
     });
     const got = (try notifier.decodeState(allocator, encoded)) orelse
         return error.TestExpectedNonNull;
     defer notifier.freeState(allocator, got);
     try testing.expectEqual(@as(i64, 1714400000), got.checked_at);
     try testing.expectEqualStrings("v0.10.1", got.latest_tag);
+    try testing.expectEqualStrings("0.10.0", got.current_seen);
+    try testing.expectEqual(@as(i64, 1714400500), got.last_attempt);
+}
+
+test "decodeState: caches written before last_attempt existed default to 0" {
+    // Old cache files lack the `last_attempt` key; tolerant decode keeps
+    // them readable so a downgrade-then-upgrade round-trip is safe.
+    const legacy = "{\"checked_at\":42,\"latest_tag\":\"v0.10.0\",\"current_seen\":\"0.9.0\"}";
+    const got = (try notifier.decodeState(testing.allocator, legacy)) orelse
+        return error.TestExpectedNonNull;
+    defer notifier.freeState(testing.allocator, got);
+    try testing.expectEqual(@as(i64, 0), got.last_attempt);
+}
+
+test "inFailureBackoff: only fires when last_attempt > checked_at" {
+    // Equal pair = success shape; never a backoff.
+    try testing.expect(!notifier.inFailureBackoff(1000, 500, 500, 60));
+    // last_attempt newer than checked_at + within window → back off.
+    try testing.expect(notifier.inFailureBackoff(550, 500, 100, 60));
+    // Window elapsed → no longer backing off.
+    try testing.expect(!notifier.inFailureBackoff(600, 500, 100, 60));
+    // Clock skew (now < last_attempt) — never back off, never crash.
+    try testing.expect(!notifier.inFailureBackoff(400, 500, 100, 60));
+}
+
+test "writeFailureMarker preserves prior cache and bumps last_attempt" {
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_fail_{d}", .{fs_compat.nanoTimestamp(
+        std.Options.debug_io,
+    )});
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+
+    // Seed a successful cache, then simulate a probe failure.
+    try notifier.writeCache(io, path, .{
+        .checked_at = 100,
+        .latest_tag = "v0.10.1",
+        .current_seen = "0.10.0",
+        .last_attempt = 100,
+    });
+    const prior = (try notifier.readCache(io, allocator, path)) orelse return error.TestExpectedNonNull;
+    defer notifier.freeState(allocator, prior);
+
+    notifier.writeFailureMarker(io, path, prior, 250, "0.10.0");
+
+    const after = (try notifier.readCache(io, allocator, path)) orelse return error.TestExpectedNonNull;
+    defer notifier.freeState(allocator, after);
+    // checked_at stays at the last successful probe; only last_attempt moves.
+    try testing.expectEqual(@as(i64, 100), after.checked_at);
+    try testing.expectEqual(@as(i64, 250), after.last_attempt);
+    try testing.expectEqualStrings("v0.10.1", after.latest_tag);
+    try testing.expectEqualStrings("0.10.0", after.current_seen);
+}
+
+test "markUpdatedTo bumps current_seen so a manual --check stops the nag" {
+    // Pin the N-10 contract: a manual `mt version update --check` that
+    // confirms `latest == current` must update `current_seen` so
+    // `shouldNotify` flips to false on the next invocation.
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/malt_notify_check_{d}", .{fs_compat.nanoTimestamp(
+        std.Options.debug_io,
+    )});
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+
+    _ = c_env.setenv("MALT_CACHE", dir.ptr, 1);
+    defer _ = c_env.unsetenv("MALT_CACHE");
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+
+    // Pre-seed a stale cache: notifier observed v0.10.1 long ago and the
+    // user has since installed it elsewhere, so current_seen drifted.
+    try notifier.writeCache(io, path, .{
+        .checked_at = 1,
+        .latest_tag = "v0.10.1",
+        .current_seen = "0.10.0",
+        .last_attempt = 1,
+    });
+
+    // Snapshot the live env so cachePath sees MALT_CACHE.
+    const ctx: app_ctx.AppCtx = .{ .io = io, .environ = app_ctx.processEnviron() };
+    notifier.markUpdatedTo(&ctx, "v0.10.1", "0.10.1");
+
+    const got = (try notifier.readCache(io, allocator, path)) orelse return error.TestExpectedNonNull;
+    defer notifier.freeState(allocator, got);
+    try testing.expectEqualStrings("v0.10.1", got.latest_tag);
+    try testing.expectEqualStrings("0.10.1", got.current_seen);
+    try testing.expect(!notifier.shouldNotify("0.10.1", got.latest_tag, got.current_seen));
+}
+
+test "writeFailureMarker on a first-ever run records only the failed attempt" {
+    const allocator = testing.allocator;
+    const io = std.Options.debug_io;
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/malt_notify_first_{d}", .{fs_compat.nanoTimestamp(
+        std.Options.debug_io,
+    )});
+    fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, dir) catch {};
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/version-notify.json", .{dir});
+
+    notifier.writeFailureMarker(io, path, null, 500, "0.10.0");
+
+    const got = (try notifier.readCache(io, allocator, path)) orelse return error.TestExpectedNonNull;
+    defer notifier.freeState(allocator, got);
+    try testing.expectEqual(@as(i64, 0), got.checked_at);
+    try testing.expectEqual(@as(i64, 500), got.last_attempt);
+    try testing.expectEqualStrings("", got.latest_tag);
     try testing.expectEqualStrings("0.10.0", got.current_seen);
 }
 
@@ -179,6 +308,7 @@ test "writeCache + readCache full round-trip on disk" {
         .checked_at = 42,
         .latest_tag = "v0.99.0",
         .current_seen = "0.10.0",
+        .last_attempt = 42,
     });
 
     const got = (try notifier.readCache(io, allocator, path)) orelse return error.TestExpectedNonNull;
@@ -187,6 +317,7 @@ test "writeCache + readCache full round-trip on disk" {
     try testing.expectEqual(@as(i64, 42), got.checked_at);
     try testing.expectEqualStrings("v0.99.0", got.latest_tag);
     try testing.expectEqualStrings("0.10.0", got.current_seen);
+    try testing.expectEqual(@as(i64, 42), got.last_attempt);
 }
 
 test "writeCache creates the parent directory when absent" {

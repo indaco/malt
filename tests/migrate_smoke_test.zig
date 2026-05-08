@@ -1320,6 +1320,41 @@ test "scanCellarKegs warns and preserves prior names when iterator errors" {
     try testing.expect(containsLine(buf.items, "AccessDenied"));
 }
 
+test "scanCellarKegs continues past a mid-scan iterator error" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var names: std.ArrayList([]const u8) = .empty;
+    // Bad entry sits between two good ones; the loop must skip the bad
+    // index and still surface the trailing keg instead of truncating.
+    var mock = MockIter{
+        .entries = &.{
+            .{ .name = "tree", .kind = .directory },
+            .{ .name = "wget", .kind = .directory },
+            .{ .name = "ffmpeg", .kind = .directory },
+        },
+        .fail_after = 1,
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &buf);
+    defer io_mod.endStderrCapture();
+
+    try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, MockDir{}, &names);
+
+    // tree precedes the error; ffmpeg follows it. The middle index that
+    // returned `error.AccessDenied` is the only one missing.
+    try testing.expectEqual(@as(usize, 2), names.items.len);
+    try testing.expectEqualStrings("tree", names.items[0]);
+    try testing.expectEqualStrings("ffmpeg", names.items[1]);
+    try testing.expect(containsLine(buf.items, "Cellar scan error"));
+}
+
 // ── Resume manifest ────────────────────────────────────────────────
 //
 // Pre-seed `{cache}/migrate.progress.json` with one keg name. Run migrate
@@ -1975,8 +2010,11 @@ test "scanCellarKegs skips non-directory entries and survives fail-first iterato
     io_mod.beginStderrCapture(testing.allocator, &buf);
     defer io_mod.endStderrCapture();
 
+    // Error swallows the .DS_Store slot (idx 0); the loop must keep
+    // going so the trailing keg "tree" still lands in the result.
     try migrate.scanCellarKegs(std.Options.debug_io, arena.allocator(), &mock, MockDir{}, &names);
-    try testing.expectEqual(@as(usize, 0), names.items.len);
+    try testing.expectEqual(@as(usize, 1), names.items.len);
+    try testing.expectEqualStrings("tree", names.items[0]);
     try testing.expect(containsLine(buf.items, "Cellar scan error"));
 }
 

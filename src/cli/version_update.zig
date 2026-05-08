@@ -97,6 +97,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const latest = release.stripVPrefix(tag);
 
     if (std.mem.eql(u8, latest, current_version)) {
+        // Freshen the passive notifier cache so a manual `--check` that
+        // confirms the running version stops the next invocation from
+        // nagging about an already-installed release.
+        notifier.markUpdatedTo(ctx, tag, current_version);
         output.info("Already up to date ({s})", .{current_version});
         return;
     }
