@@ -579,6 +579,7 @@ test "routePostInstallOutcome: non-fatal entry surfaces the --use-system-ruby hi
 }
 
 test "routePostInstallOutcome: --use-system-ruby=NAME in scope triggers the Ruby fallback banner" {
+    try test_io.skipIfNoSubprocess();
     var flog = dsl.FallbackLog.init(testing.allocator);
     defer flog.deinit();
     flog.log(.{
@@ -627,6 +628,7 @@ test "routePostInstallOutcome: fatal entry wins over hasErrors heuristic" {
 // ruby@N) are auto-included in the system-Ruby allow-list so the
 // hook routes to the same fallback path with no flag from the user.
 test "routePostInstallOutcome: ruby keg auto-routes to system Ruby with no flag" {
+    try test_io.skipIfNoSubprocess();
     var flog = dsl.FallbackLog.init(testing.allocator);
     defer flog.deinit();
     flog.log(.{
@@ -645,6 +647,7 @@ test "routePostInstallOutcome: ruby keg auto-routes to system Ruby with no flag"
 }
 
 test "routePostInstallOutcome: ruby@N keg also auto-routes to system Ruby" {
+    try test_io.skipIfNoSubprocess();
     var flog = dsl.FallbackLog.init(testing.allocator);
     defer flog.deinit();
     flog.log(.{
@@ -719,6 +722,7 @@ test "routePostInstallOutcome: auto-included ruby keg skips re-run when DSL did 
 // the auto-include must still fall back so a fresh `mt migrate ruby`
 // (or any zero-coverage scenario) still runs the hook via system Ruby.
 test "routePostInstallOutcome: auto-included ruby keg falls back when DSL did nothing" {
+    try test_io.skipIfNoSubprocess();
     var flog = dsl.FallbackLog.init(testing.allocator);
     defer flog.deinit();
     flog.log(.{

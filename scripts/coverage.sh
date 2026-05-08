@@ -28,6 +28,13 @@ src_dir="$(pwd)/src"
 # block on `read(STDIN_FILENO)` when kcov inherits the user's terminal.
 # Redirecting from /dev/null forces isTty()=false so those paths take the
 # unattended-abort branch the tests are written against.
+#
+# kcov's Mach-port instrumentation collides with sandbox-exec / posix_spawn
+# children on macOS (vm_write / thread_get_state failures), turning a
+# coverage run into an unbounded hang on tests that actually fork. The
+# affected tests gate on `MALT_SKIP_SUBPROCESS_TESTS` and stay live under
+# `zig build test`; only this loop opts out of them.
+export MALT_SKIP_SUBPROCESS_TESTS=1
 for bin in zig-out/test-bin/*; do
   # Skip .dSYM debug bundles and any non-regular files
   [ -f "$bin" ] || continue
