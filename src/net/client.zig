@@ -9,6 +9,10 @@ pub const DownloadError = error{
     TlsDowngradeRefused,
     ResponseTooLarge,
     ReadFailed,
+    /// The watchdog could not be set up (pipe(2) or Thread.spawn failed).
+    /// Without the watchdog a stalled download has no fail-fast, so we
+    /// surface the error rather than silently degrade.
+    WatchdogSpawnFailed,
 };
 
 pub const DownloadDiagnostic = struct {
@@ -39,7 +43,7 @@ pub fn classifyStatus(status: u16) ?DownloadError {
 
 pub fn isTransientError(err: DownloadError) bool {
     return switch (err) {
-        error.Timeout, error.ConnectionReset, error.HttpServerError, error.RateLimited, error.ReadFailed => true,
+        error.Timeout, error.ConnectionReset, error.HttpServerError, error.RateLimited, error.ReadFailed, error.WatchdogSpawnFailed => true,
         error.HttpClientError, error.TlsDowngradeRefused, error.ResponseTooLarge => false,
     };
 }
@@ -87,6 +91,88 @@ pub fn shouldFireIdleWatchdog(
 ) bool {
     if (cancelled) return true;
     return idle_elapsed_ns >= idle_limit_ns or total_elapsed_ns >= total_limit_ns;
+}
+
+/// Self-pipe wake mechanism for the watchdog. Replaces std.Io.Event,
+/// whose wait can park indefinitely on Darwin under contention with a
+/// sibling thread holding a socket read - the failure mode that produced
+/// hung bottle downloads. `signal` closes the write end so the watchdog's
+/// poll(2) on the read end wakes via POLLHUP without needing an extra
+/// write syscall and without a pipe-full corner case.
+const Wake = struct {
+    read_fd: std.posix.fd_t,
+    write_fd: std.posix.fd_t,
+    write_closed: bool,
+
+    fn init() error{WatchdogSpawnFailed}!Wake {
+        var fds: [2]std.posix.fd_t = undefined;
+        if (std.c.pipe(&fds) != 0) return error.WatchdogSpawnFailed;
+        return .{ .read_fd = fds[0], .write_fd = fds[1], .write_closed = false };
+    }
+
+    /// Idempotent. Caller-owned single-thread access; the watchdog only
+    /// reads from the read end, never closes either end.
+    fn signal(self: *Wake) void {
+        if (!self.write_closed) {
+            _ = std.c.close(self.write_fd);
+            self.write_closed = true;
+        }
+    }
+
+    fn deinit(self: *Wake) void {
+        self.signal();
+        _ = std.c.close(self.read_fd);
+    }
+};
+
+/// Watchdog tick loop, pure of any `std.http` coupling so it's testable
+/// without a live request. Returns true iff a deadline (or cancel) tripped
+/// and the caller should shut the connection down; false iff `wake_fd`
+/// became readable / POLLHUP-ed first (success path).
+fn watchdogLoop(
+    io: std.Io,
+    wake_fd: std.posix.fd_t,
+    bytes_progress: *std.atomic.Value(u64),
+    idle_timeout_ns: u64,
+    total_timeout_ns: u64,
+    cancel: ?*const fn () bool,
+) bool {
+    const start_ns: u64 = @intCast(std.Io.Clock.real.now(io).toNanoseconds());
+    var last_seen_bytes: u64 = bytes_progress.load(.acquire);
+    var last_progress_ns: u64 = start_ns;
+    // Quarter of the smallest deadline, capped at 5 s, floored at
+    // 100 ms - keeps Ctrl-C snappy on a sub-second probe without
+    // spinning on a multi-minute blob download.
+    const tick_ns: u64 = @max(
+        @min(@min(idle_timeout_ns, total_timeout_ns) / 4, 5 * std.time.ns_per_s),
+        100 * std.time.ns_per_ms,
+    );
+    const tick_ms: i32 = @intCast(tick_ns / std.time.ns_per_ms);
+
+    while (true) {
+        var pfds = [_]std.posix.pollfd{.{
+            .fd = wake_fd,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        // poll(2) is a direct kernel syscall - its deadline behaviour on
+        // Darwin is field-tested. EINTR is retried inside std.posix.poll.
+        const n = std.posix.poll(&pfds, tick_ms) catch return false;
+        if (n > 0) return false; // POLLIN or POLLHUP both clear revents
+
+        const cur_bytes = bytes_progress.load(.acquire);
+        const now_ns: u64 = @intCast(std.Io.Clock.real.now(io).toNanoseconds());
+        if (cur_bytes > last_seen_bytes) {
+            last_seen_bytes = cur_bytes;
+            last_progress_ns = now_ns;
+        }
+        const idle_elapsed = now_ns - last_progress_ns;
+        const total_elapsed = now_ns - start_ns;
+        const cancelled = if (cancel) |fp| fp() else false;
+        if (shouldFireIdleWatchdog(idle_elapsed, total_elapsed, idle_timeout_ns, total_timeout_ns, cancelled)) {
+            return true;
+        }
+    }
 }
 
 /// Optional progress callback for long downloads (post-decompression bytes).
@@ -476,33 +562,32 @@ pub const HttpClient = struct {
         const idle_timeout = idleTimeoutNsFromEnv(
             std.process.Environ.getPosix(self.environ, "MALT_HTTP_IDLE_TIMEOUT_SECS"),
         );
-        var request_done: std.Io.Event = .unset;
+        var wake = try Wake.init();
         const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
             self.io,
-            &request_done,
+            wake.read_fd,
             &counting.bytes_written,
             idle_timeout,
             total_timeout,
             &req,
             self.cancel,
-        }) catch null;
+        }) catch {
+            wake.deinit();
+            return error.WatchdogSpawnFailed;
+        };
         defer {
-            request_done.set(self.io);
-            if (watchdog) |w| w.join();
+            wake.signal();
+            watchdog.join();
+            wake.deinit();
         }
         _ = body_reader.streamRemaining(&counting.writer) catch |e| switch (e) {
             error.WriteFailed => {
-                request_done.set(self.io);
                 if (counting.limit_exceeded) return error.ResponseTooLarge;
                 return error.ReadFailed;
             },
-            error.ReadFailed => {
-                request_done.set(self.io);
-                return error.ReadFailed;
-            },
+            error.ReadFailed => return error.ReadFailed,
         };
 
-        request_done.set(self.io);
         if (counting.limit_exceeded) return error.ResponseTooLarge;
 
         const body = try body_writer.toOwnedSlice();
@@ -514,61 +599,25 @@ pub const HttpClient = struct {
         };
     }
 
-    /// Polls `bytes_progress` on a tick; fires (shuts down the socket)
-    /// when either deadline is breached or `cancel()` returns true. Both
-    /// flag `conn.closing` AND `shutdown(.both)` because setting closing
-    /// alone does not wake a `readv` already parked in the kernel —
-    /// stalled TLS reads hung the previous single-deadline implementation.
+    /// On a fired deadline (or cancellation), shuts down the request's
+    /// socket so a kernel-parked `readv` returns. Both `conn.closing` AND
+    /// `shutdown(.both)` because setting closing alone does not wake a
+    /// parked read - stalled TLS reads hung the previous single-deadline
+    /// implementation.
     fn watchdogFn(
         io: std.Io,
-        request_done: *std.Io.Event,
+        wake_fd: std.posix.fd_t,
         bytes_progress: *std.atomic.Value(u64),
         idle_timeout_ns: u64,
         total_timeout_ns: u64,
         req: *std.http.Client.Request,
         cancel: ?*const fn () bool,
     ) void {
-        const start_ns: u64 = @intCast(std.Io.Clock.real.now(io).toNanoseconds());
-        var last_seen_bytes: u64 = bytes_progress.load(.acquire);
-        var last_progress_ns: u64 = start_ns;
-        // Quarter of the smallest deadline, capped at 5 s, floored at
-        // 100 ms — keeps Ctrl-C snappy on a sub-second probe without
-        // spinning on a multi-minute blob download.
-        const tick_ns: u64 = @max(
-            @min(@min(idle_timeout_ns, total_timeout_ns) / 4, 5 * std.time.ns_per_s),
-            100 * std.time.ns_per_ms,
-        );
-
-        while (true) {
-            const tick: std.Io.Timeout = .{ .duration = .{
-                .raw = std.Io.Duration.fromNanoseconds(@intCast(tick_ns)),
-                .clock = .awake,
-            } };
-            request_done.waitTimeout(io, tick) catch |err| switch (err) {
-                error.Timeout => {
-                    const cur_bytes = bytes_progress.load(.acquire);
-                    const now_ns: u64 = @intCast(std.Io.Clock.real.now(io).toNanoseconds());
-                    if (cur_bytes > last_seen_bytes) {
-                        last_seen_bytes = cur_bytes;
-                        last_progress_ns = now_ns;
-                    }
-                    const idle_elapsed = now_ns - last_progress_ns;
-                    const total_elapsed = now_ns - start_ns;
-                    const cancelled = if (cancel) |fp| fp() else false;
-                    if (shouldFireIdleWatchdog(idle_elapsed, total_elapsed, idle_timeout_ns, total_timeout_ns, cancelled)) {
-                        if (req.connection) |conn| {
-                            conn.closing = true;
-                            const fd = conn.stream_reader.stream.socket.handle;
-                            _ = std.c.shutdown(fd, std.posix.SHUT.RDWR);
-                        }
-                        return;
-                    }
-                    continue;
-                },
-                else => return,
-            };
-            // request_done was set → success path, stop watching.
-            return;
+        if (!watchdogLoop(io, wake_fd, bytes_progress, idle_timeout_ns, total_timeout_ns, cancel)) return;
+        if (req.connection) |conn| {
+            conn.closing = true;
+            const fd = conn.stream_reader.stream.socket.handle;
+            _ = std.c.shutdown(fd, std.posix.SHUT.RDWR);
         }
     }
 };
@@ -773,4 +822,91 @@ test "doGetWithRetry surfaces sleep cancellation on a later backoff" {
     const result = http.get("http://127.0.0.1:1/nothing-listens-here");
     try std.testing.expectError(error.Canceled, result);
     try std.testing.expectEqual(@as(usize, 3), CancelSleepProbe.sleep_calls);
+}
+
+// ── Wake + watchdogLoop: poll(2)-based watchdog wake mechanism ─────
+
+test "Wake.signal: closing the write end produces POLLHUP on the read fd" {
+    var wake = try Wake.init();
+    defer wake.deinit();
+    wake.signal();
+    var pfds = [_]std.posix.pollfd{.{
+        .fd = wake.read_fd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const n = try std.posix.poll(&pfds, 500);
+    try std.testing.expect(n > 0);
+    try std.testing.expect(pfds[0].revents != 0);
+}
+
+test "Wake.signal: idempotent" {
+    var wake = try Wake.init();
+    defer wake.deinit();
+    wake.signal();
+    wake.signal(); // second call must not double-close the fd
+}
+
+test "Wake without signal: poll on the read fd times out" {
+    var wake = try Wake.init();
+    defer wake.deinit();
+    var pfds = [_]std.posix.pollfd{.{
+        .fd = wake.read_fd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const n = try std.posix.poll(&pfds, 50);
+    try std.testing.expectEqual(@as(usize, 0), n);
+}
+
+test "watchdogLoop: returns false when wake signalled before the first tick" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var wake = try Wake.init();
+    defer wake.deinit();
+    wake.signal();
+    var bytes = std.atomic.Value(u64).init(0);
+    const fired = watchdogLoop(io, wake.read_fd, &bytes, 1 * std.time.ns_per_s, 1 * std.time.ns_per_s, null);
+    try std.testing.expect(!fired);
+}
+
+test "watchdogLoop: fires when idle deadline elapses with no progress" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var wake = try Wake.init();
+    defer wake.deinit();
+    var bytes = std.atomic.Value(u64).init(0);
+    // idle=200 ms forces tick to floor (100 ms); loop fires on second tick.
+    const fired = watchdogLoop(io, wake.read_fd, &bytes, 200 * std.time.ns_per_ms, 10 * std.time.ns_per_s, null);
+    try std.testing.expect(fired);
+}
+
+test "watchdogLoop: fires when total deadline elapses even with progress" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var wake = try Wake.init();
+    defer wake.deinit();
+    // Bump bytes after start so idle keeps resetting; only total can fire.
+    var bytes = std.atomic.Value(u64).init(1);
+    const fired = watchdogLoop(io, wake.read_fd, &bytes, 10 * std.time.ns_per_s, 200 * std.time.ns_per_ms, null);
+    try std.testing.expect(fired);
+}
+
+test "watchdogLoop: fires on cancellation predicate" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var wake = try Wake.init();
+    defer wake.deinit();
+    var bytes = std.atomic.Value(u64).init(0);
+    const Stub = struct {
+        fn cancel() bool {
+            return true;
+        }
+    };
+    const fired = watchdogLoop(io, wake.read_fd, &bytes, 10 * std.time.ns_per_s, 10 * std.time.ns_per_s, &Stub.cancel);
+    try std.testing.expect(fired);
 }
