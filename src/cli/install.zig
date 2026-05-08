@@ -114,6 +114,9 @@ pub const InstallAllOpts = struct {
 /// Non-argv primitive used by `core/bundle/runner.zig` via its injected
 /// `Dispatcher`. Argv parsing stays in `execute`; this seam is what lets
 /// core/bundle share orchestration without importing `cli/*`.
+///
+/// `allocator` must be an arena: dep-job per-string fields are not freed
+/// individually (only top-level jobs are scrubbed by `dropTopLevelJobs`).
 pub fn installAll(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -159,6 +162,7 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "--only-dependencies", .only_dependencies },
 });
 
+/// `allocator` must be an arena (see `installAll`).
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     return executeWithOpts(ctx, allocator, args, .{});
 }

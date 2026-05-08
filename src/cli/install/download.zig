@@ -529,6 +529,8 @@ pub fn assignDownloadLineIndices(jobs: []DownloadJob) u16 {
 /// can bail before the requested package is materialised. Frees the same five
 /// strings `dupeJobStrings` allocated; `formula_json` on top-level jobs is
 /// borrowed from `api.fetchFormula`, so freeing it here would double-free.
+/// Dep-job allocations stay in place — `installAll`/`execute` require an arena
+/// and rely on it to reclaim them.
 pub fn dropTopLevelJobs(allocator: std.mem.Allocator, jobs: *std.ArrayList(DownloadJob)) void {
     var i: usize = 0;
     while (i < jobs.items.len) {
