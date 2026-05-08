@@ -326,7 +326,7 @@ fn upgradeFormula(
         };
 
         output.info("  Downloading {s}...", .{name});
-        _ = bottle_mod.download(ctx.io, allocator, &ghcr, http, repo, digest, bottle.sha256, tmp_dir, null) catch {
+        _ = bottle_mod.download(ctx.io, allocator, &ghcr, http, repo, digest, bottle.sha256, tmp_dir, null, null) catch {
             output.err("  Download failed: {s}", .{name});
             atomic.cleanupTempDir(ctx.io, tmp_dir);
             allocator.free(tmp_dir);
