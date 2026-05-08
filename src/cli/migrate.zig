@@ -337,6 +337,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             if (len > max_name_len) max_name_len = len;
         }
 
+        // u16 cap: kegs past the first 65,535 still migrate but render no
+        // progress bar. Practically unreachable on a real Homebrew install.
         const work_count: u16 = @intCast(@min(work_indices.items.len, std.math.maxInt(u16)));
         var multi = progress_mod.MultiProgress.init(work_count);
         defer multi.finish();
