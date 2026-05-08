@@ -123,12 +123,8 @@ fn applyRlimits(limits: Limits) SandboxError!void {
     try setrlimitClamped(.CPU, cpu_max);
     try setrlimitClamped(.FSIZE, fs_max);
 
-    // RLIMIT_AS/RSS is intentionally NOT applied on Darwin: XNU stopped
-    // enforcing RSS many releases ago, AND `setrlimit` rejects any
-    // value below an undocumented system minimum (observed ~512 GB)
-    // with EINVAL — which would fail fork→exec for any reasonable
-    // memory cap. The sandbox-exec profile + macOS memory-pressure
-    // handling is the actual abuse boundary on this platform.
+    // Skip RLIMIT_AS on Darwin: XNU rejects values below ~512 GB with EINVAL
+    // and no longer enforces RSS; sandbox-exec is the real boundary here.
     _ = limits.address_space_bytes;
 }
 

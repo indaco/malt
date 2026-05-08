@@ -62,7 +62,7 @@ fn invalidateSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_di
 }
 
 fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: []const u8) !void {
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return error.Aborted;
 

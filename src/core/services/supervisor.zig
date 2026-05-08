@@ -78,13 +78,13 @@ pub const ServiceInfo = struct {
 
 /// Returns the services directory: `{prefix}/var/malt/services`.
 pub fn servicesDir(allocator: std.mem.Allocator) SupervisorError![]const u8 {
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
     return std.fmt.allocPrint(allocator, "{s}/var/malt/services", .{prefix}) catch
         return SupervisorError.OutOfMemory;
 }
 
 pub fn serviceDir(allocator: std.mem.Allocator, name: []const u8) SupervisorError![]const u8 {
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
     return std.fmt.allocPrint(allocator, "{s}/var/malt/services/{s}", .{ prefix, name }) catch
         return SupervisorError.OutOfMemory;
 }

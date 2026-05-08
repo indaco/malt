@@ -25,16 +25,16 @@ fn unsetCache() void {
     _ = c.unsetenv("MALT_CACHE");
 }
 
-test "maltPrefix returns default when env unset" {
+test "maltPrefixOrAbort returns default when env unset" {
     unsetPrefix();
-    const got = atomic.maltPrefix();
+    const got = atomic.maltPrefixOrAbort();
     try testing.expectEqualStrings("/opt/malt", got);
 }
 
-test "maltPrefix honours MALT_PREFIX env var" {
+test "maltPrefixOrAbort honours MALT_PREFIX env var" {
     setPrefix("/tmp/malt_atomic_prefix_env");
     defer unsetPrefix();
-    const got = atomic.maltPrefix();
+    const got = atomic.maltPrefixOrAbort();
     try testing.expectEqualStrings("/tmp/malt_atomic_prefix_env", got);
 }
 

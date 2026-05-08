@@ -110,7 +110,10 @@ fn worker(pool: *Pool) void {
         const in_manifest = pool.manifest.contains(keg_name);
         pool.manifest_mu.unlock(io);
         // DB cross-check guards against a stale manifest after `mt
-        // uninstall` — see the matching note in cli/migrate.zig.
+        // uninstall` — see the matching note in cli/migrate.zig. Read runs
+        // outside `db_mu` because build.zig links SQLite with
+        // `SQLITE_THREADSAFE=1` (Serialized mode); without that flag this
+        // probe would race the worker writes that hold `db_mu`.
         if (in_manifest and keg_mod.isInstalled(pool.db, keg_name)) {
             pool.outcomes[idx] = .{ .name = keg_name, .result = .skipped_installed };
             continue;

@@ -122,7 +122,7 @@ pub fn run(
     const bundle_name = if (manifest.name.len > 0) manifest.name else "unnamed";
 
     // Bundles directory + advisory lock for idempotency.
-    const prefix: []const u8 = opts.prefix orelse atomic.maltPrefix();
+    const prefix: []const u8 = opts.prefix orelse atomic.maltPrefixOrAbort();
     const bundles_dir = std.fmt.allocPrint(allocator, "{s}/var/malt/bundles", .{prefix}) catch
         return RunnerError.OutOfMemory;
     defer allocator.free(bundles_dir);

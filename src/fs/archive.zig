@@ -133,7 +133,7 @@ pub fn extractTarGz(io: std.Io, archive_path: []const u8, dest_dir: []const u8) 
     };
 
     if (hardlinks.len > 0) {
-        try applyHardLinks(io, dest_dir, hardlinks);
+        try applyHardLinks(dest_dir, hardlinks);
     }
 }
 
@@ -147,8 +147,7 @@ const HardLink = struct {
 /// target is itself a symlink shares the symlink inode rather than the
 /// symlink's target inode - macOS `link(2)` follows by default, which
 /// would let an archive craft a hardlink that escapes via a symlink hop.
-fn applyHardLinks(io: std.Io, dest_dir: []const u8, links: []const HardLink) !void {
-    _ = io;
+fn applyHardLinks(dest_dir: []const u8, links: []const HardLink) !void {
     var target_buf: [std.Io.Dir.max_path_bytes * 2]u8 = undefined;
     var name_buf: [std.Io.Dir.max_path_bytes * 2]u8 = undefined;
     for (links) |hl| {

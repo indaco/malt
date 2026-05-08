@@ -48,7 +48,7 @@ fn run(ctx: *const AppCtx, args: []const []const u8, action: Action) !void {
     }
     const name = args[0];
 
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
     var db = sqlite.Database.open(db_path) catch {

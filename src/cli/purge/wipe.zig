@@ -94,7 +94,7 @@ fn warnBanner() void {
 }
 
 pub fn writeManifest(ctx: *const AppCtx, allocator: std.mem.Allocator, path: []const u8) Error!void {
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return Error.DatabaseError;
 

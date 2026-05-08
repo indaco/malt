@@ -114,6 +114,9 @@ pub const InstallAllOpts = struct {
 /// Non-argv primitive used by `core/bundle/runner.zig` via its injected
 /// `Dispatcher`. Argv parsing stays in `execute`; this seam is what lets
 /// core/bundle share orchestration without importing `cli/*`.
+///
+/// `allocator` must be an arena: dep-job per-string fields are not freed
+/// individually (only top-level jobs are scrubbed by `dropTopLevelJobs`).
 pub fn installAll(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -159,6 +162,7 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "--only-dependencies", .only_dependencies },
 });
 
+/// `allocator` must be an arena (see `installAll`).
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     return executeWithOpts(ctx, allocator, args, .{});
 }
@@ -272,7 +276,7 @@ fn executeWithOpts(
     const use_system_ruby_list: []const []const u8 = use_system_ruby_scope.items;
 
     // Initialize infrastructure
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
 
     // Absurdly long prefixes overflow install_name_tool's load-command slots.
     checkPrefixSane(prefix) catch |err| switch (err) {
@@ -921,7 +925,7 @@ fn installCask(
 
     output.info("Installing cask {s} {s}...", .{ cask.token, cask.version });
 
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
 
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
     installer.artifact_type_override = artifact_type;

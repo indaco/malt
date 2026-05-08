@@ -91,7 +91,7 @@ pub fn execute(ctx: *const AppCtx, _: std.mem.Allocator, args: []const []const u
         return error.Aborted;
     };
 
-    const prefix = atomic.maltPrefix();
+    const prefix = atomic.maltPrefixOrAbort();
 
     // Bare name -> {prefix}/bin/<name>; absolute path -> as-is. The
     // readlink result is the source of truth: the cellar path encodes

@@ -86,7 +86,7 @@ fn getenvLocal(name: []const u8) ?[:0]const u8 {
     return std.process.Environ.getPosix(env, name);
 }
 
-/// Validated form of `maltPrefix`, returns an error on bad env so tests
+/// Validated form of `maltPrefixOrAbort`, returns an error on bad env so tests
 /// can inspect the failure without the process exiting.
 pub fn maltPrefixChecked() PrefixError![:0]const u8 {
     const raw = getenvLocal("MALT_PREFIX") orelse return "/opt/malt";
@@ -96,8 +96,9 @@ pub fn maltPrefixChecked() PrefixError![:0]const u8 {
 
 /// Install prefix with a fail-closed env check. A malformed MALT_PREFIX
 /// is a startup misconfig or traversal attempt — abort loudly rather
-/// than falling back silently.
-pub fn maltPrefix() [:0]const u8 {
+/// than falling back silently. Callers that hold an AppCtx and want to
+/// surface the error should use `maltPrefixChecked` instead.
+pub fn maltPrefixOrAbort() [:0]const u8 {
     return maltPrefixChecked() catch |e| {
         const raw = getenvLocal("MALT_PREFIX") orelse "<unset>";
         // Bypass the UI layer — atomic.zig sits below it in the dep graph.
@@ -196,7 +197,7 @@ fn atomicWriteFileImpl(io: std.Io, dst_path: []const u8, data: []const u8, sync_
 /// a random hex suffix.  The returned path is allocated via `allocator` and
 /// the caller owns the memory.
 pub fn createTempDir(io: std.Io, allocator: std.mem.Allocator, label: []const u8) ![]const u8 {
-    const prefix = maltPrefix();
+    const prefix = maltPrefixOrAbort();
 
     // Ensure the tmp base directory exists. If makePath fails, makeDirAbsolute
     // below surfaces the real error on the final dir.
@@ -235,12 +236,12 @@ pub fn cleanupTempDir(io: std.Io, dir_path: []const u8) void {
 
 /// Return "{prefix}/tmp", allocated via `allocator`.
 pub fn maltTmpDir(allocator: std.mem.Allocator) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/tmp", .{maltPrefix()});
+    return std.fmt.allocPrint(allocator, "{s}/tmp", .{maltPrefixOrAbort()});
 }
 
 /// Return "{prefix}/db", allocated via `allocator`.
 pub fn maltDbDir(allocator: std.mem.Allocator) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{s}/db", .{maltPrefix()});
+    return std.fmt.allocPrint(allocator, "{s}/db", .{maltPrefixOrAbort()});
 }
 
 /// Return the cache directory, honouring MALT_CACHE env var.
@@ -249,7 +250,7 @@ pub fn maltCacheDir(allocator: std.mem.Allocator) ![]const u8 {
     if (getenvLocal("MALT_CACHE")) |cache| {
         return allocator.dupe(u8, std.mem.sliceTo(cache, 0));
     }
-    return std.fmt.allocPrint(allocator, "{s}/cache", .{maltPrefix()});
+    return std.fmt.allocPrint(allocator, "{s}/cache", .{maltPrefixOrAbort()});
 }
 
 // Inline tests for the atomicWriteFileImpl durability seam.
