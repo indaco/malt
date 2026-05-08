@@ -66,6 +66,14 @@ pub fn getenv(name: []const u8) ?[:0]const u8 {
     return std.process.Environ.getPosix(malt.app_ctx.processEnviron(), name);
 }
 
+/// Skip when the harness asks us not to fork external processes.
+/// kcov's Mach-port instrumentation collides with sandbox-exec children
+/// on macOS (vm_write / thread_get_state failures), turning a coverage
+/// run into an unbounded hang.
+pub fn skipIfNoSubprocess() !void {
+    if (getenv("MALT_SKIP_SUBPROCESS_TESTS") != null) return error.SkipZigTest;
+}
+
 pub fn copyFileAbsolute(io: std.Io, source_path: []const u8, dest_path: []const u8, options: std.Io.Dir.CopyFileOptions) !void {
     const cwd_dir: std.Io.Dir = .cwd();
     return std.Io.Dir.copyFile(cwd_dir, source_path, cwd_dir, dest_path, io, options);

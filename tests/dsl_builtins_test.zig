@@ -558,6 +558,7 @@ fn arenaCtxLive(arena: *std.heap.ArenaAllocator, lio: *LiveIo, root: []const u8)
 }
 
 test "system runs /bin/true and returns true" {
+    try test_io.skipIfNoSubprocess();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var lio = LiveIo.init();
@@ -567,6 +568,7 @@ test "system runs /bin/true and returns true" {
 }
 
 test "system runs /bin/false and returns false" {
+    try test_io.skipIfNoSubprocess();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var lio = LiveIo.init();
@@ -583,6 +585,7 @@ test "system with no args returns nil" {
 }
 
 test "quietSystem always returns nil regardless of exit code" {
+    try test_io.skipIfNoSubprocess();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var lio = LiveIo.init();
@@ -634,6 +637,7 @@ test "osMac is true, osLinux is false, cpuArch is arm64 or x86_64" {
 }
 
 test "macosVersion returns a non-empty string" {
+    try test_io.skipIfNoSubprocess();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var lio = LiveIo.init();
@@ -690,6 +694,7 @@ test "formulaLookup returns MALT_PREFIX/opt/<name>" {
 }
 
 test "safePopenRead captures stdout and chomps trailing newline" {
+    try test_io.skipIfNoSubprocess();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var lio = LiveIo.init();

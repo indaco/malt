@@ -10,6 +10,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 const sandbox = @import("malt").sandbox_macos;
+const test_io = @import("test_io");
 
 test "validatePathForProfile accepts clean absolute paths" {
     try sandbox.validatePathForProfile("/opt/malt");
@@ -107,6 +108,7 @@ const ReapObserver = struct {
 
 test "spawnFilteredWithHooks reaps child when first reader-thread spawn fails" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try test_io.skipIfNoSubprocess();
 
     const argv = [_][]const u8{"/usr/bin/true"};
     const argv_z = try sandbox.buildArgv(testing.allocator, argv[0..]);
@@ -134,6 +136,7 @@ test "spawnFilteredWithHooks reaps child when first reader-thread spawn fails" {
 
 test "spawnFilteredWithHooks reaps child and joins out-thread when second spawn fails" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try test_io.skipIfNoSubprocess();
 
     const argv = [_][]const u8{"/usr/bin/true"};
     const argv_z = try sandbox.buildArgv(testing.allocator, argv[0..]);
@@ -166,6 +169,7 @@ test "spawnFilteredWithHooks reaps child and joins out-thread when second spawn 
 // `failed command:` against a passing test).
 test "spawnFilteredWithHooks routes child stderr to the configured fd" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try test_io.skipIfNoSubprocess();
 
     const argv = [_][]const u8{ "/bin/sh", "-c", "printf %s err-via-fd >&2" };
     const argv_z = try sandbox.buildArgv(testing.allocator, argv[0..]);
