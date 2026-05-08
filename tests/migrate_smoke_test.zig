@@ -2389,3 +2389,129 @@ test "tap fallback stays silent when the tap formula has no post_install" {
     // keg — the absence of every post_install line is the contract.
     try testing.expect(!containsLine(stderr_buf.items, "post_install"));
 }
+
+// ── post_install drain runs only after every keg's linkOpt ──────────────
+//
+// Two kegs migrate via the parallel pool; each tap formula's post_install
+// drops a marker into its own Cellar prefix only when the OTHER keg's
+// `opt/<name>` symlink is already on disk. Both markers can only land if
+// drain fires once — after every worker has joined and called `linkOpt`
+// — instead of from per-worker scope. This pins the invariant
+// `scripts/smokes/smoke_migrate_parallel.sh` exercises against real
+// fontconfig+gettext, but inside `zig build test`.
+test "post_install drain fires after every keg's linkOpt has run" {
+    resetOutput();
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    const brew = try scratchDir("brew_drain");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    // Mach-O patching budget: ≤13 bytes for the prefix path.
+    const mt_z: [:0]const u8 = "/tmp/mt_drn";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const formulas = [_]struct { name: []const u8, peer: []const u8 }{
+        .{ .name = "alpha", .peer = "bravo" },
+        .{ .name = "bravo", .peer = "alpha" },
+    };
+
+    for (formulas) |f| {
+        const tap_rb = try std.fmt.allocPrint(
+            testing.allocator,
+            "{s}/Library/Taps/owner/homebrew-tap/Formula/{c}/{s}.rb",
+            .{ brew, f.name[0], f.name },
+        );
+        defer testing.allocator.free(tap_rb);
+        const tap_dir = std.fs.path.dirname(tap_rb).?;
+        try test_io.cwd().createDirPath(std.Options.debug_io, tap_dir);
+        {
+            // Marker lands inside `prefix/` (the keg's own Cellar dir),
+            // which sandbox.validatePath always allows. Conditional on
+            // the peer's opt/ symlink so its presence proves drain
+            // observed both linkOpts before firing the hook.
+            const body = try std.fmt.allocPrint(testing.allocator,
+                \\class {c}{s} < Formula
+                \\  url "x"
+                \\  def post_install
+                \\    if File.exist?(Formula["{s}"])
+                \\      touch prefix/"saw_peer.marker"
+                \\    end
+                \\  end
+                \\end
+                \\
+            , .{
+                std.ascii.toUpper(f.name[0]),
+                f.name[1..],
+                f.peer,
+            });
+            defer testing.allocator.free(body);
+            const file = try test_io.createFileAbsolute(std.Options.debug_io, tap_rb, .{ .truncate = true });
+            defer file.close(std.Options.debug_io);
+            try file.writeStreamingAll(std.Options.debug_io, body);
+        }
+
+        const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/{s}/1.0", .{ brew, f.name });
+        defer testing.allocator.free(keg_dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
+        const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+        defer testing.allocator.free(receipt_path);
+        {
+            const receipt = try std.fmt.allocPrint(
+                testing.allocator,
+                "{{\"source\":{{\"tap\":\"owner/tap\",\"path\":\"{s}\",\"versions\":{{\"stable\":\"1.0\"}}}}}}",
+                .{tap_rb},
+            );
+            defer testing.allocator.free(receipt);
+            const file = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
+            defer file.close(std.Options.debug_io);
+            try file.writeStreamingAll(std.Options.debug_io, receipt);
+        }
+
+        const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+        defer testing.allocator.free(cache_api);
+        try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+        const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_{s}.404", .{ cache_api, f.name });
+        defer testing.allocator.free(marker);
+        (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
+    }
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    io_mod.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer io_mod.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    // `--parallel` routes post_install through the shared queue and
+    // exercises the drain-after-linkOpt invariant. Sequential mode runs
+    // each post_install inline, so the bug case can't even arise there.
+    try migrate.execute(&ctx, arena.allocator(), &.{"--parallel"});
+
+    for (formulas) |f| {
+        const marker_path = try std.fmt.allocPrint(
+            testing.allocator,
+            "{s}/Cellar/{s}/1.0/saw_peer.marker",
+            .{ mt_z, f.name },
+        );
+        defer testing.allocator.free(marker_path);
+        std.Io.Dir.cwd().access(std.Options.debug_io, marker_path, .{}) catch {
+            std.debug.panic("post_install for {s} did not observe peer's opt/ symlink at drain time", .{f.name});
+        };
+    }
+    try testing.expect(containsLine(stderr_buf.items, "post_install completed for alpha"));
+    try testing.expect(containsLine(stderr_buf.items, "post_install completed for bravo"));
+}
