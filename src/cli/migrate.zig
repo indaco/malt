@@ -52,7 +52,7 @@ fn lockTimeoutMs(ctx: *const AppCtx) u32 {
     return 30_000;
 }
 
-/// Arena-own Cellar names and log iterator errors instead of silently
+/// Arena-own Cellar names and log + skip iterator errors instead of
 /// truncating the scan — `iter.next() catch null` used to hide every
 /// later keg behind the first bad entry. `anytype` for mock iterators
 /// and a duck-typed `dir` so symlink-target lookups go through the same
@@ -66,8 +66,8 @@ pub fn scanCellarKegs(
 ) !void {
     while (true) {
         const entry = iter.next(io) catch |err| {
-            output.warn("Cellar scan error: {s}; keeping {d} entries already found", .{ @errorName(err), names.items.len });
-            break;
+            output.warn("Cellar scan error: {s}; skipping entry, kept {d} so far", .{ @errorName(err), names.items.len });
+            continue;
         } orelse break;
         const accept = switch (entry.kind) {
             .directory => true,
