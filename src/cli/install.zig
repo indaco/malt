@@ -33,6 +33,7 @@ pub const isSelfInstall = args_mod.isSelfInstall;
 pub const parseTapName = args_mod.parseTapName;
 pub const isAllowedArchiveUrl = args_mod.isAllowedArchiveUrl;
 pub const interpolateVersion = args_mod.interpolateVersion;
+pub const interpolateUrl = args_mod.interpolateUrl;
 pub const expandTildePath = args_mod.expandTildePath;
 const download_mod = @import("install/download.zig");
 pub const DownloadJob = download_mod.DownloadJob;
