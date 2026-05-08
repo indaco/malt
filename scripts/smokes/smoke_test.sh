@@ -303,7 +303,7 @@ else
   # on jq because not every smoke environment ships it.
   if command -v jq >/dev/null 2>&1; then
     out=$("$MT_BIN" --json --quiet purge --housekeeping --dry-run 2>/dev/null)
-    if printf '%s\n' "$out" | jq -e '.version == 1 and .dry_run == true and (.scopes | type == "array")' >/dev/null 2>&1; then
+    if printf '%s\n' "$out" | jq -e '.version == 2 and .dry_run == true and (.scopes | type == "array")' >/dev/null 2>&1; then
       printf '  PASS  [t3.purge.house.json.dry] mt --json purge --housekeeping --dry-run\n'
       PASS=$((PASS + 1))
     else
