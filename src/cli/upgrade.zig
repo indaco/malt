@@ -367,44 +367,58 @@ fn upgradeFormula(
     };
     output.emitNdjsonEvent(.materialized, name, "ok");
 
-    // Step 6: Unlink old symlinks
+    // Steps 6–8 (DB part): atomic. unlink-old → recordKeg → link-new →
+    // deleteKeg-old run inside a single SQLite transaction so a partial
+    // failure cannot leave kegs/links half-mutated. On any error inside
+    // the txn we ROLLBACK first, then run filesystem rollback (re-link
+    // old version, remove the new cellar dir) so the user can retry the
+    // upgrade against a consistent on-disk + DB state.
     var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
-    linker.unlink(old_keg_id) catch {
-        output.warn("Could not remove old symlinks for {s}", .{name});
-    };
-
-    // Step 7: Create new symlinks — rollback on failure
-    const new_keg_id = recordKeg(db, &formula, bottle.sha256, new_keg.path) catch {
-        output.err("Failed to record new version of {s} in database", .{name});
-        // Rollback: re-link old version
-        restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
-        // rollback cellar cleanup; a leftover keg is tolerable if the rollback is already failing.
+    db.beginTransaction() catch |txn_err| {
+        output.err(
+            "Could not begin DB transaction for {s}: {s} ({s})",
+            .{ name, @errorName(txn_err), db.errMsg() },
+        );
         cellar_mod.remove(ctx.io, prefix, formula.name, formula.pkg_version) catch {};
-        return;
+        return error.Aborted;
     };
 
-    linker.link(new_keg.path, formula.name, new_keg_id) catch {
-        output.err("Failed to link new version of {s}", .{name});
-        output.emitNdjsonEvent(.linked, name, "failed");
-        // Rollback: remove partial new links, restore old
-        // partial link cleanup in a rollback path.
+    const new_keg_id = upgradeDbAtomic(db, &linker, old_keg_id, &formula, bottle.sha256, new_keg.path) catch |db_err| {
+        output.err(
+            "Failed to record new version of {s} in database: {s} ({s})",
+            .{ name, @errorName(db_err), db.errMsg() },
+        );
+        db.rollback();
+        // FS rollback: the txn restored old keg/links rows; we still
+        // need to recreate the old symlinks (FS isn't transactional)
+        // and drop the freshly-materialized new cellar dir.
+        restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
+        cellar_mod.remove(ctx.io, prefix, formula.name, formula.pkg_version) catch {};
+        return error.Aborted;
+    };
+
+    db.commit() catch |commit_err| {
+        output.err(
+            "Failed to commit upgrade for {s}: {s} ({s})",
+            .{ name, @errorName(commit_err), db.errMsg() },
+        );
+        db.rollback();
+        // best-effort FS cleanup before falling back to the old version.
         linker.unlink(new_keg_id) catch {};
-        deleteKeg(db, new_keg_id);
         restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
-        // rollback cellar cleanup.
         cellar_mod.remove(ctx.io, prefix, formula.name, formula.pkg_version) catch {};
-        return;
+        return error.Aborted;
     };
-    // `recorded` after both succeed — link rollback above undoes the
-    // keg row, so an early emit would lie if `linked:failed` follows.
+
+    // emit only after the txn commits — earlier emits would lie if a
+    // later step inside the txn rolled the recorded/linked state back.
     output.emitNdjsonEvent(.linked, name, "ok");
     output.emitNdjsonEvent(.recorded, name, "ok");
 
     // opt symlink is convenience; install is already functional via versioned link.
     linker.linkOpt(formula.name, formula.pkg_version) catch {};
 
-    // Step 8: Remove old DB record + Cellar entry (success path only)
-    deleteKeg(db, old_keg_id);
+    // Step 8 (FS-only tail): drop the now-replaced cellar entry.
     cellar_mod.remove(ctx.io, prefix, name, old_pkg_version) catch {
         output.warn("Could not remove old cellar entry for {s} {s}", .{ name, old_pkg_version });
     };
@@ -556,6 +570,28 @@ fn upgradeTapCaskFallback(
     return false;
 }
 
+/// Run the DB-mutating steps of a formula upgrade — caller owns the
+/// surrounding transaction. Order is load-bearing: old links must be
+/// DELETEd before the new keg is INSERTed so the new symlinks can take
+/// over the same `link_path`s without tripping the UNIQUE index, and
+/// the old keg row stays alive until last so the FS rollback path can
+/// still find its `cellar_path`. On error the caller rolls back and
+/// runs `restoreOldLinks` + cellar cleanup.
+pub fn upgradeDbAtomic(
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    old_keg_id: i64,
+    formula: *const formula_mod.Formula,
+    store_sha256: []const u8,
+    new_cellar_path: []const u8,
+) !i64 {
+    try linker.unlink(old_keg_id);
+    const new_keg_id = try recordKeg(db, formula, store_sha256, new_cellar_path);
+    try linker.link(new_cellar_path, formula.name, new_keg_id);
+    deleteKeg(db, old_keg_id);
+    return new_keg_id;
+}
+
 /// Re-link old version during rollback.
 fn restoreOldLinks(
     _: *sqlite.Database,
@@ -574,36 +610,36 @@ fn restoreOldLinks(
 /// The COALESCE on `pinned` inherits any existing user pin from the
 /// row(s) being replaced so a force-upgrade preserves the hold rather
 /// than silently clearing it. Fresh installs (no prior row) default to 0.
+///
+/// Inherits the caller's transaction (no internal BEGIN/COMMIT) so
+/// upgradeFormula can wrap unlink → recordKeg → link in a single txn:
+/// nesting `BEGIN IMMEDIATE` would error out as "cannot start a
+/// transaction within a transaction" and leave the upgrade half-mutated.
+/// A standalone caller still gets atomicity from SQLite's implicit
+/// per-statement transaction.
 pub fn recordKeg(
     db: *sqlite.Database,
     formula: *const formula_mod.Formula,
     store_sha256: []const u8,
     cellar_path: []const u8,
-) !i64 {
-    db.beginTransaction() catch return error.RecordFailed;
-    errdefer db.rollback();
-
-    var stmt = db.prepare(
+) sqlite.SqliteError!i64 {
+    var stmt = try db.prepare(
         "INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, pinned)" ++
             " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'direct', COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));",
-    ) catch return error.RecordFailed;
+    );
     defer stmt.finalize();
 
-    stmt.bindText(1, formula.name) catch return error.RecordFailed;
-    stmt.bindText(2, formula.full_name) catch return error.RecordFailed;
-    stmt.bindText(3, formula.version) catch return error.RecordFailed;
-    stmt.bindInt(4, formula.revision) catch return error.RecordFailed;
-    stmt.bindText(5, formula.tap) catch return error.RecordFailed;
-    stmt.bindText(6, store_sha256) catch return error.RecordFailed;
-    stmt.bindText(7, cellar_path) catch return error.RecordFailed;
+    try stmt.bindText(1, formula.name);
+    try stmt.bindText(2, formula.full_name);
+    try stmt.bindText(3, formula.version);
+    try stmt.bindInt(4, formula.revision);
+    try stmt.bindText(5, formula.tap);
+    try stmt.bindText(6, store_sha256);
+    try stmt.bindText(7, cellar_path);
 
-    _ = stmt.step() catch return error.RecordFailed;
+    _ = try stmt.step();
 
-    const keg_id = getLastInsertId(db) catch return error.RecordFailed;
-
-    db.commit() catch return error.RecordFailed;
-
-    return keg_id;
+    return try getLastInsertId(db);
 }
 
 /// Delete a keg record from the database (rollback helper). The whole
@@ -628,12 +664,13 @@ fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
     _ = stmt.step() catch {};
 }
 
-/// Get the last inserted row id from SQLite.
-fn getLastInsertId(db: *sqlite.Database) !i64 {
-    var stmt = db.prepare("SELECT last_insert_rowid();") catch return error.RecordFailed;
+/// Get the last inserted row id from SQLite. Propagates the typed
+/// SqliteError so callers can route it through `db.errMsg()`.
+fn getLastInsertId(db: *sqlite.Database) sqlite.SqliteError!i64 {
+    var stmt = try db.prepare("SELECT last_insert_rowid();");
     defer stmt.finalize();
-    const has_row = stmt.step() catch return error.RecordFailed;
-    if (!has_row) return error.RecordFailed;
+    const has_row = try stmt.step();
+    if (!has_row) return sqlite.SqliteError.StepFailed;
     return stmt.columnInt(0);
 }
 
@@ -761,23 +798,57 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // after recordInstall so a `--force` upgrade preserves the user's hold.
     const was_pinned = pin_mod.isPinned(db, token);
 
-    // Uninstall old version
+    // Atomic DB section (uninstall's DELETE + recordInstall's INSERT OR
+    // REPLACE) so a partial failure can't leave the casks row missing
+    // when the new app is already on disk. The malt.lock fileguards
+    // against other malt writers, so holding the SQLite txn across the
+    // (potentially slow) install is harmless to other connections.
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
-    installer.uninstall(token) catch {
-        output.err("Failed to remove old version of {s}", .{token});
+    db.beginTransaction() catch |txn_err| {
+        output.err(
+            "Could not begin DB transaction for {s}: {s} ({s})",
+            .{ token, @errorName(txn_err), db.errMsg() },
+        );
         return error.Aborted;
     };
 
-    // Install new version
-    const app_path = installer.install(&parsed_cask) catch {
-        output.err("Failed to install new version of {s}", .{token});
+    installer.uninstall(token) catch |un_err| {
+        output.err(
+            "Failed to remove old version of {s}: {s}",
+            .{ token, @errorName(un_err) },
+        );
+        db.rollback();
         return error.Aborted;
     };
 
-    cask_mod.recordInstall(db, &parsed_cask, app_path) catch {
-        output.warn("Failed to record cask {s} in database", .{token});
+    const app_path = installer.install(&parsed_cask) catch |in_err| {
+        output.err(
+            "Failed to install new version of {s}: {s}",
+            .{ token, @errorName(in_err) },
+        );
+        db.rollback();
+        return error.Aborted;
+    };
+
+    cask_mod.recordInstall(db, &parsed_cask, app_path) catch |rec_err| {
+        output.err(
+            "Failed to record cask {s} in database: {s} ({s})",
+            .{ token, @errorName(rec_err), db.errMsg() },
+        );
+        db.rollback();
+        allocator.free(app_path);
+        return error.Aborted;
     };
     allocator.free(app_path);
+
+    db.commit() catch |commit_err| {
+        output.err(
+            "Failed to commit upgrade for cask {s}: {s} ({s})",
+            .{ token, @errorName(commit_err), db.errMsg() },
+        );
+        db.rollback();
+        return error.Aborted;
+    };
 
     if (was_pinned) {
         // Best-effort: a missing pin restore is a UX regression, not data
