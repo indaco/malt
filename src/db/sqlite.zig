@@ -133,6 +133,16 @@ pub const Database = struct {
         _ = c.sqlite3_close(self._handle);
     }
 
+    /// Last error message from this connection. Returns the SQLite-owned
+    /// UTF-8 buffer (`sqlite3_errmsg`); the slice is valid only until the
+    /// next call on this handle, so use it inline (e.g. directly in an
+    /// `output.err` format) and never store it past the next op.
+    pub fn errMsg(self: *Database) []const u8 {
+        const ptr = c.sqlite3_errmsg(self._handle);
+        if (ptr == null) return "";
+        return std.mem.sliceTo(ptr, 0);
+    }
+
     /// Execute one or more SQL statements that return no result rows.
     /// String literals and `bufPrintZ` output coerce to `[:0]const u8`; dynamic
     /// SQL should be built with `bufPrintZ` or an ArrayList plus a trailing 0.
@@ -167,3 +177,34 @@ pub const Database = struct {
         _ = c.sqlite3_exec(self._handle, "ROLLBACK;", null, null, null);
     }
 };
+
+const testing = std.testing;
+
+test "errMsg returns the underlying SQLite error string after a failed exec" {
+    var db = try Database.open(":memory:");
+    defer db.close();
+
+    // Forces a parse error, populating the connection's last-error slot.
+    try testing.expectError(SqliteError.ExecFailed, db.exec("NOT VALID SQL;"));
+    const msg = db.errMsg();
+    try testing.expect(msg.len > 0);
+    // SQLite's parse error includes the offending token; assert on a stable
+    // substring rather than the full message.
+    try testing.expect(std.mem.indexOf(u8, msg, "syntax error") != null or
+        std.mem.indexOf(u8, msg, "near \"NOT\"") != null);
+}
+
+test "errMsg surfaces a UNIQUE constraint violation message" {
+    var db = try Database.open(":memory:");
+    defer db.close();
+
+    try db.exec("CREATE TABLE t(name TEXT UNIQUE);");
+    try db.exec("INSERT INTO t(name) VALUES('a');");
+
+    var stmt = try db.prepare("INSERT INTO t(name) VALUES(?1);");
+    defer stmt.finalize();
+    try stmt.bindText(1, "a");
+    try testing.expectError(SqliteError.ConstraintViolation, stmt.step());
+    const msg = db.errMsg();
+    try testing.expect(std.mem.indexOf(u8, msg, "UNIQUE") != null);
+}
