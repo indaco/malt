@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.11.2 - 2026-05-10
+
+### 🩹 Fixes
+
+- **upgrade:** atomic DB updates and actionable failure messages ([24b3f76](https://github.com/indaco/malt/commit/24b3f76)) ([#312](https://github.com/indaco/malt/pull/312))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.11.1 - 2026-05-09
 
 ### 🩹 Fixes
