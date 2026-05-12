@@ -145,6 +145,12 @@ pub fn patchPathsCollecting(
         patched += 1;
     }
 
+    for (macho.cstrings) |region| {
+        const counts = patchCstringRegion(data, region, replacements);
+        patched += counts.patched;
+        skipped += counts.skipped;
+    }
+
     if (patched > 0) {
         file.writePositionalAll(io, data, 0) catch return PatchError.IoError;
     }
@@ -159,6 +165,75 @@ pub fn patchPathsCollecting(
 fn pickReplacement(path: []const u8, replacements: []const Replacement) ?Replacement {
     for (replacements) |r| if (hasPrefix(path, r.old)) return r;
     return null;
+}
+
+const CstringPatchCounts = struct { patched: u32, skipped: u32 };
+
+/// Rewrite NUL-terminated strings inside one `__cstring` region whose
+/// content begins with any configured old prefix. In-place only — the
+/// section's file offset cannot grow without rewriting every fixup in
+/// the binary, which `install_name_tool` does not do for cstring data.
+///
+/// Each slot's original length (from its NUL terminator) becomes the
+/// hard budget. When the replacement fits, the slot is overwritten and
+/// the tail up to the original NUL is zero-padded so no fragment of the
+/// old path remains. When it doesn't fit, the string is left intact and
+/// counted as skipped — fundamental constraint, not a recoverable
+/// error.
+///
+/// Pointer safety: clang+ld64 with the default `-fmerge-constants`
+/// behaviour deduplicate identical strings but do not tail-merge
+/// substrings, so every in-binary pointer references the head of its
+/// string. Zero-padding the tail after the new NUL cannot break any
+/// such pointer.
+fn patchCstringRegion(
+    data: []u8,
+    region: parser.CstringRegion,
+    replacements: []const Replacement,
+) CstringPatchCounts {
+    var counts: CstringPatchCounts = .{ .patched = 0, .skipped = 0 };
+
+    const end = std.math.add(usize, region.file_offset, region.size) catch return counts;
+    if (end > data.len) return counts;
+    const blob = data[region.file_offset..end];
+
+    var i: usize = 0;
+    while (i < blob.len) {
+        const nul = std.mem.indexOfScalarPos(u8, blob, i, 0) orelse break;
+        const old_len = nul - i;
+        if (old_len == 0) {
+            i = nul + 1;
+            continue;
+        }
+
+        const current = blob[i..nul];
+        if (pickReplacement(current, replacements)) |r| {
+            const new_len = r.new.len + (old_len - r.old.len);
+            if (new_len <= old_len) {
+                // Stage in a stack buffer because the suffix aliases bytes
+                // we are about to overwrite.
+                var staging: [1024]u8 = undefined;
+                if (new_len <= staging.len) {
+                    @memcpy(staging[0..r.new.len], r.new);
+                    @memcpy(
+                        staging[r.new.len..new_len],
+                        current[r.old.len..],
+                    );
+                    @memcpy(blob[i..][0..new_len], staging[0..new_len]);
+                    @memset(blob[i + new_len .. nul], 0);
+                    counts.patched += 1;
+                } else {
+                    counts.skipped += 1;
+                }
+            } else {
+                counts.skipped += 1;
+            }
+        }
+
+        i = nul + 1;
+    }
+
+    return counts;
 }
 
 /// Dupe both old/new strings into the caller's allocator and append.

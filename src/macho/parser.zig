@@ -25,13 +25,26 @@ pub const LoadCommandPath = struct {
     path: []const u8,
 };
 
+/// A `__TEXT,__cstring` (or any S_CSTRING_LITERALS) section located in
+/// the binary. Holds the absolute file offset + byte size of the packed
+/// NUL-separated string blob so the patcher can rewrite path literals
+/// (e.g. ImageMagick's compiled-in `MAGICKCORE_CODER_PATH`) that the
+/// load-command walker never sees.
+pub const CstringRegion = struct {
+    file_offset: usize,
+    size: usize,
+};
+
 pub const MachO = struct {
     /// All load command paths found in the binary
     paths: []LoadCommandPath,
+    /// Every S_CSTRING_LITERALS section across all arch slices.
+    cstrings: []CstringRegion,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *MachO) void {
         self.allocator.free(self.paths);
+        self.allocator.free(self.cstrings);
     }
 };
 
@@ -91,6 +104,8 @@ fn parseFat(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
 
     var all_paths: std.ArrayList(LoadCommandPath) = .empty;
     errdefer all_paths.deinit(allocator);
+    var all_cstrings: std.ArrayList(CstringRegion) = .empty;
+    errdefer all_cstrings.deinit(allocator);
 
     var offset: usize = 8;
     var i: u32 = 0;
@@ -107,7 +122,7 @@ fn parseFat(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
 
         // Skip legacy/unsupported slices; bubble structural corruption.
         // See the doc comment above for the full policy.
-        const slice_result = parseMachO64(
+        var slice_result = parseMachO64(
             allocator,
             data[slice_offset .. slice_offset + slice_size],
             slice_offset,
@@ -120,16 +135,18 @@ fn parseFat(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
             ParseError.OutOfMemory,
             => return e,
         };
-        // Transfer the slice's LoadCommandPath values (struct-by-value) into
-        // the aggregated list, then free the slice's container. The `path`
-        // byte slices inside each LoadCommandPath still reference the outer
-        // `data` buffer which outlives this call.
-        defer allocator.free(slice_result.paths);
+        // Transfer the slice's results (struct-by-value) into the aggregated
+        // lists, then release the per-slice containers. The byte slices
+        // inside each LoadCommandPath still reference the outer `data`
+        // buffer which outlives this call.
+        defer slice_result.deinit();
         all_paths.appendSlice(allocator, slice_result.paths) catch return ParseError.OutOfMemory;
+        all_cstrings.appendSlice(allocator, slice_result.cstrings) catch return ParseError.OutOfMemory;
     }
 
     return .{
         .paths = all_paths.toOwnedSlice(allocator) catch return ParseError.OutOfMemory,
+        .cstrings = all_cstrings.toOwnedSlice(allocator) catch return ParseError.OutOfMemory,
         .allocator = allocator,
     };
 }
@@ -143,6 +160,8 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
 
     var paths: std.ArrayList(LoadCommandPath) = .empty;
     errdefer paths.deinit(allocator);
+    var cstrings: std.ArrayList(CstringRegion) = .empty;
+    errdefer cstrings.deinit(allocator);
 
     // Sanity check: reject obviously corrupt headers (ncmds > 10,000 is unreasonable)
     if (header.ncmds > 10_000) return ParseError.InvalidLoadCommand;
@@ -231,6 +250,14 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
                     .path = path,
                 }) catch return ParseError.OutOfMemory;
             },
+            .SEGMENT_64 => {
+                // Bottle dylibs (ImageMagick, …) bake their install prefix
+                // into compile-time `#define`d C strings that live in
+                // `__TEXT,__cstring`, separately from any LC_LOAD_DYLIB
+                // path. Collect every S_CSTRING_LITERALS section so the
+                // patcher can rewrite those literals too.
+                try collectCstringSections(allocator, data, cmd_offset, cmdsize, base_offset, &cstrings);
+            },
             else => {},
         }
 
@@ -239,6 +266,67 @@ fn parseMachO64(allocator: std.mem.Allocator, data: []const u8, base_offset: usi
 
     return .{
         .paths = paths.toOwnedSlice(allocator) catch return ParseError.OutOfMemory,
+        .cstrings = cstrings.toOwnedSlice(allocator) catch return ParseError.OutOfMemory,
         .allocator = allocator,
     };
+}
+
+/// Walk every `section_64` inside one LC_SEGMENT_64 and append the C-string
+/// regions to `out`. Mach-O permits multiple S_CSTRING_LITERALS sections per
+/// segment, so we don't short-circuit on the first match.
+///
+/// Bounds and overflow checks mirror the rest of `parseMachO64`: any field
+/// that would point past the slice's `data` buffer is treated as corruption
+/// and bubbled via `ParseError.InvalidLoadCommand`. A section whose
+/// declared file offset + size lands beyond the slice is dropped (legacy
+/// stripped binaries do this for zerofill-like layouts and are not corrupt
+/// per se), keeping the parse resilient.
+fn collectCstringSections(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    cmd_offset: usize,
+    cmdsize: u32,
+    base_offset: usize,
+    out: *std.ArrayList(CstringRegion),
+) ParseError!void {
+    const seg_size = @sizeOf(macho.segment_command_64);
+    const sect_size = @sizeOf(macho.section_64);
+    if (cmdsize < seg_size) return;
+
+    const seg = std.mem.bytesAsValue(
+        macho.segment_command_64,
+        data[cmd_offset..][0..seg_size],
+    );
+    const nsects = seg.nsects;
+
+    const sects_total = @as(usize, nsects) * sect_size;
+    const sects_end = @addWithOverflow(seg_size, sects_total);
+    if (sects_end[1] != 0 or sects_end[0] > cmdsize) return ParseError.InvalidLoadCommand;
+
+    var sect_idx: u32 = 0;
+    while (sect_idx < nsects) : (sect_idx += 1) {
+        const sect_off = cmd_offset + seg_size + @as(usize, sect_idx) * sect_size;
+        const sect = std.mem.bytesAsValue(
+            macho.section_64,
+            data[sect_off..][0..sect_size],
+        );
+
+        if (sect.type() != macho.S_CSTRING_LITERALS) continue;
+
+        const sect_file_off: usize = sect.offset;
+        const sect_size_bytes: usize = @intCast(sect.size);
+        if (sect_size_bytes == 0) continue;
+
+        // Drop sections that land outside the current slice — legacy /
+        // pre-stripped binaries occasionally claim offsets they don't
+        // actually carry, and a malformed section_64 must not let the
+        // patcher walk off the buffer.
+        const end = @addWithOverflow(sect_file_off, sect_size_bytes);
+        if (end[1] != 0 or end[0] > data.len) continue;
+
+        out.append(allocator, .{
+            .file_offset = base_offset + sect_file_off,
+            .size = sect_size_bytes,
+        }) catch return ParseError.OutOfMemory;
+    }
 }

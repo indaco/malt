@@ -361,3 +361,198 @@ test "flushOverflow on an empty list does nothing and returns ok" {
     // (no-overflow bottle); the driver must not spawn anything.
     try patcher.flushOverflow(threaded.io(), testing.allocator, "/tmp/whatever", &.{});
 }
+
+/// Build a Mach-O 64 binary carrying one LC_SEGMENT_64 (__TEXT) with a
+/// single __cstring section holding `blob`. The section's file offset is
+/// placed immediately after the load commands so the on-disk layout is
+/// trivially predictable for byte-level assertions.
+///
+/// Returns the buffer and the absolute file offset of `blob[0]`.
+const CstringFixture = struct {
+    bytes: []u8,
+    cstring_offset: usize,
+};
+
+fn buildCstringFixture(
+    allocator: std.mem.Allocator,
+    blob: []const u8,
+) !CstringFixture {
+    const header_size = @sizeOf(macho.mach_header_64);
+    const seg_size = @sizeOf(macho.segment_command_64);
+    const sect_size = @sizeOf(macho.section_64);
+    const cmdsize: u32 = @intCast(seg_size + sect_size);
+    const cstring_offset = header_size + cmdsize;
+    const total = cstring_offset + blob.len;
+
+    const buf = try allocator.alloc(u8, total);
+    @memset(buf, 0);
+
+    const hdr = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    hdr.* = .{
+        .magic = macho.MH_MAGIC_64,
+        .ncmds = 1,
+        .sizeofcmds = cmdsize,
+    };
+
+    const seg = std.mem.bytesAsValue(macho.segment_command_64, buf[header_size..][0..seg_size]);
+    seg.* = .{
+        .cmd = .SEGMENT_64,
+        .cmdsize = cmdsize,
+        .segname = [_]u8{0} ** 16,
+        .nsects = 1,
+    };
+    @memcpy(seg.segname[0.."__TEXT".len], "__TEXT");
+
+    const sect = std.mem.bytesAsValue(macho.section_64, buf[header_size + seg_size ..][0..sect_size]);
+    sect.* = .{
+        .sectname = [_]u8{0} ** 16,
+        .segname = [_]u8{0} ** 16,
+        .offset = @intCast(cstring_offset),
+        .size = blob.len,
+        .flags = macho.S_CSTRING_LITERALS,
+    };
+    @memcpy(sect.sectname[0.."__cstring".len], "__cstring");
+    @memcpy(sect.segname[0.."__TEXT".len], "__TEXT");
+
+    @memcpy(buf[cstring_offset..][0..blob.len], blob);
+
+    return .{ .bytes = buf, .cstring_offset = cstring_offset };
+}
+
+test "patchPathsCollecting rewrites __cstring strings that match an old prefix" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // Two prefix-matching strings and one untouched neighbour, all NUL-
+    // terminated and packed back-to-back as ld64 emits them.
+    const a = "/opt/homebrew/foo\x00";
+    const b = "/opt/homebrew/Cellar/imagemagick\x00";
+    const c = "unchanged\x00";
+    const blob = a ++ b ++ c;
+
+    const fix = try buildCstringFixture(testing.allocator, blob);
+    defer testing.allocator.free(fix.bytes);
+
+    const dir = try tmpSubdir(io, "cstr_basic");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", fix.bytes);
+    defer testing.allocator.free(path);
+
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "/opt/homebrew", .new = "/M" },
+    };
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
+    defer outcome.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 2), outcome.patched_count);
+    try testing.expectEqual(@as(usize, 0), outcome.overflow.len);
+
+    // Re-read and inspect the cstring region byte-for-byte.
+    const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    const got = try testing.allocator.alloc(u8, fix.bytes.len);
+    defer testing.allocator.free(got);
+    _ = try file.readPositionalAll(io, got, 0);
+
+    const region = got[fix.cstring_offset..][0..blob.len];
+
+    // First string: "/opt/homebrew/foo" → "/M/foo", NUL-padded to original 17B slot.
+    const slot_a_len = a.len; // includes trailing NUL
+    try testing.expectEqualStrings("/M/foo", std.mem.sliceTo(region[0..slot_a_len], 0));
+    for (region[("/M/foo".len + 1)..slot_a_len]) |byte| try testing.expectEqual(@as(u8, 0), byte);
+
+    // Second string: "/opt/homebrew/Cellar/imagemagick" → "/M/Cellar/imagemagick".
+    const slot_b_off = slot_a_len;
+    const slot_b_len = b.len;
+    try testing.expectEqualStrings(
+        "/M/Cellar/imagemagick",
+        std.mem.sliceTo(region[slot_b_off..][0..slot_b_len], 0),
+    );
+
+    // Third string left intact.
+    const slot_c_off = slot_a_len + slot_b_len;
+    try testing.expectEqualStrings("unchanged", std.mem.sliceTo(region[slot_c_off..][0..c.len], 0));
+}
+
+test "patchPathsCollecting leaves __cstring strings whose replacement does not fit" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // Replacement "/opt/homebrew/much-longer-prefix" > "/x" (old) for any cstring
+    // beginning with "/x". Cstring slots can't grow in place — the patcher
+    // must leave the byte untouched and not error.
+    const blob = "/x/short\x00";
+    const fix = try buildCstringFixture(testing.allocator, blob);
+    defer testing.allocator.free(fix.bytes);
+
+    const dir = try tmpSubdir(io, "cstr_overflow");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", fix.bytes);
+    defer testing.allocator.free(path);
+
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "/x", .new = "/much-longer-prefix" },
+    };
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
+    defer outcome.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 0), outcome.patched_count);
+    try testing.expectEqual(@as(usize, 0), outcome.overflow.len);
+
+    const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    const got = try testing.allocator.alloc(u8, fix.bytes.len);
+    defer testing.allocator.free(got);
+    _ = try file.readPositionalAll(io, got, 0);
+    try testing.expectEqualStrings(
+        "/x/short",
+        std.mem.sliceTo(got[fix.cstring_offset..][0..blob.len], 0),
+    );
+}
+
+test "patchPathsCollecting picks the first matching prefix for cstrings" {
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    // Two replacement candidates with overlapping prefixes — first match wins
+    // (same semantics as the load-command path; documented at pickReplacement).
+    const blob = "/opt/homebrew/lib/x\x00";
+    const fix = try buildCstringFixture(testing.allocator, blob);
+    defer testing.allocator.free(fix.bytes);
+
+    const dir = try tmpSubdir(io, "cstr_firstmatch");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+    const path = try writeFixture(io, dir, "bin", fix.bytes);
+    defer testing.allocator.free(path);
+
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "/opt/homebrew", .new = "/A" },
+        .{ .old = "/opt", .new = "/B" },
+    };
+    var outcome = try patcher.patchPathsCollecting(io, testing.allocator, path, &replacements);
+    defer outcome.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 1), outcome.patched_count);
+
+    const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+    const got = try testing.allocator.alloc(u8, fix.bytes.len);
+    defer testing.allocator.free(got);
+    _ = try file.readPositionalAll(io, got, 0);
+    try testing.expectEqualStrings(
+        "/A/lib/x",
+        std.mem.sliceTo(got[fix.cstring_offset..][0..blob.len], 0),
+    );
+}
