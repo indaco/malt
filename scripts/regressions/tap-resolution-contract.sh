@@ -30,10 +30,13 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 
-hits_prefix=$(grep -rn --include='*.zig' -F 'homebrew-{' src/ || true)
-hits_bare_slug=$(grep -rn --include='*.zig' -F 'https://github.com/{s}"' src/ || true)
-hits_token=$(grep -rn --include='*.zig' -F 'MALT_GITHUB_TOKEN' src/ || true)
-hits_auth_helper=$(grep -rn --include='*.zig' -F 'githubAuthHeader' src/ || true)
+# Search root is `src` (no trailing slash) so grep outputs `src/path:N:…`
+# uniformly across BSD and GNU; a trailing slash makes some grep
+# versions emit `src//path` and the allowlist regex below would miss.
+hits_prefix=$(grep -rn --include='*.zig' -F 'homebrew-{' src || true)
+hits_bare_slug=$(grep -rn --include='*.zig' -F 'https://github.com/{s}"' src || true)
+hits_token=$(grep -rn --include='*.zig' -F 'MALT_GITHUB_TOKEN' src || true)
+hits_auth_helper=$(grep -rn --include='*.zig' -F 'githubAuthHeader' src || true)
 
 all=$(printf '%s\n%s\n%s\n%s\n' \
   "$hits_prefix" "$hits_bare_slug" "$hits_token" "$hits_auth_helper")
