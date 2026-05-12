@@ -714,15 +714,80 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
         }
     }
 
-    if (version != null and url != null and sha256 != null) {
+    if (url != null and sha256 != null) {
+        // Homebrew treats `version` as optional when the tag is encoded
+        // in the URL. Mirror that: derive it from the release-asset or
+        // archive-tag path so common tap shapes (top-level url+sha256,
+        // no `version` line) still install.
+        const final_version = version orelse deriveVersionFromUrl(url.?) orelse return null;
         return .{
-            .version = version.?,
+            .version = final_version,
             .url = url.?,
             .sha256 = sha256.?,
             .arch_token = arch_token,
         };
     }
     return null;
+}
+
+/// Pull a version token out of a Homebrew-style URL when the formula
+/// omits `version "..."`. Covers the three shapes Homebrew itself
+/// derives from:
+///   * `…/releases/download/<X>/…`              — release asset
+///   * `…/archive/refs/tags/<X>.<archive-ext>`  — git tag tarball
+///   * `…/archive/<X>.<archive-ext>`            — short-form tag tarball
+/// Returns null when no pattern matches or the captured token does not
+/// look like a version (must start with a digit, optionally after a
+/// single `v`/`V`). The strict check stops malt from inventing a
+/// version like `latest` or `nightly` for a floating-tag URL.
+fn deriveVersionFromUrl(url: []const u8) ?[]const u8 {
+    const archive_exts = [_][]const u8{ ".tar.gz", ".tar.xz", ".tgz", ".zip" };
+
+    if (std.mem.indexOf(u8, url, "/releases/download/")) |pos| {
+        const after = url[pos + "/releases/download/".len ..];
+        const slash = std.mem.indexOfScalar(u8, after, '/') orelse return null;
+        return validateVersionToken(after[0..slash]);
+    }
+
+    if (std.mem.indexOf(u8, url, "/archive/refs/tags/")) |pos| {
+        const after = url[pos + "/archive/refs/tags/".len ..];
+        for (archive_exts) |ext| {
+            if (std.mem.endsWith(u8, after, ext)) {
+                return validateVersionToken(after[0 .. after.len - ext.len]);
+            }
+        }
+        return null;
+    }
+
+    if (std.mem.indexOf(u8, url, "/archive/")) |pos| {
+        const after = url[pos + "/archive/".len ..];
+        // Nested paths belong to the `/archive/refs/tags/` shape, which
+        // would already have matched above — anything still containing
+        // a slash here is not a version token.
+        if (std.mem.indexOfScalar(u8, after, '/') != null) return null;
+        for (archive_exts) |ext| {
+            if (std.mem.endsWith(u8, after, ext)) {
+                return validateVersionToken(after[0 .. after.len - ext.len]);
+            }
+        }
+        return null;
+    }
+
+    return null;
+}
+
+/// Strip an optional leading `v`/`V` and confirm the next byte is a
+/// digit. Reject anything else so a tag like `latest`, `nightly`, or
+/// `release-2.0.0` never becomes a malt `Cellar/<name>/<version>`
+/// path. Returns the trimmed slice or null on rejection.
+fn validateVersionToken(s: []const u8) ?[]const u8 {
+    if (s.len == 0) return null;
+    if (s[0] == 'v' or s[0] == 'V') {
+        if (s.len < 2 or !std.ascii.isDigit(s[1])) return null;
+        return s[1..];
+    }
+    if (!std.ascii.isDigit(s[0])) return null;
+    return s;
 }
 
 /// True when the trimmed line body starts with a keyword argument the
