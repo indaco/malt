@@ -28,7 +28,7 @@ Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosyste
 > [!IMPORTANT]
 > **malt is under active development.** The CLI surface is mostly settled and significant breaking changes are unlikely - but bugs are still likely.
 >
-> If you hit one, please [open an issue](https://github.com/indaco/malt/issues/new). User-reported bugs jump ahead of everything else I'm working on and ship in patch releases per [`RELEASING.md`](RELEASING.md).
+> If you hit one, please [open an issue](https://github.com/indaco/malt/issues/new). User-reported bugs jump the queue and ship in patch releases.
 
 ## Why malt exists
 
