@@ -174,19 +174,17 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
 
     switch (action) {
         .add => {
-            const slash = std.mem.findScalar(u8, name, '/').?;
-            const user = name[0..slash];
-            const repo = name[slash + 1 ..];
+            const urls = try tap_mod.resolveTapBaseUrls(allocator, name);
+            defer urls.deinit(allocator);
+
             // Resolve HEAD so the tap is pinned from day one. Failing
             // here beats silently registering an unpinned tap.
-            const sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, user, repo) catch |e| {
+            const sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch |e| {
                 output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
                 return error.Aborted;
             };
             defer allocator.free(sha);
-            var url_buf: [256]u8 = undefined;
-            const url = std.fmt.bufPrint(&url_buf, "https://github.com/{s}", .{name}) catch return;
-            tap_mod.add(&db, name, url, sha) catch {
+            tap_mod.add(&db, name, urls.repo_url, sha) catch {
                 output.err("Failed to add tap {s}", .{name});
                 return error.Aborted;
             };
@@ -207,10 +205,9 @@ fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Data
         output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{name});
         return error.Aborted;
     };
-    const slash = std.mem.findScalar(u8, name, '/').?;
-    const user = name[0..slash];
-    const repo = name[slash + 1 ..];
-    const sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, user, repo) catch |e| {
+    const urls = try tap_mod.resolveTapBaseUrls(allocator, name);
+    defer urls.deinit(allocator);
+    const sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch |e| {
         output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
         return error.Aborted;
     };

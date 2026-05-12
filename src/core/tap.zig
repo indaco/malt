@@ -172,6 +172,105 @@ pub fn resolveFormula(allocator: std.mem.Allocator, user: []const u8, repo: []co
     return std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ user, repo, formula });
 }
 
+/// URLs every tap fetch site needs, derived from one slug parse so the
+/// `homebrew-<repo>` synthesis lives in exactly one place. For raw
+/// fetches callers append `/<sha>/Formula/<name>.rb` (or `Casks/`) to
+/// `raw_base` — keeping the sha out of the helper means the API URL
+/// (queried before any sha exists) shares the same synthesis path.
+pub const TapBaseUrls = struct {
+    /// `https://api.github.com/repos/<user>/homebrew-<repo>/commits/HEAD`
+    api_head_url: []const u8,
+    /// `https://github.com/<user>/homebrew-<repo>` — the URL that actually
+    /// resolves; written to `taps.url`.
+    repo_url: []const u8,
+    /// `https://raw.githubusercontent.com/<user>/homebrew-<repo>` — caller
+    /// appends `/<sha>/Formula/<name>.rb` or `/<sha>/Casks/<name>.rb`.
+    raw_base: []const u8,
+
+    pub fn deinit(self: TapBaseUrls, allocator: std.mem.Allocator) void {
+        allocator.free(self.api_head_url);
+        allocator.free(self.repo_url);
+        allocator.free(self.raw_base);
+    }
+};
+
+/// Build every URL needed to talk to a tap repo from its `user/repo` slug.
+/// Single seam for `homebrew-<repo>` prefix synthesis — a future change
+/// to the URL shape (prefixless taps, non-GitHub hosts) lands in one
+/// file. `slug` must be a validated `user/repo` form (see
+/// `cli/tap.zig:validateTapName`); a missing `/` trips `unreachable`.
+pub fn resolveTapBaseUrls(
+    allocator: std.mem.Allocator,
+    slug: []const u8,
+) std.mem.Allocator.Error!TapBaseUrls {
+    const slash = std.mem.indexOfScalar(u8, slug, '/') orelse unreachable;
+    const user = slug[0..slash];
+    const repo = slug[slash + 1 ..];
+
+    const api_head_url = try std.fmt.allocPrint(
+        allocator,
+        "https://api.github.com/repos/{s}/homebrew-{s}/commits/HEAD",
+        .{ user, repo },
+    );
+    errdefer allocator.free(api_head_url);
+
+    const repo_url = try std.fmt.allocPrint(
+        allocator,
+        "https://github.com/{s}/homebrew-{s}",
+        .{ user, repo },
+    );
+    errdefer allocator.free(repo_url);
+
+    const raw_base = try std.fmt.allocPrint(
+        allocator,
+        "https://raw.githubusercontent.com/{s}/homebrew-{s}",
+        .{ user, repo },
+    );
+    errdefer allocator.free(raw_base);
+
+    return .{
+        .api_head_url = api_head_url,
+        .repo_url = repo_url,
+        .raw_base = raw_base,
+    };
+}
+
+test "resolveTapBaseUrls synthesises homebrew- prefix once per field" {
+    const urls = try resolveTapBaseUrls(std.testing.allocator, "aeroxy/tap");
+    defer urls.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(
+        "https://api.github.com/repos/aeroxy/homebrew-tap/commits/HEAD",
+        urls.api_head_url,
+    );
+    try std.testing.expectEqualStrings(
+        "https://github.com/aeroxy/homebrew-tap",
+        urls.repo_url,
+    );
+    try std.testing.expectEqualStrings(
+        "https://raw.githubusercontent.com/aeroxy/homebrew-tap",
+        urls.raw_base,
+    );
+}
+
+test "resolveTapBaseUrls preserves repo names containing hyphens and digits" {
+    const urls = try resolveTapBaseUrls(std.testing.allocator, "user-1/some-tap.v2");
+    defer urls.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings(
+        "https://api.github.com/repos/user-1/homebrew-some-tap.v2/commits/HEAD",
+        urls.api_head_url,
+    );
+    try std.testing.expectEqualStrings(
+        "https://github.com/user-1/homebrew-some-tap.v2",
+        urls.repo_url,
+    );
+    try std.testing.expectEqualStrings(
+        "https://raw.githubusercontent.com/user-1/homebrew-some-tap.v2",
+        urls.raw_base,
+    );
+}
+
 /// A 40-char lowercase hex commit SHA — matches git's printable form.
 pub fn validateCommitSha(sha: []const u8) TapError!void {
     if (sha.len != 40) return TapError.InvalidSha;
@@ -206,20 +305,17 @@ pub fn parseCommitShaFromJson(body: []const u8) ?[]const u8 {
 /// the 40-char lowercase hex SHA or a classified `TapError` so callers
 /// can surface the actual cause (rate limit, 404, network, JSON). Caller
 /// owns the returned slice.
+///
+/// `api_head_url` must come from `resolveTapBaseUrls` — that single seam
+/// owns the `homebrew-<repo>` synthesis. A bare-args overload that
+/// re-synthesised the URL inline is exactly the refresh-regression mode
+/// we structurally prevent by routing every fetch site through the helper.
 pub fn resolveHeadCommit(
     io: std.Io,
     environ: std.process.Environ,
     allocator: std.mem.Allocator,
-    user: []const u8,
-    repo_bare: []const u8,
+    api_head_url: []const u8,
 ) TapError![]const u8 {
-    var url_buf: [512]u8 = undefined;
-    const url = std.fmt.bufPrint(
-        &url_buf,
-        "https://api.github.com/repos/{s}/homebrew-{s}/commits/HEAD",
-        .{ user, repo_bare },
-    ) catch return TapError.ResolveFailed;
-
     var http = client_mod.HttpClient.init(io, environ, allocator);
     defer http.deinit();
 
@@ -228,8 +324,8 @@ pub fn resolveHeadCommit(
     var auth_buf: [256]u8 = undefined;
     var resp = if (githubAuthHeader(environ, &auth_buf)) |header| blk: {
         const headers = [_]std.http.Header{header};
-        break :blk http.getWithHeaders(url, &headers, null) catch return TapError.NetworkError;
-    } else http.get(url) catch return TapError.NetworkError;
+        break :blk http.getWithHeaders(api_head_url, &headers, null) catch return TapError.NetworkError;
+    } else http.get(api_head_url) catch return TapError.NetworkError;
     defer resp.deinit();
 
     if (resp.status != 200) return classifyResolveStatus(resp.status);

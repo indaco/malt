@@ -468,16 +468,17 @@ fn upgradeTapFormula(
         output.err("Cannot parse tap '{s}' for {s}", .{ tap_label, name });
         return error.Aborted;
     };
-    const user = tap_label[0..slash];
-    const repo = tap_label[slash + 1 ..];
-    if (user.len == 0 or repo.len == 0) {
+    if (slash == 0 or slash == tap_label.len - 1) {
         output.err("Cannot parse tap '{s}' for {s}", .{ tap_label, name });
         return error.Aborted;
     }
 
+    const urls = try tap_mod.resolveTapBaseUrls(allocator, tap_label);
+    defer urls.deinit(allocator);
+
     // The whole point of `mt upgrade` is "give me the latest", so we
     // ignore any cached pin and force-resolve HEAD.
-    const fresh_sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, user, repo) catch |e| {
+    const fresh_sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch |e| {
         output.err("Could not resolve {s} HEAD: {s}", .{ tap_label, tap_mod.describeResolveError(e) });
         return error.Aborted;
     };
@@ -502,9 +503,7 @@ fn upgradeTapFormula(
 
     // Persist the new pin BEFORE installTapFormula reads it. Use add()
     // so a missing tap row (legacy install) is created instead of erroring.
-    var tap_url_buf: [256]u8 = undefined;
-    const tap_url = std.fmt.bufPrint(&tap_url_buf, "https://github.com/{s}", .{tap_label}) catch return error.Aborted;
-    tap_mod.add(db, tap_label, tap_url, fresh_sha) catch {
+    tap_mod.add(db, tap_label, urls.repo_url, fresh_sha) catch {
         output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
         return error.Aborted;
     };
@@ -546,17 +545,16 @@ fn upgradeTapCaskFallback(
         if (install_args_mod.isCoreTap(t.name)) continue;
 
         const slash = std.mem.indexOfScalar(u8, t.name, '/') orelse continue;
-        const user = t.name[0..slash];
-        const repo = t.name[slash + 1 ..];
-        if (user.len == 0 or repo.len == 0) continue;
+        if (slash == 0 or slash == t.name.len - 1) continue;
+
+        const urls = tap_mod.resolveTapBaseUrls(allocator, t.name) catch continue;
+        defer urls.deinit(allocator);
 
         // Resolve fresh HEAD per-tap. Failures are non-fatal — try the next.
-        const fresh_sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, user, repo) catch continue;
+        const fresh_sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch continue;
         defer allocator.free(fresh_sha);
 
-        var tap_url_buf: [256]u8 = undefined;
-        const tap_url = std.fmt.bufPrint(&tap_url_buf, "https://github.com/{s}", .{t.name}) catch continue;
-        tap_mod.add(db, t.name, tap_url, fresh_sha) catch continue;
+        tap_mod.add(db, t.name, urls.repo_url, fresh_sha) catch continue;
 
         const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ t.name, token }) catch continue;
         defer allocator.free(full_name);
