@@ -32,9 +32,14 @@ install:
 # Test & coverage
 # ---------------------------------------------------------------------------
 
-# Run unit tests
+# Static regression guards — cheap, no network, no build.
 [group('test')]
-test:
+regressions-static:
+    @./scripts/regressions/tap-resolution-contract.sh
+
+# Run unit tests + cheap static regression guards.
+[group('test')]
+test: regressions-static
     zig build test --summary all
 
 # Run tests under kcov, print line-coverage percentage, and refresh
