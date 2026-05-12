@@ -91,11 +91,14 @@ pub fn installTapFormula(
     const tap_slug = std.fmt.bufPrint(&tap_slug_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
         return InstallError.FormulaNotFound;
 
+    const urls = try tap_mod.resolveTapBaseUrls(allocator, tap_slug);
+    defer urls.deinit(allocator);
+
     const commit_sha = blk: {
         if ((tap_mod.getCommitSha(allocator, db, tap_slug) catch null)) |cached| {
             break :blk cached;
         }
-        break :blk tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, parts.user, parts.repo) catch |e| {
+        break :blk tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch |e| {
             output.err("Could not resolve {s}'s HEAD commit: {s}", .{ tap_slug, tap_mod.describeResolveError(e) });
             return InstallError.FormulaNotFound;
         };
@@ -107,9 +110,8 @@ pub fn installTapFormula(
 
     // Try Formula/ first, then Casks/
     var url_buf: [512]u8 = undefined;
-    const rb_url = std.fmt.bufPrint(&url_buf, "https://raw.githubusercontent.com/{s}/homebrew-{s}/{s}/Formula/{s}.rb", .{
-        parts.user,
-        parts.repo,
+    const rb_url = std.fmt.bufPrint(&url_buf, "{s}/{s}/Formula/{s}.rb", .{
+        urls.raw_base,
         commit_sha,
         parts.formula,
     }) catch return InstallError.FormulaNotFound;
@@ -127,9 +129,8 @@ pub fn installTapFormula(
     defer if (cask_resp) |*c| c.deinit();
 
     const resp: *const client_mod.Response = if (rb_resp.status == 200) &rb_resp else blk: {
-        const cask_url = std.fmt.bufPrint(&url_buf, "https://raw.githubusercontent.com/{s}/homebrew-{s}/{s}/Casks/{s}.rb", .{
-            parts.user,
-            parts.repo,
+        const cask_url = std.fmt.bufPrint(&url_buf, "{s}/{s}/Casks/{s}.rb", .{
+            urls.raw_base,
             commit_sha,
             parts.formula,
         }) catch return InstallError.FormulaNotFound;
@@ -157,23 +158,16 @@ pub fn installTapFormula(
     var final_url_buf: [512]u8 = undefined;
     const final_url = args.interpolateUrl(&final_url_buf, rb.url, rb.version, rb.arch_token);
 
-    var tap_buf: [128]u8 = undefined;
-    const tap_name = std.fmt.bufPrint(&tap_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
-        return InstallError.FormulaNotFound;
-    var tap_url_buf: [256]u8 = undefined;
-    const tap_url = std.fmt.bufPrint(&tap_url_buf, "https://github.com/{s}", .{tap_name}) catch
-        return InstallError.FormulaNotFound;
-
     const resolved = ResolvedRubyFormula{
         .name = parts.formula,
         .full_name = pkg_name,
-        .tap_label = tap_name,
+        .tap_label = tap_slug,
         .version = rb.version,
         .url = final_url,
         .sha256 = rb.sha256,
         .binary_name = parseCaskBinary(resp.body),
         .app_name = parseCaskApp(resp.body),
-        .tap_registration = .{ .url = tap_url, .commit_sha = commit_sha },
+        .tap_registration = .{ .url = urls.repo_url, .commit_sha = commit_sha },
     };
     try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force);
 }

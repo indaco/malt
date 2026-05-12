@@ -81,13 +81,19 @@ jobs:
       - name: Check Zig formatting
         run: zig fmt --check src/ tests/
 
+      # Static structural guard: every tap fetch URL, writeback URL,
+      # and MALT_GITHUB_TOKEN reach stays inside src/core/tap.zig.
+      # No build, no network — fast enough to live in lint.
+      - name: Tap-resolution contract guard
+        run: ./scripts/regressions/tap-resolution-contract.sh
+
       - name: Install shell-lint tools
         run: brew install shellcheck shfmt
 
       - name: Lint shell scripts (shellcheck + shfmt)
         run: |
-          shellcheck scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/smokes/*.sh
-          shfmt -i 2 -d scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/smokes/*.sh
+          shellcheck scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh
+          shfmt -i 2 -d scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh
 
   # Drift guard: re-run gen-pins.sh against the committed pin on every PR
   # and fail on any diff. Catches "bumped pins.zig, forgot to regenerate
