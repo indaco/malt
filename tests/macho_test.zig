@@ -336,3 +336,133 @@ test "patchPaths preserves trailing NUL at max_path_len-1 boundary" {
     try testing.expectEqualStrings("/bin/aaaaaaaaaa", slot[0 .. max_path_len - 1]);
     try testing.expectEqual(@as(u8, 0), slot[max_path_len - 1]);
 }
+
+/// Build a Mach-O 64 with one LC_SEGMENT_64 (__TEXT) carrying `nsects`
+/// sections. The caller fills each `section_64` via `sections` before the
+/// returned buffer is parsed. C-string data lives at `[cstring_offset, end)`.
+fn buildSegmentFixture(
+    allocator: std.mem.Allocator,
+    sections: []const macho.section_64,
+    cstring_blob: []const u8,
+) ![]u8 {
+    const header_size = @sizeOf(macho.mach_header_64);
+    const seg_size = @sizeOf(macho.segment_command_64);
+    const sect_size = @sizeOf(macho.section_64);
+    const cmdsize: u32 = @intCast(seg_size + sections.len * sect_size);
+    const cstring_offset = header_size + cmdsize;
+    const total = cstring_offset + cstring_blob.len;
+
+    const buf = try allocator.alloc(u8, total);
+    @memset(buf, 0);
+
+    const hdr = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    hdr.* = .{
+        .magic = macho.MH_MAGIC_64,
+        .ncmds = 1,
+        .sizeofcmds = cmdsize,
+    };
+
+    const seg = std.mem.bytesAsValue(macho.segment_command_64, buf[header_size..][0..seg_size]);
+    seg.* = .{
+        .cmd = .SEGMENT_64,
+        .cmdsize = cmdsize,
+        .segname = [_]u8{0} ** 16,
+        .nsects = @intCast(sections.len),
+    };
+    @memcpy(seg.segname[0.."__TEXT".len], "__TEXT");
+
+    for (sections, 0..) |s, idx| {
+        const sect_off = header_size + seg_size + idx * sect_size;
+        const sect = std.mem.bytesAsValue(macho.section_64, buf[sect_off..][0..sect_size]);
+        sect.* = s;
+    }
+
+    @memcpy(buf[cstring_offset..][0..cstring_blob.len], cstring_blob);
+
+    return buf;
+}
+
+test "parse a Mach-O 64 with __TEXT,__cstring captures the section region" {
+    const blob = "/opt/homebrew/x\x00next\x00";
+    const cstring_offset = @sizeOf(macho.mach_header_64) + @sizeOf(macho.segment_command_64) + @sizeOf(macho.section_64);
+
+    var sect: macho.section_64 = .{
+        .sectname = [_]u8{0} ** 16,
+        .segname = [_]u8{0} ** 16,
+        .offset = @intCast(cstring_offset),
+        .size = blob.len,
+        .flags = macho.S_CSTRING_LITERALS,
+    };
+    @memcpy(sect.sectname[0.."__cstring".len], "__cstring");
+    @memcpy(sect.segname[0.."__TEXT".len], "__TEXT");
+
+    const buf = try buildSegmentFixture(testing.allocator, &.{sect}, blob);
+    defer testing.allocator.free(buf);
+
+    var m = try parser.parse(testing.allocator, buf);
+    defer m.deinit();
+
+    try testing.expectEqual(@as(usize, 1), m.cstrings.len);
+    try testing.expectEqual(@as(usize, cstring_offset), m.cstrings[0].file_offset);
+    try testing.expectEqual(@as(usize, blob.len), m.cstrings[0].size);
+}
+
+test "parse a Mach-O 64 ignores non-cstring sections in the same segment" {
+    const blob = "anything\x00";
+    const cstring_offset = @sizeOf(macho.mach_header_64) + @sizeOf(macho.segment_command_64) + 2 * @sizeOf(macho.section_64);
+
+    var text_sect: macho.section_64 = .{
+        .sectname = [_]u8{0} ** 16,
+        .segname = [_]u8{0} ** 16,
+        .offset = @intCast(cstring_offset),
+        .size = blob.len,
+        .flags = macho.S_REGULAR | macho.S_ATTR_PURE_INSTRUCTIONS,
+    };
+    @memcpy(text_sect.sectname[0.."__text".len], "__text");
+    @memcpy(text_sect.segname[0.."__TEXT".len], "__TEXT");
+
+    var cstring_sect: macho.section_64 = .{
+        .sectname = [_]u8{0} ** 16,
+        .segname = [_]u8{0} ** 16,
+        .offset = @intCast(cstring_offset),
+        .size = blob.len,
+        .flags = macho.S_CSTRING_LITERALS,
+    };
+    @memcpy(cstring_sect.sectname[0.."__cstring".len], "__cstring");
+    @memcpy(cstring_sect.segname[0.."__TEXT".len], "__TEXT");
+
+    const buf = try buildSegmentFixture(testing.allocator, &.{ text_sect, cstring_sect }, blob);
+    defer testing.allocator.free(buf);
+
+    var m = try parser.parse(testing.allocator, buf);
+    defer m.deinit();
+
+    // Only the cstring section should land in the result.
+    try testing.expectEqual(@as(usize, 1), m.cstrings.len);
+    try testing.expectEqual(@as(usize, cstring_offset), m.cstrings[0].file_offset);
+}
+
+test "parse a Mach-O 64 drops cstring sections pointing outside the slice" {
+    // Section claims it lives at a file offset past the buffer end.
+    const blob = "/opt/homebrew/x\x00";
+    const cstring_offset = @sizeOf(macho.mach_header_64) + @sizeOf(macho.segment_command_64) + @sizeOf(macho.section_64);
+
+    var sect: macho.section_64 = .{
+        .sectname = [_]u8{0} ** 16,
+        .segname = [_]u8{0} ** 16,
+        .offset = 0xFFFFFFFF, // far past EOF
+        .size = blob.len,
+        .flags = macho.S_CSTRING_LITERALS,
+    };
+    @memcpy(sect.sectname[0.."__cstring".len], "__cstring");
+    @memcpy(sect.segname[0.."__TEXT".len], "__TEXT");
+    _ = cstring_offset;
+
+    const buf = try buildSegmentFixture(testing.allocator, &.{sect}, blob);
+    defer testing.allocator.free(buf);
+
+    var m = try parser.parse(testing.allocator, buf);
+    defer m.deinit();
+
+    try testing.expectEqual(@as(usize, 0), m.cstrings.len);
+}
