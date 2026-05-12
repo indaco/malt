@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.11.4 - 2026-05-12
+
+### 🩹 Fixes
+
+- **macho:** relocate path literals embedded in cstring sections ([e0d58d1](https://github.com/indaco/malt/commit/e0d58d1)) ([#319](https://github.com/indaco/malt/pull/319))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.11.3 - 2026-05-12
 
 ### 🩹 Fixes
