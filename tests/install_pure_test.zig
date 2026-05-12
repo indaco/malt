@@ -508,6 +508,139 @@ test "parseRubyFormula ignores arch directive outside on_macos" {
     try testing.expectEqualStrings("", got.arch_token);
 }
 
+// `version` is optional in Homebrew formulas — when the tag is encoded
+// in the URL path, the parser must derive it so common tap shapes like
+// `aeroxy/tap/ast-outline` (top-level url + sha256, no version line,
+// release-asset URL) install instead of failing as "unsupported DSL".
+test "parseRubyFormula derives version from /releases/download/<X>/ when version directive is absent" {
+    const src =
+        \\class AstOutline < Formula
+        \\  desc "test"
+        \\  url "https://github.com/aeroxy/ast-outline/releases/download/2.0.0/ast-outline-macos-arm64.zip"
+        \\  sha256 "a76c4e384a0dd155a42b6dc7b2fe4f125de7c5ede04ddb8e7ee8fbab51fc0f34"
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("2.0.0", got.version);
+    try testing.expectEqualStrings(
+        "https://github.com/aeroxy/ast-outline/releases/download/2.0.0/ast-outline-macos-arm64.zip",
+        got.url,
+    );
+    try testing.expectEqualStrings(
+        "a76c4e384a0dd155a42b6dc7b2fe4f125de7c5ede04ddb8e7ee8fbab51fc0f34",
+        got.sha256,
+    );
+}
+
+// A leading `v` on the captured token is stripped — `v3.1.4` → `3.1.4`.
+// Every release-tag URL we sampled in the wild used this convention,
+// and `Cellar/<name>/v3.1.4` paths would be ugly and inconsistent with
+// the bottle path Homebrew installs to.
+test "parseRubyFormula derives version stripping a leading v from a release tag" {
+    const src =
+        \\class Tool < Formula
+        \\  url "https://github.com/example/tool/releases/download/v3.1.4/tool.tar.gz"
+        \\  sha256 "1111111111111111111111111111111111111111111111111111111111111111"
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("3.1.4", got.version);
+}
+
+// `archive/refs/tags/v<X>.tar.gz` is the dominant source-archive shape
+// for taps like FelixKratz/sketchybar — pinning it keeps the parser
+// useful for the broader "version-in-URL" population, not just for
+// release-asset binaries.
+test "parseRubyFormula derives version from archive/refs/tags/<X>.tar.gz" {
+    const src =
+        \\class Sketchybar < Formula
+        \\  url "https://github.com/FelixKratz/SketchyBar/archive/refs/tags/v2.23.0.tar.gz"
+        \\  sha256 "2222222222222222222222222222222222222222222222222222222222222222"
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("2.23.0", got.version);
+}
+
+// .zip variant of the same shape — extension matching is exhaustive
+// across the four archive formats we extract, so .zip must work too.
+test "parseRubyFormula derives version from archive/refs/tags/<X>.zip" {
+    const src =
+        \\class Tool < Formula
+        \\  url "https://github.com/example/tool/archive/refs/tags/1.0.0.zip"
+        \\  sha256 "3333333333333333333333333333333333333333333333333333333333333333"
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("1.0.0", got.version);
+}
+
+// Short-form `/archive/<X>.tar.gz` — GitHub serves the same tarball
+// for this and the long form, and a non-trivial slice of older
+// formulas still use the short URL.
+test "parseRubyFormula derives version from archive/<X>.tar.gz" {
+    const src =
+        \\class Tool < Formula
+        \\  url "https://github.com/example/tool/archive/v1.0.0.tar.gz"
+        \\  sha256 "4444444444444444444444444444444444444444444444444444444444444444"
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("1.0.0", got.version);
+}
+
+// An explicit `version "..."` always wins over what could be derived
+// from the URL — the formula author's intent is authoritative.
+test "parseRubyFormula prefers explicit version over a derivable URL token" {
+    const src =
+        \\class Tool < Formula
+        \\  version "9.9.9"
+        \\  url "https://github.com/example/tool/releases/download/2.0.0/tool.zip"
+        \\  sha256 "5555555555555555555555555555555555555555555555555555555555555555"
+        \\end
+    ;
+    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try testing.expectEqualStrings("9.9.9", got.version);
+}
+
+// Floating-tag URLs (`latest`, `nightly`, …) are common but must not
+// silently become a malt keg directory named `latest`. The token must
+// start with a digit; anything else returns null so the user sees the
+// "unsupported DSL shape" error and adds an explicit `version`.
+test "parseRubyFormula rejects floating-tag URLs that are not version-shaped" {
+    const src =
+        \\class Tool < Formula
+        \\  url "https://github.com/example/tool/releases/download/latest/tool.zip"
+        \\  sha256 "6666666666666666666666666666666666666666666666666666666666666666"
+        \\end
+    ;
+    try testing.expect(install.parseRubyFormula(src) == null);
+}
+
+// URL with none of the three recognised path shapes — the parser does
+// not invent a version from the filename basename.
+test "parseRubyFormula returns null when URL matches no derivation pattern" {
+    const src =
+        \\class Tool < Formula
+        \\  url "https://example.com/foo.tar.gz"
+        \\  sha256 "7777777777777777777777777777777777777777777777777777777777777777"
+        \\end
+    ;
+    try testing.expect(install.parseRubyFormula(src) == null);
+}
+
+// A leading `v` must be followed by a digit — otherwise `vendor-build`,
+// `v0lume`'s typo, or a tag like `vN` would all parse as versions.
+test "parseRubyFormula rejects a v-prefix that is not followed by a digit" {
+    const src =
+        \\class Tool < Formula
+        \\  url "https://github.com/example/tool/releases/download/vendor-build/tool.zip"
+        \\  sha256 "8888888888888888888888888888888888888888888888888888888888888888"
+        \\end
+    ;
+    try testing.expect(install.parseRubyFormula(src) == null);
+}
+
 // extractQuoted underpins both legacy and cask DSL extraction; the
 // keyword-arg shape introduces a new pattern (`url "..."` after a
 // long sha256 directive) so pin a "won't accidentally cut on the

@@ -64,6 +64,53 @@ const TapRegistration = struct {
     commit_sha: []const u8,
 };
 
+/// Archive container formats the tap/local install path extracts.
+/// `tar_gz` collapses `.tar.gz` and `.tgz` URLs into the same
+/// extractor — the variant names match the `archive_mod.extract*`
+/// functions called by `materializeRubyFormula`.
+const TapArchiveKind = enum {
+    tar_gz,
+    tar_xz,
+    zip,
+
+    /// Canonical suffix used when staging the downloaded archive on
+    /// disk. The `.tgz` alias is accepted on input via `fromUrl` but
+    /// the staged file always carries `.tar.gz` so a stray inspection
+    /// (or the `defer deleteFile`) finds a predictable name.
+    fn extension(self: TapArchiveKind) []const u8 {
+        return switch (self) {
+            .tar_gz => ".tar.gz",
+            .tar_xz => ".tar.xz",
+            .zip => ".zip",
+        };
+    }
+
+    /// Classify a tap URL by suffix. Returns null for any extension
+    /// the tap installer does not extract — the caller surfaces an
+    /// "unsupported archive format" error to the user.
+    fn fromUrl(url: []const u8) ?TapArchiveKind {
+        for (tap_archive_suffixes) |row| {
+            if (std.mem.endsWith(u8, url, row.suffix)) return row.kind;
+        }
+        return null;
+    }
+};
+
+/// Single source of truth for the `(suffix, TapArchiveKind)` pairs the
+/// tap/local install path accepts. Drives both `TapArchiveKind.fromUrl`
+/// (URL → enum) and `deriveVersionFromUrl` (which iterates the
+/// suffixes to strip a version token from a tag-in-URL formula).
+/// Adding a new format requires one edit here.
+const tap_archive_suffixes = [_]struct {
+    suffix: []const u8,
+    kind: TapArchiveKind,
+}{
+    .{ .suffix = ".tar.gz", .kind = .tar_gz },
+    .{ .suffix = ".tgz", .kind = .tar_gz },
+    .{ .suffix = ".tar.xz", .kind = .tar_xz },
+    .{ .suffix = ".zip", .kind = .zip },
+};
+
 /// Install a tap formula by fetching the Ruby formula from GitHub and
 /// extracting URL + SHA256 for the current platform.
 pub fn installTapFormula(
@@ -457,25 +504,13 @@ fn materializeRubyFormula(
 
     // Pick archive kind from the URL suffix; reject unknown formats
     // rather than feeding them to tar and printing a generic "failed".
-    const TapArchive = enum { tar_gz, tar_xz, zip };
-    const kind: ?TapArchive = blk: {
-        if (std.mem.endsWith(u8, resolved.url, ".tar.gz") or std.mem.endsWith(u8, resolved.url, ".tgz")) break :blk .tar_gz;
-        if (std.mem.endsWith(u8, resolved.url, ".tar.xz")) break :blk .tar_xz;
-        if (std.mem.endsWith(u8, resolved.url, ".zip")) break :blk .zip;
-        break :blk null;
-    };
-    const archive_kind = kind orelse {
+    const archive_kind = TapArchiveKind.fromUrl(resolved.url) orelse {
         output.err("Unsupported archive format for {s}: {s}", .{ resolved.name, resolved.url });
         output.err("Supported formats: .tar.gz, .tar.xz, .zip.", .{});
         return InstallError.DownloadFailed;
     };
-    const ext: []const u8 = switch (archive_kind) {
-        .tar_gz => ".tar.gz",
-        .tar_xz => ".tar.xz",
-        .zip => ".zip",
-    };
     var tmp_buf: [512]u8 = undefined;
-    const tmp_archive = formatTapDownloadName(&tmp_buf, prefix, ext, std.c.getpid()) catch
+    const tmp_archive = formatTapDownloadName(&tmp_buf, prefix, archive_kind.extension(), std.c.getpid()) catch
         return InstallError.DownloadFailed;
 
     const tmp_file = std.Io.Dir.createFileAbsolute(ctx.io, tmp_archive, .{}) catch return InstallError.DownloadFailed;
@@ -714,15 +749,82 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
         }
     }
 
-    if (version != null and url != null and sha256 != null) {
+    if (url != null and sha256 != null) {
+        // Homebrew treats `version` as optional when the tag is encoded
+        // in the URL. Mirror that: derive it from the release-asset or
+        // archive-tag path so common tap shapes (top-level url+sha256,
+        // no `version` line) still install.
+        const final_version = version orelse deriveVersionFromUrl(url.?) orelse return null;
         return .{
-            .version = version.?,
+            .version = final_version,
             .url = url.?,
             .sha256 = sha256.?,
             .arch_token = arch_token,
         };
     }
     return null;
+}
+
+/// Pull a version token out of a Homebrew-style URL when the formula
+/// omits `version "..."`. Covers the three shapes Homebrew itself
+/// derives from:
+///   * `…/releases/download/<X>/…`              — release asset
+///   * `…/archive/refs/tags/<X>.<archive-ext>`  — git tag tarball
+///   * `…/archive/<X>.<archive-ext>`            — short-form tag tarball
+/// Returns null when no pattern matches or the captured token does not
+/// look like a version (must start with a digit, optionally after a
+/// single `v`/`V`). The strict check stops malt from inventing a
+/// version like `latest` or `nightly` for a floating-tag URL.
+fn deriveVersionFromUrl(url: []const u8) ?[]const u8 {
+    if (std.mem.indexOf(u8, url, "/releases/download/")) |pos| {
+        const after = url[pos + "/releases/download/".len ..];
+        const slash = std.mem.indexOfScalar(u8, after, '/') orelse return null;
+        return validateVersionToken(after[0..slash]);
+    }
+
+    if (std.mem.indexOf(u8, url, "/archive/refs/tags/")) |pos| {
+        const after = url[pos + "/archive/refs/tags/".len ..];
+        return stripArchiveSuffixThenValidate(after);
+    }
+
+    if (std.mem.indexOf(u8, url, "/archive/")) |pos| {
+        const after = url[pos + "/archive/".len ..];
+        // Nested paths belong to the `/archive/refs/tags/` shape, which
+        // would already have matched above — anything still containing
+        // a slash here is not a version token.
+        if (std.mem.indexOfScalar(u8, after, '/') != null) return null;
+        return stripArchiveSuffixThenValidate(after);
+    }
+
+    return null;
+}
+
+/// Strip any accepted tap-archive suffix from `tail` and run the
+/// result through `validateVersionToken`. Returns null when no
+/// recognised suffix matches — keeps the suffix list in lockstep with
+/// `tap_archive_suffixes` so adding a format wires up version
+/// derivation automatically.
+fn stripArchiveSuffixThenValidate(tail: []const u8) ?[]const u8 {
+    for (tap_archive_suffixes) |row| {
+        if (std.mem.endsWith(u8, tail, row.suffix)) {
+            return validateVersionToken(tail[0 .. tail.len - row.suffix.len]);
+        }
+    }
+    return null;
+}
+
+/// Strip an optional leading `v`/`V` and confirm the next byte is a
+/// digit. Reject anything else so a tag like `latest`, `nightly`, or
+/// `release-2.0.0` never becomes a malt `Cellar/<name>/<version>`
+/// path. Returns the trimmed slice or null on rejection.
+fn validateVersionToken(s: []const u8) ?[]const u8 {
+    if (s.len == 0) return null;
+    if (s[0] == 'v' or s[0] == 'V') {
+        if (s.len < 2 or !std.ascii.isDigit(s[1])) return null;
+        return s[1..];
+    }
+    if (!std.ascii.isDigit(s[0])) return null;
+    return s;
 }
 
 /// True when the trimmed line body starts with a keyword argument the
