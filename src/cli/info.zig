@@ -470,39 +470,86 @@ fn writeJsonInfo(
     try stdout.writeAll("}\n");
 }
 
+/// One installed cask row as the info-render path consumes it. Slices
+/// borrow from a live `sqlite.Statement` — populate via `readInstalledCaskRow`
+/// and hand straight to an encoder; do not retain past `stmt.step`/`finalize`.
+pub const InstalledCaskRow = struct {
+    token: []const u8,
+    name: []const u8,
+    version: ?[]const u8 = null,
+    url: ?[]const u8 = null,
+    app_path: ?[]const u8 = null,
+    auto_updates: bool = false,
+    installed_at: ?[]const u8 = null,
+};
+
+/// Resolved column count is encoded in the `WHERE`-ordered SELECT below.
+const installed_cask_select =
+    "SELECT token, name, version, url, app_path, auto_updates, installed_at " ++
+    "FROM casks WHERE token = ?1 LIMIT 1;";
+
+fn readInstalledCaskRow(stmt: *sqlite.Statement, fallback_name: []const u8) InstalledCaskRow {
+    return .{
+        .token = if (stmt.columnText(0)) |t| std.mem.sliceTo(t, 0) else fallback_name,
+        .name = if (stmt.columnText(1)) |n| std.mem.sliceTo(n, 0) else fallback_name,
+        .version = if (stmt.columnText(2)) |v| std.mem.sliceTo(v, 0) else null,
+        .url = if (stmt.columnText(3)) |u| std.mem.sliceTo(u, 0) else null,
+        .app_path = if (stmt.columnText(4)) |p| std.mem.sliceTo(p, 0) else null,
+        .auto_updates = stmt.columnBool(5),
+        .installed_at = if (stmt.columnText(6)) |d| std.mem.sliceTo(d, 0) else null,
+    };
+}
+
+pub fn encodeInstalledCaskHuman(
+    w: *std.Io.Writer,
+    scratch: []u8,
+    row: *const InstalledCaskRow,
+    colorize: bool,
+) !void {
+    // "Auto-updates:" is the longest key (13 chars incl. colon), value at col 14.
+    const col: usize = 14;
+    try encodeHeader(w, colorize, row.token, "", row.version orelse "unknown", "(cask)");
+    try output.writeField(w, scratch, colorize, col, "Name", "{s}", .{row.name});
+    try output.writeField(w, scratch, colorize, col, "URL", "{s}", .{row.url orelse "N/A"});
+    try output.writeField(w, scratch, colorize, col, "App", "{s}", .{row.app_path orelse "N/A"});
+    if (row.auto_updates) try output.writeField(w, scratch, colorize, col, "Auto-updates", "yes", .{});
+    try output.writeField(w, scratch, colorize, col, "Installed", "{s}", .{row.installed_at orelse "N/A"});
+}
+
+pub fn encodeInstalledCaskJson(w: *std.Io.Writer, row: *const InstalledCaskRow) !void {
+    try w.writeAll("{\"name\":");
+    try output.jsonStr(w, row.token);
+    try w.writeAll(",\"type\":\"cask\",\"installed\":true,\"version\":");
+    try output.jsonStr(w, row.version orelse "");
+    try w.writeAll(",\"full_name\":");
+    try output.jsonStr(w, row.name);
+    try w.writeAll(",\"url\":");
+    try output.jsonStr(w, row.url orelse "");
+    try w.writeAll(",\"app_path\":");
+    try output.jsonStr(w, row.app_path orelse "");
+    try w.writeAll(",\"auto_updates\":");
+    try w.writeAll(if (row.auto_updates) "true" else "false");
+    try w.writeAll(",\"installed_at\":");
+    try output.jsonStr(w, row.installed_at orelse "");
+    try w.writeAll("}\n");
+}
+
 fn writeHumanCaskInfo(
     db: *sqlite.Database,
     name: []const u8,
     stdout: *std.Io.Writer,
     colorize: bool,
 ) !void {
-    var stmt = db.prepare(
-        "SELECT token, name, version, url, sha256, app_path, auto_updates, installed_at FROM casks WHERE token = ?1 LIMIT 1;",
-    ) catch return;
+    var stmt = db.prepare(installed_cask_select) catch return;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return;
 
     const found = stmt.step() catch false;
     if (!found) return;
 
+    const row = readInstalledCaskRow(&stmt, name);
     var buf: [4096]u8 = undefined;
-    // "Auto-updates:" is the longest key (13 chars incl. colon), value at col 14.
-    const col: usize = 14;
-
-    const token = if (stmt.columnText(0)) |t| std.mem.sliceTo(t, 0) else name;
-    const cask_name = if (stmt.columnText(1)) |n| std.mem.sliceTo(n, 0) else name;
-    const ver = if (stmt.columnText(2)) |v| std.mem.sliceTo(v, 0) else "unknown";
-    const url = if (stmt.columnText(3)) |u| std.mem.sliceTo(u, 0) else "N/A";
-    const app_path = if (stmt.columnText(5)) |p| std.mem.sliceTo(p, 0) else "N/A";
-    const auto_updates = stmt.columnBool(6);
-    const installed_at = if (stmt.columnText(7)) |d| std.mem.sliceTo(d, 0) else "N/A";
-
-    try encodeHeader(stdout, colorize, token, "", ver, "(cask)");
-    try output.writeField(stdout, &buf, colorize, col, "Name", "{s}", .{cask_name});
-    try output.writeField(stdout, &buf, colorize, col, "URL", "{s}", .{url});
-    try output.writeField(stdout, &buf, colorize, col, "App", "{s}", .{app_path});
-    if (auto_updates) try output.writeField(stdout, &buf, colorize, col, "Auto-updates", "yes", .{});
-    try output.writeField(stdout, &buf, colorize, col, "Installed", "{s}", .{installed_at});
+    try encodeInstalledCaskHuman(stdout, &buf, &row, colorize);
 }
 
 fn writeJsonCaskInfo(
@@ -510,36 +557,13 @@ fn writeJsonCaskInfo(
     name: []const u8,
     stdout: *std.Io.Writer,
 ) !void {
-    var stmt = db.prepare(
-        "SELECT token, name, version, url, sha256, app_path, auto_updates, installed_at FROM casks WHERE token = ?1 LIMIT 1;",
-    ) catch return;
+    var stmt = db.prepare(installed_cask_select) catch return;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return;
 
     const found = stmt.step() catch false;
     if (!found) return;
 
-    const token = if (stmt.columnText(0)) |t| std.mem.sliceTo(t, 0) else name;
-    const cask_name = if (stmt.columnText(1)) |n| std.mem.sliceTo(n, 0) else name;
-    const ver = if (stmt.columnText(2)) |v| std.mem.sliceTo(v, 0) else "";
-    const url = if (stmt.columnText(3)) |u| std.mem.sliceTo(u, 0) else "";
-    const app_path = if (stmt.columnText(5)) |p| std.mem.sliceTo(p, 0) else "";
-    const auto_updates = stmt.columnBool(6);
-    const installed_at = if (stmt.columnText(7)) |d| std.mem.sliceTo(d, 0) else "";
-
-    try stdout.writeAll("{\"name\":");
-    try output.jsonStr(stdout, token);
-    try stdout.writeAll(",\"type\":\"cask\",\"installed\":true,\"version\":");
-    try output.jsonStr(stdout, ver);
-    try stdout.writeAll(",\"full_name\":");
-    try output.jsonStr(stdout, cask_name);
-    try stdout.writeAll(",\"url\":");
-    try output.jsonStr(stdout, url);
-    try stdout.writeAll(",\"app_path\":");
-    try output.jsonStr(stdout, app_path);
-    try stdout.writeAll(",\"auto_updates\":");
-    try stdout.writeAll(if (auto_updates) "true" else "false");
-    try stdout.writeAll(",\"installed_at\":");
-    try output.jsonStr(stdout, installed_at);
-    try stdout.writeAll("}\n");
+    const row = readInstalledCaskRow(&stmt, name);
+    try encodeInstalledCaskJson(stdout, &row);
 }

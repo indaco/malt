@@ -188,3 +188,92 @@ test "encodeApiCaskJson produces the documented shape" {
         aw.written(),
     );
 }
+
+// --- installed-cask encoders -------------------------------------------
+
+test "encodeInstalledCaskHuman renders every populated field" {
+    const row: info.InstalledCaskRow = .{
+        .token = "firefox",
+        .name = "Firefox",
+        .version = "120.0",
+        .url = "https://example.com/firefox.dmg",
+        .app_path = "/Applications/Firefox.app",
+        .auto_updates = true,
+        .installed_at = "2026-05-13 10:40:56",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, false);
+
+    const out = aw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "firefox: 120.0 (cask)\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Name:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Firefox") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "URL:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "https://example.com/firefox.dmg") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "App:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "/Applications/Firefox.app") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Auto-updates:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Installed:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "2026-05-13 10:40:56") != null);
+}
+
+test "encodeInstalledCaskHuman omits Auto-updates when false and uses fallbacks for nulls" {
+    const row: info.InstalledCaskRow = .{
+        .token = "ghost",
+        .name = "ghost",
+        // version/url/app_path/installed_at null → human fallbacks ("unknown"/"N/A")
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, false);
+
+    const out = aw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "ghost: unknown (cask)\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Auto-updates:") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "URL:          N/A") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "App:          N/A") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Installed:    N/A") != null);
+}
+
+test "encodeInstalledCaskJson produces the documented shape" {
+    const row: info.InstalledCaskRow = .{
+        .token = "firefox",
+        .name = "Firefox",
+        .version = "120.0",
+        .url = "https://example.com/firefox.dmg",
+        .app_path = "/Applications/Firefox.app",
+        .auto_updates = false,
+        .installed_at = "2026-05-13 10:40:56",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try info.encodeInstalledCaskJson(&aw.writer, &row);
+
+    try testing.expectEqualStrings(
+        "{\"name\":\"firefox\",\"type\":\"cask\",\"installed\":true,\"version\":\"120.0\",\"full_name\":\"Firefox\",\"url\":\"https://example.com/firefox.dmg\",\"app_path\":\"/Applications/Firefox.app\",\"auto_updates\":false,\"installed_at\":\"2026-05-13 10:40:56\"}\n",
+        aw.written(),
+    );
+}
+
+test "encodeInstalledCaskJson emits empty strings for null fields" {
+    const row: info.InstalledCaskRow = .{
+        .token = "ghost",
+        .name = "ghost",
+        .auto_updates = true,
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try info.encodeInstalledCaskJson(&aw.writer, &row);
+
+    try testing.expectEqualStrings(
+        "{\"name\":\"ghost\",\"type\":\"cask\",\"installed\":true,\"version\":\"\",\"full_name\":\"ghost\",\"url\":\"\",\"app_path\":\"\",\"auto_updates\":true,\"installed_at\":\"\"}\n",
+        aw.written(),
+    );
+}
