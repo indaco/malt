@@ -115,8 +115,11 @@ if ! grep -q "is already at latest version" "$UP2_LOG"; then
 fi
 pass "${TOKEN}: second upgrade emits 'is already at latest version'"
 
-# Assertion 2: routed-path proceed line must NOT surface.
-if grep -qE "^Upgrading ${TOKEN} " "$UP2_LOG"; then
+# Assertion 2: routed-path proceed line must NOT surface. `output.info`
+# decorates the line with a `> ` prefix; the unanchored regex catches
+# both the bare and the decorated form so a future output-format
+# tweak can't silently turn this assertion into a false-pass.
+if grep -qE "Upgrading ${TOKEN} " "$UP2_LOG"; then
   tail -30 "$UP2_LOG" >&2
   fail "${TOKEN}: second upgrade proceeded past the skip"
 fi

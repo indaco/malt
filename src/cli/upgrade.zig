@@ -654,7 +654,7 @@ fn upgradeRoutedTapCask(
 /// Backfill the `casks.tap` column once we've discovered the owning tap
 /// via the probe loop. Idempotent (`WHERE tap IS NULL`); failures are
 /// non-fatal — the row stays NULL and we re-probe on the next upgrade.
-fn backfillCaskTap(db: *sqlite.Database, token: []const u8, tap_label: []const u8) void {
+pub fn backfillCaskTap(db: *sqlite.Database, token: []const u8, tap_label: []const u8) void {
     var stmt = db.prepare("UPDATE casks SET tap = ?1 WHERE token = ?2 AND tap IS NULL;") catch return;
     defer stmt.finalize();
     stmt.bindText(1, tap_label) catch return;
