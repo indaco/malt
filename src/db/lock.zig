@@ -4,147 +4,33 @@ pub const LockError = error{
     Timeout,
     OpenFailed,
     WriteFailed,
-    /// ENOLCK: kernel advisory-lock slots exhausted — not contention, so surface distinctly.
-    LockResourceExhausted,
 };
 
-/// Cap on EINTR retries so a signal storm can't spin the acquire loop forever.
-pub const MAX_EINTR_RETRIES: u32 = 5;
-
-/// Mapping of a non-zero `flock` errno to a loop action. Pure so it's unit-testable.
-pub const FlockOutcome = enum {
-    retry_later, // EAGAIN — sleep and try again within the deadline.
-    interrupted, // EINTR — retry immediately (bounded).
-    resource_exhausted, // ENOLCK — kernel lock table full.
-    open_failed, // EBADF / EINVAL / … — treat as a hard failure.
-};
-
-pub fn classifyFlockErrno(errno: std.c.E) FlockOutcome {
-    return switch (errno) {
-        .AGAIN => .retry_later,
-        .INTR => .interrupted,
-        .NOLCK => .resource_exhausted,
-        else => .open_failed,
-    };
-}
-
-/// Next action for the acquire loop, from the current `flock` probe plus loop state.
-pub const AcquireStep = enum {
-    acquired,
-    sleep_and_retry,
-    timeout,
-    retry_interrupted,
-    interrupted_exhausted,
-    resource_exhausted,
-    open_failed,
-};
-
-pub const AcquireProbe = struct {
-    rc: c_int,
-    errno: std.c.E,
-    elapsed_ns: u128,
-    deadline_ns: u128,
-    eintr_retries: u32,
-};
-
-pub fn nextAcquireStep(p: AcquireProbe) AcquireStep {
-    if (p.rc == 0) return .acquired;
-    return switch (classifyFlockErrno(p.errno)) {
-        .retry_later => if (p.elapsed_ns >= p.deadline_ns) .timeout else .sleep_and_retry,
-        .interrupted => if (p.eintr_retries >= MAX_EINTR_RETRIES) .interrupted_exhausted else .retry_interrupted,
-        .resource_exhausted => .resource_exhausted,
-        .open_failed => .open_failed,
-    };
-}
+/// Between contention probes. Short enough to feel snappy, long enough not to
+/// spin the cpu against a long-held lock.
+const retry_interval_ns: u64 = 100 * std.time.ns_per_ms;
 
 pub const LockFile = struct {
     /// Owned by the LockFile; touch only via `release` / `holderPid`.
-    _fd: std.posix.fd_t,
+    file: std.Io.File,
     path: []const u8,
 
     /// Acquire an exclusive advisory lock at `path`, retrying with 100 ms
-    /// sleeps until `timeout_ms` elapses.  On success the current PID is
-    /// written to the file so that other processes can identify the holder.
-    pub fn acquire(path: []const u8, timeout_ms: u32) LockError!LockFile {
-        const path_z = std.posix.toPosixPath(path) catch return error.OpenFailed;
-        const fd = std.c.open(&path_z, .{
-            .ACCMODE = .RDWR,
-            .CREAT = true,
-        }, @as(std.c.mode_t, 0o644));
-        if (fd < 0) return error.OpenFailed;
-        errdefer _ = std.c.close(fd);
+    /// sleeps until `timeout_ms` elapses. On success the current PID is
+    /// written and fsync'd so other processes can identify the live holder.
+    pub fn acquire(io: std.Io, path: []const u8, timeout_ms: u32) LockError!LockFile {
+        const file = std.Io.Dir.createFileAbsolute(io, path, .{
+            .read = true,
+            .truncate = false,
+        }) catch return error.OpenFailed;
+        errdefer file.close(io);
 
-        const deadline_ns: u128 = @as(u128, @intCast(timeout_ms)) * std.time.ns_per_ms;
-        var elapsed_ns: u128 = 0;
-        var eintr_retries: u32 = 0;
-        const sleep_ns: u64 = 100 * std.time.ns_per_ms;
+        try acquireLockWithin(io, file, timeout_ms);
+        errdefer file.unlock(io);
 
-        acquire_loop: while (true) {
-            const rc = std.c.flock(fd, std.c.LOCK.EX | std.c.LOCK.NB);
-            // errno is read unconditionally; ignored on rc==0 inside nextAcquireStep.
-            const step = nextAcquireStep(.{
-                .rc = rc,
-                .errno = std.posix.errno(rc),
-                .elapsed_ns = elapsed_ns,
-                .deadline_ns = deadline_ns,
-                .eintr_retries = eintr_retries,
-            });
-            switch (step) {
-                .acquired => break :acquire_loop,
-                .sleep_and_retry => {
-                    const ts: std.c.timespec = .{
-                        .sec = @intCast(sleep_ns / std.time.ns_per_s),
-                        .nsec = @intCast(sleep_ns % std.time.ns_per_s),
-                    };
-                    _ = std.c.nanosleep(&ts, null);
-                    elapsed_ns += sleep_ns;
-                },
-                .retry_interrupted => eintr_retries += 1,
-                .timeout => return error.Timeout,
-                .resource_exhausted => return error.LockResourceExhausted,
-                // Exhausted EINTR retries collapse into OpenFailed — no new tag in scope.
-                .interrupted_exhausted, .open_failed => return error.OpenFailed,
-            }
-        }
+        try writePidAndSync(io, file);
 
-        // Truncate and write PID.
-        if (std.c.ftruncate(fd, 0) != 0) {
-            _ = std.c.flock(fd, std.c.LOCK.UN);
-            _ = std.c.close(fd);
-            return error.WriteFailed;
-        }
-
-        var buf: [32]u8 = undefined;
-        const pid = std.c.getpid();
-        const pid_str = std.fmt.bufPrint(&buf, "{d}", .{pid}) catch {
-            _ = std.c.flock(fd, std.c.LOCK.UN);
-            _ = std.c.close(fd);
-            return error.WriteFailed;
-        };
-
-        const written = std.c.write(fd, pid_str.ptr, pid_str.len);
-        if (written < 0) {
-            _ = std.c.flock(fd, std.c.LOCK.UN);
-            _ = std.c.close(fd);
-            return error.WriteFailed;
-        }
-
-        return LockFile{
-            ._fd = fd,
-            .path = path,
-        };
-    }
-
-    /// Bounded retry on WouldBlock so a future O_NONBLOCK flip can't silently hide a held lock.
-    fn readHolderBytes(fd: std.posix.fd_t, buf: []u8) ?usize {
-        var attempts: u2 = 0;
-        while (attempts < 2) : (attempts += 1) {
-            return std.posix.read(fd, buf) catch |err| switch (err) {
-                error.WouldBlock => continue,
-                else => return null,
-            };
-        }
-        return null;
+        return .{ .file = file, .path = path };
     }
 
     /// Release the advisory lock and close the file descriptor.
@@ -154,29 +40,108 @@ pub const LockFile = struct {
     /// vacated instead of reporting a stale PID. The file itself is
     /// left in place — removing it would race against other processes
     /// that may already have it open.
-    pub fn release(self: *LockFile) void {
-        _ = std.c.ftruncate(self._fd, 0);
-        // fsync before unlock so a crash between truncate and close can't
-        // leave a stale PID in the lock file — `doctor` would otherwise
-        // report a phantom holder.
-        _ = std.c.fsync(self._fd);
-        _ = std.c.flock(self._fd, std.c.LOCK.UN);
-        _ = std.c.close(self._fd);
+    pub fn release(self: *LockFile, io: std.Io) void {
+        // Vacate the pid before unlock so a racing reader sees an empty
+        // file, not the just-released holder's pid. The truncate+sync are
+        // best-effort: any failure leaves a stale pid that the next
+        // acquire immediately overwrites.
+        self.file.setLength(io, 0) catch {};
+        self.file.sync(io) catch {};
+        self.file.unlock(io);
+        self.file.close(io);
     }
 
-    /// Read the PID from an existing lock file.  Returns null when the file
-    /// does not exist or cannot be parsed.
-    pub fn holderPid(path: []const u8) ?std.posix.pid_t {
-        const path_z = std.posix.toPosixPath(path) catch return null;
-        const fd = std.c.open(&path_z, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-        if (fd < 0) return null;
-        defer _ = std.c.close(fd);
+    /// Read the PID from an existing lock file. Returns null when the file
+    /// does not exist, is empty, or cannot be parsed.
+    pub fn holderPid(io: std.Io, path: []const u8) ?std.posix.pid_t {
+        const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
+        defer file.close(io);
 
         var buf: [32]u8 = undefined;
-        const n = readHolderBytes(fd, &buf) orelse return null;
+        const n = file.readPositionalAll(io, &buf, 0) catch return null;
         if (n == 0) return null;
 
-        const trimmed = std.mem.trimEnd(u8, buf[0..n], &[_]u8{ '\n', '\r', ' ' });
+        const trimmed = std.mem.trimEnd(u8, buf[0..n], &[_]u8{ '\n', '\r', ' ', 0 });
         return std.fmt.parseInt(std.posix.pid_t, trimmed, 10) catch null;
     }
 };
+
+fn acquireLockWithin(io: std.Io, file: std.Io.File, timeout_ms: u32) LockError!void {
+    const deadline_ns: u128 = @as(u128, @intCast(timeout_ms)) * std.time.ns_per_ms;
+    var elapsed_ns: u128 = 0;
+    while (true) {
+        const locked = file.tryLock(io, .exclusive) catch return error.OpenFailed;
+        if (locked) return;
+        if (elapsed_ns >= deadline_ns) return error.Timeout;
+        // Cancel just shortens the wait; the next loop iteration re-checks the deadline.
+        std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(retry_interval_ns)), .awake) catch {};
+        elapsed_ns += retry_interval_ns;
+    }
+}
+
+fn writePidAndSync(io: std.Io, file: std.Io.File) LockError!void {
+    file.setLength(io, 0) catch return error.WriteFailed;
+
+    var buf: [32]u8 = undefined;
+    // `getpid` has no typed std peer in Zig 0.16; the libc wrapper never fails.
+    const pid = std.posix.system.getpid();
+    const pid_str = std.fmt.bufPrint(&buf, "{d}", .{pid}) catch return error.WriteFailed;
+    file.writePositionalAll(io, pid_str, 0) catch return error.WriteFailed;
+
+    // Durability of the live pid for `mt doctor` after a SIGKILL —
+    // without this the pid lives only in the page cache.
+    file.sync(io) catch return error.WriteFailed;
+}
+
+test "acquire has a single close path (regression guard for double-close)" {
+    // The historical bug was three explicit `close(fd)` calls inside the
+    // WriteFailed arms colliding with a function-top errdefer. The fix
+    // is structural: one `errdefer file.close(io)` covers every error
+    // arm. Single-threaded tests can't observe the original race, so
+    // scan the source to pin the invariant.
+    const src = @embedFile("lock.zig");
+    const marker = "pub fn acquire(io: std.Io, path: []const u8, timeout_ms: u32) LockError!LockFile {";
+    const start = std.mem.indexOf(u8, src, marker) orelse return error.AcquireFnNotFound;
+
+    var depth: usize = 0;
+    var body_end: usize = 0;
+    var i: usize = start + marker.len;
+    while (i < src.len) : (i += 1) {
+        switch (src[i]) {
+            '{' => depth += 1,
+            '}' => {
+                if (depth == 0) {
+                    body_end = i;
+                    break;
+                }
+                depth -= 1;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(body_end > start);
+    const body = src[start..body_end];
+
+    var close_count: usize = 0;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, body, idx, ".close(")) |pos| : (idx = pos + 1) {
+        close_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), close_count);
+    try std.testing.expect(std.mem.indexOf(u8, body, "errdefer file.close(io)") != null);
+}
+
+test "acquire fsyncs the pid (regression guard for stale-pid bug)" {
+    // The historical bug was a missing fsync between the pid write and
+    // the lock being held — a SIGKILL'd holder left a phantom pid on
+    // disk for `mt doctor`. Page cache satisfies single-process tests,
+    // so pin the invariant in the source.
+    const src = @embedFile("lock.zig");
+    const writer_marker = "fn writePidAndSync";
+    const fn_start = std.mem.indexOf(u8, src, writer_marker) orelse return error.WriterFnNotFound;
+    const body = src[fn_start..];
+
+    const write_pos = std.mem.indexOf(u8, body, "writePositionalAll") orelse return error.WriteCallMissing;
+    const sync_pos = std.mem.indexOf(u8, body, "file.sync(io)") orelse return error.SyncCallMissing;
+    try std.testing.expect(sync_pos > write_pos);
+}

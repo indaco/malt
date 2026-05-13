@@ -254,7 +254,7 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
 
     var lock_path_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return .{};
-    var lk_maybe: ?lock_mod.LockFile = lock_mod.LockFile.acquire(lock_path, 30_000) catch null;
+    var lk_maybe: ?lock_mod.LockFile = lock_mod.LockFile.acquire(ctx.io, lock_path, 30_000) catch null;
 
     var removed: usize = 0;
     var skipped: usize = 0;
@@ -280,7 +280,7 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
         } else skipped += 1;
     }
 
-    if (lk_maybe) |*lk| lk.release();
+    if (lk_maybe) |*lk| lk.release(ctx.io);
 
     if (db_idx) |idx| {
         if (deleteTarget(io, plan[idx].path)) {

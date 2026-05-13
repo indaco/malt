@@ -69,18 +69,17 @@ pub fn planFixes(c: Conditions) Plan {
 
 const StaleLockState = enum { absent, live, stale };
 
-fn probeStaleLockState(prefix: []const u8) StaleLockState {
+fn probeStaleLockState(io: std.Io, prefix: []const u8) StaleLockState {
     var lock_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return .absent;
-    const pid = lock_mod.LockFile.holderPid(lock_path) orelse return .absent;
+    const pid = lock_mod.LockFile.holderPid(io, lock_path) orelse return .absent;
     const is_alive = std.c.kill(pid, @enumFromInt(0)) == 0;
     return if (is_alive) .live else .stale;
 }
 
 /// True when the lock file holds a PID that no longer exists.
 pub fn probeStaleLock(io: std.Io, prefix: []const u8) bool {
-    _ = io;
-    return probeStaleLockState(prefix) == .stale;
+    return probeStaleLockState(io, prefix) == .stale;
 }
 
 /// Count broken symlinks under the prefix's link directories without
@@ -124,7 +123,7 @@ fn walkBrokenSymlinks(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
 /// Best-effort removal of the prefix's lock file when its PID is dead.
 /// Idempotent: a missing or live lock file is a no-op (returns false).
 pub fn fixStaleLock(io: std.Io, prefix: []const u8) bool {
-    if (probeStaleLockState(prefix) != .stale) return false;
+    if (probeStaleLockState(io, prefix) != .stale) return false;
     var lock_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return false;
     std.Io.Dir.deleteFileAbsolute(io, lock_path) catch return false;

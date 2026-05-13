@@ -152,8 +152,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // (fresh install with no DB) — that's fine, we proceed without.
     var lock_path_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
-    var lk_maybe: ?lock_mod.LockFile = lock_mod.LockFile.acquire(lock_path, 30_000) catch null;
-    defer if (lk_maybe) |*lk| lk.release();
+    var lk_maybe: ?lock_mod.LockFile = lock_mod.LockFile.acquire(ctx.io, lock_path, 30_000) catch null;
+    defer if (lk_maybe) |*lk| lk.release(ctx.io);
 
     var summary = report.Summary{};
     defer summary.deinit(allocator);

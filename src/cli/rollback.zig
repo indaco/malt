@@ -127,11 +127,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Acquire lock
     var lock_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return error.Aborted;
-    var lk = lock_mod.LockFile.acquire(lock_path, 30000) catch {
+    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch {
         output.err("Another mt process is running", .{});
         return error.Aborted;
     };
-    defer lk.release();
+    defer lk.release(ctx.io);
 
     // Unlink current version
     var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
