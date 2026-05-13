@@ -283,6 +283,7 @@ test "encodeInstalledCaskHuman surfaces the owning tap when set" {
         .token = "deckclip",
         .name = "deckclip",
         .version = "1.4.5",
+        .installed_at = "2026-05-13 10:40:56",
         .tap = "yuzeguitarist/deck",
     };
 
@@ -293,12 +294,11 @@ test "encodeInstalledCaskHuman surfaces the owning tap when set" {
 
     const out = aw.written();
     try testing.expect(std.mem.indexOf(u8, out, "Tap:          yuzeguitarist/deck") != null);
-    // Tap line sits between Name and URL — same position as `From:` for formulas.
-    const name_idx = std.mem.indexOf(u8, out, "Name:") orelse return error.NoNameLine;
+    // Tap is appended after Installed so the top of the dump stays
+    // stable for scripts that grep the first N lines of `mt info`.
+    const installed_idx = std.mem.indexOf(u8, out, "Installed:") orelse return error.NoInstalledLine;
     const tap_idx = std.mem.indexOf(u8, out, "Tap:") orelse return error.NoTapLine;
-    const url_idx = std.mem.indexOf(u8, out, "URL:") orelse return error.NoUrlLine;
-    try testing.expect(name_idx < tap_idx);
-    try testing.expect(tap_idx < url_idx);
+    try testing.expect(installed_idx < tap_idx);
 }
 
 test "encodeInstalledCaskHuman omits the Tap line when null (core-API cask)" {
@@ -329,4 +329,30 @@ test "encodeInstalledCaskJson includes tap as an empty string for null and the l
     try info.encodeInstalledCaskJson(&aw.writer, &tapped);
 
     try testing.expect(std.mem.indexOf(u8, aw.written(), "\"tap\":\"yuzeguitarist/deck\"") != null);
+}
+
+test "encodeInstalledCaskJson output parses as JSON with .tap reachable" {
+    // Loose shape guard: catches future reorderings or sibling-field
+    // additions that the exact-bytes test would also catch, but keeps
+    // working even if a later refactor reorders the object keys. WHY
+    // this matters: downstream consumers branch on `.tap`, not on byte
+    // position — a parses-as test pins the contract they actually rely on.
+    const row: info.InstalledCaskRow = .{
+        .token = "deckclip",
+        .name = "deckclip",
+        .version = "1.4.5",
+        .tap = "yuzeguitarist/deck",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try info.encodeInstalledCaskJson(&aw.writer, &row);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer parsed.deinit();
+
+    const tap_val = parsed.value.object.get("tap") orelse return error.MissingTapKey;
+    try testing.expectEqualStrings("yuzeguitarist/deck", tap_val.string);
+    const type_val = parsed.value.object.get("type") orelse return error.MissingTypeKey;
+    try testing.expectEqualStrings("cask", type_val.string);
 }

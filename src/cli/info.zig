@@ -488,8 +488,11 @@ pub const InstalledCaskRow = struct {
     tap: ?[]const u8 = null,
 };
 
+/// SELECT shape kept byte-for-byte compatible with the pre-refactor query.
+/// `sha256` is unused by the renderers but stays in the column list so the
+/// extraction commit is a true mechanical refactor — only `tap` is new.
 const installed_cask_select =
-    "SELECT token, name, version, url, app_path, auto_updates, installed_at, tap " ++
+    "SELECT token, name, version, url, sha256, app_path, auto_updates, installed_at, tap " ++
     "FROM casks WHERE token = ?1 LIMIT 1;";
 
 fn readInstalledCaskRow(stmt: *sqlite.Statement, fallback_name: []const u8) InstalledCaskRow {
@@ -498,10 +501,11 @@ fn readInstalledCaskRow(stmt: *sqlite.Statement, fallback_name: []const u8) Inst
         .name = if (stmt.columnText(1)) |n| std.mem.sliceTo(n, 0) else fallback_name,
         .version = if (stmt.columnText(2)) |v| std.mem.sliceTo(v, 0) else null,
         .url = if (stmt.columnText(3)) |u| std.mem.sliceTo(u, 0) else null,
-        .app_path = if (stmt.columnText(4)) |p| std.mem.sliceTo(p, 0) else null,
-        .auto_updates = stmt.columnBool(5),
-        .installed_at = if (stmt.columnText(6)) |d| std.mem.sliceTo(d, 0) else null,
-        .tap = if (stmt.columnText(7)) |t| std.mem.sliceTo(t, 0) else null,
+        // column 4 is sha256 — intentionally unread.
+        .app_path = if (stmt.columnText(5)) |p| std.mem.sliceTo(p, 0) else null,
+        .auto_updates = stmt.columnBool(6),
+        .installed_at = if (stmt.columnText(7)) |d| std.mem.sliceTo(d, 0) else null,
+        .tap = if (stmt.columnText(8)) |t| std.mem.sliceTo(t, 0) else null,
     };
 }
 
@@ -515,13 +519,13 @@ pub fn encodeInstalledCaskHuman(
     const col: usize = 14;
     try encodeHeader(w, colorize, row.token, "", row.version orelse "unknown", "(cask)");
     try output.writeField(w, scratch, colorize, col, "Name", "{s}", .{row.name});
-    // Omit the Tap line for core-API casks — `homebrew/cask` is the
-    // default and printing it adds noise without information.
-    if (row.tap) |t| try output.writeField(w, scratch, colorize, col, "Tap", "{s}", .{t});
     try output.writeField(w, scratch, colorize, col, "URL", "{s}", .{row.url orelse "N/A"});
     try output.writeField(w, scratch, colorize, col, "App", "{s}", .{row.app_path orelse "N/A"});
     if (row.auto_updates) try output.writeField(w, scratch, colorize, col, "Auto-updates", "yes", .{});
     try output.writeField(w, scratch, colorize, col, "Installed", "{s}", .{row.installed_at orelse "N/A"});
+    // Trailing position keeps the top of the dump stable for scripts that
+    // grep the first N lines. Omitted for core-API casks (NULL tap).
+    if (row.tap) |t| try output.writeField(w, scratch, colorize, col, "Tap", "{s}", .{t});
 }
 
 pub fn encodeInstalledCaskJson(w: *std.Io.Writer, row: *const InstalledCaskRow) !void {
