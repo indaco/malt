@@ -244,7 +244,7 @@ fn checkStaleLock(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     };
-    const pid = lock_mod.LockFile.holderPid(lock_path);
+    const pid = lock_mod.LockFile.holderPid(ctx.io, lock_path);
     if (pid) |p| {
         const is_alive = std.c.kill(p, @enumFromInt(0)) == 0;
         var pid_buf: [256]u8 = undefined;

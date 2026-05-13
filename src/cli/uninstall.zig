@@ -44,11 +44,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Acquire lock
     var lock_path_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
-    var lock = lock_mod.LockFile.acquire(lock_path, 5000) catch {
+    var lock = lock_mod.LockFile.acquire(ctx.io, lock_path, 5000) catch {
         output.err("Could not acquire lock. Another malt process may be running.", .{});
         return error.Aborted;
     };
-    defer lock.release();
+    defer lock.release(ctx.io);
 
     // Open DB
     var db_path_buf: [512]u8 = undefined;

@@ -98,7 +98,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     var lock_path_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
-    var lk = lock_mod.LockFile.acquire(lock_path, 5000) catch {
+    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 5000) catch {
         // Fresh prefix: no `db/` yet = nothing installed, nothing to
         // upgrade. Exit 0 silently rather than treating the missing
         // lock directory as contention with another process.
@@ -106,7 +106,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.err("Could not acquire lock. Another malt process may be running.", .{});
         return error.Aborted;
     };
-    defer lk.release();
+    defer lk.release(ctx.io);
     // LIFO: install_complete fires before lk.release. Inline gate keeps
     // the deferred call out of the default paths.
     defer if (output.isNdjson()) output.emitNdjsonEvent(.install_complete, "", null);
