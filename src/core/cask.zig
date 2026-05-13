@@ -439,12 +439,12 @@ pub const CaskInstaller = struct {
             "-mountpoint", mount_point,
             dmg_path,
         };
-        child_mod.runOrFail(self.io, &mount_argv) catch return error.InstallFailed;
+        child_mod.runOrFail(self.io, self.allocator, &mount_argv) catch return error.InstallFailed;
 
         // Unmount on any exit; kernel reaps stuck mounts on reboot if both fail.
         defer {
             const detach_argv = [_][]const u8{ "hdiutil", "detach", mount_point, "-quiet" };
-            child_mod.runOrFail(self.io, &detach_argv) catch {};
+            child_mod.runOrFail(self.io, self.allocator, &detach_argv) catch {};
             std.Io.Dir.deleteDirAbsolute(self.io, mount_point) catch {};
         }
 
@@ -468,7 +468,7 @@ pub const CaskInstaller = struct {
 
         // Copy .app bundle using ditto (preserves resource forks, xattrs)
         const ditto_argv = [_][]const u8{ "ditto", src_app, dst_app };
-        child_mod.runOrFail(self.io, &ditto_argv) catch return error.InstallFailed;
+        child_mod.runOrFail(self.io, self.allocator, &ditto_argv) catch return error.InstallFailed;
 
         return dst_app;
     }
@@ -487,7 +487,7 @@ pub const CaskInstaller = struct {
 
         // Extract with ditto -xk (handles macOS-specific ZIP features)
         const ditto_argv = [_][]const u8{ "ditto", "-xk", zip_path, extract_dir };
-        child_mod.runOrFail(self.io, &ditto_argv) catch return error.InstallFailed;
+        child_mod.runOrFail(self.io, self.allocator, &ditto_argv) catch return error.InstallFailed;
 
         // Find the .app. app_name_buf owns the fallback past iterator teardown.
         var app_name_buf: [256]u8 = undefined;
@@ -507,7 +507,7 @@ pub const CaskInstaller = struct {
 
         // Move .app to /Applications
         const mv_argv = [_][]const u8{ "ditto", src_app, dst_app };
-        child_mod.runOrFail(self.io, &mv_argv) catch return error.InstallFailed;
+        child_mod.runOrFail(self.io, self.allocator, &mv_argv) catch return error.InstallFailed;
 
         return dst_app;
     }
@@ -560,7 +560,7 @@ pub const CaskInstaller = struct {
         // existing app may not be present.
         std.Io.Dir.cwd().deleteTree(self.io, dst_app) catch {};
         const mv_argv = [_][]const u8{ "ditto", src_app, dst_app };
-        child_mod.runOrFail(self.io, &mv_argv) catch return error.InstallFailed;
+        child_mod.runOrFail(self.io, self.allocator, &mv_argv) catch return error.InstallFailed;
         return dst_app;
     }
 
@@ -627,7 +627,7 @@ pub const CaskInstaller = struct {
     fn installPkg(self: *CaskInstaller, pkg_path: []const u8) ![]const u8 {
         // PKG installs require sudo — the caller must confirm
         const argv = [_][]const u8{ "sudo", "installer", "-pkg", pkg_path, "-target", "/" };
-        child_mod.runOrFail(self.io, &argv) catch return error.InstallFailed;
+        child_mod.runOrFail(self.io, self.allocator, &argv) catch return error.InstallFailed;
         // PKG installs don't have a single app path — record the pkg location
         return std.fmt.allocPrint(self.allocator, "{s}", .{pkg_path}) catch return error.OutOfMemory;
     }
