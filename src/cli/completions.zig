@@ -144,7 +144,7 @@ pub const bash_script =
     \\        upgrade)          cmd_flags="--all --cask --formula --dry-run --pinned --force -f" ;;
     \\        outdated)         cmd_flags="--json --formula --cask --pinned-only --refresh --quiet -q" ;;
     \\        update)           cmd_flags="--check --quiet -q" ;;
-    \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --json --quiet -q" ;;
+    \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --tap --json --quiet -q" ;;
     \\        info)             cmd_flags="--formula --cask --json" ;;
     \\        search)           cmd_flags="--formula --cask --json" ;;
     \\        uses)             cmd_flags="--recursive -r --json --quiet -q" ;;
@@ -301,6 +301,7 @@ pub const zsh_script =
     \\                        '--formula[Formulas only]' \
     \\                        '--cask[Casks only]' \
     \\                        '--pinned[Pinned packages only]' \
+    \\                        '--tap[Only packages from <label> (e.g. user/repo)]:tap label:' \
     \\                        '--json[Output as JSON]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Names only]'
     \\                    ;;
@@ -521,6 +522,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l formula  -d 'Formulas only'
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l cask     -d 'Casks only'
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l pinned   -d 'Pinned only'
+    \\    complete -c $__malt_bin -n '__malt_using_command list' -l tap      -x -d 'Only packages from <label>'
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l json     -d 'JSON output'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l versions -d 'Show version numbers'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l formula  -d 'Formulas only'
