@@ -108,15 +108,38 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         }
     }
 
-    var cstmt = db.prepare("SELECT token, version FROM casks ORDER BY token;") catch null;
+    // Tap is read alongside token + version so the line written for
+    // a third-party-tap cask carries the fully-qualified slug
+    // `<user>/<repo>/<token>`. Bare tokens 404 against the core API
+    // on restore; the qualified form routes through
+    // `installTapFormula` and re-installs from the owning tap.
+    var cstmt = db.prepare("SELECT token, version, tap FROM casks ORDER BY token;") catch null;
     if (cstmt) |*s| {
         defer s.finalize();
         while (s.step() catch false) {
             const name_ptr = s.columnText(0) orelse continue;
             const ver_ptr = s.columnText(1);
-            const name = std.mem.sliceTo(name_ptr, 0);
+            const tap_ptr = s.columnText(2);
+            const token = std.mem.sliceTo(name_ptr, 0);
             const version = if (ver_ptr) |p| std.mem.sliceTo(p, 0) else "";
-            try writeEntry(w, .cask, name, version, include_versions);
+            const tap = if (tap_ptr) |p| std.mem.sliceTo(p, 0) else "";
+
+            // Qualify only for third-party taps. `homebrew/cask` is the
+            // core API path and stays bare so legacy backups parse the
+            // same way.
+            if (tap.len > 0 and !std.mem.eql(u8, tap, "homebrew/cask")) {
+                var qual_buf: [256]u8 = undefined;
+                const qualified = std.fmt.bufPrint(&qual_buf, "{s}/{s}", .{ tap, token }) catch {
+                    // Tap label too long for the qualified-name buffer —
+                    // fall back to the bare token so the entry isn't lost.
+                    try writeEntry(w, .cask, token, version, include_versions);
+                    count += 1;
+                    continue;
+                };
+                try writeEntry(w, .cask, qualified, version, include_versions);
+            } else {
+                try writeEntry(w, .cask, token, version, include_versions);
+            }
             count += 1;
         }
     }

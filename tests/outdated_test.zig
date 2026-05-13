@@ -310,6 +310,42 @@ test "loadCaskRows .all returns every installed cask" {
     try testing.expectEqualStrings("loose-cask", rows[1].name);
 }
 
+// Pre-routing in `mt outdated` mirrors the upgrade path: a row whose
+// `casks.tap` is non-null gets its latest version resolved against the
+// owning tap's `.rb`, so a tap-cask version bump shows up in the audit
+// instead of being silently dropped by the core-API 404 path.
+test "loadCaskRows surfaces the owning tap when set" {
+    const path = try setupPinnedPrefix("cask_tap_column");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try db.exec(
+        \\INSERT INTO casks(token, name, version, url, tap)
+        \\VALUES ('flux-markdown', 'flux-markdown', '0.1.0',
+        \\        'https://example.invalid/flux.dmg', 'xykong/tap');
+    );
+    try db.exec(
+        \\INSERT INTO casks(token, name, version, url)
+        \\VALUES ('legacy-cask', 'legacy-cask', '1.0',
+        \\        'https://example.invalid/legacy.dmg');
+    );
+
+    const rows = try outdated_mod.loadCaskRows(testing.allocator, &db, .all);
+    defer outdated_mod.freeKegRows(testing.allocator, rows);
+
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    // ORDER BY token: 'flux-markdown' < 'legacy-cask' alphabetically.
+    try testing.expectEqualStrings("flux-markdown", rows[0].name);
+    try testing.expect(rows[0].tap != null);
+    try testing.expectEqualStrings("xykong/tap", rows[0].tap.?);
+
+    try testing.expectEqualStrings("legacy-cask", rows[1].name);
+    try testing.expect(rows[1].tap == null);
+}
+
 test "outdated execute --pinned-only walks pinned casks alongside formulas" {
     const path = try setupPinnedPrefix("exec_pinned_mixed");
     defer testing.allocator.free(path);
