@@ -41,7 +41,7 @@ fn tableExists(db: *sqlite.Database, name: [:0]const u8) !bool {
     return stmt.columnInt(0) == 1;
 }
 
-test "initSchema runs v1 then migrates to v5" {
+test "initSchema runs v1 then migrates to v6" {
     var tdb = try TempDb.init("init");
     defer tdb.deinit();
 
@@ -53,7 +53,7 @@ test "initSchema runs v1 then migrates to v5" {
     try testing.expect(try tableExists(&tdb.db, "bundle_members"));
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 5), ver);
+    try testing.expectEqual(@as(i64, 6), ver);
 }
 
 test "migrate is idempotent on re-run" {
@@ -65,7 +65,7 @@ test "migrate is idempotent on re-run" {
     try schema.migrate(&tdb.db);
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 5), ver);
+    try testing.expectEqual(@as(i64, 6), ver);
 }
 
 test "v4 migration adds pinned column to casks" {
@@ -95,7 +95,51 @@ test "v4 migration is idempotent on re-run" {
     try schema.migrate(&tdb.db);
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 5), ver);
+    try testing.expectEqual(@as(i64, 6), ver);
+}
+
+test "v6 migration adds tap column to casks" {
+    var tdb = try TempDb.init("v6_casks_tap");
+    defer tdb.deinit();
+
+    try schema.initSchema(&tdb.db);
+
+    // INSERT exercising the new column proves the ALTER landed.
+    try tdb.db.exec(
+        \\INSERT INTO casks(token, name, version, url, tap)
+        \\VALUES ('flux-markdown', 'flux-markdown', '0.1.0',
+        \\        'https://example.invalid/flux.dmg', 'xykong/tap');
+    );
+
+    var stmt = try tdb.db.prepare("SELECT tap FROM casks WHERE token='flux-markdown';");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    const raw = stmt.columnText(0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("xykong/tap", std.mem.sliceTo(raw, 0));
+}
+
+test "v6 migration leaves legacy casks with tap NULL" {
+    var tdb = try TempDb.init("v6_legacy_null");
+    defer tdb.deinit();
+
+    // Apply schema then reset version + drop column to simulate a v5 DB.
+    try schema.initSchema(&tdb.db);
+    try tdb.db.exec("DELETE FROM schema_version WHERE version >= 6;");
+
+    // Seed a row in v5-shape (no tap column awareness).
+    try tdb.db.exec(
+        \\INSERT INTO casks(token, name, version, url)
+        \\VALUES ('firefox', 'firefox', '123.0', 'https://example.invalid');
+    );
+
+    // Re-run migrate — should detect "still need v6" and re-apply
+    // idempotently without breaking the row.
+    try schema.migrate(&tdb.db);
+
+    var stmt = try tdb.db.prepare("SELECT tap FROM casks WHERE token='firefox';");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    try testing.expect(stmt.columnText(0) == null);
 }
 
 test "v3 migration adds commit_sha column to taps" {

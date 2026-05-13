@@ -948,8 +948,8 @@ fn installCask(
     };
     bar.finish();
 
-    // Record in DB with install path
-    cask_mod.recordInstall(db, &cask, app_path) catch {
+    // Core API casks have no third-party tap origin to record.
+    cask_mod.recordInstall(db, &cask, app_path, null) catch {
         output.warn("Failed to record cask {s} in database", .{cask.token});
     };
     allocator.free(app_path);

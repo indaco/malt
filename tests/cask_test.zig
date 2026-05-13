@@ -158,7 +158,7 @@ test "recordInstall preserves an existing pinned flag (force-upgrade keeps the h
     // Simulate a force-upgrade rewriting the row at version 200.
     var c2 = try cask.parseCask(std.testing.allocator, test_cask_json_v2);
     defer c2.deinit();
-    try cask.recordInstall(&t.db, &c2, "/Applications/Firefox.app");
+    try cask.recordInstall(&t.db, &c2, "/Applications/Firefox.app", null);
 
     try std.testing.expectEqual(true, try readCaskPinned(&t.db, "firefox"));
 }
@@ -172,7 +172,7 @@ test "recordInstall on a fresh cask defaults pinned to 0" {
 
     var c2 = try cask.parseCask(std.testing.allocator, test_cask_json_v2);
     defer c2.deinit();
-    try cask.recordInstall(&t.db, &c2, "/Applications/Firefox.app");
+    try cask.recordInstall(&t.db, &c2, "/Applications/Firefox.app", null);
 
     try std.testing.expectEqual(false, try readCaskPinned(&t.db, "firefox"));
 }
@@ -317,12 +317,27 @@ test "recordInstall and lookupInstalled round-trip" {
     var c = try cask.parseCask(std.testing.allocator, test_cask_json);
     defer c.deinit();
 
-    try cask.recordInstall(&db, &c, "/Applications/Firefox.app");
+    try cask.recordInstall(&db, &c, "/Applications/Firefox.app", null);
 
     const info = cask.lookupInstalled(&db, "firefox");
     try std.testing.expect(info != null);
     try std.testing.expectEqualStrings("123.0", info.?.version());
     try std.testing.expectEqualStrings("/Applications/Firefox.app", info.?.appPath().?);
+    try std.testing.expect(info.?.tap() == null);
+}
+
+test "recordInstall stores the owning tap for third-party-tap casks" {
+    var db = try openTestDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var c = try cask.parseCask(std.testing.allocator, test_cask_json);
+    defer c.deinit();
+
+    try cask.recordInstall(&db, &c, "/Applications/Firefox.app", "xykong/tap");
+
+    const info = cask.lookupInstalled(&db, "firefox").?;
+    try std.testing.expectEqualStrings("xykong/tap", info.tap().?);
 }
 
 test "isInstalled returns true after recordInstall" {
@@ -334,7 +349,7 @@ test "isInstalled returns true after recordInstall" {
     defer c.deinit();
 
     try std.testing.expect(!cask.isInstalled(&db, "firefox"));
-    try cask.recordInstall(&db, &c, "/Applications/Firefox.app");
+    try cask.recordInstall(&db, &c, "/Applications/Firefox.app", null);
     try std.testing.expect(cask.isInstalled(&db, "firefox"));
 }
 
@@ -346,7 +361,7 @@ test "removeRecord removes cask from DB" {
     var c = try cask.parseCask(std.testing.allocator, test_cask_json);
     defer c.deinit();
 
-    try cask.recordInstall(&db, &c, "/Applications/Firefox.app");
+    try cask.recordInstall(&db, &c, "/Applications/Firefox.app", null);
     try std.testing.expect(cask.isInstalled(&db, "firefox"));
 
     try cask.removeRecord(&db, "firefox");
@@ -365,7 +380,7 @@ test "recordInstall surfaces SqliteError when schema is missing" {
 
     try std.testing.expectError(
         sqlite.SqliteError.PrepareFailed,
-        cask.recordInstall(&db, &c, "/Applications/Firefox.app"),
+        cask.recordInstall(&db, &c, "/Applications/Firefox.app", null),
     );
 }
 
@@ -389,7 +404,7 @@ test "isOutdated detects version mismatch" {
     var c = try cask.parseCask(std.testing.allocator, test_cask_json);
     defer c.deinit();
 
-    try cask.recordInstall(&db, &c, "/Applications/Firefox.app");
+    try cask.recordInstall(&db, &c, "/Applications/Firefox.app", null);
 
     const prefix: [:0]const u8 = "/tmp/malt_test";
     var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .environ = malt.app_ctx.processEnviron() });

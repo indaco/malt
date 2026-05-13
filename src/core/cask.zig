@@ -69,11 +69,20 @@ pub fn parseCask(allocator: std.mem.Allocator, json_bytes: []const u8) !Cask {
 /// Record cask installation in database.
 /// The COALESCE subquery on `pinned` carries any existing user pin
 /// across INSERT OR REPLACE so a force-upgrade doesn't silently clear
-/// the hold; first-time installs default to 0.
-pub fn recordInstall(db: *sqlite.Database, cask: *const Cask, app_path: ?[]const u8) sqlite.SqliteError!void {
+/// the hold; first-time installs default to 0. `tap` is NULL for casks
+/// installed from the core Homebrew API and the tap label
+/// (`user/repo`) for those installed from a third-party tap — read at
+/// upgrade time so `mt upgrade <token>` can pre-route to the owning
+/// tap without probing the rest of the registered list.
+pub fn recordInstall(
+    db: *sqlite.Database,
+    cask: *const Cask,
+    app_path: ?[]const u8,
+    tap: ?[]const u8,
+) sqlite.SqliteError!void {
     var stmt = try db.prepare(
-        "INSERT OR REPLACE INTO casks (token, name, version, url, sha256, app_path, auto_updates, pinned)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE((SELECT pinned FROM casks WHERE token = ?1), 0));",
+        "INSERT OR REPLACE INTO casks (token, name, version, url, sha256, app_path, auto_updates, pinned, tap)" ++
+            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE((SELECT pinned FROM casks WHERE token = ?1), 0), ?8);",
     );
     defer stmt.finalize();
 
@@ -84,6 +93,7 @@ pub fn recordInstall(db: *sqlite.Database, cask: *const Cask, app_path: ?[]const
     if (cask.sha256) |s| try stmt.bindText(5, s) else try stmt.bindNull(5);
     if (app_path) |p| try stmt.bindText(6, p) else try stmt.bindNull(6);
     try stmt.bindInt(7, if (cask.auto_updates) 1 else 0);
+    if (tap) |t| try stmt.bindText(8, t) else try stmt.bindNull(8);
     _ = try stmt.step();
 }
 
@@ -809,6 +819,9 @@ pub const InstalledCask = struct {
     app_path_buf: [512]u8 = undefined,
     app_path_len: usize = 0,
     has_app_path: bool = false,
+    tap_buf: [128]u8 = undefined,
+    tap_len: usize = 0,
+    has_tap: bool = false,
 
     pub fn version(self: *const InstalledCask) []const u8 {
         return self.version_buf[0..self.version_len];
@@ -818,12 +831,20 @@ pub const InstalledCask = struct {
         if (!self.has_app_path) return null;
         return self.app_path_buf[0..self.app_path_len];
     }
+
+    /// Owning tap label (`user/repo`) or null when the cask was
+    /// installed from the core Homebrew API. Drives `mt upgrade`'s
+    /// pre-routing decision — non-null skips the multi-tap probe loop.
+    pub fn tap(self: *const InstalledCask) ?[]const u8 {
+        if (!self.has_tap) return null;
+        return self.tap_buf[0..self.tap_len];
+    }
 };
 
 /// Look up installed cask info from DB. Copies data to avoid dangling pointers.
 pub fn lookupInstalled(db: *sqlite.Database, token: []const u8) ?InstalledCask {
     var stmt = db.prepare(
-        "SELECT version, app_path FROM casks WHERE token = ?1 LIMIT 1;",
+        "SELECT version, app_path, tap FROM casks WHERE token = ?1 LIMIT 1;",
     ) catch return null;
     defer stmt.finalize();
     stmt.bindText(1, token) catch return null;
@@ -845,6 +866,15 @@ pub fn lookupInstalled(db: *sqlite.Database, token: []const u8) ?InstalledCask {
             @memcpy(result.app_path_buf[0..path_slice.len], path_slice);
             result.app_path_len = path_slice.len;
             result.has_app_path = true;
+        }
+    }
+
+    if (stmt.columnText(2)) |tap_ptr| {
+        const tap_slice = std.mem.sliceTo(tap_ptr, 0);
+        if (tap_slice.len <= result.tap_buf.len) {
+            @memcpy(result.tap_buf[0..tap_slice.len], tap_slice);
+            result.tap_len = tap_slice.len;
+            result.has_tap = true;
         }
     }
 

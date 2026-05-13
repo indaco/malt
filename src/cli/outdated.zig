@@ -10,6 +10,9 @@ const output = @import("../ui/output.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const cask_mod = @import("../core/cask.zig");
+const tap_mod = @import("../core/tap.zig");
+const install_local_mod = @import("install/local.zig");
+const install_args_mod = @import("install/args.zig");
 const color = @import("../ui/color.zig");
 const help = @import("help.zig");
 
@@ -40,9 +43,15 @@ pub const SNAPSHOT_VERSION: u32 = 1;
 pub const SNAPSHOT_FILE = "outdated.json";
 
 /// One row of the installed-package list fed to the worker pool.
+/// `tap` is the third-party tap label for tap-installed casks (drives
+/// outdated's pre-routing the same way `upgradeCask` uses
+/// `lookupInstalled.tap()`); null for kegs and for casks installed
+/// from the core Homebrew API. Owned by the same allocator as `name`
+/// and `version`; freed by `freeKegRows`.
 pub const KegRow = struct {
     name: []const u8,
     version: []const u8,
+    tap: ?[]const u8 = null,
 };
 
 /// Scope filter for `loadFormulaRows`. `--pinned-only` swaps in a
@@ -937,15 +946,17 @@ pub fn loadFormulaRows(
 
 /// Cask sibling of `loadFormulaRows`. Same lifetime contract; pinned
 /// filter swaps in `WHERE pinned = 1` so `--pinned-only` walks the
-/// pinned-cask audit path symmetrically with formulas.
+/// pinned-cask audit path symmetrically with formulas. The `tap`
+/// column comes along for the ride so `upstreamLatest` can pre-route
+/// tap casks to the owning tap's `.rb` instead of the core API.
 pub fn loadCaskRows(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     filter: KegFilter,
 ) ![]KegRow {
     const sql: [:0]const u8 = switch (filter) {
-        .all => "SELECT token, version FROM casks ORDER BY token;",
-        .pinned_only => "SELECT token, version FROM casks WHERE pinned = 1 ORDER BY token;",
+        .all => "SELECT token, version, tap FROM casks ORDER BY token;",
+        .pinned_only => "SELECT token, version, tap FROM casks WHERE pinned = 1 ORDER BY token;",
     };
     return loadKegRows(allocator, db, sql);
 }
@@ -956,10 +967,15 @@ pub fn freeKegRows(allocator: std.mem.Allocator, rows: []KegRow) void {
     for (rows) |r| {
         allocator.free(r.name);
         allocator.free(r.version);
+        if (r.tap) |t| allocator.free(t);
     }
     allocator.free(rows);
 }
 
+/// Reads `name, version` (and optionally `tap` as column 2) into
+/// caller-owned `KegRow`s. Tap is left null when the column isn't
+/// part of the SELECT (formula loader) or when the row's value is
+/// SQL NULL (core-API cask, or a v5-era row not yet backfilled).
 fn loadKegRows(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
@@ -973,6 +989,7 @@ fn loadKegRows(
         for (rows.items) |r| {
             allocator.free(r.name);
             allocator.free(r.version);
+            if (r.tap) |t| allocator.free(t);
         }
         rows.deinit(allocator);
     }
@@ -984,7 +1001,16 @@ fn loadKegRows(
         const name_dup = try allocator.dupe(u8, name_slice);
         errdefer allocator.free(name_dup);
         const ver_dup = try allocator.dupe(u8, ver_slice);
-        try rows.append(allocator, .{ .name = name_dup, .version = ver_dup });
+        errdefer allocator.free(ver_dup);
+        // Column 2 is the `tap` field for cask loaders; formula
+        // loaders don't SELECT it, so `columnText` returns null and
+        // the row gets a null tap.
+        var tap_dup: ?[]u8 = null;
+        if (stmt.columnText(2)) |tap_ptr| {
+            const tap_slice = std.mem.sliceTo(tap_ptr, 0);
+            tap_dup = try allocator.dupe(u8, tap_slice);
+        }
+        try rows.append(allocator, .{ .name = name_dup, .version = ver_dup, .tap = tap_dup });
     }
     return rows.toOwnedSlice(allocator);
 }
@@ -1185,7 +1211,7 @@ fn collectOutdated(
 
     if (!shouldUsePool(kegs.len)) {
         for (kegs, 0..) |row, i| {
-            latest_versions[i] = try fetchLatest(allocator, api, kind, row);
+            latest_versions[i] = try fetchLatest(allocator, api, ctx.io, ctx.environ, kind, row);
         }
     } else {
         try runPool(ctx, allocator, cache_dir, kegs, workers_override, kind, latest_versions);
@@ -1229,23 +1255,37 @@ fn assembleEntries(
     return out.toOwnedSlice(allocator);
 }
 
-/// Fetch + parse the upstream latest version for `name` onto `alloc`.
+/// Fetch + parse the upstream latest version for `row` onto `alloc`.
 /// Best-effort: network or parse failures collapse to null. Shared by
 /// the serial and pool paths so the JSON-shape logic lives once.
+/// `io` and `environ` are only consumed by the tap-cask branch (which
+/// needs them for the per-tap HEAD resolve + raw `.rb` fetch); core-
+/// API formula/cask lookups go through `api` which already wraps the
+/// shared HTTP client.
 fn upstreamLatest(
     alloc: std.mem.Allocator,
     api: *api_mod.BrewApi,
+    io: std.Io,
+    environ: std.process.Environ,
     kind: Kind,
-    name: []const u8,
+    row: KegRow,
 ) ?[]u8 {
     return switch (kind) {
         .formula => blk: {
-            const json = api.fetchFormula(name) catch break :blk null;
+            const json = api.fetchFormula(row.name) catch break :blk null;
             defer alloc.free(json);
             break :blk parseFormulaLatest(alloc, json);
         },
         .cask => blk: {
-            const json = api.fetchCask(name) catch break :blk null;
+            // Pre-route to the owning tap when set: the core API 404s
+            // for third-party-tap casks, so the API path would silently
+            // drop the row from the audit. Same shape as `upgradeCask`.
+            if (row.tap) |tap_label| {
+                if (!install_args_mod.isCoreTap(tap_label)) {
+                    break :blk tapCaskLatestVersion(alloc, io, environ, tap_label, row.name);
+                }
+            }
+            const json = api.fetchCask(row.name) catch break :blk null;
             defer alloc.free(json);
             var cask = cask_mod.parseCask(alloc, json) catch break :blk null;
             defer cask.deinit();
@@ -1254,15 +1294,52 @@ fn upstreamLatest(
     };
 }
 
+/// Resolve a tap cask's upstream version by fetching the owning tap's
+/// `Casks/<token>.rb` at fresh HEAD and reading the `version` field.
+/// Best-effort: any network, parse, or URL-synth failure collapses to
+/// null and the cask is silently treated as up-to-date (the same
+/// fail-soft contract `fetchCask` follows for the core API).
+fn tapCaskLatestVersion(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    environ: std.process.Environ,
+    tap_label: []const u8,
+    token: []const u8,
+) ?[]u8 {
+    const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse return null;
+    if (slash == 0 or slash == tap_label.len - 1) return null;
+
+    const urls = tap_mod.resolveTapBaseUrls(alloc, tap_label) catch return null;
+    defer urls.deinit(alloc);
+
+    const fresh_sha = tap_mod.resolveHeadCommit(io, environ, alloc, urls.api_head_url) catch return null;
+    defer alloc.free(fresh_sha);
+
+    var http = client_mod.HttpClient.init(io, environ, alloc);
+    defer http.deinit();
+
+    var rb_url_buf: [512]u8 = undefined;
+    const rb_url = std.fmt.bufPrint(&rb_url_buf, "{s}/{s}/Casks/{s}.rb", .{ urls.raw_base, fresh_sha, token }) catch return null;
+
+    var rb_resp = http.get(rb_url) catch return null;
+    defer rb_resp.deinit();
+    if (rb_resp.status != 200) return null;
+
+    const rb_info = install_local_mod.parseRubyFormula(rb_resp.body) orelse return null;
+    return alloc.dupe(u8, rb_info.version) catch null;
+}
+
 /// Serial-path single-row check. Returns a caller-owned latest-version
 /// string if `row` is outdated, null otherwise.
 fn fetchLatest(
     allocator: std.mem.Allocator,
     api: *api_mod.BrewApi,
+    io: std.Io,
+    environ: std.process.Environ,
     kind: Kind,
     row: KegRow,
 ) std.mem.Allocator.Error!?[]u8 {
-    const v = upstreamLatest(allocator, api, kind, row.name) orelse return null;
+    const v = upstreamLatest(allocator, api, io, environ, kind, row) orelse return null;
     if (std.mem.eql(u8, row.version, v)) {
         allocator.free(v);
         return null;
@@ -1296,6 +1373,10 @@ fn parseFormulaLatest(allocator: std.mem.Allocator, json_bytes: []const u8) ?[]u
 
 const WorkerCtx = struct {
     io: std.Io,
+    /// Carried so tap-cask rows can resolve their owning tap's HEAD
+    /// through `tap_mod.resolveHeadCommit`, which reads GitHub auth
+    /// tokens from the parent process environ.
+    environ: std.process.Environ,
     arena: std.heap.ArenaAllocator,
     pool: *client_mod.HttpClientPool,
     cache_dir: []const u8,
@@ -1330,7 +1411,7 @@ fn runOne(out_alloc: std.mem.Allocator, wctx: *WorkerCtx) void {
 
     const arena_alloc = wctx.arena.allocator();
     var local_api = api_mod.BrewApi.init(wctx.io, arena_alloc, http, wctx.cache_dir);
-    const latest = upstreamLatest(arena_alloc, &local_api, wctx.kind, wctx.row.name) orelse return;
+    const latest = upstreamLatest(arena_alloc, &local_api, wctx.io, wctx.environ, wctx.kind, wctx.row) orelse return;
     if (std.mem.eql(u8, wctx.row.version, latest)) return;
 
     // Move into the caller's allocator so the result outlives `arena.deinit()`.
@@ -1362,6 +1443,7 @@ fn runPool(
     }
     for (ctxs, 0..) |*c, i| c.* = .{
         .io = ctx.io,
+        .environ = ctx.environ,
         .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
         .pool = &http_pool,
         .cache_dir = cache_dir,
