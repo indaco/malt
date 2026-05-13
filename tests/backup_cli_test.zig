@@ -258,3 +258,54 @@ test "execute -q sets quiet mode without breaking the write" {
     defer testing.allocator.free(body);
     try testing.expect(std.mem.indexOf(u8, body, "formula wget") != null);
 }
+
+// `mt restore` re-feeds the backup file through `mt install`. For tap
+// casks, the unqualified token would 404 against the core API, so the
+// backup line must carry the `user/repo/token` slug shape that
+// `installTapFormula` resolves. The bare-token form is preserved for
+// core-API casks so backups produced before schema v6 keep working.
+fn seedTapCask(prefix: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url, sha256, tap)
+        \\VALUES ('flux-markdown', 'flux-markdown', '0.1.0',
+        \\        'https://example.invalid/flux.dmg', 'aa', 'xykong/tap');
+    );
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url, sha256)
+        \\VALUES ('firefox', 'Firefox', '120.0', 'https://example/firefox.dmg', 'bb');
+    );
+}
+
+test "execute writes tap casks as <user>/<repo>/<token> so restore re-routes correctly" {
+    var s = try Scratch.init(testing.allocator, "tap_cask_slug");
+    defer s.deinit(testing.allocator);
+    try seedTapCask(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", out_path });
+
+    const body = try readAll(testing.allocator, out_path);
+    defer testing.allocator.free(body);
+
+    // Tap cask: fully-qualified slug so restore routes through
+    // `installTapFormula`.
+    try testing.expect(std.mem.indexOf(u8, body, "cask xykong/tap/flux-markdown") != null);
+
+    // Bare-token form preserved for the core-API cask alongside.
+    try testing.expect(std.mem.indexOf(u8, body, "cask firefox\n") != null);
+
+    // Negative: the tap cask must NOT also surface in the unqualified
+    // form, otherwise restore would attempt both and the bare-token
+    // attempt would 404 against the core API.
+    try testing.expect(std.mem.indexOf(u8, body, "cask flux-markdown\n") == null);
+}

@@ -250,7 +250,7 @@ test "force-upgrade-cask orchestration: pin survives removeRecord + recordInstal
         \\}
     );
     defer c2.deinit();
-    try malt.cask.recordInstall(&db, &c2, "/Applications/Firefox.app");
+    try malt.cask.recordInstall(&db, &c2, "/Applications/Firefox.app", null);
 
     // Step 3: orchestration must reapply the pin.
     if (was_pinned) {
@@ -852,4 +852,69 @@ test "upgrade <pinned-tap-keg> short-circuits without resolving HEAD" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     // Pinned + non-force = quiet skip on the tap branch too.
     try upgrade.execute(&ctx, testing.allocator, &.{"frozen-tap"});
+}
+
+// `backfillCaskTap` is the lazy-attribution writer the v5-row fallback
+// probe relies on: once it discovers the owning tap, subsequent
+// upgrades must pre-route directly instead of probing every registered
+// tap again. The pure SQL check sidesteps the network surface and pins
+// both the success and the WHERE-tap-IS-NULL idempotence guard.
+fn readCaskTap(db: *sqlite.Database, token: []const u8) !?[]u8 {
+    var stmt = try db.prepare("SELECT tap FROM casks WHERE token = ?1 LIMIT 1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    _ = try stmt.step();
+    const raw = stmt.columnText(0) orelse return null;
+    const slice = std.mem.sliceTo(raw, 0);
+    return try testing.allocator.dupe(u8, slice);
+}
+
+test "backfillCaskTap writes the tap label on a NULL row" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO casks(token, name, version, url)
+        \\VALUES ('legacy', 'legacy', '1.0', 'https://example.invalid/x.dmg');
+    );
+
+    upgrade.backfillCaskTap(&db, "legacy", "xykong/tap");
+
+    const got = try readCaskTap(&db, "legacy") orelse return error.TestUnexpectedResult;
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("xykong/tap", got);
+}
+
+test "backfillCaskTap leaves an already-set row alone (WHERE tap IS NULL)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO casks(token, name, version, url, tap)
+        \\VALUES ('claimed', 'claimed', '1.0', 'https://example.invalid/x.dmg',
+        \\        'first-owner/tap');
+    );
+
+    // Try to overwrite — the guard must keep the row's original tap.
+    upgrade.backfillCaskTap(&db, "claimed", "different-owner/tap");
+
+    const got = try readCaskTap(&db, "claimed") orelse return error.TestUnexpectedResult;
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("first-owner/tap", got);
+}
+
+test "backfillCaskTap on an absent token is a silent no-op" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // No INSERT — the UPDATE matches zero rows, must not raise.
+    upgrade.backfillCaskTap(&db, "never-installed", "x/y");
+
+    var stmt = try db.prepare("SELECT COUNT(*) FROM casks;");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
 }

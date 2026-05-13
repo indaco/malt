@@ -131,7 +131,7 @@ test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row"
     defer testing.allocator.free(app_path_z);
     try test_io.makeDirAbsolute(std.Options.debug_io, app_path_z);
 
-    try cask.recordInstall(&db, &c, app_path_z);
+    try cask.recordInstall(&db, &c, app_path_z, null);
     try testing.expect(cask.isInstalled(&db, "firefox"));
 
     const prefix: [:0]const u8 = "/tmp/mc-uninstall";
