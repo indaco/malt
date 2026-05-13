@@ -232,7 +232,7 @@ jobs:
       name: Release
     steps:
       - name: Download rendered cask
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: homebrew-cask
           path: /tmp/cask
