@@ -158,18 +158,29 @@ pub fn writeHumanOutput(
     }
 }
 
+/// Flag combinations for the kegs/casks list SELECT. Used as the switch
+/// key in `formulaListSql` / `caskListSql` so the compiler enforces
+/// exhaustive handling of every (pinned × tap) variant.
+const ListSqlVariant = enum { plain, tap, pinned, pinned_tap };
+
+fn listSqlVariant(show_pinned: bool, tap_filter: bool) ListSqlVariant {
+    if (show_pinned and tap_filter) return .pinned_tap;
+    if (show_pinned) return .pinned;
+    if (tap_filter) return .tap;
+    return .plain;
+}
+
 /// Compose the kegs SELECT with optional pinned + tap filters. The
-/// `?1` placeholder is bound by the caller when `tap_filter = true`.
-/// Strict equality means NULL-tap rows never match — kegs are always
-/// attributed at install time, so this is purely future-proofing.
+/// `?1` placeholder is bound by the caller for the `.tap` / `.pinned_tap`
+/// variants. Strict equality means NULL-tap rows never match — kegs are
+/// always attributed at install time, so this is purely future-proofing.
 fn formulaListSql(show_pinned: bool, tap_filter: bool) [:0]const u8 {
-    if (show_pinned and tap_filter)
-        return "SELECT name, version, pinned FROM kegs WHERE pinned = 1 AND tap = ?1 ORDER BY name;";
-    if (show_pinned)
-        return "SELECT name, version, pinned FROM kegs WHERE pinned = 1 ORDER BY name;";
-    if (tap_filter)
-        return "SELECT name, version, pinned FROM kegs WHERE tap = ?1 ORDER BY name;";
-    return "SELECT name, version, pinned FROM kegs ORDER BY name;";
+    return switch (listSqlVariant(show_pinned, tap_filter)) {
+        .plain => "SELECT name, version, pinned FROM kegs ORDER BY name;",
+        .tap => "SELECT name, version, pinned FROM kegs WHERE tap = ?1 ORDER BY name;",
+        .pinned => "SELECT name, version, pinned FROM kegs WHERE pinned = 1 ORDER BY name;",
+        .pinned_tap => "SELECT name, version, pinned FROM kegs WHERE pinned = 1 AND tap = ?1 ORDER BY name;",
+    };
 }
 
 /// Cask counterpart to `formulaListSql`. NULL tap means "unattributed"
@@ -177,13 +188,12 @@ fn formulaListSql(show_pinned: bool, tap_filter: bool) [:0]const u8 {
 /// honest. The user-facing workaround (`mt upgrade <token>`) is in the
 /// help string.
 fn caskListSql(show_pinned: bool, tap_filter: bool) [:0]const u8 {
-    if (show_pinned and tap_filter)
-        return "SELECT token, version FROM casks WHERE pinned = 1 AND tap = ?1 ORDER BY token;";
-    if (show_pinned)
-        return "SELECT token, version FROM casks WHERE pinned = 1 ORDER BY token;";
-    if (tap_filter)
-        return "SELECT token, version FROM casks WHERE tap = ?1 ORDER BY token;";
-    return "SELECT token, version FROM casks ORDER BY token;";
+    return switch (listSqlVariant(show_pinned, tap_filter)) {
+        .plain => "SELECT token, version FROM casks ORDER BY token;",
+        .tap => "SELECT token, version FROM casks WHERE tap = ?1 ORDER BY token;",
+        .pinned => "SELECT token, version FROM casks WHERE pinned = 1 ORDER BY token;",
+        .pinned_tap => "SELECT token, version FROM casks WHERE pinned = 1 AND tap = ?1 ORDER BY token;",
+    };
 }
 
 /// `--pinned` walks formulas + casks together so the output is a single
@@ -230,30 +240,43 @@ fn writePinnedHuman(
     }
 }
 
+/// Which kinds participate in the `--pinned` view. `.neither` short-circuits
+/// the caller (no SELECT to run); the other three pick a UNION shape.
+const PinnedUnionKind = enum { neither, formula_only, cask_only, both };
+
+fn pinnedUnionKind(show_formula: bool, show_cask: bool) PinnedUnionKind {
+    if (show_formula and show_cask) return .both;
+    if (show_formula) return .formula_only;
+    if (show_cask) return .cask_only;
+    return .neither;
+}
+
 /// Build the SQL that drives the `--pinned` view. The 'formula' / 'cask'
 /// literal column tags each row so the caller can render the right marker.
 /// `?1` is bound once and reused across both UNION branches when
 /// `tap_filter` is set — sqlite parameter reuse is well-defined.
 fn pinnedUnionSql(show_formula: bool, show_cask: bool, tap_filter: bool) ?[:0]const u8 {
-    if (show_formula and show_cask) {
-        if (tap_filter) return "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 AND tap = ?1 " ++
-            "UNION ALL " ++
-            "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 AND tap = ?1 " ++
-            "ORDER BY name;";
-        return "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 " ++
-            "UNION ALL " ++
-            "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 " ++
-            "ORDER BY name;";
-    }
-    if (show_formula) {
-        if (tap_filter) return "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 AND tap = ?1 ORDER BY name;";
-        return "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 ORDER BY name;";
-    }
-    if (show_cask) {
-        if (tap_filter) return "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 AND tap = ?1 ORDER BY name;";
-        return "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 ORDER BY name;";
-    }
-    return null;
+    return switch (pinnedUnionKind(show_formula, show_cask)) {
+        .neither => null,
+        .both => if (tap_filter)
+            "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 AND tap = ?1 " ++
+                "UNION ALL " ++
+                "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 AND tap = ?1 " ++
+                "ORDER BY name;"
+        else
+            "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 " ++
+                "UNION ALL " ++
+                "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 " ++
+                "ORDER BY name;",
+        .formula_only => if (tap_filter)
+            "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 AND tap = ?1 ORDER BY name;"
+        else
+            "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 ORDER BY name;",
+        .cask_only => if (tap_filter)
+            "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 AND tap = ?1 ORDER BY name;"
+        else
+            "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 ORDER BY name;",
+    };
 }
 
 /// Emit the leading cyan bullet + space, honouring `NO_COLOR`.
