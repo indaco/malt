@@ -111,8 +111,27 @@ const tap_archive_suffixes = [_]struct {
     .{ .suffix = ".zip", .kind = .zip },
 };
 
-/// Install a tap formula by fetching the Ruby formula from GitHub and
-/// extracting URL + SHA256 for the current platform.
+/// Selects which subdirectory of the tap the installer probes for the
+/// `.rb` file. `.formula_or_cask` (the default for `mt install`) tries
+/// `Formula/` first and falls back to `Casks/`; `.cask_only` skips the
+/// Formula/ probe entirely.
+///
+/// `.cask_only` exists because the formula branch of
+/// `materializeRubyFormula` opens its own DB transaction. Callers
+/// holding an open transaction (currently `upgradeRoutedTapCask`)
+/// would deadlock if a Formula/ probe accidentally resolved 200 — for
+/// example, on a tap that ships both `Formula/<name>.rb` and
+/// `Casks/<name>.rb` for the same token. The flag pins the resolver
+/// to the cask subdirectory so that branch is structurally
+/// unreachable.
+const TapResolveKind = enum {
+    formula_or_cask,
+    cask_only,
+};
+
+/// Install a tap formula or cask. Probes `Formula/<name>.rb` first and
+/// falls back to `Casks/<name>.rb` so a single entry point covers both
+/// shapes — the `mt install <user>/<repo>/<name>` form the user types.
 pub fn installTapFormula(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -122,6 +141,37 @@ pub fn installTapFormula(
     prefix: []const u8,
     dry_run: bool,
     force: bool,
+) !void {
+    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, .formula_or_cask);
+}
+
+/// Install a tap cask whose owning tap is already known. Skips the
+/// `Formula/` probe — safe to call from inside an open DB transaction
+/// because the formula branch of `materializeRubyFormula` (which
+/// begins its own transaction) is structurally unreachable.
+pub fn installTapCask(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    pkg_name: []const u8,
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    prefix: []const u8,
+    dry_run: bool,
+    force: bool,
+) !void {
+    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, .cask_only);
+}
+
+fn installTapRb(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    pkg_name: []const u8,
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    prefix: []const u8,
+    dry_run: bool,
+    force: bool,
+    kind: TapResolveKind,
 ) !void {
     const parts = args.parseTapName(pkg_name) orelse {
         output.err("Invalid tap formula format: {s}", .{pkg_name});
@@ -155,11 +205,17 @@ pub fn installTapFormula(
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
 
-    // Try Formula/ first, then Casks/
+    // First probe: Formula/ for the default mode, Casks/ when the
+    // caller has pinned the resolve to cask-only.
+    const initial_subdir: []const u8 = switch (kind) {
+        .formula_or_cask => "Formula",
+        .cask_only => "Casks",
+    };
     var url_buf: [512]u8 = undefined;
-    const rb_url = std.fmt.bufPrint(&url_buf, "{s}/{s}/Formula/{s}.rb", .{
+    const rb_url = std.fmt.bufPrint(&url_buf, "{s}/{s}/{s}/{s}.rb", .{
         urls.raw_base,
         commit_sha,
+        initial_subdir,
         parts.formula,
     }) catch return InstallError.FormulaNotFound;
 
@@ -175,7 +231,13 @@ pub fn installTapFormula(
     var cask_resp: ?client_mod.Response = null;
     defer if (cask_resp) |*c| c.deinit();
 
-    const resp: *const client_mod.Response = if (rb_resp.status == 200) &rb_resp else blk: {
+    const resp: *const client_mod.Response = blk: {
+        if (rb_resp.status == 200) break :blk &rb_resp;
+        // `.cask_only` already probed Casks/ — there is no fallback to
+        // try, and the downstream `resp.status != 200` check surfaces
+        // the not-found error.
+        if (kind == .cask_only) break :blk &rb_resp;
+
         const cask_url = std.fmt.bufPrint(&url_buf, "{s}/{s}/Casks/{s}.rb", .{
             urls.raw_base,
             commit_sha,
