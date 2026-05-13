@@ -481,11 +481,15 @@ pub const InstalledCaskRow = struct {
     app_path: ?[]const u8 = null,
     auto_updates: bool = false,
     installed_at: ?[]const u8 = null,
+    /// Null for casks installed from the core Homebrew API (the default
+    /// `homebrew/cask` tap) and for v5-era rows that pre-date `casks.tap`
+    /// and haven't been backfilled yet — they get attributed on the next
+    /// `mt upgrade <token>`.
+    tap: ?[]const u8 = null,
 };
 
-/// Resolved column count is encoded in the `WHERE`-ordered SELECT below.
 const installed_cask_select =
-    "SELECT token, name, version, url, app_path, auto_updates, installed_at " ++
+    "SELECT token, name, version, url, app_path, auto_updates, installed_at, tap " ++
     "FROM casks WHERE token = ?1 LIMIT 1;";
 
 fn readInstalledCaskRow(stmt: *sqlite.Statement, fallback_name: []const u8) InstalledCaskRow {
@@ -497,6 +501,7 @@ fn readInstalledCaskRow(stmt: *sqlite.Statement, fallback_name: []const u8) Inst
         .app_path = if (stmt.columnText(4)) |p| std.mem.sliceTo(p, 0) else null,
         .auto_updates = stmt.columnBool(5),
         .installed_at = if (stmt.columnText(6)) |d| std.mem.sliceTo(d, 0) else null,
+        .tap = if (stmt.columnText(7)) |t| std.mem.sliceTo(t, 0) else null,
     };
 }
 
@@ -510,6 +515,9 @@ pub fn encodeInstalledCaskHuman(
     const col: usize = 14;
     try encodeHeader(w, colorize, row.token, "", row.version orelse "unknown", "(cask)");
     try output.writeField(w, scratch, colorize, col, "Name", "{s}", .{row.name});
+    // Omit the Tap line for core-API casks — `homebrew/cask` is the
+    // default and printing it adds noise without information.
+    if (row.tap) |t| try output.writeField(w, scratch, colorize, col, "Tap", "{s}", .{t});
     try output.writeField(w, scratch, colorize, col, "URL", "{s}", .{row.url orelse "N/A"});
     try output.writeField(w, scratch, colorize, col, "App", "{s}", .{row.app_path orelse "N/A"});
     if (row.auto_updates) try output.writeField(w, scratch, colorize, col, "Auto-updates", "yes", .{});
@@ -531,6 +539,10 @@ pub fn encodeInstalledCaskJson(w: *std.Io.Writer, row: *const InstalledCaskRow) 
     try w.writeAll(if (row.auto_updates) "true" else "false");
     try w.writeAll(",\"installed_at\":");
     try output.jsonStr(w, row.installed_at orelse "");
+    // Matches the formula JSON's tap field — always present, empty
+    // string when unattributed so consumers can branch on truthiness.
+    try w.writeAll(",\"tap\":");
+    try output.jsonStr(w, row.tap orelse "");
     try w.writeAll("}\n");
 }
 

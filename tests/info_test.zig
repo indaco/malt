@@ -256,7 +256,7 @@ test "encodeInstalledCaskJson produces the documented shape" {
     try info.encodeInstalledCaskJson(&aw.writer, &row);
 
     try testing.expectEqualStrings(
-        "{\"name\":\"firefox\",\"type\":\"cask\",\"installed\":true,\"version\":\"120.0\",\"full_name\":\"Firefox\",\"url\":\"https://example.com/firefox.dmg\",\"app_path\":\"/Applications/Firefox.app\",\"auto_updates\":false,\"installed_at\":\"2026-05-13 10:40:56\"}\n",
+        "{\"name\":\"firefox\",\"type\":\"cask\",\"installed\":true,\"version\":\"120.0\",\"full_name\":\"Firefox\",\"url\":\"https://example.com/firefox.dmg\",\"app_path\":\"/Applications/Firefox.app\",\"auto_updates\":false,\"installed_at\":\"2026-05-13 10:40:56\",\"tap\":\"\"}\n",
         aw.written(),
     );
 }
@@ -273,7 +273,60 @@ test "encodeInstalledCaskJson emits empty strings for null fields" {
     try info.encodeInstalledCaskJson(&aw.writer, &row);
 
     try testing.expectEqualStrings(
-        "{\"name\":\"ghost\",\"type\":\"cask\",\"installed\":true,\"version\":\"\",\"full_name\":\"ghost\",\"url\":\"\",\"app_path\":\"\",\"auto_updates\":true,\"installed_at\":\"\"}\n",
+        "{\"name\":\"ghost\",\"type\":\"cask\",\"installed\":true,\"version\":\"\",\"full_name\":\"ghost\",\"url\":\"\",\"app_path\":\"\",\"auto_updates\":true,\"installed_at\":\"\",\"tap\":\"\"}\n",
         aw.written(),
     );
+}
+
+test "encodeInstalledCaskHuman surfaces the owning tap when set" {
+    const row: info.InstalledCaskRow = .{
+        .token = "deckclip",
+        .name = "deckclip",
+        .version = "1.4.5",
+        .tap = "yuzeguitarist/deck",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, false);
+
+    const out = aw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "Tap:          yuzeguitarist/deck") != null);
+    // Tap line sits between Name and URL — same position as `From:` for formulas.
+    const name_idx = std.mem.indexOf(u8, out, "Name:") orelse return error.NoNameLine;
+    const tap_idx = std.mem.indexOf(u8, out, "Tap:") orelse return error.NoTapLine;
+    const url_idx = std.mem.indexOf(u8, out, "URL:") orelse return error.NoUrlLine;
+    try testing.expect(name_idx < tap_idx);
+    try testing.expect(tap_idx < url_idx);
+}
+
+test "encodeInstalledCaskHuman omits the Tap line when null (core-API cask)" {
+    const row: info.InstalledCaskRow = .{
+        .token = "firefox",
+        .name = "Firefox",
+        .version = "120.0",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, false);
+
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "Tap:") == null);
+}
+
+test "encodeInstalledCaskJson includes tap as an empty string for null and the label for tap casks" {
+    const tapped: info.InstalledCaskRow = .{
+        .token = "deckclip",
+        .name = "deckclip",
+        .version = "1.4.5",
+        .tap = "yuzeguitarist/deck",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try info.encodeInstalledCaskJson(&aw.writer, &tapped);
+
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "\"tap\":\"yuzeguitarist/deck\"") != null);
 }
