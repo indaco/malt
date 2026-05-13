@@ -92,6 +92,55 @@ fn seedCaskRow(prefix: []const u8) !void {
     _ = try stmt.step();
 }
 
+fn seedTapCaskRow(prefix: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var stmt = try db.prepare(
+        \\INSERT INTO casks (token, name, version, url, sha256, app_path, tap)
+        \\VALUES ('deckclip', 'deckclip', '1.4.5', 'https://example/deckclip.dmg', 'bb', '/Applications/Deck.app', 'yuzeguitarist/deck');
+    );
+    defer stmt.finalize();
+    _ = try stmt.step();
+}
+
+/// End-to-end stdout capture. Backs `ctx.stdout` with a real fd to a
+/// scratch file so the encoder's writes survive past `execute` and can
+/// be re-read for assertions. Caller owns the returned slice.
+fn captureExecute(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    tag: []const u8,
+) ![]u8 {
+    const ts = test_io.nanoTimestamp(std.Options.debug_io);
+    const cap_path = try std.fmt.allocPrintSentinel(
+        allocator,
+        "/tmp/malt_info_cap_{s}_{d}",
+        .{ tag, ts },
+        0,
+    );
+    defer allocator.free(cap_path);
+    defer test_io.deleteFileAbsolute(std.Options.debug_io, cap_path) catch {};
+
+    var file = try test_io.createFileAbsolute(std.Options.debug_io, cap_path, .{ .truncate = true });
+    errdefer file.close(std.Options.debug_io);
+
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .stdout = file,
+        .stderr = test_io.testSink(),
+    };
+
+    try info.execute(&ctx, allocator, args);
+    file.close(std.Options.debug_io);
+
+    return try test_io.readFileAbsoluteAlloc(std.Options.debug_io, allocator, cap_path, 64 * 1024);
+}
+
 // --- early-return + arg parsing ---------------------------------------
 
 test "execute --help short-circuits without touching the database" {
@@ -248,4 +297,78 @@ test "execute falls back to cached API formula metadata for a not-locally-instal
     defer unquiet();
 
     try info.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"jq"});
+}
+
+// --- end-to-end stdout capture: tap surfacing -------------------------
+//
+// WHY a separate block: the tests above prove `execute` doesn't crash on
+// the cask path, but `debug_ctx.stdout = -1` means they assert nothing
+// about the bytes. These tests back stdout with a real file so the full
+// DB → SELECT → readInstalledCaskRow → encoder → writer chain is
+// observable — catching column-index regressions, SELECT shape drift,
+// and tap-surfacing bugs that the pure encoder tests cannot see.
+
+test "execute on a tap-cask emits a Tap: line at the bottom of the human dump" {
+    var s = try Scratch.init(testing.allocator, "tap_cask_human");
+    defer s.deinit(testing.allocator);
+    try seedTapCaskRow(s.path);
+
+    const out = try captureExecute(testing.allocator, &.{"deckclip"}, "tap_cask_human");
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "deckclip: 1.4.5 (cask)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Tap:          yuzeguitarist/deck") != null);
+    const installed_idx = std.mem.indexOf(u8, out, "Installed:") orelse return error.NoInstalledLine;
+    const tap_idx = std.mem.indexOf(u8, out, "Tap:") orelse return error.NoTapLine;
+    try testing.expect(installed_idx < tap_idx);
+}
+
+test "execute on a NULL-tap cask omits the Tap: line entirely" {
+    var s = try Scratch.init(testing.allocator, "null_tap_human");
+    defer s.deinit(testing.allocator);
+    try seedCaskRow(s.path);
+
+    const out = try captureExecute(testing.allocator, &.{"firefox"}, "null_tap_human");
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "firefox: 120.0 (cask)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Tap:") == null);
+}
+
+test "execute --json on a tap-cask exposes the tap field" {
+    var s = try Scratch.init(testing.allocator, "tap_cask_json");
+    defer s.deinit(testing.allocator);
+    try seedTapCaskRow(s.path);
+
+    const prior_mode: output.OutputMode = if (output.isJson()) .json else .human;
+    output.setMode(.json);
+    defer output.setMode(prior_mode);
+
+    const out = try captureExecute(testing.allocator, &.{"deckclip"}, "tap_cask_json");
+    defer testing.allocator.free(out);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+
+    const tap_val = parsed.value.object.get("tap") orelse return error.MissingTapKey;
+    try testing.expectEqualStrings("yuzeguitarist/deck", tap_val.string);
+}
+
+test "execute --json on a NULL-tap cask still emits tap as an empty string" {
+    var s = try Scratch.init(testing.allocator, "null_tap_json");
+    defer s.deinit(testing.allocator);
+    try seedCaskRow(s.path);
+
+    const prior_mode: output.OutputMode = if (output.isJson()) .json else .human;
+    output.setMode(.json);
+    defer output.setMode(prior_mode);
+
+    const out = try captureExecute(testing.allocator, &.{"firefox"}, "null_tap_json");
+    defer testing.allocator.free(out);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+
+    const tap_val = parsed.value.object.get("tap") orelse return error.MissingTapKey;
+    try testing.expectEqualStrings("", tap_val.string);
 }

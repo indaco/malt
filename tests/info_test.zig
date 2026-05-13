@@ -188,3 +188,171 @@ test "encodeApiCaskJson produces the documented shape" {
         aw.written(),
     );
 }
+
+// --- installed-cask encoders -------------------------------------------
+
+test "encodeInstalledCaskHuman renders every populated field" {
+    const row: info.InstalledCaskRow = .{
+        .token = "firefox",
+        .name = "Firefox",
+        .version = "120.0",
+        .url = "https://example.com/firefox.dmg",
+        .app_path = "/Applications/Firefox.app",
+        .auto_updates = true,
+        .installed_at = "2026-05-13 10:40:56",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, false);
+
+    const out = aw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "firefox: 120.0 (cask)\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Name:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Firefox") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "URL:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "https://example.com/firefox.dmg") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "App:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "/Applications/Firefox.app") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Auto-updates:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Installed:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "2026-05-13 10:40:56") != null);
+}
+
+test "encodeInstalledCaskHuman omits Auto-updates when false and uses fallbacks for nulls" {
+    const row: info.InstalledCaskRow = .{
+        .token = "ghost",
+        .name = "ghost",
+        // version/url/app_path/installed_at null → human fallbacks ("unknown"/"N/A")
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, false);
+
+    const out = aw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "ghost: unknown (cask)\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Auto-updates:") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "URL:          N/A") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "App:          N/A") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Installed:    N/A") != null);
+}
+
+test "encodeInstalledCaskJson produces the documented shape" {
+    const row: info.InstalledCaskRow = .{
+        .token = "firefox",
+        .name = "Firefox",
+        .version = "120.0",
+        .url = "https://example.com/firefox.dmg",
+        .app_path = "/Applications/Firefox.app",
+        .auto_updates = false,
+        .installed_at = "2026-05-13 10:40:56",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try info.encodeInstalledCaskJson(&aw.writer, &row);
+
+    try testing.expectEqualStrings(
+        "{\"name\":\"firefox\",\"type\":\"cask\",\"installed\":true,\"version\":\"120.0\",\"full_name\":\"Firefox\",\"url\":\"https://example.com/firefox.dmg\",\"app_path\":\"/Applications/Firefox.app\",\"auto_updates\":false,\"installed_at\":\"2026-05-13 10:40:56\",\"tap\":\"\"}\n",
+        aw.written(),
+    );
+}
+
+test "encodeInstalledCaskJson emits empty strings for null fields" {
+    const row: info.InstalledCaskRow = .{
+        .token = "ghost",
+        .name = "ghost",
+        .auto_updates = true,
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try info.encodeInstalledCaskJson(&aw.writer, &row);
+
+    try testing.expectEqualStrings(
+        "{\"name\":\"ghost\",\"type\":\"cask\",\"installed\":true,\"version\":\"\",\"full_name\":\"ghost\",\"url\":\"\",\"app_path\":\"\",\"auto_updates\":true,\"installed_at\":\"\",\"tap\":\"\"}\n",
+        aw.written(),
+    );
+}
+
+test "encodeInstalledCaskHuman surfaces the owning tap when set" {
+    const row: info.InstalledCaskRow = .{
+        .token = "deckclip",
+        .name = "deckclip",
+        .version = "1.4.5",
+        .installed_at = "2026-05-13 10:40:56",
+        .tap = "yuzeguitarist/deck",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, false);
+
+    const out = aw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "Tap:          yuzeguitarist/deck") != null);
+    // Tap is appended after Installed so the top of the dump stays
+    // stable for scripts that grep the first N lines of `mt info`.
+    const installed_idx = std.mem.indexOf(u8, out, "Installed:") orelse return error.NoInstalledLine;
+    const tap_idx = std.mem.indexOf(u8, out, "Tap:") orelse return error.NoTapLine;
+    try testing.expect(installed_idx < tap_idx);
+}
+
+test "encodeInstalledCaskHuman omits the Tap line when null (core-API cask)" {
+    const row: info.InstalledCaskRow = .{
+        .token = "firefox",
+        .name = "Firefox",
+        .version = "120.0",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, false);
+
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "Tap:") == null);
+}
+
+test "encodeInstalledCaskJson includes tap as an empty string for null and the label for tap casks" {
+    const tapped: info.InstalledCaskRow = .{
+        .token = "deckclip",
+        .name = "deckclip",
+        .version = "1.4.5",
+        .tap = "yuzeguitarist/deck",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try info.encodeInstalledCaskJson(&aw.writer, &tapped);
+
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "\"tap\":\"yuzeguitarist/deck\"") != null);
+}
+
+test "encodeInstalledCaskJson output parses as JSON with .tap reachable" {
+    // Loose shape guard: catches future reorderings or sibling-field
+    // additions that the exact-bytes test would also catch, but keeps
+    // working even if a later refactor reorders the object keys. WHY
+    // this matters: downstream consumers branch on `.tap`, not on byte
+    // position — a parses-as test pins the contract they actually rely on.
+    const row: info.InstalledCaskRow = .{
+        .token = "deckclip",
+        .name = "deckclip",
+        .version = "1.4.5",
+        .tap = "yuzeguitarist/deck",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try info.encodeInstalledCaskJson(&aw.writer, &row);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer parsed.deinit();
+
+    const tap_val = parsed.value.object.get("tap") orelse return error.MissingTapKey;
+    try testing.expectEqualStrings("yuzeguitarist/deck", tap_val.string);
+    const type_val = parsed.value.object.get("type") orelse return error.MissingTypeKey;
+    try testing.expectEqualStrings("cask", type_val.string);
+}
