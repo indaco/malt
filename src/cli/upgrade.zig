@@ -563,8 +563,13 @@ fn upgradeRoutedTapCask(
     defer urls.deinit(allocator);
 
     // Always force-resolve HEAD: the whole point of `mt upgrade` is
-    // "give me the latest", so we ignore any cached pin here.
-    const fresh_sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch return error.Aborted;
+    // "give me the latest", so we ignore any cached pin here. Same
+    // error shape as `upgradeTapFormula` so probe-loop callers can
+    // grep for the resolve failure consistently.
+    const fresh_sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch |e| {
+        output.err("Could not resolve {s} HEAD: {s}", .{ tap_label, tap_mod.describeResolveError(e) });
+        return error.Aborted;
+    };
     defer allocator.free(fresh_sha);
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
@@ -573,7 +578,10 @@ fn upgradeRoutedTapCask(
     var rb_url_buf: [512]u8 = undefined;
     const rb_url = std.fmt.bufPrint(&rb_url_buf, "{s}/{s}/Casks/{s}.rb", .{ urls.raw_base, fresh_sha, token }) catch return error.Aborted;
 
-    var rb_resp = http.get(rb_url) catch return error.Aborted;
+    var rb_resp = http.get(rb_url) catch |e| {
+        output.err("Could not fetch {s} from tap {s}: {s}", .{ token, tap_label, @errorName(e) });
+        return error.Aborted;
+    };
     defer rb_resp.deinit();
     if (rb_resp.status != 200) return error.NotInTap;
 
@@ -607,24 +615,35 @@ fn upgradeRoutedTapCask(
     // Mirrors the core-API path in `upgradeCask` so a partial failure
     // can't leave the casks row missing once the new app is on disk.
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
-    db.beginTransaction() catch return error.Aborted;
-    errdefer db.rollback();
-
-    installer.uninstall(token) catch {
-        output.err("Failed to remove old version of {s}", .{token});
+    db.beginTransaction() catch |txn_err| {
+        output.err("Could not begin DB transaction for {s}: {s} ({s})", .{ token, @errorName(txn_err), db.errMsg() });
         return error.Aborted;
     };
 
-    const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap_label, token }) catch return error.Aborted;
+    installer.uninstall(token) catch |un_err| {
+        output.err("Failed to remove old version of {s}: {s}", .{ token, @errorName(un_err) });
+        db.rollback();
+        return error.Aborted;
+    };
+
+    const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap_label, token }) catch {
+        db.rollback();
+        return error.Aborted;
+    };
     defer allocator.free(full_name);
 
     var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
-    install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true) catch {
-        output.err("Failed to upgrade tap cask {s}", .{full_name});
+    install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true) catch |in_err| {
+        output.err("Failed to upgrade tap cask {s}: {s}", .{ full_name, @errorName(in_err) });
+        db.rollback();
         return error.Aborted;
     };
 
-    db.commit() catch return error.Aborted;
+    db.commit() catch |commit_err| {
+        output.err("Failed to commit upgrade for cask {s}: {s} ({s})", .{ token, @errorName(commit_err), db.errMsg() });
+        db.rollback();
+        return error.Aborted;
+    };
 
     if (was_pinned) _ = pin_mod.setPinned(db, token, true) catch {};
 }
