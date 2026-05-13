@@ -35,7 +35,8 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
     try db.exec("CREATE INDEX IF NOT EXISTS idx_kegs_name ON kegs(name);");
     try db.exec("CREATE INDEX IF NOT EXISTS idx_kegs_store ON kegs(store_sha256);");
 
-    // 3. casks
+    // 3. casks. `pinned` is added by v4, `tap` by v6 — both ALTERs are
+    //    PRAGMA-guarded so fresh and upgraded DBs converge.
     try db.exec(
         \\CREATE TABLE IF NOT EXISTS casks (
         \\    id            INTEGER PRIMARY KEY,
@@ -101,7 +102,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 5;
+pub const known_schema_version: i64 = 6;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -116,6 +117,7 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 3) try migrateV2toV3(db);
     if (ver < 4) try migrateV3toV4(db);
     if (ver < 5) try migrateV4toV5(db);
+    if (ver < 6) try migrateV5toV6(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -312,6 +314,35 @@ fn migrateV4toV5(db: *sqlite.Database) sqlite.SqliteError!void {
         defer stmt.finalize();
         if (try stmt.step()) return sqlite.SqliteError.ConstraintViolation;
     }
+
+    try db.commit();
+}
+
+/// v6 — record the originating tap on every cask row so `mt upgrade`
+/// can pre-route directly to the owning tap instead of probing every
+/// registered tap on each invocation. Legacy rows stay NULL until the
+/// next upgrade fills them in via the fallback probe.
+fn migrateV5toV6(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    var have_column = false;
+    {
+        var stmt = try db.prepare("PRAGMA table_info(casks);");
+        defer stmt.finalize();
+        while (try stmt.step()) {
+            const name = stmt.columnText(1) orelse continue;
+            if (std.mem.eql(u8, std.mem.sliceTo(name, 0), "tap")) {
+                have_column = true;
+                break;
+            }
+        }
+    }
+    if (!have_column) {
+        try db.exec("ALTER TABLE casks ADD COLUMN tap TEXT;");
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (6);");
 
     try db.commit();
 }

@@ -986,7 +986,10 @@ fn materializeTapCask(
     bar.finish();
     defer allocator.free(app_path);
 
-    cask_mod.recordInstall(db, &cask, app_path) catch {
+    // tap_label is the third-party tap origin (`user/repo`) — drives
+    // pre-routing in `mt upgrade` so subsequent invocations skip the
+    // multi-tap probe loop.
+    cask_mod.recordInstall(db, &cask, app_path, resolved.tap_label) catch {
         output.warn("Failed to record cask {s} in database", .{cask.token});
     };
 

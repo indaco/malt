@@ -250,7 +250,7 @@ test "force-upgrade-cask orchestration: pin survives removeRecord + recordInstal
         \\}
     );
     defer c2.deinit();
-    try malt.cask.recordInstall(&db, &c2, "/Applications/Firefox.app");
+    try malt.cask.recordInstall(&db, &c2, "/Applications/Firefox.app", null);
 
     // Step 3: orchestration must reapply the pin.
     if (was_pinned) {

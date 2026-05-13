@@ -533,18 +533,129 @@ fn upgradeTapFormula(
     };
 }
 
+/// Distinguishes "this tap doesn't own the cask" from "the upgrade
+/// attempt failed". The probe loop in `upgradeTapCaskFallback` continues
+/// on either — the pre-routed call from `upgradeCask` continues only on
+/// the latter (a 404 against a recorded `casks.tap` is user-facing).
+const TapRouteError = error{ NotInTap, Aborted };
+
+/// Upgrade a cask whose owning tap is known. Fetches the tap's
+/// `Casks/<token>.rb` once to read the new version, short-circuits when
+/// the cask is already at that version, and otherwise drives the same
+/// uninstall + tap re-install sequence the install path uses. Centralises
+/// the version check so we never re-download the artifact for a cask
+/// whose tap hasn't bumped its version.
+fn upgradeRoutedTapCask(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    token: []const u8,
+    tap_label: []const u8,
+    installed_version: []const u8,
+    db: *sqlite.Database,
+    prefix: [:0]const u8,
+    dry_run: bool,
+    force: bool,
+) TapRouteError!void {
+    const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse return error.Aborted;
+    if (slash == 0 or slash == tap_label.len - 1) return error.Aborted;
+
+    const urls = tap_mod.resolveTapBaseUrls(allocator, tap_label) catch return error.Aborted;
+    defer urls.deinit(allocator);
+
+    // Always force-resolve HEAD: the whole point of `mt upgrade` is
+    // "give me the latest", so we ignore any cached pin here.
+    const fresh_sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch return error.Aborted;
+    defer allocator.free(fresh_sha);
+
+    var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    var rb_url_buf: [512]u8 = undefined;
+    const rb_url = std.fmt.bufPrint(&rb_url_buf, "{s}/{s}/Casks/{s}.rb", .{ urls.raw_base, fresh_sha, token }) catch return error.Aborted;
+
+    var rb_resp = http.get(rb_url) catch return error.Aborted;
+    defer rb_resp.deinit();
+    if (rb_resp.status != 200) return error.NotInTap;
+
+    const rb_info = install_local_mod.parseRubyFormula(rb_resp.body) orelse return error.NotInTap;
+
+    if (!force and std.mem.eql(u8, installed_version, rb_info.version)) {
+        output.skip("{s} is already at latest version {s}", .{ token, rb_info.version });
+        output.emitNdjsonEvent(.up_to_date, token, null);
+        return;
+    }
+
+    if (dry_run) {
+        output.info("Dry run: would upgrade cask {s} {s} -> {s}", .{ token, installed_version, rb_info.version });
+        output.emitNdjsonEvent(.would_install, token, null);
+        return;
+    }
+
+    // Persist the new pin BEFORE installTapFormula reads it via
+    // `tap_mod.getCommitSha`. Same pattern as `upgradeTapFormula`.
+    tap_mod.add(db, tap_label, urls.repo_url, fresh_sha) catch {
+        output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
+        return error.Aborted;
+    };
+
+    output.info("Upgrading {s} {s} -> {s}...", .{ token, installed_version, rb_info.version });
+
+    // Snapshot the pin so a force-upgrade preserves the user's hold.
+    const was_pinned = pin_mod.isPinned(db, token);
+
+    // Single DB transaction across uninstall + install + recordInstall.
+    // Mirrors the core-API path in `upgradeCask` so a partial failure
+    // can't leave the casks row missing once the new app is on disk.
+    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
+    db.beginTransaction() catch return error.Aborted;
+    errdefer db.rollback();
+
+    installer.uninstall(token) catch {
+        output.err("Failed to remove old version of {s}", .{token});
+        return error.Aborted;
+    };
+
+    const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap_label, token }) catch return error.Aborted;
+    defer allocator.free(full_name);
+
+    var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
+    install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true) catch {
+        output.err("Failed to upgrade tap cask {s}", .{full_name});
+        return error.Aborted;
+    };
+
+    db.commit() catch return error.Aborted;
+
+    if (was_pinned) _ = pin_mod.setPinned(db, token, true) catch {};
+}
+
+/// Backfill the `casks.tap` column once we've discovered the owning tap
+/// via the probe loop. Idempotent (`WHERE tap IS NULL`); failures are
+/// non-fatal — the row stays NULL and we re-probe on the next upgrade.
+fn backfillCaskTap(db: *sqlite.Database, token: []const u8, tap_label: []const u8) void {
+    var stmt = db.prepare("UPDATE casks SET tap = ?1 WHERE token = ?2 AND tap IS NULL;") catch return;
+    defer stmt.finalize();
+    stmt.bindText(1, tap_label) catch return;
+    stmt.bindText(2, token) catch return;
+    _ = stmt.step() catch {};
+}
+
 /// Probe registered taps for a cask token whose row in `casks` has no
-/// tap origin column to consult. Returns true if a tap claimed the
-/// token and the upgrade went through; returns false if no third-party
+/// recorded tap origin (legacy v5 install, pre-schema-v6). Returns true
+/// if a tap claimed the token and the upgrade resolved (installed *or*
+/// skipped at the matching version); returns false if no third-party
 /// tap had `Casks/<token>.rb` so the caller can surface the original
-/// "removed upstream" error.
+/// "removed upstream" error. On a successful match the column is
+/// backfilled so the next upgrade pre-routes directly.
 fn upgradeTapCaskFallback(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     token: []const u8,
+    installed_version: []const u8,
     db: *sqlite.Database,
     prefix: [:0]const u8,
     dry_run: bool,
+    force: bool,
 ) bool {
     const taps = tap_mod.list(allocator, db) catch return false;
     defer {
@@ -559,24 +670,16 @@ fn upgradeTapCaskFallback(
     for (taps) |t| {
         if (install_args_mod.isCoreTap(t.name)) continue;
 
-        const slash = std.mem.indexOfScalar(u8, t.name, '/') orelse continue;
-        if (slash == 0 or slash == t.name.len - 1) continue;
+        upgradeRoutedTapCask(ctx, allocator, token, t.name, installed_version, db, prefix, dry_run, force) catch |e| switch (e) {
+            // Either "tap doesn't own this token" or "something went
+            // wrong with this tap" — neither is fatal to the probe.
+            error.NotInTap, error.Aborted => continue,
+        };
 
-        const urls = tap_mod.resolveTapBaseUrls(allocator, t.name) catch continue;
-        defer urls.deinit(allocator);
-
-        // Resolve fresh HEAD per-tap. Failures are non-fatal — try the next.
-        const fresh_sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch continue;
-        defer allocator.free(fresh_sha);
-
-        tap_mod.add(db, t.name, urls.repo_url, fresh_sha) catch continue;
-
-        const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ t.name, token }) catch continue;
-        defer allocator.free(full_name);
-
-        var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
-        install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true) catch continue;
-
+        // The owning tap is now known. recordInstall sets `casks.tap`
+        // automatically for the install branch; backfillCaskTap covers
+        // the version-match-skip branch where no recordInstall ran.
+        backfillCaskTap(db, token, t.name);
         return true;
     }
 
@@ -776,11 +879,30 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return error.Aborted;
     };
 
-    // Fetch latest version. Casks have no `tap` column on the table, so
-    // we can't pre-route the way the formula path does — fall back to
-    // probing every registered third-party tap if the core API 404s.
+    // Pre-route when the recorded `casks.tap` points at a third-party
+    // tap — saves the multi-tap probe loop and, more importantly, the
+    // version compare runs against the owning tap's `.rb` before any
+    // DMG download starts. Legacy rows (NULL tap, pre-v6 install) and
+    // core-API casks fall through to the API path below.
+    if (installed.tap()) |tap_label| {
+        if (!install_args_mod.isCoreTap(tap_label)) {
+            upgradeRoutedTapCask(ctx, allocator, token, tap_label, installed.version(), db, prefix, dry_run, force) catch |e| switch (e) {
+                error.NotInTap => {
+                    output.err("Cask {s} is no longer in tap {s}", .{ token, tap_label });
+                    return error.Aborted;
+                },
+                error.Aborted => return error.Aborted,
+            };
+            return;
+        }
+    }
+
+    // Fetch latest version. Casks have no `tap` column populated on
+    // legacy installs, so we still fall back to probing every registered
+    // third-party tap if the core API 404s — the probe also backfills
+    // `casks.tap` for the next invocation.
     const cask_json = api.fetchCask(token) catch {
-        if (upgradeTapCaskFallback(ctx, allocator, token, db, prefix, dry_run)) return;
+        if (upgradeTapCaskFallback(ctx, allocator, token, installed.version(), db, prefix, dry_run, force)) return;
         output.err("Could not fetch cask info for {s}", .{token});
         return error.Aborted;
     };
@@ -843,7 +965,10 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return error.Aborted;
     };
 
-    cask_mod.recordInstall(db, &parsed_cask, app_path) catch |rec_err| {
+    // Reaching this point implies the core Homebrew API served the
+    // cask, so the tap origin stays NULL. Tap-installed casks pre-route
+    // to `upgradeTapCask` and never get here.
+    cask_mod.recordInstall(db, &parsed_cask, app_path, null) catch |rec_err| {
         output.err(
             "Failed to record cask {s} in database: {s} ({s})",
             .{ token, @errorName(rec_err), db.errMsg() },
