@@ -341,13 +341,13 @@ fn executeWithOpts(
         var lock_path_buf: [512]u8 = undefined;
         const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch
             return InstallError.LockError;
-        lk = lock_mod.LockFile.acquire(lock_path, 30000) catch {
+        lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch {
             output.err("Another mt process is running. Wait or run mt doctor.", .{});
             return InstallError.LockError;
         };
         output.emitNdjsonEvent(.lock_acquired, "", null);
     }
-    defer if (lk) |*l| l.release();
+    defer if (lk) |*l| l.release(ctx.io);
     // LIFO: install_complete must precede release in the deferred chain,
     // and the outer holder owns the matching pair when we skipped here.
     defer if (lk != null and output.isNdjson()) output.emitNdjsonEvent(.install_complete, "", null);

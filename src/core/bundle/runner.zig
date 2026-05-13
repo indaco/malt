@@ -134,10 +134,10 @@ pub fn run(
     defer allocator.free(lock_path);
 
     var lock = if (!opts.dry_run)
-        (lock_mod.LockFile.acquire(lock_path, 5_000) catch return RunnerError.LockFailed)
+        (lock_mod.LockFile.acquire(io, lock_path, 5_000) catch return RunnerError.LockFailed)
     else
         null;
-    defer if (lock) |*l| l.release();
+    defer if (lock) |*l| l.release(io);
 
     var failures: std.ArrayList(MemberError) = .empty;
     errdefer failures.deinit(allocator);

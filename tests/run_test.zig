@@ -117,12 +117,13 @@ test "LockFile blocks a second acquire on the same path" {
     test_io.deleteFileAbsolute(std.Options.debug_io, lock_path) catch {};
     defer test_io.deleteFileAbsolute(std.Options.debug_io, lock_path) catch {};
 
-    var first = try malt.lock.LockFile.acquire(lock_path, 1_000);
-    defer first.release();
+    const io = std.Options.debug_io;
+    var first = try malt.lock.LockFile.acquire(io, lock_path, 1_000);
+    defer first.release(io);
 
     // Second acquire must time out within 200 ms while the first is held.
     try testing.expectError(
         error.Timeout,
-        malt.lock.LockFile.acquire(lock_path, 200),
+        malt.lock.LockFile.acquire(io, lock_path, 200),
     );
 }
