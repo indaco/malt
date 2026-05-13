@@ -20,8 +20,11 @@ pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
     var show_cask = false;
     var show_versions = false;
     var show_pinned = false;
+    var tap_filter: ?[]const u8 = null;
 
-    for (args) |arg| {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (std.mem.eql(u8, arg, "--formula") or std.mem.eql(u8, arg, "--formulae")) {
             show_formula = true;
         } else if (std.mem.eql(u8, arg, "--cask") or std.mem.eql(u8, arg, "--casks")) {
@@ -30,6 +33,15 @@ pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
             show_versions = true;
         } else if (std.mem.eql(u8, arg, "--pinned")) {
             show_pinned = true;
+        } else if (std.mem.eql(u8, arg, "--tap")) {
+            if (i + 1 >= args.len) {
+                output.err("--tap requires a label (e.g. `--tap user/repo`)", .{});
+                return error.Aborted;
+            }
+            i += 1;
+            tap_filter = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--tap=")) {
+            tap_filter = arg["--tap=".len..];
         }
     }
     const json_mode = output.isJson();
@@ -59,9 +71,9 @@ pub fn execute(ctx: *const AppCtx, args: []const []const u8) !void {
     defer stdout.flush() catch {};
 
     if (json_mode) {
-        try writeJsonOutput(ctx, &db, show_formula, show_cask, show_pinned, stdout);
+        try writeJsonOutput(ctx, &db, show_formula, show_cask, show_pinned, tap_filter, stdout);
     } else {
-        try writeHumanOutput(&db, show_formula, show_cask, show_versions, show_pinned, stdout);
+        try writeHumanOutput(&db, show_formula, show_cask, show_versions, show_pinned, tap_filter, stdout);
     }
 }
 
@@ -77,18 +89,21 @@ pub fn writeHumanOutput(
     show_cask: bool,
     show_versions: bool,
     show_pinned: bool,
+    tap_filter: ?[]const u8,
     stdout: *std.Io.Writer,
 ) !void {
     const quiet = output.isQuiet();
 
     if (show_pinned) {
-        try writePinnedHuman(db, show_formula, show_cask, show_versions, quiet, stdout);
+        try writePinnedHuman(db, show_formula, show_cask, show_versions, tap_filter, quiet, stdout);
         return;
     }
 
     if (show_formula) {
-        var stmt = db.prepare("SELECT name, version, pinned FROM kegs ORDER BY name;") catch return;
+        const sql = formulaListSql(false, tap_filter != null);
+        var stmt = db.prepare(sql) catch return;
         defer stmt.finalize();
+        if (tap_filter) |t| stmt.bindText(1, t) catch return;
 
         while (stmt.step() catch false) {
             const name = stmt.columnText(0) orelse continue;
@@ -116,9 +131,10 @@ pub fn writeHumanOutput(
     }
 
     if (show_cask) {
-        const sql = "SELECT token, version FROM casks ORDER BY token;";
+        const sql = caskListSql(false, tap_filter != null);
         var stmt = db.prepare(sql) catch return;
         defer stmt.finalize();
+        if (tap_filter) |t| stmt.bindText(1, t) catch return;
 
         while (stmt.step() catch false) {
             const token = stmt.columnText(0) orelse continue;
@@ -142,6 +158,44 @@ pub fn writeHumanOutput(
     }
 }
 
+/// Flag combinations for the kegs/casks list SELECT. Used as the switch
+/// key in `formulaListSql` / `caskListSql` so the compiler enforces
+/// exhaustive handling of every (pinned × tap) variant.
+const ListSqlVariant = enum { plain, tap, pinned, pinned_tap };
+
+fn listSqlVariant(show_pinned: bool, tap_filter: bool) ListSqlVariant {
+    if (show_pinned and tap_filter) return .pinned_tap;
+    if (show_pinned) return .pinned;
+    if (tap_filter) return .tap;
+    return .plain;
+}
+
+/// Compose the kegs SELECT with optional pinned + tap filters. The
+/// `?1` placeholder is bound by the caller for the `.tap` / `.pinned_tap`
+/// variants. Strict equality means NULL-tap rows never match — kegs are
+/// always attributed at install time, so this is purely future-proofing.
+fn formulaListSql(show_pinned: bool, tap_filter: bool) [:0]const u8 {
+    return switch (listSqlVariant(show_pinned, tap_filter)) {
+        .plain => "SELECT name, version, pinned FROM kegs ORDER BY name;",
+        .tap => "SELECT name, version, pinned FROM kegs WHERE tap = ?1 ORDER BY name;",
+        .pinned => "SELECT name, version, pinned FROM kegs WHERE pinned = 1 ORDER BY name;",
+        .pinned_tap => "SELECT name, version, pinned FROM kegs WHERE pinned = 1 AND tap = ?1 ORDER BY name;",
+    };
+}
+
+/// Cask counterpart to `formulaListSql`. NULL tap means "unattributed"
+/// (v5-era rows pre-`casks.tap`) — strict equality keeps the filter
+/// honest. The user-facing workaround (`mt upgrade <token>`) is in the
+/// help string.
+fn caskListSql(show_pinned: bool, tap_filter: bool) [:0]const u8 {
+    return switch (listSqlVariant(show_pinned, tap_filter)) {
+        .plain => "SELECT token, version FROM casks ORDER BY token;",
+        .tap => "SELECT token, version FROM casks WHERE tap = ?1 ORDER BY token;",
+        .pinned => "SELECT token, version FROM casks WHERE pinned = 1 ORDER BY token;",
+        .pinned_tap => "SELECT token, version FROM casks WHERE pinned = 1 AND tap = ?1 ORDER BY token;",
+    };
+}
+
 /// `--pinned` walks formulas + casks together so the output is a single
 /// sorted list across both kinds, with a `[cask]` tag distinguishing
 /// cask rows. The `[pinned]` tag is dropped — every row is pinned by
@@ -151,12 +205,14 @@ fn writePinnedHuman(
     show_formula: bool,
     show_cask: bool,
     show_versions: bool,
+    tap_filter: ?[]const u8,
     quiet: bool,
     stdout: *std.Io.Writer,
 ) !void {
-    const sql = pinnedUnionSql(show_formula, show_cask) orelse return;
+    const sql = pinnedUnionSql(show_formula, show_cask, tap_filter != null) orelse return;
     var stmt = db.prepare(sql) catch return;
     defer stmt.finalize();
+    if (tap_filter) |t| stmt.bindText(1, t) catch return;
 
     while (stmt.step() catch false) {
         const name = stmt.columnText(0) orelse continue;
@@ -184,19 +240,43 @@ fn writePinnedHuman(
     }
 }
 
+/// Which kinds participate in the `--pinned` view. `.neither` short-circuits
+/// the caller (no SELECT to run); the other three pick a UNION shape.
+const PinnedUnionKind = enum { neither, formula_only, cask_only, both };
+
+fn pinnedUnionKind(show_formula: bool, show_cask: bool) PinnedUnionKind {
+    if (show_formula and show_cask) return .both;
+    if (show_formula) return .formula_only;
+    if (show_cask) return .cask_only;
+    return .neither;
+}
+
 /// Build the SQL that drives the `--pinned` view. The 'formula' / 'cask'
 /// literal column tags each row so the caller can render the right marker.
-fn pinnedUnionSql(show_formula: bool, show_cask: bool) ?[:0]const u8 {
-    if (show_formula and show_cask)
-        return "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 " ++
-            "UNION ALL " ++
-            "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 " ++
-            "ORDER BY name;";
-    if (show_formula)
-        return "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 ORDER BY name;";
-    if (show_cask)
-        return "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 ORDER BY name;";
-    return null;
+/// `?1` is bound once and reused across both UNION branches when
+/// `tap_filter` is set — sqlite parameter reuse is well-defined.
+fn pinnedUnionSql(show_formula: bool, show_cask: bool, tap_filter: bool) ?[:0]const u8 {
+    return switch (pinnedUnionKind(show_formula, show_cask)) {
+        .neither => null,
+        .both => if (tap_filter)
+            "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 AND tap = ?1 " ++
+                "UNION ALL " ++
+                "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 AND tap = ?1 " ++
+                "ORDER BY name;"
+        else
+            "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 " ++
+                "UNION ALL " ++
+                "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 " ++
+                "ORDER BY name;",
+        .formula_only => if (tap_filter)
+            "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 AND tap = ?1 ORDER BY name;"
+        else
+            "SELECT name, version, 'formula' AS kind FROM kegs WHERE pinned = 1 ORDER BY name;",
+        .cask_only => if (tap_filter)
+            "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 AND tap = ?1 ORDER BY name;"
+        else
+            "SELECT token AS name, version, 'cask' AS kind FROM casks WHERE pinned = 1 ORDER BY name;",
+    };
 }
 
 /// Emit the leading cyan bullet + space, honouring `NO_COLOR`.
@@ -233,10 +313,11 @@ fn writeJsonOutput(
     show_formula: bool,
     show_cask: bool,
     show_pinned: bool,
+    tap_filter: ?[]const u8,
     stdout: *std.Io.Writer,
 ) !void {
     const start_ts = std.Io.Clock.real.now(ctx.io).toMilliseconds();
-    try buildListJson(db, stdout, show_formula, show_cask, show_pinned, start_ts);
+    try buildListJson(db, stdout, show_formula, show_cask, show_pinned, tap_filter, start_ts);
 }
 
 /// Build the `{ "installed": [...], "formulae": [...], "casks": [...], "time_ms": N }`
@@ -249,29 +330,30 @@ pub fn buildListJson(
     show_formula: bool,
     show_cask: bool,
     show_pinned: bool,
+    tap_filter: ?[]const u8,
     start_ts: i64,
 ) !void {
     try w.writeAll("{\"installed\":[");
     var first = true;
     if (show_pinned) {
-        try writePinnedInstalled(db, w, show_formula, show_cask, &first);
+        try writePinnedInstalled(db, w, show_formula, show_cask, tap_filter, &first);
     } else {
-        if (show_formula) try writeFormulaRows(db, w, false, .installed, &first);
-        if (show_cask) try writeCaskRows(db, w, false, .installed, &first);
+        if (show_formula) try writeFormulaRows(db, w, false, tap_filter, .installed, &first);
+        if (show_cask) try writeCaskRows(db, w, false, tap_filter, .installed, &first);
     }
     try w.writeAll("]");
 
     if (show_formula) {
         try w.writeAll(",\"formulae\":[");
         var legacy_first = true;
-        try writeFormulaRows(db, w, show_pinned, .legacy, &legacy_first);
+        try writeFormulaRows(db, w, show_pinned, tap_filter, .legacy, &legacy_first);
         try w.writeAll("]");
     }
 
     if (show_cask) {
         try w.writeAll(",\"casks\":[");
         var legacy_first = true;
-        try writeCaskRows(db, w, show_pinned, .legacy, &legacy_first);
+        try writeCaskRows(db, w, show_pinned, tap_filter, .legacy, &legacy_first);
         try w.writeAll("]");
     }
 
@@ -287,11 +369,13 @@ fn writePinnedInstalled(
     w: *std.Io.Writer,
     show_formula: bool,
     show_cask: bool,
+    tap_filter: ?[]const u8,
     first: *bool,
 ) !void {
-    const sql = pinnedUnionSql(show_formula, show_cask) orelse return;
+    const sql = pinnedUnionSql(show_formula, show_cask, tap_filter != null) orelse return;
     var stmt = db.prepare(sql) catch return;
     defer stmt.finalize();
+    if (tap_filter) |t| stmt.bindText(1, t) catch return;
 
     while (stmt.step() catch false) {
         const name = stmt.columnText(0) orelse continue;
@@ -319,16 +403,15 @@ fn writeFormulaRows(
     db: *sqlite.Database,
     w: *std.Io.Writer,
     show_pinned: bool,
+    tap_filter: ?[]const u8,
     shape: RowShape,
     first: *bool,
 ) !void {
-    const sql = if (show_pinned)
-        "SELECT name, version, pinned FROM kegs WHERE pinned = 1 ORDER BY name;"
-    else
-        "SELECT name, version, pinned FROM kegs ORDER BY name;";
+    const sql = formulaListSql(show_pinned, tap_filter != null);
 
     var stmt = db.prepare(sql) catch return;
     defer stmt.finalize();
+    if (tap_filter) |t| stmt.bindText(1, t) catch return;
 
     while (stmt.step() catch false) {
         const name = stmt.columnText(0) orelse continue;
@@ -359,15 +442,14 @@ fn writeCaskRows(
     db: *sqlite.Database,
     w: *std.Io.Writer,
     show_pinned: bool,
+    tap_filter: ?[]const u8,
     shape: RowShape,
     first: *bool,
 ) !void {
-    const sql: [:0]const u8 = if (show_pinned)
-        "SELECT token, version FROM casks WHERE pinned = 1 ORDER BY token;"
-    else
-        "SELECT token, version FROM casks ORDER BY token;";
+    const sql = caskListSql(show_pinned, tap_filter != null);
     var stmt = db.prepare(sql) catch return;
     defer stmt.finalize();
+    if (tap_filter) |t| stmt.bindText(1, t) catch return;
 
     while (stmt.step() catch false) {
         const token = stmt.columnText(0) orelse continue;

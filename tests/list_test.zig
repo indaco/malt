@@ -43,12 +43,32 @@ fn insertKeg(db: *sqlite.Database, name: []const u8, version: []const u8, pinned
     try db.exec(sql);
 }
 
+fn insertKegTap(db: *sqlite.Database, name: []const u8, version: []const u8, tap: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &buf,
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap) VALUES ('{s}', '{s}', '{s}', 'deadbeef', '/opt/malt/Cellar/{s}/{s}', '{s}');",
+        .{ name, name, version, name, version, tap },
+    );
+    try db.exec(sql);
+}
+
 fn insertCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
     var buf: [512]u8 = undefined;
     const sql = try std.fmt.bufPrintZ(
         &buf,
         "INSERT INTO casks (token, name, version, url) VALUES ('{s}', '{s}', '{s}', 'https://example.com');",
         .{ token, token, version },
+    );
+    try db.exec(sql);
+}
+
+fn insertCaskTap(db: *sqlite.Database, token: []const u8, version: []const u8, tap: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &buf,
+        "INSERT INTO casks (token, name, version, url, tap) VALUES ('{s}', '{s}', '{s}', 'https://example.com', '{s}');",
+        .{ token, token, version, tap },
     );
     try db.exec(sql);
 }
@@ -60,10 +80,21 @@ fn runBuild(
     show_cask: bool,
     show_pinned: bool,
 ) ![]u8 {
+    return runBuildTap(allocator, db, show_formula, show_cask, show_pinned, null);
+}
+
+fn runBuildTap(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    show_formula: bool,
+    show_cask: bool,
+    show_pinned: bool,
+    tap_filter: ?[]const u8,
+) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     // Use a fixed start_ts so the ",\"time_ms\":N" suffix is predictable.
-    try cli_list.buildListJson(db, &aw.writer, show_formula, show_cask, show_pinned, test_io.milliTimestamp(
+    try cli_list.buildListJson(db, &aw.writer, show_formula, show_cask, show_pinned, tap_filter, test_io.milliTimestamp(
         std.Options.debug_io,
     ));
     return aw.toOwnedSlice();
@@ -89,6 +120,19 @@ fn runHuman(
     show_pinned: bool,
     quiet: bool,
 ) ![]u8 {
+    return runHumanTap(allocator, db, show_formula, show_cask, show_versions, show_pinned, quiet, null);
+}
+
+fn runHumanTap(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    show_formula: bool,
+    show_cask: bool,
+    show_versions: bool,
+    show_pinned: bool,
+    quiet: bool,
+    tap_filter: ?[]const u8,
+) ![]u8 {
     const prior_quiet = malt.output.isQuiet();
     malt.output.setQuiet(quiet);
     defer malt.output.setQuiet(prior_quiet);
@@ -99,7 +143,7 @@ fn runHuman(
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
-    try cli_list.writeHumanOutput(db, show_formula, show_cask, show_versions, show_pinned, &aw.writer);
+    try cli_list.writeHumanOutput(db, show_formula, show_cask, show_versions, show_pinned, tap_filter, &aw.writer);
     return aw.toOwnedSlice();
 }
 
@@ -372,6 +416,146 @@ test "writeHumanOutput --pinned merges pinned formulas + casks in one sorted lis
     const firefox_pos = std.mem.indexOf(u8, out, "firefox").?;
     const zsh_pos = std.mem.indexOf(u8, out, "zsh").?;
     try testing.expect(firefox_pos < zsh_pos);
+}
+
+// --- --tap filter ------------------------------------------------------
+
+test "writeHumanOutput --tap scopes formulas and casks to a single tap" {
+    var t = try TempDb.init("human_tap");
+    defer t.deinit();
+
+    try insertKegTap(&t.db, "tap-formula", "1.0", "user/repo");
+    try insertKeg(&t.db, "core-formula", "2.0", false);
+    try insertCaskTap(&t.db, "tap-cask", "3.0", "user/repo");
+    try insertCask(&t.db, "core-cask", "4.0");
+
+    const out = try runHumanTap(testing.allocator, &t.db, true, true, false, false, true, "user/repo");
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("tap-formula\ntap-cask\n", out);
+}
+
+test "writeHumanOutput --tap nonexistent yields empty output (typo guard)" {
+    var t = try TempDb.init("human_tap_typo");
+    defer t.deinit();
+
+    try insertKegTap(&t.db, "alpha", "1.0", "user/repo");
+    try insertCaskTap(&t.db, "bravo", "2.0", "user/repo");
+
+    const out = try runHumanTap(testing.allocator, &t.db, true, true, false, false, true, "user/nope");
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("", out);
+}
+
+test "writeHumanOutput --tap combined with --formula scopes to that tap's formulas only" {
+    var t = try TempDb.init("human_tap_formula_only");
+    defer t.deinit();
+
+    try insertKegTap(&t.db, "alpha", "1.0", "user/repo");
+    try insertCaskTap(&t.db, "bravo", "2.0", "user/repo");
+
+    const out = try runHumanTap(testing.allocator, &t.db, true, false, false, false, true, "user/repo");
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("alpha\n", out);
+}
+
+test "writeHumanOutput --tap excludes NULL-tap casks (legacy rows treated as unattributed)" {
+    // v5-era casks have tap = NULL until upgrade backfills them. The
+    // --tap filter is strict equality: NULL never matches, even when
+    // the requested label is `homebrew/cask`. The workaround documented
+    // in `--help` is `mt upgrade <token>` to trigger attribution.
+    var t = try TempDb.init("human_tap_null_excluded");
+    defer t.deinit();
+
+    try insertCask(&t.db, "legacy-cask", "1.0"); // tap = NULL
+
+    const out = try runHumanTap(testing.allocator, &t.db, false, true, false, false, true, "homebrew/cask");
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("", out);
+}
+
+test "writeHumanOutput --tap combined with --pinned scopes to pinned rows from that tap" {
+    var t = try TempDb.init("human_tap_pinned");
+    defer t.deinit();
+
+    try t.db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, pinned)
+        \\VALUES ('pinned-alpha', 'pinned-alpha', '1.0', 'aa', '/c/pinned-alpha/1.0', 'user/repo', 1),
+        \\       ('loose-bravo',  'loose-bravo',  '2.0', 'aa', '/c/loose-bravo/2.0',  'user/repo', 0);
+    );
+
+    const out = try runHumanTap(testing.allocator, &t.db, true, true, false, true, true, "user/repo");
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings("pinned-alpha\n", out);
+}
+
+test "buildListJson --tap filters both installed and legacy arrays" {
+    var t = try TempDb.init("json_tap");
+    defer t.deinit();
+
+    try insertKegTap(&t.db, "tap-formula", "1.0", "user/repo");
+    try insertKeg(&t.db, "core-formula", "2.0", false);
+    try insertCaskTap(&t.db, "tap-cask", "3.0", "user/repo");
+
+    const out = try runBuildTap(testing.allocator, &t.db, true, true, false, "user/repo");
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[" ++
+            "{\"name\":\"tap-formula\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":false}," ++
+            "{\"name\":\"tap-cask\",\"version\":\"3.0\",\"type\":\"cask\"}" ++
+            "],\"formulae\":[" ++
+            "{\"name\":\"tap-formula\",\"version\":\"1.0\",\"pinned\":false}" ++
+            "],\"casks\":[" ++
+            "{\"token\":\"tap-cask\",\"version\":\"3.0\"}" ++
+            "]",
+        body,
+    );
+}
+
+test "buildListJson --tap with no matches produces empty arrays" {
+    var t = try TempDb.init("json_tap_empty");
+    defer t.deinit();
+
+    try insertKegTap(&t.db, "alpha", "1.0", "user/repo");
+
+    const out = try runBuildTap(testing.allocator, &t.db, true, true, false, "other/tap");
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[],\"formulae\":[],\"casks\":[]",
+        body,
+    );
+}
+
+test "buildListJson --tap with --pinned cross-filters" {
+    var t = try TempDb.init("json_tap_pinned");
+    defer t.deinit();
+
+    try t.db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, tap, pinned)
+        \\VALUES ('held', 'held', '1.0', 'aa', '/c/held/1.0', 'user/repo', 1),
+        \\       ('loose', 'loose', '2.0', 'aa', '/c/loose/2.0', 'user/repo', 0);
+    );
+
+    const out = try runBuildTap(testing.allocator, &t.db, true, false, true, "user/repo");
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[" ++
+            "{\"name\":\"held\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":true}" ++
+            "],\"formulae\":[" ++
+            "{\"name\":\"held\",\"version\":\"1.0\",\"pinned\":true}" ++
+            "]",
+        body,
+    );
 }
 
 test "buildListJson: output parses as valid JSON" {
