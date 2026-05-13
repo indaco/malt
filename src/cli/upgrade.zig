@@ -22,6 +22,8 @@ const pin_mod = @import("pin.zig");
 const install_mod = @import("install.zig");
 const install_local_mod = @import("install/local.zig");
 const install_args_mod = @import("install/args.zig");
+const install_download_mod = @import("install/download.zig");
+const progress_mod = @import("../ui/progress.zig");
 const tap_mod = @import("../core/tap.zig");
 const deps_mod = @import("../core/deps.zig");
 
@@ -37,6 +39,16 @@ const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     .{ "-f", .force },
     .{ "--pinned", .pinned },
 });
+
+/// Build the `ProgressCallback` that `bottle_mod.download` feeds. Mirrors the
+/// install + migrate wiring so `mt upgrade` shows the same per-keg bar as the
+/// rest of the suite instead of a bare "Downloading…" line.
+fn bottleProgress(bar: *progress_mod.ProgressBar) client_mod.ProgressCallback {
+    return .{
+        .context = @ptrCast(bar),
+        .func = &install_download_mod.progressBridge,
+    };
+}
 
 /// True when this name should be skipped due to a user pin. Pure gate so
 /// the `--force` semantics are testable without dragging in the API.
@@ -325,13 +337,16 @@ fn upgradeFormula(
             return error.Aborted;
         };
 
-        output.info("  Downloading {s}...", .{name});
-        _ = bottle_mod.download(ctx.io, allocator, &ghcr, http, repo, digest, bottle.sha256, tmp_dir, null, null) catch {
+        var bar = progress_mod.ProgressBar.init(name, 0);
+        const progress_cb = bottleProgress(&bar);
+        _ = bottle_mod.download(ctx.io, allocator, &ghcr, http, repo, digest, bottle.sha256, tmp_dir, progress_cb, null) catch {
+            bar.finish();
             output.err("  Download failed: {s}", .{name});
             atomic.cleanupTempDir(ctx.io, tmp_dir);
             allocator.free(tmp_dir);
             return error.Aborted;
         };
+        bar.finish();
 
         store.commitFrom(bottle.sha256, tmp_dir) catch {
             output.err("Failed to commit bottle to store for {s}", .{name});
@@ -938,3 +953,14 @@ pub fn collectMissingDepNames(
 // `collectMissingDepNames` now consults the filesystem (cellar_path +
 // opt symlink), so coverage lives in `tests/upgrade_test.zig` where a
 // real MALT_PREFIX fixture is available.
+
+test "bottleProgress wires byte updates into a ProgressBar" {
+    // Guards the core-formula upgrade path against silently dropping the
+    // progress callback (the bug where `bottle_mod.download(..., null, null)`
+    // skipped the bar entirely).
+    var bar = progress_mod.ProgressBar.init("yazi", 0);
+    const cb = bottleProgress(&bar);
+    cb.report(100, 1000);
+    try std.testing.expectEqual(@as(u64, 1000), bar.total);
+    try std.testing.expectEqual(@as(u64, 100), bar.current);
+}
