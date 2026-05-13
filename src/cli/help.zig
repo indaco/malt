@@ -147,6 +147,10 @@ const list_help =
     \\  --formula      Formulas only
     \\  --cask         Casks only
     \\  --pinned       Pinned packages only
+    \\  --tap <label>  Only packages from <label> (e.g. `user/repo`).
+    \\                 Strict equality: legacy v6-era casks with no
+    \\                 recorded tap won't match — run `mt upgrade <token>`
+    \\                 to trigger attribution, or omit the filter.
     \\  --json         Output as JSON
     \\  --quiet, -q    Names only, one per line
     \\
