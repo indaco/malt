@@ -144,6 +144,46 @@ test "capturePinnedById reads the pinned column for a given keg id" {
     try testing.expect(!rollback.capturePinnedById(&db, 999_999));
 }
 
+test "rollback distinguishes a cask token from a truly missing package" {
+    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_diag";
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    // Seed a cask row only — no matching keg. Pre-fix, the kegs-only
+    // check claimed the cask was "not installed", which lied: it IS
+    // installed, just not as a formula. This test pins the corrected
+    // diagnostic so the lie doesn't quietly come back.
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url, sha256)
+        \\VALUES ('flux-markdown', 'flux-markdown', '1.32.427',
+        \\        'https://example.invalid/flux.dmg', 'aa');
+    );
+    db.close();
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    const err = rollback.execute(&ctx, testing.allocator, &.{"flux-markdown"});
+    try testing.expectError(error.Aborted, err);
+
+    // The corrected diagnostic names the cask shape and steers the user
+    // away from the "package is missing" mental model.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "cask") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "is not installed") == null);
+}
+
 test "schema version table exists" {
     const prefix = "/tmp/malt_sv_test";
     test_io.makeDirAbsolute(std.Options.debug_io, prefix) catch {};
