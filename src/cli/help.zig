@@ -240,16 +240,20 @@ const rollback_help =
     \\       malt rollback --list <package>
     \\       malt rollback --to <version> <package>
     \\
-    \\Revert a package to its previous version using the
-    \\content-addressable store. No re-download needed.
+    \\Revert a formula or cask to a previous version. Formulas
+    \\reuse the content-addressable store (no re-download). Casks
+    \\reuse the per-version cache when present and re-download from
+    \\the recorded URL otherwise; SHA256 is verified either way.
     \\
     \\Without --to, lands on the most recent previous entry.
     \\
     \\Flags:
-    \\  --list             Print every reachable store entry for <package>
-    \\                     (sha, version, timestamp) and exit without changes
-    \\  --to <version>     Roll back to the exact <pkg_version> if present
-    \\                     in the store; otherwise refuse and print --list
+    \\  --list             Print every retained version for <package>
+    \\                     and exit without changes
+    \\  --to <version>     Roll back to the exact version if present;
+    \\                     otherwise refuse and print --list. A --to
+    \\                     of the currently-installed version is a
+    \\                     clean no-op (exit 0)
     \\  --json             Emit --list output as JSON (scriptable)
     \\  --dry-run          Show what would happen
     \\

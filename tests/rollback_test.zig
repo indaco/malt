@@ -390,3 +390,137 @@ test "rollback --to <version> refuses with the listing when the version is absen
     try testing.expect(std.mem.indexOf(u8, out, "1.20") != null);
     try testing.expect(std.mem.indexOf(u8, out, "1.21") != null);
 }
+
+// --- cask `--list` / `--to` integration ---------------------------------
+
+fn seedCask(prefix: [:0]const u8, token: []const u8, version: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare(
+        \\INSERT INTO casks (token, name, version, url, sha256)
+        \\VALUES (?1, ?1, ?2, 'https://example.invalid/x.dmg', 'aa');
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    try stmt.bindText(2, version);
+    _ = try stmt.step();
+}
+
+fn seedCaskVersion(prefix: [:0]const u8, token: []const u8, version: []const u8, installed_at: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare(
+        \\INSERT INTO cask_versions (token, version, url, sha256, artifact_type, installed_at)
+        \\VALUES (?1, ?2, 'https://example.invalid/x.dmg', 'aa', 'dmg', ?3);
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    try stmt.bindText(2, version);
+    try stmt.bindText(3, installed_at);
+    _ = try stmt.step();
+}
+
+test "rollback <cask> --list lists every retained cask version" {
+    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_list_happy";
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try seedCask(prefix, "flux-markdown", "1.32.427");
+    try seedCaskVersion(prefix, "flux-markdown", "1.30.0", "2026-01-01T00:00:00");
+    try seedCaskVersion(prefix, "flux-markdown", "1.31.0", "2026-02-01T00:00:00");
+    try seedCaskVersion(prefix, "flux-markdown", "1.32.427", "2026-03-01T00:00:00");
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try rollback.execute(&ctx, testing.allocator, &.{ "flux-markdown", "--list" });
+
+    const out = stdout_buf.items;
+    try testing.expect(std.mem.indexOf(u8, out, "1.30.0") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.31.0") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.32.427") == null);
+
+    const p31 = std.mem.indexOf(u8, out, "1.31.0").?;
+    const p30 = std.mem.indexOf(u8, out, "1.30.0").?;
+    try testing.expect(p31 < p30);
+}
+
+test "rollback <cask> --to <missing> refuses with the cask listing" {
+    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_to_missing";
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try seedCask(prefix, "flux-markdown", "1.32.427");
+    try seedCaskVersion(prefix, "flux-markdown", "1.30.0", "2026-01-01T00:00:00");
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    const err = rollback.execute(&ctx, testing.allocator, &.{ "--to", "9.9.9", "flux-markdown" });
+    try testing.expectError(error.Aborted, err);
+
+    // Listing must accompany the refusal so the user knows which versions exist.
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "1.30.0") != null);
+}
+
+test "rollback <cask> --to <current> is an idempotent no-op" {
+    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_to_current";
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try seedCask(prefix, "flux-markdown", "1.32.427");
+    try seedCaskVersion(prefix, "flux-markdown", "1.32.427", "2026-03-01T00:00:00");
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    // Asking to roll back to the version already installed must succeed
+    // without engaging the install pipeline.
+    try rollback.execute(&ctx, testing.allocator, &.{ "flux-markdown", "--to", "1.32.427" });
+}
+
+test "rollback <cask> --to <ver> dry-run announces without engaging install" {
+    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_dryrun";
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try seedCask(prefix, "flux-markdown", "1.32.427");
+    try seedCaskVersion(prefix, "flux-markdown", "1.30.0", "2026-01-01T00:00:00");
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    // Dry-run must short-circuit before reinstall — proven by an invalid
+    // URL not breaking the call (the real reinstall would error here).
+    try rollback.execute(&ctx, testing.allocator, &.{ "--dry-run", "flux-markdown", "--to", "1.30.0" });
+}

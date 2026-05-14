@@ -851,3 +851,163 @@ test "resolveAppDir: default prefix + not writable + no HOME → /Applications f
     const got = cask.resolveAppDir("/opt/malt", null, null, false, &buf);
     try testing.expectEqualStrings("/Applications", got);
 }
+
+// --- cask_versions history ----------------------------------------------
+
+test "recordCaskVersion + lookupCaskVersion round-trip" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try cask.recordCaskVersion(
+        &db,
+        "flux-markdown",
+        "1.32.427",
+        "https://example.invalid/flux.dmg",
+        "aa",
+        "dmg",
+        "/cache/Cask/flux-markdown-1.32.427.dmg",
+    );
+
+    var row = (try cask.lookupCaskVersion(testing.allocator, &db, "flux-markdown", "1.32.427")) orelse return error.TestUnexpectedResult;
+    defer row.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("flux-markdown", row.token);
+    try testing.expectEqualStrings("1.32.427", row.version);
+    try testing.expectEqualStrings("https://example.invalid/flux.dmg", row.url);
+    try testing.expectEqualStrings("aa", row.sha256 orelse "");
+    try testing.expectEqualStrings("dmg", row.artifact_type);
+    try testing.expectEqualStrings("/cache/Cask/flux-markdown-1.32.427.dmg", row.cache_path orelse "");
+}
+
+test "recordCaskVersion is idempotent under repeat inserts for the same (token, version)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try cask.recordCaskVersion(&db, "flux-markdown", "1.32.427", "u", "aa", "dmg", null);
+    try cask.recordCaskVersion(&db, "flux-markdown", "1.32.427", "u", "aa", "dmg", null);
+
+    var cnt = try db.prepare("SELECT COUNT(*) FROM cask_versions WHERE token = 'flux-markdown';");
+    defer cnt.finalize();
+    _ = try cnt.step();
+    try testing.expectEqual(@as(i64, 1), cnt.columnInt(0));
+}
+
+test "lookupCaskVersion returns null for an unknown (token, version)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try testing.expect((try cask.lookupCaskVersion(testing.allocator, &db, "missing", "1.0")) == null);
+}
+
+test "lookupCaskVersion handles NULL sha256 and cache_path" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // Backfill-shape row: only required columns set; sha256 + cache_path null.
+    try db.exec(
+        \\INSERT INTO cask_versions (token, version, url, artifact_type)
+        \\VALUES ('flux-markdown', '1.0.0', 'https://x.invalid/a.dmg', 'dmg');
+    );
+
+    var row = (try cask.lookupCaskVersion(testing.allocator, &db, "flux-markdown", "1.0.0")) orelse return error.TestUnexpectedResult;
+    defer row.deinit(testing.allocator);
+    try testing.expect(row.sha256 == null);
+    try testing.expect(row.cache_path == null);
+}
+
+// --- artifact type tag <-> enum -----------------------------------------
+
+test "artifactTypeTag is the inverse of artifactTypeFromTag" {
+    inline for ([_]cask.ArtifactType{ .dmg, .zip, .pkg, .tar_gz, .unknown }) |t| {
+        try testing.expectEqual(t, cask.artifactTypeFromTag(cask.artifactTypeTag(t)));
+    }
+}
+
+test "artifactTypeFromTag maps unknown strings to .unknown" {
+    try testing.expectEqual(cask.ArtifactType.unknown, cask.artifactTypeFromTag("bogus"));
+}
+
+// --- per-version cache sweep -------------------------------------------
+
+test "sweepPerVersionCache deletes only files prefixed by '<token>-'" {
+    const io = testIo();
+    const prefix = "/tmp/malt_cask_sweep";
+    test_io.deleteTreeAbsolute(io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    try test_io.cwd().createDirPath(io, prefix ++ "/cache/Cask");
+
+    const seeds = [_][]const u8{
+        prefix ++ "/cache/Cask/flux-markdown-1.0.dmg",
+        prefix ++ "/cache/Cask/flux-markdown-2.0.dmg",
+        prefix ++ "/cache/Cask/flux-markdown.dmg", // legacy unprefixed — preserved by sweep
+        prefix ++ "/cache/Cask/other-1.0.dmg", // unrelated token — must survive
+    };
+    for (seeds) |p| {
+        const f = try test_io.createFileAbsolute(io, p, .{ .truncate = true });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "x");
+    }
+
+    cask.sweepPerVersionCache(io, prefix, "flux-markdown");
+
+    // Per-version files are gone; legacy + unrelated remain.
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, seeds[0], .{}));
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, seeds[1], .{}));
+    try test_io.accessAbsolute(io, seeds[2], .{});
+    try test_io.accessAbsolute(io, seeds[3], .{});
+}
+
+test "sweepPerVersionCache silently skips a missing cache directory" {
+    const io = testIo();
+    const prefix = "/tmp/malt_cask_sweep_missing";
+    test_io.deleteTreeAbsolute(io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    try test_io.cwd().createDirPath(io, prefix);
+
+    // Cache dir deliberately absent — function must not error.
+    cask.sweepPerVersionCache(io, prefix, "flux-markdown");
+}
+
+// --- reinstallFromHistory dispatch contract ---------------------------------
+
+test "reinstallFromHistory refuses when no history row matches" {
+    const io = testIo();
+    const prefix: [:0]const u8 = "/tmp/malt_cask_reinstall_missing";
+    test_io.deleteTreeAbsolute(io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    try test_io.cwd().createDirPath(io, prefix);
+
+    var buf: [256]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&buf, "{s}/test.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, prefix);
+    try testing.expectError(cask.CaskError.InstallFailed, installer.reinstallFromHistory("missing-token", "1.0"));
+}
+
+test "reinstallFromHistory refuses on a history row whose artifact_type is unknown" {
+    const io = testIo();
+    const prefix: [:0]const u8 = "/tmp/malt_cask_reinstall_unknown";
+    test_io.deleteTreeAbsolute(io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    try test_io.cwd().createDirPath(io, prefix);
+
+    var buf: [256]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&buf, "{s}/test.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO cask_versions (token, version, url, sha256, artifact_type)
+        \\VALUES ('mystery', '1.0', 'https://x.invalid/m.bin', 'aa', 'unknown');
+    );
+
+    var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, prefix);
+    try testing.expectError(cask.CaskError.InstallFailed, installer.reinstallFromHistory("mystery", "1.0"));
+}

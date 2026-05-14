@@ -7,6 +7,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
 const cellar = @import("../core/cellar.zig");
+const cask_mod = @import("../core/cask.zig");
 const linker_mod = @import("../core/linker.zig");
 const store_mod = @import("../core/store.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -228,7 +229,6 @@ fn dispatchCask(
     token: []const u8,
     parsed: ParsedArgs,
 ) !void {
-    _ = ctx;
     const cur_ver_opt = currentCaskVersion(allocator, db, token);
     defer if (cur_ver_opt) |v| allocator.free(v);
 
@@ -258,23 +258,34 @@ fn dispatchCask(
         return error.Aborted;
     }
 
-    if (parsed.to_version) |req| {
-        if (selectTargetIndex(entries.items, req)) |_| {
-            output.err("{s} {s} is in the cask history, but cask reinstall is not yet wired", .{ token, req });
-            output.info("history is queryable via `mt rollback {s} --list`; reinstall lands in a follow-up commit", .{token});
-            return error.Aborted;
-        } else |_| {
-            output.err("{s} {s} is not in the cask history", .{ token, req });
-            try printListing(allocator, token, entries.items);
-            return error.Aborted;
+    // Resolve the target version: `--to <ver>` or default (newest).
+    const target_pkg_version = blk: {
+        if (parsed.to_version) |req| {
+            const idx = selectTargetIndex(entries.items, req) catch {
+                output.err("{s} {s} is not in the cask history", .{ token, req });
+                try printListing(allocator, token, entries.items);
+                return error.Aborted;
+            };
+            break :blk entries.items[idx].pkg_version;
         }
+        break :blk entries.items[0].pkg_version;
+    };
+
+    const cur_ver_str = cur_ver_opt orelse "unknown";
+    output.info("Rolling back {s}: {s} -> {s}", .{ token, cur_ver_str, target_pkg_version });
+
+    if (parsed.dry_run) {
+        output.info("Dry run: would reinstall {s} {s} from cask history", .{ token, target_pkg_version });
+        return;
     }
 
-    // Default rollback (no flag) — same gap as `--to` for now.
-    output.err("cask rollback reinstall is not yet wired", .{});
-    output.info("available rollback targets for {s}:", .{token});
-    try printListing(allocator, token, entries.items);
-    return error.Aborted;
+    const prefix = atomic.maltPrefixOrAbort();
+    var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
+    installer.reinstallFromHistory(token, target_pkg_version) catch |e| {
+        output.err("failed to reinstall {s} {s} ({s})", .{ token, target_pkg_version, @errorName(e) });
+        return error.Aborted;
+    };
+    output.info("{s} rolled back to {s}", .{ token, target_pkg_version });
 }
 
 /// Best-effort lookup: is `token` registered as an installed cask? Used to
