@@ -63,10 +63,14 @@ pass "$SEED installed"
 [[ -f "$DB" ]] || fail "expected DB at $DB after install"
 
 # --- 2. schema_version reached v5 -------------------------------------
+# The contract this regression locks down is the v4→v5 broaden-UNIQUE
+# migration. Later schema bumps keep that migration in place, so any
+# version ≥ 5 satisfies it. Pinning to a single value goes stale on
+# every bump and masks real regressions in this gate.
 SCHEMA_VER=$(sqlite3 "$DB" "SELECT MAX(version) FROM schema_version;")
-[[ "$SCHEMA_VER" == "5" ]] ||
-  fail "schema_version is $SCHEMA_VER, expected 5 (v4→v5 migration did not run)"
-pass "schema_version = 5"
+[[ "$SCHEMA_VER" =~ ^[0-9]+$ && "$SCHEMA_VER" -ge 5 ]] ||
+  fail "schema_version is $SCHEMA_VER, expected ≥5 (v4→v5 migration did not run)"
+pass "schema_version = $SCHEMA_VER (≥5)"
 
 # --- 3. kegs table carries the broadened UNIQUE -----------------------
 # The UNIQUE shape is preserved verbatim in sqlite_master.sql by SQLite,
