@@ -1011,3 +1011,96 @@ test "reinstallFromHistory refuses on a history row whose artifact_type is unkno
     var installer = cask.CaskInstaller.init(io, .empty, testing.allocator, &db, prefix);
     try testing.expectError(cask.CaskError.InstallFailed, installer.reinstallFromHistory("mystery", "1.0"));
 }
+
+// --- rollback metadata preservation -----------------------------------------
+
+test "readReinstallMeta surfaces auto_updates and tap from the casks row" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url, sha256, auto_updates, tap)
+        \\VALUES ('flux-markdown', 'flux-markdown', '1.32.427',
+        \\        'https://example.invalid/flux.dmg', 'aa', 1, 'xykong/tap');
+    );
+
+    var meta = try cask.readReinstallMeta(testing.allocator, &db, "flux-markdown");
+    defer meta.deinit(testing.allocator);
+    try testing.expect(meta.auto_updates);
+    try testing.expectEqualStrings("xykong/tap", meta.tap orelse "");
+}
+
+test "readReinstallMeta returns defaults for an unknown token" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var meta = try cask.readReinstallMeta(testing.allocator, &db, "missing");
+    defer meta.deinit(testing.allocator);
+    try testing.expect(!meta.auto_updates);
+    try testing.expect(meta.tap == null);
+}
+
+test "readReinstallMeta returns tap=null when the casks row left it NULL" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url, sha256, auto_updates)
+        \\VALUES ('legacy', 'legacy', '1.0', 'https://example.invalid/x.dmg', 'aa', 0);
+    );
+
+    var meta = try cask.readReinstallMeta(testing.allocator, &db, "legacy");
+    defer meta.deinit(testing.allocator);
+    try testing.expect(meta.tap == null);
+}
+
+test "readReinstallMeta + recordInstall preserves auto_updates and tap across a row swap" {
+    // The rollback path INSERT-OR-REPLACEs the casks row to flip the
+    // version; the same row swap must NOT silently regress auto_updates
+    // or the owning tap. This test pins the read+write contract that
+    // T-037's rollback hangs on so a future refactor can't quietly
+    // re-introduce the regression.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url, sha256, auto_updates, tap, pinned)
+        \\VALUES ('flux-markdown', 'flux-markdown', '1.32.427',
+        \\        'https://example.invalid/new.dmg', 'aa', 1, 'xykong/tap', 1);
+    );
+
+    var meta = try cask.readReinstallMeta(testing.allocator, &db, "flux-markdown");
+    defer meta.deinit(testing.allocator);
+
+    // Reinstall conceptually: replace the row to point at the older
+    // version while feeding the preserved meta back through recordInstall.
+    var parsed_empty = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{}", .{});
+    defer parsed_empty.deinit();
+    const rolled_back: cask.Cask = .{
+        .token = "flux-markdown",
+        .name = "flux-markdown",
+        .version = "1.30.0",
+        .desc = "",
+        .homepage = "",
+        .url = "https://example.invalid/old.dmg",
+        .sha256 = "dd",
+        .auto_updates = meta.auto_updates,
+        .parsed = parsed_empty,
+    };
+    try cask.recordInstall(&db, &rolled_back, "/Applications/flux-markdown.app", meta.tap);
+
+    var stmt = try db.prepare("SELECT version, auto_updates, tap, pinned FROM casks WHERE token = 'flux-markdown';");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    const ver = stmt.columnText(0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("1.30.0", std.mem.sliceTo(ver, 0));
+    try testing.expect(stmt.columnBool(1));
+    const tap = stmt.columnText(2) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("xykong/tap", std.mem.sliceTo(tap, 0));
+    // Pinned survives via recordInstall's COALESCE, not via this preservation path.
+    try testing.expect(stmt.columnBool(3));
+}

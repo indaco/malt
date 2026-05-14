@@ -156,6 +156,37 @@ pub const CaskVersion = struct {
 
 pub const LookupError = sqlite.SqliteError || std.mem.Allocator.Error;
 
+/// Existing-cask metadata the rollback path must preserve across a
+/// reinstall — `auto_updates` and the owning `tap`. Mirrors the keg
+/// rollback's pin-preservation: a rolled-back cask must not silently
+/// flip these fields back to "fresh install" defaults.
+pub const ReinstallMeta = struct {
+    auto_updates: bool,
+    tap: ?[]u8,
+
+    pub fn deinit(self: *ReinstallMeta, allocator: std.mem.Allocator) void {
+        if (self.tap) |t| allocator.free(t);
+    }
+};
+
+/// Read `auto_updates` and `tap` from the current `casks` row for
+/// `token`. Returns defaults (`false`, `null`) when the row is absent
+/// — the rollback caller refuses earlier if the cask isn't installed,
+/// so the default branch only fires under truly anomalous DB state.
+pub fn readReinstallMeta(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    token: []const u8,
+) LookupError!ReinstallMeta {
+    var stmt = try db.prepare("SELECT auto_updates, tap FROM casks WHERE token = ?1 LIMIT 1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    if (!(try stmt.step())) return .{ .auto_updates = false, .tap = null };
+    const au = stmt.columnBool(0);
+    const tap_dup = try dupColumn(allocator, stmt.columnText(1));
+    return .{ .auto_updates = au, .tap = tap_dup };
+}
+
 /// Look up the cask_versions row for `(token, version)`. Returns null
 /// when no row matches — the caller decides whether that's a rollback
 /// refusal or a re-download trigger.
@@ -571,6 +602,15 @@ pub const CaskInstaller = struct {
         self.artifact_type_override = at;
         defer self.artifact_type_override = null;
 
+        // Preserve `auto_updates` + owning `tap` across the rollback so
+        // a held cask doesn't silently regress to install defaults. The
+        // keg path gets the same guarantee on `pinned` via the COALESCE
+        // inside recordInstall; cask fields aren't COALESCE-able from
+        // there because install/upgrade legitimately overwrite them.
+        var meta = readReinstallMeta(self.allocator, self.db, token) catch
+            return CaskError.InstallFailed;
+        defer meta.deinit(self.allocator);
+
         // Parse "{}" so the synthetic Cask carries a valid (empty)
         // ObjectMap — `parseAppName` falls through to `findAppInDir`,
         // which is the same fallback shape used for any cask whose API
@@ -588,17 +628,17 @@ pub const CaskInstaller = struct {
             .homepage = "",
             .url = row.url,
             .sha256 = if (row.sha256) |s| s else null,
-            .auto_updates = false,
+            .auto_updates = meta.auto_updates,
             .parsed = parsed_empty,
         };
 
         const app_path = try self.install(&synthetic);
         defer self.allocator.free(app_path);
 
-        // Flip the `casks` row to the rolled-back version. Preserves the
-        // pin via the COALESCE inside recordInstall, mirroring the keg
-        // rollback's pin-preservation guarantee.
-        recordInstall(self.db, &synthetic, app_path, null) catch return CaskError.InstallFailed;
+        // Flip the `casks` row to the rolled-back version. `pinned`
+        // survives via recordInstall's COALESCE; `auto_updates` and
+        // `tap` survive via the preserved values above.
+        recordInstall(self.db, &synthetic, app_path, meta.tap) catch return CaskError.InstallFailed;
     }
 
     /// Check installed version vs API version. Returns true if outdated.
