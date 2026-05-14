@@ -237,12 +237,21 @@ const migrate_help =
 
 const rollback_help =
     \\Usage: malt rollback <package> [flags]
+    \\       malt rollback --list <package>
+    \\       malt rollback --to <version> <package>
     \\
     \\Revert a package to its previous version using the
     \\content-addressable store. No re-download needed.
     \\
+    \\Without --to, lands on the most recent previous entry.
+    \\
     \\Flags:
-    \\  --dry-run      Show what would happen
+    \\  --list             Print every reachable store entry for <package>
+    \\                     (sha, version, timestamp) and exit without changes
+    \\  --to <version>     Roll back to the exact <pkg_version> if present
+    \\                     in the store; otherwise refuse and print --list
+    \\  --json             Emit --list output as JSON (scriptable)
+    \\  --dry-run          Show what would happen
     \\
 ;
 
