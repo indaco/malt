@@ -149,7 +149,8 @@ pub const bash_script =
     \\        search)           cmd_flags="--formula --cask --json" ;;
     \\        uses)             cmd_flags="--recursive -r --json --quiet -q" ;;
     \\        which)            cmd_flags="--json" ;;
-    \\        migrate|rollback) cmd_flags="--dry-run" ;;
+    \\        migrate)          cmd_flags="--dry-run" ;;
+    \\        rollback)         cmd_flags="--dry-run --list --to --json" ;;
     \\        link)             cmd_flags="--overwrite --force -f" ;;
     \\        services)         cmd_flags="--tail --stderr --follow -f --system --json" ;;
     \\        bundle)           cmd_flags="--dry-run -n --format --from-installed --purge --yes -y" ;;
@@ -319,8 +320,16 @@ pub const zsh_script =
     \\                        '--json[Output as JSON]' \
     \\                        '*::query:'
     \\                    ;;
-    \\                migrate|rollback)
+    \\                migrate)
     \\                    _arguments '--dry-run[Preview without executing]'
+    \\                    ;;
+    \\                rollback)
+    \\                    _arguments \
+    \\                        '--dry-run[Preview without executing]' \
+    \\                        '--list[List every reachable store entry for <package>]' \
+    \\                        '--to[Roll back to a specific store entry]:version:' \
+    \\                        '--json[Emit --list output as JSON]' \
+    \\                        '*::package:'
     \\                    ;;
     \\                link)
     \\                    _arguments \
@@ -551,6 +560,9 @@ pub const fish_script =
     \\    # migrate / rollback
     \\    complete -c $__malt_bin -n '__malt_using_command migrate'    -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l dry-run -d 'Preview'
+    \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l list    -d 'List every reachable store entry'
+    \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l to    -x -d 'Roll back to a specific store entry (pass <version>)'
+    \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l json    -d 'Emit --list output as JSON'
     \\
     \\    # link
     \\    complete -c $__malt_bin -n '__malt_using_command link' -l overwrite -d 'Replace existing symlinks'

@@ -198,3 +198,195 @@ test "schema version table exists" {
     const has_row = try stmt.step();
     try testing.expect(has_row);
 }
+
+// --- `--list` / `--to` integration ----------------------------------------
+
+const output = malt.output;
+
+/// Insert a current-keg row for `name` at `version` into the sandbox DB
+/// so `execute` clears its "package not installed" guard.
+fn insertCurrentKeg(prefix: [:0]const u8, name: []const u8, version: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_path_buf, "{s}/db/malt.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+
+    var stmt = try db.prepare(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason)
+        \\VALUES (?1, ?1, ?2, 0, 'cur-sha', '/cellar/x', 'direct');
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    try stmt.bindText(2, version);
+    _ = try stmt.step();
+}
+
+/// Seed a store entry tree `<prefix>/store/<sha>/<name>/<pkg_version>/` and
+/// optionally sleep afterwards so two seeds get distinct mtimes on
+/// second-resolution filesystems.
+fn seedStoreEntry(
+    prefix: [:0]const u8,
+    sha: []const u8,
+    name: []const u8,
+    pkg_version: []const u8,
+    delay_ms_after: u64,
+) !void {
+    const io = std.Options.debug_io;
+    var buf: [512]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version });
+    try test_io.cwd().createDirPath(io, dir);
+
+    var f_buf: [600]u8 = undefined;
+    const file_path = try std.fmt.bufPrint(&f_buf, "{s}/INSTALL_RECEIPT.json", .{dir});
+    const f = try test_io.createFileAbsolute(io, file_path, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, "{}");
+
+    if (delay_ms_after > 0) {
+        test_io.sleepNanos(io, delay_ms_after * std.time.ns_per_ms);
+    }
+}
+
+test "rollback --list prints every store entry available for the package" {
+    const prefix: [:0]const u8 = "/tmp/malt_rb_list_happy";
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try insertCurrentKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, "sha_a", "wget", "1.20", 1100);
+    try seedStoreEntry(prefix, "sha_b", "wget", "1.21", 1100);
+    try seedStoreEntry(prefix, "sha_c", "wget", "1.22", 0); // current — must be excluded
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try rollback.execute(&ctx, testing.allocator, &.{ "--list", "wget" });
+
+    const out = stdout_buf.items;
+    try testing.expect(std.mem.indexOf(u8, out, "wget") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.20") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.21") != null);
+    // Current version is excluded from the listing.
+    try testing.expect(std.mem.indexOf(u8, out, "1.22") == null);
+
+    // Newest entry (sha_b/1.21) precedes the older one (sha_a/1.20).
+    const v21 = std.mem.indexOf(u8, out, "1.21").?;
+    const v20 = std.mem.indexOf(u8, out, "1.20").?;
+    try testing.expect(v21 < v20);
+}
+
+test "rollback --list --json emits the documented JSON shape" {
+    const prefix: [:0]const u8 = "/tmp/malt_rb_list_json";
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try insertCurrentKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, "sha_a", "wget", "1.20", 1100);
+    try seedStoreEntry(prefix, "sha_b", "wget", "1.21", 0);
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    const prior = output.isJson();
+    defer output.setMode(if (prior) .json else .human);
+    output.setMode(.json);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try rollback.execute(&ctx, testing.allocator, &.{ "--list", "wget" });
+
+    // Parseable JSON with the documented shape.
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        testing.allocator,
+        std.mem.trimEnd(u8, stdout_buf.items, "\n"),
+        .{},
+    );
+    defer parsed.deinit();
+
+    try testing.expectEqualStrings("wget", parsed.value.object.get("name").?.string);
+    const arr = parsed.value.object.get("entries").?.array;
+    try testing.expectEqual(@as(usize, 2), arr.items.len);
+    // Sorted newest-first.
+    try testing.expectEqualStrings("1.21", arr.items[0].object.get("version").?.string);
+    try testing.expectEqualStrings("1.20", arr.items[1].object.get("version").?.string);
+    // mtime is an integer (unix seconds), not a string.
+    try testing.expect(arr.items[0].object.get("mtime").? == .integer);
+}
+
+test "rollback --to <current_version> is a clean no-op, not a confusing refusal" {
+    const prefix: [:0]const u8 = "/tmp/malt_rb_to_current";
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try insertCurrentKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, "sha_a", "wget", "1.20", 1100);
+    try seedStoreEntry(prefix, "sha_cur", "wget", "1.22", 0);
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    // Asking to roll back to the version we're already on must succeed
+    // (no mutation, no Aborted) so users can re-run the same command
+    // idempotently inside scripts.
+    try rollback.execute(&ctx, testing.allocator, &.{ "--to", "1.22", "wget" });
+
+    // The "not in the store" refusal must NOT fire — that line is what we
+    // explicitly do not want surfacing in this case.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "is not in the store") == null);
+}
+
+test "rollback --to <version> refuses with the listing when the version is absent" {
+    const prefix: [:0]const u8 = "/tmp/malt_rb_to_missing";
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try insertCurrentKeg(prefix, "wget", "1.22");
+    try seedStoreEntry(prefix, "sha_a", "wget", "1.20", 1100);
+    try seedStoreEntry(prefix, "sha_b", "wget", "1.21", 0);
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    const err = rollback.execute(&ctx, testing.allocator, &.{ "--to", "9.9.9", "wget" });
+    try testing.expectError(error.Aborted, err);
+
+    const out = stdout_buf.items;
+    // The refusal must surface the actual available versions so the user can pick one.
+    try testing.expect(std.mem.indexOf(u8, out, "1.20") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.21") != null);
+}
