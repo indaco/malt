@@ -153,10 +153,34 @@ const default_sync_ops: DefaultSyncOps = .{};
 /// leaves the tempfile behind; the next call writes its own and
 /// overwrites atomically.
 pub fn atomicWriteFile(io: std.Io, dst_path: []const u8, data: []const u8) !void {
-    return atomicWriteFileImpl(io, dst_path, data, default_sync_ops);
+    return atomicWriteFileImpl(io, dst_path, data, default_sync_ops, .default_file);
 }
 
-fn atomicWriteFileImpl(io: std.Io, dst_path: []const u8, data: []const u8, sync_ops: anytype) !void {
+/// Atomic write that publishes `data` under the existing file's
+/// permissions. The tempfile is created with the snapshotted mode so
+/// the rename itself is the single observable transition — no window
+/// where the new file carries the platform default. Use this when
+/// overwriting a live file whose mode bits (exec on shebangs, libtool
+/// archives, pkgconfig fragments) must survive the swap. A missing
+/// `dst_path` falls back to the platform default, matching
+/// `atomicWriteFile`.
+pub fn atomicReplaceFile(io: std.Io, dst_path: []const u8, data: []const u8) !void {
+    const perms: std.Io.File.Permissions = blk: {
+        const existing = std.Io.Dir.openFileAbsolute(io, dst_path, .{}) catch break :blk .default_file;
+        defer existing.close(io);
+        const s = existing.stat(io) catch break :blk .default_file;
+        break :blk s.permissions;
+    };
+    return atomicWriteFileImpl(io, dst_path, data, default_sync_ops, perms);
+}
+
+fn atomicWriteFileImpl(
+    io: std.Io,
+    dst_path: []const u8,
+    data: []const u8,
+    sync_ops: anytype,
+    permissions: std.Io.File.Permissions,
+) !void {
     var rand_bytes: [4]u8 = undefined;
     std.c.arc4random_buf(&rand_bytes, rand_bytes.len);
     const hex_chars = "0123456789abcdef";
@@ -171,7 +195,10 @@ fn atomicWriteFileImpl(io: std.Io, dst_path: []const u8, data: []const u8, sync_
         return error.NameTooLong;
 
     {
-        const f = try std.Io.Dir.createFileAbsolute(io, tmp_path, .{ .truncate = true });
+        const f = try std.Io.Dir.createFileAbsolute(io, tmp_path, .{
+            .truncate = true,
+            .permissions = permissions,
+        });
         defer f.close(io);
         // Drop the tempfile on any failure before rename publishes it.
         errdefer std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
@@ -285,7 +312,7 @@ test "atomicWriteFileImpl fsyncs the tempfile via the injected sync ops" {
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
     test_sync_counters = .{};
-    try atomicWriteFileImpl(io, base ++ "/data.bin", "abc", TestSyncOps{});
+    try atomicWriteFileImpl(io, base ++ "/data.bin", "abc", TestSyncOps{}, .default_file);
     try std.testing.expectEqual(@as(usize, 1), test_sync_counters.file);
 }
 
@@ -297,7 +324,7 @@ test "atomicWriteFileImpl fsyncs the parent directory via the injected sync ops"
     defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
 
     test_sync_counters = .{};
-    try atomicWriteFileImpl(io, base ++ "/data.bin", "abc", TestSyncOps{});
+    try atomicWriteFileImpl(io, base ++ "/data.bin", "abc", TestSyncOps{}, .default_file);
     try std.testing.expectEqual(@as(usize, 1), test_sync_counters.dir);
 }
 
@@ -311,7 +338,7 @@ test "atomicWriteFileImpl propagates syncFile errors and removes the tempfile" {
     const dst = base ++ "/data.bin";
     try std.testing.expectError(
         error.AccessDenied,
-        atomicWriteFileImpl(io, dst, "abc", TestSyncOps{ .fail_file = true }),
+        atomicWriteFileImpl(io, dst, "abc", TestSyncOps{ .fail_file = true }, .default_file),
     );
 
     // dst was never renamed in; tempfiles must not accumulate either.
@@ -332,7 +359,7 @@ test "atomicWriteFileImpl propagates syncDir errors but leaves the renamed file 
     const dst = base ++ "/data.bin";
     try std.testing.expectError(
         error.AccessDenied,
-        atomicWriteFileImpl(io, dst, "abc", TestSyncOps{ .fail_dir = true }),
+        atomicWriteFileImpl(io, dst, "abc", TestSyncOps{ .fail_dir = true }, .default_file),
     );
 
     // syncDir runs after rename, so dst_path must hold the durable bytes.
