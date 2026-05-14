@@ -50,7 +50,14 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     cur_stmt.bindText(1, name) catch return error.Aborted;
 
     if (!(cur_stmt.step() catch false)) {
-        output.err("{s} is not installed", .{name});
+        // A cask installed under the same token reads as "not installed"
+        // by the kegs query alone — split the diagnostic so the user
+        // isn't told their installed app is missing.
+        if (isCaskInstalled(&db, name)) {
+            output.err("{s} is a cask; mt rollback does not support casks yet", .{name});
+        } else {
+            output.err("{s} is not installed", .{name});
+        }
         return error.Aborted;
     }
 
@@ -183,6 +190,18 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     db.commit() catch return error.Aborted;
 
     output.info("{s} rolled back to {s}", .{ name, target.version });
+}
+
+/// Best-effort lookup: is `token` registered as an installed cask? Used to
+/// split the rollback "not installed" diagnostic so a cask token doesn't
+/// read as a missing package. Any SQL failure collapses to `false` — the
+/// caller falls back to the original message rather than masking the
+/// underlying error.
+fn isCaskInstalled(db: *sqlite.Database, token: []const u8) bool {
+    var stmt = db.prepare("SELECT 1 FROM casks WHERE token = ?1 LIMIT 1;") catch return false;
+    defer stmt.finalize();
+    stmt.bindText(1, token) catch return false;
+    return stmt.step() catch false;
 }
 
 /// Wipe the on-disk Cellar dir for a keg currently at `version`/`revision`.
