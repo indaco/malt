@@ -362,6 +362,107 @@ test "flushOverflow on an empty list does nothing and returns ok" {
     try patcher.flushOverflow(threaded.io(), testing.allocator, "/tmp/whatever", &.{});
 }
 
+// ---------------------------------------------------------------------------
+// patchTextFiles — atomicity and mode-preservation invariants
+// ---------------------------------------------------------------------------
+
+test "patchTextFiles leaves the original file intact when atomic staging fails" {
+    // Root bypasses POSIX mode bits, so the EACCES path the test relies
+    // on cannot fire — skip rather than mis-pass.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    const root = try tmpSubdir(io, "atomic_intact");
+    const sub = try std.fmt.allocPrint(testing.allocator, "{s}/sub", .{root});
+    defer testing.allocator.free(sub);
+    try std.Io.Dir.createDirAbsolute(io, sub, .default_dir);
+
+    const sub_z = try testing.allocator.dupeZ(u8, sub);
+    defer testing.allocator.free(sub_z);
+    defer {
+        // Re-enable write perm so deleteTree can clean up the locked subdir.
+        _ = std.c.chmod(sub_z.ptr, 0o755);
+        std.Io.Dir.cwd().deleteTree(io, root) catch {};
+        testing.allocator.free(root);
+    }
+
+    const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/wrapper.txt", .{sub});
+    defer testing.allocator.free(file_path);
+    const original = "exec @@HOMEBREW_PREFIX@@/bin/foo\n";
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, file_path, .{});
+        try f.writeStreamingAll(io, original);
+        f.close(io);
+    }
+
+    // 0o555 lets the walker enter and openFile read the existing file
+    // (POSIX needs write on the file, not the parent) but blocks the
+    // sibling tempfile that an atomic rename stages. The in-place
+    // writePositionalAll path the patcher is moving away from would
+    // rewrite the file here and corrupt the assertion below.
+    if (std.c.chmod(sub_z.ptr, 0o555) != 0) return error.SkipZigTest;
+
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" },
+    };
+    // Error is irrelevant — the load-bearing invariant is the file's bytes.
+    _ = patcher.patchTextFiles(io, testing.allocator, root, &replacements) catch {};
+
+    _ = std.c.chmod(sub_z.ptr, 0o755);
+
+    const f = try std.Io.Dir.openFileAbsolute(io, file_path, .{});
+    defer f.close(io);
+    var buf: [128]u8 = undefined;
+    const n = try f.readPositionalAll(io, &buf, 0);
+    try testing.expectEqualStrings(original, buf[0..n]);
+}
+
+test "patchTextFiles preserves the original file mode across the rewrite" {
+    // Root would override the 0o755 the test pins against.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    const dir = try tmpSubdir(io, "preserve_mode");
+    defer {
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(dir);
+    }
+
+    const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/wrapper", .{dir});
+    defer testing.allocator.free(file_path);
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, file_path, .{});
+        try f.writeStreamingAll(io, "#!/bin/sh\nexec @@HOMEBREW_PREFIX@@/bin/foo\n");
+        f.close(io);
+    }
+
+    // 0o755 is the canonical mode for a Python or shell wrapper inside a
+    // relocated keg; losing the exec bit would silently break `mt install`
+    // on any formula that ships shebang scripts.
+    const fp_z = try testing.allocator.dupeZ(u8, file_path);
+    defer testing.allocator.free(fp_z);
+    if (std.c.chmod(fp_z.ptr, 0o755) != 0) return error.SkipZigTest;
+
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" },
+    };
+    const count = try patcher.patchTextFiles(io, testing.allocator, dir, &replacements);
+    // Without an actual patch the rename never runs; the mode check
+    // below would pass trivially and stop guarding the regression.
+    try testing.expectEqual(@as(u32, 1), count);
+
+    const f = try std.Io.Dir.openFileAbsolute(io, file_path, .{});
+    defer f.close(io);
+    const s = try f.stat(io);
+    try testing.expectEqual(@as(std.posix.mode_t, 0o755), s.permissions.toMode() & 0o7777);
+}
+
 /// Build a Mach-O 64 binary carrying one LC_SEGMENT_64 (__TEXT) with a
 /// single __cstring section holding `blob`. The section's file offset is
 /// placed immediately after the load commands so the on-disk layout is

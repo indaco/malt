@@ -4,6 +4,7 @@
 const std = @import("std");
 const parser = @import("parser.zig");
 const text_replace = @import("../text_replace.zig");
+const atomic = @import("../fs/atomic.zig");
 
 pub const PatchError = error{
     PathTooLong,
@@ -462,11 +463,12 @@ pub fn patchTextFiles(
 
         if (modified) {
             defer if (current.ptr != content.ptr) allocator.free(current);
-            // Write back
-            file.writePositionalAll(io, current, 0) catch continue;
-            // Truncate if new content is shorter; trailing bytes are harmless if truncate fails
-            // (Mach-O loader stops at size recorded in header, not file size).
-            file.setLength(io, current.len) catch {};
+            // Atomic rename keeps the file old-or-new on a mid-write
+            // failure; `Replace` (not `Write`) also preserves the exec
+            // bit on shebanged scripts and shell wrappers.
+            var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const abs_path = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
+            atomic.atomicReplaceFile(io, abs_path, current) catch continue;
             count += 1;
         }
     }

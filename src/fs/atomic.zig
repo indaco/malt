@@ -156,6 +156,31 @@ pub fn atomicWriteFile(io: std.Io, dst_path: []const u8, data: []const u8) !void
     return atomicWriteFileImpl(io, dst_path, data, default_sync_ops);
 }
 
+/// Atomic write that re-applies the existing file's permissions after
+/// the rename. Use this when overwriting a live file whose mode bits
+/// (exec on shebangs, libtool archives, pkgconfig fragments) must
+/// survive the swap — `atomicWriteFile` alone publishes the new content
+/// under the platform default and would silently drop the exec bit.
+/// A missing `dst_path` is treated as a fresh write.
+pub fn atomicReplaceFile(io: std.Io, dst_path: []const u8, data: []const u8) !void {
+    const prior_perms: ?std.Io.File.Permissions = blk: {
+        const existing = std.Io.Dir.openFileAbsolute(io, dst_path, .{}) catch break :blk null;
+        defer existing.close(io);
+        const s = existing.stat(io) catch break :blk null;
+        break :blk s.permissions;
+    };
+
+    try atomicWriteFile(io, dst_path, data);
+
+    if (prior_perms) |p| {
+        // Best-effort mode restore: content is already durable on disk;
+        // failing here would only drop us back to the platform-default mode.
+        const f = std.Io.Dir.openFileAbsolute(io, dst_path, .{}) catch return;
+        defer f.close(io);
+        f.setPermissions(io, p) catch {};
+    }
+}
+
 fn atomicWriteFileImpl(io: std.Io, dst_path: []const u8, data: []const u8, sync_ops: anytype) !void {
     var rand_bytes: [4]u8 = undefined;
     std.c.arc4random_buf(&rand_bytes, rand_bytes.len);
