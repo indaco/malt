@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.11.6 - 2026-05-14
+
+### 🩹 Fixes
+
+- **macho/patcher:** make text-file replacements atomic ([4136068](https://github.com/indaco/malt/commit/4136068)) ([#329](https://github.com/indaco/malt/pull/329))
+- **db/lock:** close double-fd race and adopt std.Io.File ([b3a6791](https://github.com/indaco/malt/commit/b3a6791)) ([#328](https://github.com/indaco/malt/pull/328))
+
+### 💅 Refactors
+
+- **app_ctx:** tighten environ bootstrap to match stdlib ([1061d51](https://github.com/indaco/malt/commit/1061d51)) ([#330](https://github.com/indaco/malt/pull/330))
+
+### ✅ Tests
+
+- **regressions:** keep upgrade-revision-bump green across schema bumps ([ee7aa0f](https://github.com/indaco/malt/commit/ee7aa0f)) ([#331](https://github.com/indaco/malt/pull/331))
+
+### 🤖 CI
+
+- update actions/download-artifact to v8 ([38afde1](https://github.com/indaco/malt/commit/38afde1)) ([#327](https://github.com/indaco/malt/pull/327))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.11.5 - 2026-05-13
 
 ### 🩹 Fixes
