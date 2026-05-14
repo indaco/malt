@@ -87,14 +87,14 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     cur_stmt.bindText(1, name) catch return error.Aborted;
 
     if (!(cur_stmt.step() catch false)) {
-        // A cask installed under the same token reads as "not installed"
-        // by the kegs query alone — split the diagnostic so the user
-        // isn't told their installed app is missing.
+        // Cask path: not a keg, but the same token may name an
+        // installed cask. The cask listing and reinstall flow live
+        // alongside the keg flow so the user-facing `--list` / `--to`
+        // / default behaviours are consistent across package types.
         if (isCaskInstalled(&db, name)) {
-            output.err("{s} is a cask; mt rollback does not support casks yet", .{name});
-        } else {
-            output.err("{s} is not installed", .{name});
+            return dispatchCask(ctx, allocator, &db, name, parsed);
         }
+        output.err("{s} is not installed", .{name});
         return error.Aborted;
     }
 
@@ -216,6 +216,67 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     output.info("{s} rolled back to {s}", .{ name, target.pkg_version });
 }
 
+/// Handle the cask side of `mt rollback`. Mirrors the keg flow:
+///   - `--list` prints retained versions (excluding current).
+///   - `--to <ver>` and the default selection refuse with a clear
+///     diagnostic until per-version artefact retention lands in the
+///     install path; `--list` is fully wired in the meantime.
+fn dispatchCask(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    token: []const u8,
+    parsed: ParsedArgs,
+) !void {
+    _ = ctx;
+    const cur_ver_opt = currentCaskVersion(allocator, db, token);
+    defer if (cur_ver_opt) |v| allocator.free(v);
+
+    // `--to <current>`: idempotent no-op, same UX as the keg path.
+    if (parsed.to_version) |req| {
+        if (cur_ver_opt) |cv| {
+            if (std.mem.eql(u8, req, cv)) {
+                output.info("{s} is already at {s}", .{ token, cv });
+                return;
+            }
+        }
+    }
+
+    var entries = try collectCaskEntries(allocator, db, token, cur_ver_opt);
+    defer freeEntries(allocator, &entries);
+
+    if (parsed.list_mode) {
+        return printListing(allocator, token, entries.items);
+    }
+
+    if (entries.items.len == 0) {
+        output.err("No previous version found for {s}", .{token});
+        if (cur_ver_opt) |cv| {
+            output.info("the cask history only contains the current version ({s})", .{cv});
+        }
+        output.info("cask versions accumulate on future installs; upgrade {s} to populate history", .{token});
+        return error.Aborted;
+    }
+
+    if (parsed.to_version) |req| {
+        if (selectTargetIndex(entries.items, req)) |_| {
+            output.err("{s} {s} is in the cask history, but cask reinstall is not yet wired", .{ token, req });
+            output.info("history is queryable via `mt rollback {s} --list`; reinstall lands in a follow-up commit", .{token});
+            return error.Aborted;
+        } else |_| {
+            output.err("{s} {s} is not in the cask history", .{ token, req });
+            try printListing(allocator, token, entries.items);
+            return error.Aborted;
+        }
+    }
+
+    // Default rollback (no flag) — same gap as `--to` for now.
+    output.err("cask rollback reinstall is not yet wired", .{});
+    output.info("available rollback targets for {s}:", .{token});
+    try printListing(allocator, token, entries.items);
+    return error.Aborted;
+}
+
 /// Best-effort lookup: is `token` registered as an installed cask? Used to
 /// split the rollback "not installed" diagnostic so a cask token doesn't
 /// read as a missing package. Any SQL failure collapses to `false` — the
@@ -226,6 +287,68 @@ fn isCaskInstalled(db: *sqlite.Database, token: []const u8) bool {
     defer stmt.finalize();
     stmt.bindText(1, token) catch return false;
     return stmt.step() catch false;
+}
+
+/// Read the currently-installed cask version for `token` so the rollback
+/// listing can exclude it the same way the keg listing excludes the
+/// current keg. Returns null when the cask is absent or unreadable.
+/// Caller owns the returned slice and must `allocator.free` it.
+pub fn currentCaskVersion(allocator: std.mem.Allocator, db: *sqlite.Database, token: []const u8) ?[]u8 {
+    var stmt = db.prepare("SELECT version FROM casks WHERE token = ?1 LIMIT 1;") catch return null;
+    defer stmt.finalize();
+    stmt.bindText(1, token) catch return null;
+    if (!(stmt.step() catch false)) return null;
+    const ver_ptr = stmt.columnText(0) orelse return null;
+    return allocator.dupe(u8, std.mem.sliceTo(ver_ptr, 0)) catch null;
+}
+
+/// Collect rollback candidates for a cask from the `cask_versions`
+/// history table. `skip_version`, when non-null, drops the row matching
+/// it (typically the currently-installed version). Result sorted
+/// newest-first by `installed_at`. Caller owns the inner slices + list
+/// and releases via `freeEntries`.
+pub fn collectCaskEntries(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    token: []const u8,
+    skip_version: ?[]const u8,
+) CollectError!std.ArrayList(Entry) {
+    var entries: std.ArrayList(Entry) = .empty;
+    errdefer freeEntries(allocator, &entries);
+
+    var stmt = db.prepare(
+        \\SELECT version, sha256, strftime('%s', installed_at) AS ts
+        \\FROM cask_versions WHERE token = ?1
+        \\ORDER BY installed_at DESC;
+    ) catch return CollectError.StoreUnreadable;
+    defer stmt.finalize();
+    stmt.bindText(1, token) catch return CollectError.StoreUnreadable;
+
+    while (stmt.step() catch false) {
+        const ver_ptr = stmt.columnText(0) orelse continue;
+        const ver_slice = std.mem.sliceTo(ver_ptr, 0);
+        if (skip_version) |skip| {
+            if (std.mem.eql(u8, ver_slice, skip)) continue;
+        }
+
+        // sha256 is nullable on the casks side; surface "" so the printer
+        // doesn't emit a trailing parenthetical that looks like a bug.
+        const sha_slice: []const u8 = if (stmt.columnText(1)) |s| std.mem.sliceTo(s, 0) else "";
+        // strftime('%s', ...) returns text; parse → seconds → ns to fit
+        // the keg-side Entry's `mtime_ns` field.
+        const ts_secs: i128 = if (stmt.columnText(2)) |t| std.fmt.parseInt(i128, std.mem.sliceTo(t, 0), 10) catch 0 else 0;
+
+        const ver_dup = allocator.dupe(u8, ver_slice) catch return CollectError.OutOfMemory;
+        errdefer allocator.free(ver_dup);
+        const sha_dup = allocator.dupe(u8, sha_slice) catch return CollectError.OutOfMemory;
+        errdefer allocator.free(sha_dup);
+        try entries.append(allocator, .{
+            .sha256 = sha_dup,
+            .pkg_version = ver_dup,
+            .mtime_ns = ts_secs * std.time.ns_per_s,
+        });
+    }
+    return entries;
 }
 
 /// Wipe the on-disk Cellar dir for a keg currently at `version`/`revision`.
@@ -636,6 +759,81 @@ fn seedStoreEntry(
     if (delay_ms_after > 0) {
         std.Io.sleep(io, std.Io.Duration.fromNanoseconds(@intCast(delay_ms_after * std.time.ns_per_ms)), .awake) catch {};
     }
+}
+
+test "collectCaskEntries returns history rows sorted newest-first" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // Order matters: even if rows are inserted out of order, the listing
+    // must respect installed_at descending so the newest rollback target
+    // shows first.
+    try db.exec(
+        \\INSERT INTO cask_versions (token, version, url, sha256, installed_at)
+        \\VALUES ('flux-markdown', '1.30.0', 'https://x.invalid/a.dmg', 'aa', '2026-01-01T00:00:00'),
+        \\       ('flux-markdown', '1.32.0', 'https://x.invalid/b.dmg', 'bb', '2026-03-01T00:00:00'),
+        \\       ('flux-markdown', '1.31.0', 'https://x.invalid/c.dmg', 'cc', '2026-02-01T00:00:00');
+    );
+
+    var entries = try collectCaskEntries(testing.allocator, &db, "flux-markdown", null);
+    defer freeEntries(testing.allocator, &entries);
+
+    try testing.expectEqual(@as(usize, 3), entries.items.len);
+    try testing.expectEqualStrings("1.32.0", entries.items[0].pkg_version);
+    try testing.expectEqualStrings("1.31.0", entries.items[1].pkg_version);
+    try testing.expectEqualStrings("1.30.0", entries.items[2].pkg_version);
+}
+
+test "collectCaskEntries drops the row matching skip_version" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO cask_versions (token, version, url, installed_at)
+        \\VALUES ('flux-markdown', '1.30.0', 'u', '2026-01-01T00:00:00'),
+        \\       ('flux-markdown', '1.32.0', 'u', '2026-03-01T00:00:00');
+    );
+
+    var entries = try collectCaskEntries(testing.allocator, &db, "flux-markdown", "1.32.0");
+    defer freeEntries(testing.allocator, &entries);
+
+    try testing.expectEqual(@as(usize, 1), entries.items.len);
+    try testing.expectEqualStrings("1.30.0", entries.items[0].pkg_version);
+}
+
+test "collectCaskEntries returns an empty list when the token has no history" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var entries = try collectCaskEntries(testing.allocator, &db, "missing-cask", null);
+    defer freeEntries(testing.allocator, &entries);
+    try testing.expectEqual(@as(usize, 0), entries.items.len);
+}
+
+test "currentCaskVersion reads the installed cask version when present" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url)
+        \\VALUES ('flux-markdown', 'flux-markdown', '1.32.427', 'https://x.invalid/f.dmg');
+    );
+
+    const v = currentCaskVersion(testing.allocator, &db, "flux-markdown") orelse return error.TestUnexpectedResult;
+    defer testing.allocator.free(v);
+    try testing.expectEqualStrings("1.32.427", v);
+}
+
+test "currentCaskVersion returns null when the token is unknown" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try testing.expect(currentCaskVersion(testing.allocator, &db, "missing") == null);
 }
 
 test "collectEntries returns an empty list when the store has no matching package" {
