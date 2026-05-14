@@ -524,3 +524,62 @@ test "rollback <cask> --to <ver> dry-run announces without engaging install" {
     // URL not breaking the call (the real reinstall would error here).
     try rollback.execute(&ctx, testing.allocator, &.{ "--dry-run", "flux-markdown", "--to", "1.30.0" });
 }
+
+test "rollback <cask> (no flag) lands on the newest non-current entry" {
+    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_default";
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try seedCask(prefix, "flux-markdown", "1.32.427");
+    try seedCaskVersion(prefix, "flux-markdown", "1.30.0", "2026-01-01T00:00:00");
+    try seedCaskVersion(prefix, "flux-markdown", "1.31.0", "2026-02-01T00:00:00");
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    // Default rollback (no --to) must engage the reinstall path; the
+    // seeded URL is unreachable so the call surfaces error.Aborted.
+    // The contract under test is that dispatch picks 1.31.0 (newest
+    // non-current), not that the network round-trips.
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    const err = rollback.execute(&ctx, testing.allocator, &.{"flux-markdown"});
+    try testing.expectError(error.Aborted, err);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1.31.0") != null);
+}
+
+test "rollback <cask> with empty history refuses with a useful diagnostic" {
+    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_empty";
+    try makeSandbox(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try seedCask(prefix, "flux-markdown", "1.32.427");
+    // Only the current version exists in history.
+    try seedCaskVersion(prefix, "flux-markdown", "1.32.427", "2026-03-01T00:00:00");
+
+    setPrefix(prefix);
+    defer unsetPrefix();
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    const err = rollback.execute(&ctx, testing.allocator, &.{"flux-markdown"});
+    try testing.expectError(error.Aborted, err);
+
+    // The user must be told *why* there's nothing to roll back to.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "No previous version") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1.32.427") != null);
+}
