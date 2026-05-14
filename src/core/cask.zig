@@ -105,6 +105,180 @@ pub fn removeRecord(db: *sqlite.Database, token: []const u8) sqlite.SqliteError!
     _ = try stmt.step();
 }
 
+/// Append a row to the per-version cask history. Called from `install`
+/// (and any other code path that materialises a cask version on disk)
+/// so `mt rollback <cask> --list / --to` can retrieve the URL, SHA256,
+/// artifact type, and cache path needed to reinstall later. INSERT OR
+/// IGNORE keeps reinstalls of the same version idempotent.
+pub fn recordCaskVersion(
+    db: *sqlite.Database,
+    token: []const u8,
+    version: []const u8,
+    url: []const u8,
+    sha256: ?[]const u8,
+    artifact_type: []const u8,
+    cache_path: ?[]const u8,
+) sqlite.SqliteError!void {
+    var stmt = try db.prepare(
+        \\INSERT OR IGNORE INTO cask_versions
+        \\    (token, version, url, sha256, artifact_type, cache_path)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6);
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    try stmt.bindText(2, version);
+    try stmt.bindText(3, url);
+    if (sha256) |s| try stmt.bindText(4, s) else try stmt.bindNull(4);
+    try stmt.bindText(5, artifact_type);
+    if (cache_path) |p| try stmt.bindText(6, p) else try stmt.bindNull(6);
+    _ = try stmt.step();
+}
+
+/// Snapshot of a single `cask_versions` row, owned by the caller.
+/// Returned by `lookupCaskVersion`. Free via `deinit`.
+pub const CaskVersion = struct {
+    token: []u8,
+    version: []u8,
+    url: []u8,
+    sha256: ?[]u8,
+    artifact_type: []u8,
+    cache_path: ?[]u8,
+
+    pub fn deinit(self: *CaskVersion, allocator: std.mem.Allocator) void {
+        allocator.free(self.token);
+        allocator.free(self.version);
+        allocator.free(self.url);
+        if (self.sha256) |s| allocator.free(s);
+        allocator.free(self.artifact_type);
+        if (self.cache_path) |p| allocator.free(p);
+    }
+};
+
+pub const LookupError = sqlite.SqliteError || std.mem.Allocator.Error;
+
+/// Existing-cask metadata the rollback path must preserve across a
+/// reinstall — `auto_updates` and the owning `tap`. Mirrors the keg
+/// rollback's pin-preservation: a rolled-back cask must not silently
+/// flip these fields back to "fresh install" defaults.
+pub const ReinstallMeta = struct {
+    auto_updates: bool,
+    tap: ?[]u8,
+
+    pub fn deinit(self: *ReinstallMeta, allocator: std.mem.Allocator) void {
+        if (self.tap) |t| allocator.free(t);
+    }
+};
+
+/// Read `auto_updates` and `tap` from the current `casks` row for
+/// `token`. Returns defaults (`false`, `null`) when the row is absent
+/// — the rollback caller refuses earlier if the cask isn't installed,
+/// so the default branch only fires under truly anomalous DB state.
+pub fn readReinstallMeta(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    token: []const u8,
+) LookupError!ReinstallMeta {
+    var stmt = try db.prepare("SELECT auto_updates, tap FROM casks WHERE token = ?1 LIMIT 1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    if (!(try stmt.step())) return .{ .auto_updates = false, .tap = null };
+    const au = stmt.columnBool(0);
+    const tap_dup = try dupColumn(allocator, stmt.columnText(1));
+    return .{ .auto_updates = au, .tap = tap_dup };
+}
+
+/// Look up the cask_versions row for `(token, version)`. Returns null
+/// when no row matches — the caller decides whether that's a rollback
+/// refusal or a re-download trigger.
+pub fn lookupCaskVersion(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    token: []const u8,
+    version: []const u8,
+) LookupError!?CaskVersion {
+    var stmt = try db.prepare(
+        \\SELECT token, version, url, sha256, artifact_type, cache_path
+        \\FROM cask_versions WHERE token = ?1 AND version = ?2 LIMIT 1;
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    try stmt.bindText(2, version);
+    if (!(try stmt.step())) return null;
+
+    // Stage every dup in a slot tracked by `cleanup`; the cleanup runs
+    // on every error path so a mid-row OOM doesn't leak the earlier dups.
+    var slots: [6]?[]u8 = .{null} ** 6;
+    errdefer for (slots) |s| if (s) |buf| allocator.free(buf);
+
+    inline for (.{ 0, 1, 2, 3, 4, 5 }) |idx| {
+        slots[idx] = try dupColumn(allocator, stmt.columnText(idx));
+    }
+
+    // Required columns: token, version, url, artifact_type. NULL here
+    // means the row is malformed; refuse cleanly so the caller can fall
+    // back to "no rollback target".
+    if (slots[0] == null or slots[1] == null or slots[2] == null or slots[4] == null) return null;
+
+    return .{
+        .token = slots[0].?,
+        .version = slots[1].?,
+        .url = slots[2].?,
+        .sha256 = slots[3],
+        .artifact_type = slots[4].?,
+        .cache_path = slots[5],
+    };
+}
+
+/// Duplicate a SQLite text column into an allocator-owned slice. NULL
+/// columns map to `null`; rows whose schema is shorter than the index
+/// also return `null` to keep the caller's error space tight.
+fn dupColumn(allocator: std.mem.Allocator, raw: ?[*:0]const u8) std.mem.Allocator.Error!?[]u8 {
+    const ptr = raw orelse return null;
+    return try allocator.dupe(u8, std.mem.sliceTo(ptr, 0));
+}
+
+/// Render an `ArtifactType` enum tag for storage in `cask_versions.artifact_type`.
+/// Symmetric with `artifactTypeFromTag` so writes and reads agree byte-for-byte.
+pub fn artifactTypeTag(t: ArtifactType) []const u8 {
+    return switch (t) {
+        .dmg => "dmg",
+        .zip => "zip",
+        .pkg => "pkg",
+        .tar_gz => "tar_gz",
+        .unknown => "unknown",
+    };
+}
+
+/// Iterate `{prefix}/cache/Cask/` and delete any file whose basename
+/// starts with `{token}-` — the per-version cache shape this binary
+/// writes. Used by uninstall + purge so per-version artefacts don't
+/// outlive their owning cask. Best-effort; silent on missing dirs.
+pub fn sweepPerVersionCache(io: std.Io, prefix: []const u8, token: []const u8) void {
+    var dir_buf: [512]u8 = undefined;
+    const cache_dir_path = std.fmt.bufPrint(&dir_buf, "{s}/cache/Cask", .{prefix}) catch return;
+
+    var dir = std.Io.Dir.openDirAbsolute(io, cache_dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    var prefix_buf: [256]u8 = undefined;
+    const name_prefix = std.fmt.bufPrint(&prefix_buf, "{s}-", .{token}) catch return;
+
+    var iter = dir.iterate();
+    while (iter.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.startsWith(u8, entry.name, name_prefix)) continue;
+        dir.deleteFile(io, entry.name) catch {};
+    }
+}
+
+pub fn artifactTypeFromTag(tag: []const u8) ArtifactType {
+    if (std.mem.eql(u8, tag, "dmg")) return .dmg;
+    if (std.mem.eql(u8, tag, "zip")) return .zip;
+    if (std.mem.eql(u8, tag, "pkg")) return .pkg;
+    if (std.mem.eql(u8, tag, "tar_gz")) return .tar_gz;
+    return .unknown;
+}
+
 /// Determine the artifact type from the cask download URL.
 /// `tar_gz` covers both `.tar.gz` and `.tgz` — the two spellings are
 /// treated as a single container format here; the extractor is the same.
@@ -329,6 +503,18 @@ pub const CaskInstaller = struct {
         // Caskroom dir is bookkeeping; app is already in place.
         self.recordCaskroom(cask) catch {};
 
+        // History row for `mt rollback <cask> --list / --to`. Best-effort:
+        // a failed history insert must not undo a successful install.
+        recordCaskVersion(
+            self.db,
+            cask.token,
+            cask.version,
+            cask.url,
+            cask.sha256,
+            artifactTypeTag(artifact_type),
+            cache_path,
+        ) catch {};
+
         // Clean up cache file (keep for uninstall/upgrade reference if desired)
         // We keep the cache file so reinstalls are faster.
 
@@ -370,15 +556,89 @@ pub const CaskInstaller = struct {
         const caskroom_path = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}", .{ self.prefix, token }) catch "";
         if (caskroom_path.len > 0) std.Io.Dir.cwd().deleteTree(self.io, caskroom_path) catch {};
 
+        // Clean up cached artefacts. Two name shapes coexist: the legacy
+        // `<token>.<ext>` and the per-version `<token>-<version>.<ext>`
+        // shape that retains rollback targets. Wipe both for `uninstall`,
+        // since after uninstall there is no version left to roll back to.
         var cache_buf: [512]u8 = undefined;
         for ([_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz" }) |ext| {
             const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask/{s}{s}", .{ self.prefix, token, ext }) catch continue;
-            // cache file may not exist for this extension.
             std.Io.Dir.cwd().deleteFile(self.io, cache_file) catch {};
         }
+        sweepPerVersionCache(self.io, self.prefix, token);
+
+        // Drop every history row so a future install starts clean.
+        if (self.db.prepare("DELETE FROM cask_versions WHERE token = ?1;")) |prepared| {
+            var hist_stmt = prepared;
+            defer hist_stmt.finalize();
+            hist_stmt.bindText(1, token) catch {};
+            _ = hist_stmt.step() catch false;
+        } else |_| {}
 
         // DB row cleanup; uninstall already did the user-visible work.
         removeRecord(self.db, token) catch {};
+    }
+
+    /// Reinstall a previously-installed cask version from history. Drives
+    /// the same `install` pipeline used for fresh installs, but sources
+    /// (url, sha256, artifact_type) come from the `cask_versions` row
+    /// instead of an API parse. Uses the cached artefact when present;
+    /// otherwise re-downloads from the recorded URL.
+    pub fn reinstallFromHistory(
+        self: *CaskInstaller,
+        token: []const u8,
+        target_version: []const u8,
+    ) CaskError!void {
+        const row_opt = lookupCaskVersion(self.allocator, self.db, token, target_version) catch
+            return CaskError.InstallFailed;
+        var row = row_opt orelse return CaskError.InstallFailed;
+        defer row.deinit(self.allocator);
+
+        // Refuse if the recorded artifact type isn't one this binary can
+        // install — silently picking `.unknown` would land an empty
+        // install and corrupt the rollback contract.
+        const at = artifactTypeFromTag(row.artifact_type);
+        if (at == .unknown) return CaskError.InstallFailed;
+        self.artifact_type_override = at;
+        defer self.artifact_type_override = null;
+
+        // Preserve `auto_updates` + owning `tap` across the rollback so
+        // a held cask doesn't silently regress to install defaults. The
+        // keg path gets the same guarantee on `pinned` via the COALESCE
+        // inside recordInstall; cask fields aren't COALESCE-able from
+        // there because install/upgrade legitimately overwrite them.
+        var meta = readReinstallMeta(self.allocator, self.db, token) catch
+            return CaskError.InstallFailed;
+        defer meta.deinit(self.allocator);
+
+        // Parse "{}" so the synthetic Cask carries a valid (empty)
+        // ObjectMap — `parseAppName` falls through to `findAppInDir`,
+        // which is the same fallback shape used for any cask whose API
+        // payload didn't ship an explicit `app:` artifact. The Parsed
+        // value owns its own arena; one `deinit` releases everything.
+        var parsed_empty = std.json.parseFromSlice(std.json.Value, self.allocator, "{}", .{}) catch
+            return CaskError.OutOfMemory;
+        defer parsed_empty.deinit();
+
+        const synthetic: Cask = .{
+            .token = row.token,
+            .name = row.token,
+            .version = row.version,
+            .desc = "",
+            .homepage = "",
+            .url = row.url,
+            .sha256 = if (row.sha256) |s| s else null,
+            .auto_updates = meta.auto_updates,
+            .parsed = parsed_empty,
+        };
+
+        const app_path = try self.install(&synthetic);
+        defer self.allocator.free(app_path);
+
+        // Flip the `casks` row to the rolled-back version. `pinned`
+        // survives via recordInstall's COALESCE; `auto_updates` and
+        // `tap` survive via the preserved values above.
+        recordInstall(self.db, &synthetic, app_path, meta.tap) catch return CaskError.InstallFailed;
     }
 
     /// Check installed version vs API version. Returns true if outdated.
@@ -408,7 +668,11 @@ pub const CaskInstaller = struct {
             .tar_gz => ".tar.gz",
             .unknown => ".bin",
         };
-        const dest = try std.fmt.allocPrint(self.allocator, "{s}/{s}{s}", .{ cache_dir, cask.token, ext_str });
+        // Per-version filename so older versions' artefacts survive a
+        // newer install — `mt rollback <cask> --to <ver>` reaches for
+        // the cached file at `<token>-<version>.<ext>` before falling
+        // back to a fresh download.
+        const dest = try std.fmt.allocPrint(self.allocator, "{s}/{s}-{s}{s}", .{ cache_dir, cask.token, cask.version, ext_str });
         errdefer self.allocator.free(dest);
 
         // Download via HTTP client
