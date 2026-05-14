@@ -366,6 +366,23 @@ test "flushOverflow on an empty list does nothing and returns ok" {
 // patchTextFiles — atomicity and mode-preservation invariants
 // ---------------------------------------------------------------------------
 
+/// Goes through `std.Io.File.setPermissions` (matching the dir-as-file
+/// pattern used by `src/fs/atomic.zig`) so the new tests never reach for
+/// `std.c.chmod`. `geteuid` has no portable Zig peer in 0.16 and stays
+/// on `std.c` — same call shape as `tests/swap_test.zig`.
+fn chmodDir(io: std.Io, path: []const u8, mode: std.posix.mode_t) !void {
+    var d = try std.Io.Dir.openDirAbsolute(io, path, .{});
+    defer d.close(io);
+    const handle: std.Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
+    try handle.setPermissions(io, std.Io.File.Permissions.fromMode(mode));
+}
+
+fn chmodFile(io: std.Io, path: []const u8, mode: std.posix.mode_t) !void {
+    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    try f.setPermissions(io, std.Io.File.Permissions.fromMode(mode));
+}
+
 test "patchTextFiles leaves the original file intact when atomic staging fails" {
     // Root bypasses POSIX mode bits, so the EACCES path the test relies
     // on cannot fire — skip rather than mis-pass.
@@ -379,12 +396,9 @@ test "patchTextFiles leaves the original file intact when atomic staging fails" 
     const sub = try std.fmt.allocPrint(testing.allocator, "{s}/sub", .{root});
     defer testing.allocator.free(sub);
     try std.Io.Dir.createDirAbsolute(io, sub, .default_dir);
-
-    const sub_z = try testing.allocator.dupeZ(u8, sub);
-    defer testing.allocator.free(sub_z);
     defer {
         // Re-enable write perm so deleteTree can clean up the locked subdir.
-        _ = std.c.chmod(sub_z.ptr, 0o755);
+        chmodDir(io, sub, 0o755) catch {};
         std.Io.Dir.cwd().deleteTree(io, root) catch {};
         testing.allocator.free(root);
     }
@@ -403,7 +417,7 @@ test "patchTextFiles leaves the original file intact when atomic staging fails" 
     // sibling tempfile that an atomic rename stages. The in-place
     // writePositionalAll path the patcher is moving away from would
     // rewrite the file here and corrupt the assertion below.
-    if (std.c.chmod(sub_z.ptr, 0o555) != 0) return error.SkipZigTest;
+    chmodDir(io, sub, 0o555) catch return error.SkipZigTest;
 
     const replacements = [_]patcher.Replacement{
         .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" },
@@ -411,7 +425,7 @@ test "patchTextFiles leaves the original file intact when atomic staging fails" 
     // Error is irrelevant — the load-bearing invariant is the file's bytes.
     _ = patcher.patchTextFiles(io, testing.allocator, root, &replacements) catch {};
 
-    _ = std.c.chmod(sub_z.ptr, 0o755);
+    chmodDir(io, sub, 0o755) catch {};
 
     const f = try std.Io.Dir.openFileAbsolute(io, file_path, .{});
     defer f.close(io);
@@ -445,9 +459,7 @@ test "patchTextFiles preserves the original file mode across the rewrite" {
     // 0o755 is the canonical mode for a Python or shell wrapper inside a
     // relocated keg; losing the exec bit would silently break `mt install`
     // on any formula that ships shebang scripts.
-    const fp_z = try testing.allocator.dupeZ(u8, file_path);
-    defer testing.allocator.free(fp_z);
-    if (std.c.chmod(fp_z.ptr, 0o755) != 0) return error.SkipZigTest;
+    chmodFile(io, file_path, 0o755) catch return error.SkipZigTest;
 
     const replacements = [_]patcher.Replacement{
         .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" },
@@ -461,6 +473,48 @@ test "patchTextFiles preserves the original file mode across the rewrite" {
     defer f.close(io);
     const s = try f.stat(io);
     try testing.expectEqual(@as(std.posix.mode_t, 0o755), s.permissions.toMode() & 0o7777);
+}
+
+test "patchTextFiles rewrites a 0o444 read-only text file" {
+    // Old in-place path opened files with `.read_write`, so 0o444 configs
+    // were silently skipped. The atomic helper publishes a fresh inode
+    // with the prior mode, so read-only-on-disk text files can now be
+    // relocated without losing the original `0o444` afterwards.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = undefined;
+    const io = testIo(&threaded);
+    defer threaded.deinit();
+
+    const dir = try tmpSubdir(io, "readonly_input");
+    const file_path = try std.fmt.allocPrint(testing.allocator, "{s}/conf.pc", .{dir});
+    defer {
+        // Restore write perm so deleteTree can unlink the 0o444 file.
+        chmodFile(io, file_path, 0o644) catch {};
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+        testing.allocator.free(file_path);
+        testing.allocator.free(dir);
+    }
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, file_path, .{});
+        try f.writeStreamingAll(io, "prefix=@@HOMEBREW_PREFIX@@\n");
+        f.close(io);
+    }
+    chmodFile(io, file_path, 0o444) catch return error.SkipZigTest;
+
+    const replacements = [_]patcher.Replacement{
+        .{ .old = "@@HOMEBREW_PREFIX@@", .new = "/opt/malt" },
+    };
+    const count = try patcher.patchTextFiles(io, testing.allocator, dir, &replacements);
+    try testing.expectEqual(@as(u32, 1), count);
+
+    const f = try std.Io.Dir.openFileAbsolute(io, file_path, .{});
+    defer f.close(io);
+    var buf: [64]u8 = undefined;
+    const n = try f.readPositionalAll(io, &buf, 0);
+    try testing.expectEqualStrings("prefix=/opt/malt\n", buf[0..n]);
+    const s = try f.stat(io);
+    try testing.expectEqual(@as(std.posix.mode_t, 0o444), s.permissions.toMode() & 0o7777);
 }
 
 /// Build a Mach-O 64 binary carrying one LC_SEGMENT_64 (__TEXT) with a

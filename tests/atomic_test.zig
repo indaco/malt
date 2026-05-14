@@ -383,6 +383,103 @@ test "atomicWriteFile surfaces FileNotFound when the parent dir is missing" {
     try testing.expectError(error.FileNotFound, err);
 }
 
+// atomicReplaceFile: the rename publishes new content under the prior
+// mode bits. Direct coverage so the helper's contract is pinned even
+// when its only caller (the macho/patcher) is refactored.
+
+test "atomicReplaceFile preserves the existing file's mode" {
+    const base = "/tmp/malt_atomic_replace_preserve";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+
+    const dst = base ++ "/wrapper";
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, dst, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "OLD");
+        // 0o750 = unusual triple so a default-mode regression is unambiguous.
+        try f.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(0o750));
+    }
+
+    try atomic.atomicReplaceFile(std.Options.debug_io, dst, "NEW");
+
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, dst, .{});
+    defer f.close(std.Options.debug_io);
+    var buf: [8]u8 = undefined;
+    const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
+    try testing.expectEqualStrings("NEW", buf[0..n]);
+
+    const s = try f.stat(std.Options.debug_io);
+    try testing.expectEqual(@as(std.posix.mode_t, 0o750), s.permissions.toMode() & 0o7777);
+}
+
+test "atomicReplaceFile writes a fresh file when dst is missing" {
+    const base = "/tmp/malt_atomic_replace_fresh";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+
+    const dst = base ++ "/new.txt";
+    try atomic.atomicReplaceFile(std.Options.debug_io, dst, "hello");
+
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, dst, .{});
+    defer f.close(std.Options.debug_io);
+    var buf: [16]u8 = undefined;
+    const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
+    try testing.expectEqualStrings("hello", buf[0..n]);
+}
+
+test "atomicReplaceFile leaves the original intact when staging fails" {
+    // Root would bypass the 0o555 the test relies on to fail the rename.
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    const base = "/tmp/malt_atomic_replace_intact";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.makeDirAbsolute(std.Options.debug_io, base);
+
+    const dst = base ++ "/wrapper";
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, dst, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "ORIGINAL");
+    }
+
+    // Lock the parent so the helper cannot stage a sibling tempfile.
+    {
+        var d = try test_io.openDirAbsolute(std.Options.debug_io, base, .{});
+        defer d.close(std.Options.debug_io);
+        const handle: std.Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
+        handle.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(0o555)) catch return error.SkipZigTest;
+    }
+    defer {
+        unlock: {
+            var d = test_io.openDirAbsolute(std.Options.debug_io, base, .{}) catch break :unlock;
+            defer d.close(std.Options.debug_io);
+            const handle: std.Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
+            handle.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(0o755)) catch {};
+        }
+        test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    }
+
+    // Whatever error the helper surfaces, the load-bearing invariant is
+    // that the path still holds the original bytes afterwards.
+    _ = atomic.atomicReplaceFile(std.Options.debug_io, dst, "NEW") catch {};
+
+    {
+        var d = try test_io.openDirAbsolute(std.Options.debug_io, base, .{});
+        defer d.close(std.Options.debug_io);
+        const handle: std.Io.File = .{ .handle = d.handle, .flags = .{ .nonblocking = false } };
+        try handle.setPermissions(std.Options.debug_io, std.Io.File.Permissions.fromMode(0o755));
+    }
+
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, dst, .{});
+    defer f.close(std.Options.debug_io);
+    var buf: [16]u8 = undefined;
+    const n = try f.readPositionalAll(std.Options.debug_io, &buf, 0);
+    try testing.expectEqualStrings("ORIGINAL", buf[0..n]);
+}
+
 test "atomicRename moves a directory tree within the same filesystem" {
     const base = "/tmp/malt_atomic_rename_dir";
     test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};

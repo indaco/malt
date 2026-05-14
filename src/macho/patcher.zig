@@ -420,8 +420,10 @@ pub fn patchTextFiles(
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
 
-        // Read file
-        const file = dir.openFile(io, entry.path, .{ .mode = .read_write }) catch continue;
+        // Read-only: the rewrite is published by the atomic helper, not
+        // through this handle, so a 0o444 read-only config is still
+        // patchable.
+        const file = dir.openFile(io, entry.path, .{ .mode = .read_only }) catch continue;
         defer file.close(io);
 
         const stat = file.stat(io) catch continue;
