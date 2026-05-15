@@ -2,10 +2,11 @@
 //! Covers showIfRequested flag detection and the helpFor lookup table.
 
 const std = @import("std");
+const testing = std.testing;
+
+const help = @import("malt").cli_help;
 const malt = @import("malt");
 const test_io = @import("test_io");
-const testing = std.testing;
-const help = @import("malt").cli_help;
 
 fn quietCtx() malt.app_ctx.AppCtx {
     return .{
@@ -80,6 +81,16 @@ test "install help documents --local and its code-exec warning" {
     const text = help.helpFor("install");
     try testing.expect(std.mem.indexOf(u8, text, "--local") != null);
     try testing.expect(std.mem.indexOf(u8, text, "trust") != null);
+}
+
+test "deps help documents --recursive, --installed, and --json" {
+    // Discoverability guard: deps is the forward complement of `uses`,
+    // and the three flags below define what the command can do beyond
+    // a single direct read. Drop one from --help and users won't know.
+    const text = help.helpFor("deps");
+    try testing.expect(std.mem.indexOf(u8, text, "--recursive") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--installed") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--json") != null);
 }
 
 test "helpFor falls back gracefully for unknown commands" {

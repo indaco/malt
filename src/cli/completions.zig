@@ -2,6 +2,7 @@
 //! Prints shell completion scripts for bash, zsh, or fish to stdout.
 
 const std = @import("std");
+
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const help = @import("help.zig");
 
@@ -86,7 +87,7 @@ pub const bash_script =
     \\    words=("${COMP_WORDS[@]}")
     \\    cword=$COMP_CWORD
     \\
-    \\    local commands="install uninstall remove upgrade update outdated list ls info search uses which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge services bundle help"
+    \\    local commands="install uninstall remove upgrade update outdated list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge services bundle help"
     \\    local global_flags="--verbose -v --quiet -q --json --output-format=ndjson --dry-run --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
@@ -148,6 +149,7 @@ pub const bash_script =
     \\        info)             cmd_flags="--formula --cask --json" ;;
     \\        search)           cmd_flags="--formula --cask --json" ;;
     \\        uses)             cmd_flags="--recursive -r --json --quiet -q" ;;
+    \\        deps)             cmd_flags="--recursive -r --installed --json --quiet -q" ;;
     \\        which)            cmd_flags="--json" ;;
     \\        migrate)          cmd_flags="--dry-run" ;;
     \\        rollback)         cmd_flags="--dry-run --list --to --json" ;;
@@ -202,6 +204,7 @@ pub const zsh_script =
     \\        'info:Show detailed package information'
     \\        'search:Search formulas and casks'
     \\        'uses:Show installed packages that depend on a formula'
+    \\        'deps:Show what a formula depends on (forward of `uses`)'
     \\        'which:Resolve a prefix binary to its owning keg'
     \\        'doctor:System health check'
     \\        'tap:Manage taps'
@@ -471,6 +474,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a info        -d 'Show detailed package information'
     \\    complete -c $__malt_bin -n __malt_needs_command -a search      -d 'Search formulas and casks'
     \\    complete -c $__malt_bin -n __malt_needs_command -a uses        -d 'Show packages that depend on a formula'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a deps        -d 'Show what a formula depends on'
     \\    complete -c $__malt_bin -n __malt_needs_command -a which       -d 'Resolve a prefix binary to its owning keg'
     \\    complete -c $__malt_bin -n __malt_needs_command -a doctor      -d 'System health check'
     \\    complete -c $__malt_bin -n __malt_needs_command -a tap         -d 'Manage taps'
@@ -553,6 +557,12 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command uses' -l recursive -s r -d 'Include transitive dependents'
     \\    complete -c $__malt_bin -n '__malt_using_command uses' -l json               -d 'JSON output'
     \\    complete -c $__malt_bin -n '__malt_using_command uses' -l quiet     -s q    -d 'Suppress status messages'
+    \\
+    \\    # deps
+    \\    complete -c $__malt_bin -n '__malt_using_command deps' -l recursive -s r -d 'Walk transitive deps'
+    \\    complete -c $__malt_bin -n '__malt_using_command deps' -l installed         -d 'Restrict to locally-resolved kegs'
+    \\    complete -c $__malt_bin -n '__malt_using_command deps' -l json              -d 'JSON output'
+    \\    complete -c $__malt_bin -n '__malt_using_command deps' -l quiet     -s q   -d 'Suppress status messages'
     \\
     \\    # which
     \\    complete -c $__malt_bin -n '__malt_using_command which' -l json -d 'JSON output'
