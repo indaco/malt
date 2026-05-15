@@ -338,12 +338,12 @@ test "checkMachOPlaceholders under --verbose lists each affected (package versio
         .environ = .empty,
     }, &doctor.checks);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    alpha 1.0\n") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    beta 2.0\n") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - alpha 1.0\n") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - beta 2.0\n") != null);
     // Each package appears exactly once — no per-file rows leaking
     // back in via the grouping.
-    const alpha_idx = std.mem.indexOf(u8, stderr_buf.items, "    alpha 1.0\n").?;
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items[alpha_idx + 1 ..], "    alpha 1.0\n") == null);
+    const alpha_idx = std.mem.indexOf(u8, stderr_buf.items, "    - alpha 1.0\n").?;
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items[alpha_idx + 1 ..], "    - alpha 1.0\n") == null);
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha/1.0/lib/libalpha.dylib") == null);
     // Verbose redundantly shows every package below the headline,
     // so the (first: …) hint must drop out — the row above is
@@ -377,7 +377,7 @@ test "checkBrokenSymlinks without --verbose keeps the count summary only" {
     }, &doctor.checks);
 
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1 broken symlink(s)") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    bin/ghost-default") == null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - bin/ghost-default") == null);
 }
 
 test "checkMachOPlaceholders without --verbose keeps the count + first-hint summary only" {
@@ -429,8 +429,8 @@ test "checkMachOPlaceholders without --verbose keeps the count + first-hint summ
     const has_alpha_first = std.mem.indexOf(u8, stderr_buf.items, "(first: alpha 1.0)") != null;
     const has_beta_first = std.mem.indexOf(u8, stderr_buf.items, "(first: beta 2.0)") != null;
     try testing.expect(has_alpha_first or has_beta_first);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    alpha 1.0\n") == null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    beta 2.0\n") == null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - alpha 1.0\n") == null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - beta 2.0\n") == null);
 }
 
 test "checkBrokenSymlinks under --verbose lists every broken symlink path" {

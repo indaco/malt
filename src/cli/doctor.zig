@@ -191,14 +191,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 }
 
-/// Emit one dim/faint detail line indented under a check row. Routes
-/// through `output.writeStderrAll` so doctor's stderr-capture tests
-/// see the bytes; `std.debug.print` would bypass the capture buffer.
-/// 4-space indent keeps the row visually nested under the parent
-/// without crowding the message text on the line above.
+/// Emit one dim/faint detail line indented under a check row, with a
+/// `-` bullet so multiple rows read as a list. Routes through
+/// `output.writeStderrAll` so doctor's stderr-capture tests see the
+/// bytes; `std.debug.print` would bypass the capture buffer.
 fn writeStyledDetail(text: []const u8) void {
     var line_buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(&line_buf, "    {s}\n", .{text}) catch return;
+    const line = std.fmt.bufPrint(&line_buf, "    - {s}\n", .{text}) catch return;
     if (color.isColorEnabled()) {
         output.writeStderrAll(color.SemanticStyle.detail.code());
         output.writeStderrAll(line);
