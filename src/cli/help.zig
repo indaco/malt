@@ -180,9 +180,20 @@ const search_help =
     \\
     \\Search formulas and casks by name.
     \\
-    \\Flags:
+    \\Default scope: try the local DB first, fall through to the Homebrew API
+    \\only when nothing local matches. Use the flags below to pin the scope.
+    \\
+    \\Scope:
+    \\  --installed    Query kegs.name + casks.token only. No network.
+    \\  --api          Force the Homebrew API path (today's behaviour, explicit).
+    \\  --all          Run both passes and merge results, deduped + sorted.
+    \\  --offline      Alias of --installed (mirrors MALT_OFFLINE=1).
+    \\
+    \\Kind filter:
     \\  --formula      Search formulas only
     \\  --cask         Search casks only
+    \\
+    \\Output:
     \\  --json         Output as JSON
     \\
 ;
