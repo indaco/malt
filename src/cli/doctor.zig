@@ -19,6 +19,7 @@ const mount_c = @import("c_mount");
 const render = @import("doctor/render.zig");
 const post_install = @import("doctor/post_install.zig");
 const fix_mod = @import("doctor/fix.zig");
+pub const cask_history = @import("doctor/cask_history.zig");
 
 pub const FixKind = fix_mod.FixKind;
 pub const ManualKind = fix_mod.ManualKind;
@@ -89,6 +90,36 @@ pub fn runChecks(ctx: CheckCtx, table: []const Check) Tally {
     return tally;
 }
 
+/// Walk retained cask versions and emit the report doctor surfaces
+/// after the check rows. Pure read-only: routes to stdout (JSON) or
+/// stderr (human + optional verbose entry list) by reading
+/// `output.isJson()` and `output.isVerbose()`. Held public so the
+/// integration test can drive the same path `execute` uses.
+pub fn emitCaskHistoryReport(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) void {
+    var census = cask_history.collectCensus(allocator, io, prefix);
+    defer census.deinit(allocator);
+
+    if (output.isJson()) {
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        cask_history.writeJson(&aw.writer, census) catch return;
+        output.writeStdoutAll(aw.written());
+        return;
+    }
+
+    if (census.entries.len == 0) return;
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    cask_history.writeHumanSummary(&aw.writer, census) catch return;
+    if (output.isVerbose()) {
+        // Best-effort: a writer error here loses the entry rows but
+        // the summary line is already in `aw` and worth flushing.
+        cask_history.writeHumanEntries(&aw.writer, census) catch {};
+    }
+    output.writeStderrAll(aw.written());
+}
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "doctor")) return;
 
@@ -110,6 +141,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         .io = ctx.io,
         .environ = ctx.environ,
     }, &checks);
+
+    emitCaskHistoryReport(allocator, ctx.io, prefix);
 
     if (fix_requested) {
         output.plain("", .{});

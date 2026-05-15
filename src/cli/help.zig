@@ -186,12 +186,25 @@ const doctor_help =
     \\Run system health checks: database integrity, orphaned store
     \\entries, broken symlinks, disk space, API reachability, and more.
     \\
+    \\Trailing report:
+    \\  Retained cask versions — for every cask token whose
+    \\  `cask_versions` history has rows that are not the live
+    \\  install, the count + on-disk bytes are summarised. Empty
+    \\  state stays silent. Read-only: `mt purge --old-versions`
+    \\  is what actually reclaims the space.
+    \\
     \\Options:
     \\  --fix          Apply the safe-class fixers (stale lock,
     \\                 orphaned store entries, broken symlinks).
     \\                 Pair with --dry-run to preview the plan.
     \\                 Dangerous classes (corrupt DB, missing kegs)
     \\                 still print a manual remediation command.
+    \\  --verbose      Include per-(token version) entries under the
+    \\                 retained-cask-versions summary.
+    \\  --json         Emit the retained-cask-versions report as a
+    \\                 stable `{cask_history: {retained_versions,
+    \\                 bytes}}` payload on stdout. Empty state still
+    \\                 surfaces with zero values.
     \\
 ;
 
