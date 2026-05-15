@@ -305,8 +305,10 @@ mt list --json
 mt info wget                             # version, tap, cellar path, pinned status
 mt info --cask firefox
 
-mt search ripgrep                        # search formulas + casks
+mt search ripgrep                        # brew-parity: queries the Homebrew API
 mt search ripgrep --formula              # narrow
+mt search ripgrep --installed            # local DB only; no network
+mt search ripgrep --all                  # local + API, merged
 
 mt uses openssl@3                        # direct dependents
 mt uses --recursive openssl@3            # full transitive closure
@@ -317,6 +319,8 @@ mt which jq                              # reverse lookup: bin -> keg-path
 ```
 
 `mt which` accepts a bare name (resolved through `{prefix}/bin/<name>`) or an absolute path to a malt-managed symlink. Output is `<name> <version> <keg-path>` (or `{"name", "version", "keg"}` with `--json`). It's read-only and offline; exits non-zero with a clear message when the binary is not owned by malt.
+
+`mt search` matches `brew search` by default — it queries the Homebrew API and ranks substring matches across formulas and casks. `--installed` flips it to a local-DB scan over `kegs.name` and `casks.token` (no network), `--all` runs both passes and merges results deduped, and `--api` is the explicit form of the default. `--offline` (or `MALT_OFFLINE=1`) collapses every scope into `--installed`, so a plane-mode user gets an answer instead of a connect timeout. `--json`, `--formula`, and `--cask` compose with every scope.
 
 `mt deps` is the forward symmetric of `mt uses`: instead of "_who depends on X?_", it answers "_what does X depend on?_". Installed kegs read from the local DB; uninstalled formulas walk the upstream API. `--installed` restricts to kegs that resolve locally (offline-safe; the API path is skipped). `--json` emits `[{"formula":"…","depends_on":[…]}, …]` - one entry per visited node, so a recursive walk preserves the graph shape.
 
@@ -497,6 +501,7 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 | `HOMEBREW_GITHUB_API_TOKEN`     | GitHub token for higher API rate limits                                           | unset            |
 | `MALT_GITHUB_TOKEN`             | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only    | unset            |
 | `MALT_HTTP_IDLE_TIMEOUT_SECS`   | HTTP idle (no-progress) read timeout in seconds (clamped to `[5, 600]`)           | `30`             |
+| `MALT_OFFLINE`                  | Set to `1`/`true` to force `mt search` to the local DB (mirrors `--offline`)      | unset            |
 | `MALT_MIGRATE_PARALLEL_WORKERS` | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                   | `4`              |
 | `MALT_OUTDATED_MAX_AGE`         | TTL in hours for the `outdated.json` snapshot                                     | `24`             |
 | `MALT_ALLOW_RAW_POST_INSTALL`   | Disable terminal escape filter on ruby `post_install` output                      | unset            |

@@ -147,7 +147,7 @@ pub const bash_script =
     \\        update)           cmd_flags="--check --quiet -q" ;;
     \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --tap --json --quiet -q" ;;
     \\        info)             cmd_flags="--formula --cask --json" ;;
-    \\        search)           cmd_flags="--formula --cask --json" ;;
+    \\        search)           cmd_flags="--formula --cask --json --installed --api --all --offline" ;;
     \\        uses)             cmd_flags="--recursive -r --json --quiet -q" ;;
     \\        deps)             cmd_flags="--recursive -r --installed --json --quiet -q" ;;
     \\        which)            cmd_flags="--json" ;;
@@ -320,6 +320,10 @@ pub const zsh_script =
     \\                    _arguments \
     \\                        '--formula[Search formulas only]' \
     \\                        '--cask[Search casks only]' \
+    \\                        '--installed[Local DB only, no network]' \
+    \\                        '--api[Force Homebrew API path]' \
+    \\                        '--all[Run local + API and merge results]' \
+    \\                        '--offline[Alias of --installed (mirrors MALT_OFFLINE)]' \
     \\                        '--json[Output as JSON]' \
     \\                        '*::query:'
     \\                    ;;
@@ -549,9 +553,13 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command info' -l json    -d 'JSON output'
     \\
     \\    # search
-    \\    complete -c $__malt_bin -n '__malt_using_command search' -l formula -d 'Formulas only'
-    \\    complete -c $__malt_bin -n '__malt_using_command search' -l cask    -d 'Casks only'
-    \\    complete -c $__malt_bin -n '__malt_using_command search' -l json    -d 'JSON output'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l formula   -d 'Formulas only'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l cask      -d 'Casks only'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l installed -d 'Local DB only, no network'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l api       -d 'Force Homebrew API path'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l all       -d 'Run local + API and merge'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l offline   -d 'Alias of --installed'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l json      -d 'JSON output'
     \\
     \\    # uses
     \\    complete -c $__malt_bin -n '__malt_using_command uses' -l recursive -s r -d 'Include transitive dependents'

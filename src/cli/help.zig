@@ -180,9 +180,20 @@ const search_help =
     \\
     \\Search formulas and casks by name.
     \\
-    \\Flags:
+    \\Default scope: query the Homebrew API (same as `brew search`). Use
+    \\--installed when you only want to know what's already on disk.
+    \\
+    \\Scope:
+    \\  --installed    Query kegs.name + casks.token only. No network.
+    \\  --api          Explicit form of the default (Homebrew API).
+    \\  --all          Run both passes and merge results, deduped + sorted.
+    \\  --offline      Alias of --installed (mirrors MALT_OFFLINE=1).
+    \\
+    \\Kind filter:
     \\  --formula      Search formulas only
     \\  --cask         Search casks only
+    \\
+    \\Output:
     \\  --json         Output as JSON
     \\
 ;
