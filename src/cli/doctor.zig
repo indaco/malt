@@ -9,6 +9,7 @@ const lock_mod = @import("../db/lock.zig");
 const atomic = @import("../fs/atomic.zig");
 const clonefile = @import("../fs/clonefile.zig");
 const output = @import("../ui/output.zig");
+const color = @import("../ui/color.zig");
 const help = @import("help.zig");
 const parser = @import("../macho/parser.zig");
 const patch = @import("../core/patch.zig");
@@ -188,6 +189,45 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     } else {
         output.success("Your malt installation is healthy", .{});
     }
+}
+
+/// Stream the entries (one per indented line, 8-space prefix matching
+/// the detail-row pattern `checkPrefixPermissions` uses) to stderr
+/// when `--verbose` is active. Lines are wrapped in the detail
+/// (dim/faint) colour so they visually recede next to the check row
+/// they belong to. Routes through `output.writeStderrAll` so doctor's
+/// stderr-capture tests see the bytes; `std.debug.print` would bypass
+/// the capture buffer.
+fn writeVerboseList(entries: []const []const u8) void {
+    if (!output.isVerbose()) return;
+    const colorize = color.isColorEnabled();
+    var line_buf: [1024]u8 = undefined;
+    for (entries) |e| {
+        const text = std.fmt.bufPrint(&line_buf, "        {s}\n", .{e}) catch continue;
+        if (colorize) {
+            output.writeStderrAll(color.SemanticStyle.detail.code());
+            output.writeStderrAll(text);
+            output.writeStderrAll(color.Style.reset.code());
+        } else {
+            output.writeStderrAll(text);
+        }
+    }
+}
+
+fn freeOwnedStringList(allocator: std.mem.Allocator, list: *std.ArrayList([]u8)) void {
+    for (list.items) |s| allocator.free(s);
+    list.deinit(allocator);
+}
+
+/// Extract the keg identifier (`<package> <version>`) from a
+/// Cellar-relative file path of the form `<package>/<version>/<rest>`.
+/// Returns null when the path has fewer than two slash-delimited
+/// segments — those are walker artefacts we ignore here.
+fn caskCellarKegKey(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+    const first_slash = std.mem.indexOfScalar(u8, path, '/') orelse return null;
+    const rest = path[first_slash + 1 ..];
+    const second_slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+    return std.fmt.allocPrint(allocator, "{s} {s}", .{ path[0..first_slash], rest[0..second_slash] }) catch null;
 }
 
 // ── individual checks ────────────────────────────────────────────────
@@ -447,16 +487,26 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
     };
     defer stmt.finalize();
 
-    var missing_count: u32 = 0;
+    // Collect missing kegs so `--verbose` can name each one; under
+    // default mode the list is just sized for the count.
+    var offenders: std.ArrayList([]u8) = .empty;
+    defer freeOwnedStringList(ctx.allocator, &offenders);
+
     while (stmt.step() catch false) {
         const cellar_raw = stmt.columnText(2) orelse continue;
         const cellar_path = std.mem.sliceTo(cellar_raw, 0);
         std.Io.Dir.accessAbsolute(ctx.io, cellar_path, .{}) catch {
-            missing_count += 1;
+            const k_name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
+            const k_ver = std.mem.sliceTo(stmt.columnText(1) orelse continue, 0);
+            const row = std.fmt.allocPrint(ctx.allocator, "{s} {s}", .{ k_name, k_ver }) catch continue;
+            offenders.append(ctx.allocator, row) catch {
+                ctx.allocator.free(row);
+                continue;
+            };
         };
     }
 
-    if (missing_count == 0) {
+    if (offenders.items.len == 0) {
         printCheck(name, .ok, null);
         return .ok;
     }
@@ -464,15 +514,17 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
     const msg = std.fmt.bufPrint(
         &msg_buf,
         "{d} keg(s) in DB but missing on disk. Reinstall affected packages",
-        .{missing_count},
+        .{offenders.items.len},
     ) catch "Missing keg directories detected. Reinstall affected packages";
     printCheck(name, .err_status, msg);
+    writeVerboseList(offenders.items);
     return .err_status;
 }
 
 fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
     const link_dirs = [_][]const u8{ "bin", "lib", "include", "share", "sbin" };
-    var broken_count: u32 = 0;
+    var offenders: std.ArrayList([]u8) = .empty;
+    defer freeOwnedStringList(ctx.allocator, &offenders);
 
     for (link_dirs) |subdir| {
         var dir_buf: [512]u8 = undefined;
@@ -484,14 +536,18 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
         while (dir_iter.next(ctx.io) catch null) |entry| {
             if (entry.kind == .sym_link) {
                 _ = dir.statFile(ctx.io, entry.name, .{}) catch {
-                    broken_count += 1;
+                    const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ subdir, entry.name }) catch continue;
+                    offenders.append(ctx.allocator, path) catch {
+                        ctx.allocator.free(path);
+                        continue;
+                    };
                     continue;
                 };
             }
         }
     }
 
-    if (broken_count == 0) {
+    if (offenders.items.len == 0) {
         printCheck(name, .ok, null);
         return .ok;
     }
@@ -499,9 +555,10 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
     const msg = std.fmt.bufPrint(
         &msg_buf,
         "{d} broken symlink(s). Run: mt purge --housekeeping",
-        .{broken_count},
+        .{offenders.items.len},
     ) catch "Broken symlinks found. Run: mt purge --housekeeping";
     printCheck(name, .warn_status, msg);
+    writeVerboseList(offenders.items);
     return .warn_status;
 }
 
@@ -528,6 +585,17 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
     var bad_count: u32 = 0;
     var first_bad_buf: [256]u8 = undefined;
     var first_bad_len: usize = 0;
+    // Group by `<package> <version>` so the verbose list reports the
+    // reinstall target the user actually cares about. A single keg
+    // can bundle hundreds of placeholder-bearing files (Python
+    // site-packages, llvm tools, …) and a per-file enumeration buries
+    // the actionable name in noise.
+    var groups: std.StringArrayHashMapUnmanaged(u32) = .empty;
+    defer {
+        var it = groups.iterator();
+        while (it.next()) |kv| ctx.allocator.free(kv.key_ptr.*);
+        groups.deinit(ctx.allocator);
+    }
 
     while (walker.next(ctx.io) catch null) |entry| {
         if (entry.kind != .file) continue;
@@ -537,6 +605,19 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
                 const s = std.fmt.bufPrint(&first_bad_buf, "{s}", .{entry.path}) catch continue;
                 first_bad_len = s.len;
             }
+            // Verbose-grouping is best-effort: an allocator failure
+            // here drops the group entry, never the count.
+            const key = caskCellarKegKey(ctx.allocator, entry.path) orelse continue;
+            const gop = groups.getOrPut(ctx.allocator, key) catch {
+                ctx.allocator.free(key);
+                continue;
+            };
+            if (gop.found_existing) {
+                ctx.allocator.free(key);
+            } else {
+                gop.value_ptr.* = 0;
+            }
+            gop.value_ptr.* += 1;
         }
     }
 
@@ -551,6 +632,20 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
         .{ bad_count, first_bad_buf[0..first_bad_len] },
     ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
     printCheck(name, .err_status, msg);
+
+    if (output.isVerbose()) {
+        var lines: std.ArrayList([]u8) = .empty;
+        defer freeOwnedStringList(ctx.allocator, &lines);
+        var it = groups.iterator();
+        while (it.next()) |kv| {
+            const row = std.fmt.allocPrint(ctx.allocator, "{s} ({d} file(s))", .{ kv.key_ptr.*, kv.value_ptr.* }) catch continue;
+            lines.append(ctx.allocator, row) catch {
+                ctx.allocator.free(row);
+                continue;
+            };
+        }
+        writeVerboseList(lines.items);
+    }
     return .err_status;
 }
 

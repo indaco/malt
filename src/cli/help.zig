@@ -199,8 +199,11 @@ const doctor_help =
     \\                 Pair with --dry-run to preview the plan.
     \\                 Dangerous classes (corrupt DB, missing kegs)
     \\                 still print a manual remediation command.
-    \\  --verbose      Include per-(token version) entries under the
-    \\                 retained-cask-versions summary.
+    \\  --verbose      List every offender under the count-only
+    \\                 checks (Mach-O placeholders, broken symlinks,
+    \\                 missing kegs) on its own indented line, and
+    \\                 include the per-(token version) breakdown
+    \\                 under the retained-cask-versions summary.
     \\  --json         Emit the retained-cask-versions report as a
     \\                 stable `{cask_history: {retained_versions,
     \\                 bytes}}` payload on stdout. Empty state still
