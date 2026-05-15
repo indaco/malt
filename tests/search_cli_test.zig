@@ -261,24 +261,12 @@ test "execute --api still works with only the cache seeded" {
     try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--api", "wget" });
 }
 
-test "execute default short-circuits when local has a match" {
-    // Seed DB only — no cache. Default scope should run the local pass,
-    // find `wget`, and skip the API entirely (cache absence is harmless).
-    var s = try Scratch.init(testing.allocator, "default_local_hit");
-    defer s.deinit(testing.allocator);
-    try seedDb(testing.allocator, s.path);
-
-    const prior = OutputState.save();
-    defer prior.restore();
-    output.setQuiet(true);
-
-    try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"wget"});
-}
-
-test "execute default falls through to API on local miss" {
-    // Seed DB + cache; query a name that's in the cache index but not
-    // installed locally. Default scope must reach for the API.
-    var s = try Scratch.init(testing.allocator, "default_fallthrough");
+test "execute default queries the API even when the local DB has a match" {
+    // Default mirrors `brew search`: regardless of what's installed in
+    // the local prefix, the answer comes from the Homebrew API. Seed
+    // both DB and cache, query something both know about, and verify
+    // the helper accepts the work without erroring.
+    var s = try Scratch.init(testing.allocator, "default_api_parity");
     defer s.deinit(testing.allocator);
     try seedDb(testing.allocator, s.path);
     try seedCache(testing.allocator, s.path);
@@ -287,11 +275,21 @@ test "execute default falls through to API on local miss" {
     defer prior.restore();
     output.setQuiet(true);
 
-    // "wgetpaste" matches in the API index AND locally — better to query
-    // a token that's API-only. The seeded cask index has `brave`, which
-    // is also in the local DB. Use `jq` — local has it, so this tests
-    // short-circuit. For fall-through use a token only the cache knows.
-    try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--cask", "firefox-developer-edition" });
+    try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"wget"});
+}
+
+test "execute default tolerates a missing local DB (never reads it)" {
+    // Fresh prefix with only the API cache — default scope never opens
+    // the local DB, so absence is a no-op rather than an error path.
+    var s = try Scratch.init(testing.allocator, "default_nodb");
+    defer s.deinit(testing.allocator);
+    try seedCache(testing.allocator, s.path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setQuiet(true);
+
+    try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"wget"});
 }
 
 test "execute --all runs both passes with cache + DB seeded" {

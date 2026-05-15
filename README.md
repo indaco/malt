@@ -305,10 +305,9 @@ mt list --json
 mt info wget                             # version, tap, cellar path, pinned status
 mt info --cask firefox
 
-mt search ripgrep                        # local first; API only on local miss
+mt search ripgrep                        # brew-parity: queries the Homebrew API
 mt search ripgrep --formula              # narrow
 mt search ripgrep --installed            # local DB only; no network
-mt search ripgrep --api                  # force the Homebrew API path
 mt search ripgrep --all                  # local + API, merged
 
 mt uses openssl@3                        # direct dependents
@@ -321,7 +320,7 @@ mt which jq                              # reverse lookup: bin -> keg-path
 
 `mt which` accepts a bare name (resolved through `{prefix}/bin/<name>`) or an absolute path to a malt-managed symlink. Output is `<name> <version> <keg-path>` (or `{"name", "version", "keg"}` with `--json`). It's read-only and offline; exits non-zero with a clear message when the binary is not owned by malt.
 
-`mt search` is local-first by default: a substring scan over `kegs.name` and `casks.token` runs first, and the Homebrew API fires only when nothing local matches. `--installed` pins the local path and never touches the network; `--api` forces the API; `--all` runs both passes and merges results, deduped. `--offline` (or `MALT_OFFLINE=1`) collapses every scope into `--installed`, so a plane-mode user gets an answer instead of a connect timeout. `--json`, `--formula`, and `--cask` compose with every scope.
+`mt search` matches `brew search` by default — it queries the Homebrew API and ranks substring matches across formulas and casks. `--installed` flips it to a local-DB scan over `kegs.name` and `casks.token` (no network), `--all` runs both passes and merges results deduped, and `--api` is the explicit form of the default. `--offline` (or `MALT_OFFLINE=1`) collapses every scope into `--installed`, so a plane-mode user gets an answer instead of a connect timeout. `--json`, `--formula`, and `--cask` compose with every scope.
 
 `mt deps` is the forward symmetric of `mt uses`: instead of "_who depends on X?_", it answers "_what does X depend on?_". Installed kegs read from the local DB; uninstalled formulas walk the upstream API. `--installed` restricts to kegs that resolve locally (offline-safe; the API path is skipped). `--json` emits `[{"formula":"…","depends_on":[…]}, …]` - one entry per visited node, so a recursive walk preserves the graph shape.
 

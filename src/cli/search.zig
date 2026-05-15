@@ -15,21 +15,25 @@ const help = @import("help.zig");
 /// fall-through to the API; explicit flags pin the choice.
 pub const Scope = enum { default, installed, api, all };
 
-/// Does this scope ever consult the local DB?
+/// Does this scope ever consult the local DB? Default stays brew-parity
+/// (API-only) so `mt search` doesn't silently diverge for users coming
+/// from `brew search`; `--installed` / `--all` / `--offline` are the
+/// explicit opt-ins into the local path.
 pub fn shouldRunLocal(scope: Scope) bool {
     return switch (scope) {
-        .default, .installed, .all => true,
-        .api => false,
+        .installed, .all => true,
+        .default, .api => false,
     };
 }
 
-/// Should the API path run? `.default` only falls through when local
-/// produced nothing — short-circuit behaviour is the point.
+/// Should the API path run? `.installed` is the only scope that bypasses
+/// it entirely; everything else (including `.default`, which mirrors
+/// `brew search`) reaches for the index.
 pub fn shouldRunApi(scope: Scope, has_local_hit: bool) bool {
+    _ = has_local_hit;
     return switch (scope) {
-        .api, .all => true,
+        .default, .api, .all => true,
         .installed => false,
-        .default => !has_local_hit,
     };
 }
 
@@ -131,9 +135,9 @@ test "parseScope: ignores non-scope flags and positional args" {
     try testing.expectEqual(Scope.installed, parseScope(&.{ "--formula", "--json", "--installed", "wget" }));
 }
 
-test "shouldRunApi: default falls through only on local miss" {
+test "shouldRunApi: default mirrors brew search and hits the API" {
     try testing.expect(shouldRunApi(.default, false));
-    try testing.expect(!shouldRunApi(.default, true));
+    try testing.expect(shouldRunApi(.default, true));
 }
 
 test "shouldRunApi: installed never hits API" {
@@ -148,9 +152,9 @@ test "shouldRunApi: api and all always hit API" {
     try testing.expect(shouldRunApi(.all, false));
 }
 
-test "shouldRunLocal: api never reads local DB" {
+test "shouldRunLocal: default and api skip the local DB" {
+    try testing.expect(!shouldRunLocal(.default));
     try testing.expect(!shouldRunLocal(.api));
-    try testing.expect(shouldRunLocal(.default));
     try testing.expect(shouldRunLocal(.installed));
     try testing.expect(shouldRunLocal(.all));
 }
