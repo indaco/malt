@@ -42,8 +42,8 @@ const all_commands = [_][]const u8{
     "untap",   "migrate",     "rollback", "link",
     "unlink",  "pin",         "unpin",    "run",
     "version", "completions", "shellenv", "backup",
-    "restore", "purge",       "services", "bundle",
-    "which",   "deps",
+    "restore", "purge",       "cleanup",  "services",
+    "bundle",  "which",       "deps",
 };
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
@@ -145,6 +145,15 @@ test "purge completions surface --json and --output-format=ndjson" {
     // surfaces as a purge-specific failure.
     try expectContains(completions.bash_script, "--output-format=ndjson");
     try expectContains(completions.fish_script, "output-format=ndjson");
+}
+
+test "all completions expose cleanup as a top-level verb" {
+    // `cleanup` already appears in every script as a `bundle cleanup`
+    // subcommand, so substring presence isn't enough — pin the
+    // top-level token shapes each shell uses for the verbs row.
+    try expectContains(completions.bash_script, "list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup");
+    try expectContains(completions.zsh_script, "'cleanup:");
+    try expectContains(completions.fish_script, "__malt_needs_command -a cleanup");
 }
 
 test "all bundle completions expose the cleanup subcommand and its flags" {

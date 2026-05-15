@@ -41,6 +41,7 @@ pub fn helpFor(command: []const u8) []const u8 {
         .{ "backup", backup_help },
         .{ "restore", restore_help },
         .{ "purge", purge_help },
+        .{ "cleanup", cleanup_help },
         .{ "uses", uses_help },
         .{ "deps", deps_help },
         .{ "which", which_help },
@@ -440,6 +441,31 @@ const purge_help =
     \\  malt purge --wipe --backup ~/malt-snapshot.txt --remove-binary --yes
     \\
     \\For per-package removal use `mt uninstall <name>`.
+    \\
+;
+
+const cleanup_help =
+    \\Usage: malt cleanup [flags]
+    \\
+    \\Shorthand for `malt purge --housekeeping` — the safe daily-driver
+    \\scope (store-orphans + unused-deps + cache + stale-casks). For the
+    \\full menu (downloads scrub, old-versions, wipe) use `mt purge`.
+    \\
+    \\Flags pass through to `purge`; the common ones:
+    \\  --dry-run, -n        Preview only
+    \\  --yes, -y            Skip every typed confirmation
+    \\  --quiet, -q          Suppress per-item output
+    \\  --verbose, -v        Show every per-scope item, full SHAs
+    \\  --cache=<DAYS>       Override the 30-day cache cutoff
+    \\  --backup, -b <path>  Write a `mt restore`-compatible manifest first
+    \\  --json               Single summary object on stdout
+    \\  --output-format=ndjson
+    \\                       One event per scope start/complete
+    \\
+    \\Examples:
+    \\  malt cleanup
+    \\  malt cleanup --dry-run
+    \\  malt cleanup --cache=7 --yes
     \\
 ;
 

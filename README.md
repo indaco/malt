@@ -232,6 +232,7 @@ Commands:
   purge         Housekeeping or full wipe (--store-orphans, --unused-deps,
                 --cache, --downloads, --stale-casks, --old-versions,
                 --housekeeping, --wipe)
+  cleanup       Shorthand for `purge --housekeeping`
   services      Manage long-running launchd services (start/stop/status/logs)
   bundle        Install or export a Brewfile/Maltfile.json set of packages
   version       Show version (use 'version update' to self-update)
@@ -383,6 +384,8 @@ Shared flags: `--dry-run`/`-n` (preview), `--yes`/`-y` (skip typed-confirm), `--
 Structured output for scripts: `mt --json purge --<scope>...` emits a single summary object on stdout (`version`, `dry_run`, `scopes`, `totals`, `time_ms`); `mt --output-format=ndjson purge ...` streams `scope_started` / `scope_completed` / `purge_complete` events, one per line. Stderr stays the human surface in either mode.
 
 `--wipe` cannot combine with any other scope. Every other scope can run together under one lock acquisition. `mt purge` honours `MALT_PREFIX` and `MALT_CACHE`, so pointing those at a throwaway path is the safe way to test the command end-to-end. For per-package removal, use `mt uninstall`.
+
+`mt cleanup` is a Homebrew-shaped alias for `mt purge --housekeeping`: the safe daily-driver scope (`--store-orphans --unused-deps --cache --stale-casks`). Trailing flags pass through unchanged (`mt cleanup --dry-run`, `mt cleanup --cache=7 --yes`), so weekly muscle memory works while the full scope menu stays under `mt purge`.
 
 `mt link <formula>` and `mt unlink <formula>` manage the prefix symlinks. `link` reports conflicts and aborts unless `--overwrite`/`--force`/`-f` is passed. `unlink` removes symlinks from `bin/`, `lib/`, etc. and the `opt/` symlink, but leaves the keg installed.
 

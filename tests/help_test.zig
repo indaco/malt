@@ -97,6 +97,21 @@ test "helpFor falls back gracefully for unknown commands" {
     try testing.expectEqualStrings("No help available.\n", help.helpFor("not-a-real-command"));
 }
 
+test "cleanup help advertises the shorthand and points at purge" {
+    // `mt cleanup` is a thin alias; --help has to make that explicit so
+    // users discover the full scope menu lives under `mt purge`.
+    const text = help.helpFor("cleanup");
+    try testing.expect(std.mem.indexOf(u8, text, "malt cleanup") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--housekeeping") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "mt purge") != null);
+}
+
+test "showIfRequested honours --help for cleanup" {
+    const ctx = quietCtx();
+    const args = [_][]const u8{"--help"};
+    try testing.expect(help.showIfRequested(&ctx, &args, "cleanup"));
+}
+
 // Integration: verify that `malt <cmd> --help` writes to stdout (not stderr).
 // Relies on the pre-built binary under zig-out/bin/malt; skipped if absent.
 test "--help output lands on stdout, not stderr" {

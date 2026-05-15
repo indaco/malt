@@ -215,6 +215,7 @@ pub fn build(b: *std.Build) void {
         "tests/deps_cli_exec_test.zig",
         "tests/text_replace_test.zig",
         "tests/bottle_test.zig",
+        "tests/cleanup_cli_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");
