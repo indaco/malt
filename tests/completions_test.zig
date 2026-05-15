@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+
 const completions = @import("malt").completions;
 
 test "parseShell recognises the three supported shells" {
@@ -42,7 +43,7 @@ const all_commands = [_][]const u8{
     "unlink",  "pin",         "unpin",    "run",
     "version", "completions", "shellenv", "backup",
     "restore", "purge",       "services", "bundle",
-    "which",
+    "which",   "deps",
 };
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {

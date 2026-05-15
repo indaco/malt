@@ -2,6 +2,7 @@
 //! Returns help text for each subcommand, displayed on -h / --help.
 
 const std = @import("std");
+
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 
 /// Check if args contain -h or --help. If so, print help to stdout (so the
@@ -41,6 +42,7 @@ pub fn helpFor(command: []const u8) []const u8 {
         .{ "restore", restore_help },
         .{ "purge", purge_help },
         .{ "uses", uses_help },
+        .{ "deps", deps_help },
         .{ "which", which_help },
         .{ "pin", pin_help },
         .{ "unpin", unpin_help },
@@ -465,6 +467,28 @@ const uses_help =
     \\  malt uses openssl@3
     \\  malt uses --recursive icu4c@78
     \\  malt --json uses node@20
+    \\
+;
+
+const deps_help =
+    \\Usage: malt deps <formula> [flags]
+    \\
+    \\Show what <formula> depends on — the forward symmetric of
+    \\`mt uses`. Installed kegs read from the local DB; uninstalled
+    \\formulas walk the upstream API.
+    \\
+    \\Flags:
+    \\  --recursive, -r   Walk the transitive closure
+    \\  --installed       Restrict to kegs that resolve locally (skips
+    \\                    the API fallback; offline-safe)
+    \\  --json            Emit `[{"formula","depends_on":[…]}, …]`
+    \\  --quiet, -q       Suppress status messages
+    \\
+    \\Examples:
+    \\  malt deps openssl@3
+    \\  malt deps --recursive ffmpeg
+    \\  malt deps --installed -r node@20
+    \\  malt --json deps wget
     \\
 ;
 

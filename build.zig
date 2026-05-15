@@ -212,6 +212,7 @@ pub fn build(b: *std.Build) void {
         "tests/list_cli_test.zig",
         "tests/tap_cli_test.zig",
         "tests/uses_cli_test.zig",
+        "tests/deps_cli_exec_test.zig",
         "tests/text_replace_test.zig",
         "tests/bottle_test.zig",
     };
