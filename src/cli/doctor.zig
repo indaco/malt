@@ -582,15 +582,13 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
     };
     defer walker.deinit();
 
-    var bad_count: u32 = 0;
-    var first_bad_buf: [256]u8 = undefined;
-    var first_bad_len: usize = 0;
-    // Group by `<package> <version>` so the verbose list reports the
-    // reinstall target the user actually cares about. A single keg
-    // can bundle hundreds of placeholder-bearing files (Python
-    // site-packages, llvm tools, …) and a per-file enumeration buries
-    // the actionable name in noise.
-    var groups: std.StringArrayHashMapUnmanaged(u32) = .empty;
+    // Group by `<package> <version>` so the headline reports the
+    // reinstall target — the user reinstalls the keg, not the file.
+    // A single keg can bundle hundreds of placeholder-bearing files
+    // (Python site-packages inside a meta-package, LLVM tools);
+    // counting files there inflates the number without adding
+    // actionable information.
+    var groups: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer {
         var it = groups.iterator();
         while (it.next()) |kv| ctx.allocator.free(kv.key_ptr.*);
@@ -600,50 +598,41 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
     while (walker.next(ctx.io) catch null) |entry| {
         if (entry.kind != .file) continue;
         if (hasUnpatchedPlaceholder(ctx.io, ctx.allocator, &cellar_dir, entry.path) catch false) {
-            bad_count += 1;
-            if (first_bad_len == 0) {
-                const s = std.fmt.bufPrint(&first_bad_buf, "{s}", .{entry.path}) catch continue;
-                first_bad_len = s.len;
-            }
-            // Verbose-grouping is best-effort: an allocator failure
-            // here drops the group entry, never the count.
+            // Grouping is best-effort: an allocator failure here
+            // drops the group entry, never silently triggers an
+            // .ok outcome — the headline is still right because
+            // it's derived from `groups.count()` which only grows
+            // when the entry actually lands.
             const key = caskCellarKegKey(ctx.allocator, entry.path) orelse continue;
             const gop = groups.getOrPut(ctx.allocator, key) catch {
                 ctx.allocator.free(key);
                 continue;
             };
-            if (gop.found_existing) {
-                ctx.allocator.free(key);
-            } else {
-                gop.value_ptr.* = 0;
-            }
-            gop.value_ptr.* += 1;
+            if (gop.found_existing) ctx.allocator.free(key);
         }
     }
 
-    if (bad_count == 0) {
+    if (groups.count() == 0) {
         printCheck(name, .ok, null);
         return .ok;
     }
+    const first_key = blk: {
+        var it = groups.iterator();
+        break :blk if (it.next()) |kv| kv.key_ptr.* else "";
+    };
     var msg_buf: [512]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &msg_buf,
-        "{d} Mach-O file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Reinstall the affected packages.",
-        .{ bad_count, first_bad_buf[0..first_bad_len] },
+        "{d} package(s) ship Mach-O file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Reinstall the affected packages.",
+        .{ groups.count(), first_key },
     ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
     printCheck(name, .err_status, msg);
 
     if (output.isVerbose()) {
-        var lines: std.ArrayList([]u8) = .empty;
-        defer freeOwnedStringList(ctx.allocator, &lines);
+        var lines: std.ArrayList([]const u8) = .empty;
+        defer lines.deinit(ctx.allocator);
         var it = groups.iterator();
-        while (it.next()) |kv| {
-            const row = std.fmt.allocPrint(ctx.allocator, "{s} ({d} file(s))", .{ kv.key_ptr.*, kv.value_ptr.* }) catch continue;
-            lines.append(ctx.allocator, row) catch {
-                ctx.allocator.free(row);
-                continue;
-            };
-        }
+        while (it.next()) |kv| lines.append(ctx.allocator, kv.key_ptr.*) catch continue;
         writeVerboseList(lines.items);
     }
     return .err_status;

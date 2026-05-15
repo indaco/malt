@@ -291,17 +291,20 @@ fn captureStderrAround(
     op();
 }
 
-test "checkMachOPlaceholders under --verbose groups offenders by (package version)" {
+test "checkMachOPlaceholders under --verbose lists each affected (package version)" {
     // The verbose list is keyed by the keg the user would reinstall —
     // package + version — not per file, because a single keg can
     // ship hundreds of bundled Mach-O files (Python site-packages
     // inside a meta-package, for example) and a flat enumeration
-    // buries the actionable name in noise.
+    // buries the actionable name in noise. The per-package file
+    // count is also dropped: the user reinstalls the keg either way,
+    // and a "(N file(s))" suffix turns out to be implementation
+    // noise that distracts from the action.
     const allocator = testing.allocator;
     var s = try Scratch.init(allocator, "macho_verbose");
     defer s.deinit(allocator);
 
-    // alpha 1.0: two bad files → "alpha 1.0 (2 file(s))".
+    // alpha 1.0: two bad files — should appear ONCE in the list.
     const dir1 = try std.fmt.allocPrint(allocator, "{s}/Cellar/alpha/1.0/lib", .{s.path});
     defer allocator.free(dir1);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir1);
@@ -312,7 +315,7 @@ test "checkMachOPlaceholders under --verbose groups offenders by (package versio
     defer allocator.free(bin1b);
     try writeMachOWithPath(allocator, bin1b, "@@HOMEBREW_PREFIX@@/lib/libalpha-extra.dylib");
 
-    // beta 2.0: one bad file → "beta 2.0 (1 file(s))".
+    // beta 2.0: one bad file.
     const dir2 = try std.fmt.allocPrint(allocator, "{s}/Cellar/beta/2.0/bin", .{s.path});
     defer allocator.free(dir2);
     try test_io.cwd().createDirPath(std.Options.debug_io, dir2);
@@ -335,11 +338,12 @@ test "checkMachOPlaceholders under --verbose groups offenders by (package versio
         .environ = .empty,
     }, &doctor.checks);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha 1.0 (2 file(s))") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        beta 2.0 (1 file(s))") != null);
-    // Flat per-file rows must NOT appear — that is what the user
-    // explicitly asked to stop seeing on real systems where one
-    // affected keg can contribute 100+ files.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha 1.0\n") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        beta 2.0\n") != null);
+    // Each package appears exactly once — no per-file rows leaking
+    // back in via the grouping.
+    const alpha_idx = std.mem.indexOf(u8, stderr_buf.items, "        alpha 1.0\n").?;
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items[alpha_idx + 1 ..], "        alpha 1.0\n") == null);
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha/1.0/lib/libalpha.dylib") == null);
 }
 
@@ -409,12 +413,20 @@ test "checkMachOPlaceholders without --verbose keeps the count + first-hint summ
         .environ = .empty,
     }, &doctor.checks);
 
-    // Both files contribute to the count, but only one shows as the
-    // (first: …) example in default mode. The verbose-only indented
-    // lines must be absent.
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "2 Mach-O file(s)") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha/1.0/lib/libalpha.dylib") == null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        beta/2.0/bin/beta") == null);
+    // Headline counts PACKAGES, not files: the user reinstalls the
+    // keg either way, so the package count is the actionable number.
+    // First-package hint stays (helps users who don't want to re-run
+    // with --verbose). No detail rows in default mode.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "2 package(s)") != null);
+    // FS walk order isn't guaranteed to be alphabetical on every
+    // host, so accept either of the two seeded kegs as the first
+    // example — the contract is "name a real package", not "name
+    // this specific package".
+    const has_alpha_first = std.mem.indexOf(u8, stderr_buf.items, "(first: alpha 1.0)") != null;
+    const has_beta_first = std.mem.indexOf(u8, stderr_buf.items, "(first: beta 2.0)") != null;
+    try testing.expect(has_alpha_first or has_beta_first);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha 1.0\n") == null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        beta 2.0\n") == null);
 }
 
 test "checkBrokenSymlinks under --verbose lists every broken symlink path" {
