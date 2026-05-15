@@ -134,7 +134,7 @@ mt outdated                       # what has updates available
 mt upgrade ripgrep                # atomic; old version is restored on failure
 ```
 
-`mt` and `malt` are the same binary — `mt` is a symlink to `malt` and ships with every install method. Additional aliases: `remove` for `uninstall`, `ls` for `list`. Anywhere a flag accepts `--formula` or `--cask`, it also accepts `--formulae` or `--casks` - pick whichever reads more naturally.
+`mt` and `malt` are the same binary - `mt` is a symlink to `malt` and ships with every install method. Additional aliases: `remove` for `uninstall`, `ls` for `list`. Anywhere a flag accepts `--formula` or `--cask`, it also accepts `--formulae` or `--casks` - pick whichever reads more naturally.
 
 If you typed something malt doesn't implement, malt checks for `brew` and silently delegates. If `brew` isn't installed:
 
@@ -198,7 +198,7 @@ Commands grouped by what you're doing. Every command works with `malt` or `mt`, 
 At a glance - `malt -h`:
 
 ```text
-malt — a fast, drop-in Homebrew alternative for macOS.
+malt - a fast, drop-in Homebrew alternative for macOS.
 Warm installs in milliseconds. post_install scripts that actually run.
 
 Usage: malt <command> [options] [arguments]
@@ -214,6 +214,7 @@ Commands:
   info          Show detailed package information
   search        Search formulas and casks
   uses          Show installed packages that depend on a formula
+  deps          Show what a formula depends on (forward of `uses`)
   which         Resolve a prefix binary (or path) to its keg
   doctor        System health check
   tap/untap     Manage taps
@@ -309,10 +310,15 @@ mt search ripgrep --formula              # narrow
 
 mt uses openssl@3                        # direct dependents
 mt uses --recursive openssl@3            # full transitive closure
+mt deps ffmpeg                           # direct deps (forward of `uses`)
+mt deps --recursive ffmpeg               # full forward closure
+mt deps --installed -r node@20           # restrict to locally-resolved kegs
 mt which jq                              # reverse lookup: bin -> keg-path
 ```
 
 `mt which` accepts a bare name (resolved through `{prefix}/bin/<name>`) or an absolute path to a malt-managed symlink. Output is `<name> <version> <keg-path>` (or `{"name", "version", "keg"}` with `--json`). It's read-only and offline; exits non-zero with a clear message when the binary is not owned by malt.
+
+`mt deps` is the forward symmetric of `mt uses`: instead of "_who depends on X?_", it answers "_what does X depend on?_". Installed kegs read from the local DB; uninstalled formulas walk the upstream API. `--installed` restricts to kegs that resolve locally (offline-safe; the API path is skipped). `--json` emits `[{"formula":"…","depends_on":[…]}, …]` - one entry per visited node, so a recursive walk preserves the graph shape.
 
 ### Maintain malt
 
@@ -600,33 +606,39 @@ For installing malt from a local checkout (the end-user path), see [From source]
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size   |
+| -------- | ------ |
 | **malt** | 3.4 MB |
 | nanobrew | 2.6 MB |
 | zerobrew | 8.6 MB |
+
 <!-- BENCH:SIZE:END -->
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install (median ±σ)
 
-| Package | malt | nanobrew | zerobrew | Homebrew |
-| ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.468±0.094s | 0.409±0.138s | 0.913±0.044s | 4.142±0.455s |
-| **wget** (6 deps) | 3.313±0.354s | 3.431±0.504s | 6.052±1.101s | 4.352±0.699s |
+| Package              | malt         | nanobrew     | zerobrew     | Homebrew      |
+| -------------------- | ------------ | ------------ | ------------ | ------------- |
+| **tree** (0 deps)    | 0.468±0.094s | 0.409±0.138s | 0.913±0.044s | 4.142±0.455s  |
+| **wget** (6 deps)    | 3.313±0.354s | 3.431±0.504s | 6.052±1.101s | 4.352±0.699s  |
 | **ffmpeg** (11 deps) | 3.949±0.309s | 3.194±0.685s | 8.331±0.551s | 19.281±1.176s |
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew |
-| ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.008s | 0.012s | 0.300s |
-| **wget** (6 deps) | 0.011s | 0.015s | 0.830s |
-| **ffmpeg** (11 deps) | 0.031s | 0.020s | 3.875s |
+| Package              | malt   | nanobrew | zerobrew |
+| -------------------- | ------ | -------- | -------- |
+| **tree** (0 deps)    | 0.008s | 0.012s   | 0.300s   |
+| **wget** (6 deps)    | 0.011s | 0.015s   | 0.830s   |
+| **ffmpeg** (11 deps) | 0.031s | 0.020s   | 3.875s   |
+
 <!-- BENCH:WARM:END -->
 
 Apple Silicon (GitHub Actions macos-14), 2026-05-11. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
