@@ -253,6 +253,45 @@ test "resolveTapBaseUrls synthesises homebrew- prefix once per field" {
     );
 }
 
+/// Build the `commits/<sha>` URL siblings of `api_head_url`. Routed
+/// through the same `homebrew-<repo>` synthesis so `mt tap --pin` and the
+/// HEAD path can't drift apart — a 200 here means the SHA is reachable
+/// against the exact repo subsequent installs will fetch from.
+pub fn resolveCommitUrl(
+    allocator: std.mem.Allocator,
+    slug: []const u8,
+    sha: []const u8,
+) std.mem.Allocator.Error![]const u8 {
+    const slash = std.mem.indexOfScalar(u8, slug, '/') orelse unreachable;
+    const user = slug[0..slash];
+    const repo = slug[slash + 1 ..];
+    return std.fmt.allocPrint(
+        allocator,
+        "https://api.github.com/repos/{s}/homebrew-{s}/commits/{s}",
+        .{ user, repo, sha },
+    );
+}
+
+test "resolveCommitUrl builds the homebrew- prefixed commits/<sha> URL" {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const url = try resolveCommitUrl(std.testing.allocator, "user/repo", sha);
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://api.github.com/repos/user/homebrew-repo/commits/" ++ sha,
+        url,
+    );
+}
+
+test "resolveCommitUrl preserves hyphens and digits in repo names" {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const url = try resolveCommitUrl(std.testing.allocator, "user-1/some-tap.v2", sha);
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://api.github.com/repos/user-1/homebrew-some-tap.v2/commits/" ++ sha,
+        url,
+    );
+}
+
 test "resolveTapBaseUrls preserves repo names containing hyphens and digits" {
     const urls = try resolveTapBaseUrls(std.testing.allocator, "user-1/some-tap.v2");
     defer urls.deinit(std.testing.allocator);

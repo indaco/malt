@@ -232,13 +232,29 @@ const doctor_help =
 const tap_help =
     \\Usage: malt tap [<user>/<repo>]
     \\       malt tap --refresh <user>/<repo>
+    \\       malt tap --refresh --all [--yes] [--json]
+    \\       malt tap --pin <user>/<repo> <sha>
     \\       malt untap <user>/<repo>
     \\
     \\Manage taps. Without arguments, lists registered taps + their
     \\pinned commit. `tap <slug>` resolves the repo's HEAD commit at
     \\that moment and stores it; subsequent installs from the tap fetch
     \\against the pin, not whatever HEAD happens to point to later.
-    \\`--refresh` explicitly advances the pin to the current HEAD.
+    \\
+    \\Flags:
+    \\  --refresh [<slug>]   Advance the pin to the current HEAD. With a
+    \\                       slug, refreshes that one tap; with --all,
+    \\                       walks every registered tap.
+    \\  --all                Pairs with --refresh: batch every tap, print
+    \\                       a per-row `old_sha[..7] -> new_sha[..7]` diff,
+    \\                       and refuse to apply without --yes when any
+    \\                       tap moved.
+    \\  --pin <slug> <sha>   Explicitly pin <slug> to <sha>. The SHA is
+    \\                       validated for reachability through GitHub's
+    \\                       commits/<sha> endpoint before the pin lands.
+    \\  --yes, -y            Confirm the apply step of --refresh --all.
+    \\  --json               Emit the --refresh --all diff as
+    \\                       `{"taps":[{"tap","old_sha","new_sha","status"}]}`.
     \\
     \\Taps are auto-resolved during install, so explicit `tap` is
     \\usually unnecessary — the auto-tap also pins the SHA on first use.

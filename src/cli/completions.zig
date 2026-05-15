@@ -158,6 +158,7 @@ pub const bash_script =
     \\        bundle)           cmd_flags="--dry-run -n --format --from-installed --purge --yes -y" ;;
     \\        run)              cmd_flags="--keep" ;;
     \\        doctor)           cmd_flags="--fix --dry-run" ;;
+    \\        tap)              cmd_flags="--refresh --all --pin --yes -y --json" ;;
     \\    esac
     \\
     \\    if [[ "$cur" == -* ]]; then
@@ -402,6 +403,15 @@ pub const zsh_script =
     \\                        'export[Print bundle to stdout]' \
     \\                        'import[Register a bundle definition without installing]'
     \\                    ;;
+    \\                tap)
+    \\                    _arguments \
+    \\                        '--refresh[Advance the pin to current HEAD]' \
+    \\                        '--all[With --refresh: walk every registered tap]' \
+    \\                        '--pin[Explicitly pin <slug> to <sha>]' \
+    \\                        '(--yes -y)'{--yes,-y}'[Confirm --refresh --all apply]' \
+    \\                        '--json[Emit refresh-all diff as JSON]' \
+    \\                        '*::slug:'
+    \\                    ;;
     \\            esac
     \\            ;;
     \\    esac
@@ -588,6 +598,13 @@ pub const fish_script =
     \\
     \\    # run
     \\    complete -c $__malt_bin -n '__malt_using_command run' -l keep -d 'Cache extracted bottle under {cache}/run/<sha256>/'
+    \\
+    \\    # tap
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l refresh -d 'Advance the pin to current HEAD'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l all     -d 'With --refresh: walk every registered tap'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l pin     -d 'Explicitly pin <slug> to <sha>'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -s y -l yes -d 'Confirm --refresh --all apply'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l json    -d 'Emit refresh-all diff as JSON'
     \\
     \\    # completions — shell name as positional
     \\    complete -c $__malt_bin -n '__malt_using_command completions' -f -a 'bash zsh fish'
