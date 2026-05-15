@@ -469,6 +469,105 @@ test "checkBrokenSymlinks under --verbose lists every broken symlink path" {
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "lib/ghost-b") != null);
 }
 
+test "after the check loop, a dim --verbose hint fires when offenders exist and --verbose is off" {
+    // Mach-O placeholder seeded so the check has at least one
+    // offender to enumerate; with --verbose OFF the user only sees
+    // the count + first hint. The new tail-of-output nudge points
+    // them at --verbose so they can find the rest without having
+    // to know about the flag.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "verbose_hint");
+    defer s.deinit(allocator);
+
+    const dir1 = try std.fmt.allocPrint(allocator, "{s}/Cellar/alpha/1.0/lib", .{s.path});
+    defer allocator.free(dir1);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir1);
+    const bin1 = try std.fmt.allocPrint(allocator, "{s}/libalpha.dylib", .{dir1});
+    defer allocator.free(bin1);
+    try writeMachOWithPath(allocator, bin1, "@@HOMEBREW_PREFIX@@/lib/libalpha.dylib");
+
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    doctor.resetVerboseHint();
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+    doctor.emitVerboseHintIfNeeded();
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "--verbose") != null);
+}
+
+test "emitVerboseHintIfNeeded stays silent when --verbose is already active" {
+    // Re-running with --verbose surfaces the list directly, so the
+    // nudge would be redundant. Pin it as silent in that case.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "verbose_hint_on");
+    defer s.deinit(allocator);
+
+    const dir1 = try std.fmt.allocPrint(allocator, "{s}/Cellar/alpha/1.0/lib", .{s.path});
+    defer allocator.free(dir1);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir1);
+    const bin1 = try std.fmt.allocPrint(allocator, "{s}/libalpha.dylib", .{dir1});
+    defer allocator.free(bin1);
+    try writeMachOWithPath(allocator, bin1, "@@HOMEBREW_PREFIX@@/lib/libalpha.dylib");
+
+    output.setVerbose(true);
+    defer output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    doctor.resetVerboseHint();
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+    doctor.emitVerboseHintIfNeeded();
+
+    // The "Run …" prefix on the existing fix hint (e.g.
+    // `Run: mt purge --housekeeping`) is unrelated; assert the
+    // nudge-specific phrase is absent.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "for the full list") == null);
+}
+
+test "emitVerboseHintIfNeeded stays silent on a clean prefix" {
+    // No enumerable offenders → no nudge. Otherwise we'd train
+    // users to ignore it as noise on healthy systems.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "verbose_hint_clean");
+    defer s.deinit(allocator);
+
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    doctor.resetVerboseHint();
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+    doctor.emitVerboseHintIfNeeded();
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "for the full list") == null);
+}
+
 test "checkPrefixPermissions hint lines flow through stderr capture so they share the verbose-list look" {
     // Pre-this PR, the first-3 hint rows used `std.debug.print` and
     // bypassed the output capture, so tests couldn't pin them and

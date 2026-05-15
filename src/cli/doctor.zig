@@ -2,36 +2,38 @@
 //! System health check.
 
 const std = @import("std");
-const AppCtx = @import("../app_ctx.zig").AppCtx;
-const sqlite = @import("../db/sqlite.zig");
-const schema = @import("../db/schema.zig");
-const lock_mod = @import("../db/lock.zig");
-const atomic = @import("../fs/atomic.zig");
-const clonefile = @import("../fs/clonefile.zig");
-const output = @import("../ui/output.zig");
-const color = @import("../ui/color.zig");
-const help = @import("help.zig");
-const parser = @import("../macho/parser.zig");
-const patch = @import("../core/patch.zig");
-const perms_mod = @import("../core/perms.zig");
-const client_mod = @import("../net/client.zig");
+
 const mount_c = @import("c_mount");
 
-const render = @import("doctor/render.zig");
-const post_install = @import("doctor/post_install.zig");
-const fix_mod = @import("doctor/fix.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
+const patch = @import("../core/patch.zig");
+const perms_mod = @import("../core/perms.zig");
+const lock_mod = @import("../db/lock.zig");
+const schema = @import("../db/schema.zig");
+const sqlite = @import("../db/sqlite.zig");
+const atomic = @import("../fs/atomic.zig");
+const clonefile = @import("../fs/clonefile.zig");
+const parser = @import("../macho/parser.zig");
+const client_mod = @import("../net/client.zig");
+const color = @import("../ui/color.zig");
+const output = @import("../ui/output.zig");
 pub const cask_history = @import("doctor/cask_history.zig");
-
+const fix_mod = @import("doctor/fix.zig");
 pub const FixKind = fix_mod.FixKind;
 pub const ManualKind = fix_mod.ManualKind;
 pub const FixConditions = fix_mod.Conditions;
 pub const FixPlan = fix_mod.Plan;
 pub const planFixes = fix_mod.planFixes;
-
+const post_install = @import("doctor/post_install.zig");
+const render = @import("doctor/render.zig");
 pub const CheckStatus = render.CheckStatus;
 pub const CheckStyle = render.CheckStyle;
 pub const renderCheckRow = render.renderCheckRow;
 pub const printCheck = render.printCheck;
+/// Per-check outcome; same tags the row renderer uses so the walker
+/// can tally without re-translating.
+pub const CheckResult = render.CheckStatus;
+const help = @import("help.zig");
 
 /// Shared context passed to every check.
 pub const CheckCtx = struct {
@@ -40,10 +42,6 @@ pub const CheckCtx = struct {
     io: std.Io,
     environ: std.process.Environ,
 };
-
-/// Per-check outcome; same tags the row renderer uses so the walker
-/// can tally without re-translating.
-pub const CheckResult = render.CheckStatus;
 
 /// One entry in the health walk. `run` prints its row(s) and returns
 /// the walker's tally tag.
@@ -135,6 +133,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     const fix_requested = fix_mod.wantsFix(args);
 
+    resetVerboseHint();
     output.info("Running health checks...", .{});
     const tally = runChecks(.{
         .allocator = allocator,
@@ -180,6 +179,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 
     output.plain("", .{});
+    emitVerboseHintIfNeeded();
     if (tally.errors > 0) {
         output.err("{d} error(s), {d} warning(s)", .{ tally.errors, tally.warnings });
         std.process.exit(2);
@@ -189,6 +189,37 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     } else {
         output.success("Your malt installation is healthy", .{});
     }
+}
+
+/// Armed by any check that surfaces offenders the user could see
+/// listed under `--verbose` (Mach-O placeholders, broken symlinks,
+/// missing kegs, prefix-permissions). `execute` reads it after the
+/// check loop to emit a dim "run with --verbose for the full list"
+/// nudge. Reset by `resetVerboseHint` so re-entering the dispatcher
+/// from tests starts clean.
+var verbose_hint_armed: bool = false;
+
+/// Test hook + production reset: clear the verbose-hint flag at the
+/// top of every `execute` so a previous run on the same process
+/// doesn't leak its state.
+pub fn resetVerboseHint() void {
+    verbose_hint_armed = false;
+}
+
+/// Internal arm — called by enumerable checks whenever they have
+/// offenders, regardless of the verbose flag. `emitVerboseHintIfNeeded`
+/// decides whether to surface the nudge.
+fn armVerboseHint() void {
+    verbose_hint_armed = true;
+}
+
+/// Emit a "run with --verbose for the full list" nudge after the
+/// check loop when an enumerable check surfaced offenders AND
+/// `--verbose` is off.
+pub fn emitVerboseHintIfNeeded() void {
+    if (output.isVerbose()) return;
+    if (!verbose_hint_armed) return;
+    output.dim("run with --verbose for the full list", .{});
 }
 
 /// Emit one dim/faint detail line indented under a check row, with a
@@ -386,6 +417,7 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
         .{ findings.len, ctx.prefix },
     ) catch "Weak-permission paths under prefix";
     printCheck(name, .warn_status, pm_msg);
+    armVerboseHint();
     // First few as a hint so the user knows where to look. Routes
     // through the shared styled-detail writer for parity with the
     // verbose lists below — capture-aware (so tests see the bytes)
@@ -522,6 +554,7 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
         .{offenders.items.len},
     ) catch "Missing keg directories detected. Reinstall affected packages";
     printCheck(name, .err_status, msg);
+    armVerboseHint();
     writeVerboseList(offenders.items);
     return .err_status;
 }
@@ -563,6 +596,7 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
         .{offenders.items.len},
     ) catch "Broken symlinks found. Run: mt purge --housekeeping";
     printCheck(name, .warn_status, msg);
+    armVerboseHint();
     writeVerboseList(offenders.items);
     return .warn_status;
 }
@@ -643,6 +677,7 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
         ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
     };
     printCheck(name, .err_status, msg);
+    armVerboseHint();
 
     if (output.isVerbose()) {
         var lines: std.ArrayList([]const u8) = .empty;
