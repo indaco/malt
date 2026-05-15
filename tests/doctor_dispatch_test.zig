@@ -10,6 +10,7 @@ const std = @import("std");
 const malt = @import("malt");
 const test_io = @import("test_io");
 const testing = std.testing;
+const macho = std.macho;
 const doctor = malt.doctor;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
@@ -226,4 +227,429 @@ test "countMissingLocalSources tallies missing source paths against tap='local' 
     const census = doctor.countMissingLocalSources(std.Options.debug_io, &db);
     try testing.expectEqual(@as(u32, 2), census.total);
     try testing.expectEqual(@as(u32, 1), census.stale);
+}
+
+// --- --verbose enumeration for count-only checks -----------------------
+
+fn writeMachOWithPath(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    embedded_path: []const u8,
+) !void {
+    // Mach-O 64 with a single LC_LOAD_DYLIB whose dylib name is
+    // `embedded_path`. `doctor.checkMachOPlaceholders` parses load
+    // command paths and flags any that still contain
+    // `@@HOMEBREW_PREFIX@@` / `@@HOMEBREW_CELLAR@@`, so this fixture is
+    // the minimum that exercises the check end-to-end.
+    const lc_size = @sizeOf(macho.dylib_command);
+    const name_offset: u32 = @intCast(lc_size);
+    const path_len = embedded_path.len + 1; // NUL terminator
+    const cmdsize: u32 = @intCast(lc_size + path_len);
+    const cmdsize_aligned: u32 = (cmdsize + 7) & ~@as(u32, 7);
+
+    const header_size = @sizeOf(macho.mach_header_64);
+    const total_len = header_size + cmdsize_aligned;
+
+    const buf = try allocator.alloc(u8, total_len);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    const header = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    header.* = .{
+        .magic = macho.MH_MAGIC_64,
+        .ncmds = 1,
+        .sizeofcmds = cmdsize_aligned,
+    };
+
+    const dy = std.mem.bytesAsValue(macho.dylib_command, buf[header_size..][0..lc_size]);
+    dy.* = .{
+        .cmd = .LOAD_DYLIB,
+        .cmdsize = cmdsize_aligned,
+        .dylib = .{
+            .name = name_offset,
+            .timestamp = 0,
+            .current_version = 0,
+            .compatibility_version = 0,
+        },
+    };
+    @memcpy(buf[header_size + lc_size ..][0..embedded_path.len], embedded_path);
+    // Trailing NUL is already zero from @memset; the +1 ensures
+    // parser sees a terminated string.
+
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, buf);
+}
+
+fn captureStderrAround(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+    op: anytype,
+) void {
+    output.beginStderrCapture(allocator, buf);
+    defer output.endStderrCapture();
+    op();
+}
+
+test "checkMachOPlaceholders under --verbose lists each affected (package version)" {
+    // The verbose list is keyed by the keg the user would reinstall —
+    // package + version — not per file, because a single keg can
+    // ship hundreds of bundled Mach-O files (Python site-packages
+    // inside a meta-package, for example) and a flat enumeration
+    // buries the actionable name in noise. The per-package file
+    // count is also dropped: the user reinstalls the keg either way,
+    // and a "(N file(s))" suffix turns out to be implementation
+    // noise that distracts from the action.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "macho_verbose");
+    defer s.deinit(allocator);
+
+    // alpha 1.0: two bad files — should appear ONCE in the list.
+    const dir1 = try std.fmt.allocPrint(allocator, "{s}/Cellar/alpha/1.0/lib", .{s.path});
+    defer allocator.free(dir1);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir1);
+    const bin1a = try std.fmt.allocPrint(allocator, "{s}/libalpha.dylib", .{dir1});
+    defer allocator.free(bin1a);
+    try writeMachOWithPath(allocator, bin1a, "@@HOMEBREW_PREFIX@@/lib/libalpha.dylib");
+    const bin1b = try std.fmt.allocPrint(allocator, "{s}/libalpha-extra.dylib", .{dir1});
+    defer allocator.free(bin1b);
+    try writeMachOWithPath(allocator, bin1b, "@@HOMEBREW_PREFIX@@/lib/libalpha-extra.dylib");
+
+    // beta 2.0: one bad file.
+    const dir2 = try std.fmt.allocPrint(allocator, "{s}/Cellar/beta/2.0/bin", .{s.path});
+    defer allocator.free(dir2);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir2);
+    const bin2 = try std.fmt.allocPrint(allocator, "{s}/beta", .{dir2});
+    defer allocator.free(bin2);
+    try writeMachOWithPath(allocator, bin2, "@@HOMEBREW_CELLAR@@/beta/2.0/bin/beta");
+
+    output.setVerbose(true);
+    defer output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - alpha 1.0\n") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - beta 2.0\n") != null);
+    // Each package appears exactly once — no per-file rows leaking
+    // back in via the grouping.
+    const alpha_idx = std.mem.indexOf(u8, stderr_buf.items, "    - alpha 1.0\n").?;
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items[alpha_idx + 1 ..], "    - alpha 1.0\n") == null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha/1.0/lib/libalpha.dylib") == null);
+    // Verbose redundantly shows every package below the headline,
+    // so the (first: …) hint must drop out — the row above is
+    // shorter without it.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "(first:") == null);
+}
+
+test "checkBrokenSymlinks without --verbose keeps the count summary only" {
+    // Default-mode pinning so the verbose branch cannot leak detail
+    // rows when the user did not ask for them.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "symlinks_default");
+    defer s.deinit(allocator);
+
+    const link_path = try std.fmt.allocPrint(allocator, "{s}/bin/ghost-default", .{s.path});
+    defer allocator.free(link_path);
+    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, "/tmp/malt_doctor_disp_default_symlink_target_dne", link_path, .{});
+
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1 broken symlink(s)") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - bin/ghost-default") == null);
+}
+
+test "checkMachOPlaceholders without --verbose keeps the count + first-hint summary only" {
+    // Pin the default-mode output so the verbose branch does not
+    // accidentally leak detail lines into non-verbose runs.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "macho_default");
+    defer s.deinit(allocator);
+
+    const dir1 = try std.fmt.allocPrint(allocator, "{s}/Cellar/alpha/1.0/lib", .{s.path});
+    defer allocator.free(dir1);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir1);
+    const bin1 = try std.fmt.allocPrint(allocator, "{s}/libalpha.dylib", .{dir1});
+    defer allocator.free(bin1);
+    try writeMachOWithPath(allocator, bin1, "@@HOMEBREW_PREFIX@@/lib/libalpha.dylib");
+
+    const dir2 = try std.fmt.allocPrint(allocator, "{s}/Cellar/beta/2.0/bin", .{s.path});
+    defer allocator.free(dir2);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir2);
+    const bin2 = try std.fmt.allocPrint(allocator, "{s}/beta", .{dir2});
+    defer allocator.free(bin2);
+    try writeMachOWithPath(allocator, bin2, "@@HOMEBREW_CELLAR@@/beta/2.0/bin/beta");
+
+    // Explicit reset so a leaky test earlier in the run does not
+    // poison this one.
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+
+    // Headline counts PACKAGES, not files: the user reinstalls the
+    // keg either way, so the package count is the actionable number.
+    // First-package hint stays (helps users who don't want to re-run
+    // with --verbose). No detail rows in default mode.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "2 package(s)") != null);
+    // FS walk order isn't guaranteed to be alphabetical on every
+    // host, so accept either of the two seeded kegs as the first
+    // example — the contract is "name a real package", not "name
+    // this specific package".
+    const has_alpha_first = std.mem.indexOf(u8, stderr_buf.items, "(first: alpha 1.0)") != null;
+    const has_beta_first = std.mem.indexOf(u8, stderr_buf.items, "(first: beta 2.0)") != null;
+    try testing.expect(has_alpha_first or has_beta_first);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - alpha 1.0\n") == null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - beta 2.0\n") == null);
+}
+
+test "checkBrokenSymlinks under --verbose lists every broken symlink path" {
+    // Two link-dir entries (bin/ and lib/) each pointing at targets
+    // that do not exist. The check counts both today; verbose must
+    // surface the symlink paths so the user can `ls -l` them
+    // directly.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "symlinks_verbose");
+    defer s.deinit(allocator);
+
+    const link_a_path = try std.fmt.allocPrint(allocator, "{s}/bin/ghost-a", .{s.path});
+    defer allocator.free(link_a_path);
+    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, "/tmp/malt_doctor_disp_ghost_target_does_not_exist_a", link_a_path, .{});
+
+    const link_b_path = try std.fmt.allocPrint(allocator, "{s}/lib/ghost-b", .{s.path});
+    defer allocator.free(link_b_path);
+    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, "/tmp/malt_doctor_disp_ghost_target_does_not_exist_b", link_b_path, .{});
+
+    output.setVerbose(true);
+    defer output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "bin/ghost-a") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "lib/ghost-b") != null);
+}
+
+test "after the check loop, a dim --verbose hint fires when offenders exist and --verbose is off" {
+    // Mach-O placeholder seeded so the check has at least one
+    // offender to enumerate; with --verbose OFF the user only sees
+    // the count + first hint. The new tail-of-output nudge points
+    // them at --verbose so they can find the rest without having
+    // to know about the flag.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "verbose_hint");
+    defer s.deinit(allocator);
+
+    const dir1 = try std.fmt.allocPrint(allocator, "{s}/Cellar/alpha/1.0/lib", .{s.path});
+    defer allocator.free(dir1);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir1);
+    const bin1 = try std.fmt.allocPrint(allocator, "{s}/libalpha.dylib", .{dir1});
+    defer allocator.free(bin1);
+    try writeMachOWithPath(allocator, bin1, "@@HOMEBREW_PREFIX@@/lib/libalpha.dylib");
+
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    doctor.resetVerboseHint();
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+    doctor.emitVerboseHintIfNeeded();
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "--verbose") != null);
+}
+
+test "emitVerboseHintIfNeeded stays silent when --verbose is already active" {
+    // Re-running with --verbose surfaces the list directly, so the
+    // nudge would be redundant. Pin it as silent in that case.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "verbose_hint_on");
+    defer s.deinit(allocator);
+
+    const dir1 = try std.fmt.allocPrint(allocator, "{s}/Cellar/alpha/1.0/lib", .{s.path});
+    defer allocator.free(dir1);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir1);
+    const bin1 = try std.fmt.allocPrint(allocator, "{s}/libalpha.dylib", .{dir1});
+    defer allocator.free(bin1);
+    try writeMachOWithPath(allocator, bin1, "@@HOMEBREW_PREFIX@@/lib/libalpha.dylib");
+
+    output.setVerbose(true);
+    defer output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    doctor.resetVerboseHint();
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+    doctor.emitVerboseHintIfNeeded();
+
+    // The "Run …" prefix on the existing fix hint (e.g.
+    // `Run: mt purge --housekeeping`) is unrelated; assert the
+    // nudge-specific phrase is absent.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "for the full list") == null);
+}
+
+test "emitVerboseHintIfNeeded stays silent on a clean prefix" {
+    // No enumerable offenders → no nudge. Otherwise we'd train
+    // users to ignore it as noise on healthy systems.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "verbose_hint_clean");
+    defer s.deinit(allocator);
+
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    doctor.resetVerboseHint();
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+    doctor.emitVerboseHintIfNeeded();
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "for the full list") == null);
+}
+
+test "checkPrefixPermissions hint lines flow through stderr capture so they share the verbose-list look" {
+    // Pre-this PR, the first-3 hint rows used `std.debug.print` and
+    // bypassed the output capture, so tests couldn't pin them and
+    // they were styled differently from every other detail line.
+    // Both should now route through `output.writeStderrAll` (the
+    // same path used by Mach-O / symlinks / kegs verbose lists),
+    // putting the bytes into the capture buffer.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "perms_hints");
+    defer s.deinit(allocator);
+
+    // Plant a path with a group-writable bit so the perms walker
+    // reports it. Bit 0o020 == group-write. UID match keeps the
+    // walker focused on the perms axis.
+    const weak = try std.fmt.allocPrint(allocator, "{s}/Cellar/weak", .{s.path});
+    defer allocator.free(weak);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, weak, .{ .truncate = true });
+    f.close(std.Options.debug_io);
+    _ = std.c.chmod(@ptrCast(weak.ptr), 0o664);
+
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+
+    // Either the path landed in the capture (new behaviour) or the
+    // perms walker on this host didn't trip (CI without group bits);
+    // accept both, but if the row appears it must have flowed
+    // through the capture, not the bypass.
+    if (std.mem.indexOf(u8, stderr_buf.items, "Prefix permissions") != null and
+        std.mem.indexOf(u8, stderr_buf.items, "weak permissions") != null)
+    {
+        try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Cellar/weak") != null);
+    }
+}
+
+test "checkMissingKegs under --verbose lists each missing (name version) pair" {
+    // Two keg rows pointing at Cellar paths that don't exist. The
+    // user needs the names to decide which packages to reinstall —
+    // count alone forces them to inspect the DB by hand.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "missing_keg_verbose");
+    defer s.deinit(allocator);
+
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+            \\VALUES
+            \\  ('phantom-a', 'phantom-a', '9.9', 0, '', '/tmp/malt_doctor_disp_phantom_a_dne'),
+            \\  ('phantom-b', 'phantom-b', '1.0', 0, '', '/tmp/malt_doctor_disp_phantom_b_dne');
+        );
+    }
+
+    output.setVerbose(true);
+    defer output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "phantom-a 9.9") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "phantom-b 1.0") != null);
 }
