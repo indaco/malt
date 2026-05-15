@@ -249,6 +249,26 @@ pub fn artifactTypeTag(t: ArtifactType) []const u8 {
     };
 }
 
+/// Delete the per-version cache file for one `(token, version)` pair.
+/// Mirrors the `<prefix>/cache/Cask/<token>-<version>.<ext>` naming
+/// `sweepPerVersionCache` matches by prefix, but stays surgical so
+/// `purge --old-versions` can drop a stale version without touching
+/// the current one. Iterates every known extension because
+/// `cask_versions.artifact_type` is nullable on rows backfilled
+/// before v7. Returns true when every file that existed was removed
+/// (or none existed); false when an existing file could not be
+/// deleted — the caller uses that signal to gate the DB row delete
+/// so a read-only mount doesn't orphan history.
+pub fn deletePerVersionCacheFile(io: std.Io, prefix: []const u8, token: []const u8, version: []const u8) bool {
+    for ([_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz" }) |ext| {
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/cache/Cask/{s}-{s}{s}", .{ prefix, token, version, ext }) catch continue;
+        std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
+        std.Io.Dir.cwd().deleteFile(io, path) catch return false;
+    }
+    return true;
+}
+
 /// Iterate `{prefix}/cache/Cask/` and delete any file whose basename
 /// starts with `{token}-` — the per-version cache shape this binary
 /// writes. Used by uninstall + purge so per-version artefacts don't

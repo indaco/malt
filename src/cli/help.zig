@@ -361,7 +361,7 @@ const purge_help =
     \\  --cache[=DAYS]       Cache files older than DAYS (default 30)
     \\  --downloads          Wipe {cache}/downloads entirely        (typed confirm)
     \\  --stale-casks        Cask cache + Caskroom for uninstalled casks
-    \\  --old-versions       Non-latest versions in {prefix}/Cellar (typed confirm)
+    \\  --old-versions       Non-latest Cellar versions + retained cask history (typed confirm)
     \\  --housekeeping       = --store-orphans --unused-deps --cache --stale-casks
     \\  --wipe               Nuclear: every malt artefact on disk    (typed confirm)
     \\

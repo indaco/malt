@@ -157,6 +157,85 @@ test "--stale-casks --dry-run iterates orphaned cache/Cask files and Caskroom di
 
 // --- --old-versions ------------------------------------------------------
 
+test "--old-versions --yes sweeps cask per-version cache + caskroom + history row" {
+    // End-to-end integration: drives `purge.execute` (not the scope
+    // function directly) so the JSON summary path and locking flow are
+    // exercised alongside the cask sweep. Mirrors the keg-side
+    // destructive test pattern.
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "old_versions_cask");
+    defer prefix.deinit(allocator);
+
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+
+        var cask_stmt = try db.prepare(
+            \\INSERT INTO casks (token, name, version, url, sha256, app_path, auto_updates)
+            \\VALUES ('flux', 'flux', '2.0', 'https://example.invalid/dummy', NULL, NULL, 0);
+        );
+        defer cask_stmt.finalize();
+        _ = try cask_stmt.step();
+
+        for ([_][]const u8{ "1.0", "2.0" }) |ver| {
+            var v_stmt = try db.prepare(
+                \\INSERT INTO cask_versions (token, version, url, sha256, artifact_type, cache_path)
+                \\VALUES ('flux', ?1, 'https://example.invalid/dummy', NULL, 'dmg', NULL);
+            );
+            defer v_stmt.finalize();
+            try v_stmt.bindText(1, ver);
+            _ = try v_stmt.step();
+        }
+    }
+
+    try writeFileAt(allocator, &.{ prefix.path, "cache", "Cask", "flux-1.0.dmg" }, "stale");
+    try writeFileAt(allocator, &.{ prefix.path, "cache", "Cask", "flux-2.0.dmg" }, "current");
+    try writeFileAt(allocator, &.{ prefix.path, "Caskroom", "flux", "1.0", ".meta" }, "x");
+    try writeFileAt(allocator, &.{ prefix.path, "Caskroom", "flux", "2.0", ".meta" }, "x");
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(true);
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try purge.execute(&ctx, allocator, &.{ "--old-versions", "--yes" });
+
+    // Stale artefacts gone.
+    const stale_cache = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/flux-1.0.dmg", .{prefix.path});
+    defer allocator.free(stale_cache);
+    try testing.expectError(
+        error.FileNotFound,
+        test_io.accessAbsolute(std.Options.debug_io, stale_cache, .{}),
+    );
+    const stale_room = try std.fmt.allocPrint(allocator, "{s}/Caskroom/flux/1.0", .{prefix.path});
+    defer allocator.free(stale_room);
+    try testing.expectError(
+        error.FileNotFound,
+        test_io.accessAbsolute(std.Options.debug_io, stale_room, .{}),
+    );
+
+    // Current artefacts survive.
+    const current_cache = try std.fmt.allocPrint(allocator, "{s}/cache/Cask/flux-2.0.dmg", .{prefix.path});
+    defer allocator.free(current_cache);
+    try test_io.accessAbsolute(std.Options.debug_io, current_cache, .{});
+
+    // History rows: only the current row remains.
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var count_stmt = try db.prepare("SELECT COUNT(*) FROM cask_versions WHERE token = 'flux';");
+    defer count_stmt.finalize();
+    _ = try count_stmt.step();
+    try testing.expectEqual(@as(i64, 1), count_stmt.columnInt(0));
+}
+
 test "--old-versions --dry-run iterates Cellar dirs that hold multiple versions" {
     const allocator = testing.allocator;
     var prefix = try ScratchPrefix.init(allocator, "old_versions");
