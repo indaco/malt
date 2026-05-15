@@ -159,7 +159,12 @@ const list_help =
 const info_help =
     \\Usage: malt info <package> [flags]
     \\
-    \\Show detailed information about a formula or cask.
+    \\Show detailed information about a formula or cask. If the package
+    \\has retained rollback versions (multi-version store entries for
+    \\formulas, cask_versions history for casks), they are listed under
+    \\an "Available rollback versions" section so `mt rollback <pkg>`
+    \\and `mt info <pkg>` agree on what's retrievable. The same listing
+    \\is exposed in `--json` as the `available_rollback_versions` array.
     \\
     \\Flags:
     \\  --formula      Show formula info only
