@@ -361,7 +361,7 @@ pub const zsh_script =
     \\                        '--cache[Prune cache files older than 30 days]' \
     \\                        '--downloads[Wipe the downloads cache]' \
     \\                        '--stale-casks[Remove cache + Caskroom for uninstalled casks]' \
-    \\                        '--old-versions[Remove non-latest Cellar versions]' \
+    \\                        '--old-versions[Remove non-latest Cellar versions + retained cask history]' \
     \\                        '--housekeeping[All safe scopes at once]' \
     \\                        '--wipe[Nuclear: remove every malt artefact]' \
     \\                        '(--backup -b)'{--backup,-b}'[Write a restorable manifest before deleting]:path:_files' \
@@ -592,7 +592,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l cache            -d 'Prune cache files older than 30 days (or N via --cache=N)'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l downloads        -d 'Wipe the downloads cache (typed confirm)'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l stale-casks      -d 'Cask cache + Caskroom for uninstalled casks'
-    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l old-versions     -d 'Non-latest Cellar versions (typed confirm)'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l old-versions     -d 'Non-latest Cellar versions + retained cask history (typed confirm)'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l housekeeping     -d 'All safe scopes at once'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l wipe             -d 'Nuclear: every malt artefact (typed confirm)'
     \\    # purge — shared / wipe-only flags
