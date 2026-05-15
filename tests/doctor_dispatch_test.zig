@@ -338,13 +338,17 @@ test "checkMachOPlaceholders under --verbose lists each affected (package versio
         .environ = .empty,
     }, &doctor.checks);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha 1.0\n") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        beta 2.0\n") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    alpha 1.0\n") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    beta 2.0\n") != null);
     // Each package appears exactly once — no per-file rows leaking
     // back in via the grouping.
-    const alpha_idx = std.mem.indexOf(u8, stderr_buf.items, "        alpha 1.0\n").?;
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items[alpha_idx + 1 ..], "        alpha 1.0\n") == null);
+    const alpha_idx = std.mem.indexOf(u8, stderr_buf.items, "    alpha 1.0\n").?;
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items[alpha_idx + 1 ..], "    alpha 1.0\n") == null);
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha/1.0/lib/libalpha.dylib") == null);
+    // Verbose redundantly shows every package below the headline,
+    // so the (first: …) hint must drop out — the row above is
+    // shorter without it.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "(first:") == null);
 }
 
 test "checkBrokenSymlinks without --verbose keeps the count summary only" {
@@ -373,7 +377,7 @@ test "checkBrokenSymlinks without --verbose keeps the count summary only" {
     }, &doctor.checks);
 
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1 broken symlink(s)") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        bin/ghost-default") == null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    bin/ghost-default") == null);
 }
 
 test "checkMachOPlaceholders without --verbose keeps the count + first-hint summary only" {
@@ -425,8 +429,8 @@ test "checkMachOPlaceholders without --verbose keeps the count + first-hint summ
     const has_alpha_first = std.mem.indexOf(u8, stderr_buf.items, "(first: alpha 1.0)") != null;
     const has_beta_first = std.mem.indexOf(u8, stderr_buf.items, "(first: beta 2.0)") != null;
     try testing.expect(has_alpha_first or has_beta_first);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha 1.0\n") == null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        beta 2.0\n") == null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    alpha 1.0\n") == null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    beta 2.0\n") == null);
 }
 
 test "checkBrokenSymlinks under --verbose lists every broken symlink path" {
@@ -463,6 +467,51 @@ test "checkBrokenSymlinks under --verbose lists every broken symlink path" {
 
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "bin/ghost-a") != null);
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "lib/ghost-b") != null);
+}
+
+test "checkPrefixPermissions hint lines flow through stderr capture so they share the verbose-list look" {
+    // Pre-this PR, the first-3 hint rows used `std.debug.print` and
+    // bypassed the output capture, so tests couldn't pin them and
+    // they were styled differently from every other detail line.
+    // Both should now route through `output.writeStderrAll` (the
+    // same path used by Mach-O / symlinks / kegs verbose lists),
+    // putting the bytes into the capture buffer.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "perms_hints");
+    defer s.deinit(allocator);
+
+    // Plant a path with a group-writable bit so the perms walker
+    // reports it. Bit 0o020 == group-write. UID match keeps the
+    // walker focused on the perms axis.
+    const weak = try std.fmt.allocPrint(allocator, "{s}/Cellar/weak", .{s.path});
+    defer allocator.free(weak);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, weak, .{ .truncate = true });
+    f.close(std.Options.debug_io);
+    _ = std.c.chmod(@ptrCast(weak.ptr), 0o664);
+
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+
+    // Either the path landed in the capture (new behaviour) or the
+    // perms walker on this host didn't trip (CI without group bits);
+    // accept both, but if the row appears it must have flowed
+    // through the capture, not the bypass.
+    if (std.mem.indexOf(u8, stderr_buf.items, "Prefix permissions") != null and
+        std.mem.indexOf(u8, stderr_buf.items, "weak permissions") != null)
+    {
+        try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Cellar/weak") != null);
+    }
 }
 
 test "checkMissingKegs under --verbose lists each missing (name version) pair" {

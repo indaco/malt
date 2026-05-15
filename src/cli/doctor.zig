@@ -191,27 +191,30 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 }
 
-/// Stream the entries (one per indented line, 8-space prefix matching
-/// the detail-row pattern `checkPrefixPermissions` uses) to stderr
-/// when `--verbose` is active. Lines are wrapped in the detail
-/// (dim/faint) colour so they visually recede next to the check row
-/// they belong to. Routes through `output.writeStderrAll` so doctor's
-/// stderr-capture tests see the bytes; `std.debug.print` would bypass
-/// the capture buffer.
+/// Emit one dim/faint detail line indented under a check row. Routes
+/// through `output.writeStderrAll` so doctor's stderr-capture tests
+/// see the bytes; `std.debug.print` would bypass the capture buffer.
+/// 4-space indent keeps the row visually nested under the parent
+/// without crowding the message text on the line above.
+fn writeStyledDetail(text: []const u8) void {
+    var line_buf: [1024]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buf, "    {s}\n", .{text}) catch return;
+    if (color.isColorEnabled()) {
+        output.writeStderrAll(color.SemanticStyle.detail.code());
+        output.writeStderrAll(line);
+        output.writeStderrAll(color.Style.reset.code());
+    } else {
+        output.writeStderrAll(line);
+    }
+}
+
+/// Stream the verbose-only entry list. Gated on `--verbose`; the
+/// always-on first-3 hint lines (`checkPrefixPermissions`) call
+/// `writeStyledDetail` directly so they share the styling without
+/// the verbose gate.
 fn writeVerboseList(entries: []const []const u8) void {
     if (!output.isVerbose()) return;
-    const colorize = color.isColorEnabled();
-    var line_buf: [1024]u8 = undefined;
-    for (entries) |e| {
-        const text = std.fmt.bufPrint(&line_buf, "        {s}\n", .{e}) catch continue;
-        if (colorize) {
-            output.writeStderrAll(color.SemanticStyle.detail.code());
-            output.writeStderrAll(text);
-            output.writeStderrAll(color.Style.reset.code());
-        } else {
-            output.writeStderrAll(text);
-        }
-    }
+    for (entries) |e| writeStyledDetail(e);
 }
 
 fn freeOwnedStringList(allocator: std.mem.Allocator, list: *std.ArrayList([]u8)) void {
@@ -384,7 +387,10 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
         .{ findings.len, ctx.prefix },
     ) catch "Weak-permission paths under prefix";
     printCheck(name, .warn_status, pm_msg);
-    // First few as a hint so the user knows where to look.
+    // First few as a hint so the user knows where to look. Routes
+    // through the shared styled-detail writer for parity with the
+    // verbose lists below — capture-aware (so tests see the bytes)
+    // and dim/faint on a tty.
     for (findings[0..@min(findings.len, 3)]) |f| {
         var line_buf: [1024]u8 = undefined;
         const reason = if (f.report.other_writable)
@@ -393,8 +399,8 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
             "group-writable"
         else
             "wrong owner";
-        const line = std.fmt.bufPrint(&line_buf, "        {s} ({s})", .{ f.path, reason }) catch continue;
-        std.debug.print("{s}\n", .{line});
+        const line = std.fmt.bufPrint(&line_buf, "{s} ({s})", .{ f.path, reason }) catch continue;
+        writeStyledDetail(line);
     }
     return .warn_status;
 }
@@ -616,16 +622,27 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     }
-    const first_key = blk: {
-        var it = groups.iterator();
-        break :blk if (it.next()) |kv| kv.key_ptr.* else "";
-    };
     var msg_buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrint(
-        &msg_buf,
-        "{d} package(s) ship Mach-O file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Reinstall the affected packages.",
-        .{ groups.count(), first_key },
-    ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
+    const msg = blk: {
+        if (output.isVerbose()) {
+            // Verbose lists every package below; the (first: …) hint
+            // would just duplicate the first row of that list.
+            break :blk std.fmt.bufPrint(
+                &msg_buf,
+                "{d} package(s) ship Mach-O file(s) with unpatched @@HOMEBREW_* placeholders. Reinstall the affected packages.",
+                .{groups.count()},
+            ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
+        }
+        const first_key = first_key: {
+            var it = groups.iterator();
+            break :first_key if (it.next()) |kv| kv.key_ptr.* else "";
+        };
+        break :blk std.fmt.bufPrint(
+            &msg_buf,
+            "{d} package(s) ship Mach-O file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Reinstall the affected packages.",
+            .{ groups.count(), first_key },
+        ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
+    };
     printCheck(name, .err_status, msg);
 
     if (output.isVerbose()) {
