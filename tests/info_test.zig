@@ -72,6 +72,7 @@ test "encodeInstallHint collapses to a bare line in quiet mode" {
 
 const malt_formula = @import("malt").formula;
 const malt_cask = @import("malt").cask;
+const rollback = @import("malt").cli_rollback;
 
 const FORMULA_FIXTURE =
     \\{
@@ -205,7 +206,7 @@ test "encodeInstalledCaskHuman renders every populated field" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     var scratch: [4096]u8 = undefined;
-    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, false);
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, info.no_history, false);
 
     const out = aw.written();
     try testing.expect(std.mem.indexOf(u8, out, "firefox: 120.0 (cask)\n") != null);
@@ -230,7 +231,7 @@ test "encodeInstalledCaskHuman omits Auto-updates when false and uses fallbacks 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     var scratch: [4096]u8 = undefined;
-    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, false);
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, info.no_history, false);
 
     const out = aw.written();
     try testing.expect(std.mem.indexOf(u8, out, "ghost: unknown (cask)\n") != null);
@@ -253,10 +254,10 @@ test "encodeInstalledCaskJson produces the documented shape" {
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try info.encodeInstalledCaskJson(&aw.writer, &row);
+    try info.encodeInstalledCaskJson(&aw.writer, &row, info.no_history);
 
     try testing.expectEqualStrings(
-        "{\"name\":\"firefox\",\"type\":\"cask\",\"installed\":true,\"version\":\"120.0\",\"full_name\":\"Firefox\",\"url\":\"https://example.com/firefox.dmg\",\"app_path\":\"/Applications/Firefox.app\",\"auto_updates\":false,\"installed_at\":\"2026-05-13 10:40:56\",\"tap\":\"\"}\n",
+        "{\"name\":\"firefox\",\"type\":\"cask\",\"installed\":true,\"version\":\"120.0\",\"full_name\":\"Firefox\",\"url\":\"https://example.com/firefox.dmg\",\"app_path\":\"/Applications/Firefox.app\",\"auto_updates\":false,\"installed_at\":\"2026-05-13 10:40:56\",\"tap\":\"\",\"available_rollback_versions\":[]}\n",
         aw.written(),
     );
 }
@@ -270,10 +271,10 @@ test "encodeInstalledCaskJson emits empty strings for null fields" {
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try info.encodeInstalledCaskJson(&aw.writer, &row);
+    try info.encodeInstalledCaskJson(&aw.writer, &row, info.no_history);
 
     try testing.expectEqualStrings(
-        "{\"name\":\"ghost\",\"type\":\"cask\",\"installed\":true,\"version\":\"\",\"full_name\":\"ghost\",\"url\":\"\",\"app_path\":\"\",\"auto_updates\":true,\"installed_at\":\"\",\"tap\":\"\"}\n",
+        "{\"name\":\"ghost\",\"type\":\"cask\",\"installed\":true,\"version\":\"\",\"full_name\":\"ghost\",\"url\":\"\",\"app_path\":\"\",\"auto_updates\":true,\"installed_at\":\"\",\"tap\":\"\",\"available_rollback_versions\":[]}\n",
         aw.written(),
     );
 }
@@ -290,7 +291,7 @@ test "encodeInstalledCaskHuman surfaces the owning tap when set" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     var scratch: [4096]u8 = undefined;
-    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, false);
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, info.no_history, false);
 
     const out = aw.written();
     try testing.expect(std.mem.indexOf(u8, out, "Tap:          yuzeguitarist/deck") != null);
@@ -311,7 +312,7 @@ test "encodeInstalledCaskHuman omits the Tap line when null (core-API cask)" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     var scratch: [4096]u8 = undefined;
-    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, false);
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, info.no_history, false);
 
     try testing.expect(std.mem.indexOf(u8, aw.written(), "Tap:") == null);
 }
@@ -326,9 +327,213 @@ test "encodeInstalledCaskJson includes tap as an empty string for null and the l
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try info.encodeInstalledCaskJson(&aw.writer, &tapped);
+    try info.encodeInstalledCaskJson(&aw.writer, &tapped, info.no_history);
 
     try testing.expect(std.mem.indexOf(u8, aw.written(), "\"tap\":\"yuzeguitarist/deck\"") != null);
+}
+
+// --- rollback history surfaces ------------------------------------------
+//
+// `mt info` reuses `mt rollback <pkg> --list`'s listing so users see one
+// shape across both verbs. These tests pin: (a) empty history is invisible
+// in human output but stable as `[]` in JSON, (b) non-empty history emits
+// the `mt rollback --list` section under both formula and cask paths.
+
+const ns_per_s: i128 = std.time.ns_per_s;
+
+const two_entries = [_]rollback.Entry{
+    .{ .sha256 = "aaa111", .pkg_version = "1.24", .mtime_ns = 1_700_000_000 * ns_per_s },
+    .{ .sha256 = "bbb222", .pkg_version = "1.23", .mtime_ns = 1_699_000_000 * ns_per_s },
+};
+
+test "encodeInstalledFormulaHuman omits the rollback section when history is empty" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try info.encodeInstalledFormulaHuman(
+        &aw.writer,
+        &scratch,
+        "wget",
+        "1.24.5",
+        "homebrew/core",
+        "/opt/malt/Cellar/wget/1.24.5",
+        false,
+        "2026-05-13 10:40:56",
+        info.no_history,
+        false,
+    );
+    // Byte-identical to the pre-T-040 shape — adding history must not
+    // alter the dump for a fresh single-version install.
+    try testing.expectEqualStrings(
+        "wget: stable 1.24.5\n" ++
+            "From:      homebrew/core\n" ++
+            "Path:      /opt/malt/Cellar/wget/1.24.5\n" ++
+            "Installed: 2026-05-13 10:40:56\n",
+        aw.written(),
+    );
+}
+
+test "encodeInstalledFormulaHuman appends the rollback listing when history is non-empty" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try info.encodeInstalledFormulaHuman(
+        &aw.writer,
+        &scratch,
+        "wget",
+        "1.24.5",
+        "homebrew/core",
+        "/opt/malt/Cellar/wget/1.24.5",
+        false,
+        "2026-05-13 10:40:56",
+        &two_entries,
+        false,
+    );
+    const out = aw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "Available rollback versions for wget") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.24") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.23") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "aaa111") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "bbb222") != null);
+    // Section sits below the field block so the top of the dump stays
+    // stable for greppers reading the first N lines.
+    const installed_idx = std.mem.indexOf(u8, out, "Installed:").?;
+    const section_idx = std.mem.indexOf(u8, out, "Available rollback versions").?;
+    try testing.expect(installed_idx < section_idx);
+}
+
+test "encodeInstalledFormulaJson emits available_rollback_versions:[] for an empty history" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try info.encodeInstalledFormulaJson(
+        &aw.writer,
+        "wget",
+        "1.24.5",
+        "homebrew/core",
+        false,
+        "2026-05-13 10:40:56",
+        info.no_history,
+    );
+    try testing.expectEqualStrings(
+        "{\"name\":\"wget\",\"type\":\"formula\",\"installed\":true,\"version\":\"1.24.5\"," ++
+            "\"tap\":\"homebrew/core\",\"pinned\":false,\"installed_at\":\"2026-05-13 10:40:56\"," ++
+            "\"available_rollback_versions\":[]}\n",
+        aw.written(),
+    );
+}
+
+test "encodeInstalledFormulaJson splices the same entries[] shape mt rollback --list emits" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try info.encodeInstalledFormulaJson(
+        &aw.writer,
+        "wget",
+        "1.24.5",
+        "homebrew/core",
+        true,
+        "2026-05-13 10:40:56",
+        &two_entries,
+    );
+    // Pinning the entries-array bytes here is the splice contract:
+    // downstream consumers already parse `mt rollback --list --json`'s
+    // `entries[]`, and the info payload must hand them the same shape.
+    try testing.expectEqualStrings(
+        "{\"name\":\"wget\",\"type\":\"formula\",\"installed\":true,\"version\":\"1.24.5\"," ++
+            "\"tap\":\"homebrew/core\",\"pinned\":true,\"installed_at\":\"2026-05-13 10:40:56\"," ++
+            "\"available_rollback_versions\":[" ++
+            "{\"sha256\":\"aaa111\",\"version\":\"1.24\",\"mtime\":1700000000}," ++
+            "{\"sha256\":\"bbb222\",\"version\":\"1.23\",\"mtime\":1699000000}" ++
+            "]}\n",
+        aw.written(),
+    );
+}
+
+test "encodeInstalledFormulaJson output parses as JSON with available_rollback_versions reachable" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try info.encodeInstalledFormulaJson(
+        &aw.writer,
+        "wget",
+        "1.24.5",
+        "homebrew/core",
+        false,
+        "2026-05-13 10:40:56",
+        &two_entries,
+    );
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer parsed.deinit();
+
+    const arr = parsed.value.object.get("available_rollback_versions") orelse return error.MissingKey;
+    try testing.expectEqual(@as(usize, 2), arr.array.items.len);
+    try testing.expectEqualStrings("1.24", arr.array.items[0].object.get("version").?.string);
+    try testing.expectEqualStrings("aaa111", arr.array.items[0].object.get("sha256").?.string);
+    try testing.expectEqual(@as(i64, 1_700_000_000), arr.array.items[0].object.get("mtime").?.integer);
+}
+
+test "encodeInstalledCaskHuman omits the rollback section when history is empty" {
+    const row: info.InstalledCaskRow = .{
+        .token = "firefox",
+        .name = "Firefox",
+        .version = "120.0",
+        .url = "https://example.com/firefox.dmg",
+        .app_path = "/Applications/Firefox.app",
+        .auto_updates = false,
+        .installed_at = "2026-05-13 10:40:56",
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, info.no_history, false);
+
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "Available rollback versions") == null);
+}
+
+test "encodeInstalledCaskHuman appends the rollback listing when history is non-empty" {
+    const row: info.InstalledCaskRow = .{
+        .token = "flux-markdown",
+        .name = "flux-markdown",
+        .version = "1.32.0",
+    };
+    const cask_history = [_]rollback.Entry{
+        .{ .sha256 = "aa", .pkg_version = "1.31.0", .mtime_ns = 1_700_000_000 * ns_per_s },
+        .{ .sha256 = "bb", .pkg_version = "1.30.0", .mtime_ns = 1_699_000_000 * ns_per_s },
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var scratch: [4096]u8 = undefined;
+    try info.encodeInstalledCaskHuman(&aw.writer, &scratch, &row, &cask_history, false);
+
+    const out = aw.written();
+    try testing.expect(std.mem.indexOf(u8, out, "Available rollback versions for flux-markdown") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.31.0") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.30.0") != null);
+}
+
+test "encodeInstalledCaskJson splices history entries into the installed-cask object" {
+    const row: info.InstalledCaskRow = .{
+        .token = "flux-markdown",
+        .name = "flux-markdown",
+        .version = "1.32.0",
+        .auto_updates = false,
+        .installed_at = "2026-05-13 10:40:56",
+    };
+    const cask_history = [_]rollback.Entry{
+        .{ .sha256 = "aa", .pkg_version = "1.31.0", .mtime_ns = 1_700_000_000 * ns_per_s },
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try info.encodeInstalledCaskJson(&aw.writer, &row, &cask_history);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer parsed.deinit();
+
+    const arr = parsed.value.object.get("available_rollback_versions") orelse return error.MissingKey;
+    try testing.expectEqual(@as(usize, 1), arr.array.items.len);
+    try testing.expectEqualStrings("1.31.0", arr.array.items[0].object.get("version").?.string);
+    try testing.expectEqual(@as(i64, 1_700_000_000), arr.array.items[0].object.get("mtime").?.integer);
 }
 
 test "encodeInstalledCaskJson output parses as JSON with .tap reachable" {
@@ -346,7 +551,7 @@ test "encodeInstalledCaskJson output parses as JSON with .tap reachable" {
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try info.encodeInstalledCaskJson(&aw.writer, &row);
+    try info.encodeInstalledCaskJson(&aw.writer, &row, info.no_history);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
     defer parsed.deinit();

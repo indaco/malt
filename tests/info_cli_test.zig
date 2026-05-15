@@ -372,3 +372,174 @@ test "execute --json on a NULL-tap cask still emits tap as an empty string" {
     const tap_val = parsed.value.object.get("tap") orelse return error.MissingTapKey;
     try testing.expectEqualStrings("", tap_val.string);
 }
+
+// --- retained rollback history under `mt info` -------------------------
+//
+// WHY end-to-end: the pure encoder tests cover the bytes, but only an
+// `execute` capture exercises the SQL SELECTs, the store walker, and
+// the skip_pkg_version wiring. Regressing those silently is the failure
+// mode that bit T-037 — pinning here keeps both halves honest.
+
+/// Seed `<prefix>/store/<sha>/<name>/<pkg_version>/INSTALL_RECEIPT.json`
+/// so `rollback.collectEntries` sees a real retained version for `name`.
+fn seedStoreVersion(prefix: []const u8, sha: []const u8, name: []const u8, pkg_version: []const u8) !void {
+    var buf: [512]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&buf, "{s}/store/{s}/{s}/{s}", .{ prefix, sha, name, pkg_version });
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+
+    var f_buf: [600]u8 = undefined;
+    const file_path = try std.fmt.bufPrint(&f_buf, "{s}/INSTALL_RECEIPT.json", .{dir});
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, file_path, .{ .truncate = true });
+    defer f.close(std.Options.debug_io);
+    try f.writeStreamingAll(std.Options.debug_io, "{}");
+}
+
+fn seedCaskVersionsHistory(prefix: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO cask_versions (token, version, url, sha256, installed_at)
+        \\VALUES ('flux-markdown', '1.30.0', 'https://x/a.dmg', 'aa', '2026-01-01T00:00:00'),
+        \\       ('flux-markdown', '1.31.0', 'https://x/b.dmg', 'bb', '2026-02-01T00:00:00');
+    );
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url, sha256, app_path)
+        \\VALUES ('flux-markdown', 'flux-markdown', '1.32.0', 'https://x/c.dmg', 'cc', '/Applications/Flux.app');
+    );
+}
+
+test "execute on a formula with retained store versions appends the rollback section" {
+    var s = try Scratch.init(testing.allocator, "fmla_hist_human");
+    defer s.deinit(testing.allocator);
+    try seedFormulaKeg(testing.allocator, s.path);
+    // Two prior versions in the store; current (1.21) excluded by the
+    // skip_pkg_version handoff so it doesn't appear in its own listing.
+    try seedStoreVersion(s.path, "sha_old", "wget", "1.19");
+    try seedStoreVersion(s.path, "sha_mid", "wget", "1.20");
+
+    const out = try captureExecute(testing.allocator, &.{"wget"}, "fmla_hist_human");
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "Available rollback versions for wget") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.19") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.20") != null);
+    // Current version must be filtered out of its own listing.
+    const section_idx = std.mem.indexOf(u8, out, "Available rollback versions").?;
+    try testing.expect(std.mem.indexOf(u8, out[section_idx..], "1.21") == null);
+}
+
+test "execute --json on a formula with retained store versions populates available_rollback_versions" {
+    var s = try Scratch.init(testing.allocator, "fmla_hist_json");
+    defer s.deinit(testing.allocator);
+    try seedFormulaKeg(testing.allocator, s.path);
+    try seedStoreVersion(s.path, "sha_old", "wget", "1.19");
+
+    const prior_mode: output.OutputMode = if (output.isJson()) .json else .human;
+    output.setMode(.json);
+    defer output.setMode(prior_mode);
+
+    const out = try captureExecute(testing.allocator, &.{"wget"}, "fmla_hist_json");
+    defer testing.allocator.free(out);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+
+    const arr = parsed.value.object.get("available_rollback_versions") orelse return error.MissingKey;
+    try testing.expectEqual(@as(usize, 1), arr.array.items.len);
+    try testing.expectEqualStrings("1.19", arr.array.items[0].object.get("version").?.string);
+}
+
+test "execute --json on a formula with no retained versions emits available_rollback_versions:[]" {
+    var s = try Scratch.init(testing.allocator, "fmla_empty_json");
+    defer s.deinit(testing.allocator);
+    try seedFormulaKeg(testing.allocator, s.path);
+
+    const prior_mode: output.OutputMode = if (output.isJson()) .json else .human;
+    output.setMode(.json);
+    defer output.setMode(prior_mode);
+
+    const out = try captureExecute(testing.allocator, &.{"wget"}, "fmla_empty_json");
+    defer testing.allocator.free(out);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+
+    const arr = parsed.value.object.get("available_rollback_versions") orelse return error.MissingKey;
+    try testing.expectEqual(@as(usize, 0), arr.array.items.len);
+}
+
+test "execute on a formula with no retained versions omits the section in human output" {
+    var s = try Scratch.init(testing.allocator, "fmla_empty_human");
+    defer s.deinit(testing.allocator);
+    try seedFormulaKeg(testing.allocator, s.path);
+
+    const out = try captureExecute(testing.allocator, &.{"wget"}, "fmla_empty_human");
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "Available rollback versions") == null);
+    // Existing field block stays byte-identical for the empty-history case.
+    try testing.expect(std.mem.indexOf(u8, out, "wget: stable 1.21\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "From:      homebrew/core\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Installed:") != null);
+}
+
+test "execute on a cask with retained cask_versions rows appends the rollback section" {
+    var s = try Scratch.init(testing.allocator, "cask_hist_human");
+    defer s.deinit(testing.allocator);
+    try seedCaskVersionsHistory(s.path);
+
+    const out = try captureExecute(testing.allocator, &.{"flux-markdown"}, "cask_hist_human");
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "Available rollback versions for flux-markdown") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.31.0") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.30.0") != null);
+    // Current cask version must not appear in its own rollback listing.
+    const section_idx = std.mem.indexOf(u8, out, "Available rollback versions").?;
+    try testing.expect(std.mem.indexOf(u8, out[section_idx..], "1.32.0") == null);
+}
+
+test "execute --json on a cask with history populates available_rollback_versions" {
+    var s = try Scratch.init(testing.allocator, "cask_hist_json");
+    defer s.deinit(testing.allocator);
+    try seedCaskVersionsHistory(s.path);
+
+    const prior_mode: output.OutputMode = if (output.isJson()) .json else .human;
+    output.setMode(.json);
+    defer output.setMode(prior_mode);
+
+    const out = try captureExecute(testing.allocator, &.{"flux-markdown"}, "cask_hist_json");
+    defer testing.allocator.free(out);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+
+    const arr = parsed.value.object.get("available_rollback_versions") orelse return error.MissingKey;
+    try testing.expectEqual(@as(usize, 2), arr.array.items.len);
+    // Newest-first ordering matches `mt rollback --list` exactly.
+    try testing.expectEqualStrings("1.31.0", arr.array.items[0].object.get("version").?.string);
+    try testing.expectEqualStrings("1.30.0", arr.array.items[1].object.get("version").?.string);
+}
+
+test "execute --json on a cask with no history emits available_rollback_versions:[]" {
+    var s = try Scratch.init(testing.allocator, "cask_empty_json");
+    defer s.deinit(testing.allocator);
+    try seedCaskRow(s.path);
+
+    const prior_mode: output.OutputMode = if (output.isJson()) .json else .human;
+    output.setMode(.json);
+    defer output.setMode(prior_mode);
+
+    const out = try captureExecute(testing.allocator, &.{"firefox"}, "cask_empty_json");
+    defer testing.allocator.free(out);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+
+    const arr = parsed.value.object.get("available_rollback_versions") orelse return error.MissingKey;
+    try testing.expectEqual(@as(usize, 0), arr.array.items.len);
+}

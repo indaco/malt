@@ -620,7 +620,17 @@ fn formatIso8601(buf: []u8, mtime_ns: i128) ![]const u8 {
 pub fn writeListJson(w: *std.Io.Writer, name: []const u8, entries: []const Entry) !void {
     try w.writeAll("{\"name\":");
     try output.jsonStr(w, name);
-    try w.writeAll(",\"entries\":[");
+    try w.writeAll(",\"entries\":");
+    try writeEntriesJsonArray(w, entries);
+    try w.writeAll("}\n");
+}
+
+/// Just the `[{sha256,version,mtime}, ...]` array. Shared so `mt info`
+/// can splice the rollback-list shape into its installed-package JSON
+/// without rewriting the encoder — one source of truth for downstream
+/// consumers that already parse `mt rollback --list --json`.
+pub fn writeEntriesJsonArray(w: *std.Io.Writer, entries: []const Entry) !void {
+    try w.writeAll("[");
     for (entries, 0..) |e, i| {
         if (i != 0) try w.writeAll(",");
         try w.writeAll("{\"sha256\":");
@@ -633,7 +643,7 @@ pub fn writeListJson(w: *std.Io.Writer, name: []const u8, entries: []const Entry
         try w.writeAll(s);
         try w.writeAll("}");
     }
-    try w.writeAll("]}\n");
+    try w.writeAll("]");
 }
 
 const testing = std.testing;
@@ -743,6 +753,32 @@ test "writeListJson with no entries emits an empty array" {
 
     try writeListJson(&aw.writer, "wget", &.{});
     try testing.expectEqualStrings("{\"name\":\"wget\",\"entries\":[]}\n", aw.written());
+}
+
+test "writeEntriesJsonArray emits a bare array compatible with rollback-list entries[]" {
+    // The array is the splice point: `mt info` reuses it inside its own
+    // object so downstream consumers can parse one shape across both
+    // commands. Pinning the bytes here prevents drift between the
+    // splice site and `writeListJson`'s consumers.
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    const ns_per_s: i128 = std.time.ns_per_s;
+    const entries = [_]Entry{
+        .{ .sha256 = "aaa", .pkg_version = "1.24", .mtime_ns = 1_700_000_000 * ns_per_s },
+    };
+    try writeEntriesJsonArray(&aw.writer, &entries);
+    try testing.expectEqualStrings(
+        "[{\"sha256\":\"aaa\",\"version\":\"1.24\",\"mtime\":1700000000}]",
+        aw.written(),
+    );
+}
+
+test "writeEntriesJsonArray emits [] when empty" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeEntriesJsonArray(&aw.writer, &.{});
+    try testing.expectEqualStrings("[]", aw.written());
 }
 
 /// Seed a `<prefix>/store/<sha>/<name>/<pkg_version>/INSTALL_RECEIPT.json`
