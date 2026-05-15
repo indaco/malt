@@ -592,9 +592,9 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
     var msg_buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &msg_buf,
-        "{d} broken symlink(s). Run: mt purge --housekeeping",
+        "{d} broken symlink(s). Run: mt cleanup",
         .{offenders.items.len},
-    ) catch "Broken symlinks found. Run: mt purge --housekeeping";
+    ) catch "Broken symlinks found. Run: mt cleanup";
     printCheck(name, .warn_status, msg);
     armVerboseHint();
     writeVerboseList(offenders.items);

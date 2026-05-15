@@ -378,6 +378,8 @@ test "checkBrokenSymlinks without --verbose keeps the count summary only" {
 
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1 broken symlink(s)") != null);
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "    - bin/ghost-default") == null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Run: mt cleanup") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "purge --housekeeping") == null);
 }
 
 test "checkMachOPlaceholders without --verbose keeps the count + first-hint summary only" {
@@ -537,8 +539,8 @@ test "emitVerboseHintIfNeeded stays silent when --verbose is already active" {
     doctor.emitVerboseHintIfNeeded();
 
     // The "Run …" prefix on the existing fix hint (e.g.
-    // `Run: mt purge --housekeeping`) is unrelated; assert the
-    // nudge-specific phrase is absent.
+    // `Run: mt cleanup`) is unrelated; assert the nudge-specific
+    // phrase is absent.
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "for the full list") == null);
 }
 
