@@ -155,7 +155,7 @@ fi
 
 # Per-command --help on everything documented.
 for cmd in install uninstall upgrade update outdated list info search uses deps which \
-  doctor purge tap untap migrate backup restore services bundle \
+  doctor purge cleanup tap untap migrate backup restore services bundle \
   rollback run link unlink pin unpin version completions shellenv; do
   run_ok "t1.help.$cmd" -- "$MT_BIN" "$cmd" --help
 done
@@ -301,6 +301,9 @@ else
   run_ok t3.purge.store.dry -- "$MT_BIN" purge --store-orphans --dry-run
   run_ok t3.purge.house.dry -- "$MT_BIN" purge --housekeeping --dry-run
   run_ok t3.purge.cache.dry -- "$MT_BIN" purge --cache=7 --dry-run
+  # `mt cleanup` shim — forwards to `purge --housekeeping`.
+  run_ok t3.cleanup.dry -- "$MT_BIN" cleanup --dry-run
+  run_ok t3.cleanup.cache.dry -- "$MT_BIN" cleanup --cache=7 --dry-run
 
   # Structured-output probes: prove the v1 wire format is parseable. Gated
   # on jq because not every smoke environment ships it.

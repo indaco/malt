@@ -126,6 +126,7 @@ const Command = enum {
     backup,
     restore,
     purge,
+    cleanup,
     services,
     bundle,
     uses,
@@ -165,6 +166,7 @@ const command_names = [_]struct {
     .{ .tag = .backup, .names = &.{"backup"} },
     .{ .tag = .restore, .names = &.{"restore"} },
     .{ .tag = .purge, .names = &.{"purge"} },
+    .{ .tag = .cleanup, .names = &.{"cleanup"} },
     .{ .tag = .services, .names = &.{"services"} },
     .{ .tag = .bundle, .names = &.{"bundle"} },
     .{ .tag = .uses, .names = &.{"uses"} },
@@ -268,6 +270,12 @@ test "applyGlobalFlag returns false for unrecognised flags" {
 test "dispatch accepts AppCtx and routes help without panic" {
     const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
     try dispatch(std.testing.allocator, &ctx, .help, &.{});
+}
+
+test "command_map resolves cleanup to the cleanup tag" {
+    // `mt cleanup` is the Homebrew-shaped alias for `mt purge --housekeeping`.
+    // Pin the tag so a rename can't silently break the dispatch arm.
+    try std.testing.expectEqual(@as(?Command, .cleanup), command_map.get("cleanup"));
 }
 
 test "dispatch clears stale interrupt under the test runner" {
@@ -457,6 +465,7 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         .backup => try backup.execute(ctx, allocator, cmd_args),
         .restore => try restore.execute(ctx, allocator, cmd_args),
         .purge => try purge.execute(ctx, allocator, cmd_args),
+        .cleanup => try purge.executeCleanup(ctx, allocator, cmd_args),
         .services => try services.execute(ctx, allocator, cmd_args),
         .bundle => try bundle.execute(ctx, allocator, cmd_args),
         .uses => try uses.execute(ctx, allocator, cmd_args),
@@ -511,6 +520,7 @@ fn printUsage(ctx: *const AppCtx) void {
         \\  purge         Housekeeping or full wipe (--store-orphans, --unused-deps,
         \\                --cache, --downloads, --stale-casks, --old-versions,
         \\                --housekeeping, --wipe)
+        \\  cleanup       Shorthand for `purge --housekeeping`
         \\  services      Manage long-running launchd services (start/stop/status/logs)
         \\  bundle        Install or export a Brewfile/Maltfile.json set of packages
         \\  version       Show version (use 'version update' to self-update)

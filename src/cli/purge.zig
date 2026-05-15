@@ -234,3 +234,17 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         output.success("removed {d} {s}, freed ~{s}", .{ grand_total.removed, item_noun, sz });
     }
 }
+
+/// `mt cleanup` shim — Homebrew-shaped verb that forwards to the safe
+/// daily-driver scope. Prepends `--housekeeping` so trailing flags
+/// (`--dry-run`, `--json`, ...) pass through unchanged. Intercepts
+/// `--help` first so users see the cleanup banner, not purge's.
+pub fn executeCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "cleanup")) return;
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.ensureTotalCapacity(allocator, args.len + 1);
+    argv.appendAssumeCapacity("--housekeeping");
+    argv.appendSliceAssumeCapacity(args);
+    return execute(ctx, allocator, argv.items);
+}
