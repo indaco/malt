@@ -1,12 +1,13 @@
 {
-  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.1/.schema/devbox.schema.json",
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.2/.schema/devbox.schema.json",
   "packages": [
     "zig@0.16",
     "git@latest",
     "curl@latest",
     "just@latest",
     "shellcheck@latest",
-    "shfmt@latest"
+    "shfmt@latest",
+    "sqlite@latest"
   ],
   "shell": {
     "scripts": {
