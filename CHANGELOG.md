@@ -4,6 +4,88 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.11.6 - 2026-05-14
+
+### 🩹 Fixes
+
+- **macho/patcher:** make text-file replacements atomic ([4136068](https://github.com/indaco/malt/commit/4136068)) ([#329](https://github.com/indaco/malt/pull/329))
+- **db/lock:** close double-fd race and adopt std.Io.File ([b3a6791](https://github.com/indaco/malt/commit/b3a6791)) ([#328](https://github.com/indaco/malt/pull/328))
+
+### 💅 Refactors
+
+- **app_ctx:** tighten environ bootstrap to match stdlib ([1061d51](https://github.com/indaco/malt/commit/1061d51)) ([#330](https://github.com/indaco/malt/pull/330))
+
+### ✅ Tests
+
+- **regressions:** keep upgrade-revision-bump green across schema bumps ([ee7aa0f](https://github.com/indaco/malt/commit/ee7aa0f)) ([#331](https://github.com/indaco/malt/pull/331))
+
+### 🤖 CI
+
+- update actions/download-artifact to v8 ([38afde1](https://github.com/indaco/malt/commit/38afde1)) ([#327](https://github.com/indaco/malt/pull/327))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.11.5 - 2026-05-13
+
+### 🩹 Fixes
+
+- **upgrade:** stop re-downloading tap casks when not needed ([e3b06d6](https://github.com/indaco/malt/commit/e3b06d6)) ([#323](https://github.com/indaco/malt/pull/323))
+- **cask:** suppress subprocess noise on success, surface it on failure ([016b793](https://github.com/indaco/malt/commit/016b793)) ([#322](https://github.com/indaco/malt/pull/322))
+- **upgrade:** show the same per-keg progress bar as install and migrate ([70d93f6](https://github.com/indaco/malt/commit/70d93f6)) ([#321](https://github.com/indaco/malt/pull/321))
+
+### 💅 Refactors
+
+- **list:** scope mt list to a single tap with --tap filter ([49d9911](https://github.com/indaco/malt/commit/49d9911)) ([#325](https://github.com/indaco/malt/pull/325))
+- **info:** surface owning tap for casks in mt info ([6421c62](https://github.com/indaco/malt/commit/6421c62)) ([#324](https://github.com/indaco/malt/pull/324))
+- **tap:** consolidate tap-fetch URL synthesis behind one seam ([30f9eeb](https://github.com/indaco/malt/commit/30f9eeb)) ([#315](https://github.com/indaco/malt/pull/315))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.11.4 - 2026-05-12
+
+### 🩹 Fixes
+
+- **macho:** relocate path literals embedded in cstring sections ([e0d58d1](https://github.com/indaco/malt/commit/e0d58d1)) ([#319](https://github.com/indaco/malt/pull/319))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.11.3 - 2026-05-12
+
+### 🩹 Fixes
+
+- **install/tap:** install third-party tap formulas with version-in-URL ([57012ab](https://github.com/indaco/malt/commit/57012ab)) ([#316](https://github.com/indaco/malt/pull/316))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.11.2 - 2026-05-10
+
+### 🩹 Fixes
+
+- **upgrade:** atomic DB updates and actionable failure messages ([24b3f76](https://github.com/indaco/malt/commit/24b3f76)) ([#312](https://github.com/indaco/malt/pull/312))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.11.1 - 2026-05-09
+
+### 🩹 Fixes
+
+- **bottle:** retry transient SHA256 mismatches and surface diagnostics ([16b1718](https://github.com/indaco/malt/commit/16b1718)) ([#310](https://github.com/indaco/malt/pull/310))
+- **install/local:** parse cask DSL multi-arch sha256 and arch-token URLs ([a585b05](https://github.com/indaco/malt/commit/a585b05)) ([#308](https://github.com/indaco/malt/pull/308))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.11.0 - 2026-05-08
 
 ### Highlights
