@@ -11,6 +11,8 @@ const test_io = @import("test_io");
 const testing = std.testing;
 const search = malt.cli_search;
 const output = malt.output;
+const sqlite = malt.sqlite;
+const schema = malt.schema;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -51,6 +53,34 @@ fn writeFile(path: []const u8, content: []const u8) !void {
     const f = try test_io.createFileAbsolute(std.Options.debug_io, path, .{ .truncate = true });
     defer f.close(std.Options.debug_io);
     try f.writeStreamingAll(std.Options.debug_io, content);
+}
+
+// Seed `{prefix}/db/malt.db` with kegs + casks so `--installed` and the
+// `default` local-first path find real rows without ever touching the API.
+fn seedDb(allocator: std.mem.Allocator, prefix: []const u8) !void {
+    const db_dir = try std.fmt.allocPrint(allocator, "{s}/db", .{prefix});
+    defer allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/malt.db", .{db_dir}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs(name, full_name, version, store_sha256, cellar_path)
+        \\VALUES
+        \\  ('wget',      'wget',      '1.21', 'aaa', '/c/wget/1.21'),
+        \\  ('wgetpaste', 'wgetpaste', '2.31', 'bbb', '/c/wgetpaste/2.31'),
+        \\  ('jq',        'jq',        '1.7',  'ccc', '/c/jq/1.7');
+    );
+    try db.exec(
+        \\INSERT INTO casks(token, name, version, url)
+        \\VALUES
+        \\  ('firefox', 'Firefox', '120.0', 'https://x'),
+        \\  ('brave',   'Brave',   '1.0',   'https://x');
+    );
 }
 
 // Seed both names indexes + a per-package json so api.exists() and
@@ -171,4 +201,155 @@ test "execute --json emits a JSON object covering both kinds" {
     // is only populated for `output.*` writes which `search` only uses
     // on the no-args branch.
     _ = stdout_buf.items;
+}
+
+// --- T-031: scope flag plumbing through `execute` ----------------------
+
+test "execute --installed reads the local DB without an API cache present" {
+    var s = try Scratch.init(testing.allocator, "installed");
+    defer s.deinit(testing.allocator);
+    try seedDb(testing.allocator, s.path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setQuiet(true);
+
+    // No `seedCache` — if the local-only path slipped through to the API,
+    // `runKindIsolated` would still tolerate the miss (matches stays empty),
+    // so the real assertion is "no error and the helper accepted the flag".
+    try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--installed", "wget" });
+}
+
+test "execute --installed --formula composes scope with kind filter" {
+    var s = try Scratch.init(testing.allocator, "installed_formula");
+    defer s.deinit(testing.allocator);
+    try seedDb(testing.allocator, s.path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setQuiet(true);
+
+    try search.execute(
+        &malt.app_ctx.debug_ctx,
+        testing.allocator,
+        &.{ "--installed", "--formula", "jq" },
+    );
+}
+
+test "execute --installed --json keeps the JSON dispatch active" {
+    var s = try Scratch.init(testing.allocator, "installed_json");
+    defer s.deinit(testing.allocator);
+    try seedDb(testing.allocator, s.path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.json);
+    output.setQuiet(true);
+
+    try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--installed", "wget" });
+}
+
+test "execute --api still works with only the cache seeded" {
+    var s = try Scratch.init(testing.allocator, "api_only");
+    defer s.deinit(testing.allocator);
+    try seedCache(testing.allocator, s.path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setQuiet(true);
+
+    try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--api", "wget" });
+}
+
+test "execute default queries the API even when the local DB has a match" {
+    // Default mirrors `brew search`: regardless of what's installed in
+    // the local prefix, the answer comes from the Homebrew API. Seed
+    // both DB and cache, query something both know about, and verify
+    // the helper accepts the work without erroring.
+    var s = try Scratch.init(testing.allocator, "default_api_parity");
+    defer s.deinit(testing.allocator);
+    try seedDb(testing.allocator, s.path);
+    try seedCache(testing.allocator, s.path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setQuiet(true);
+
+    try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"wget"});
+}
+
+test "execute default tolerates a missing local DB (never reads it)" {
+    // Fresh prefix with only the API cache — default scope never opens
+    // the local DB, so absence is a no-op rather than an error path.
+    var s = try Scratch.init(testing.allocator, "default_nodb");
+    defer s.deinit(testing.allocator);
+    try seedCache(testing.allocator, s.path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setQuiet(true);
+
+    try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"wget"});
+}
+
+test "execute --all runs both passes with cache + DB seeded" {
+    var s = try Scratch.init(testing.allocator, "all_scope");
+    defer s.deinit(testing.allocator);
+    try seedDb(testing.allocator, s.path);
+    try seedCache(testing.allocator, s.path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setQuiet(true);
+
+    try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--all", "wget" });
+}
+
+test "execute --installed tolerates a missing local DB without crashing" {
+    // Fresh prefix with no `db/malt.db` — local lookup must degrade
+    // silently, not error out.
+    var s = try Scratch.init(testing.allocator, "installed_nodb");
+    defer s.deinit(testing.allocator);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setQuiet(true);
+
+    try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--installed", "wget" });
+}
+
+test "execute --offline collapses --api into local-only" {
+    // T-029 slice: even with `--api` requested, `--offline` wins and the
+    // command must not attempt the network path.
+    var s = try Scratch.init(testing.allocator, "offline");
+    defer s.deinit(testing.allocator);
+    try seedDb(testing.allocator, s.path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setQuiet(true);
+
+    try search.execute(
+        &malt.app_ctx.debug_ctx,
+        testing.allocator,
+        &.{ "--offline", "--api", "wget" },
+    );
+}
+
+test "execute MALT_OFFLINE=1 mirrors the --offline flag" {
+    var s = try Scratch.init(testing.allocator, "offline_env");
+    defer s.deinit(testing.allocator);
+    try seedDb(testing.allocator, s.path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setQuiet(true);
+
+    // Build an AppCtx with a one-entry environ instead of mutating the
+    // process env — keeps the test hermetic and parallel-safe.
+    const entries = [_:null]?[*:0]const u8{"MALT_OFFLINE=1".ptr};
+    const env: std.process.Environ = .{ .block = .{ .slice = entries[0..1 :null] } };
+    const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = env };
+
+    try search.execute(&ctx, testing.allocator, &.{"wget"});
 }

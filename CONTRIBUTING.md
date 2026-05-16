@@ -26,6 +26,28 @@ These are repeatedly-stated boundaries; PRs against them will be closed without 
 - **`post_install` constructs outside the documented Ruby subset.** The native interpreter covers a defined slice of Ruby (see `src/core/dsl/`). Adding ad-hoc constructs case-by-case grows the trust surface; the supported escape hatch is `--use-system-ruby`, which runs in the sandbox profile.
 - **Mac App Store (`mas`) and VSCode (`vscode`) install support.** Those directives parse so existing `Brewfile`s round-trip cleanly, but malt does not install Mac App Store apps or VSCode extensions and has no near-term plan to.
 
+## Development environment
+
+### Using Devbox (recommended)
+
+[Devbox](https://www.jetify.com/devbox) pins every tool this repo expects. Install it ([instructions](https://www.jetify.com/devbox/docs/installing_devbox/)), then from the repo root:
+
+```bash
+devbox install                                   # fetch pinned tools
+devbox shell --pure                              # enter the isolated shell
+```
+
+`devbox.json` pins `zig@0.16`, `just`, `git`, `curl`, `shellcheck`, `shfmt`, and `sqlite` - enough to build, test, lint, and run every script under `scripts/`.
+
+### Manual setup
+
+If you'd rather not use Devbox, install these yourself:
+
+- [Zig 0.16](https://ziglang.org/download/) - toolchain (pin to 0.16, not `master`)
+- [just](https://github.com/casey/just) - task runner wrapping `zig build` / lint / bench targets
+- [shellcheck](https://www.shellcheck.net/) and [shfmt](https://github.com/mvdan/sh) - required by the shell-script lint
+- `sqlite3`, `curl`, and `git` - standard, usually already present on macOS
+
 ## Before you submit
 
 Run these locally before opening the PR. Most are fast.

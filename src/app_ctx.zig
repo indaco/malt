@@ -16,16 +16,17 @@ pub const AppCtx = struct {
     stderr: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } },
 };
 
-/// Parent `environ` as `std.process.Environ`, read directly from
-/// `std.c.environ`. Production `main` builds an AppCtx from
-/// `std.process.Init.Minimal` instead — this helper is for integration
-/// tests that need to spawn children with the real PATH (`/opt/homebrew/bin`,
-/// etc.) without threading an init through every test fixture.
+/// Parent `environ` as `std.process.Environ`. Production `main` builds an
+/// AppCtx from `std.process.Init.Minimal`; this helper is for integration
+/// tests that need the real PATH without threading an init through every
+/// fixture. Zig 0.16 has no `std.process` seam that wraps libc `environ`
+/// on POSIX — `Block` resolves to `PosixBlock` whose only field is `slice`,
+/// so the bootstrap walks `std.c.environ` to its sentinel like stdlib's
+/// own `start.zig` does.
 pub fn processEnviron() std.process.Environ {
     var n: usize = 0;
     while (std.c.environ[n] != null) : (n += 1) {}
-    const slice: [:null]const ?[*:0]const u8 = @ptrCast(std.c.environ[0..n :null]);
-    return .{ .block = .{ .slice = slice } };
+    return .{ .block = .{ .slice = std.c.environ[0..n :null] } };
 }
 
 /// Test-only borrowed ctx with `debug_io` and an empty environ. Plenty

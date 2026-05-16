@@ -13,6 +13,7 @@ const store_mod = @import("../../core/store.zig");
 const deps_mod = @import("../../core/deps.zig");
 const linker_mod = @import("../../core/linker.zig");
 const cellar_mod = @import("../../core/cellar.zig");
+const cask_mod = @import("../../core/cask.zig");
 const util = @import("util.zig");
 const report = @import("report.zig");
 
@@ -439,36 +440,92 @@ pub fn runStaleCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
 
 // ── Tier: --old-versions ────────────────────────────────────────────────────
 
+// Single shape for both `old-versions` passes. `kind` distinguishes
+// keg dirs in `Cellar/<formula>/<version>` from cask history rows in
+// `cask_versions` — they share the same report row but route through
+// different sweep paths.
+const OldVersionCandidate = struct {
+    kind: enum { cellar, cask },
+    name: []u8, // owned: formula name (cellar) or cask token
+    version: []u8, // owned
+    size: u64,
+};
+
 pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: []const u8, dry_run: bool) !TierResult {
     var result: TierResult = .{};
     const io = ctx.io;
 
     var rep = report.Reporter.init("old-versions", dry_run);
 
-    var cellar_buf: [512]u8 = undefined;
-    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{prefix}) catch return result;
-
-    var cellar_dir = std.Io.Dir.openDirAbsolute(io, cellar_path, .{ .iterate = true }) catch {
-        rep.empty("no Cellar directory");
-        return result;
-    };
-    defer cellar_dir.close(io);
-
-    // Two-pass: collect candidates first so the header count matches what
-    // the user is about to see scrolled past.
-    const Candidate = struct {
-        formula: []u8, // owned
-        version: []u8, // owned
-        size: u64,
-    };
-    var candidates: std.ArrayList(Candidate) = .empty;
+    var candidates: std.ArrayList(OldVersionCandidate) = .empty;
     defer {
         for (candidates.items) |c| {
-            allocator.free(c.formula);
+            allocator.free(c.name);
             allocator.free(c.version);
         }
         candidates.deinit(allocator);
     }
+
+    try collectCellarOldVersions(io, allocator, prefix, &candidates);
+    collectCaskOldVersions(io, allocator, prefix, &candidates, &result);
+
+    if (candidates.items.len == 0) {
+        rep.empty("nothing to remove");
+        return result;
+    }
+
+    rep.header(candidates.items.len, "version", "versions");
+
+    // Reopen the DB only when the cask pass actually found rows — the
+    // cellar-only case stays DB-free, matching the pre-T-038 shape.
+    var db_opt: ?sqlite.Database = blk: {
+        for (candidates.items) |c| {
+            if (c.kind == .cask) break :blk reopenDbForRowDeletes(io, prefix, &result);
+        }
+        break :blk null;
+    };
+    defer if (db_opt) |*db| db.close();
+
+    var label_buf: [256]u8 = undefined;
+    for (candidates.items) |c| {
+        const label = std.fmt.bufPrint(&label_buf, "{s}/{s}", .{ c.name, c.version }) catch c.name;
+        switch (c.kind) {
+            .cellar => {
+                if (!dry_run) {
+                    var path_buf: [512]u8 = undefined;
+                    const full = std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, c.name, c.version }) catch continue;
+                    std.Io.Dir.cwd().deleteTree(io, full) catch continue;
+                }
+                rep.item(label);
+                result.bytes += c.size;
+                result.removed += 1;
+            },
+            .cask => {
+                if (!dry_run) {
+                    if (!sweepCaskOldVersion(io, prefix, c.name, c.version)) continue;
+                    if (db_opt) |*db| deleteCaskVersionRow(db, c.name, c.version);
+                }
+                rep.item(label);
+                result.bytes += c.size;
+                result.removed += 1;
+            },
+        }
+    }
+    rep.done(candidates.items.len);
+    return result;
+}
+
+fn collectCellarOldVersions(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    candidates: *std.ArrayList(OldVersionCandidate),
+) !void {
+    var cellar_buf: [512]u8 = undefined;
+    const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar", .{prefix}) catch return;
+
+    var cellar_dir = std.Io.Dir.openDirAbsolute(io, cellar_path, .{ .iterate = true }) catch return;
+    defer cellar_dir.close(io);
 
     var iter = cellar_dir.iterate();
     while (iter.next(io) catch null) |formula_entry| {
@@ -515,35 +572,134 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
                 allocator.free(fdup);
                 continue;
             };
-            candidates.append(allocator, .{ .formula = fdup, .version = vdup, .size = sz }) catch {
+            candidates.append(allocator, .{ .kind = .cellar, .name = fdup, .version = vdup, .size = sz }) catch {
                 allocator.free(fdup);
                 allocator.free(vdup);
                 continue;
             };
         }
     }
+}
 
-    if (candidates.items.len == 0) {
-        rep.empty("nothing to remove");
-        return result;
+// Walk `cask_versions` for rows whose version isn't the currently-
+// installed cask. Best-effort: an absent DB (fresh prefix, no install
+// yet) is a clean skip, not a fault.
+fn collectCaskOldVersions(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    candidates: *std.ArrayList(OldVersionCandidate),
+    result: *TierResult,
+) void {
+    var db = switch (util.openDbTri(io, prefix)) {
+        .absent => return,
+        .unreadable => |e| {
+            output.warn("old-versions: cannot open database for cask history ({s})", .{@errorName(e)});
+            result.status = .err;
+            result.error_kind = "db_unreadable";
+            return;
+        },
+        .opened => |db_val| db_val,
+    };
+    defer db.close();
+    schema.initSchema(&db) catch |e| {
+        output.warn("old-versions: cannot init schema for cask history ({s})", .{@errorName(e)});
+        result.status = .err;
+        result.error_kind = "schema_init";
+        return;
+    };
+
+    // INNER JOIN drops tokens that have history rows but no current
+    // install (uninstall already wiped that case); != selects every
+    // history row whose version no longer matches the live one.
+    var stmt = db.prepare(
+        \\SELECT cv.token, cv.version
+        \\FROM cask_versions cv
+        \\JOIN casks c ON c.token = cv.token
+        \\WHERE cv.version != c.version;
+    ) catch |e| {
+        output.warn("old-versions: cannot prepare cask history query ({s})", .{@errorName(e)});
+        result.status = .err;
+        result.error_kind = "db_prepare";
+        return;
+    };
+    defer stmt.finalize();
+
+    while (stmt.step() catch false) {
+        const token_ptr = stmt.columnText(0) orelse continue;
+        const version_ptr = stmt.columnText(1) orelse continue;
+        const token = std.mem.sliceTo(token_ptr, 0);
+        const version = std.mem.sliceTo(version_ptr, 0);
+
+        // Size the on-disk footprint: Caskroom dir + every per-version
+        // cache file we'd remove. Computed up front so the report's
+        // freed-bytes counter is accurate even on dry-run.
+        const sz = caskVersionFootprint(io, allocator, prefix, token, version);
+
+        const tdup = allocator.dupe(u8, token) catch continue;
+        const vdup = allocator.dupe(u8, version) catch {
+            allocator.free(tdup);
+            continue;
+        };
+        candidates.append(allocator, .{ .kind = .cask, .name = tdup, .version = vdup, .size = sz }) catch {
+            allocator.free(tdup);
+            allocator.free(vdup);
+            continue;
+        };
     }
+}
 
-    rep.header(candidates.items.len, "version", "versions");
+fn reopenDbForRowDeletes(io: std.Io, prefix: []const u8, result: *TierResult) ?sqlite.Database {
+    return switch (util.openDbTri(io, prefix)) {
+        .absent => null,
+        .unreadable => |e| blk: {
+            output.warn("old-versions: cannot reopen database for history rows ({s})", .{@errorName(e)});
+            result.status = .err;
+            result.error_kind = "db_unreadable";
+            break :blk null;
+        },
+        .opened => |db_val| db_val,
+    };
+}
 
-    var label_buf: [256]u8 = undefined;
-    for (candidates.items) |c| {
-        if (!dry_run) {
-            var path_buf: [512]u8 = undefined;
-            const full = std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, c.formula, c.version }) catch continue;
-            std.Io.Dir.cwd().deleteTree(io, full) catch continue;
-        }
-        const label = std.fmt.bufPrint(&label_buf, "{s}/{s}", .{ c.formula, c.version }) catch c.formula;
-        rep.item(label);
-        result.bytes += c.size;
-        result.removed += 1;
+fn caskVersionFootprint(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, token: []const u8, version: []const u8) u64 {
+    var total: u64 = 0;
+    var path_buf: [512]u8 = undefined;
+    if (std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
+        total += util.pathSize(io, allocator, caskroom_path);
+    } else |_| {}
+
+    for ([_][]const u8{ ".dmg", ".zip", ".pkg", ".tar.gz" }) |ext| {
+        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/cache/Cask/{s}-{s}{s}", .{ prefix, token, version, ext }) catch continue;
+        if (std.Io.Dir.cwd().statFile(io, cache_path, .{})) |st| {
+            total += st.size;
+        } else |_| {}
     }
-    rep.done(candidates.items.len);
-    return result;
+    return total;
+}
+
+// Try the filesystem-side removal first; the history row delete is
+// only safe after we've actually cleared disk. Returns true when both
+// the Caskroom dir and every per-version cache file are gone (either
+// removed here or already absent). A live file we cannot remove (e.g.
+// read-only mount) gates the row so a future writable run can finish.
+fn sweepCaskOldVersion(io: std.Io, prefix: []const u8, token: []const u8, version: []const u8) bool {
+    var path_buf: [512]u8 = undefined;
+    if (std.fmt.bufPrint(&path_buf, "{s}/Caskroom/{s}/{s}", .{ prefix, token, version })) |caskroom_path| {
+        if (std.Io.Dir.accessAbsolute(io, caskroom_path, .{})) |_| {
+            std.Io.Dir.cwd().deleteTree(io, caskroom_path) catch return false;
+        } else |_| {}
+    } else |_| {}
+
+    return cask_mod.deletePerVersionCacheFile(io, prefix, token, version);
+}
+
+fn deleteCaskVersionRow(db: *sqlite.Database, token: []const u8, version: []const u8) void {
+    var stmt = db.prepare("DELETE FROM cask_versions WHERE token = ?1 AND version = ?2;") catch return;
+    defer stmt.finalize();
+    stmt.bindText(1, token) catch return;
+    stmt.bindText(2, version) catch return;
+    _ = stmt.step() catch {};
 }
 
 // ── inline unit tests ──────────────────────────────────────────────────────
@@ -617,4 +773,228 @@ test "runStaleCasks self-heals a schema-less db rather than reporting it as a fa
     try testing.expectEqual(util.ScopeStatus.ok, result.status);
     try testing.expect(result.error_kind == null);
     try testing.expectEqual(@as(u32, 0), result.removed);
+}
+
+// ── runOldVersions cask history sweep ──────────────────────────────────────
+//
+// T-038 extends the Cellar-only walker so cask per-version artefacts
+// (`cache/Cask/<token>-<version>.<ext>`, `Caskroom/<token>/<version>/`)
+// and the matching `cask_versions` rows get the same "non-current wins,
+// older versions go" treatment. Pinning the contract here so a future
+// refactor cannot silently drop the cask branch.
+
+fn seedCaskVersionRow(
+    db: *sqlite.Database,
+    token: []const u8,
+    version: []const u8,
+    artifact_type: []const u8,
+) !void {
+    var stmt = try db.prepare(
+        \\INSERT INTO cask_versions (token, version, url, sha256, artifact_type, cache_path)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6);
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    try stmt.bindText(2, version);
+    try stmt.bindText(3, "https://example.invalid/dummy");
+    try stmt.bindNull(4);
+    try stmt.bindText(5, artifact_type);
+    try stmt.bindNull(6);
+    _ = try stmt.step();
+}
+
+fn seedCurrentCask(db: *sqlite.Database, token: []const u8, version: []const u8) !void {
+    var stmt = try db.prepare(
+        \\INSERT INTO casks (token, name, version, url, sha256, app_path, auto_updates)
+        \\VALUES (?1, ?1, ?2, 'https://example.invalid/dummy', NULL, NULL, 0);
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    try stmt.bindText(2, version);
+    _ = try stmt.step();
+}
+
+fn touchFile(io: std.Io, path: []const u8) !void {
+    if (std.fs.path.dirname(path)) |dir| {
+        try std.Io.Dir.cwd().createDirPath(io, dir);
+    }
+    const f = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
+    defer f.close(io);
+    try f.writeStreamingAll(io, "x");
+}
+
+fn rowCount(db: *sqlite.Database, token: []const u8) !i64 {
+    var stmt = try db.prepare("SELECT COUNT(*) FROM cask_versions WHERE token = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, token);
+    _ = try stmt.step();
+    return stmt.columnInt(0);
+}
+
+test "runOldVersions sweeps non-current cask per-version cache + caskroom + history" {
+    // Two history rows for `flux`: one current (v2), one stale (v1).
+    // After a live run the stale cache file and Caskroom version dir
+    // must be gone, the stale history row deleted, and counters must
+    // reflect at least the cask removal.
+    const allocator = testing.allocator;
+
+    const prefix = "/tmp/malt_runOldVersions_cask_sweep";
+    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/cache/Cask");
+
+    {
+        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        defer db.close();
+        try schema.initSchema(&db);
+        try seedCurrentCask(&db, "flux", "2.0");
+        try seedCaskVersionRow(&db, "flux", "2.0", "dmg");
+        try seedCaskVersionRow(&db, "flux", "1.0", "dmg");
+    }
+
+    try touchFile(fs_test_io, prefix ++ "/cache/Cask/flux-2.0.dmg");
+    try touchFile(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg");
+    try touchFile(fs_test_io, prefix ++ "/Caskroom/flux/2.0/.metadata");
+    try touchFile(fs_test_io, prefix ++ "/Caskroom/flux/1.0/.metadata");
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runOldVersions(&ctx, allocator, prefix, false);
+
+    try testing.expectEqual(util.ScopeStatus.ok, result.status);
+    try testing.expect(result.removed >= 1);
+
+    // Current artefacts survive.
+    try std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/cache/Cask/flux-2.0.dmg", .{});
+    try std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/Caskroom/flux/2.0", .{});
+
+    // Stale artefacts gone.
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg", .{}),
+    );
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/Caskroom/flux/1.0", .{}),
+    );
+
+    // History row deleted; current row preserved.
+    {
+        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        defer db.close();
+        try testing.expectEqual(@as(i64, 1), try rowCount(&db, "flux"));
+    }
+}
+
+test "runOldVersions --dry-run reports cask candidates without touching disk or db" {
+    const allocator = testing.allocator;
+
+    const prefix = "/tmp/malt_runOldVersions_cask_dry_run";
+    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/cache/Cask");
+
+    {
+        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        defer db.close();
+        try schema.initSchema(&db);
+        try seedCurrentCask(&db, "flux", "2.0");
+        try seedCaskVersionRow(&db, "flux", "2.0", "dmg");
+        try seedCaskVersionRow(&db, "flux", "1.0", "dmg");
+    }
+
+    try touchFile(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg");
+    try touchFile(fs_test_io, prefix ++ "/Caskroom/flux/1.0/.metadata");
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runOldVersions(&ctx, allocator, prefix, true);
+
+    try testing.expectEqual(util.ScopeStatus.ok, result.status);
+    try testing.expect(result.removed >= 1);
+
+    // Dry-run preserves everything.
+    try std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg", .{});
+    try std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/Caskroom/flux/1.0", .{});
+
+    var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+    defer db.close();
+    try testing.expectEqual(@as(i64, 2), try rowCount(&db, "flux"));
+}
+
+test "runOldVersions on already-swept cask state is a clean no-op" {
+    // After a successful live run the second invocation must report
+    // zero removals — no missing-row warnings, no errored status. Pins
+    // the idempotence acceptance criterion.
+    const allocator = testing.allocator;
+
+    const prefix = "/tmp/malt_runOldVersions_cask_noop";
+    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/cache/Cask");
+
+    {
+        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        defer db.close();
+        try schema.initSchema(&db);
+        try seedCurrentCask(&db, "flux", "2.0");
+        try seedCaskVersionRow(&db, "flux", "2.0", "dmg");
+        try seedCaskVersionRow(&db, "flux", "1.0", "dmg");
+    }
+    try touchFile(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg");
+    try touchFile(fs_test_io, prefix ++ "/Caskroom/flux/1.0/.metadata");
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    _ = try runOldVersions(&ctx, allocator, prefix, false);
+    const second = try runOldVersions(&ctx, allocator, prefix, false);
+
+    try testing.expectEqual(util.ScopeStatus.ok, second.status);
+    try testing.expectEqual(@as(u32, 0), second.removed);
+}
+
+test "runOldVersions ignores pin status when sweeping old cask versions" {
+    // Pinned cask: current row stays in `casks`. Pin must not bleed
+    // into the history sweep — old versions are still eligible for
+    // removal, matching the Cellar-side policy.
+    const allocator = testing.allocator;
+
+    const prefix = "/tmp/malt_runOldVersions_cask_pinned";
+    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/cache/Cask");
+
+    {
+        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        defer db.close();
+        try schema.initSchema(&db);
+        // Insert with auto_updates=1 to simulate a held cask; the cask
+        // schema does not carry a `pinned` column itself, so the proxy
+        // here is "user-flagged-as-managed" via auto_updates.
+        var stmt = try db.prepare(
+            \\INSERT INTO casks (token, name, version, url, sha256, app_path, auto_updates)
+            \\VALUES ('flux', 'flux', '2.0', 'https://example.invalid/dummy', NULL, NULL, 1);
+        );
+        defer stmt.finalize();
+        _ = try stmt.step();
+        try seedCaskVersionRow(&db, "flux", "2.0", "dmg");
+        try seedCaskVersionRow(&db, "flux", "1.0", "dmg");
+    }
+    try touchFile(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg");
+    try touchFile(fs_test_io, prefix ++ "/Caskroom/flux/1.0/.metadata");
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runOldVersions(&ctx, allocator, prefix, false);
+
+    try testing.expectEqual(util.ScopeStatus.ok, result.status);
+    try testing.expect(result.removed >= 1);
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg", .{}),
+    );
 }

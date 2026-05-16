@@ -2,6 +2,7 @@
 //! Prints shell completion scripts for bash, zsh, or fish to stdout.
 
 const std = @import("std");
+
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const help = @import("help.zig");
 
@@ -86,7 +87,7 @@ pub const bash_script =
     \\    words=("${COMP_WORDS[@]}")
     \\    cword=$COMP_CWORD
     \\
-    \\    local commands="install uninstall remove upgrade update outdated list ls info search uses which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge services bundle help"
+    \\    local commands="install uninstall remove upgrade update outdated list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services bundle help"
     \\    local global_flags="--verbose -v --quiet -q --json --output-format=ndjson --dry-run --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
@@ -146,15 +147,18 @@ pub const bash_script =
     \\        update)           cmd_flags="--check --quiet -q" ;;
     \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --tap --json --quiet -q" ;;
     \\        info)             cmd_flags="--formula --cask --json" ;;
-    \\        search)           cmd_flags="--formula --cask --json" ;;
+    \\        search)           cmd_flags="--formula --cask --json --installed --api --all --offline" ;;
     \\        uses)             cmd_flags="--recursive -r --json --quiet -q" ;;
+    \\        deps)             cmd_flags="--recursive -r --installed --json --quiet -q" ;;
     \\        which)            cmd_flags="--json" ;;
-    \\        migrate|rollback) cmd_flags="--dry-run" ;;
+    \\        migrate)          cmd_flags="--dry-run" ;;
+    \\        rollback)         cmd_flags="--dry-run --list --to --json" ;;
     \\        link)             cmd_flags="--overwrite --force -f" ;;
     \\        services)         cmd_flags="--tail --stderr --follow -f --system --json" ;;
     \\        bundle)           cmd_flags="--dry-run -n --format --from-installed --purge --yes -y" ;;
     \\        run)              cmd_flags="--keep" ;;
     \\        doctor)           cmd_flags="--fix --dry-run" ;;
+    \\        tap)              cmd_flags="--refresh --all --pin --yes -y --json" ;;
     \\    esac
     \\
     \\    if [[ "$cur" == -* ]]; then
@@ -201,6 +205,7 @@ pub const zsh_script =
     \\        'info:Show detailed package information'
     \\        'search:Search formulas and casks'
     \\        'uses:Show installed packages that depend on a formula'
+    \\        'deps:Show what a formula depends on (forward of `uses`)'
     \\        'which:Resolve a prefix binary to its owning keg'
     \\        'doctor:System health check'
     \\        'tap:Manage taps'
@@ -218,6 +223,7 @@ pub const zsh_script =
     \\        'backup:Dump installed packages to a restorable text file'
     \\        'restore:Reinstall every package listed in a backup file'
     \\        'purge:Housekeeping or full wipe (requires a scope flag)'
+    \\        'cleanup:Shorthand for purge --housekeeping (safe daily-driver)'
     \\        'services:Manage long-running launchd services'
     \\        'bundle:Install or export a Brewfile/Maltfile.json bundle'
     \\        'help:Show help'
@@ -316,11 +322,23 @@ pub const zsh_script =
     \\                    _arguments \
     \\                        '--formula[Search formulas only]' \
     \\                        '--cask[Search casks only]' \
+    \\                        '--installed[Local DB only, no network]' \
+    \\                        '--api[Force Homebrew API path]' \
+    \\                        '--all[Run local + API and merge results]' \
+    \\                        '--offline[Alias of --installed (mirrors MALT_OFFLINE)]' \
     \\                        '--json[Output as JSON]' \
     \\                        '*::query:'
     \\                    ;;
-    \\                migrate|rollback)
+    \\                migrate)
     \\                    _arguments '--dry-run[Preview without executing]'
+    \\                    ;;
+    \\                rollback)
+    \\                    _arguments \
+    \\                        '--dry-run[Preview without executing]' \
+    \\                        '--list[List every reachable store entry for <package>]' \
+    \\                        '--to[Roll back to a specific store entry]:version:' \
+    \\                        '--json[Emit --list output as JSON]' \
+    \\                        '*::package:'
     \\                    ;;
     \\                link)
     \\                    _arguments \
@@ -352,7 +370,7 @@ pub const zsh_script =
     \\                        '--cache[Prune cache files older than 30 days]' \
     \\                        '--downloads[Wipe the downloads cache]' \
     \\                        '--stale-casks[Remove cache + Caskroom for uninstalled casks]' \
-    \\                        '--old-versions[Remove non-latest Cellar versions]' \
+    \\                        '--old-versions[Remove non-latest Cellar versions + retained cask history]' \
     \\                        '--housekeeping[All safe scopes at once]' \
     \\                        '--wipe[Nuclear: remove every malt artefact]' \
     \\                        '(--backup -b)'{--backup,-b}'[Write a restorable manifest before deleting]:path:_files' \
@@ -385,6 +403,15 @@ pub const zsh_script =
     \\                        'remove[Unregister a bundle]' \
     \\                        'export[Print bundle to stdout]' \
     \\                        'import[Register a bundle definition without installing]'
+    \\                    ;;
+    \\                tap)
+    \\                    _arguments \
+    \\                        '--refresh[Advance the pin to current HEAD]' \
+    \\                        '--all[With --refresh: walk every registered tap]' \
+    \\                        '--pin[Explicitly pin <slug> to <sha>]' \
+    \\                        '(--yes -y)'{--yes,-y}'[Confirm --refresh --all apply]' \
+    \\                        '--json[Emit refresh-all diff as JSON]' \
+    \\                        '*::slug:'
     \\                    ;;
     \\            esac
     \\            ;;
@@ -462,6 +489,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a info        -d 'Show detailed package information'
     \\    complete -c $__malt_bin -n __malt_needs_command -a search      -d 'Search formulas and casks'
     \\    complete -c $__malt_bin -n __malt_needs_command -a uses        -d 'Show packages that depend on a formula'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a deps        -d 'Show what a formula depends on'
     \\    complete -c $__malt_bin -n __malt_needs_command -a which       -d 'Resolve a prefix binary to its owning keg'
     \\    complete -c $__malt_bin -n __malt_needs_command -a doctor      -d 'System health check'
     \\    complete -c $__malt_bin -n __malt_needs_command -a tap         -d 'Manage taps'
@@ -479,6 +507,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a backup      -d 'Dump installed packages to a text file'
     \\    complete -c $__malt_bin -n __malt_needs_command -a restore     -d 'Reinstall every package in a backup file'
     \\    complete -c $__malt_bin -n __malt_needs_command -a purge       -d 'Housekeeping or full wipe (requires a scope)'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a cleanup     -d 'Shorthand for purge --housekeeping (safe daily-driver)'
     \\    complete -c $__malt_bin -n __malt_needs_command -a services    -d 'Manage long-running launchd services'
     \\    complete -c $__malt_bin -n __malt_needs_command -a bundle      -d 'Install or export a Brewfile/Maltfile.json'
     \\    complete -c $__malt_bin -n __malt_needs_command -a help        -d 'Show help'
@@ -536,14 +565,24 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command info' -l json    -d 'JSON output'
     \\
     \\    # search
-    \\    complete -c $__malt_bin -n '__malt_using_command search' -l formula -d 'Formulas only'
-    \\    complete -c $__malt_bin -n '__malt_using_command search' -l cask    -d 'Casks only'
-    \\    complete -c $__malt_bin -n '__malt_using_command search' -l json    -d 'JSON output'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l formula   -d 'Formulas only'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l cask      -d 'Casks only'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l installed -d 'Local DB only, no network'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l api       -d 'Force Homebrew API path'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l all       -d 'Run local + API and merge'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l offline   -d 'Alias of --installed'
+    \\    complete -c $__malt_bin -n '__malt_using_command search' -l json      -d 'JSON output'
     \\
     \\    # uses
     \\    complete -c $__malt_bin -n '__malt_using_command uses' -l recursive -s r -d 'Include transitive dependents'
     \\    complete -c $__malt_bin -n '__malt_using_command uses' -l json               -d 'JSON output'
     \\    complete -c $__malt_bin -n '__malt_using_command uses' -l quiet     -s q    -d 'Suppress status messages'
+    \\
+    \\    # deps
+    \\    complete -c $__malt_bin -n '__malt_using_command deps' -l recursive -s r -d 'Walk transitive deps'
+    \\    complete -c $__malt_bin -n '__malt_using_command deps' -l installed         -d 'Restrict to locally-resolved kegs'
+    \\    complete -c $__malt_bin -n '__malt_using_command deps' -l json              -d 'JSON output'
+    \\    complete -c $__malt_bin -n '__malt_using_command deps' -l quiet     -s q   -d 'Suppress status messages'
     \\
     \\    # which
     \\    complete -c $__malt_bin -n '__malt_using_command which' -l json -d 'JSON output'
@@ -551,6 +590,9 @@ pub const fish_script =
     \\    # migrate / rollback
     \\    complete -c $__malt_bin -n '__malt_using_command migrate'    -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l dry-run -d 'Preview'
+    \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l list    -d 'List every reachable store entry'
+    \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l to    -x -d 'Roll back to a specific store entry (pass <version>)'
+    \\    complete -c $__malt_bin -n '__malt_using_command rollback'   -l json    -d 'Emit --list output as JSON'
     \\
     \\    # link
     \\    complete -c $__malt_bin -n '__malt_using_command link' -l overwrite -d 'Replace existing symlinks'
@@ -558,6 +600,13 @@ pub const fish_script =
     \\
     \\    # run
     \\    complete -c $__malt_bin -n '__malt_using_command run' -l keep -d 'Cache extracted bottle under {cache}/run/<sha256>/'
+    \\
+    \\    # tap
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l refresh -d 'Advance the pin to current HEAD'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l all     -d 'With --refresh: walk every registered tap'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l pin     -d 'Explicitly pin <slug> to <sha>'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -s y -l yes -d 'Confirm --refresh --all apply'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l json    -d 'Emit refresh-all diff as JSON'
     \\
     \\    # completions — shell name as positional
     \\    complete -c $__malt_bin -n '__malt_using_command completions' -f -a 'bash zsh fish'
@@ -580,7 +629,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l cache            -d 'Prune cache files older than 30 days (or N via --cache=N)'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l downloads        -d 'Wipe the downloads cache (typed confirm)'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l stale-casks      -d 'Cask cache + Caskroom for uninstalled casks'
-    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l old-versions     -d 'Non-latest Cellar versions (typed confirm)'
+    \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l old-versions     -d 'Non-latest Cellar versions + retained cask history (typed confirm)'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l housekeeping     -d 'All safe scopes at once'
     \\    complete -c $__malt_bin -n '__malt_using_command purge'      -l wipe             -d 'Nuclear: every malt artefact (typed confirm)'
     \\    # purge — shared / wipe-only flags

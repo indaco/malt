@@ -202,6 +202,7 @@ pub fn build(b: *std.Build) void {
         "tests/restore_cli_test.zig",
         "tests/search_cli_test.zig",
         "tests/doctor_dispatch_test.zig",
+        "tests/doctor_cask_history_test.zig",
         "tests/info_cli_test.zig",
         "tests/backup_cli_test.zig",
         "tests/run_cli_test.zig",
@@ -211,8 +212,10 @@ pub fn build(b: *std.Build) void {
         "tests/list_cli_test.zig",
         "tests/tap_cli_test.zig",
         "tests/uses_cli_test.zig",
+        "tests/deps_cli_exec_test.zig",
         "tests/text_replace_test.zig",
         "tests/bottle_test.zig",
+        "tests/cleanup_cli_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");

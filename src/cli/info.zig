@@ -13,6 +13,12 @@ const client_mod = @import("../net/client.zig");
 const formula_mod = @import("../core/formula.zig");
 const cask_mod = @import("../core/cask.zig");
 const help = @import("help.zig");
+const rollback = @import("rollback.zig");
+
+/// Empty history sentinel for encoder callers that don't have a DB /
+/// store handy (tests, the API-fallback path). Keeps the signature
+/// uniform without forcing every caller to allocate an empty slice.
+pub const no_history: []const rollback.Entry = &.{};
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "info")) return;
@@ -64,8 +70,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     if (db_opt) |*db| {
         // Schema is idempotent; info's API fallback handles a broken DB gracefully.
         schema.initSchema(db) catch {};
-        if (!force_cask and try emitInstalledFormula(db, name, prefix, stdout, json_mode, colorize)) return;
-        if (!force_formula and try emitInstalledCask(db, name, stdout, json_mode, colorize)) return;
+        if (!force_cask and try emitInstalledFormula(ctx, allocator, db, name, prefix, stdout, json_mode, colorize)) return;
+        if (!force_formula and try emitInstalledCask(allocator, db, name, stdout, json_mode, colorize)) return;
     }
 
     // Not locally installed — fall back to Homebrew API metadata so
@@ -82,6 +88,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 /// true (caller stops). Returns false when the lookup misses so the
 /// caller can try the cask path.
 fn emitInstalledFormula(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
     db: *sqlite.Database,
     name: []const u8,
     prefix: []const u8,
@@ -90,7 +98,7 @@ fn emitInstalledFormula(
     colorize: bool,
 ) !bool {
     var stmt = db.prepare(
-        "SELECT name, version, tap, cellar_path, pinned, installed_at FROM kegs WHERE name = ?1 LIMIT 1;",
+        "SELECT name, version, tap, cellar_path, pinned, installed_at, revision FROM kegs WHERE name = ?1 LIMIT 1;",
     ) catch return false;
     defer stmt.finalize();
     stmt.bindText(1, name) catch return false;
@@ -98,16 +106,35 @@ fn emitInstalledFormula(
     const installed = stmt.step() catch false;
     if (!installed) return false;
 
+    const ver_ptr = stmt.columnText(1);
+    const ver_slice = if (ver_ptr) |v| std.mem.sliceTo(v, 0) else "unknown";
+    const revision = stmt.columnInt(6);
+
+    // The store walker keys on the on-disk pkg_version (`1.9.2_2`), not
+    // the bare upstream version — without the suffix a revision-bumped
+    // current keg would re-appear in its own rollback listing.
+    var pkgver_buf: [128]u8 = undefined;
+    const current_pkg_version = formula_mod.pkgVersion(&pkgver_buf, ver_slice, revision) catch ver_slice;
+
+    var history = rollback.collectEntries(ctx.io, allocator, prefix, name, current_pkg_version) catch |e| switch (e) {
+        // Missing store / OOM during the listing must not break the
+        // primary info dump — fall through with an empty history so
+        // the user still sees the installed-row fields.
+        rollback.CollectError.StoreUnreadable, rollback.CollectError.OutOfMemory => @as(std.ArrayList(rollback.Entry), .empty),
+    };
+    defer rollback.freeEntries(allocator, &history);
+
     if (json_mode) {
-        try writeJsonInfo(name, true, &stmt, stdout);
+        try writeJsonInfo(name, &stmt, history.items, stdout);
     } else {
-        try writeHumanInfo(name, true, &stmt, prefix, stdout, colorize);
+        try writeHumanInfo(name, &stmt, history.items, stdout, colorize);
     }
     return true;
 }
 
 /// Cask counterpart to `emitInstalledFormula`.
 fn emitInstalledCask(
+    allocator: std.mem.Allocator,
     db: *sqlite.Database,
     name: []const u8,
     stdout: *std.Io.Writer,
@@ -115,10 +142,19 @@ fn emitInstalledCask(
     colorize: bool,
 ) !bool {
     if (cask_mod.lookupInstalled(db, name) == null) return false;
+
+    const cur_ver_opt = rollback.currentCaskVersion(allocator, db, name);
+    defer if (cur_ver_opt) |v| allocator.free(v);
+
+    var history = rollback.collectCaskEntries(allocator, db, name, cur_ver_opt) catch |e| switch (e) {
+        rollback.CollectError.StoreUnreadable, rollback.CollectError.OutOfMemory => @as(std.ArrayList(rollback.Entry), .empty),
+    };
+    defer rollback.freeEntries(allocator, &history);
+
     if (json_mode) {
-        try writeJsonCaskInfo(db, name, stdout);
+        try writeJsonCaskInfo(db, name, history.items, stdout);
     } else {
-        try writeHumanCaskInfo(db, name, stdout, colorize);
+        try writeHumanCaskInfo(db, name, history.items, stdout, colorize);
     }
     return true;
 }
@@ -405,69 +441,115 @@ fn writeJsonNotInstalled(
 
 fn writeHumanInfo(
     name: []const u8,
-    installed: bool,
     stmt: *sqlite.Statement,
-    prefix: []const u8,
+    history: []const rollback.Entry,
     stdout: *std.Io.Writer,
     colorize: bool,
 ) !void {
-    var buf: [4096]u8 = undefined;
+    const ver = stmt.columnText(1);
+    const tap = stmt.columnText(2);
+    const cellar_path = stmt.columnText(3);
+    const pinned = stmt.columnBool(4);
+    const installed_at = stmt.columnText(5);
 
-    if (installed) {
-        // "Installed:" is the longest key (10 chars incl. colon), value at col 11.
-        const col: usize = 11;
-        const ver = stmt.columnText(1);
-        const tap = stmt.columnText(2);
-        const cellar_path = stmt.columnText(3);
-        const pinned = stmt.columnBool(4);
-        const installed_at = stmt.columnText(5);
+    const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "unknown";
+    const tap_slice = if (tap) |t| std.mem.sliceTo(t, 0) else "N/A";
+    const path_slice = if (cellar_path) |p| std.mem.sliceTo(p, 0) else "N/A";
+    const date_slice = if (installed_at) |d| std.mem.sliceTo(d, 0) else "N/A";
 
-        const ver_slice = if (ver) |v| std.mem.sliceTo(v, 0) else "unknown";
-        const tap_slice = if (tap) |t| std.mem.sliceTo(t, 0) else "N/A";
-        const path_slice = if (cellar_path) |p| std.mem.sliceTo(p, 0) else "N/A";
-        const date_slice = if (installed_at) |d| std.mem.sliceTo(d, 0) else "N/A";
-
-        try encodeHeader(stdout, colorize, name, "stable", ver_slice, "");
-        try output.writeField(stdout, &buf, colorize, col, "From", "{s}", .{tap_slice});
-        // Use the recorded cellar_path directly — it carries the
-        // correct `_<revision>` suffix for revisioned formulas.
-        _ = prefix;
-        try output.writeField(stdout, &buf, colorize, col, "Path", "{s}", .{path_slice});
-        if (pinned) try output.writeField(stdout, &buf, colorize, col, "Pinned", "yes", .{});
-        try output.writeField(stdout, &buf, colorize, col, "Installed", "{s}", .{date_slice});
-    } else {
-        try writeLine(stdout, &buf, "{s}: not installed\n", .{name});
-    }
+    var scratch: [4096]u8 = undefined;
+    try encodeInstalledFormulaHuman(
+        stdout,
+        &scratch,
+        name,
+        ver_slice,
+        tap_slice,
+        path_slice,
+        pinned,
+        date_slice,
+        history,
+        colorize,
+    );
 }
 
 fn writeJsonInfo(
     name: []const u8,
-    installed: bool,
     stmt: *sqlite.Statement,
+    history: []const rollback.Entry,
     stdout: *std.Io.Writer,
 ) !void {
-    try stdout.writeAll("{\"name\":");
-    try output.jsonStr(stdout, name);
-    try stdout.writeAll(",\"type\":\"formula\",\"installed\":");
-    try stdout.writeAll(if (installed) "true" else "false");
+    const ver = stmt.columnText(1);
+    const tap = stmt.columnText(2);
+    const pinned = stmt.columnBool(4);
+    const installed_at = stmt.columnText(5);
 
-    if (installed) {
-        const ver = stmt.columnText(1);
-        const tap = stmt.columnText(2);
-        const pinned = stmt.columnBool(4);
-        const installed_at = stmt.columnText(5);
+    try encodeInstalledFormulaJson(
+        stdout,
+        name,
+        if (ver) |v| std.mem.sliceTo(v, 0) else "",
+        if (tap) |t| std.mem.sliceTo(t, 0) else "",
+        pinned,
+        if (installed_at) |d| std.mem.sliceTo(d, 0) else "",
+        history,
+    );
+}
 
-        try stdout.writeAll(",\"version\":");
-        try output.jsonStr(stdout, if (ver) |v| std.mem.sliceTo(v, 0) else "");
-        try stdout.writeAll(",\"tap\":");
-        try output.jsonStr(stdout, if (tap) |t| std.mem.sliceTo(t, 0) else "");
-        try stdout.writeAll(",\"pinned\":");
-        try stdout.writeAll(if (pinned) "true" else "false");
-        try stdout.writeAll(",\"installed_at\":");
-        try output.jsonStr(stdout, if (installed_at) |d| std.mem.sliceTo(d, 0) else "");
+/// Installed-formula human encoder. Mirrors today's `mt info <formula>`
+/// field block byte-for-byte when `history` is empty so a fresh
+/// single-version install looks unchanged. When non-empty, appends a
+/// blank line + the same listing `mt rollback <pkg> --list` emits so
+/// users see one mental model across both commands.
+pub fn encodeInstalledFormulaHuman(
+    w: *std.Io.Writer,
+    scratch: []u8,
+    name: []const u8,
+    version: []const u8,
+    tap: []const u8,
+    cellar_path: []const u8,
+    pinned: bool,
+    installed_at: []const u8,
+    history: []const rollback.Entry,
+    colorize: bool,
+) !void {
+    // "Installed:" is the longest key (10 chars incl. colon), value at col 11.
+    const col: usize = 11;
+    try encodeHeader(w, colorize, name, "stable", version, "");
+    try output.writeField(w, scratch, colorize, col, "From", "{s}", .{tap});
+    try output.writeField(w, scratch, colorize, col, "Path", "{s}", .{cellar_path});
+    if (pinned) try output.writeField(w, scratch, colorize, col, "Pinned", "yes", .{});
+    try output.writeField(w, scratch, colorize, col, "Installed", "{s}", .{installed_at});
+    if (history.len != 0) {
+        try w.writeAll("\n");
+        try rollback.writeListHuman(w, name, history, colorize);
     }
+}
 
-    try stdout.writeAll("}\n");
+/// Installed-formula JSON encoder. Always emits
+/// `available_rollback_versions` (empty array when no retained store
+/// entries exist) so downstream consumers can branch on length without
+/// guarding for an absent key.
+pub fn encodeInstalledFormulaJson(
+    w: *std.Io.Writer,
+    name: []const u8,
+    version: []const u8,
+    tap: []const u8,
+    pinned: bool,
+    installed_at: []const u8,
+    history: []const rollback.Entry,
+) !void {
+    try w.writeAll("{\"name\":");
+    try output.jsonStr(w, name);
+    try w.writeAll(",\"type\":\"formula\",\"installed\":true,\"version\":");
+    try output.jsonStr(w, version);
+    try w.writeAll(",\"tap\":");
+    try output.jsonStr(w, tap);
+    try w.writeAll(",\"pinned\":");
+    try w.writeAll(if (pinned) "true" else "false");
+    try w.writeAll(",\"installed_at\":");
+    try output.jsonStr(w, installed_at);
+    try w.writeAll(",\"available_rollback_versions\":");
+    try rollback.writeEntriesJsonArray(w, history);
+    try w.writeAll("}\n");
 }
 
 /// One installed cask row as the info-render path consumes it. Slices
@@ -513,6 +595,7 @@ pub fn encodeInstalledCaskHuman(
     w: *std.Io.Writer,
     scratch: []u8,
     row: *const InstalledCaskRow,
+    history: []const rollback.Entry,
     colorize: bool,
 ) !void {
     // "Auto-updates:" is the longest key (13 chars incl. colon), value at col 14.
@@ -526,9 +609,17 @@ pub fn encodeInstalledCaskHuman(
     // Trailing position keeps the top of the dump stable for scripts that
     // grep the first N lines. Omitted for core-API casks (NULL tap).
     if (row.tap) |t| try output.writeField(w, scratch, colorize, col, "Tap", "{s}", .{t});
+    if (history.len != 0) {
+        try w.writeAll("\n");
+        try rollback.writeListHuman(w, row.token, history, colorize);
+    }
 }
 
-pub fn encodeInstalledCaskJson(w: *std.Io.Writer, row: *const InstalledCaskRow) !void {
+pub fn encodeInstalledCaskJson(
+    w: *std.Io.Writer,
+    row: *const InstalledCaskRow,
+    history: []const rollback.Entry,
+) !void {
     try w.writeAll("{\"name\":");
     try output.jsonStr(w, row.token);
     try w.writeAll(",\"type\":\"cask\",\"installed\":true,\"version\":");
@@ -547,12 +638,15 @@ pub fn encodeInstalledCaskJson(w: *std.Io.Writer, row: *const InstalledCaskRow) 
     // string when unattributed so consumers can branch on truthiness.
     try w.writeAll(",\"tap\":");
     try output.jsonStr(w, row.tap orelse "");
+    try w.writeAll(",\"available_rollback_versions\":");
+    try rollback.writeEntriesJsonArray(w, history);
     try w.writeAll("}\n");
 }
 
 fn writeHumanCaskInfo(
     db: *sqlite.Database,
     name: []const u8,
+    history: []const rollback.Entry,
     stdout: *std.Io.Writer,
     colorize: bool,
 ) !void {
@@ -565,12 +659,13 @@ fn writeHumanCaskInfo(
 
     const row = readInstalledCaskRow(&stmt, name);
     var buf: [4096]u8 = undefined;
-    try encodeInstalledCaskHuman(stdout, &buf, &row, colorize);
+    try encodeInstalledCaskHuman(stdout, &buf, &row, history, colorize);
 }
 
 fn writeJsonCaskInfo(
     db: *sqlite.Database,
     name: []const u8,
+    history: []const rollback.Entry,
     stdout: *std.Io.Writer,
 ) !void {
     var stmt = db.prepare(installed_cask_select) catch return;
@@ -581,5 +676,5 @@ fn writeJsonCaskInfo(
     if (!found) return;
 
     const row = readInstalledCaskRow(&stmt, name);
-    try encodeInstalledCaskJson(stdout, &row);
+    try encodeInstalledCaskJson(stdout, &row, history);
 }

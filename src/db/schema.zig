@@ -51,6 +51,26 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
         \\);
     );
 
+    // 3b. cask_versions — append-only history added by v7 so rollback
+    //     has a per-version (url, sha256, cache_path, artifact_type)
+    //     trail to reinstall from. CREATE IF NOT EXISTS here so fresh
+    //     DBs ship with the v7 shape; the v6→v7 migration also creates
+    //     and backfills it for upgraded DBs.
+    try db.exec(
+        \\CREATE TABLE IF NOT EXISTS cask_versions (
+        \\    id              INTEGER PRIMARY KEY,
+        \\    token           TEXT NOT NULL,
+        \\    version         TEXT NOT NULL,
+        \\    url             TEXT NOT NULL,
+        \\    sha256          TEXT,
+        \\    artifact_type   TEXT,
+        \\    cache_path      TEXT,
+        \\    installed_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        \\    UNIQUE(token, version)
+        \\);
+    );
+    try db.exec("CREATE INDEX IF NOT EXISTS idx_cask_versions_token ON cask_versions(token);");
+
     // 4. dependencies
     try db.exec(
         \\CREATE TABLE IF NOT EXISTS dependencies (
@@ -102,7 +122,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 6;
+pub const known_schema_version: i64 = 7;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -118,6 +138,7 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 4) try migrateV3toV4(db);
     if (ver < 5) try migrateV4toV5(db);
     if (ver < 6) try migrateV5toV6(db);
+    if (ver < 7) try migrateV6toV7(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -347,6 +368,70 @@ fn migrateV5toV6(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
+/// v7 — introduce cask_versions, an append-only per-version history so
+/// `mt rollback <cask> --list / --to` has a URL + SHA + cache hint per
+/// retained version. Backfills existing casks rows so users who upgrade
+/// without a fresh install still see their currently-installed cask in
+/// the listing.
+fn migrateV6toV7(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    try db.exec(
+        \\CREATE TABLE IF NOT EXISTS cask_versions (
+        \\    id              INTEGER PRIMARY KEY,
+        \\    token           TEXT NOT NULL,
+        \\    version         TEXT NOT NULL,
+        \\    url             TEXT NOT NULL,
+        \\    sha256          TEXT,
+        \\    artifact_type   TEXT,
+        \\    cache_path      TEXT,
+        \\    installed_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        \\    UNIQUE(token, version)
+        \\);
+    );
+    try db.exec("CREATE INDEX IF NOT EXISTS idx_cask_versions_token ON cask_versions(token);");
+
+    // Backfill only when the canonical casks columns are present. Tests
+    // and forensic fixtures sometimes pre-seed a partial `casks` table
+    // shape; aborting the migration on that ground would surface as a
+    // hard "schema_init" failure later instead of the precise error the
+    // affected scope reports.
+    if (try caskColumnsPresent(db, &.{ "token", "version", "url", "sha256", "installed_at" })) {
+        // INSERT OR IGNORE so a partial backfill on a prior run (or a
+        // fresh DB that already shipped with cask_versions populated)
+        // stays a no-op rather than tripping UNIQUE(token, version).
+        try db.exec(
+            \\INSERT OR IGNORE INTO cask_versions
+            \\    (token, version, url, sha256, installed_at)
+            \\SELECT token, version, url, sha256, installed_at FROM casks;
+        );
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (7);");
+
+    try db.commit();
+}
+
+/// Return true iff every column in `wanted` is present on the `casks`
+/// table. Mirrors the PRAGMA-guarded probes used by v2→v3 / v3→v4 /
+/// v5→v6; centralised here because the v6→v7 backfill needs five
+/// columns, not one.
+fn caskColumnsPresent(db: *sqlite.Database, wanted: []const []const u8) sqlite.SqliteError!bool {
+    var seen: u32 = 0;
+    var stmt = try db.prepare("PRAGMA table_info(casks);");
+    defer stmt.finalize();
+    while (try stmt.step()) {
+        const name_ptr = stmt.columnText(1) orelse continue;
+        const name = std.mem.sliceTo(name_ptr, 0);
+        for (wanted, 0..) |w, i| {
+            if (std.mem.eql(u8, name, w)) seen |= (@as(u32, 1) << @intCast(i));
+        }
+    }
+    const all: u32 = (@as(u32, 1) << @intCast(wanted.len)) - 1;
+    return seen == all;
+}
+
 /// Query the current schema version.
 pub fn currentVersion(db: *sqlite.Database) sqlite.SqliteError!i64 {
     var stmt = try db.prepare("SELECT MAX(version) FROM schema_version;");
@@ -441,6 +526,74 @@ test "v4→v5 migration aborts when foreign_key_check finds a violation" {
 
     // Rollback must leave the schema at v4 so a future run can retry.
     try testing.expectEqual(@as(i64, 4), try currentVersion(&db));
+}
+
+// v6→v7 backfills the new cask_versions table from existing casks rows
+// so upgrade-then-rollback on a cask that was installed before the
+// migration ran still has a history entry to roll back to.
+test "v6→v7 migration backfills cask_versions from existing casks rows" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    // Seed two casks rows on the now-current schema so the next
+    // initSchema call (post-bump) treats them as legacy state.
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url, sha256)
+        \\VALUES ('flux-markdown', 'flux-markdown', '1.32.427',
+        \\        'https://example.invalid/flux.dmg', 'aa'),
+        \\       ('firefox', 'Firefox', '120.0',
+        \\        'https://example.invalid/firefox.dmg', 'bb');
+    );
+
+    // Force the schema marker back to v6 so the migrate call re-runs the
+    // v6→v7 step against the seeded rows — the same path a user upgrading
+    // an existing install hits on first launch of the new binary.
+    try db.exec("DELETE FROM schema_version WHERE version >= 7;");
+
+    try migrate(&db);
+
+    var stmt = try db.prepare(
+        "SELECT token, version, url FROM cask_versions ORDER BY token;",
+    );
+    defer stmt.finalize();
+
+    try testing.expect(try stmt.step());
+    const token0 = stmt.columnText(0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("firefox", std.mem.sliceTo(token0, 0));
+    const ver0 = stmt.columnText(1) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("120.0", std.mem.sliceTo(ver0, 0));
+
+    try testing.expect(try stmt.step());
+    const token1 = stmt.columnText(0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("flux-markdown", std.mem.sliceTo(token1, 0));
+
+    try testing.expectEqual(@as(i64, 7), try currentVersion(&db));
+}
+
+test "v6→v7 migration is idempotent when cask_versions already carries the rows" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url, sha256)
+        \\VALUES ('flux-markdown', 'flux-markdown', '1.32.427',
+        \\        'https://example.invalid/flux.dmg', 'aa');
+    );
+
+    // First run: backfills.
+    try db.exec("DELETE FROM schema_version WHERE version >= 7;");
+    try migrate(&db);
+
+    // Second run: same DB, the backfill must not double-insert.
+    try db.exec("DELETE FROM schema_version WHERE version >= 7;");
+    try migrate(&db);
+
+    var cnt = try db.prepare("SELECT COUNT(*) FROM cask_versions WHERE token = 'flux-markdown';");
+    defer cnt.finalize();
+    _ = try cnt.step();
+    try testing.expectEqual(@as(i64, 1), cnt.columnInt(0));
 }
 
 test "migrate refuses a DB whose schema_version exceeds the known max" {

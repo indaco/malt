@@ -592,12 +592,12 @@ test "installAll honours skip_lock so an outer holder can re-enter without a sel
     // Mimic the outer hold that upgrade.execute already owns.
     var lock_path_buf: [512]u8 = undefined;
     const lock_path = try std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{path});
-    var outer = try lock_mod.LockFile.acquire(lock_path, 1000);
-    defer outer.release();
-
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var outer = try lock_mod.LockFile.acquire(ctx.io, lock_path, 1000);
+    defer outer.release(ctx.io);
 
     output.setQuiet(true);
     defer output.setQuiet(false);

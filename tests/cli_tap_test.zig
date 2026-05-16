@@ -166,3 +166,174 @@ test "execute with a bare name (no slash) surfaces error.Aborted" {
         tap_cli.execute(&ctx, testing.allocator, &.{"no_slash_here"}),
     );
 }
+
+// ---------------------------------------------------------------------------
+// --pin <user/repo> <sha>
+// ---------------------------------------------------------------------------
+
+test "execute --pin without two operands aborts" {
+    const prefix = try setupPrefix("pin_missing_operand");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{"--pin"}),
+    );
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{ "--pin", "user/repo" }),
+    );
+}
+
+test "execute --pin with malformed SHA aborts before any network call" {
+    const prefix = try setupPrefix("pin_bad_sha");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    // Empty environ guarantees no live network configuration is in play;
+    // if the implementation routes to HTTP this will hang or error noisily.
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{ "--pin", "user/repo", "deadbeef" }),
+    );
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{ "--pin", "user/repo", "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG" }),
+    );
+}
+
+test "execute --pin with malformed tap name aborts" {
+    const prefix = try setupPrefix("pin_bad_tap");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{
+            "--pin", "no_slash_here", "0123456789abcdef0123456789abcdef01234567",
+        }),
+    );
+}
+
+test "execute --pin under `mt untap` is rejected" {
+    const prefix = try setupPrefix("pin_under_untap");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.executeUntap(&ctx, testing.allocator, &.{
+            "--pin", "user/repo", "0123456789abcdef0123456789abcdef01234567",
+        }),
+    );
+}
+
+test "execute --pin with unresolvable repo surfaces error.Aborted" {
+    const prefix = try setupPrefix("pin_unresolvable");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // `user/repo` is not a real homebrew tap — the commits/<sha> endpoint
+    // 404s and the pin must be refused, mirroring the `mt tap` add path.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = threaded.io(),
+        .environ = malt.app_ctx.processEnviron(),
+    };
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{
+            "--pin", "user/repo", "0123456789abcdef0123456789abcdef01234567",
+        }),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// --refresh --all
+// ---------------------------------------------------------------------------
+
+test "execute --refresh --all on an empty DB is a clean no-op" {
+    const prefix = try setupPrefix("refresh_all_empty");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    // No taps registered → no diff, no apply, exit 0.
+    try tap_cli.execute(&ctx, testing.allocator, &.{ "--refresh", "--all" });
+    try tap_cli.execute(&ctx, testing.allocator, &.{ "--refresh", "--all", "--yes" });
+}
+
+test "execute --refresh --all under `mt untap` is rejected" {
+    const prefix = try setupPrefix("refresh_all_under_untap");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.executeUntap(&ctx, testing.allocator, &.{ "--refresh", "--all" }),
+    );
+}
+
+test "execute --refresh --all with only failed rows does not gate the apply" {
+    // Pre-seed a row whose remote 404s. `--all` walks it, surfaces the
+    // failure, but the no-moved-rows path still exits cleanly without
+    // requiring `--yes`. Confirms the `anyMoved` gate is failure-tolerant.
+    const prefix = try setupPrefix("refresh_all_failed_only");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const db_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/db/malt.db",
+        .{prefix},
+        0,
+    );
+    defer testing.allocator.free(db_path);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try malt.tap.add(
+            &db,
+            "user/repo",
+            "https://github.com/user/homebrew-repo",
+            "0123456789abcdef0123456789abcdef01234567",
+        );
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = threaded.io(),
+        .environ = malt.app_ctx.processEnviron(),
+    };
+    // The remote 404s → row is `failed` → not gated → exit clean.
+    try tap_cli.execute(&ctx, testing.allocator, &.{ "--refresh", "--all" });
+}

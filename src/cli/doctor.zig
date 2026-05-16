@@ -2,34 +2,38 @@
 //! System health check.
 
 const std = @import("std");
-const AppCtx = @import("../app_ctx.zig").AppCtx;
-const sqlite = @import("../db/sqlite.zig");
-const schema = @import("../db/schema.zig");
-const lock_mod = @import("../db/lock.zig");
-const atomic = @import("../fs/atomic.zig");
-const clonefile = @import("../fs/clonefile.zig");
-const output = @import("../ui/output.zig");
-const help = @import("help.zig");
-const parser = @import("../macho/parser.zig");
-const patch = @import("../core/patch.zig");
-const perms_mod = @import("../core/perms.zig");
-const client_mod = @import("../net/client.zig");
+
 const mount_c = @import("c_mount");
 
-const render = @import("doctor/render.zig");
-const post_install = @import("doctor/post_install.zig");
+const AppCtx = @import("../app_ctx.zig").AppCtx;
+const patch = @import("../core/patch.zig");
+const perms_mod = @import("../core/perms.zig");
+const lock_mod = @import("../db/lock.zig");
+const schema = @import("../db/schema.zig");
+const sqlite = @import("../db/sqlite.zig");
+const atomic = @import("../fs/atomic.zig");
+const clonefile = @import("../fs/clonefile.zig");
+const parser = @import("../macho/parser.zig");
+const client_mod = @import("../net/client.zig");
+const color = @import("../ui/color.zig");
+const output = @import("../ui/output.zig");
+pub const cask_history = @import("doctor/cask_history.zig");
 const fix_mod = @import("doctor/fix.zig");
-
 pub const FixKind = fix_mod.FixKind;
 pub const ManualKind = fix_mod.ManualKind;
 pub const FixConditions = fix_mod.Conditions;
 pub const FixPlan = fix_mod.Plan;
 pub const planFixes = fix_mod.planFixes;
-
+const post_install = @import("doctor/post_install.zig");
+const render = @import("doctor/render.zig");
 pub const CheckStatus = render.CheckStatus;
 pub const CheckStyle = render.CheckStyle;
 pub const renderCheckRow = render.renderCheckRow;
 pub const printCheck = render.printCheck;
+/// Per-check outcome; same tags the row renderer uses so the walker
+/// can tally without re-translating.
+pub const CheckResult = render.CheckStatus;
+const help = @import("help.zig");
 
 /// Shared context passed to every check.
 pub const CheckCtx = struct {
@@ -38,10 +42,6 @@ pub const CheckCtx = struct {
     io: std.Io,
     environ: std.process.Environ,
 };
-
-/// Per-check outcome; same tags the row renderer uses so the walker
-/// can tally without re-translating.
-pub const CheckResult = render.CheckStatus;
 
 /// One entry in the health walk. `run` prints its row(s) and returns
 /// the walker's tally tag.
@@ -89,6 +89,36 @@ pub fn runChecks(ctx: CheckCtx, table: []const Check) Tally {
     return tally;
 }
 
+/// Walk retained cask versions and emit the report doctor surfaces
+/// after the check rows. Pure read-only: routes to stdout (JSON) or
+/// stderr (human + optional verbose entry list) by reading
+/// `output.isJson()` and `output.isVerbose()`. Held public so the
+/// integration test can drive the same path `execute` uses.
+pub fn emitCaskHistoryReport(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) void {
+    var census = cask_history.collectCensus(allocator, io, prefix);
+    defer census.deinit(allocator);
+
+    if (output.isJson()) {
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        cask_history.writeJson(&aw.writer, census) catch return;
+        output.writeStdoutAll(aw.written());
+        return;
+    }
+
+    if (census.entries.len == 0) return;
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    cask_history.writeHumanSummary(&aw.writer, census) catch return;
+    if (output.isVerbose()) {
+        // Best-effort: a writer error here loses the entry rows but
+        // the summary line is already in `aw` and worth flushing.
+        cask_history.writeHumanEntries(&aw.writer, census) catch {};
+    }
+    output.writeStderrAll(aw.written());
+}
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "doctor")) return;
 
@@ -103,6 +133,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     const fix_requested = fix_mod.wantsFix(args);
 
+    resetVerboseHint();
     output.info("Running health checks...", .{});
     const tally = runChecks(.{
         .allocator = allocator,
@@ -110,6 +141,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         .io = ctx.io,
         .environ = ctx.environ,
     }, &checks);
+
+    emitCaskHistoryReport(allocator, ctx.io, prefix);
 
     if (fix_requested) {
         output.plain("", .{});
@@ -146,6 +179,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }
 
     output.plain("", .{});
+    emitVerboseHintIfNeeded();
     if (tally.errors > 0) {
         output.err("{d} error(s), {d} warning(s)", .{ tally.errors, tally.warnings });
         std.process.exit(2);
@@ -155,6 +189,78 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     } else {
         output.success("Your malt installation is healthy", .{});
     }
+}
+
+/// Armed by any check that surfaces offenders the user could see
+/// listed under `--verbose` (Mach-O placeholders, broken symlinks,
+/// missing kegs, prefix-permissions). `execute` reads it after the
+/// check loop to emit a dim "run with --verbose for the full list"
+/// nudge. Reset by `resetVerboseHint` so re-entering the dispatcher
+/// from tests starts clean.
+var verbose_hint_armed: bool = false;
+
+/// Test hook + production reset: clear the verbose-hint flag at the
+/// top of every `execute` so a previous run on the same process
+/// doesn't leak its state.
+pub fn resetVerboseHint() void {
+    verbose_hint_armed = false;
+}
+
+/// Internal arm — called by enumerable checks whenever they have
+/// offenders, regardless of the verbose flag. `emitVerboseHintIfNeeded`
+/// decides whether to surface the nudge.
+fn armVerboseHint() void {
+    verbose_hint_armed = true;
+}
+
+/// Emit a "run with --verbose for the full list" nudge after the
+/// check loop when an enumerable check surfaced offenders AND
+/// `--verbose` is off.
+pub fn emitVerboseHintIfNeeded() void {
+    if (output.isVerbose()) return;
+    if (!verbose_hint_armed) return;
+    output.dim("run with --verbose for the full list", .{});
+}
+
+/// Emit one dim/faint detail line indented under a check row, with a
+/// `-` bullet so multiple rows read as a list. Routes through
+/// `output.writeStderrAll` so doctor's stderr-capture tests see the
+/// bytes; `std.debug.print` would bypass the capture buffer.
+fn writeStyledDetail(text: []const u8) void {
+    var line_buf: [1024]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buf, "    - {s}\n", .{text}) catch return;
+    if (color.isColorEnabled()) {
+        output.writeStderrAll(color.SemanticStyle.detail.code());
+        output.writeStderrAll(line);
+        output.writeStderrAll(color.Style.reset.code());
+    } else {
+        output.writeStderrAll(line);
+    }
+}
+
+/// Stream the verbose-only entry list. Gated on `--verbose`; the
+/// always-on first-3 hint lines (`checkPrefixPermissions`) call
+/// `writeStyledDetail` directly so they share the styling without
+/// the verbose gate.
+fn writeVerboseList(entries: []const []const u8) void {
+    if (!output.isVerbose()) return;
+    for (entries) |e| writeStyledDetail(e);
+}
+
+fn freeOwnedStringList(allocator: std.mem.Allocator, list: *std.ArrayList([]u8)) void {
+    for (list.items) |s| allocator.free(s);
+    list.deinit(allocator);
+}
+
+/// Extract the keg identifier (`<package> <version>`) from a
+/// Cellar-relative file path of the form `<package>/<version>/<rest>`.
+/// Returns null when the path has fewer than two slash-delimited
+/// segments — those are walker artefacts we ignore here.
+fn caskCellarKegKey(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+    const first_slash = std.mem.indexOfScalar(u8, path, '/') orelse return null;
+    const rest = path[first_slash + 1 ..];
+    const second_slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+    return std.fmt.allocPrint(allocator, "{s} {s}", .{ path[0..first_slash], rest[0..second_slash] }) catch null;
 }
 
 // ── individual checks ────────────────────────────────────────────────
@@ -244,7 +350,7 @@ fn checkStaleLock(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     };
-    const pid = lock_mod.LockFile.holderPid(lock_path);
+    const pid = lock_mod.LockFile.holderPid(ctx.io, lock_path);
     if (pid) |p| {
         const is_alive = std.c.kill(p, @enumFromInt(0)) == 0;
         var pid_buf: [256]u8 = undefined;
@@ -311,7 +417,11 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
         .{ findings.len, ctx.prefix },
     ) catch "Weak-permission paths under prefix";
     printCheck(name, .warn_status, pm_msg);
-    // First few as a hint so the user knows where to look.
+    armVerboseHint();
+    // First few as a hint so the user knows where to look. Routes
+    // through the shared styled-detail writer for parity with the
+    // verbose lists below — capture-aware (so tests see the bytes)
+    // and dim/faint on a tty.
     for (findings[0..@min(findings.len, 3)]) |f| {
         var line_buf: [1024]u8 = undefined;
         const reason = if (f.report.other_writable)
@@ -320,8 +430,8 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
             "group-writable"
         else
             "wrong owner";
-        const line = std.fmt.bufPrint(&line_buf, "        {s} ({s})", .{ f.path, reason }) catch continue;
-        std.debug.print("{s}\n", .{line});
+        const line = std.fmt.bufPrint(&line_buf, "{s} ({s})", .{ f.path, reason }) catch continue;
+        writeStyledDetail(line);
     }
     return .warn_status;
 }
@@ -414,16 +524,26 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
     };
     defer stmt.finalize();
 
-    var missing_count: u32 = 0;
+    // Collect missing kegs so `--verbose` can name each one; under
+    // default mode the list is just sized for the count.
+    var offenders: std.ArrayList([]u8) = .empty;
+    defer freeOwnedStringList(ctx.allocator, &offenders);
+
     while (stmt.step() catch false) {
         const cellar_raw = stmt.columnText(2) orelse continue;
         const cellar_path = std.mem.sliceTo(cellar_raw, 0);
         std.Io.Dir.accessAbsolute(ctx.io, cellar_path, .{}) catch {
-            missing_count += 1;
+            const k_name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
+            const k_ver = std.mem.sliceTo(stmt.columnText(1) orelse continue, 0);
+            const row = std.fmt.allocPrint(ctx.allocator, "{s} {s}", .{ k_name, k_ver }) catch continue;
+            offenders.append(ctx.allocator, row) catch {
+                ctx.allocator.free(row);
+                continue;
+            };
         };
     }
 
-    if (missing_count == 0) {
+    if (offenders.items.len == 0) {
         printCheck(name, .ok, null);
         return .ok;
     }
@@ -431,15 +551,18 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
     const msg = std.fmt.bufPrint(
         &msg_buf,
         "{d} keg(s) in DB but missing on disk. Reinstall affected packages",
-        .{missing_count},
+        .{offenders.items.len},
     ) catch "Missing keg directories detected. Reinstall affected packages";
     printCheck(name, .err_status, msg);
+    armVerboseHint();
+    writeVerboseList(offenders.items);
     return .err_status;
 }
 
 fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
     const link_dirs = [_][]const u8{ "bin", "lib", "include", "share", "sbin" };
-    var broken_count: u32 = 0;
+    var offenders: std.ArrayList([]u8) = .empty;
+    defer freeOwnedStringList(ctx.allocator, &offenders);
 
     for (link_dirs) |subdir| {
         var dir_buf: [512]u8 = undefined;
@@ -451,24 +574,30 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
         while (dir_iter.next(ctx.io) catch null) |entry| {
             if (entry.kind == .sym_link) {
                 _ = dir.statFile(ctx.io, entry.name, .{}) catch {
-                    broken_count += 1;
+                    const path = std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ subdir, entry.name }) catch continue;
+                    offenders.append(ctx.allocator, path) catch {
+                        ctx.allocator.free(path);
+                        continue;
+                    };
                     continue;
                 };
             }
         }
     }
 
-    if (broken_count == 0) {
+    if (offenders.items.len == 0) {
         printCheck(name, .ok, null);
         return .ok;
     }
     var msg_buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &msg_buf,
-        "{d} broken symlink(s). Run: mt purge --housekeeping",
-        .{broken_count},
-    ) catch "Broken symlinks found. Run: mt purge --housekeeping";
+        "{d} broken symlink(s). Run: mt cleanup",
+        .{offenders.items.len},
+    ) catch "Broken symlinks found. Run: mt cleanup";
     printCheck(name, .warn_status, msg);
+    armVerboseHint();
+    writeVerboseList(offenders.items);
     return .warn_status;
 }
 
@@ -492,32 +621,71 @@ fn checkMachOPlaceholders(ctx: CheckCtx, name: []const u8) CheckResult {
     };
     defer walker.deinit();
 
-    var bad_count: u32 = 0;
-    var first_bad_buf: [256]u8 = undefined;
-    var first_bad_len: usize = 0;
+    // Group by `<package> <version>` so the headline reports the
+    // reinstall target — the user reinstalls the keg, not the file.
+    // A single keg can bundle hundreds of placeholder-bearing files
+    // (Python site-packages inside a meta-package, LLVM tools);
+    // counting files there inflates the number without adding
+    // actionable information.
+    var groups: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer {
+        var it = groups.iterator();
+        while (it.next()) |kv| ctx.allocator.free(kv.key_ptr.*);
+        groups.deinit(ctx.allocator);
+    }
 
     while (walker.next(ctx.io) catch null) |entry| {
         if (entry.kind != .file) continue;
         if (hasUnpatchedPlaceholder(ctx.io, ctx.allocator, &cellar_dir, entry.path) catch false) {
-            bad_count += 1;
-            if (first_bad_len == 0) {
-                const s = std.fmt.bufPrint(&first_bad_buf, "{s}", .{entry.path}) catch continue;
-                first_bad_len = s.len;
-            }
+            // Grouping is best-effort: an allocator failure here
+            // drops the group entry, never silently triggers an
+            // .ok outcome — the headline is still right because
+            // it's derived from `groups.count()` which only grows
+            // when the entry actually lands.
+            const key = caskCellarKegKey(ctx.allocator, entry.path) orelse continue;
+            const gop = groups.getOrPut(ctx.allocator, key) catch {
+                ctx.allocator.free(key);
+                continue;
+            };
+            if (gop.found_existing) ctx.allocator.free(key);
         }
     }
 
-    if (bad_count == 0) {
+    if (groups.count() == 0) {
         printCheck(name, .ok, null);
         return .ok;
     }
     var msg_buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrint(
-        &msg_buf,
-        "{d} Mach-O file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Reinstall the affected packages.",
-        .{ bad_count, first_bad_buf[0..first_bad_len] },
-    ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
+    const msg = blk: {
+        if (output.isVerbose()) {
+            // Verbose lists every package below; the (first: …) hint
+            // would just duplicate the first row of that list.
+            break :blk std.fmt.bufPrint(
+                &msg_buf,
+                "{d} package(s) ship Mach-O file(s) with unpatched @@HOMEBREW_* placeholders. Reinstall the affected packages.",
+                .{groups.count()},
+            ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
+        }
+        const first_key = first_key: {
+            var it = groups.iterator();
+            break :first_key if (it.next()) |kv| kv.key_ptr.* else "";
+        };
+        break :blk std.fmt.bufPrint(
+            &msg_buf,
+            "{d} package(s) ship Mach-O file(s) with unpatched @@HOMEBREW_* placeholders (first: {s}). Reinstall the affected packages.",
+            .{ groups.count(), first_key },
+        ) catch "Mach-O files with unpatched @@HOMEBREW_* placeholders found.";
+    };
     printCheck(name, .err_status, msg);
+    armVerboseHint();
+
+    if (output.isVerbose()) {
+        var lines: std.ArrayList([]const u8) = .empty;
+        defer lines.deinit(ctx.allocator);
+        var it = groups.iterator();
+        while (it.next()) |kv| lines.append(ctx.allocator, kv.key_ptr.*) catch continue;
+        writeVerboseList(lines.items);
+    }
     return .err_status;
 }
 

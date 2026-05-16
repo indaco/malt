@@ -2,10 +2,11 @@
 //! Covers showIfRequested flag detection and the helpFor lookup table.
 
 const std = @import("std");
+const testing = std.testing;
+
+const help = @import("malt").cli_help;
 const malt = @import("malt");
 const test_io = @import("test_io");
-const testing = std.testing;
-const help = @import("malt").cli_help;
 
 fn quietCtx() malt.app_ctx.AppCtx {
     return .{
@@ -82,8 +83,33 @@ test "install help documents --local and its code-exec warning" {
     try testing.expect(std.mem.indexOf(u8, text, "trust") != null);
 }
 
+test "deps help documents --recursive, --installed, and --json" {
+    // Discoverability guard: deps is the forward complement of `uses`,
+    // and the three flags below define what the command can do beyond
+    // a single direct read. Drop one from --help and users won't know.
+    const text = help.helpFor("deps");
+    try testing.expect(std.mem.indexOf(u8, text, "--recursive") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--installed") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--json") != null);
+}
+
 test "helpFor falls back gracefully for unknown commands" {
     try testing.expectEqualStrings("No help available.\n", help.helpFor("not-a-real-command"));
+}
+
+test "cleanup help advertises the shorthand and points at purge" {
+    // `mt cleanup` is a thin alias; --help has to make that explicit so
+    // users discover the full scope menu lives under `mt purge`.
+    const text = help.helpFor("cleanup");
+    try testing.expect(std.mem.indexOf(u8, text, "malt cleanup") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--housekeeping") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "mt purge") != null);
+}
+
+test "showIfRequested honours --help for cleanup" {
+    const ctx = quietCtx();
+    const args = [_][]const u8{"--help"};
+    try testing.expect(help.showIfRequested(&ctx, &args, "cleanup"));
 }
 
 // Integration: verify that `malt <cmd> --help` writes to stdout (not stderr).

@@ -1089,8 +1089,8 @@ test "lock contention returns error.Aborted when db/malt.lock is already held" {
     try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
     const lock_path = try std.fmt.allocPrint(testing.allocator, "{s}/malt.lock", .{db_dir});
     defer testing.allocator.free(lock_path);
-    var holder = try malt.lock.LockFile.acquire(lock_path, 1000);
-    defer holder.release();
+    var holder = try malt.lock.LockFile.acquire(std.Options.debug_io, lock_path, 1000);
+    defer holder.release(std.Options.debug_io);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

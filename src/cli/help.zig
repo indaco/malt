@@ -2,6 +2,7 @@
 //! Returns help text for each subcommand, displayed on -h / --help.
 
 const std = @import("std");
+
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 
 /// Check if args contain -h or --help. If so, print help to stdout (so the
@@ -40,7 +41,9 @@ pub fn helpFor(command: []const u8) []const u8 {
         .{ "backup", backup_help },
         .{ "restore", restore_help },
         .{ "purge", purge_help },
+        .{ "cleanup", cleanup_help },
         .{ "uses", uses_help },
+        .{ "deps", deps_help },
         .{ "which", which_help },
         .{ "pin", pin_help },
         .{ "unpin", unpin_help },
@@ -159,7 +162,12 @@ const list_help =
 const info_help =
     \\Usage: malt info <package> [flags]
     \\
-    \\Show detailed information about a formula or cask.
+    \\Show detailed information about a formula or cask. If the package
+    \\has retained rollback versions (multi-version store entries for
+    \\formulas, cask_versions history for casks), they are listed under
+    \\an "Available rollback versions" section so `mt rollback <pkg>`
+    \\and `mt info <pkg>` agree on what's retrievable. The same listing
+    \\is exposed in `--json` as the `available_rollback_versions` array.
     \\
     \\Flags:
     \\  --formula      Show formula info only
@@ -173,9 +181,20 @@ const search_help =
     \\
     \\Search formulas and casks by name.
     \\
-    \\Flags:
+    \\Default scope: query the Homebrew API (same as `brew search`). Use
+    \\--installed when you only want to know what's already on disk.
+    \\
+    \\Scope:
+    \\  --installed    Query kegs.name + casks.token only. No network.
+    \\  --api          Explicit form of the default (Homebrew API).
+    \\  --all          Run both passes and merge results, deduped + sorted.
+    \\  --offline      Alias of --installed (mirrors MALT_OFFLINE=1).
+    \\
+    \\Kind filter:
     \\  --formula      Search formulas only
     \\  --cask         Search casks only
+    \\
+    \\Output:
     \\  --json         Output as JSON
     \\
 ;
@@ -186,25 +205,57 @@ const doctor_help =
     \\Run system health checks: database integrity, orphaned store
     \\entries, broken symlinks, disk space, API reachability, and more.
     \\
+    \\Trailing report:
+    \\  Retained cask versions — for every cask token whose
+    \\  `cask_versions` history has rows that are not the live
+    \\  install, the count + on-disk bytes are summarised. Empty
+    \\  state stays silent. Read-only: `mt purge --old-versions`
+    \\  is what actually reclaims the space.
+    \\
     \\Options:
     \\  --fix          Apply the safe-class fixers (stale lock,
     \\                 orphaned store entries, broken symlinks).
     \\                 Pair with --dry-run to preview the plan.
     \\                 Dangerous classes (corrupt DB, missing kegs)
     \\                 still print a manual remediation command.
+    \\  --verbose      List every offender under the count-only
+    \\                 checks (Mach-O placeholders, broken symlinks,
+    \\                 missing kegs) on its own indented line, and
+    \\                 include the per-(token version) breakdown
+    \\                 under the retained-cask-versions summary.
+    \\  --json         Emit the retained-cask-versions report as a
+    \\                 stable `{cask_history: {retained_versions,
+    \\                 bytes}}` payload on stdout. Empty state still
+    \\                 surfaces with zero values.
     \\
 ;
 
 const tap_help =
     \\Usage: malt tap [<user>/<repo>]
     \\       malt tap --refresh <user>/<repo>
+    \\       malt tap --refresh --all [--yes] [--json]
+    \\       malt tap --pin <user>/<repo> <sha>
     \\       malt untap <user>/<repo>
     \\
     \\Manage taps. Without arguments, lists registered taps + their
     \\pinned commit. `tap <slug>` resolves the repo's HEAD commit at
     \\that moment and stores it; subsequent installs from the tap fetch
     \\against the pin, not whatever HEAD happens to point to later.
-    \\`--refresh` explicitly advances the pin to the current HEAD.
+    \\
+    \\Flags:
+    \\  --refresh [<slug>]   Advance the pin to the current HEAD. With a
+    \\                       slug, refreshes that one tap; with --all,
+    \\                       walks every registered tap.
+    \\  --all                Pairs with --refresh: batch every tap, print
+    \\                       a per-row `old_sha[..7] -> new_sha[..7]` diff,
+    \\                       and refuse to apply without --yes when any
+    \\                       tap moved.
+    \\  --pin <slug> <sha>   Explicitly pin <slug> to <sha>. The SHA is
+    \\                       validated for reachability through GitHub's
+    \\                       commits/<sha> endpoint before the pin lands.
+    \\  --yes, -y            Confirm the apply step of --refresh --all.
+    \\  --json               Emit the --refresh --all diff as
+    \\                       `{"taps":[{"tap","old_sha","new_sha","status"}]}`.
     \\
     \\Taps are auto-resolved during install, so explicit `tap` is
     \\usually unnecessary — the auto-tap also pins the SHA on first use.
@@ -237,12 +288,25 @@ const migrate_help =
 
 const rollback_help =
     \\Usage: malt rollback <package> [flags]
+    \\       malt rollback --list <package>
+    \\       malt rollback --to <version> <package>
     \\
-    \\Revert a package to its previous version using the
-    \\content-addressable store. No re-download needed.
+    \\Revert a formula or cask to a previous version. Formulas
+    \\reuse the content-addressable store (no re-download). Casks
+    \\reuse the per-version cache when present and re-download from
+    \\the recorded URL otherwise; SHA256 is verified either way.
+    \\
+    \\Without --to, lands on the most recent previous entry.
     \\
     \\Flags:
-    \\  --dry-run      Show what would happen
+    \\  --list             Print every retained version for <package>
+    \\                     and exit without changes
+    \\  --to <version>     Roll back to the exact version if present;
+    \\                     otherwise refuse and print --list. A --to
+    \\                     of the currently-installed version is a
+    \\                     clean no-op (exit 0)
+    \\  --json             Emit --list output as JSON (scriptable)
+    \\  --dry-run          Show what would happen
     \\
 ;
 
@@ -348,7 +412,7 @@ const purge_help =
     \\  --cache[=DAYS]       Cache files older than DAYS (default 30)
     \\  --downloads          Wipe {cache}/downloads entirely        (typed confirm)
     \\  --stale-casks        Cask cache + Caskroom for uninstalled casks
-    \\  --old-versions       Non-latest versions in {prefix}/Cellar (typed confirm)
+    \\  --old-versions       Non-latest Cellar versions + retained cask history (typed confirm)
     \\  --housekeeping       = --store-orphans --unused-deps --cache --stale-casks
     \\  --wipe               Nuclear: every malt artefact on disk    (typed confirm)
     \\
@@ -377,6 +441,31 @@ const purge_help =
     \\  malt purge --wipe --backup ~/malt-snapshot.txt --remove-binary --yes
     \\
     \\For per-package removal use `mt uninstall <name>`.
+    \\
+;
+
+const cleanup_help =
+    \\Usage: malt cleanup [flags]
+    \\
+    \\Shorthand for `malt purge --housekeeping` — the safe daily-driver
+    \\scope (store-orphans + unused-deps + cache + stale-casks). For the
+    \\full menu (downloads scrub, old-versions, wipe) use `mt purge`.
+    \\
+    \\Flags pass through to `purge`; the common ones:
+    \\  --dry-run, -n        Preview only
+    \\  --yes, -y            Skip every typed confirmation
+    \\  --quiet, -q          Suppress per-item output
+    \\  --verbose, -v        Show every per-scope item, full SHAs
+    \\  --cache=<DAYS>       Override the 30-day cache cutoff
+    \\  --backup, -b <path>  Write a `mt restore`-compatible manifest first
+    \\  --json               Single summary object on stdout
+    \\  --output-format=ndjson
+    \\                       One event per scope start/complete
+    \\
+    \\Examples:
+    \\  malt cleanup
+    \\  malt cleanup --dry-run
+    \\  malt cleanup --cache=7 --yes
     \\
 ;
 
@@ -431,6 +520,28 @@ const uses_help =
     \\  malt uses openssl@3
     \\  malt uses --recursive icu4c@78
     \\  malt --json uses node@20
+    \\
+;
+
+const deps_help =
+    \\Usage: malt deps <formula> [flags]
+    \\
+    \\Show what <formula> depends on — the forward symmetric of
+    \\`mt uses`. Installed kegs read from the local DB; uninstalled
+    \\formulas walk the upstream API.
+    \\
+    \\Flags:
+    \\  --recursive, -r   Walk the transitive closure
+    \\  --installed       Restrict to kegs that resolve locally (skips
+    \\                    the API fallback; offline-safe)
+    \\  --json            Emit `[{"formula","depends_on":[…]}, …]`
+    \\  --quiet, -q       Suppress status messages
+    \\
+    \\Examples:
+    \\  malt deps openssl@3
+    \\  malt deps --recursive ffmpeg
+    \\  malt deps --installed -r node@20
+    \\  malt --json deps wget
     \\
 ;
 

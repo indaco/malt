@@ -28,8 +28,8 @@ fn keepLockTimeoutMs(ctx: *const AppCtx) u32 {
 
 /// Release-and-clear: scattered call sites would otherwise drift on the
 /// release/null pairing and silently leak the lock fd into exec.
-fn releaseKeepLock(slot: *?lock_mod.LockFile) void {
-    if (slot.*) |*lk| lk.release();
+fn releaseKeepLock(io: std.Io, slot: *?lock_mod.LockFile) void {
+    if (slot.*) |*lk| lk.release(io);
     slot.* = null;
 }
 
@@ -150,7 +150,7 @@ fn ephemeralRun(
     // Per-slot lock serializes parallel `mt run --keep <pkg>` so two
     // peers don't truncate one another's bottle.tar.gz mid-extract.
     var keep_lock: ?lock_mod.LockFile = null;
-    errdefer releaseKeepLock(&keep_lock);
+    errdefer releaseKeepLock(ctx.io, &keep_lock);
 
     if (keep) {
         var run_root_buf: [512]u8 = undefined;
@@ -169,9 +169,9 @@ fn ephemeralRun(
             output.err("Cache lock path too long for {s}", .{pkg_name});
             return error.Aborted;
         };
-        keep_lock = lock_mod.LockFile.acquire(lock_path, keepLockTimeoutMs(ctx)) catch |e| {
+        keep_lock = lock_mod.LockFile.acquire(ctx.io, lock_path, keepLockTimeoutMs(ctx)) catch |e| {
             if (e == error.Timeout) {
-                if (lock_mod.LockFile.holderPid(lock_path)) |pid| {
+                if (lock_mod.LockFile.holderPid(ctx.io, lock_path)) |pid| {
                     output.err("Another `mt run --keep` for {s} is in progress (pid {d})", .{ pkg_name, pid });
                 } else {
                     output.err("Another `mt run --keep` for {s} is in progress", .{pkg_name});
@@ -186,7 +186,7 @@ fn ephemeralRun(
         var hit_buf: [512]u8 = undefined;
         if (findCachedBinary(ctx, &hit_buf, cache_dir, bottle.sha256, pkg_name, formula.version) catch null) |cached_bin| {
             // Drop the lock before exec so peers can run the cached binary unblocked.
-            releaseKeepLock(&keep_lock);
+            releaseKeepLock(ctx.io, &keep_lock);
             output.info("Running cached {s} {s}...", .{ pkg_name, formula.version });
             return try execBinary(ctx, allocator, cached_bin, cmd_args);
         }
@@ -267,7 +267,7 @@ fn ephemeralRun(
     }
 
     // Slot fully populated; let waiting peers in before we hand off to exec.
-    if (keep_lock) |*lk| lk.release();
+    if (keep_lock) |*lk| lk.release(ctx.io);
     keep_lock = null;
 
     if (keep) {

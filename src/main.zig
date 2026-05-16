@@ -2,9 +2,39 @@
 //! CLI entry point and command dispatch for the `mt` binary.
 
 const std = @import("std");
+
+const AppCtx = @import("app_ctx.zig").AppCtx;
+const backup = @import("cli/backup.zig");
+const bundle = @import("cli/bundle.zig");
+const completions = @import("cli/completions.zig");
+const deps_cmd = @import("cli/deps.zig");
+const doctor = @import("cli/doctor.zig");
+const info = @import("cli/info.zig");
+const install = @import("cli/install.zig");
+const link_cmd = @import("cli/link.zig");
+const list = @import("cli/list.zig");
+const migrate = @import("cli/migrate.zig");
+const outdated = @import("cli/outdated.zig");
+const pin_cmd = @import("cli/pin.zig");
+const purge = @import("cli/purge.zig");
+const restore = @import("cli/restore.zig");
+const rollback = @import("cli/rollback.zig");
+const run_cmd = @import("cli/run.zig");
+const search = @import("cli/search.zig");
+const services = @import("cli/services.zig");
+const shellenv = @import("cli/shellenv.zig");
+const tap = @import("cli/tap.zig");
+const uninstall = @import("cli/uninstall.zig");
+const update = @import("cli/update.zig");
+const upgrade = @import("cli/upgrade.zig");
+const uses = @import("cli/uses.zig");
+const version_update = @import("cli/version_update.zig");
+const which_cmd = @import("cli/which.zig");
 const color_mod = @import("ui/color.zig");
 const progress_mod = @import("ui/progress.zig");
-const AppCtx = @import("app_ctx.zig").AppCtx;
+const notifier = @import("update/notifier.zig");
+const version_mod = @import("version.zig");
+const version = version_mod.value;
 
 // Wrap the panic path so the cursor + autowrap state owned by
 // MultiProgress / Spinner is restored before abort. Defers don't run
@@ -71,36 +101,6 @@ fn sigintHandler(_: std.posix.SIG) callconv(.c) void {
 }
 
 // CLI command modules
-const install = @import("cli/install.zig");
-const uninstall = @import("cli/uninstall.zig");
-const upgrade = @import("cli/upgrade.zig");
-const update = @import("cli/update.zig");
-const outdated = @import("cli/outdated.zig");
-const list = @import("cli/list.zig");
-const info = @import("cli/info.zig");
-const search = @import("cli/search.zig");
-const doctor = @import("cli/doctor.zig");
-const tap = @import("cli/tap.zig");
-const migrate = @import("cli/migrate.zig");
-const rollback = @import("cli/rollback.zig");
-const link_cmd = @import("cli/link.zig");
-const pin_cmd = @import("cli/pin.zig");
-const run_cmd = @import("cli/run.zig");
-const version_update = @import("cli/version_update.zig");
-const completions = @import("cli/completions.zig");
-const shellenv = @import("cli/shellenv.zig");
-const backup = @import("cli/backup.zig");
-const restore = @import("cli/restore.zig");
-const purge = @import("cli/purge.zig");
-const services = @import("cli/services.zig");
-const bundle = @import("cli/bundle.zig");
-const uses = @import("cli/uses.zig");
-const which_cmd = @import("cli/which.zig");
-
-const version_mod = @import("version.zig");
-const version = version_mod.value;
-const notifier = @import("update/notifier.zig");
-
 const Command = enum {
     install,
     uninstall,
@@ -126,9 +126,11 @@ const Command = enum {
     backup,
     restore,
     purge,
+    cleanup,
     services,
     bundle,
     uses,
+    deps,
     which,
     help,
     version,
@@ -164,9 +166,11 @@ const command_names = [_]struct {
     .{ .tag = .backup, .names = &.{"backup"} },
     .{ .tag = .restore, .names = &.{"restore"} },
     .{ .tag = .purge, .names = &.{"purge"} },
+    .{ .tag = .cleanup, .names = &.{"cleanup"} },
     .{ .tag = .services, .names = &.{"services"} },
     .{ .tag = .bundle, .names = &.{"bundle"} },
     .{ .tag = .uses, .names = &.{"uses"} },
+    .{ .tag = .deps, .names = &.{"deps"} },
     .{ .tag = .which, .names = &.{"which"} },
     .{ .tag = .help, .names = &.{ "help", "--help", "-h" } },
     .{ .tag = .version, .names = &.{"--version"} },
@@ -266,6 +270,12 @@ test "applyGlobalFlag returns false for unrecognised flags" {
 test "dispatch accepts AppCtx and routes help without panic" {
     const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
     try dispatch(std.testing.allocator, &ctx, .help, &.{});
+}
+
+test "command_map resolves cleanup to the cleanup tag" {
+    // `mt cleanup` is the Homebrew-shaped alias for `mt purge --housekeeping`.
+    // Pin the tag so a rename can't silently break the dispatch arm.
+    try std.testing.expectEqual(@as(?Command, .cleanup), command_map.get("cleanup"));
 }
 
 test "dispatch clears stale interrupt under the test runner" {
@@ -455,9 +465,11 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         .backup => try backup.execute(ctx, allocator, cmd_args),
         .restore => try restore.execute(ctx, allocator, cmd_args),
         .purge => try purge.execute(ctx, allocator, cmd_args),
+        .cleanup => try purge.executeCleanup(ctx, allocator, cmd_args),
         .services => try services.execute(ctx, allocator, cmd_args),
         .bundle => try bundle.execute(ctx, allocator, cmd_args),
         .uses => try uses.execute(ctx, allocator, cmd_args),
+        .deps => try deps_cmd.execute(ctx, allocator, cmd_args),
         .which => try which_cmd.execute(ctx, allocator, cmd_args),
         .version_cmd => {
             // "mt version" — check for "mt version update" subcommand
@@ -490,6 +502,7 @@ fn printUsage(ctx: *const AppCtx) void {
         \\  info          Show detailed package information
         \\  search        Search formulas and casks
         \\  uses          Show installed packages that depend on a formula
+        \\  deps          Show what a formula depends on (forward of `uses`)
         \\  which         Resolve a prefix binary (or path) to its keg
         \\  doctor        System health check
         \\  tap/untap     Manage taps
@@ -507,6 +520,7 @@ fn printUsage(ctx: *const AppCtx) void {
         \\  purge         Housekeeping or full wipe (--store-orphans, --unused-deps,
         \\                --cache, --downloads, --stale-casks, --old-versions,
         \\                --housekeeping, --wipe)
+        \\  cleanup       Shorthand for `purge --housekeeping`
         \\  services      Manage long-running launchd services (start/stop/status/logs)
         \\  bundle        Install or export a Brewfile/Maltfile.json set of packages
         \\  version       Show version (use 'version update' to self-update)

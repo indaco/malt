@@ -152,8 +152,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // (fresh install with no DB) — that's fine, we proceed without.
     var lock_path_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
-    var lk_maybe: ?lock_mod.LockFile = lock_mod.LockFile.acquire(lock_path, 30_000) catch null;
-    defer if (lk_maybe) |*lk| lk.release();
+    var lk_maybe: ?lock_mod.LockFile = lock_mod.LockFile.acquire(ctx.io, lock_path, 30_000) catch null;
+    defer if (lk_maybe) |*lk| lk.release(ctx.io);
 
     var summary = report.Summary{};
     defer summary.deinit(allocator);
@@ -233,4 +233,18 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     } else {
         output.success("removed {d} {s}, freed ~{s}", .{ grand_total.removed, item_noun, sz });
     }
+}
+
+/// `mt cleanup` shim — Homebrew-shaped verb that forwards to the safe
+/// daily-driver scope. Prepends `--housekeeping` so trailing flags
+/// (`--dry-run`, `--json`, ...) pass through unchanged. Intercepts
+/// `--help` first so users see the cleanup banner, not purge's.
+pub fn executeCleanup(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (help.showIfRequested(ctx, args, "cleanup")) return;
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.ensureTotalCapacity(allocator, args.len + 1);
+    argv.appendAssumeCapacity("--housekeeping");
+    argv.appendSliceAssumeCapacity(args);
+    return execute(ctx, allocator, argv.items);
 }
