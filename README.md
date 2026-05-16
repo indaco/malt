@@ -1,8 +1,8 @@
 # malt
 
-**A fast, drop-in Homebrew alternative for macOS. Warm installs in milliseconds. `post_install` scripts that actually run.**
+**A fast, drop-in Homebrew alternative for macOS. Warm installs in milliseconds. `post_install` scripts that actually run. Goes wider than `install` and `uninstall`.**
 
-Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosystem; installs to its own prefix; ~3 MB single binary; ~3 ms cold start. Designed by a human and implemented by AI.
+Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosystem; installs to its own prefix; ~3 MB single binary; ~3 ms cold start. `mt services` with `logs --follow`, `mt bundle` with full Brewfile parity, `mt doctor --fix`, `mt purge` with composable scopes, `mt backup`/`restore`, `mt uses` for reverse dependencies. Designed by a human and implemented by AI.
 
 ![macOS only](https://img.shields.io/badge/platform-macOS-blue)
 ![Version](https://img.shields.io/github/v/tag/indaco/malt?label=version&sort=semver&color=4c1)
@@ -36,37 +36,27 @@ Three observations shape malt.
 
 **`post_install` is where most alternative Homebrew clients quietly give up.** A surprising number of formulas don't really finish installing the moment their files hit disk. They ship a `post_install` block - symlinks, man pages, config files, service registration - that the binary expects to find at runtime. Skip it and the package extracts fine but isn't actually usable. Other clients tend to either skip these scripts entirely or pattern-match a handful of well-known cases. malt ships a built-in Zig interpreter for the Ruby subset these blocks use, so packages like `node`, `openssl`, `fontconfig`, and `docbook` are fully configured by the time the install returns. Coverage isn't 100% - when the interpreter hits something it doesn't support, `--use-system-ruby` delegates to a sandboxed Ruby subprocess, and the absence of either path is _reported_, not silently ignored.
 
-**Cold installs happen once. Warm installs happen forever.** The first `brew install ffmpeg` on a fresh checkout is a one-time cost. Every reinstall, upgrade, devbox/nix-style rebuild, and CI cache restore after it is a _warm_ install against an existing store. Over a developer's working life the ratio is roughly 1 cold to 10+ warm - so the warm row is where the minutes actually compound. malt is fast on both axes, but the warm gap is the one that shows up in daily use: `tree` (0 deps) in **12 ms**, `wget` (6 deps) in **7 ms**, `ffmpeg` (11 deps) in **24 ms**. Most warm installs finish before you've finished reading the output line.
+**Cold installs happen once. Warm installs happen forever.** The first `brew install ffmpeg` on a fresh checkout is a one-time cost. Every reinstall, upgrade, devbox/nix-style rebuild, and CI cache restore after it is a _warm_ install against an existing store. Over a developer's working life the ratio is roughly 1 cold to 10+ warm - so the warm row is where the minutes actually compound. malt is fast on both axes, but the warm gap is the one that shows up in daily use: `tree` (0 deps) in **8 ms**, `wget` (6 deps) in **11 ms**, `ffmpeg` (11 deps) in **31 ms**. Most warm installs finish before you've finished reading the output line.
 
 **A package manager is also a piece of infrastructure on your machine.** It runs as your user, writes to a privileged-ish prefix, downloads code from the internet, and patches Mach-O headers. It deserves the posture of any other root-adjacent tool: streaming SHA256 before extraction, atomic installs with full rollback on failure, an advisory lock against concurrent mutations, sandboxed subprocesses for the opt-in Ruby path, and cosign-verified releases pinned to their build workflow. malt's binary is ~3 MB and starts in ~3 ms. None of the safety properties are paid for in startup time.
 
 malt installs to `/opt/malt`, never touches Homebrew's files, reads existing `Brewfile`s without conversion, and transparently delegates anything it doesn't implement to `brew` if it's installed. It is a client for the Homebrew registry, not a fork.
 
-## How malt is built
-
-malt is a study in human-directed AI implementation. The design, architecture, threat model, and every merged change were directed and reviewed by a human. The implementation - every commit of Zig - was produced by AI ([Claude Code](https://claude.ai/code) and [ruflo](https://github.com/ruvnet/ruflo)).
-
-The fragile thing about AI-generated code isn't the first commit - it's the tenth. malt has been refactored end-to-end more than once: the install protocol, the post_install interpreter, the Mach-O patcher. Every round was steered by design notes, ADRs, and security review the model wouldn't have written on its own. malt has a SQLite schema with referential integrity, a 9-step install protocol with a global advisory lock, a streaming download pipeline that hashes and decompresses concurrently, a Mach-O parser that rewrites load commands and re-codesigns on arm64, and a sandboxed interpreter for a subset of Ruby. The benchmarks below say what it does on those parts. The repository, the test suite, and the running tool are the evidence on offer.
+The implementation is a study in human-directed AI: design, architecture, and every merged change reviewed by a human; every commit of Zig produced by AI ([Claude Code](https://claude.ai/code) and [ruflo](https://github.com/ruvnet/ruflo)). The fragile thing about AI-generated code isn't the first commit - it's the tenth. malt has been refactored end-to-end more than once - install protocol, `post_install` interpreter, Mach-O patcher - each round steered by ADRs and security review the model wouldn't have written on its own. The repository, the test suite, and the running tool are the evidence on offer.
 
 ## Features
 
 If you're scanning rather than reading, here is the surface area in one place.
 
-- **Drop-in for Homebrew workflows** - installs formulas, casks, tap formulas, and inline tap shortcuts (`user/tap/formula`); reads existing `Brewfile`s with no conversion; `mt shellenv` is a drop-in for `eval "$(brew shellenv)"`; `mt services` is a drop-in for `brew services`.
-- **Native `post_install` execution** - a built-in Zig interpreter runs Homebrew `post_install` scripts natively, so packages actually work after install.
-- **System Ruby fallback** - `--use-system-ruby` (per-formula by design) delegates to any installed Ruby for the handful of scripts the interpreter doesn't cover.
-- **Isolated prefix** - installs to `/opt/malt`, never touches Homebrew's files; both managers can coexist on the same machine.
-- **Content-addressable, deduplicated store** - bottles indexed by SHA256; the same bottle is never downloaded or extracted twice across versions or kegs.
-- **Parallel downloads** - multiple packages fetch simultaneously under one lock.
-- **Brew fallback** - anything malt doesn't implement is silently delegated to `brew` if installed.
-- **Atomic upgrades + instant rollback** - new version verified before old is touched; `mt rollback` reverts from the store with no re-download.
-- **Ephemeral run** - `mt run <pkg> -- <args...>` launches a binary without a permanent install; `--keep` caches the bottle for next time.
-- **Background services** - `mt services` manages launchd processes (`bootstrap`, `bootout`, `status`, `logs --tail/-f`).
-- **Bundles + plain-text backups** - `mt bundle` for Brewfile/Maltfile workflows, `mt backup` / `mt restore` for hand-editable manifests.
-- **Polished output** - readable by default; `--json` everywhere it makes sense; `NO_COLOR`, `MALT_NO_EMOJI`, `MALT_THEME` for shaping output.
-- **Path-sandboxed `post_install`** - every mutating filesystem op in the interpreter is validated against the formula's Cellar and the malt prefix.
-- **Safe under concurrency** - a 30 s advisory file lock prevents concurrent mutations; read-only commands don't acquire it.
-- **Signed, verifiable releases** - every release is cosign-signed keyless via GitHub OIDC; `install.sh` and `mt version update` verify the signature before trusting the SHA256 checksum.
+- **Drop-in for Homebrew workflows.** Installs formulas, casks, tap formulas, and `user/tap/formula` shortcuts; reads existing `Brewfile`s with no conversion; `mt shellenv` is a drop-in for `eval "$(brew shellenv)"`; `mt services` is a drop-in for `brew services`. Installs to `/opt/malt`, never touches Homebrew's files. Anything malt doesn't implement is silently delegated to `brew` if installed.
+- **Native `post_install`.** A built-in Zig interpreter runs Homebrew `post_install` scripts natively - `node`, `openssl`, `fontconfig`, `docbook` are fully configured by the time the install returns. When the interpreter hits an unsupported construct, `--use-system-ruby` (per-formula by design) delegates to a sandboxed Ruby subprocess; the absence of either path is _reported_, not silently ignored.
+- **Content-addressable store.** Bottles indexed by SHA256; the same bottle is never downloaded or extracted twice. Kegs in `Cellar/` are APFS `clonefile()` copies. Reinstalls and rollbacks cost no bytes and no network.
+- **Atomic install protocol.** New versions verified before old versions are touched; `mt rollback --to <version>` reverts from the store with no re-download. Streaming SHA256 + parallel downloads + a 30 s advisory file lock against concurrent mutations.
+- **Ephemeral run.** `mt run <pkg> -- <args...>` extracts and `execvp`s without a permanent install; `--keep` caches the bottle for next time.
+- **Full operational surface.** `mt services` with `status` and `logs --tail/--follow`. `mt bundle` reading both `Brewfile` and `Maltfile.json`. `mt doctor --fix` with a planner and a manual-only set. `mt purge` with composable scopes (`--cache`, `--unused-deps`, `--store-orphans`, `--old-versions`, `--wipe`) and typed-confirmation gates. `mt backup`/`mt restore` for hand-editable manifests. `mt migrate` that relocates a Homebrew install rather than inventorying it. `mt uses` for reverse-dependency queries via SQL.
+- **Scriptable.** `--json` and `--output-format=ndjson` everywhere it makes sense; orthogonal flags. `--quiet`, `--verbose`, `--debug`, `--dry-run` are global. `NO_COLOR`, `MALT_NO_EMOJI`, `MALT_THEME` for shaping output.
+- **Signed, verifiable releases.** Every release is cosign-signed keyless via GitHub OIDC; `install.sh` and `mt version update` verify the signature before trusting the SHA256 checksum. Tap commits are pinned and formula source is SHA256-verified against an embedded manifest. Advance a pin with `mt tap --refresh user/repo`.
+- **Sandboxed `post_install`.** The `--use-system-ruby` path runs inside a `sandbox-exec` profile scoped to the formula's cellar, with a scrubbed environment and `RLIMIT_CPU`/`AS`/`FSIZE` caps. Every mutating op in the native interpreter is validated against the Cellar/malt prefix.
 
 > [!NOTE]
 > **Compatibility note.** "Drop-in" covers the directives a typical `Brewfile` uses - `tap`, `brew`, `cask`, `mas`, and `vscode` (the last two round-trip through the parser but are not yet installed by malt) - plus hash options and Ruby symbols. It does _not_ cover Ruby `do … end` blocks or conditionals like `if OS.mac?`. Both raise a clear error; the conditional error points to `Maltfile.json` for the power-user case. macOS only - Linux and Windows are out of scope.
@@ -148,12 +138,15 @@ Install Homebrew: https://brew.sh
 The correctness story rests on a few load-bearing properties:
 
 - **SHA256 verification.** Streaming hash computed during download, verified before extraction. No unverified data touches the store.
+- **Tar entry pre-scan.** Every entry's name **and symlink target** are validated before any byte is written; the 512-byte tar header is checksum-verified per entry; hardlinks are applied via `linkat(..., 0)`, which refuses to follow a symlink. A hostile tarball cannot land a hardlink inside the keg via a symlink to `/etc/passwd`.
 - **Pre-flight checks.** Dependencies resolved, disk space verified, link conflicts detected before any download begins.
 - **Atomic installs.** The 9-step protocol uses `errdefer` at every stage. Interrupted installs leave no partial state.
 - **Concurrent access.** A 30-second-timeout advisory file lock prevents concurrent mutations. Read-only commands don't acquire it.
 - **Upgrade rollback.** New version is fully installed and verified before the old version is touched.
 - **Store immutability.** Store entries are never modified after commit. Patching happens on the Cellar clone.
+- **Mach-O parser hardening.** Section offsets and string-table indices are validated against the slice using overflow-checked arithmetic, so a bottle with crafted load commands can't wrap an integer into a bounds-bypass.
 - **DSL path sandboxing.** Every mutating operation in the post_install interpreter is validated against the Cellar/malt prefix; `..` and symlink-escape paths are rejected.
+- **DSL `system` is argv-only.** The interpreter's `system` builtin spawns with an argv slice and pins the executable - never `/bin/sh -c`, never PATH-resolved. A formula that writes `system "rm", arg` cannot reach the parent shell.
 
 The supply-chain story:
 
@@ -163,7 +156,7 @@ The supply-chain story:
 - **Boundary validation.** `MALT_PREFIX`, launchd service declarations, install-script checksums, and HTTP redirects fail-closed on malformed or suspicious input - no silent HTTPS→HTTP downgrades, no `/bin/sh` in service argv, no `..` in prefix paths.
 - **Posture visibility.** `mt doctor` flags world- or group-writable paths and unexpected ownership under `/opt/malt`, so multi-user machines see their attack surface at a glance.
 
-## Local formulas: the trust boundary
+### Local formulas: the trust boundary
 
 `mt install --local ./formula.rb` deserves its own paragraph because it is a code-execution surface in a way the rest of malt isn't. The `.rb` file names the archive URL and SHA256 of what ends up on your system - installing one trusts that file. Use it for your own formulas, for experimenting with upstream changes before they land in a tap, or for private in-house packages. Do not use it for a `.rb` you did not read.
 
@@ -613,18 +606,6 @@ For installing malt from a local checkout (the end-user path), see [From source]
 
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
-<!-- BENCH:SIZE:START -->
-
-### Binary Size
-
-| Tool     | Size   |
-| -------- | ------ |
-| **malt** | 3.4 MB |
-| nanobrew | 2.6 MB |
-| zerobrew | 8.6 MB |
-
-<!-- BENCH:SIZE:END -->
-
 <!-- BENCH:COLD:START -->
 
 ### Cold Install (median ±σ)
@@ -649,18 +630,31 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 <!-- BENCH:WARM:END -->
 
+<!-- BENCH:SIZE:START -->
+
+### Binary Size
+
+| Tool     | Size   |
+| -------- | ------ |
+| **malt** | 3.4 MB |
+| nanobrew | 2.6 MB |
+| zerobrew | 8.6 MB |
+
+<!-- BENCH:SIZE:END -->
+
 Apple Silicon (GitHub Actions macos-14), 2026-05-11. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
 
 ### What's in the 3 MB
 
-malt is a few hundred kilobytes heavier than the lightest Homebrew alternative on the table, and on cold installs that mass shows up as a few hundred milliseconds of extra work. Both costs are deliberate. They pay for engineering that lighter clients leave out:
+The ~3 MB is five subsystems and the glue between them:
 
-- **A real database (~1.5 MB of the 3 MB binary).** SQLite gives malt ACID writes, reverse-dependency queries (`mt uses openssl@3`), linker-conflict detection before any symlink is created, and atomic rollback after a failed upgrade. A flat JSON state file is smaller; it also can't survive an interrupted write.
-- **A native `post_install` interpreter.** Running a Ruby subset in Zig means `node`, `openssl`, `fontconfig`, `docbook`, and the rest of the formulas that ship `post_install` blocks are actually configured by the time the install returns - no Ruby subprocess required. Without this, those packages extract fine but aren't usable.
-- **Mach-O patching with arm64 ad-hoc codesign (~15 ms/pkg).** Every binary patched to rewrite `/opt/homebrew` → `MALT_PREFIX` is re-signed so `dyld` will load it. Skip this and the binaries fail to launch on modern macOS.
-- **Global install lock + pre-link conflict check (~3 ms).** `flock` on `db/malt.lock` plus a symlink-tree walk that refuses to overwrite another keg's files. This is what keeps two concurrent malt invocations - or an Ctrl-C'd install - from corrupting state.
+- **SQLite (~1.5 MB).** ACID writes, reverse-dependency queries (`mt uses openssl@3`), linker-conflict detection before any symlink is created, atomic rollback after a failed upgrade. Survives `kill -9` mid-write.
+- **The native `post_install` interpreter.** A Ruby-subset interpreter in Zig - lexer, parser, AST, builtins for `String` and `Pathname`. Under 80 KB; only activates for formulas that define `post_install`. Packages like `node`, `openssl`, `fontconfig`, and `docbook` are fully configured by the time the install returns.
+- **Mach-O patching with arm64 ad-hoc codesign (~15 ms/pkg).** Every binary patched to rewrite `/opt/homebrew` → `MALT_PREFIX` is re-signed so `dyld` will load it on modern macOS.
+- **The install lock (~3 ms).** `flock` on `db/malt.lock` plus a symlink-tree walk that refuses to overwrite another keg's files, acquired by every mutating command. Two concurrent malt invocations - or a Ctrl-C'd install - cannot corrupt state.
+- **The `sandbox-exec` profile.** The opt-in `--use-system-ruby` path runs every formula script inside a deny-default sandbox with a scrubbed environment, `RLIMIT_CPU`/`AS`/`FSIZE` caps, and terminal-escape filtering on child output.
 
-On the warm row, where the cost of these features is amortized to near zero, malt is at the fast end of the comparison set: every warm install in the table finishes in under 25 ms, with `wget` at 7 ms and `tree` within a millisecond of the lightest peer.
+On the warm row above, these subsystems run in negligible time: 8 ms for `tree`, 11 ms for `wget`, 31 ms for `ffmpeg`.
 
 ### Methodology
 
@@ -677,8 +671,6 @@ Each package bench opens with a discarded warmup round - every tool runs one ins
 Each tool is built using the release flags its upstream ships with: malt `ReleaseSafe` (matches [`.goreleaser.yaml`](.goreleaser.yaml)), nanobrew `ReleaseFast`, zerobrew `cargo build --release`. Binary sizes may differ from the numbers shown on each tool's own repo - the gap is almost always version drift, not a flag difference.
 
 To reproduce locally, `./scripts/local-bench.sh` runs the four CI phases (tree, wget, ffmpeg, stress-test) in order. Add `--clean` to wipe `/tmp` bench state afterwards. For iterative work, `scripts/bench.sh <pkg>` directly - `SKIP_BUILD=1` reuses existing binaries; `SKIP_OTHERS=1` / `SKIP_BREW=1` skip peer comparisons.
-
-bru previously appeared in this table but was dropped: upstream pins Zig 0.15.2 and relies on `std.heap.ThreadSafeAllocator`, which was removed in Zig 0.16 (what malt and nanobrew now build on). It will be re-added once upstream catches up.
 
 ## Contributing
 
