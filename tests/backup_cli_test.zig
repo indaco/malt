@@ -264,6 +264,196 @@ test "execute -q sets quiet mode without breaking the write" {
 // backup line must carry the `user/repo/token` slug shape that
 // `installTapFormula` resolves. The bare-token form is preserved for
 // core-API casks so backups produced before schema v6 keep working.
+// --- --json dispatch -------------------------------------------------
+//
+// Under `--json` the default path emits to stdout (no default file), so
+// CI pipelines that already use `jq` don't have to clean up a stale
+// `malt-backup-*.txt` after each call. The plain-text path stays
+// unchanged to preserve `mt restore` parity.
+
+fn withJson() bool {
+    const prior = output.isJson();
+    output.setMode(.json);
+    return prior;
+}
+
+fn restoreJson(prior: bool) void {
+    output.setMode(if (prior) .json else .human);
+}
+
+test "execute --json on an empty DB emits `{formulas:[],casks:[]}`" {
+    var s = try Scratch.init(testing.allocator, "json_empty");
+    defer s.deinit(testing.allocator);
+
+    const prior = withJson();
+    defer restoreJson(prior);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
+
+    try testing.expectEqualStrings("{\"formulas\":[],\"casks\":[]}\n", stdout_buf.items);
+}
+
+test "execute --json on a populated DB emits direct formulas + casks with tap" {
+    var s = try Scratch.init(testing.allocator, "json_populated");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+
+    const prior = withJson();
+    defer restoreJson(prior);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
+
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"wget\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"jq\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"firefox\"") != null);
+    // Dep-only row excluded — `mt restore` pulls deps transitively.
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"zlib\"") == null);
+    try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "{\"formulas\":["));
+    try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "]}\n"));
+}
+
+test "execute --json output is a parseable JSON document" {
+    var s = try Scratch.init(testing.allocator, "json_valid_parse");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+
+    const prior = withJson();
+    defer restoreJson(prior);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
+
+    // Hand the captured bytes to the standard JSON parser; anything other
+    // than a clean parse means we shipped malformed output.
+    const trimmed = std.mem.trim(u8, stdout_buf.items, " \t\r\n");
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, trimmed, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    try testing.expect(root.contains("formulas"));
+    try testing.expect(root.contains("casks"));
+    try testing.expectEqual(@as(usize, 2), root.get("formulas").?.array.items.len);
+    try testing.expectEqual(@as(usize, 1), root.get("casks").?.array.items.len);
+}
+
+test "execute --json keeps the cask `tap` field separate (no token qualification)" {
+    var s = try Scratch.init(testing.allocator, "json_tap");
+    defer s.deinit(testing.allocator);
+    try seedTapCask(s.path);
+
+    const prior = withJson();
+    defer restoreJson(prior);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
+
+    // Bare token + separate `tap` field — consumers re-qualify themselves.
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"flux-markdown\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"tap\":\"xykong/tap\"") != null);
+    // The slash-qualified shape belongs to plain-text only — must not leak in.
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "xykong/tap/flux-markdown") == null);
+    // Core-API cask: empty `tap` field.
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"firefox\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"firefox\",\"version\":\"120.0\",\"tap\":\"\"") != null);
+}
+
+test "execute --json --versions is a no-op (version is already a field, not a suffix)" {
+    var s = try Scratch.init(testing.allocator, "json_versions");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+
+    const prior = withJson();
+    defer restoreJson(prior);
+
+    var with_buf: std.ArrayList(u8) = .empty;
+    defer with_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &with_buf);
+    quiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--versions"});
+    output.endStdoutCapture();
+
+    var without_buf: std.ArrayList(u8) = .empty;
+    defer without_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &without_buf);
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
+    output.endStdoutCapture();
+    unquiet();
+
+    try testing.expectEqualStrings(with_buf.items, without_buf.items);
+    // No `name@version` suffix may bleed in from the plain-text writer.
+    try testing.expect(std.mem.indexOf(u8, with_buf.items, "wget@") == null);
+    try testing.expect(std.mem.indexOf(u8, with_buf.items, "firefox@") == null);
+}
+
+test "execute --json --output - emits to stdout instead of a default file" {
+    var s = try Scratch.init(testing.allocator, "json_stdout");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+
+    const prior = withJson();
+    defer restoreJson(prior);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", "-" });
+
+    try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "{\"formulas\":["));
+    try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "]}\n"));
+}
+
+test "execute --json with --output <path> writes JSON to the file" {
+    var s = try Scratch.init(testing.allocator, "json_to_path");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.json", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    const prior = withJson();
+    defer restoreJson(prior);
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", out_path });
+
+    const body = try readAll(testing.allocator, out_path);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.startsWith(u8, body, "{\"formulas\":["));
+    try testing.expect(std.mem.endsWith(u8, body, "]}\n"));
+    try testing.expect(std.mem.indexOf(u8, body, "\"name\":\"wget\"") != null);
+}
+
 fn seedTapCask(prefix: []const u8) !void {
     var db_path_buf: [512]u8 = undefined;
     const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);

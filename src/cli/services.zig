@@ -14,6 +14,35 @@ pub const ServicesError = error{
     SupervisorError,
 };
 
+/// One row in the `--json` listing; mirrors what the human path already
+/// renders (`name`, runtime state, auto-start hint, owning keg). Kept
+/// `pub` so tests can pin the exact bytes without staging a DB.
+pub const JsonRow = struct {
+    name: []const u8,
+    state: []const u8,
+    auto_start: bool,
+    keg_name: []const u8,
+};
+
+/// Emit `[{name,state,auto_start,keg_name},...]\n` for
+/// `mt services list --json` and `mt services status <name> --json`.
+pub fn writeServicesJson(w: *std.Io.Writer, rows: []const JsonRow) !void {
+    try w.writeAll("[");
+    for (rows, 0..) |row, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try output.jsonStr(w, row.name);
+        try w.writeAll(",\"state\":");
+        try output.jsonStr(w, row.state);
+        try w.writeAll(",\"auto_start\":");
+        try w.writeAll(if (row.auto_start) "true" else "false");
+        try w.writeAll(",\"keg_name\":");
+        try output.jsonStr(w, row.keg_name);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]\n");
+}
+
 pub fn describeError(err: ServicesError) []const u8 {
     return switch (err) {
         ServicesError.InvalidArgs => "invalid argument to `services`",
@@ -84,6 +113,9 @@ fn cmdOne(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, rest: 
 fn cmdList(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database) !void {
     const items = try supervisor.list(.{ .allocator = allocator, .io = io, .db = db });
     defer supervisor.freeServiceInfos(allocator, items);
+
+    if (output.isJson()) return emitJson(io, allocator, items);
+
     if (items.len == 0) {
         output.info("no services registered", .{});
         return;
@@ -107,8 +139,40 @@ fn cmdStatus(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, res
         output.err("no such service: {s}", .{name});
         return ServicesError.SupervisorError;
     }
+    if (output.isJson()) {
+        // Reuse `supervisor.list` filtered down to `name`, so the JSON shape
+        // matches `list --json` (single-element array, identical fields).
+        const items = try supervisor.list(.{ .allocator = allocator, .io = io, .db = db });
+        defer supervisor.freeServiceInfos(allocator, items);
+        var picked: std.ArrayList(supervisor.ServiceInfo) = .empty;
+        defer picked.deinit(allocator);
+        for (items) |s| if (std.mem.eql(u8, s.name, name)) try picked.append(allocator, s);
+        return emitJson(io, allocator, picked.items);
+    }
     const runtime = supervisor.queryRuntime(io, allocator, name);
     output.info("service {s}: {s}", .{ name, supervisor.runtimeStateName(runtime) });
+}
+
+/// Render the supervisor's list of services as `--json`. Runtime state
+/// is probed per row; `queryRuntime` returns `.not_loaded` on launchctl
+/// errors so the field is always a textual tag, never a numeric code.
+fn emitJson(io: std.Io, allocator: std.mem.Allocator, items: []const supervisor.ServiceInfo) !void {
+    var rows: std.ArrayList(JsonRow) = .empty;
+    defer rows.deinit(allocator);
+    try rows.ensureTotalCapacityPrecise(allocator, items.len);
+    for (items) |s| {
+        const state = supervisor.runtimeStateName(supervisor.queryRuntime(io, allocator, s.name));
+        rows.appendAssumeCapacity(.{
+            .name = s.name,
+            .state = state,
+            .auto_start = s.auto_start,
+            .keg_name = s.keg_name,
+        });
+    }
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeServicesJson(&aw.writer, rows.items);
+    output.writeStdoutAll(aw.written());
 }
 
 fn cmdLogs(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
@@ -158,6 +222,30 @@ fn openDb(ctx: *const AppCtx) !sqlite.Database {
     const path = std.fmt.bufPrintSentinel(&path_buf, "{s}/malt.db", .{db_dir}, 0) catch
         return ServicesError.DatabaseError;
     return sqlite.Database.open(path);
+}
+
+test "writeServicesJson: empty input emits `[]\\n`" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeServicesJson(&aw.writer, &.{});
+    try std.testing.expectEqualStrings("[]\n", aw.written());
+}
+
+test "writeServicesJson: emits name, state, auto_start, keg_name per row" {
+    const rows = [_]JsonRow{
+        .{ .name = "redis", .state = "running", .auto_start = true, .keg_name = "redis" },
+        .{ .name = "postgres", .state = "not-loaded", .auto_start = false, .keg_name = "postgresql@16" },
+    };
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeServicesJson(&aw.writer, &rows);
+    try std.testing.expectEqualStrings(
+        "[" ++
+            "{\"name\":\"redis\",\"state\":\"running\",\"auto_start\":true,\"keg_name\":\"redis\"}," ++
+            "{\"name\":\"postgres\",\"state\":\"not-loaded\",\"auto_start\":false,\"keg_name\":\"postgresql@16\"}" ++
+            "]\n",
+        aw.written(),
+    );
 }
 
 fn printHelp(ctx: *const AppCtx) !void {
