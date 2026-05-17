@@ -733,40 +733,17 @@ fn executeWithOpts(
         return;
     }
 
-    // `--force` semantics: re-materialize on top of an existing keg.
-    // The cellar's clonefile/copy refuses to overwrite a populated dir,
-    // so wipe each target Cellar dir up front. Pin survives because the
-    // DB row is rewritten via INSERT OR REPLACE with COALESCE-MAX
-    // inheritance on `pinned`.
-    //
-    // When the resolver picks a new revision (10.47 → 10.47_1) the
-    // prior keg has its own row in `kegs` and its own dir under
-    // `Cellar/<name>/`; both must go or doctor flips between
-    // "Mach-O placeholders" (disk orphan) and "Missing kegs" (DB
-    // orphan pointing at the swept dir). The DB-driven cleanup also
-    // unlinks the prior keg's symlinks via the linker.
-    //
-    // Failure-mode tradeoff: clearing the prior state before
-    // materialize means a materialize crash leaves the user keg-
-    // less. The same risk already existed for same-version `--force`
-    // via the cellar wipe; we're extending it to revision-bump
-    // `--force`. Recovery is a retry; for the bug this fix targets
-    // (orphan after prior failed force) the user is already broken,
-    // so a retry is the worst case.
+    // `--force` pre-materialize: the cellar's clonefile/copy refuses
+    // to overwrite a populated dir, so wipe the resolved-version dir
+    // up front. The destructive part of the cleanup — dropping stale
+    // DB rows, unlinking prior symlinks, sweeping orphan dirs — is
+    // deferred to the serial link phase below so a materialize crash
+    // leaves the user's prior keg + row intact for the revision-bump
+    // case. Pin survives because INSERT OR REPLACE in `recordKeg`
+    // inherits via COALESCE-MAX on `pinned` by name.
     if (force) {
         for (all_jobs.items) |job| {
-            var keep_path_buf: [512]u8 = undefined;
-            const keep_path = std.fmt.bufPrint(
-                &keep_path_buf,
-                "{s}/Cellar/{s}/{s}",
-                .{ prefix, job.name, job.version_str },
-            ) catch {
-                pruneCellarForReinstall(ctx, prefix, job.name, job.version_str);
-                continue;
-            };
             pruneCellarForReinstall(ctx, prefix, job.name, job.version_str);
-            unlinkAndDeleteStaleKegRows(ctx, allocator, &db, &linker, job.name, keep_path);
-            pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, job.name, job.version_str);
         }
     }
 
@@ -857,6 +834,17 @@ fn executeWithOpts(
             try failed_kegs.put(job.name, {});
             failed_count += 1;
             continue;
+        }
+
+        // `--force` post-materialize: at this point the new keg dir
+        // exists at mats[i].kegPath(); the destructive cleanup of
+        // prior state is safe to run. Skipping this on materialize
+        // failure (handled by the earlier `continue`s) is what
+        // preserves the user's working keg when a force-reinstall
+        // can't reach the network.
+        if (force) {
+            unlinkAndDeleteStaleKegRows(ctx, allocator, &db, &linker, job.name, mats[i].kegPath());
+            pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, job.name, job.version_str);
         }
 
         linkAndRecord(ctx.io, allocator, job, mats[i].kegPath(), &db, &linker, prefix, &formula_cache) catch {
