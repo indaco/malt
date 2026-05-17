@@ -340,3 +340,164 @@ test "export --format json with no installed packages emits a JSON body" {
 
     try bundle.execute(&ctx, testing.allocator, &.{ "export", "--format", "json" });
 }
+
+// --- round-trip: taps + services in `bundle create` -------------------
+//
+// `bundle export → bundle install` previously dropped taps and auto-
+// start services silently. These pin the population path in
+// `populateFromInstalled`. `create` writes the manifest to a file we
+// can read back; `export` shares the same helper.
+
+fn seedTapsAndServices(prefix: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url)
+        \\VALUES ('homebrew/cask-fonts', 'https://github.com/Homebrew/homebrew-cask-fonts'),
+        \\       ('xykong/tap',          'https://github.com/xykong/homebrew-tap');
+    );
+    try db.exec(
+        \\INSERT INTO services (name, keg_name, plist_path, auto_start, last_status)
+        \\VALUES ('postgresql@16', 'postgresql@16', '/tmp/p.plist', 1, 'running'),
+        \\       ('redis',         'redis',         '/tmp/r.plist', 0, 'stopped');
+    );
+}
+
+test "bundle create --format json emits registered taps in the manifest" {
+    var s = try Scratch.init(testing.allocator, "create_taps");
+    defer s.deinit(testing.allocator);
+    try seedTapsAndServices(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", "--format", "json", out_path });
+
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, out_path, .{});
+    defer f.close(std.Options.debug_io);
+    const stat = try f.stat(std.Options.debug_io);
+    const body = try testing.allocator.alloc(u8, stat.size);
+    defer testing.allocator.free(body);
+    _ = try f.readPositionalAll(std.Options.debug_io, body, 0);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{});
+    defer parsed.deinit();
+    const taps = parsed.value.object.get("taps") orelse return error.MissingTaps;
+    try testing.expectEqual(@as(usize, 2), taps.array.items.len);
+    try testing.expectEqualStrings("homebrew/cask-fonts", taps.array.items[0].string);
+    try testing.expectEqualStrings("xykong/tap", taps.array.items[1].string);
+}
+
+test "bundle create --format json --services emits auto_start services only" {
+    var s = try Scratch.init(testing.allocator, "create_services");
+    defer s.deinit(testing.allocator);
+    try seedTapsAndServices(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", "--format", "json", "--services", out_path });
+
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, out_path, .{});
+    defer f.close(std.Options.debug_io);
+    const stat = try f.stat(std.Options.debug_io);
+    const body = try testing.allocator.alloc(u8, stat.size);
+    defer testing.allocator.free(body);
+    _ = try f.readPositionalAll(std.Options.debug_io, body, 0);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{});
+    defer parsed.deinit();
+    const services = parsed.value.object.get("services") orelse return error.MissingServices;
+    try testing.expectEqual(@as(usize, 1), services.array.items.len);
+    const svc = services.array.items[0].object;
+    try testing.expectEqualStrings("postgresql@16", svc.get("name").?.string);
+    try testing.expect(svc.get("auto_start").?.bool);
+}
+
+test "bundle create --format json without --services omits services" {
+    var s = try Scratch.init(testing.allocator, "create_no_services");
+    defer s.deinit(testing.allocator);
+    try seedTapsAndServices(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", "--format", "json", out_path });
+
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, out_path, .{});
+    defer f.close(std.Options.debug_io);
+    const stat = try f.stat(std.Options.debug_io);
+    const body = try testing.allocator.alloc(u8, stat.size);
+    defer testing.allocator.free(body);
+    _ = try f.readPositionalAll(std.Options.debug_io, body, 0);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("services") == null);
+}
+
+test "bundle create --format brewfile --services accepts the flag but emits no service line" {
+    // Brewfile grammar has no `service` directive; the help text says
+    // services are JSON-only. Pin that the flag is accepted (no
+    // InvalidArgs) and silently drops services from the textual output.
+    var s = try Scratch.init(testing.allocator, "create_brewfile_services");
+    defer s.deinit(testing.allocator);
+    try seedTapsAndServices(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Brewfile", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", "--format", "brewfile", "--services", out_path });
+
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, out_path, .{});
+    defer f.close(std.Options.debug_io);
+    const stat = try f.stat(std.Options.debug_io);
+    const body = try testing.allocator.alloc(u8, stat.size);
+    defer testing.allocator.free(body);
+    _ = try f.readPositionalAll(std.Options.debug_io, body, 0);
+
+    // Taps still land (Brewfile grammar has `tap`); services do not.
+    try testing.expect(std.mem.indexOf(u8, body, "tap \"homebrew/cask-fonts\"") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "postgresql@16") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "service ") == null);
+}
+
+test "bundle create round-trip: emitted JSON re-parses with taps preserved" {
+    var s = try Scratch.init(testing.allocator, "create_roundtrip");
+    defer s.deinit(testing.allocator);
+    try seedTapsAndServices(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/Maltfile.json", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", "--format", "json", "--services", out_path });
+
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, out_path, .{});
+    defer f.close(std.Options.debug_io);
+    const stat = try f.stat(std.Options.debug_io);
+    const body = try testing.allocator.alloc(u8, stat.size);
+    defer testing.allocator.free(body);
+    _ = try f.readPositionalAll(std.Options.debug_io, body, 0);
+
+    var m = try malt.bundle_manifest.parseJson(testing.allocator, body);
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 2), m.taps.len);
+    try testing.expectEqualStrings("homebrew/cask-fonts", m.taps[0]);
+    try testing.expectEqual(@as(usize, 1), m.services.len);
+    try testing.expectEqualStrings("postgresql@16", m.services[0].name);
+    try testing.expect(m.services[0].auto_start);
+}

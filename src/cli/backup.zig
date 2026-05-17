@@ -44,6 +44,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     var output_path: ?[]const u8 = null;
     var include_versions = false;
+    var include_services = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -59,6 +60,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output_path = arg["--output=".len..];
         } else if (std.mem.eql(u8, arg, "--versions")) {
             include_versions = true;
+        } else if (std.mem.eql(u8, arg, "--services")) {
+            // Honoured by the JSON writer below; plain-text has no service line.
+            include_services = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             output.setQuiet(true);
         } else {
@@ -86,7 +90,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer aw.deinit();
     const w = &aw.writer;
 
-    if (output.isJson()) return executeJson(ctx, allocator, &db, output_path);
+    if (output.isJson()) return executeJson(ctx, allocator, &db, output_path, include_services);
 
     try writeHeader(w);
     var count: usize = 0;
@@ -174,6 +178,7 @@ fn executeJson(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     output_path: ?[]const u8,
+    include_services: bool,
 ) Error!void {
     // Arena owns every per-row dupe — one `deinit` reclaims them all and
     // keeps the gather loop free of per-field errdefer plumbing.
@@ -183,6 +188,7 @@ fn executeJson(
 
     var formulas: std.ArrayList(JsonFormula) = .empty;
     var casks: std.ArrayList(JsonCask) = .empty;
+    var services: std.ArrayList(JsonService) = .empty;
 
     var fstmt = db.prepare(
         "SELECT name, version FROM kegs " ++
@@ -219,9 +225,24 @@ fn executeJson(
         }
     }
 
+    if (include_services) {
+        var sstmt = db.prepare("SELECT name FROM services WHERE auto_start = 1 ORDER BY name;") catch null;
+        if (sstmt) |*st| {
+            defer st.finalize();
+            while (st.step() catch false) {
+                const name_ptr = st.columnText(0) orelse continue;
+                const name = a.dupe(u8, std.mem.sliceTo(name_ptr, 0)) catch return Error.WriteFailed;
+                services.append(a, .{ .name = name, .auto_start = true }) catch
+                    return Error.WriteFailed;
+            }
+        }
+    }
+
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    writeBackupJson(&aw.writer, formulas.items, casks.items) catch return Error.WriteFailed;
+    const services_opt: ?[]const JsonService = if (include_services) services.items else null;
+    writeBackupJson(&aw.writer, formulas.items, casks.items, services_opt) catch
+        return Error.WriteFailed;
     const bytes = aw.written();
 
     if (output_path) |p| {
@@ -281,12 +302,23 @@ pub const JsonCask = struct {
     tap: []const u8,
 };
 
+/// Plain-data view of one service row for the `--json` writer. Only
+/// emitted when `--services` is passed; consumers reproduce auto-start
+/// state on restore.
+pub const JsonService = struct {
+    name: []const u8,
+    auto_start: bool,
+};
+
 /// Emit `{ "formulas":[...], "casks":[...] }\n` for `mt backup --json`.
-/// Both arrays are always present so consumers don't branch on absence.
+/// `formulas` and `casks` are always present so consumers don't branch
+/// on absence; `services` is added only when the caller opts in, which
+/// keeps default payloads byte-identical to pre-`--services` malt.
 pub fn writeBackupJson(
     w: *std.Io.Writer,
     formulas: []const JsonFormula,
     casks: []const JsonCask,
+    services: ?[]const JsonService,
 ) !void {
     try w.writeAll("{\"formulas\":[");
     for (formulas, 0..) |f, i| {
@@ -308,7 +340,20 @@ pub fn writeBackupJson(
         try output.jsonStr(w, c.tap);
         try w.writeAll("}");
     }
-    try w.writeAll("]}\n");
+    try w.writeAll("]");
+    if (services) |list| {
+        try w.writeAll(",\"services\":[");
+        for (list, 0..) |sv, i| {
+            if (i != 0) try w.writeAll(",");
+            try w.writeAll("{\"name\":");
+            try output.jsonStr(w, sv.name);
+            try w.writeAll(",\"auto_start\":");
+            try w.writeAll(if (sv.auto_start) "true" else "false");
+            try w.writeAll("}");
+        }
+        try w.writeAll("]");
+    }
+    try w.writeAll("}\n");
 }
 
 /// Write the canonical header block at the top of a backup file.
