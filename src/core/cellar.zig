@@ -201,11 +201,6 @@ pub fn materializeWithCellar(
     };
 }
 
-const Replacement = struct {
-    old: []const u8,
-    new: []const u8,
-};
-
 /// Walk a cellar directory, apply every replacement in `replacements` to
 /// every Mach-O file found, and collect the paths of files that were
 /// actually mutated into `modified_out` so the caller can re-codesign
@@ -229,7 +224,7 @@ fn walkMachOAndPatch(
     io: std.Io,
     allocator: std.mem.Allocator,
     dir_path: []const u8,
-    replacements: []const Replacement,
+    replacements: []const patch.Replacement,
     modified_out: *std.ArrayList([]const u8),
 ) CellarError!void {
     var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
@@ -239,13 +234,6 @@ fn walkMachOAndPatch(
     defer walker.deinit();
 
     const parser_mod = @import("../macho/parser.zig");
-
-    // `cellar.Replacement` is its own type alias; convert once for
-    // the facade's shape.
-    var patch_reps_buf: [8]patch.Replacement = undefined;
-    std.debug.assert(replacements.len <= patch_reps_buf.len);
-    for (replacements, 0..) |r, i| patch_reps_buf[i] = .{ .old = r.old, .new = r.new };
-    const patch_reps = patch_reps_buf[0..replacements.len];
 
     while (walker.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
@@ -269,7 +257,7 @@ fn walkMachOAndPatch(
         // One read/write per file for all replacements. Slots that fit
         // are rewritten in process; slots that overflow are queued for
         // the install_name_tool fallback below.
-        var outcome = patch.patchPathsCollecting(io, allocator, full_path, patch_reps) catch
+        var outcome = patch.patchPathsCollecting(io, allocator, full_path, replacements) catch
             continue;
         defer outcome.deinit(allocator);
 
@@ -323,7 +311,7 @@ fn relocateKegTree(
     const skip_absolute_rewrite = std.mem.eql(u8, cellar_type, ":any") or
         std.mem.eql(u8, cellar_type, ":any_skip_relocation");
 
-    var macho_reps_buf: [4]Replacement = undefined;
+    var macho_reps_buf: [4]patch.Replacement = undefined;
     macho_reps_buf[0] = .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix };
     macho_reps_buf[1] = .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar };
     var macho_reps_len: usize = 2;
