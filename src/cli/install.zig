@@ -219,11 +219,11 @@ fn deleteKegRowOnly(db: *sqlite.Database, keg_id: i64) void {
 /// Wipe every `<prefix>/Cellar/<name>/*` entry except `keep_version`.
 /// Safety net for orphan dirs that have no `kegs` row pointing at
 /// them — legacy installs, crashed runs, manual `mkdir`. The DB-
-/// driven cleanup in `unlinkAndDeleteStaleKegRows` covers the common
-/// "force-reinstall across a revision bump" case; this one catches
-/// the residue. Best-effort otherwise: per-entry errors are
-/// swallowed because the materialize step still covers real
-/// failures.
+/// driven cleanup in `unlinkStaleKegLinks` + `dropStaleKegRows`
+/// covers the common "force-reinstall across a revision bump" case;
+/// this one catches the residue. Best-effort otherwise: per-entry
+/// errors are swallowed because the materialize step still covers
+/// real failures.
 ///
 /// Names are collected before any deletion: POSIX leaves readdir
 /// behavior undefined while entries are being unlinked, and APFS
