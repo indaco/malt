@@ -147,6 +147,37 @@ pub fn unlinkAndDeleteStaleKegRows(
     }
 }
 
+/// Unlink the on-disk symlinks AND drop the `links` rows for any
+/// `kegs` row whose `(name, cellar_path)` matches the keg we are
+/// about to re-install (i.e. same version / revision as the new
+/// resolved keg). The `kegs` row itself is left in place so the
+/// subsequent `recordKeg` INSERT OR REPLACE can inherit the user
+/// pin via COALESCE-MAX on `pinned`.
+///
+/// This closes the `--force` linker-conflict path: without the
+/// pre-link unlink, `linker.checkConflicts` sees the prior install's
+/// symlinks under `<prefix>/{bin,lib,...}` (still pointing at the
+/// freshly re-materialized cellar_path) and aborts with
+/// `Use --force to overwrite, or uninstall the conflicting package
+/// first.` — even though the user already passed `--force`.
+///
+/// Best-effort: per-row errors are swallowed; the next `doctor`
+/// pass surfaces anything we could not reach.
+pub fn unlinkSameVersionKegLinks(
+    linker: *linker_mod.Linker,
+    db: *sqlite.Database,
+    name: []const u8,
+    keep_cellar_path: []const u8,
+) void {
+    var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 AND cellar_path = ?2 LIMIT 1;") catch return;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return;
+    stmt.bindText(2, keep_cellar_path) catch return;
+    if (!(stmt.step() catch false)) return;
+    const keg_id = stmt.columnInt(0);
+    linker.unlink(keg_id) catch {};
+}
+
 fn deleteDependencyRows(db: *sqlite.Database, keg_id: i64) void {
     var stmt = db.prepare("DELETE FROM dependencies WHERE keg_id = ?1;") catch return;
     defer stmt.finalize();
@@ -841,8 +872,12 @@ fn executeWithOpts(
         // prior state is safe to run. Skipping this on materialize
         // failure (handled by the earlier `continue`s) is what
         // preserves the user's working keg when a force-reinstall
-        // can't reach the network.
+        // can't reach the network. The same-version unlink also
+        // clears the linker's would-be checkConflicts trap so the
+        // subsequent `linkAndRecord` proceeds without bouncing on
+        // the prior install's own symlinks.
         if (force) {
+            unlinkSameVersionKegLinks(&linker, &db, job.name, mats[i].kegPath());
             unlinkAndDeleteStaleKegRows(ctx, allocator, &db, &linker, job.name, mats[i].kegPath());
             pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, job.name, job.version_str);
         }

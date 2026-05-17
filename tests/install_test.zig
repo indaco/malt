@@ -1114,6 +1114,92 @@ test "unlinkAndDeleteStaleKegRows tolerates a stale row whose dir is already gon
     try testing.expectEqual(@as(i64, 1), try kegRowCount(&tdb.db, "baz"));
 }
 
+// unlinkSameVersionKegLinks: clear the package's own prior symlinks
+// before linkAndRecord runs. Without this, `linker.checkConflicts`
+// rejects a same-version `--force` reinstall against a keg the user
+// already has installed — the prior bug we shipped to T-044.
+
+test "unlinkSameVersionKegLinks removes symlinks + links rows for the matching keg" {
+    var tdb = try TempDb.init("force_unlink_same_ver");
+    defer tdb.deinit();
+    const prefix = tdb.dir;
+
+    const keg = try seedKegWithBin(prefix, "foo", "1.0", "foo-tool");
+    defer testing.allocator.free(keg);
+
+    const keg_id = try insertKegRow(&tdb.db, "foo", "1.0", 0, keg);
+
+    var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
+    try linker.link(keg, "foo", keg_id);
+
+    var link_buf: [512]u8 = undefined;
+    const link_path = try std.fmt.bufPrint(&link_buf, "{s}/bin/foo-tool", .{prefix});
+    try std.Io.Dir.accessAbsolute(std.Options.debug_io, link_path, .{});
+
+    install.unlinkSameVersionKegLinks(&linker, &tdb.db, "foo", keg);
+
+    // Symlink + links row gone; kegs row preserved so the subsequent
+    // recordKeg INSERT OR REPLACE can inherit any pin via COALESCE.
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.Options.debug_io, link_path, .{}));
+    var links_count_stmt = try tdb.db.prepare("SELECT COUNT(*) FROM links WHERE keg_id = ?1;");
+    defer links_count_stmt.finalize();
+    try links_count_stmt.bindInt(1, keg_id);
+    _ = try links_count_stmt.step();
+    try testing.expectEqual(@as(i64, 0), links_count_stmt.columnInt(0));
+    try testing.expectEqual(@as(i64, 1), try kegRowCount(&tdb.db, "foo"));
+}
+
+test "unlinkSameVersionKegLinks is a no-op when no row matches the keep path" {
+    var tdb = try TempDb.init("force_unlink_no_match");
+    defer tdb.deinit();
+    const prefix = tdb.dir;
+
+    const keg = try seedKegWithBin(prefix, "foo", "1.0", "foo-tool");
+    defer testing.allocator.free(keg);
+    const keg_id = try insertKegRow(&tdb.db, "foo", "1.0", 0, keg);
+
+    var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
+    try linker.link(keg, "foo", keg_id);
+
+    // Different cellar_path than the seeded row → must not unlink.
+    const other = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/2.0", .{prefix});
+    defer testing.allocator.free(other);
+    install.unlinkSameVersionKegLinks(&linker, &tdb.db, "foo", other);
+
+    var link_buf: [512]u8 = undefined;
+    const link_path = try std.fmt.bufPrint(&link_buf, "{s}/bin/foo-tool", .{prefix});
+    try std.Io.Dir.accessAbsolute(std.Options.debug_io, link_path, .{});
+}
+
+test "unlinkSameVersionKegLinks leaves other packages untouched" {
+    var tdb = try TempDb.init("force_unlink_scoped");
+    defer tdb.deinit();
+    const prefix = tdb.dir;
+
+    const foo = try seedKegWithBin(prefix, "foo", "1.0", "foo-tool");
+    defer testing.allocator.free(foo);
+    const bar = try seedKegWithBin(prefix, "bar", "1.0", "bar-tool");
+    defer testing.allocator.free(bar);
+
+    const foo_id = try insertKegRow(&tdb.db, "foo", "1.0", 0, foo);
+    const bar_id = try insertKegRow(&tdb.db, "bar", "1.0", 0, bar);
+
+    var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
+    try linker.link(foo, "foo", foo_id);
+    try linker.link(bar, "bar", bar_id);
+
+    install.unlinkSameVersionKegLinks(&linker, &tdb.db, "foo", foo);
+
+    // foo's symlink gone, bar's intact.
+    var foo_link_buf: [512]u8 = undefined;
+    const foo_link = try std.fmt.bufPrint(&foo_link_buf, "{s}/bin/foo-tool", .{prefix});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(std.Options.debug_io, foo_link, .{}));
+
+    var bar_link_buf: [512]u8 = undefined;
+    const bar_link = try std.fmt.bufPrint(&bar_link_buf, "{s}/bin/bar-tool", .{prefix});
+    try std.Io.Dir.accessAbsolute(std.Options.debug_io, bar_link, .{});
+}
+
 test "unlinkAndDeleteStaleKegRows wipes multiple stale rows for the same name in one pass" {
     var tdb = try TempDb.init("force_sweep_db_multi");
     defer tdb.deinit();

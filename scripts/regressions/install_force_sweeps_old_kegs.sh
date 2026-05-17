@@ -134,4 +134,27 @@ if echo "$DOCTOR_OUT" | grep -qE "keg\(s\) in DB but missing on disk"; then
 fi
 pass "doctor reports neither stale placeholder nor missing kegs"
 
+
+# ── Same-version --force must not bounce on the linker conflict ─────
+# Reproducer for the linker-side gap: with pcre2 freshly installed at
+# the resolved version, `--force` on the same version owns symlinks
+# under <prefix>/{bin,lib,...} pointing at the keg we are about to
+# re-materialize. Without `unlinkSameVersionKegLinks`, checkConflicts
+# fires and the install bails with "Use --force to overwrite" — even
+# though --force is already on.
+printf '▸ malt install pcre2 --force (same version, must overwrite linker state)\n'
+"$BIN" install --force --quiet pcre2 || fail "same-version force-install hit the linker conflict trap"
+pass "same-version force-install completed"
+
+[[ -d "$PREFIX/Cellar/pcre2/$KEEP" ]] ||
+  fail "Cellar/pcre2/$KEEP missing after same-version force"
+pass "Cellar/pcre2/$KEEP still present after same-version force"
+
+DOCTOR_OUT=$("$BIN" doctor --verbose 2>&1 || true)
+if echo "$DOCTOR_OUT" | grep -qE "Broken symlinks" | grep -v "✓"; then
+  echo "$DOCTOR_OUT" >&2
+  fail "doctor reports broken symlinks after same-version force"
+fi
+pass "doctor clean after same-version force"
+
 printf '\n✔ install-force-sweeps-old-kegs regression passed\n'
