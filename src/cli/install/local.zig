@@ -17,6 +17,7 @@ const progress_mod = @import("../../ui/progress.zig");
 const args = @import("args.zig");
 const record = @import("record.zig");
 const download = @import("download.zig");
+const install_mod = @import("../install.zig");
 
 const InstallError = record.InstallError;
 
@@ -551,6 +552,14 @@ fn materializeRubyFormula(
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
     };
+    // `--force` pre-materialize: wipe the resolved-version dir so the
+    // archive extracts into a clean target. Without this, extract
+    // mixes new and prior files at the same paths, and the post-link
+    // sweep would only address symlinks + DB rows. Matches the JSON
+    // pipeline's pre-materialize call.
+    if (force) {
+        install_mod.pruneCellarForReinstall(ctx, prefix, resolved.name, resolved.version);
+    }
     std.Io.Dir.createDirAbsolute(ctx.io, cellar_path, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
@@ -640,6 +649,17 @@ fn materializeRubyFormula(
     // step fails before commit.
     db.beginTransaction() catch return InstallError.RecordFailed;
     errdefer db.rollback();
+
+    // `--force` post-materialize: archive is on disk at cellar_path;
+    // clear the prior install's links + stale rows + orphan sibling
+    // dirs so the upcoming linker.link does not collide and so doctor
+    // does not flip from "Mach-O placeholders" to "Missing kegs".
+    // Same three-phase sequence the JSON pipeline runs.
+    if (force) {
+        install_mod.unlinkSameVersionKegLinks(linker, db, resolved.name, cellar_path);
+        install_mod.unlinkAndDeleteStaleKegRows(ctx, allocator, db, linker, resolved.name, cellar_path);
+        install_mod.pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, resolved.name, resolved.version);
+    }
 
     var keg_id: i64 = 0;
     {
