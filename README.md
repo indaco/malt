@@ -54,7 +54,7 @@ If you're scanning rather than reading, here is the surface area in one place.
 - **Atomic install protocol.** New versions verified before old versions are touched; `mt rollback --to <version>` reverts from the store with no re-download. Streaming SHA256 + parallel downloads + a 30 s advisory file lock against concurrent mutations.
 - **Ephemeral run.** `mt run <pkg> -- <args...>` extracts and `execvp`s without a permanent install; `--keep` caches the bottle for next time.
 - **Full operational surface.** `mt services` with `status` and `logs --tail/--follow`. `mt bundle` reading both `Brewfile` and `Maltfile.json`. `mt doctor --fix` with a planner and a manual-only set. `mt purge` with composable scopes (`--cache`, `--unused-deps`, `--store-orphans`, `--old-versions`, `--wipe`) and typed-confirmation gates. `mt backup`/`mt restore` for hand-editable manifests. `mt migrate` that relocates a Homebrew install rather than inventorying it. `mt uses` for reverse-dependency queries via SQL.
-- **Scriptable.** `--json` and `--output-format=ndjson` everywhere it makes sense; orthogonal flags. `--quiet`, `--verbose`, `--debug`, `--dry-run` are global. `NO_COLOR`, `MALT_NO_EMOJI`, `MALT_THEME` for shaping output.
+- **Scriptable.** `--json` and `--output-format=ndjson` everywhere it makes sense; orthogonal flags. `--quiet`, `--verbose`, `--debug`, `--dry-run` are global. `NO_COLOR`, `MALT_NO_EMOJI`, `MALT_PROGRESS`, `MALT_THEME` for shaping output.
 - **Signed, verifiable releases.** Every release is cosign-signed keyless via GitHub OIDC; `install.sh` and `mt version update` verify the signature before trusting the SHA256 checksum. Tap commits are pinned and formula source is SHA256-verified against an embedded manifest. Advance a pin with `mt tap --refresh user/repo`.
 - **Sandboxed `post_install`.** The `--use-system-ruby` path runs inside a `sandbox-exec` profile scoped to the formula's cellar, with a scrubbed environment and `RLIMIT_CPU`/`AS`/`FSIZE` caps. Every mutating op in the native interpreter is validated against the Cellar/malt prefix.
 
@@ -493,6 +493,7 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 | `NO_COLOR`                      | Disable colored output                                                            | unset            |
 | `MALT_NO_EMOJI`                 | Disable emoji in output                                                           | unset            |
 | `MALT_NO_VERSION_NOTIFIER`      | Set to `1` to suppress the "newer malt available" notice                          | unset            |
+| `MALT_PROGRESS`                 | Progress reporter for `install`/`upgrade`/`migrate`: `tty`, `plain`, or `none` (`CI=true` or `GITHUB_ACTIONS=true` flip the default to `plain`) | `tty`            |
 | `MALT_THEME`                    | Force the output palette: `light`, `dark`, or `auto` (detects via OSC 11)         | `auto`           |
 | `HOMEBREW_GITHUB_API_TOKEN`     | GitHub token for higher API rate limits                                           | unset            |
 | `MALT_GITHUB_TOKEN`             | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only    | unset            |

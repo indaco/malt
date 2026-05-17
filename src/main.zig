@@ -369,6 +369,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const output_mod = @import("ui/output.zig");
     output_mod.setRuntime(ctx.io, ctx.environ, ctx.stdout, ctx.stderr);
     progress_mod.setRuntime(ctx.io, ctx.stderr);
+    // `MALT_PROGRESS` and CI auto-detect resolve here; per-bar call sites
+    // never re-read the env so install/upgrade/migrate stay in lockstep.
+    progress_mod.setMode(progress_mod.resolveModeFromEnviron(ctx.environ));
     color_mod.setRuntime(ctx.io, ctx.environ);
 
     var args_it = try init.args.iterateAllocator(allocator);
@@ -543,6 +546,9 @@ fn printUsage(ctx: *const AppCtx) void {
         \\  MALT_CACHE        Override cache directory
         \\  NO_COLOR          Disable colored output
         \\  MALT_NO_EMOJI     Disable emoji in output
+        \\  MALT_PROGRESS=tty|plain|none
+        \\                    Choose how install/upgrade/migrate report progress;
+        \\                    default auto-detects (CI=true flips to plain)
         \\  MALT_NO_VERSION_NOTIFIER=1
         \\                    Suppress the "newer malt available" stderr notice
         \\
