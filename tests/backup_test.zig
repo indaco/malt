@@ -215,6 +215,37 @@ test "writeEntry + parseBackup round-trip preserves every entry" {
 
 // ── defaultBackupPath ────────────────────────────────────────────────────
 
+test "writeBackupJson: empty inputs emit `{formulas:[],casks:[]}\\n`" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try backup.writeBackupJson(&aw.writer, &.{}, &.{});
+    try testing.expectEqualStrings("{\"formulas\":[],\"casks\":[]}\n", aw.written());
+}
+
+test "writeBackupJson: emits `name`/`version` for formulas and `name`/`version`/`tap` for casks" {
+    const formulas = [_]backup.JsonFormula{
+        .{ .name = "wget", .version = "1.21" },
+        .{ .name = "jq", .version = "1.7" },
+    };
+    const casks = [_]backup.JsonCask{
+        .{ .name = "firefox", .version = "120.0", .tap = "" },
+        .{ .name = "flux-markdown", .version = "0.1.0", .tap = "xykong/tap" },
+    };
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try backup.writeBackupJson(&aw.writer, &formulas, &casks);
+    try testing.expectEqualStrings(
+        "{\"formulas\":[" ++
+            "{\"name\":\"wget\",\"version\":\"1.21\"}," ++
+            "{\"name\":\"jq\",\"version\":\"1.7\"}" ++
+            "],\"casks\":[" ++
+            "{\"name\":\"firefox\",\"version\":\"120.0\",\"tap\":\"\"}," ++
+            "{\"name\":\"flux-markdown\",\"version\":\"0.1.0\",\"tap\":\"xykong/tap\"}" ++
+            "]}\n",
+        aw.written(),
+    );
+}
+
 test "defaultBackupPath has the expected shape" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

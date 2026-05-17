@@ -43,6 +43,150 @@ test "execute with no args prints an empty list (no taps registered)" {
     try tap_cli.execute(&ctx, testing.allocator, &.{});
 }
 
+test "execute with --json on a prefix with no db/ directory still emits `[]`" {
+    // Fresh MALT_PREFIX where the `db/` dir doesn't exist yet: `sqlite.open`
+    // fails. CI consumers piping through `jq` need a parseable empty array,
+    // not silently-empty stdout.
+    const path = "/tmp/malt_cli_tap_fresh_no_db";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    _ = c.setenv("MALT_PREFIX", path, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.json);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer malt.output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try tap_cli.execute(&ctx, testing.allocator, &.{});
+    try testing.expectEqualStrings("[]\n", stdout_buf.items);
+}
+
+test "execute with --json on an empty DB emits `[]`" {
+    const prefix = try setupPrefix("list_empty_json");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.json);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer malt.output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try tap_cli.execute(&ctx, testing.allocator, &.{});
+    try testing.expectEqualStrings("[]\n", stdout_buf.items);
+}
+
+test "execute with --json output is a parseable JSON array" {
+    const prefix = try setupPrefix("list_json_parse");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const db_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/db/malt.db",
+        .{prefix},
+        0,
+    );
+    defer testing.allocator.free(db_path);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try malt.tap.add(
+            &db,
+            "user/repo",
+            "https://github.com/user/homebrew-repo",
+            "0123456789abcdef0123456789abcdef01234567",
+        );
+    }
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.json);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer malt.output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try tap_cli.execute(&ctx, testing.allocator, &.{});
+
+    const trimmed = std.mem.trim(u8, stdout_buf.items, " \t\r\n");
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, trimmed, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    try testing.expectEqualStrings("user/repo", parsed.value.array.items[0].object.get("name").?.string);
+}
+
+test "execute with --json on a populated DB emits one object per tap" {
+    const prefix = try setupPrefix("list_populated_json");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const db_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/db/malt.db",
+        .{prefix},
+        0,
+    );
+    defer testing.allocator.free(db_path);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try malt.tap.add(
+            &db,
+            "user/repo",
+            "https://github.com/user/homebrew-repo",
+            "0123456789abcdef0123456789abcdef01234567",
+        );
+        try malt.tap.add(&db, "x/y", "https://github.com/x/homebrew-y", null);
+    }
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.json);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer malt.output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try tap_cli.execute(&ctx, testing.allocator, &.{});
+
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"user/repo\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"url\":\"https://github.com/user/homebrew-repo\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"commit_sha\":\"0123456789abcdef0123456789abcdef01234567\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"x/y\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"commit_sha\":null") != null);
+    try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "["));
+    try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "]\n"));
+}
+
 test "execute with unresolvable user/repo aborts (no network pin = no add)" {
     const prefix = try setupPrefix("unresolvable");
     defer testing.allocator.free(prefix);

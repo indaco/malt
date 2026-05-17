@@ -82,6 +82,24 @@ fn writeRefreshRowText(w: *std.Io.Writer, row: RefreshRow) !void {
     }
 }
 
+/// Emit `[{ "name", "url", "commit_sha" }, ...]\n` for `mt tap --json`.
+/// `commit_sha` is `null` when the tap is unpinned. Kept `pub` so tests can
+/// pin the exact bytes without staging a DB or running the dispatcher.
+pub fn writeTapListJson(w: *std.Io.Writer, taps: []const tap_mod.TapInfo) !void {
+    try w.writeAll("[");
+    for (taps, 0..) |t, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try output.jsonStr(w, t.name);
+        try w.writeAll(",\"url\":");
+        try output.jsonStr(w, t.url);
+        try w.writeAll(",\"commit_sha\":");
+        if (t.commit_sha) |sha| try output.jsonStr(w, sha) else try w.writeAll("null");
+        try w.writeAll("}");
+    }
+    try w.writeAll("]\n");
+}
+
 fn writeRefreshRowsJson(w: *std.Io.Writer, rows: []const RefreshRow) !void {
     try w.writeAll("{\"taps\":[");
     for (rows, 0..) |row, i| {
@@ -256,6 +274,43 @@ test "writeRefreshRowsJson: emits `{taps:[{tap,old_sha,new_sha,status},...]}`" {
     );
 }
 
+test "writeTapListJson: empty input emits `[]\\n`" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeTapListJson(&aw.writer, &.{});
+    try std.testing.expectEqualStrings("[]\n", aw.written());
+}
+
+test "writeTapListJson: escapes embedded quotes/backslashes in url so output is valid JSON" {
+    const rows = [_]tap_mod.TapInfo{
+        .{ .name = "user/repo", .url = "https://x/\"weird\\path\"", .commit_sha = null },
+    };
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeTapListJson(&aw.writer, &rows);
+    try std.testing.expectEqualStrings(
+        "[{\"name\":\"user/repo\",\"url\":\"https://x/\\\"weird\\\\path\\\"\",\"commit_sha\":null}]\n",
+        aw.written(),
+    );
+}
+
+test "writeTapListJson: emits `name`, `url`, `commit_sha` per tap; null when unpinned" {
+    const rows = [_]tap_mod.TapInfo{
+        .{ .name = "user/repo", .url = "https://github.com/user/homebrew-repo", .commit_sha = sha_old },
+        .{ .name = "x/y", .url = "https://github.com/x/homebrew-y", .commit_sha = null },
+    };
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeTapListJson(&aw.writer, &rows);
+    try std.testing.expectEqualStrings(
+        "[" ++
+            "{\"name\":\"user/repo\",\"url\":\"https://github.com/user/homebrew-repo\",\"commit_sha\":\"" ++ sha_old ++ "\"}," ++
+            "{\"name\":\"x/y\",\"url\":\"https://github.com/x/homebrew-y\",\"commit_sha\":null}" ++
+            "]\n",
+        aw.written(),
+    );
+}
+
 test "writeRefreshRowsJson: empty input emits `{\"taps\":[]}`" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
@@ -325,10 +380,17 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
 
     const prefix = atomic.maltPrefixOrAbort();
 
+    // Listing-intent under `--json` needs a parseable empty array even on a
+    // fresh prefix where `db/` doesn't exist — otherwise `jq` chokes on
+    // silently-empty stdout. Detect intent from already-parsed argv.
+    const is_listing = positional == null and pin_slug == null and
+        refresh_target == null and !refresh_all;
+
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
     var db = sqlite.Database.open(db_path) catch {
         // Fresh prefix with no `db/` yet = no taps registered.
+        if (is_listing and output.isJson()) output.writeStdoutAll("[]\n");
         return;
     };
     defer db.close();
@@ -367,7 +429,24 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             output.err("Failed to list taps", .{});
             return error.Aborted;
         };
-        defer allocator.free(taps);
+        defer {
+            for (taps) |t| {
+                allocator.free(t.name);
+                allocator.free(t.url);
+                if (t.commit_sha) |sha| allocator.free(sha);
+            }
+            allocator.free(taps);
+        }
+
+        if (output.isJson()) {
+            // Route through `output.writeStdoutAll` so tests can capture the
+            // payload; one writeAll keeps a closed pipe from tearing the doc.
+            var aw: std.Io.Writer.Allocating = .init(allocator);
+            defer aw.deinit();
+            try writeTapListJson(&aw.writer, taps);
+            output.writeStdoutAll(aw.written());
+            return;
+        }
 
         if (taps.len == 0) {
             output.info("No taps registered", .{});
@@ -381,9 +460,6 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             const line = formatTapLine(allocator, t) catch "";
             defer if (line.len != 0) allocator.free(line);
             ctx.stdout.writeStreamingAll(ctx.io, line) catch {};
-            allocator.free(t.name);
-            allocator.free(t.url);
-            if (t.commit_sha) |sha| allocator.free(sha);
         }
         return;
     }

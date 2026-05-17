@@ -116,6 +116,194 @@ test "execute start/stop/restart with wrong arity returns InvalidArgs" {
     }
 }
 
+test "execute list --json on a prefix with no db/ directory emits `[]`" {
+    // `openDb` auto-creates `db/` and the sqlite file. CI consumers piping
+    // through `jq` need a parseable empty array on first run.
+    const path = "/tmp/malt_cli_services_fresh_no_db";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    _ = c.setenv("MALT_PREFIX", path, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.json);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer malt.output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try services_cli.execute(&ctx, testing.allocator, &.{"list"});
+    try testing.expectEqualStrings("[]\n", stdout_buf.items);
+}
+
+test "execute list --json on an empty DB emits `[]`" {
+    const prefix = try setupPrefix("list_empty_json");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.json);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer malt.output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try services_cli.execute(&ctx, testing.allocator, &.{"list"});
+    try testing.expectEqualStrings("[]\n", stdout_buf.items);
+
+    // `status` with no name routes through cmdList; under --json it must
+    // emit the same empty array so consumers can rely on a single shape.
+    stdout_buf.clearRetainingCapacity();
+    try services_cli.execute(&ctx, testing.allocator, &.{"status"});
+    try testing.expectEqualStrings("[]\n", stdout_buf.items);
+}
+
+fn seedService(prefix: []const u8, name: []const u8, keg: []const u8, auto_start: bool) !void {
+    var path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var stmt = try db.prepare(
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start, last_status)
+        \\VALUES (?, ?, '/dev/null', ?, 'registered');
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    try stmt.bindText(2, keg);
+    try stmt.bindInt(3, if (auto_start) 1 else 0);
+    _ = try stmt.step();
+}
+
+test "execute list --json on a populated DB emits one object per row" {
+    const prefix = try setupPrefix("list_populated_json");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedService(prefix, "redis", "redis", true);
+    try seedService(prefix, "postgres", "postgresql@16", false);
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.json);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer malt.output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try services_cli.execute(&ctx, testing.allocator, &.{"list"});
+
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"redis\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"keg_name\":\"redis\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"auto_start\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"postgres\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"keg_name\":\"postgresql@16\"") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"auto_start\":false") != null);
+    // Runtime probe is best-effort on non-macOS / when launchctl misses;
+    // it still must surface a textual state, never a numeric code.
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"state\":\"") != null);
+    try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "["));
+    try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "]\n"));
+}
+
+test "execute list --json output is a parseable JSON array" {
+    const prefix = try setupPrefix("list_json_parse");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedService(prefix, "redis", "redis", true);
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.json);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer malt.output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try services_cli.execute(&ctx, testing.allocator, &.{"list"});
+
+    const trimmed = std.mem.trim(u8, stdout_buf.items, " \t\r\n");
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, trimmed, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    const row = parsed.value.array.items[0].object;
+    try testing.expectEqualStrings("redis", row.get("name").?.string);
+    try testing.expectEqualStrings("redis", row.get("keg_name").?.string);
+    try testing.expectEqual(true, row.get("auto_start").?.bool);
+    // `state` is whatever launchctl reports — must be a string, not int.
+    try testing.expect(row.get("state").? == .string);
+}
+
+test "execute status <name> --json emits a single-element array" {
+    const prefix = try setupPrefix("status_populated_json");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedService(prefix, "redis", "redis", true);
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.json);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer malt.output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try services_cli.execute(&ctx, testing.allocator, &.{ "status", "redis" });
+
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"name\":\"redis\"") != null);
+    // Only one row in the array — pin the bracketing so `postgres` (not
+    // seeded here) can't sneak in via a typo in the filter SQL.
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "postgres") == null);
+    try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "[{"));
+    try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "}]\n"));
+}
+
+test "execute status <missing> --json still surfaces SupervisorError" {
+    const prefix = try setupPrefix("status_missing_json");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.json);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        error.SupervisorError,
+        services_cli.execute(&ctx, testing.allocator, &.{ "status", "nope" }),
+    );
+}
+
 test "execute logs with no args returns InvalidArgs" {
     const prefix = try setupPrefix("logs_noargs");
     defer testing.allocator.free(prefix);
