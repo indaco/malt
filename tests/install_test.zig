@@ -953,12 +953,15 @@ test "dropTopLevelJobs preserves dep order across mixed lists" {
     try testing.expectEqualStrings("dep_b", jobs.items[1].name);
 }
 
-// --- unlinkAndDeleteStaleKegRows: force-reinstall across a revision
-// bump must drop the prior keg's DB row + its links + its dependencies
-// + its on-disk dir, mirroring the upgrade path. Without this the
-// freshly-swept disk dir would leave the kegs row pointing at nothing
-// and `malt doctor` would flip from "Mach-O placeholders" to
-// "Missing kegs" — same broken state, different message.
+// --- Stale-keg sweep: force-reinstall across a revision bump must
+// drop the prior keg's DB row + its links + its dependencies + its
+// on-disk dir, mirroring the upgrade path. The sweep is split in
+// two so the user pin survives:
+//   - `unlinkStaleKegLinks` (pre-link) clears symlinks + links rows
+//   - `recordKeg` (in linkAndRecord) inherits the pin via COALESCE-MAX
+//   - `dropStaleKegRows` (post-link) wipes rows + dirs
+// Tests below exercise the combined sweep (the call-site shape)
+// plus the narrow per-helper contracts.
 
 fn insertKegRow(
     db: *sqlite.Database,
@@ -1013,7 +1016,7 @@ fn kegRowCount(db: *sqlite.Database, name: []const u8) !i64 {
     return stmt.columnInt(0);
 }
 
-test "unlinkAndDeleteStaleKegRows drops the stale row, its symlinks, and its dir" {
+test "stale-keg sweep (unlink + drop) clears the prior row, its symlinks, and its dir" {
     var tdb = try TempDb.init("force_sweep_db_row");
     defer tdb.deinit();
     const prefix = tdb.dir;
@@ -1035,15 +1038,11 @@ test "unlinkAndDeleteStaleKegRows drops the stale row, its symlinks, and its dir
     const link_path = try std.fmt.bufPrint(&link_buf, "{s}/bin/foo-tool", .{prefix});
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, link_path, .{});
 
-    // Resolved version is foo 2.0. Sweep against foo's other DB rows.
-    install.unlinkAndDeleteStaleKegRows(
-        &malt.app_ctx.debug_ctx,
-        testing.allocator,
-        &tdb.db,
-        &linker,
-        "foo",
-        keep_keg,
-    );
+    // Resolved version is foo 2.0. Sweep is two-phase at the call
+    // site: unlink first (pre-link), drop rows + dirs second
+    // (post-link). Test the combined effect.
+    install.unlinkStaleKegLinks(&tdb.db, &linker, "foo", keep_keg);
+    install.dropStaleKegRows(&malt.app_ctx.debug_ctx, testing.allocator, &tdb.db, "foo", keep_keg);
 
     // Stale row + dir + symlink all gone; keep row + dir untouched.
     try testing.expectEqual(@as(i64, 1), try kegRowCount(&tdb.db, "foo"));
@@ -1059,7 +1058,7 @@ test "unlinkAndDeleteStaleKegRows drops the stale row, its symlinks, and its dir
     try testing.expectEqual(keep_id, stmt.columnInt(0));
 }
 
-test "unlinkAndDeleteStaleKegRows is a no-op when no sibling rows exist" {
+test "stale-keg sweep is a no-op when no sibling rows exist" {
     var tdb = try TempDb.init("force_sweep_db_solo");
     defer tdb.deinit();
     const prefix = tdb.dir;
@@ -1070,20 +1069,14 @@ test "unlinkAndDeleteStaleKegRows is a no-op when no sibling rows exist" {
 
     var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
 
-    install.unlinkAndDeleteStaleKegRows(
-        &malt.app_ctx.debug_ctx,
-        testing.allocator,
-        &tdb.db,
-        &linker,
-        "bar",
-        keep_keg,
-    );
+    install.unlinkStaleKegLinks(&tdb.db, &linker, "bar", keep_keg);
+    install.dropStaleKegRows(&malt.app_ctx.debug_ctx, testing.allocator, &tdb.db, "bar", keep_keg);
 
     try testing.expectEqual(@as(i64, 1), try kegRowCount(&tdb.db, "bar"));
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, keep_keg, .{});
 }
 
-test "unlinkAndDeleteStaleKegRows tolerates a stale row whose dir is already gone" {
+test "stale-keg sweep tolerates a stale row whose dir is already gone" {
     var tdb = try TempDb.init("force_sweep_db_no_disk");
     defer tdb.deinit();
     const prefix = tdb.dir;
@@ -1101,14 +1094,8 @@ test "unlinkAndDeleteStaleKegRows tolerates a stale row whose dir is already gon
 
     var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
 
-    install.unlinkAndDeleteStaleKegRows(
-        &malt.app_ctx.debug_ctx,
-        testing.allocator,
-        &tdb.db,
-        &linker,
-        "baz",
-        keep_keg,
-    );
+    install.unlinkStaleKegLinks(&tdb.db, &linker, "baz", keep_keg);
+    install.dropStaleKegRows(&malt.app_ctx.debug_ctx, testing.allocator, &tdb.db, "baz", keep_keg);
 
     // Stale row gone even though its dir was already absent.
     try testing.expectEqual(@as(i64, 1), try kegRowCount(&tdb.db, "baz"));
@@ -1200,7 +1187,7 @@ test "unlinkSameVersionKegLinks leaves other packages untouched" {
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, bar_link, .{});
 }
 
-test "unlinkAndDeleteStaleKegRows wipes multiple stale rows for the same name in one pass" {
+test "stale-keg sweep wipes multiple stale rows for the same name in one pass" {
     var tdb = try TempDb.init("force_sweep_db_multi");
     defer tdb.deinit();
     const prefix = tdb.dir;
@@ -1224,14 +1211,8 @@ test "unlinkAndDeleteStaleKegRows wipes multiple stale rows for the same name in
 
     var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
 
-    install.unlinkAndDeleteStaleKegRows(
-        &malt.app_ctx.debug_ctx,
-        testing.allocator,
-        &tdb.db,
-        &linker,
-        "qux",
-        keep,
-    );
+    install.unlinkStaleKegLinks(&tdb.db, &linker, "qux", keep);
+    install.dropStaleKegRows(&malt.app_ctx.debug_ctx, testing.allocator, &tdb.db, "qux", keep);
 
     try testing.expectEqual(@as(i64, 1), try kegRowCount(&tdb.db, "qux"));
     for ([_][]const u8{ v1, v2, v3 }) |stale| {
@@ -1240,7 +1221,7 @@ test "unlinkAndDeleteStaleKegRows wipes multiple stale rows for the same name in
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, keep, .{});
 }
 
-test "unlinkAndDeleteStaleKegRows leaves other packages untouched" {
+test "stale-keg sweep leaves other packages untouched" {
     var tdb = try TempDb.init("force_sweep_db_scoped");
     defer tdb.deinit();
     const prefix = tdb.dir;
@@ -1258,16 +1239,76 @@ test "unlinkAndDeleteStaleKegRows leaves other packages untouched" {
 
     var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
 
-    install.unlinkAndDeleteStaleKegRows(
-        &malt.app_ctx.debug_ctx,
-        testing.allocator,
-        &tdb.db,
-        &linker,
-        "foo",
-        keep_foo,
-    );
+    install.unlinkStaleKegLinks(&tdb.db, &linker, "foo", keep_foo);
+    install.dropStaleKegRows(&malt.app_ctx.debug_ctx, testing.allocator, &tdb.db, "foo", keep_foo);
 
     try testing.expectEqual(@as(i64, 1), try kegRowCount(&tdb.db, "foo"));
     try testing.expectEqual(@as(i64, 1), try kegRowCount(&tdb.db, "qux"));
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, other, .{});
+}
+
+// The pin-preservation contract: when a user pinned the stale
+// revision and force-reinstalls across a revision bump, the pin must
+// migrate to the new row via `recordKeg`'s INSERT OR REPLACE
+// `COALESCE-MAX` subquery. That subquery runs against the kegs
+// table BEFORE the new row lands, so the stale row must still exist
+// at that moment. The two-phase sweep guarantees this:
+// unlinkStaleKegLinks clears the symlinks pre-link, but the row
+// stays until dropStaleKegRows runs post-link.
+test "two-phase sweep preserves a pin set on the stale revision through INSERT OR REPLACE" {
+    var tdb = try TempDb.init("force_pin_preservation");
+    defer tdb.deinit();
+    const prefix = tdb.dir;
+
+    const stale_keg = try seedKegWithBin(prefix, "foo", "1.0", "foo-tool");
+    defer testing.allocator.free(stale_keg);
+    const keep_keg = try seedKegWithBin(prefix, "foo", "2.0", "foo-tool");
+    defer testing.allocator.free(keep_keg);
+
+    const stale_id = try insertKegRow(&tdb.db, "foo", "1.0", 0, stale_keg);
+
+    // Stamp the pin on the stale row, mirroring `malt pin foo`.
+    {
+        var pin_stmt = try tdb.db.prepare("UPDATE kegs SET pinned = 1 WHERE id = ?1;");
+        defer pin_stmt.finalize();
+        try pin_stmt.bindInt(1, stale_id);
+        _ = try pin_stmt.step();
+    }
+
+    var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
+    try linker.link(stale_keg, "foo", stale_id);
+
+    // Pre-link: clear the stale install's symlinks so the new
+    // linker.link does not collide. Row + pin flag stay.
+    install.unlinkStaleKegLinks(&tdb.db, &linker, "foo", keep_keg);
+
+    // Simulate recordKeg's INSERT OR REPLACE running against the
+    // table while the stale row still carries the pin. Use the same
+    // COALESCE-MAX wiring the production code uses.
+    {
+        var insert = try tdb.db.prepare(
+            \\INSERT OR REPLACE INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, pinned)
+            \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));
+        );
+        defer insert.finalize();
+        try insert.bindText(1, "foo");
+        try insert.bindText(2, "foo");
+        try insert.bindText(3, "2.0");
+        try insert.bindInt(4, 0);
+        try insert.bindText(5, "0" ** 64);
+        try insert.bindText(6, keep_keg);
+        _ = try insert.step();
+    }
+
+    // Post-link: drop the stale row + dir. Pin already migrated to
+    // the new row in the step above.
+    install.dropStaleKegRows(&malt.app_ctx.debug_ctx, testing.allocator, &tdb.db, "foo", keep_keg);
+
+    try testing.expectEqual(@as(i64, 1), try kegRowCount(&tdb.db, "foo"));
+
+    var pin_stmt = try tdb.db.prepare("SELECT pinned FROM kegs WHERE name = ?1 LIMIT 1;");
+    defer pin_stmt.finalize();
+    try pin_stmt.bindText(1, "foo");
+    _ = try pin_stmt.step();
+    try testing.expectEqual(@as(i64, 1), pin_stmt.columnInt(0));
 }

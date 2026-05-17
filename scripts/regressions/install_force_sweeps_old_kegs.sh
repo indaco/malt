@@ -157,4 +157,28 @@ if echo "$DOCTOR_OUT" | grep -qE "broken symlink\(s\)"; then
 fi
 pass "doctor clean after same-version force"
 
+# ── Pin must migrate from stale revision to the new keg ─────────────
+# Re-stage a pinned stale row pointing at a non-existent dir (the
+# revision-bump shape) and assert that after --force the kegs table
+# carries the pin on the surviving row. Without the two-phase sweep,
+# COALESCE-MAX in recordKeg's INSERT OR REPLACE runs after the stale
+# row is gone and the new row lands with pinned=0.
+STALE_DIR2="$PREFIX/Cellar/pcre2/${STALE}-pinned"
+mkdir -p "$STALE_DIR2/lib"
+sqlite3 "$DB" "INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, pinned) VALUES ('pcre2', 'pcre2', '${STALE}-pinned', 0, '$(printf '%064d' 0)', '$STALE_DIR2', 1);"
+pass "seeded pinned stale row at $STALE_DIR2"
+
+printf '▸ malt install pcre2 --force (must migrate pin to new row)\n'
+"$BIN" install --force --quiet pcre2 || fail "pin-migration force-install failed"
+
+PIN_FLAG=$(sqlite3 "$DB" "SELECT pinned FROM kegs WHERE name = 'pcre2';")
+[[ "$PIN_FLAG" == "1" ]] ||
+  fail "pin lost after force-reinstall across pinned stale revision (pinned=$PIN_FLAG)"
+pass "pin survived the cross-revision force-reinstall"
+
+PINNED_STALE_PRESENT=$(sqlite3 "$DB" "SELECT COUNT(*) FROM kegs WHERE name = 'pcre2' AND cellar_path = '$STALE_DIR2';")
+[[ "$PINNED_STALE_PRESENT" == "0" ]] ||
+  fail "stale pinned row survived the sweep — pin came from the wrong source"
+pass "stale pinned row dropped (pin migrated, not duplicated)"
+
 printf '\n✔ install-force-sweeps-old-kegs regression passed\n'

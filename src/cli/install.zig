@@ -85,29 +85,57 @@ pub fn pruneCellarForReinstall(ctx: *const AppCtx, prefix: []const u8, name: []c
     std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};
 }
 
-/// Tear down DB-tracked stale kegs for the given package name: every
-/// `kegs` row whose `cellar_path` differs from `keep_cellar_path` is
-/// unlinked (symlinks + `links` rows via `linker.unlink`), its
-/// `dependencies` rows are dropped, the `kegs` row is removed, and
-/// the on-disk dir is wiped.
+/// Unlink the on-disk symlinks AND drop the `links` rows for every
+/// `kegs` row of `name` whose `cellar_path` differs from
+/// `keep_cellar_path` — i.e. the prior install at an other
+/// version/revision. The `kegs` row + its `dependencies` rows stay
+/// in place so the subsequent `recordKeg` INSERT OR REPLACE sees the
+/// stale row's `pinned` flag through COALESCE-MAX. The row drop
+/// itself is handled by `dropStaleKegRows` after `linkAndRecord`
+/// commits the new row.
 ///
-/// Pairs with `pruneCellarForReinstall` (resolved-version dir wipe)
-/// and `pruneOtherCellarVersionsForReinstall` (orphan-dir fallback)
-/// so `--force` against a revision bump does not leave the DB
-/// pointing at a dir the disk side just removed — which would flip
-/// doctor from "Mach-O placeholders" to "Missing kegs".
+/// Pre-link companion to `unlinkSameVersionKegLinks`: between the
+/// two, every same-name prior install's symlinks are cleared before
+/// `linker.checkConflicts` runs, so a `--force` reinstall does not
+/// trip on its own predecessor.
 ///
-/// The pin row is preserved by name-level COALESCE in `recordKeg`'s
-/// INSERT OR REPLACE, so dropping the old row here does not lose the
-/// user's hold on the package.
+/// Best-effort: per-row errors are swallowed; the next `doctor`
+/// pass surfaces anything we could not reach.
+pub fn unlinkStaleKegLinks(
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    name: []const u8,
+    keep_cellar_path: []const u8,
+) void {
+    var stmt = db.prepare("SELECT id FROM kegs WHERE name = ?1 AND cellar_path != ?2;") catch return;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return;
+    stmt.bindText(2, keep_cellar_path) catch return;
+
+    while (stmt.step() catch false) {
+        const id = stmt.columnInt(0);
+        linker.unlink(id) catch {};
+    }
+}
+
+/// Drop the DB rows + on-disk dirs for every `kegs` row of `name`
+/// whose `cellar_path` differs from `keep_cellar_path`. Pairs with
+/// `unlinkStaleKegLinks` (which clears the symlinks before
+/// `linkAndRecord`) so this post-link step only has to handle the
+/// row + dependencies + cellar dir teardown.
 ///
-/// Best-effort: per-row errors are swallowed; the next `doctor` pass
-/// surfaces anything we could not reach.
-pub fn unlinkAndDeleteStaleKegRows(
+/// Pin preservation: callers must run this AFTER `recordKeg`'s
+/// INSERT OR REPLACE has executed, so the COALESCE-MAX subquery
+/// inside that INSERT still sees the stale row's `pinned` flag and
+/// can inherit it. Running this before `recordKeg` would leave the
+/// new row with `pinned=0` for users who pinned the prior revision.
+///
+/// Best-effort: per-row errors are swallowed; the next `doctor`
+/// pass surfaces anything we could not reach.
+pub fn dropStaleKegRows(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
-    linker: *linker_mod.Linker,
     name: []const u8,
     keep_cellar_path: []const u8,
 ) void {
@@ -137,10 +165,6 @@ pub fn unlinkAndDeleteStaleKegRows(
     }
 
     for (stale.items) |s| {
-        // `linker.unlink` removes the on-disk symlinks AND the `links`
-        // rows for this keg_id, so we only need to clean up the
-        // `dependencies` rows and the `kegs` row ourselves.
-        linker.unlink(s.id) catch {};
         deleteDependencyRows(db, s.id);
         deleteKegRowOnly(db, s.id);
         std.Io.Dir.cwd().deleteTree(ctx.io, s.path) catch {};
@@ -867,19 +891,14 @@ fn executeWithOpts(
             continue;
         }
 
-        // `--force` post-materialize: at this point the new keg dir
-        // exists at mats[i].kegPath(); the destructive cleanup of
-        // prior state is safe to run. Skipping this on materialize
-        // failure (handled by the earlier `continue`s) is what
-        // preserves the user's working keg when a force-reinstall
-        // can't reach the network. The same-version unlink also
-        // clears the linker's would-be checkConflicts trap so the
-        // subsequent `linkAndRecord` proceeds without bouncing on
-        // the prior install's own symlinks.
+        // `--force` pre-link: clear every same-name prior install's
+        // symlinks so `linker.checkConflicts` sees a clean state in
+        // `linkAndRecord` below. Rows + dependencies + dirs stay so
+        // `recordKeg`'s COALESCE-MAX subquery can still inherit the
+        // user pin from the prior row.
         if (force) {
             unlinkSameVersionKegLinks(&linker, &db, job.name, mats[i].kegPath());
-            unlinkAndDeleteStaleKegRows(ctx, allocator, &db, &linker, job.name, mats[i].kegPath());
-            pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, job.name, job.version_str);
+            unlinkStaleKegLinks(&db, &linker, job.name, mats[i].kegPath());
         }
 
         linkAndRecord(ctx.io, allocator, job, mats[i].kegPath(), &db, &linker, prefix, &formula_cache) catch {
@@ -890,6 +909,15 @@ fn executeWithOpts(
             failed_count += 1;
             continue;
         };
+
+        // `--force` post-link: now that `recordKeg` has inserted the
+        // new row (and inherited any pin via COALESCE-MAX), it is
+        // safe to drop the prior other-version rows + their dirs.
+        // Disk safety net catches any cellar dir without a row.
+        if (force) {
+            dropStaleKegRows(ctx, allocator, &db, job.name, mats[i].kegPath());
+            pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, job.name, job.version_str);
+        }
 
         if (job.post_install_defined) {
             drive(ctx, allocator, job.name, job.version_str, job.formula_json, prefix, use_system_ruby_list, &formula_cache);
