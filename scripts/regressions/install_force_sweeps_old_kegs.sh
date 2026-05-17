@@ -134,7 +134,6 @@ if echo "$DOCTOR_OUT" | grep -qE "keg\(s\) in DB but missing on disk"; then
 fi
 pass "doctor reports neither stale placeholder nor missing kegs"
 
-
 # ── Same-version --force must not bounce on the linker conflict ─────
 # Reproducer for the linker-side gap: with pcre2 freshly installed at
 # the resolved version, `--force` on the same version owns symlinks
@@ -151,7 +150,8 @@ pass "same-version force-install completed"
 pass "Cellar/pcre2/$KEEP still present after same-version force"
 
 DOCTOR_OUT=$("$BIN" doctor --verbose 2>&1 || true)
-if echo "$DOCTOR_OUT" | grep -qE "Broken symlinks" | grep -v "✓"; then
+# Match the warn-row body, not the "✓ Broken symlinks" check label.
+if echo "$DOCTOR_OUT" | grep -qE "broken symlink\(s\)"; then
   echo "$DOCTOR_OUT" >&2
   fail "doctor reports broken symlinks after same-version force"
 fi
