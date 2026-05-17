@@ -23,6 +23,7 @@ pub const OverflowEntry = backend.OverflowEntry;
 pub const PatchError = backend.PatchError;
 pub const FallbackError = backend.FallbackError;
 pub const patchPathsCollecting = backend.patchPathsCollecting;
+pub const patchTextFiles = backend.patchTextFiles;
 pub const flushOverflow = backend.flushOverflow;
 pub const external_tool_name = backend.external_tool_name;
 
@@ -33,6 +34,7 @@ test "facade re-exports the patcher surface cellar / doctor rely on" {
     _ = PatchError;
     _ = FallbackError;
     _ = patchPathsCollecting;
+    _ = patchTextFiles;
     _ = flushOverflow;
     _ = external_tool_name;
 }
@@ -42,7 +44,8 @@ test "facade external_tool_name matches the macOS backend" {
     try std.testing.expectEqualStrings(backend.external_tool_name, external_tool_name);
 }
 
-test "facade OverflowEntry / PatchOutcome are identical to the backend's" {
+test "facade Replacement / OverflowEntry / PatchOutcome are identical to the backend's" {
+    try std.testing.expect(Replacement == backend.Replacement);
     try std.testing.expect(OverflowEntry == backend.OverflowEntry);
     try std.testing.expect(PatchOutcome == backend.PatchOutcome);
 }

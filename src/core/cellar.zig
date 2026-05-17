@@ -5,12 +5,8 @@ const std = @import("std");
 const clonefile = @import("../fs/clonefile.zig");
 // Binary-format-agnostic relocation facade. The Linux task plugs in
 // an ELF backend behind the same surface, so cellar never reaches past
-// it into `macho/patcher.zig` for load-command work.
+// it into `macho/patcher.zig` for either load-command or text-file work.
 const patch = @import("patch.zig");
-// `patchTextFiles` is byte-level text substitution, not a format
-// concern, so it still lives on the Mach-O module — safe to import
-// directly without widening the facade.
-const text_patcher = @import("../macho/patcher.zig");
 const codesign = @import("../macho/codesign.zig");
 const atomic = @import("../fs/atomic.zig");
 const relocated_store = @import("relocated_store.zig");
@@ -360,13 +356,13 @@ fn relocateKegTree(
         else => return CellarError.PatchFailed,
     };
 
-    const text_replacements = [_]text_patcher.Replacement{
+    const text_replacements = [_]patch.Replacement{
         .{ .old = "@@HOMEBREW_PREFIX@@", .new = new_prefix },
         .{ .old = "@@HOMEBREW_CELLAR@@", .new = new_cellar },
         .{ .old = "/opt/homebrew", .new = new_prefix },
         .{ .old = "/usr/local", .new = new_prefix },
     };
-    _ = text_patcher.patchTextFiles(io, allocator, cellar_path, &text_replacements) catch |e| {
+    _ = patch.patchTextFiles(io, allocator, cellar_path, &text_replacements) catch |e| {
         std.log.warn("text patching failed for {s}: {s}", .{ cellar_path, @errorName(e) });
     };
 
