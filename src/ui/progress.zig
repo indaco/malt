@@ -8,6 +8,7 @@
 //! mid-chain output.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const color = @import("color.zig");
 const output = @import("output.zig");
@@ -18,16 +19,98 @@ const output = @import("output.zig");
 var pkg_io: std.Io = std.Options.debug_io;
 var pkg_stderr: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
 
+/// Selects how long-running mutators report progress. Resolved once at
+/// process start from `MALT_PROGRESS` (and the CI auto-detection); every
+/// bar/spinner reads this same value so install/upgrade/migrate behave
+/// identically.
+pub const ProgressMode = enum { tty, plain, none };
+
+/// Default matches today's auto-detected TTY bar; `setMode` flips it
+/// after `main` reads the env.
+var pkg_mode: ProgressMode = .tty;
+
 pub fn setRuntime(io: std.Io, stderr: std.Io.File) void {
     pkg_io = io;
     pkg_stderr = stderr;
 }
 
+pub fn setMode(m: ProgressMode) void {
+    pkg_mode = m;
+}
+
+pub fn mode() ProgressMode {
+    return pkg_mode;
+}
+
+/// Pure resolver — explicit `MALT_PROGRESS` value (or null), plus a
+/// caller-computed `ci` boolean. Keeps env probing out so the table
+/// stays unit-testable. The wire vocabulary matches `ProgressMode`'s
+/// variant names by design, so `stringToEnum` is the single source of
+/// truth — a new variant means no parser update.
+pub fn resolveMode(explicit: ?[]const u8, ci: bool) ProgressMode {
+    if (explicit) |v| {
+        if (std.meta.stringToEnum(ProgressMode, v)) |m| return m;
+        // Unknown value: fall through to the CI-aware default rather
+        // than aborting — the env knob is opt-in convenience.
+    }
+    return if (ci) .plain else .tty;
+}
+
+/// Convenience wrapper: read `MALT_PROGRESS` / `CI` / `GITHUB_ACTIONS`
+/// from the supplied environ and apply `resolveMode`. An empty value
+/// (`CI=`) is treated as unset — matches the `[ -n "$CI" ]` convention
+/// shell-based CI detection uses everywhere else.
+pub fn resolveModeFromEnviron(environ: std.process.Environ) ProgressMode {
+    const explicit: ?[]const u8 = std.process.Environ.getPosix(environ, "MALT_PROGRESS");
+    const ci_set = envFlagSet(environ, "CI") or envFlagSet(environ, "GITHUB_ACTIONS");
+    return resolveMode(explicit, ci_set);
+}
+
+fn envFlagSet(environ: std.process.Environ, name: []const u8) bool {
+    const v = std.process.Environ.getPosix(environ, name) orelse return false;
+    return v.len > 0;
+}
+
+/// Test-only override for the TTY probe so the `mode + TTY` ANSI gate
+/// can be exercised without a real terminal. Pass `null` to release.
+var supports_ansi_override: ?bool = null;
+
+pub fn setSupportsAnsiForTest(v: ?bool) void {
+    if (!builtin.is_test) return;
+    supports_ansi_override = v;
+}
+
 fn supportsAnsi() bool {
+    if (builtin.is_test) {
+        if (supports_ansi_override) |v| return v;
+    }
     return pkg_stderr.supportsAnsiEscapeCodes(pkg_io) catch false;
 }
 
+/// Test-only stderr capture mirror of `output.beginStderrCapture` —
+/// tests run sequentially in a binary, so a single non-locked slot is
+/// safe. Elided from release via `builtin.is_test`.
+var capture_list: ?*std.ArrayList(u8) = null;
+var capture_allocator: std.mem.Allocator = undefined;
+
+pub fn beginStderrCapture(allocator: std.mem.Allocator, buf: *std.ArrayList(u8)) void {
+    if (!builtin.is_test) return;
+    capture_list = buf;
+    capture_allocator = allocator;
+}
+
+pub fn endStderrCapture() void {
+    if (!builtin.is_test) return;
+    capture_list = null;
+}
+
 fn writeStderrAll(bytes: []const u8) void {
+    if (builtin.is_test) {
+        if (capture_list) |list| {
+            list.appendSlice(capture_allocator, bytes) catch {};
+            return;
+        }
+    }
     pkg_stderr.writeStreamingAll(pkg_io, bytes) catch {};
 }
 
@@ -52,6 +135,24 @@ fn sleepNs(ns: u64) bool {
 /// Braille-based spinner frames, shared by ProgressBar and Spinner.
 const spinner_chars = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
 
+/// Single-line plain-mode event: `<label>: <status>\n`. No colour, no
+/// glyph, no rate-limited redraws — one byte stream that survives `tee`
+/// and CI log scrapers without `term_sanitize` having to fight it.
+/// Routed through `output.writeStderrAll` so the same mutex that
+/// serialises info/warn/etc. lines also serialises plain progress
+/// events when parallel workers finish their bars concurrently.
+fn writePlainLine(label: []const u8, status: []const u8) void {
+    var buf: [512]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "{s}: {s}\n", .{ label, status }) catch return;
+    if (builtin.is_test) {
+        if (capture_list) |list| {
+            list.appendSlice(capture_allocator, line) catch {};
+            return;
+        }
+    }
+    output.writeStderrAll(line);
+}
+
 /// Best-effort restore of terminal state mutated by `MultiProgress.init`
 /// or `Spinner.start`: re-enable autowrap, show the cursor, return to
 /// column 0. Safe to call from a panic / signal handler — the bytes are
@@ -69,7 +170,10 @@ pub const MultiProgress = struct {
     is_tty: bool,
 
     pub fn init(count: u16) MultiProgress {
-        const tty = supportsAnsi();
+        // `is_tty` here means "TTY-mode bar is active": the rendering
+        // gate folds terminal capability and `MALT_PROGRESS` together so
+        // plain/none never leaks DECSET/cursor-hide bytes into CI logs.
+        const tty = supportsAnsi() and pkg_mode == .tty;
 
         // Hide cursor, disable autowrap, reserve lines by printing empty placeholders.
         // Autowrap disabled so an over-width bar clips instead of wrapping —
@@ -117,6 +221,10 @@ pub const ProgressBar = struct {
     line_index: u16,
     /// Shared multi-progress state (null for standalone bars).
     multi: ?*MultiProgress,
+    /// Plain-mode latches: one "starting" / one "done" line per bar, no
+    /// matter how many `update` calls come from the worker.
+    plain_started: bool,
+    plain_finished: bool,
 
     const render_interval_ns: i128 = 100 * std.time.ns_per_ms; // 10 Hz max
     const bar_width: u64 = 30;
@@ -133,30 +241,57 @@ pub const ProgressBar = struct {
             .label_width = 0,
             .line_index = 0,
             .multi = null,
+            .plain_started = false,
+            .plain_finished = false,
         };
     }
 
     pub fn update(self: *ProgressBar, current: u64) void {
         self.current = current;
-        if (output.isQuiet() or !self.is_tty) return;
-
-        const now = nowNs();
-        if (now - self.last_render_ns < render_interval_ns) return;
-        self.last_render_ns = now;
-
-        self.render();
+        if (output.isQuiet()) return;
+        switch (pkg_mode) {
+            .none => return,
+            .plain => self.emitPlainStart(),
+            .tty => {
+                if (!self.is_tty) return;
+                const now = nowNs();
+                if (now - self.last_render_ns < render_interval_ns) return;
+                self.last_render_ns = now;
+                self.render();
+            },
+        }
     }
 
     pub fn finish(self: *ProgressBar) void {
-        if (output.isQuiet() or !self.is_tty) return;
-        if (self.total > 0) {
-            self.current = self.total;
+        if (output.isQuiet()) return;
+        switch (pkg_mode) {
+            .none => return,
+            .plain => self.emitPlainDone(),
+            .tty => {
+                if (!self.is_tty) return;
+                if (self.total > 0) {
+                    self.current = self.total;
+                }
+                self.render();
+                // Standalone bars own their trailing newline; multi-progress
+                // groups reserve the row up front.
+                if (self.multi == null) {
+                    writeStderrAll("\n");
+                }
+            },
         }
-        self.render();
-        // For standalone bars (no multi), emit a newline
-        if (self.multi == null) {
-            writeStderrAll("\n");
-        }
+    }
+
+    fn emitPlainStart(self: *ProgressBar) void {
+        if (self.plain_started) return;
+        self.plain_started = true;
+        writePlainLine(self.label, "starting");
+    }
+
+    fn emitPlainDone(self: *ProgressBar) void {
+        if (self.plain_finished) return;
+        self.plain_finished = true;
+        writePlainLine(self.label, "done");
     }
 
     fn render(self: *ProgressBar) void {
@@ -736,4 +871,249 @@ test "sleepNs propagates cancellation when called repeatedly" {
     try std.testing.expect(sleepNs(0));
     try std.testing.expect(!sleepNs(0));
     try std.testing.expectEqual(@as(usize, 3), CancelSleepProbe.sleep_calls);
+}
+
+// `MALT_PROGRESS` contract: explicit env wins over CI auto-detect, an
+// unrecognised value silently falls back to the CI-aware default. Pinning
+// the full table keeps install/upgrade/migrate behaviour consistent.
+test "resolveMode defaults to tty when nothing is set" {
+    try std.testing.expectEqual(ProgressMode.tty, resolveMode(null, false));
+}
+
+test "resolveMode flips to plain when CI is detected" {
+    try std.testing.expectEqual(ProgressMode.plain, resolveMode(null, true));
+}
+
+test "resolveMode honours explicit MALT_PROGRESS values" {
+    try std.testing.expectEqual(ProgressMode.tty, resolveMode("tty", false));
+    try std.testing.expectEqual(ProgressMode.plain, resolveMode("plain", false));
+    try std.testing.expectEqual(ProgressMode.none, resolveMode("none", false));
+}
+
+test "resolveMode explicit value wins over CI detection" {
+    try std.testing.expectEqual(ProgressMode.tty, resolveMode("tty", true));
+    try std.testing.expectEqual(ProgressMode.none, resolveMode("none", true));
+}
+
+test "resolveMode falls back to the CI-aware default on unknown values" {
+    try std.testing.expectEqual(ProgressMode.tty, resolveMode("bogus", false));
+    try std.testing.expectEqual(ProgressMode.plain, resolveMode("bogus", true));
+}
+
+// Mode-aware ProgressBar behaviour: `.none` must not write a single byte
+// of progress (TTY render included), `.plain` must emit one line per
+// state transition with no escape sequences so CI logs stay readable.
+test "ProgressBar in none mode writes no progress bytes" {
+    const prior_mode = mode();
+    setMode(.none);
+    defer setMode(prior_mode);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init("tree", 1000);
+    bar.is_tty = true; // force TTY render branch — must still be suppressed
+    bar.update(0);
+    bar.update(500);
+    bar.finish();
+
+    try std.testing.expectEqualStrings("", buf.items);
+}
+
+test "ProgressBar in plain mode emits one starting and one done line" {
+    const prior_mode = mode();
+    setMode(.plain);
+    defer setMode(prior_mode);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init("tree", 1000);
+    bar.update(0);
+    bar.update(500); // intermediate updates do not spam new lines
+    bar.finish();
+
+    try std.testing.expectEqualStrings("tree: starting\ntree: done\n", buf.items);
+}
+
+test "MultiProgress in plain mode emits no ANSI setup sequences" {
+    const prior_mode = mode();
+    setMode(.plain);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var mp = MultiProgress.init(3);
+    mp.finish();
+
+    try std.testing.expectEqualStrings("", buf.items);
+}
+
+// --quiet predates MALT_PROGRESS and stays the one knob that silences
+// success messages too — `MALT_PROGRESS=plain` must not punch through it.
+test "ProgressBar quiet trumps plain mode" {
+    const prior_mode = mode();
+    const prior_quiet = output.isQuiet();
+    setMode(.plain);
+    output.setQuiet(true);
+    defer {
+        setMode(prior_mode);
+        output.setQuiet(prior_quiet);
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init("tree", 1000);
+    bar.update(0);
+    bar.finish();
+
+    try std.testing.expectEqualStrings("", buf.items);
+}
+
+// Pins the env-name wiring (MALT_PROGRESS / CI / GITHUB_ACTIONS) so a
+// future rename can't silently break the CI-friendly default.
+test "resolveModeFromEnviron flips to plain when CI=true is set" {
+    var buf: [64:0]u8 = undefined;
+    const env_value = std.fmt.bufPrintZ(&buf, "CI=true", .{}) catch unreachable;
+    const slice: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{env_value.ptr};
+    const environ: std.process.Environ = .{ .block = .{ .slice = slice } };
+
+    try std.testing.expectEqual(ProgressMode.plain, resolveModeFromEnviron(environ));
+}
+
+test "resolveModeFromEnviron honours an explicit MALT_PROGRESS=none even with CI=true" {
+    var ci_buf: [64:0]u8 = undefined;
+    var prog_buf: [64:0]u8 = undefined;
+    const ci_value = std.fmt.bufPrintZ(&ci_buf, "CI=true", .{}) catch unreachable;
+    const prog_value = std.fmt.bufPrintZ(&prog_buf, "MALT_PROGRESS=none", .{}) catch unreachable;
+    const slice: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{ ci_value.ptr, prog_value.ptr };
+    const environ: std.process.Environ = .{ .block = .{ .slice = slice } };
+
+    try std.testing.expectEqual(ProgressMode.none, resolveModeFromEnviron(environ));
+}
+
+test "resolveModeFromEnviron flips to plain on GITHUB_ACTIONS=true" {
+    var buf: [64:0]u8 = undefined;
+    const v = std.fmt.bufPrintZ(&buf, "GITHUB_ACTIONS=true", .{}) catch unreachable;
+    const slice: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{v.ptr};
+    const environ: std.process.Environ = .{ .block = .{ .slice = slice } };
+
+    try std.testing.expectEqual(ProgressMode.plain, resolveModeFromEnviron(environ));
+}
+
+test "resolveModeFromEnviron returns tty on an empty environ" {
+    const environ: std.process.Environ = .empty;
+    try std.testing.expectEqual(ProgressMode.tty, resolveModeFromEnviron(environ));
+}
+
+// `CI=` (empty value) is shorthand for "no CI" in shell scripts —
+// pin that convention so a `CI=` parent override doesn't surprise
+// users into the plain bar.
+test "resolveModeFromEnviron treats empty CI value as unset" {
+    var buf: [16:0]u8 = undefined;
+    const v = std.fmt.bufPrintZ(&buf, "CI=", .{}) catch unreachable;
+    const slice: [:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{v.ptr};
+    const environ: std.process.Environ = .{ .block = .{ .slice = slice } };
+
+    try std.testing.expectEqual(ProgressMode.tty, resolveModeFromEnviron(environ));
+}
+
+test "MultiProgress in none mode emits no ANSI setup sequences" {
+    const prior_mode = mode();
+    setMode(.none);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var mp = MultiProgress.init(2);
+    mp.finish();
+
+    try std.testing.expectEqualStrings("", buf.items);
+}
+
+// MultiProgress on a real TTY with the default mode must still emit the
+// DECSET/cursor-hide prelude — pins the positive case so the mode gate
+// can't silently regress the existing bar.
+test "MultiProgress in tty mode on a TTY emits the cursor-hide prelude" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var mp = MultiProgress.init(2);
+    mp.finish();
+
+    // Prelude + 2 reserved newlines + restore-on-finish (autowrap on,
+    // cursor on, carriage return).
+    try std.testing.expectEqualStrings("\x1b[?25l\x1b[?7l\n\n\x1b[?7h\x1b[?25h\r", buf.items);
+}
+
+// A standalone bar that's `finish`-ed without any prior `update` still
+// needs to emit a `done` line in plain mode — `migrate` short-circuits
+// on a manifest hit before the first byte is downloaded but the bar
+// already exists, and CI logs should still see the row close.
+test "ProgressBar in plain mode emits done even without a prior update" {
+    const prior_mode = mode();
+    setMode(.plain);
+    defer setMode(prior_mode);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init("yazi", 0);
+    bar.finish();
+
+    try std.testing.expectEqualStrings("yazi: done\n", buf.items);
+}
+
+// Quiet must trump `.none` too: with both set, the early-return at the
+// top of update/finish takes precedence over the mode switch. Pins the
+// `output.isQuiet()` short-circuit so a refactor can't drop it without
+// breaking a test.
+test "ProgressBar quiet trumps none mode" {
+    const prior_mode = mode();
+    const prior_quiet = output.isQuiet();
+    setMode(.none);
+    output.setQuiet(true);
+    defer {
+        setMode(prior_mode);
+        output.setQuiet(prior_quiet);
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init("tree", 1000);
+    bar.is_tty = true;
+    bar.update(0);
+    bar.finish();
+
+    try std.testing.expectEqualStrings("", buf.items);
 }
