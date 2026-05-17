@@ -85,6 +85,135 @@ pub fn pruneCellarForReinstall(ctx: *const AppCtx, prefix: []const u8, name: []c
     std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};
 }
 
+/// Tear down DB-tracked stale kegs for the given package name: every
+/// `kegs` row whose `cellar_path` differs from `keep_cellar_path` is
+/// unlinked (symlinks + `links` rows via `linker.unlink`), its
+/// `dependencies` rows are dropped, the `kegs` row is removed, and
+/// the on-disk dir is wiped.
+///
+/// Pairs with `pruneCellarForReinstall` (resolved-version dir wipe)
+/// and `pruneOtherCellarVersionsForReinstall` (orphan-dir fallback)
+/// so `--force` against a revision bump does not leave the DB
+/// pointing at a dir the disk side just removed — which would flip
+/// doctor from "Mach-O placeholders" to "Missing kegs".
+///
+/// The pin row is preserved by name-level COALESCE in `recordKeg`'s
+/// INSERT OR REPLACE, so dropping the old row here does not lose the
+/// user's hold on the package.
+///
+/// Best-effort: per-row errors are swallowed; the next `doctor` pass
+/// surfaces anything we could not reach.
+pub fn unlinkAndDeleteStaleKegRows(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    name: []const u8,
+    keep_cellar_path: []const u8,
+) void {
+    const StaleRow = struct { id: i64, path: []u8 };
+    var stale: std.ArrayList(StaleRow) = .empty;
+    defer {
+        for (stale.items) |s| allocator.free(s.path);
+        stale.deinit(allocator);
+    }
+
+    {
+        var stmt = db.prepare("SELECT id, cellar_path FROM kegs WHERE name = ?1 AND cellar_path != ?2;") catch return;
+        defer stmt.finalize();
+        stmt.bindText(1, name) catch return;
+        stmt.bindText(2, keep_cellar_path) catch return;
+
+        while (stmt.step() catch false) {
+            const id = stmt.columnInt(0);
+            const path_raw = stmt.columnText(1) orelse continue;
+            const path = std.mem.sliceTo(path_raw, 0);
+            const dup = allocator.dupe(u8, path) catch continue;
+            stale.append(allocator, .{ .id = id, .path = dup }) catch {
+                allocator.free(dup);
+                continue;
+            };
+        }
+    }
+
+    for (stale.items) |s| {
+        // `linker.unlink` removes the on-disk symlinks AND the `links`
+        // rows for this keg_id, so we only need to clean up the
+        // `dependencies` rows and the `kegs` row ourselves.
+        linker.unlink(s.id) catch {};
+        deleteDependencyRows(db, s.id);
+        deleteKegRowOnly(db, s.id);
+        std.Io.Dir.cwd().deleteTree(ctx.io, s.path) catch {};
+    }
+}
+
+fn deleteDependencyRows(db: *sqlite.Database, keg_id: i64) void {
+    var stmt = db.prepare("DELETE FROM dependencies WHERE keg_id = ?1;") catch return;
+    defer stmt.finalize();
+    stmt.bindInt(1, keg_id) catch return;
+    _ = stmt.step() catch {};
+}
+
+fn deleteKegRowOnly(db: *sqlite.Database, keg_id: i64) void {
+    var stmt = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return;
+    defer stmt.finalize();
+    stmt.bindInt(1, keg_id) catch return;
+    _ = stmt.step() catch {};
+}
+
+/// Wipe every `<prefix>/Cellar/<name>/*` entry except `keep_version`.
+/// Safety net for orphan dirs that have no `kegs` row pointing at
+/// them — legacy installs, crashed runs, manual `mkdir`. The DB-
+/// driven cleanup in `unlinkAndDeleteStaleKegRows` covers the common
+/// "force-reinstall across a revision bump" case; this one catches
+/// the residue. Best-effort otherwise: per-entry errors are
+/// swallowed because the materialize step still covers real
+/// failures.
+///
+/// Names are collected before any deletion: POSIX leaves readdir
+/// behavior undefined while entries are being unlinked, and APFS
+/// readdir is buffered so a partial-page refresh can drop entries.
+pub fn pruneOtherCellarVersionsForReinstall(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    name: []const u8,
+    keep_version: []const u8,
+) void {
+    var pkg_buf: [512]u8 = undefined;
+    const pkg_path = std.fmt.bufPrint(&pkg_buf, "{s}/Cellar/{s}", .{ prefix, name }) catch return;
+
+    var pkg_dir = std.Io.Dir.openDirAbsolute(ctx.io, pkg_path, .{ .iterate = true }) catch return;
+    defer pkg_dir.close(ctx.io);
+
+    var stale: std.ArrayList([]u8) = .empty;
+    defer {
+        for (stale.items) |s| allocator.free(s);
+        stale.deinit(allocator);
+    }
+
+    var it = pkg_dir.iterate();
+    while (it.next(ctx.io) catch null) |entry| {
+        if (entry.kind != .directory) continue;
+        if (std.mem.eql(u8, entry.name, keep_version)) continue;
+        const dup = allocator.dupe(u8, entry.name) catch continue;
+        stale.append(allocator, dup) catch {
+            allocator.free(dup);
+            continue;
+        };
+    }
+
+    for (stale.items) |version_name| {
+        var version_buf: [512]u8 = undefined;
+        const version_path = std.fmt.bufPrint(
+            &version_buf,
+            "{s}/{s}",
+            .{ pkg_path, version_name },
+        ) catch continue;
+        std.Io.Dir.cwd().deleteTree(ctx.io, version_path) catch {};
+    }
+}
+
 /// Single-`stat` probe of `<prefix>/Cellar/<name>`. uninstall tears
 /// down the parent when the last version goes; an orphan empty dir is
 /// `mt doctor --fix` territory rather than something to paper over.
@@ -609,9 +738,35 @@ fn executeWithOpts(
     // so wipe each target Cellar dir up front. Pin survives because the
     // DB row is rewritten via INSERT OR REPLACE with COALESCE-MAX
     // inheritance on `pinned`.
+    //
+    // When the resolver picks a new revision (10.47 → 10.47_1) the
+    // prior keg has its own row in `kegs` and its own dir under
+    // `Cellar/<name>/`; both must go or doctor flips between
+    // "Mach-O placeholders" (disk orphan) and "Missing kegs" (DB
+    // orphan pointing at the swept dir). The DB-driven cleanup also
+    // unlinks the prior keg's symlinks via the linker.
+    //
+    // Failure-mode tradeoff: clearing the prior state before
+    // materialize means a materialize crash leaves the user keg-
+    // less. The same risk already existed for same-version `--force`
+    // via the cellar wipe; we're extending it to revision-bump
+    // `--force`. Recovery is a retry; for the bug this fix targets
+    // (orphan after prior failed force) the user is already broken,
+    // so a retry is the worst case.
     if (force) {
         for (all_jobs.items) |job| {
+            var keep_path_buf: [512]u8 = undefined;
+            const keep_path = std.fmt.bufPrint(
+                &keep_path_buf,
+                "{s}/Cellar/{s}/{s}",
+                .{ prefix, job.name, job.version_str },
+            ) catch {
+                pruneCellarForReinstall(ctx, prefix, job.name, job.version_str);
+                continue;
+            };
             pruneCellarForReinstall(ctx, prefix, job.name, job.version_str);
+            unlinkAndDeleteStaleKegRows(ctx, allocator, &db, &linker, job.name, keep_path);
+            pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, job.name, job.version_str);
         }
     }
 
@@ -983,4 +1138,187 @@ test "kegPresent returns true only when <prefix>/Cellar/<name> exists" {
 
     try testing.expect(kegPresent(&ctx, prefix, "ghost"));
     try testing.expect(!kegPresent(&ctx, prefix, "other"));
+}
+
+// `--force` that resolves to a new revision (e.g. 10.47 → 10.47_1)
+// must not orphan the prior keg dir: doctor walks the whole Cellar
+// tree and would flag the abandoned unpatched binaries forever.
+test "pruneOtherCellarVersionsForReinstall removes sibling versions but keeps the named one" {
+    const testing = std.testing;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
+    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_prune_siblings_{d}", .{ts});
+    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+
+    var old_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const old_keg = try std.fmt.bufPrint(&old_buf, "{s}/Cellar/pcre2/10.47/bin", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(ctx.io, old_keg);
+
+    var new_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const new_keg = try std.fmt.bufPrint(&new_buf, "{s}/Cellar/pcre2/10.47_1/bin", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(ctx.io, new_keg);
+
+    pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "pcre2", "10.47_1");
+
+    var old_root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const old_root = try std.fmt.bufPrint(&old_root_buf, "{s}/Cellar/pcre2/10.47", .{prefix});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(ctx.io, old_root, .{}));
+
+    var new_root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const new_root = try std.fmt.bufPrint(&new_root_buf, "{s}/Cellar/pcre2/10.47_1", .{prefix});
+    try std.Io.Dir.accessAbsolute(ctx.io, new_root, .{});
+}
+
+test "pruneOtherCellarVersionsForReinstall is a no-op when only the kept version exists" {
+    const testing = std.testing;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
+    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_prune_siblings_solo_{d}", .{ts});
+    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+
+    var keep_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const keep_keg = try std.fmt.bufPrint(&keep_buf, "{s}/Cellar/libgit2/1.9.3/lib", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(ctx.io, keep_keg);
+
+    pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "libgit2", "1.9.3");
+
+    var keep_root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const keep_root = try std.fmt.bufPrint(&keep_root_buf, "{s}/Cellar/libgit2/1.9.3", .{prefix});
+    try std.Io.Dir.accessAbsolute(ctx.io, keep_root, .{});
+}
+
+test "pruneOtherCellarVersionsForReinstall is a no-op when the package dir does not exist" {
+    const testing = std.testing;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
+    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_prune_siblings_absent_{d}", .{ts});
+    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+
+    // No `Cellar/ghost` ever created — sweep must not fault, panic, or leak.
+    pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "ghost", "1.0");
+}
+
+// A user holding several prior revisions (pinned at name level, repeated
+// force-reinstalls across revisions) is the realistic shape behind the
+// original report. All N-1 stale dirs must go in one sweep.
+test "pruneOtherCellarVersionsForReinstall sweeps multiple stale siblings in one pass" {
+    const testing = std.testing;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
+    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_prune_siblings_many_{d}", .{ts});
+    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+
+    const versions = [_][]const u8{ "10.46", "10.47", "10.47_1", "10.48" };
+    for (versions) |v| {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dir = try std.fmt.bufPrint(&buf, "{s}/Cellar/pcre2/{s}/bin", .{ prefix, v });
+        try std.Io.Dir.cwd().createDirPath(ctx.io, dir);
+    }
+
+    pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "pcre2", "10.48");
+
+    for (versions) |v| {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = try std.fmt.bufPrint(&buf, "{s}/Cellar/pcre2/{s}", .{ prefix, v });
+        if (std.mem.eql(u8, v, "10.48")) {
+            try std.Io.Dir.accessAbsolute(ctx.io, root, .{});
+        } else {
+            try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(ctx.io, root, .{}));
+        }
+    }
+}
+
+// Stray non-directory entries under `Cellar/<name>/` (e.g. a leftover
+// `.DS_Store` or a user-created marker file) must be left alone. The
+// sweep targets version dirs, not arbitrary cleanup.
+test "pruneOtherCellarVersionsForReinstall ignores non-directory entries" {
+    const testing = std.testing;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
+    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_prune_siblings_files_{d}", .{ts});
+    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+
+    var pkg_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const pkg_path = try std.fmt.bufPrint(&pkg_buf, "{s}/Cellar/pcre2", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(ctx.io, pkg_path);
+
+    var stray_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const stray = try std.fmt.bufPrint(&stray_buf, "{s}/.DS_Store", .{pkg_path});
+    {
+        const f = try std.Io.Dir.cwd().createFile(ctx.io, stray, .{});
+        defer f.close(ctx.io);
+        try f.writeStreamingAll(ctx.io, "stray");
+    }
+
+    var keep_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const keep_keg = try std.fmt.bufPrint(&keep_buf, "{s}/10.47_1/bin", .{pkg_path});
+    try std.Io.Dir.cwd().createDirPath(ctx.io, keep_keg);
+
+    pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "pcre2", "10.47_1");
+
+    try std.Io.Dir.accessAbsolute(ctx.io, stray, .{});
+}
+
+// Realistic call-site shape: `pruneCellarForReinstall` runs first and
+// removes the keep_version dir, then the sweep runs against a state
+// where keep_version no longer exists on disk. Sweep must still wipe
+// the stale siblings without faulting on the missing target.
+test "pruneOtherCellarVersionsForReinstall tolerates keep_version absent on disk" {
+    const testing = std.testing;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
+    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_prune_siblings_nokeep_{d}", .{ts});
+    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+
+    var stale_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const stale = try std.fmt.bufPrint(&stale_buf, "{s}/Cellar/pcre2/10.47/bin", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(ctx.io, stale);
+
+    pruneOtherCellarVersionsForReinstall(&ctx, testing.allocator, prefix, "pcre2", "10.47_1");
+
+    var stale_root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const stale_root = try std.fmt.bufPrint(&stale_root_buf, "{s}/Cellar/pcre2/10.47", .{prefix});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(ctx.io, stale_root, .{}));
 }
