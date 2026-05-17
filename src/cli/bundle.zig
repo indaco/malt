@@ -317,6 +317,7 @@ fn cmdRemove(ctx: *const AppCtx, rest: []const []const u8) !void {
 fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     var format: Format = .brewfile;
     var out_path: []const u8 = "Brewfile";
+    var include_services = false;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         const a = rest[i];
@@ -324,6 +325,8 @@ fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
             i += 1;
             format = parseFormat(rest[i]) orelse return BundleError.InvalidArgs;
             if (format == .json) out_path = "Maltfile.json";
+        } else if (std.mem.eql(u8, a, "--services")) {
+            include_services = true;
         } else if (!std.mem.startsWith(u8, a, "-")) {
             out_path = a;
         }
@@ -334,7 +337,7 @@ fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
-    try populateFromInstalled(&manifest, &db);
+    try populateFromInstalled(&manifest, &db, .{ .include_services = include_services });
     try writeManifest(ctx, manifest, out_path, format);
     output.success("wrote {s}", .{out_path});
 }
@@ -342,12 +345,15 @@ fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
 fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
     var format: Format = .brewfile;
     var bundle_name: ?[]const u8 = null;
+    var include_services = false;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         const a = rest[i];
         if (std.mem.eql(u8, a, "--format") and i + 1 < rest.len) {
             i += 1;
             format = parseFormat(rest[i]) orelse return BundleError.InvalidArgs;
+        } else if (std.mem.eql(u8, a, "--services")) {
+            include_services = true;
         } else if (!std.mem.startsWith(u8, a, "-")) {
             bundle_name = a;
         }
@@ -361,7 +367,7 @@ fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []c
     if (bundle_name) |n| {
         try populateFromBundle(&manifest, &db, n);
     } else {
-        try populateFromInstalled(&manifest, &db);
+        try populateFromInstalled(&manifest, &db, .{ .include_services = include_services });
     }
 
     var write_buf: [4096]u8 = undefined;
@@ -486,10 +492,32 @@ fn writeManifest(
     w.flush() catch return BundleError.WriteFailed;
 }
 
-fn populateFromInstalled(manifest: *manifest_mod.Manifest, db: *sqlite.Database) !void {
+/// Options for `populateFromInstalled`. Taps round-trip unconditionally
+/// (Brewfile carries them and a missing tap silently breaks restore);
+/// services opt in via `--services` because they encode runtime state.
+const PopulateOpts = struct {
+    include_services: bool = false,
+};
+
+fn populateFromInstalled(
+    manifest: *manifest_mod.Manifest,
+    db: *sqlite.Database,
+    opts: PopulateOpts,
+) !void {
     const a = manifest.allocator();
+    var taps: std.ArrayList([]const u8) = .empty;
     var formulas: std.ArrayList(manifest_mod.FormulaEntry) = .empty;
     var casks: std.ArrayList(manifest_mod.CaskEntry) = .empty;
+    var services: std.ArrayList(manifest_mod.ServiceEntry) = .empty;
+
+    var t = db.prepare("SELECT name FROM taps ORDER BY name;") catch
+        return BundleError.DatabaseError;
+    defer t.finalize();
+    while (t.step() catch false) {
+        const n = t.columnText(0) orelse continue;
+        const name = a.dupe(u8, std.mem.sliceTo(n, 0)) catch return BundleError.DatabaseError;
+        taps.append(a, name) catch return BundleError.DatabaseError;
+    }
 
     var f = db.prepare("SELECT name FROM kegs WHERE install_reason='direct' ORDER BY name;") catch
         return BundleError.DatabaseError;
@@ -509,8 +537,22 @@ fn populateFromInstalled(manifest: *manifest_mod.Manifest, db: *sqlite.Database)
         casks.append(a, .{ .name = name }) catch return BundleError.DatabaseError;
     }
 
+    if (opts.include_services) {
+        var s = db.prepare("SELECT name FROM services WHERE auto_start = 1 ORDER BY name;") catch
+            return BundleError.DatabaseError;
+        defer s.finalize();
+        while (s.step() catch false) {
+            const n = s.columnText(0) orelse continue;
+            const name = a.dupe(u8, std.mem.sliceTo(n, 0)) catch return BundleError.DatabaseError;
+            services.append(a, .{ .name = name, .auto_start = true }) catch
+                return BundleError.DatabaseError;
+        }
+    }
+
+    manifest.taps = taps.toOwnedSlice(a) catch return BundleError.DatabaseError;
     manifest.formulas = formulas.toOwnedSlice(a) catch return BundleError.DatabaseError;
     manifest.casks = casks.toOwnedSlice(a) catch return BundleError.DatabaseError;
+    manifest.services = services.toOwnedSlice(a) catch return BundleError.DatabaseError;
     manifest.version = manifest_mod.schema_version;
 }
 
@@ -575,12 +617,14 @@ fn printHelp(ctx: *const AppCtx) !void {
         \\  install [file]              Install formulae/casks/taps/services from a Brewfile or Maltfile.json.
         \\  cleanup [--yes] [--dry-run] [file]
         \\                              Uninstall packages present on disk but absent from the Brewfile.
-        \\  create  [--format brewfile|json] [path]
+        \\  create  [--format brewfile|json] [--services] [path]
         \\                              Write currently-installed set to a bundle file.
+        \\                              --services also emits auto-start services (JSON only).
         \\  list                        List bundles registered in the database.
         \\  remove <name>               Unregister a bundle (does NOT uninstall members).
-        \\  export  [--format brewfile|json] [name]
+        \\  export  [--format brewfile|json] [--services] [name]
         \\                              Print bundle (or current install) to stdout.
+        \\                              --services also emits auto-start services (JSON only).
         \\  import  <file>              Register a bundle definition without installing.
         \\
         \\Lookup order for install/export without an explicit path:

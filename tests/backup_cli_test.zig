@@ -432,6 +432,160 @@ test "execute --json --output - emits to stdout instead of a default file" {
     try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "]}\n"));
 }
 
+// --- --services round-trip -------------------------------------------
+//
+// `mt bundle export` populates services into the manifest; the JSON
+// surface of `mt backup` mirrors the behaviour so dotfiles workflows
+// can capture launchd state in one shot. Plain-text backups stay
+// untouched — the canonical file format has no `service` line.
+
+fn seedServices(prefix: []const u8) !void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO services (name, keg_name, plist_path, auto_start, last_status)
+        \\VALUES ('postgresql@16', 'postgresql@16', '/tmp/p.plist', 1, 'running'),
+        \\       ('redis',         'redis',         '/tmp/r.plist', 0, 'stopped');
+    );
+}
+
+test "execute --json --services emits auto_start services only" {
+    var s = try Scratch.init(testing.allocator, "json_services");
+    defer s.deinit(testing.allocator);
+    try seedServices(s.path);
+
+    const prior = withJson();
+    defer restoreJson(prior);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--services"});
+
+    const trimmed = std.mem.trim(u8, stdout_buf.items, " \t\r\n");
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, trimmed, .{});
+    defer parsed.deinit();
+    const services = parsed.value.object.get("services") orelse return error.MissingServices;
+    try testing.expectEqual(@as(usize, 1), services.array.items.len);
+    try testing.expectEqualStrings("postgresql@16", services.array.items[0].object.get("name").?.string);
+    try testing.expect(services.array.items[0].object.get("auto_start").?.bool);
+}
+
+test "execute --json without --services omits the services array" {
+    var s = try Scratch.init(testing.allocator, "json_no_services");
+    defer s.deinit(testing.allocator);
+    try seedServices(s.path);
+
+    const prior = withJson();
+    defer restoreJson(prior);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{});
+
+    const trimmed = std.mem.trim(u8, stdout_buf.items, " \t\r\n");
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, trimmed, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("services") == null);
+}
+
+test "execute --json --services on an empty services table emits `services:[]`" {
+    // Pins the explicit-empty contract: when the user asks for
+    // services and there are none, the array still appears so a
+    // downstream consumer can branch on `services` length, not on
+    // its absence.
+    var s = try Scratch.init(testing.allocator, "json_services_empty");
+    defer s.deinit(testing.allocator);
+    // schema init only; no services seeded.
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+    }
+
+    const prior = withJson();
+    defer restoreJson(prior);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--services"});
+
+    try testing.expectEqualStrings(
+        "{\"formulas\":[],\"casks\":[],\"services\":[]}\n",
+        stdout_buf.items,
+    );
+}
+
+test "execute --json --services composes with --versions and --output -" {
+    // Combined-flag smoke: arg parser is order-independent and the
+    // services payload still rides on stdout-mode output.
+    var s = try Scratch.init(testing.allocator, "json_services_combined");
+    defer s.deinit(testing.allocator);
+    try seedServices(s.path);
+    try seedRows(s.path);
+
+    const prior = withJson();
+    defer restoreJson(prior);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer output.endStdoutCapture();
+
+    quiet();
+    defer unquiet();
+    try backup.execute(
+        &malt.app_ctx.debug_ctx,
+        testing.allocator,
+        &.{ "--versions", "--services", "--output", "-" },
+    );
+
+    const trimmed = std.mem.trim(u8, stdout_buf.items, " \t\r\n");
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, trimmed, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("services") != null);
+    try testing.expect(parsed.value.object.get("formulas") != null);
+    try testing.expect(parsed.value.object.get("casks") != null);
+}
+
+test "execute --services on plain-text backup is a silent no-op (no `service` line)" {
+    var s = try Scratch.init(testing.allocator, "text_services_noop");
+    defer s.deinit(testing.allocator);
+    try seedServices(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--services", "--output", out_path });
+
+    const body = try readAll(testing.allocator, out_path);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "service ") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "postgresql@16") == null);
+}
+
 test "execute --json with --output <path> writes JSON to the file" {
     var s = try Scratch.init(testing.allocator, "json_to_path");
     defer s.deinit(testing.allocator);
