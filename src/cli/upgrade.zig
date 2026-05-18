@@ -430,8 +430,11 @@ fn upgradeFormula(
     output.emitNdjsonEvent(.linked, name, "ok");
     output.emitNdjsonEvent(.recorded, name, "ok");
 
-    // opt symlink is convenience; install is already functional via versioned link.
-    linker.linkOpt(formula.name, formula.pkg_version) catch {};
+    // opt symlink isn't convenience: dependents' LC_LOAD_DYLIB entries point
+    // into <prefix>/opt/<name>/lib/... — a silent miss surfaces at runtime.
+    linker.linkOpt(formula.name, formula.pkg_version) catch |e| {
+        output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ formula.name, @errorName(e) });
+    };
 
     // Step 8 (FS-only tail): drop the now-replaced cellar entry.
     cellar_mod.remove(ctx.io, prefix, name, old_pkg_version) catch {

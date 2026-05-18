@@ -194,7 +194,9 @@ pub fn migrateKeg(
         // the keg row, so an early emit would lie if link fails.
         output.emitNdjsonEvent(.linked, keg_name, "ok");
         output.emitNdjsonEvent(.recorded, keg_name, "ok");
-        deps.linker.linkOpt(formula.name, formula.pkg_version) catch {};
+        deps.linker.linkOpt(formula.name, formula.pkg_version) catch |e| {
+            output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ formula.name, @errorName(e) });
+        };
         recordDeps(deps.db, keg_id, &formula);
     } else {
         const keg_id = recordKeg(deps.db, &formula, bottle.sha256, keg.path, "direct") catch {
@@ -202,7 +204,9 @@ pub fn migrateKeg(
             return .failed_install;
         };
         output.emitNdjsonEvent(.recorded, keg_name, "ok");
-        deps.linker.linkOpt(formula.name, formula.pkg_version) catch {};
+        deps.linker.linkOpt(formula.name, formula.pkg_version) catch |e| {
+            output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ formula.name, @errorName(e) });
+        };
         recordDeps(deps.db, keg_id, &formula);
     }
 
@@ -336,7 +340,9 @@ fn migrateFromLocalCellar(
         cellar_mod.remove(ctx.io, deps.prefix, keg_name, receipt.version) catch {};
         return .failed_install;
     };
-    deps.linker.linkOpt(keg_name, receipt.version) catch {};
+    deps.linker.linkOpt(keg_name, receipt.version) catch |e| {
+        output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ keg_name, @errorName(e) });
+    };
     recordDepsFromList(deps.db, keg_id, receipt.runtime_deps);
 
     // Tap kegs aren't reachable from the bottle DSL pipeline (its body

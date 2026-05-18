@@ -119,6 +119,35 @@ test "linkOpt creates opt/{name} -> Cellar/{name}/{version}" {
     try testing.expect(std.mem.endsWith(u8, target2, "/Cellar/bar/2.0"));
 }
 
+test "linkOpt surfaces a typed error when opt/{name} is an obstructing directory" {
+    const prefix = try uniquePrefix("link_opt_obstructed");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    // Pre-create `<prefix>/opt/blocked/` as a non-empty directory.
+    // `deleteFile` can't remove it, so the symLink call must fail —
+    // and the failure must propagate, not get silently swallowed.
+    const opt_blocked = try std.fmt.allocPrint(testing.allocator, "{s}/opt/blocked", .{prefix});
+    defer testing.allocator.free(opt_blocked);
+    try test_io.cwd().createDirPath(std.Options.debug_io, opt_blocked);
+    const sentinel = try std.fmt.allocPrint(testing.allocator, "{s}/sentinel", .{opt_blocked});
+    defer testing.allocator.free(sentinel);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, sentinel, .{});
+    f.close(std.Options.debug_io);
+
+    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/blocked/9.9", .{prefix});
+    defer testing.allocator.free(cellar);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar);
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try testing.expectError(error.PathAlreadyExists, linker.linkOpt("blocked", "9.9"));
+}
+
 test "checkConflicts flags a symlink that points into a different keg" {
     const prefix = try uniquePrefix("link_conflict");
     defer testing.allocator.free(prefix);

@@ -146,26 +146,32 @@ pub const Linker = struct {
         }
     }
 
-    /// Create opt/{name} -> Cellar/{name}/{version} symlink.
+    /// Create `opt/{name} -> Cellar/{name}/{version}` symlink.
+    ///
+    /// Dependents' relocated `LC_LOAD_DYLIB` entries point into
+    /// `<prefix>/opt/<dep>/lib/...`; a missing link there surfaces as a
+    /// dyld load failure at *runtime*, far from this call. Errors
+    /// propagate so the caller can surface them at install time.
     pub fn linkOpt(self: *Linker, name: []const u8, version: []const u8) !void {
         var opt_parent_buf: [512]u8 = undefined;
-        const opt_parent = std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{self.prefix}) catch return;
+        const opt_parent = try std.fmt.bufPrint(&opt_parent_buf, "{s}/opt", .{self.prefix});
         std.Io.Dir.createDirAbsolute(self.io, opt_parent, .default_dir) catch |e| switch (e) {
             error.PathAlreadyExists => {},
-            else => return,
+            else => return e,
         };
 
-        var opt_dir = std.Io.Dir.openDirAbsolute(self.io, opt_parent, .{}) catch return;
+        var opt_dir = try std.Io.Dir.openDirAbsolute(self.io, opt_parent, .{});
         defer opt_dir.close(self.io);
 
         var cellar_buf: [512]u8 = undefined;
-        const cellar_path = std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ self.prefix, name, version }) catch return;
+        const cellar_path = try std.fmt.bufPrint(&cellar_buf, "{s}/Cellar/{s}/{s}", .{ self.prefix, name, version });
 
         // Stale opt link from a prior version; symLink would otherwise EEXIST.
+        // Best-effort: a directory at opt/<name> isn't removable here, and
+        // the symLink below surfaces the real obstruction as PathAlreadyExists.
         opt_dir.deleteFile(self.io, name) catch {};
 
-        // Opt is convenience; install remains functional via the versioned link.
-        opt_dir.symLink(self.io, cellar_path, name, .{}) catch {};
+        try opt_dir.symLink(self.io, cellar_path, name, .{});
     }
 
     /// Remove all symlinks for a keg (from DB).
