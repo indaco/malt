@@ -540,3 +540,44 @@ test "warnTapCaskFetchFailed names both the tap and the token" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "deckclip") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "404") != null);
 }
+
+test "parseFormulaLatest pulls versions.stable from a real-shape document" {
+    const json =
+        \\{"name":"tree","versions":{"stable":"2.1.1","head":"HEAD","bottle":true},"oldname":null}
+    ;
+    const v = parseFormulaLatest(std.testing.allocator, json) orelse return error.UnexpectedNull;
+    defer std.testing.allocator.free(v);
+    try std.testing.expectEqualStrings("2.1.1", v);
+}
+
+test "parseFormulaLatest returns null for every malformed or missing shape" {
+    // One row per shape that should collapse to null. A real upstream
+    // failure should land the keg as up-to-date rather than crash the
+    // pool worker — `null` is the contract.
+    const cases = [_][]const u8{
+        "",
+        "not-json",
+        // Top-level not an object.
+        "[]",
+        "\"a string\"",
+        // No `versions` field.
+        "{}",
+        // `versions` is not an object.
+        "{\"versions\":[]}",
+        "{\"versions\":\"1.0\"}",
+        // `versions` lacks `stable`.
+        "{\"versions\":{\"head\":\"HEAD\"}}",
+        // `stable` is not a string.
+        "{\"versions\":{\"stable\":42}}",
+        "{\"versions\":{\"stable\":null}}",
+        "{\"versions\":{\"stable\":[\"1.0\"]}}",
+    };
+    for (cases) |c| {
+        const got = parseFormulaLatest(std.testing.allocator, c);
+        if (got) |v| {
+            std.testing.allocator.free(v);
+            std.debug.print("expected null for input: {s}\n", .{c});
+            return error.UnexpectedValue;
+        }
+    }
+}

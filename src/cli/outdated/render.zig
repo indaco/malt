@@ -110,3 +110,115 @@ fn writeStyledSpan(
     stdout.writeAll(close) catch return;
     if (use_color) stdout.writeAll(color.Style.reset.code()) catch return;
 }
+
+test "writeFormulaEntries --json emits a single canonical JSON array" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const entries = [_]OutdatedEntry{
+        .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+        .{ .name = @constCast("bravo"), .installed = @constCast("3.0"), .latest = @constCast("4.0") },
+    };
+    try writeFormulaEntries(std.testing.allocator, &aw.writer, &entries, true);
+
+    const want =
+        \\[{"name":"alpha","installed":"1.0","latest":"2.0","type":"formula"},{"name":"bravo","installed":"3.0","latest":"4.0","type":"formula"}]
+    ++ "\n";
+    try std.testing.expectEqualStrings(want, aw.written());
+}
+
+test "writeFormulaEntries --json emits an empty array for no entries" {
+    // Shell-prompt integrations parse the output unconditionally; an
+    // empty array is the documented "nothing outdated" shape.
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeFormulaEntries(std.testing.allocator, &aw.writer, &.{}, true);
+    try std.testing.expectEqualStrings("[]\n", aw.written());
+}
+
+test "writeFormulaEntries escapes embedded quotes in --json mode" {
+    // Names from third-party taps can contain shell-hostile characters;
+    // the JSON layer has to escape them, not pass them through raw.
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const entries = [_]OutdatedEntry{
+        .{ .name = @constCast("a\"b"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+    };
+    try writeFormulaEntries(std.testing.allocator, &aw.writer, &entries, true);
+
+    const want =
+        \\[{"name":"a\"b","installed":"1.0","latest":"2.0","type":"formula"}]
+    ++ "\n";
+    try std.testing.expectEqualStrings(want, aw.written());
+}
+
+test "writeCaskEntries --json emits one NDJSON document per entry" {
+    // `mt outdated --json` for casks predates the formula array shape;
+    // changing it would break downstream parsers, so the NDJSON path
+    // is pinned.
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const entries = [_]OutdatedEntry{
+        .{ .name = @constCast("alpha-cask"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+        .{ .name = @constCast("beta-cask"), .installed = @constCast("3.0"), .latest = @constCast("4.0") },
+    };
+    try writeCaskEntries(&aw.writer, &entries, true);
+
+    const want =
+        \\{"name":"alpha-cask","installed":"1.0","latest":"2.0","type":"cask"}
+        \\{"name":"beta-cask","installed":"3.0","latest":"4.0","type":"cask"}
+        \\
+    ;
+    try std.testing.expectEqualStrings(want, aw.written());
+}
+
+test "writeCaskEntries --json writes nothing when entries is empty" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeCaskEntries(&aw.writer, &.{}, true);
+    try std.testing.expectEqualStrings("", aw.written());
+}
+
+test "writeFormulaEntries quiet mode prints only the name, no styling" {
+    color.setForTest(false, null);
+    output.setQuiet(true);
+    defer color.setForTest(null, null);
+    defer output.setQuiet(false);
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const entries = [_]OutdatedEntry{
+        .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+        .{ .name = @constCast("bravo"), .installed = @constCast("3.0"), .latest = @constCast("4.0") },
+    };
+    try writeFormulaEntries(std.testing.allocator, &aw.writer, &entries, false);
+
+    try std.testing.expectEqualStrings("alpha\nbravo\n", aw.written());
+}
+
+test "writeCaskEntries human mode no-color path adds the [cask] kind tag" {
+    // The bullet/styled-span path is exercised end-to-end in the smokes;
+    // here we just pin that the cask kind suffix lands and the no-color
+    // branch doesn't smuggle ANSI codes into a piped writer.
+    color.setForTest(false, null);
+    output.setQuiet(false);
+    defer color.setForTest(null, null);
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const entries = [_]OutdatedEntry{
+        .{ .name = @constCast("alpha-cask"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+    };
+    try writeCaskEntries(&aw.writer, &entries, false);
+
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "alpha-cask") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), " (1.0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), " < 2.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), " [cask]") != null);
+    // No ANSI escape leaked into the no-color path.
+    try std.testing.expect(std.mem.indexOf(u8, aw.written(), "\x1b[") == null);
+}
