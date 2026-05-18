@@ -121,18 +121,22 @@ fn saveFresh(
     // Best-effort sweep of a stale temp from a previous crashed snapshot;
     // a real permission error here will resurface on the clone below.
     std.Io.Dir.cwd().deleteTree(io, tmp) catch {};
-    // Best-effort cleanup of the partial clone on failure paths — not
-    // worth surfacing if it itself fails, since the install already
-    // succeeded and the temp is invisible to the public cache layout.
-    errdefer std.Io.Dir.cwd().deleteTree(io, tmp) catch {};
+    // Drop the temp on every exit except the success arm that renames
+    // it into place — covers errors *and* the race-loss branch where
+    // a peer worker already published `dst`.
+    var tmp_consumed = false;
+    defer if (!tmp_consumed) {
+        std.Io.Dir.cwd().deleteTree(io, tmp) catch {};
+    };
 
     clonefile.cloneTree(io, allocator, src, tmp) catch return RelocatedStoreError.SaveFailed;
 
     // Race window: another worker may have published the same sha while we
-    // were cloning. If `dst` exists now, drop our temp (errdefer) and report
-    // success without overwriting the winner.
+    // were cloning. If `dst` exists now, drop our temp (defer above) and
+    // report success without overwriting the winner.
     std.Io.Dir.accessAbsolute(io, dst, .{}) catch {
         std.Io.Dir.renameAbsolute(tmp, dst, io) catch return RelocatedStoreError.SaveFailed;
+        tmp_consumed = true;
     };
 }
 
@@ -384,6 +388,41 @@ test "materialize replaces an existing destination" {
     const got = try readAllForTests(testing.allocator, stale);
     defer testing.allocator.free(got);
     try testing.expectEqualStrings(fixture_script, got);
+}
+
+test "saveFresh cleans the tempdir on the race-loss branch" {
+    const prefix = try tmpPrefixForTests(testing.allocator, "race_loss");
+    defer {
+        std.Io.Dir.cwd().deleteTree(testIo(), prefix) catch {};
+        testing.allocator.free(prefix);
+    }
+    try buildKegForTests(testing.allocator, prefix, "rl", "1.0");
+
+    // Force the race-loss branch: pre-create dst so saveFresh's second
+    // accessAbsolute(dst) succeeds, skipping the rename and falling through.
+    const dst = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/store-relocated/{s}",
+        .{ prefix, valid_sha_for_tests },
+    );
+    defer testing.allocator.free(dst);
+    try std.Io.Dir.cwd().createDirPath(testIo(), dst);
+
+    try saveFresh(testIo(), testing.allocator, prefix, "rl", "1.0", dst);
+
+    // Race winner kept dst; the loser's tempdir must not survive.
+    const store_root = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}/store-relocated",
+        .{prefix},
+    );
+    defer testing.allocator.free(store_root);
+    var root_dir = try std.Io.Dir.openDirAbsolute(testIo(), store_root, .{ .iterate = true });
+    defer root_dir.close(testIo());
+    var iter = root_dir.iterate();
+    while (iter.next(testIo()) catch null) |entry| {
+        try testing.expect(std.mem.indexOf(u8, entry.name, ".tmp.") == null);
+    }
 }
 
 test "remove deletes the cache entry" {

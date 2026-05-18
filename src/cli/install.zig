@@ -993,7 +993,9 @@ fn linkAndRecord(
         // row, so an early emit would lie if `linked:failed` follows.
         output.emitNdjsonEvent(.linked, job.name, "ok");
         output.emitNdjsonEvent(.recorded, job.name, "ok");
-        linker.linkOpt(job.name, job.version_str) catch {};
+        linker.linkOpt(job.name, job.version_str) catch |e| {
+            output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ job.name, @errorName(e) });
+        };
         recordDeps(db, keg_id, formula);
     } else {
         const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason) catch |err| {
@@ -1003,7 +1005,9 @@ fn linkAndRecord(
         };
         // keg-only has no public link phase to roll back.
         output.emitNdjsonEvent(.recorded, job.name, "ok");
-        linker.linkOpt(job.name, job.version_str) catch {};
+        linker.linkOpt(job.name, job.version_str) catch |e| {
+            output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ job.name, @errorName(e) });
+        };
         recordDeps(db, keg_id, formula);
     }
     maybeRegisterService(io, allocator, db, formula, prefix);
