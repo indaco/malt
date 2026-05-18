@@ -58,6 +58,7 @@ pub const ruby_subprocess = @import("core/ruby_subprocess.zig");
 pub const sandbox_macos = @import("core/sandbox/macos.zig");
 pub const services_plist = @import("core/services/plist.zig");
 pub const services_supervisor = @import("core/services/supervisor.zig");
+pub const signals = @import("core/signals.zig");
 pub const store = @import("core/store.zig");
 pub const tap = @import("core/tap.zig");
 pub const lock = @import("db/lock.zig");
@@ -69,7 +70,6 @@ pub const clonefile = @import("fs/clonefile.zig");
 pub const codesign = @import("macho/codesign.zig");
 pub const parser = @import("macho/parser.zig");
 pub const patcher = @import("macho/patcher.zig");
-pub const main_mod = @import("main.zig");
 pub const api = @import("net/api.zig");
 pub const client = @import("net/client.zig");
 pub const ghcr = @import("net/ghcr.zig");
@@ -88,4 +88,8 @@ pub const version = @import("version.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
+    // main.zig is not re-exported (it's the binary's entry point, not a
+    // library surface), but its inline tests still need to be discovered
+    // by the lib_tests target.
+    _ = @import("main.zig");
 }

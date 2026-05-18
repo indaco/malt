@@ -1,6 +1,12 @@
 //! Single source of `std.Io`, stdio sinks, and `Environ` for the process.
 //! Built in `main` from `std.process.Init.Minimal` and threaded down so
 //! subcommands stop reaching for module-level globals.
+//!
+//! Boundary policy: `AppCtx` is a CLI-layer aggregate. `cli/*` and `update/*`
+//! take `*const AppCtx`; `core/*` takes raw `std.Io` and
+//! `std.process.Environ` parameters by design — no stdio, no AppCtx.
+//! Keeping core library-shaped lets unit tests drive it with `debug_io`
+//! and an empty environ without ever staging a process context.
 
 const std = @import("std");
 const builtin = @import("builtin");

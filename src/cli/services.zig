@@ -6,6 +6,7 @@ const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
+const signals = @import("../core/signals.zig");
 const supervisor = @import("../core/services/supervisor.zig");
 
 pub const ServicesError = error{
@@ -203,8 +204,7 @@ fn cmdLogs(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []con
     var stdout_writer = stdout.writer(ctx.io, &write_buf);
     const w = &stdout_writer.interface;
     if (follow) {
-        const main_mod = @import("../main.zig");
-        try supervisor.followLog(ctx.io, allocator, path, tail_n, w, main_mod.isInterrupted);
+        try supervisor.followLog(ctx.io, allocator, path, tail_n, w, signals.isInterrupted);
     } else {
         try supervisor.tailLog(ctx.io, allocator, path, tail_n, w);
     }

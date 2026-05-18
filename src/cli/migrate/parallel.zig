@@ -12,7 +12,7 @@ const ghcr_mod = @import("../../net/ghcr.zig");
 const api_mod = @import("../../net/api.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
-const main_mod = @import("../../main.zig");
+const signals = @import("../../core/signals.zig");
 const keg_mod = @import("keg.zig");
 const manifest_mod = @import("manifest.zig");
 const post_install_queue_mod = @import("post_install_queue.zig");
@@ -119,7 +119,7 @@ fn worker(pool: *Pool) void {
             continue;
         }
 
-        if (main_mod.isInterrupted()) {
+        if (signals.isInterrupted()) {
             pool.outcomes[idx] = .{ .name = keg_name, .result = .cancelled };
             continue;
         }
@@ -230,8 +230,8 @@ test "boundWorkerCount caps by job count" {
 // already." The DB pointer stays `undefined` because the empty manifest
 // short-circuits the `and` before any DB query runs.
 test "worker interrupt branch routes untouched kegs to .cancelled" {
-    main_mod.setInterruptedForTest(true);
-    defer main_mod.setInterruptedForTest(false);
+    signals.setInterruptedForTest(true);
+    defer signals.setInterruptedForTest(false);
 
     const app_ctx_mod = @import("../../app_ctx.zig");
     const names = [_][]const u8{ "a", "b", "c" };

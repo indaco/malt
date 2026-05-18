@@ -176,6 +176,7 @@ pub fn build(b: *std.Build) void {
         "tests/test_io_primitives_test.zig",
         "tests/no_io_mod_in_src_test.zig",
         "tests/no_cli_in_core_test.zig",
+        "tests/no_main_reach_in_cli_test.zig",
         "tests/ui_color_theme_test.zig",
         "tests/install_local_test.zig",
         "tests/cask_extra_test.zig",
