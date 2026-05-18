@@ -1294,11 +1294,34 @@ fn upstreamLatest(
     };
 }
 
+/// Surface a tap HEAD-resolve failure during the outdated audit. Pre-
+/// fix this collapsed silently to null and the cask got classified as
+/// up-to-date — a real upgrade could sit unannounced for hours when
+/// the only thing wrong was a transient rate limit. The wording mirrors
+/// `describeResolveError` so the install/upgrade/outdated paths share
+/// one user-actionable line.
+fn warnTapHeadResolveFailed(tap_label: []const u8, err: tap_mod.TapError) void {
+    output.warn(
+        "Could not resolve {s}'s HEAD: {s}",
+        .{ tap_label, tap_mod.describeResolveError(err) },
+    );
+}
+
+/// Companion to `warnTapHeadResolveFailed` for the raw `.rb` fetch /
+/// parse leg. Same intent — never silently drop a cask from the audit.
+fn warnTapCaskFetchFailed(tap_label: []const u8, token: []const u8, reason: []const u8) void {
+    output.warn(
+        "Could not check {s}/{s} for upgrades: {s}",
+        .{ tap_label, token, reason },
+    );
+}
+
 /// Resolve a tap cask's upstream version by fetching the owning tap's
 /// `Casks/<token>.rb` at fresh HEAD and reading the `version` field.
-/// Best-effort: any network, parse, or URL-synth failure collapses to
-/// null and the cask is silently treated as up-to-date (the same
-/// fail-soft contract `fetchCask` follows for the core API).
+/// Returns null on any failure so the caller leaves the row alone, but
+/// emits a one-line warning describing what went wrong — users (and
+/// the regression-script skip-guards) can tell "really up to date" from
+/// "couldn't reach the tap".
 fn tapCaskLatestVersion(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -1312,7 +1335,10 @@ fn tapCaskLatestVersion(
     const urls = tap_mod.resolveTapBaseUrls(alloc, tap_label) catch return null;
     defer urls.deinit(alloc);
 
-    const fresh_sha = tap_mod.resolveHeadCommit(io, environ, alloc, urls.api_head_url) catch return null;
+    const fresh_sha = tap_mod.resolveHeadCommit(io, environ, alloc, urls.api_head_url) catch |err| {
+        warnTapHeadResolveFailed(tap_label, err);
+        return null;
+    };
     defer alloc.free(fresh_sha);
 
     var http = client_mod.HttpClient.init(io, environ, alloc);
@@ -1321,12 +1347,65 @@ fn tapCaskLatestVersion(
     var rb_url_buf: [512]u8 = undefined;
     const rb_url = std.fmt.bufPrint(&rb_url_buf, "{s}/{s}/Casks/{s}.rb", .{ urls.raw_base, fresh_sha, token }) catch return null;
 
-    var rb_resp = http.get(rb_url) catch return null;
+    var rb_resp = http.get(rb_url) catch {
+        warnTapCaskFetchFailed(tap_label, token, "Network failure while reading the .rb");
+        return null;
+    };
     defer rb_resp.deinit();
-    if (rb_resp.status != 200) return null;
+    if (rb_resp.status != 200) {
+        var status_buf: [64]u8 = undefined;
+        const reason = std.fmt.bufPrint(&status_buf, "GitHub returned status {d} for the .rb", .{rb_resp.status}) catch "GitHub returned a non-200 status for the .rb";
+        warnTapCaskFetchFailed(tap_label, token, reason);
+        return null;
+    }
 
-    const rb_info = install_local_mod.parseRubyFormula(rb_resp.body) orelse return null;
+    const rb_info = install_local_mod.parseRubyFormula(rb_resp.body) orelse {
+        warnTapCaskFetchFailed(tap_label, token, "unsupported Ruby DSL shape — use `brew upgrade` for this cask");
+        return null;
+    };
     return alloc.dupe(u8, rb_info.version) catch null;
+}
+
+test "warnTapHeadResolveFailed surfaces rate-limit reason with the tap label" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    warnTapHeadResolveFailed("yuzeguitarist/deck", tap_mod.TapError.RateLimited);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "yuzeguitarist/deck") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Could not resolve") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "rate limit") != null);
+}
+
+test "warnTapHeadResolveFailed surfaces network failure for the regression skip-guards" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    warnTapHeadResolveFailed("user/repo", tap_mod.TapError.NetworkError);
+
+    // Wording must hit both the user-facing "Could not resolve" header
+    // and the existing skip-guard regex (`Network failure`) so the
+    // regressions/*.sh scripts can tell a rate-limit fail from a real
+    // assertion miss.
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Could not resolve") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Network failure") != null);
+}
+
+test "warnTapCaskFetchFailed names both the tap and the token" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    warnTapCaskFetchFailed("yuzeguitarist/deck", "deckclip", "GitHub returned status 404 for the .rb");
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "yuzeguitarist/deck") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "deckclip") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "404") != null);
 }
 
 /// Serial-path single-row check. Returns a caller-owned latest-version
