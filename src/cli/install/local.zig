@@ -17,6 +17,7 @@ const progress_mod = @import("../../ui/progress.zig");
 const args = @import("args.zig");
 const record = @import("record.zig");
 const download = @import("download.zig");
+const install_mod = @import("../install.zig");
 
 const InstallError = record.InstallError;
 
@@ -551,6 +552,14 @@ fn materializeRubyFormula(
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
     };
+    // `--force` pre-materialize: wipe the resolved-version dir so the
+    // archive extracts into a clean target. Without this, extract
+    // mixes new and prior files at the same paths, and the post-link
+    // sweep would only address symlinks + DB rows. Matches the JSON
+    // pipeline's pre-materialize call.
+    if (force) {
+        install_mod.pruneCellarForReinstall(ctx, prefix, resolved.name, resolved.version);
+    }
     std.Io.Dir.createDirAbsolute(ctx.io, cellar_path, .default_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return InstallError.CellarFailed,
@@ -641,6 +650,15 @@ fn materializeRubyFormula(
     db.beginTransaction() catch return InstallError.RecordFailed;
     errdefer db.rollback();
 
+    // `--force` pre-link: clear every same-name prior install's
+    // symlinks so the upcoming linker.link does not collide. Rows
+    // + dependencies stay so the recordKeg INSERT OR REPLACE below
+    // can inherit the user pin from any stale row via COALESCE-MAX.
+    if (force) {
+        install_mod.unlinkSameVersionKegLinks(linker, db, resolved.name, cellar_path);
+        install_mod.unlinkStaleKegLinks(db, linker, resolved.name, cellar_path);
+    }
+
     var keg_id: i64 = 0;
     {
         // The COALESCE on `pinned` carries any existing user pin across
@@ -674,6 +692,15 @@ fn materializeRubyFormula(
     linker.linkOpt(resolved.name, resolved.version) catch {
         output.warn("Could not create opt link for {s}", .{resolved.name});
     };
+
+    // `--force` post-link: the new row is recorded and the pin (if
+    // any) is inherited; safe to drop the prior other-version rows
+    // and their dirs. Disk safety net catches any cellar dir without
+    // a row.
+    if (force) {
+        install_mod.dropStaleKegRows(ctx, allocator, db, resolved.name, cellar_path);
+        install_mod.pruneOtherCellarVersionsForReinstall(ctx, allocator, prefix, resolved.name, resolved.version);
+    }
 
     db.commit() catch return InstallError.RecordFailed;
 
