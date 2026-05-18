@@ -655,3 +655,232 @@ test "checkMissingKegs under --verbose lists each missing (name version) pair" {
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "phantom-a 9.9") != null);
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "phantom-b 1.0") != null);
 }
+
+// --- --fix hint emission ----------------------------------------------
+
+test "fix hint fires when a broken symlink is present and --fix is off" {
+    // Broken symlink is a safe-class condition `--fix` can remove,
+    // so the dim nudge after the summary helps a user who doesn't
+    // know the flag exists.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "fix_hint_symlink");
+    defer s.deinit(allocator);
+
+    const link_path = try std.fmt.allocPrint(allocator, "{s}/bin/ghost-fix-hint", .{s.path});
+    defer allocator.free(link_path);
+    try std.Io.Dir.symLinkAbsolute(
+        std.Options.debug_io,
+        "/tmp/malt_doctor_disp_fix_hint_ghost_target_dne",
+        link_path,
+        .{},
+    );
+
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    doctor.resetFixHint();
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+    doctor.emitFixHintIfNeeded(false);
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "--fix") != null);
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "safe-class fixes") != null);
+}
+
+test "fix hint fires when an orphaned store entry is present" {
+    // Plant a store/<sha> directory with no matching store_refs row;
+    // checkOrphanedStore counts it and must arm the hint.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "fix_hint_orphan");
+    defer s.deinit(allocator);
+
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+    }
+
+    const orphan = try std.fmt.allocPrint(
+        allocator,
+        "{s}/store/0000000000000000000000000000000000000000000000000000000000000000",
+        .{s.path},
+    );
+    defer allocator.free(orphan);
+    try test_io.cwd().createDirPath(std.Options.debug_io, orphan);
+
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    doctor.resetFixHint();
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+    doctor.emitFixHintIfNeeded(false);
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "--fix") != null);
+}
+
+test "fix hint stays silent when --fix was already passed" {
+    // The user already knows about the flag; re-suggesting it after
+    // the summary is noise.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "fix_hint_already_on");
+    defer s.deinit(allocator);
+
+    const link_path = try std.fmt.allocPrint(allocator, "{s}/bin/ghost-fix-already", .{s.path});
+    defer allocator.free(link_path);
+    try std.Io.Dir.symLinkAbsolute(
+        std.Options.debug_io,
+        "/tmp/malt_doctor_disp_fix_already_ghost_target_dne",
+        link_path,
+        .{},
+    );
+
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    doctor.resetFixHint();
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+    doctor.emitFixHintIfNeeded(true);
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "safe-class fixes") == null);
+}
+
+test "fix hint stays silent on a clean prefix" {
+    // No fixable conditions → no nudge. Otherwise we'd train users
+    // to ignore it as noise on healthy systems.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "fix_hint_clean");
+    defer s.deinit(allocator);
+
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    doctor.resetFixHint();
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+    doctor.emitFixHintIfNeeded(false);
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "safe-class fixes") == null);
+}
+
+test "fix hint stays silent when only manual-class issues are present" {
+    // A missing keg is manual-class (reinstall); the inline check
+    // row already says so. Suggesting --fix would just route the
+    // user to a near-duplicate hint.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "fix_hint_manual_only");
+    defer s.deinit(allocator);
+
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+            \\VALUES ('phantom-fix-hint', 'phantom-fix-hint', '9.9', 0, '', '/tmp/malt_doctor_disp_phantom_fix_hint_dne');
+        );
+    }
+
+    output.setVerbose(false);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    doctor.resetFixHint();
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+    doctor.emitFixHintIfNeeded(false);
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "safe-class fixes") == null);
+}
+
+test "resetFixHint clears state between runs so a clean walker stays silent" {
+    // Without the reset, an armed flag from a prior run on the same
+    // process would leak into the next call. Pin the contract here.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "fix_hint_reset");
+    defer s.deinit(allocator);
+
+    const link_path = try std.fmt.allocPrint(allocator, "{s}/bin/ghost-fix-reset", .{s.path});
+    defer allocator.free(link_path);
+    try std.Io.Dir.symLinkAbsolute(
+        std.Options.debug_io,
+        "/tmp/malt_doctor_disp_fix_reset_ghost_target_dne",
+        link_path,
+        .{},
+    );
+
+    output.setVerbose(false);
+
+    // First walk arms the flag.
+    doctor.resetFixHint();
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+
+    // Now remove the offender and reset; the next walk has nothing
+    // to find, and the hint must not fire.
+    try test_io.cwd().deleteFile(std.Options.debug_io, link_path);
+    doctor.resetFixHint();
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    _ = doctor.runChecks(.{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks);
+    doctor.emitFixHintIfNeeded(false);
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "safe-class fixes") == null);
+}
