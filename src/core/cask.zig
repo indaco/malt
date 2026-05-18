@@ -5,7 +5,6 @@ const std = @import("std");
 
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
-const install_cmd = @import("../cli/install.zig");
 const archive_mod = @import("../fs/archive.zig");
 const hash_mod = @import("hash.zig");
 const child_mod = @import("child.zig");
@@ -1001,9 +1000,9 @@ pub fn verifyFileSha256(io: std.Io, file_path: []const u8, expected: ?[]const u8
     if (std.mem.eql(u8, expected_hash, "no_check")) return;
 
     const got = try hashFileSha256(io, file_path);
-    // Constant-time SHA compare — mirrors install.zig to close the
-    // byte-by-byte timing oracle on the expected hash.
-    if (!install_cmd.constantTimeEql(u8, &got, expected_hash)) return error.Sha256Mismatch;
+    // Constant-time SHA compare closes the byte-by-byte timing oracle
+    // on the expected hash.
+    if (!hash_mod.constantTimeEql(u8, &got, expected_hash)) return error.Sha256Mismatch;
 }
 
 /// Check if an application is currently running by its path.

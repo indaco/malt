@@ -40,3 +40,63 @@ pub fn hashFileSha256Hex(io: std.Io, file_path: []const u8) ![64]u8 {
     const raw = try hashFileSha256Raw(io, file_path);
     return std.fmt.bytesToHex(raw, .lower);
 }
+
+/// Constant-time slice equality. Closes the per-byte timing oracle on
+/// hex-SHA compares: stops only after looking at every byte, so an
+/// adaptive attacker cannot iterate one byte at a time.
+pub fn constantTimeEql(comptime T: type, a: []const T, b: []const T) bool {
+    if (a.len != b.len) return false;
+    var diff: T = 0;
+    for (a, b) |x, y| diff |= x ^ y;
+    return diff == 0;
+}
+
+test "constantTimeEql returns true for equal byte slices" {
+    try std.testing.expect(constantTimeEql(u8, "deadbeef", "deadbeef"));
+}
+
+test "constantTimeEql returns false on length mismatch" {
+    try std.testing.expect(!constantTimeEql(u8, "abc", "abcd"));
+}
+
+test "constantTimeEql returns false on different content" {
+    try std.testing.expect(!constantTimeEql(u8, "abcd", "abce"));
+}
+
+test "constantTimeEql returns true for empty equal slices" {
+    try std.testing.expect(constantTimeEql(u8, "", ""));
+}
+
+// Regression guards: the SHA path mixes byte positions, so a wrong
+// implementation that early-outs on the first byte or that masks late
+// bytes would still pass the smoke matrix above. These pin each
+// position end-to-end so an accidental refactor cannot slip past.
+
+test "constantTimeEql distinguishes inputs that differ only at first byte" {
+    const a = "0deadbeef" ** 8;
+    var b: [a.len]u8 = undefined;
+    @memcpy(&b, a);
+    b[0] = '1';
+    try std.testing.expect(!constantTimeEql(u8, a, &b));
+}
+
+test "constantTimeEql distinguishes inputs that differ only at last byte" {
+    const a = "deadbeef0" ** 8;
+    var b: [a.len]u8 = undefined;
+    @memcpy(&b, a);
+    b[b.len - 1] = '1';
+    try std.testing.expect(!constantTimeEql(u8, a, &b));
+}
+
+test "constantTimeEql handles single-byte slices" {
+    try std.testing.expect(constantTimeEql(u8, "a", "a"));
+    try std.testing.expect(!constantTimeEql(u8, "a", "b"));
+}
+
+test "constantTimeEql works on non-u8 elements (generic over T)" {
+    const a = [_]u32{ 1, 2, 3, 4 };
+    const b = [_]u32{ 1, 2, 3, 4 };
+    const c = [_]u32{ 1, 2, 3, 5 };
+    try std.testing.expect(constantTimeEql(u32, &a, &b));
+    try std.testing.expect(!constantTimeEql(u32, &a, &c));
+}

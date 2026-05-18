@@ -7,7 +7,6 @@ const archive = @import("../fs/archive.zig");
 const client_mod = @import("../net/client.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
 const hash_mod = @import("hash.zig");
-const install_cmd = @import("../cli/install.zig");
 
 pub const BottleError = error{
     DownloadFailed,
@@ -53,7 +52,7 @@ pub fn checkBottleSha(expected: []const u8, body: []const u8) ?MismatchInfo {
 
     // Constant-time compare — deny a byte-by-byte timing oracle against
     // the expected hash.
-    if (install_cmd.constantTimeEql(u8, &computed_hex, expected)) return null;
+    if (hash_mod.constantTimeEql(u8, &computed_hex, expected)) return null;
 
     var info: MismatchInfo = .{
         .expected = undefined,
@@ -150,7 +149,7 @@ pub fn verify(io: std.Io, file_path: []const u8, expected_sha256: []const u8) !b
 
     // Constant-time SHA compare — denies a byte-by-byte timing oracle on
     // re-verify-on-disk paths reachable with a remote-controllable hash.
-    return install_cmd.constantTimeEql(u8, &computed_hex, expected_sha256);
+    return hash_mod.constantTimeEql(u8, &computed_hex, expected_sha256);
 }
 
 test "verify returns true when sha256 matches on-disk content" {
