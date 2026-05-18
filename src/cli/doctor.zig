@@ -134,6 +134,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const fix_requested = fix_mod.wantsFix(args);
 
     resetVerboseHint();
+    resetFixHint();
     output.info("Running health checks...", .{});
     const tally = runChecks(.{
         .allocator = allocator,
@@ -182,9 +183,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     emitVerboseHintIfNeeded();
     if (tally.errors > 0) {
         output.err("{d} error(s), {d} warning(s)", .{ tally.errors, tally.warnings });
+        emitFixHintIfNeeded(fix_requested);
         std.process.exit(2);
     } else if (tally.warnings > 0) {
         output.warn("{d} warning(s)", .{tally.warnings});
+        emitFixHintIfNeeded(fix_requested);
         std.process.exit(1);
     } else {
         output.success("Your malt installation is healthy", .{});
@@ -220,6 +223,37 @@ pub fn emitVerboseHintIfNeeded() void {
     if (output.isVerbose()) return;
     if (!verbose_hint_armed) return;
     output.dim("run with --verbose for the full list", .{});
+}
+
+/// Armed by any check that surfaces a condition `--fix` can act on
+/// (stale lock with dead PID, orphan store entries, broken symlinks).
+/// Manual-class issues do not arm: their inline rows already carry
+/// the same remediation hint `--fix` would print, so the nudge would
+/// be pure noise. `execute` reads it after the check loop to emit a
+/// dim "run with --fix" suggestion.
+var fix_hint_armed: bool = false;
+
+/// Test hook + production reset: clear the fix-hint flag at the top
+/// of every `execute` so a previous run on the same process doesn't
+/// leak its state.
+pub fn resetFixHint() void {
+    fix_hint_armed = false;
+}
+
+/// Internal arm — called by checks that detect a safe-class
+/// condition `--fix` can resolve. `emitFixHintIfNeeded` decides
+/// whether to surface the nudge.
+fn armFixHint() void {
+    fix_hint_armed = true;
+}
+
+/// Emit a "run with --fix to apply safe-class fixes" nudge after the
+/// check loop when a fixable condition was detected and `--fix` was
+/// not already on the command line.
+pub fn emitFixHintIfNeeded(fix_requested: bool) void {
+    if (fix_requested) return;
+    if (!fix_hint_armed) return;
+    output.dim("run with --fix to apply safe-class fixes", .{});
 }
 
 /// Emit one dim/faint detail line indented under a check row, with a
@@ -360,6 +394,7 @@ fn checkStaleLock(ctx: CheckCtx, name: []const u8) CheckResult {
         } else {
             const s = std.fmt.bufPrint(&pid_buf, "Stale lock from dead PID {d}. Run: rm {s}", .{ p, lock_path }) catch "Stale lock detected";
             printCheck(name, .warn_status, s);
+            armFixHint();
         }
         return .warn_status;
     }
@@ -503,6 +538,7 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
         .{orphan_count},
     ) catch "Orphaned store entries found. Run: mt purge --store-orphans";
     printCheck(name, .warn_status, msg);
+    armFixHint();
     return .warn_status;
 }
 
@@ -597,6 +633,7 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
     ) catch "Broken symlinks found. Run: mt cleanup";
     printCheck(name, .warn_status, msg);
     armVerboseHint();
+    armFixHint();
     writeVerboseList(offenders.items);
     return .warn_status;
 }
@@ -837,4 +874,58 @@ pub fn countMissingLocalSources(
         };
     }
     return census;
+}
+
+// ── inline unit tests ───────────────────────────────────────────────
+//
+// Pure state-machine coverage for the fix-hint flag. Production walker
+// coverage (which check arms the flag) lives in
+// `tests/doctor_dispatch_test.zig` as integration; here we only pin
+// the gating contract of the emit helper.
+
+const testing = std.testing;
+
+fn fixHintEmitted(buf: []const u8) bool {
+    return std.mem.indexOf(u8, buf, "safe-class fixes") != null;
+}
+
+fn captureFixEmit(allocator: std.mem.Allocator, fix_requested: bool) !std.ArrayList(u8) {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &buf);
+    defer output.endStderrCapture();
+    emitFixHintIfNeeded(fix_requested);
+    return buf;
+}
+
+test "emitFixHintIfNeeded: silent without arming" {
+    resetFixHint();
+    var captured = try captureFixEmit(testing.allocator, false);
+    defer captured.deinit(testing.allocator);
+    try testing.expect(!fixHintEmitted(captured.items));
+}
+
+test "emitFixHintIfNeeded: emits when armed and --fix is off" {
+    resetFixHint();
+    armFixHint();
+    var captured = try captureFixEmit(testing.allocator, false);
+    defer captured.deinit(testing.allocator);
+    try testing.expect(fixHintEmitted(captured.items));
+}
+
+test "emitFixHintIfNeeded: silent when --fix was already passed" {
+    resetFixHint();
+    armFixHint();
+    var captured = try captureFixEmit(testing.allocator, true);
+    defer captured.deinit(testing.allocator);
+    try testing.expect(!fixHintEmitted(captured.items));
+}
+
+test "resetFixHint: clears a previously-armed flag" {
+    resetFixHint();
+    armFixHint();
+    resetFixHint();
+    var captured = try captureFixEmit(testing.allocator, false);
+    defer captured.deinit(testing.allocator);
+    try testing.expect(!fixHintEmitted(captured.items));
 }
