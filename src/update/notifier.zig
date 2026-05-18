@@ -9,6 +9,7 @@ const std = @import("std");
 const output = @import("../ui/output.zig");
 const color = @import("../ui/color.zig");
 const client_mod = @import("../net/client.zig");
+const signals = @import("../core/signals.zig");
 const atomic = @import("../fs/atomic.zig");
 const release = @import("release.zig");
 const origin_mod = @import("origin.zig");
@@ -239,8 +240,7 @@ fn fetchLatestTag(ctx: *const AppCtx, allocator: std.mem.Allocator) ![]u8 {
     http.timeout_ns = network_timeout_ns;
     // SIGINT on the prompt-after-success window collapses the probe
     // instead of stalling the user behind the 1.5 s deadline.
-    const main_mod = @import("../main.zig");
-    http.cancel = main_mod.isInterrupted;
+    http.cancel = signals.isInterrupted;
     defer http.deinit();
     var resp = try http.get(release.releases_latest_url);
     defer resp.deinit();
@@ -401,8 +401,7 @@ fn runNotify(ctx: *const AppCtx, allocator: std.mem.Allocator, current_version: 
     if (need_refresh) {
         // Don't make the user wait out a 1.5s HTTP timeout after Ctrl-C.
         // Same convention as `cli/install.zig` and `cli/migrate.zig`.
-        const main_mod = @import("../main.zig");
-        if (main_mod.isInterrupted()) return;
+        if (signals.isInterrupted()) return;
         refreshOnce(ctx, allocator, path, &state, now, current_version) catch {};
     }
 

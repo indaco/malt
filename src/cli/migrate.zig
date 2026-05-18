@@ -9,6 +9,7 @@ const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
+const signals = @import("../core/signals.zig");
 const store_mod = @import("../core/store.zig");
 const linker_mod = @import("../core/linker.zig");
 const client_mod = @import("../net/client.zig");
@@ -276,8 +277,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer cancelled_names.deinit(allocator);
 
     // Honour Ctrl-C raised during setup, before any network work starts.
-    const main_mod = @import("../main.zig");
-    if (main_mod.isInterrupted()) {
+    if (signals.isInterrupted()) {
         output.warn("Interrupted before migration.", .{});
         return;
     }
@@ -382,7 +382,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         try parallel_mod.run(allocator, &pool, worker_count);
         // Mirror the serial loop's interrupt UX so users running with
         // --parallel still see "Interrupted" instead of silent skips.
-        if (main_mod.isInterrupted()) {
+        if (signals.isInterrupted()) {
             output.warn("Interrupted — skipping remaining kegs.", .{});
         }
 
@@ -407,7 +407,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
         for (keg_names.items) |keg_name| {
             // Stop at the next keg boundary when the user hits Ctrl-C.
-            if (main_mod.isInterrupted()) {
+            if (signals.isInterrupted()) {
                 output.warn("Interrupted — skipping remaining kegs.", .{});
                 break;
             }

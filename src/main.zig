@@ -30,6 +30,7 @@ const upgrade = @import("cli/upgrade.zig");
 const uses = @import("cli/uses.zig");
 const version_update = @import("cli/version_update.zig");
 const which_cmd = @import("cli/which.zig");
+const signals = @import("core/signals.zig");
 const color_mod = @import("ui/color.zig");
 const progress_mod = @import("ui/progress.zig");
 const notifier = @import("update/notifier.zig");
@@ -71,33 +72,6 @@ fn maltLogFn(
     const output = @import("ui/output.zig");
     if (level == .debug and !output.isDebug()) return;
     std.log.defaultLog(level, scope, fmt, args);
-}
-
-/// Global interrupt flag — set by SIGINT handler, checked at install step boundaries.
-var interrupted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
-
-/// Tracks whether `main` has wired SIGINT to `sigintHandler`. Lets `dispatch`
-/// distinguish a real production run (preserve any flag the handler set) from
-/// a test runner re-entering with stale state from a prior case.
-var signal_handler_installed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
-
-pub fn isInterrupted() bool {
-    return interrupted.load(.acquire);
-}
-
-/// Test-only flag override — raising real SIGINT would race the test runner.
-pub fn setInterruptedForTest(v: bool) void {
-    interrupted.store(v, .release);
-}
-
-/// Test-only override so the production-mode preservation branch is reachable
-/// from inline tests without actually installing a process-wide signal handler.
-pub fn setSignalHandlerInstalledForTest(v: bool) void {
-    signal_handler_installed.store(v, .release);
-}
-
-fn sigintHandler(_: std.posix.SIG) callconv(.c) void {
-    interrupted.store(true, .release);
 }
 
 // CLI command modules
@@ -279,25 +253,25 @@ test "command_map resolves cleanup to the cleanup tag" {
 }
 
 test "dispatch clears stale interrupt under the test runner" {
-    setInterruptedForTest(true);
-    defer setInterruptedForTest(false);
+    signals.setInterruptedForTest(true);
+    defer signals.setInterruptedForTest(false);
 
     const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
     try dispatch(std.testing.allocator, &ctx, .help, &.{});
 
-    try std.testing.expect(!isInterrupted());
+    try std.testing.expect(!signals.isInterrupted());
 }
 
 test "dispatch preserves interrupt once the signal handler is installed" {
-    setSignalHandlerInstalledForTest(true);
-    defer setSignalHandlerInstalledForTest(false);
-    setInterruptedForTest(true);
-    defer setInterruptedForTest(false);
+    signals.setSignalHandlerInstalledForTest(true);
+    defer signals.setSignalHandlerInstalledForTest(false);
+    signals.setInterruptedForTest(true);
+    defer signals.setInterruptedForTest(false);
 
     const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
     try dispatch(std.testing.allocator, &ctx, .help, &.{});
 
-    try std.testing.expect(isInterrupted());
+    try std.testing.expect(signals.isInterrupted());
 }
 
 test "applyGlobalFlag --output-format=ndjson does not flip --quiet" {
@@ -333,16 +307,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     };
 
-    // Register SIGINT handler so Ctrl-C sets interrupted instead of
+    // Register SIGINT handler so Ctrl-C sets the interrupt flag instead of
     // immediately killing the process. Install commands check the flag at
     // step boundaries and clean up before exiting.
-    const act = std.posix.Sigaction{
-        .handler = .{ .handler = &sigintHandler },
-        .mask = std.posix.sigemptyset(),
-        .flags = 0,
-    };
-    std.posix.sigaction(std.posix.SIG.INT, &act, null);
-    signal_handler_installed.store(true, .release);
+    signals.installHandler();
 
     // Run terminal-background detection once, up front, before any
     // output.* call can trigger a lazy OSC 11 probe mid-stream (the
@@ -441,8 +409,8 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
     // No SIGINT handler means we're under the test runner (or some other
     // non-`main` entry); clear any flag a prior test left behind so it
     // can't bleed into this dispatch.
-    if (!signal_handler_installed.load(.acquire)) {
-        interrupted.store(false, .release);
+    if (!signals.signalHandlerInstalled()) {
+        signals.setInterruptedForTest(false);
     }
     switch (cmd) {
         .install => try install.execute(ctx, allocator, cmd_args),

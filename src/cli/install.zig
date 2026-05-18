@@ -11,6 +11,7 @@ const formula_mod = @import("../core/formula.zig");
 const linker_mod = @import("../core/linker.zig");
 const plist_mod = @import("../core/services/plist.zig");
 const supervisor_mod = @import("../core/services/supervisor.zig");
+const signals = @import("../core/signals.zig");
 const store_mod = @import("../core/store.zig");
 const lock_mod = @import("../db/lock.zig");
 const schema = @import("../db/schema.zig");
@@ -570,15 +571,14 @@ fn executeWithOpts(
     defer all_jobs.deinit(allocator);
 
     // Check for Ctrl-C before resolution phase
-    const main_mod = @import("../main.zig");
-    if (main_mod.isInterrupted()) {
+    if (signals.isInterrupted()) {
         output.warn("Interrupted before resolution.", .{});
         return;
     }
 
     for (packages.items) |pkg_name| {
         // Check for Ctrl-C between packages during resolution
-        if (main_mod.isInterrupted()) {
+        if (signals.isInterrupted()) {
             output.warn("Interrupted during resolution.", .{});
             return;
         }
@@ -783,7 +783,7 @@ fn executeWithOpts(
     }
 
     // Check for Ctrl-C between download and materialize phases
-    if (main_mod.isInterrupted()) {
+    if (signals.isInterrupted()) {
         output.warn("Interrupted. Cleaning up...", .{});
         return;
     }
@@ -849,7 +849,7 @@ fn executeWithOpts(
     var failed_count: usize = 0;
 
     for (all_jobs.items, 0..) |*job, i| {
-        if (main_mod.isInterrupted()) {
+        if (signals.isInterrupted()) {
             output.warn("Interrupted. Stopping install.", .{});
             break;
         }

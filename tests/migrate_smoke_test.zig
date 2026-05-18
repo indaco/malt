@@ -817,8 +817,8 @@ test "pre-set SIGINT flag short-circuits the per-keg loop before any API call" {
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // Pre-set the flag so the pre-loop check fires before any API hit.
-    malt.main_mod.setInterruptedForTest(true);
-    defer malt.main_mod.setInterruptedForTest(false);
+    malt.signals.setInterruptedForTest(true);
+    defer malt.signals.setInterruptedForTest(false);
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
