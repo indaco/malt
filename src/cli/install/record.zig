@@ -6,6 +6,7 @@ const std = @import("std");
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const sqlite = @import("../../db/sqlite.zig");
 const formula_mod = @import("../../core/formula.zig");
+const hash = @import("../../core/hash.zig");
 const output = @import("../../ui/output.zig");
 
 pub const InstallError = error{
@@ -199,13 +200,7 @@ pub fn ensureDirs(ctx: *const AppCtx, prefix: []const u8) !void {
     }
 }
 
-/// Constant-time equality for byte slices. Used on the SHA256
-/// comparison so a network-positioned attacker cannot mount a byte-by-
-/// byte timing oracle against the expected hash. Returns false
-/// immediately on length mismatch (the length itself is not a secret).
-pub fn constantTimeEql(comptime T: type, a: []const T, b: []const T) bool {
-    if (a.len != b.len) return false;
-    var diff: T = 0;
-    for (a, b) |x, y| diff |= x ^ y;
-    return diff == 0;
-}
+/// Back-compat alias: callers reach `constantTimeEql` via
+/// `install.zig` and `record.zig`. Canonical home is `core/hash`.
+/// Drop once the install facade settles.
+pub const constantTimeEql = hash.constantTimeEql;

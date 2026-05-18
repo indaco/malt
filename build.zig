@@ -175,6 +175,7 @@ pub fn build(b: *std.Build) void {
         "tests/no_readall_in_loop_test.zig",
         "tests/test_io_primitives_test.zig",
         "tests/no_io_mod_in_src_test.zig",
+        "tests/no_cli_in_core_test.zig",
         "tests/ui_color_theme_test.zig",
         "tests/install_local_test.zig",
         "tests/cask_extra_test.zig",
@@ -308,7 +309,7 @@ pub fn build(b: *std.Build) void {
     });
     test_io_mod.addImport("malt", malt_lib);
 
-    @setEvalBranchQuota(16000);
+    @setEvalBranchQuota(20000);
     inline for (test_modules) |test_file| {
         // e.g. "tests/formula_test.zig" → "formula_test" (so each test binary
         // has a unique install name, which `test-bin` / kcov need).
