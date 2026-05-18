@@ -119,6 +119,42 @@ test "linkOpt creates opt/{name} -> Cellar/{name}/{version}" {
     try testing.expect(std.mem.endsWith(u8, target2, "/Cellar/bar/2.0"));
 }
 
+test "linkOpt replaces a stale regular file at opt/{name}" {
+    // `deleteFile` clears regular files (and stale symlinks), so the
+    // symLink call must still succeed — only a true obstruction (a
+    // non-removable directory) should surface as an error.
+    const prefix = try uniquePrefix("link_opt_regular_file");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    const opt_parent = try std.fmt.allocPrint(testing.allocator, "{s}/opt", .{prefix});
+    defer testing.allocator.free(opt_parent);
+    try test_io.cwd().createDirPath(std.Options.debug_io, opt_parent);
+    const stale = try std.fmt.allocPrint(testing.allocator, "{s}/wget", .{opt_parent});
+    defer testing.allocator.free(stale);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, stale, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "stale\n");
+    }
+
+    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/wget/1.0", .{prefix});
+    defer testing.allocator.free(cellar);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cellar);
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try linker.linkOpt("wget", "1.0");
+
+    var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const target = try test_io.readLinkAbsolute(std.Options.debug_io, stale, &target_buf);
+    try testing.expect(std.mem.endsWith(u8, target, "/Cellar/wget/1.0"));
+}
+
 test "linkOpt surfaces a typed error when opt/{name} is an obstructing directory" {
     const prefix = try uniquePrefix("link_opt_obstructed");
     defer testing.allocator.free(prefix);
