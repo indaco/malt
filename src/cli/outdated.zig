@@ -2,302 +2,58 @@
 //! List outdated packages.
 
 const std = @import("std");
-const sqlite = @import("../db/sqlite.zig");
-const schema = @import("../db/schema.zig");
-const atomic = @import("../fs/atomic.zig");
+
 const AppCtx = @import("../app_ctx.zig").AppCtx;
-const output = @import("../ui/output.zig");
+const schema = @import("../db/schema.zig");
+const sqlite = @import("../db/sqlite.zig");
+const atomic = @import("../fs/atomic.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
-const cask_mod = @import("../core/cask.zig");
-const tap_mod = @import("../core/tap.zig");
-const install_local_mod = @import("install/local.zig");
-const install_args_mod = @import("install/args.zig");
 const color = @import("../ui/color.zig");
+const output = @import("../ui/output.zig");
 const help = @import("help.zig");
+const refresh_mod = @import("outdated/refresh.zig");
+pub const OUTDATED_DEFAULT_WORKERS = refresh_mod.OUTDATED_DEFAULT_WORKERS;
+pub const OUTDATED_WORKERS_ENV = refresh_mod.OUTDATED_WORKERS_ENV;
+pub const parseWorkersEnv = refresh_mod.parseWorkersEnv;
+pub const outdatedWorkerCount = refresh_mod.outdatedWorkerCount;
+pub const shouldUsePool = refresh_mod.shouldUsePool;
+pub const refreshSnapshot = refresh_mod.refreshSnapshot;
+pub const collectOutdatedFormulas = refresh_mod.collectOutdatedFormulas;
+pub const collectOutdatedCasks = refresh_mod.collectOutdatedCasks;
+const render_mod = @import("outdated/render.zig");
+const rows_mod = @import("outdated/rows.zig");
+pub const KegRow = rows_mod.KegRow;
+pub const KegFilter = rows_mod.KegFilter;
+pub const loadFormulaRows = rows_mod.loadFormulaRows;
+pub const loadCaskRows = rows_mod.loadCaskRows;
+pub const freeKegRows = rows_mod.freeKegRows;
+const snap_mod = @import("outdated/snapshot.zig");
+pub const SNAPSHOT_DEFAULT_MAX_AGE_HOURS = snap_mod.SNAPSHOT_DEFAULT_MAX_AGE_HOURS;
+pub const SNAPSHOT_MAX_AGE_ENV = snap_mod.SNAPSHOT_MAX_AGE_ENV;
+pub const SNAPSHOT_VERSION = snap_mod.SNAPSHOT_VERSION;
+pub const SNAPSHOT_FILE = snap_mod.SNAPSHOT_FILE;
+pub const OutdatedEntry = snap_mod.OutdatedEntry;
+pub const Snapshot = snap_mod.Snapshot;
+pub const OwnedSnapshot = snap_mod.OwnedSnapshot;
+pub const RenderError = snap_mod.RenderError;
+pub const SnapshotParseError = snap_mod.SnapshotParseError;
+pub const parseMaxAgeHoursEnv = snap_mod.parseMaxAgeHoursEnv;
+pub const isStale = snap_mod.isStale;
+pub const renderSnapshot = snap_mod.renderSnapshot;
+pub const parseSnapshot = snap_mod.parseSnapshot;
+pub const snapshotPath = snap_mod.snapshotPath;
+pub const writeSnapshot = snap_mod.writeSnapshot;
+pub const readSnapshot = snap_mod.readSnapshot;
+pub const freeSnapshot = snap_mod.freeSnapshot;
+const freeEntrySlice = snap_mod.freeEntrySlice;
 
-/// Default ceiling on concurrent API fetches. One round-trip per keg
-/// dominates `mt outdated` on machines with many installed packages, so
-/// we hand the work to a bounded pool the same way `cli/install` and
-/// `cli/search` do.
-pub const OUTDATED_DEFAULT_WORKERS: usize = 8;
-
-/// Env var that lets users tune the pool size (e.g. crank it on a fat
-/// uplink, or lower it to one to reproduce serial behaviour).
-pub const OUTDATED_WORKERS_ENV = "MALT_OUTDATED_WORKERS";
-
-/// Default max age (hours) for the cached `outdated.json` snapshot. Picked
-/// to match the analysis doc: "shell-prompt integrations want instant
-/// startup; ~daily refresh is plenty for security awareness".
-pub const SNAPSHOT_DEFAULT_MAX_AGE_HOURS: u64 = 24;
-
-/// Env var override for `SNAPSHOT_DEFAULT_MAX_AGE_HOURS`. Same lenient
-/// parsing rules as `OUTDATED_WORKERS_ENV`.
-pub const SNAPSHOT_MAX_AGE_ENV = "MALT_OUTDATED_MAX_AGE";
-
-/// On-disk snapshot version. Mismatched snapshots are treated as misses
-/// so a downgrade never tries to read a future shape.
-pub const SNAPSHOT_VERSION: u32 = 1;
-
-/// Snapshot filename under `{cache}/`.
-pub const SNAPSHOT_FILE = "outdated.json";
-
-/// One row of the installed-package list fed to the worker pool.
-/// `tap` is the third-party tap label for tap-installed casks (drives
-/// outdated's pre-routing the same way `upgradeCask` uses
-/// `lookupInstalled.tap()`); null for kegs and for casks installed
-/// from the core Homebrew API. Owned by the same allocator as `name`
-/// and `version`; freed by `freeKegRows`.
-pub const KegRow = struct {
-    name: []const u8,
-    version: []const u8,
-    tap: ?[]const u8 = null,
-};
-
-/// Scope filter for `loadFormulaRows`. `--pinned-only` swaps in a
-/// pinned-row SQL so the audit path never round-trips the API for kegs
-/// that aren't being protected from upgrade.
-pub const KegFilter = enum { all, pinned_only };
-
-/// Result row for a single outdated package. All slices are owned by
-/// the caller's allocator.
-pub const OutdatedEntry = struct {
-    name: []u8,
-    installed: []u8,
-    latest: []u8,
-};
-
-/// Cached `mt outdated` result. Snapshot trades freshness for instant
-/// startup so shell-prompt integrations don't pay an API round-trip per
-/// shell. All slices are owned by the parser's allocator (or by the
-/// caller, when assembling an in-memory snapshot from `OutdatedEntry`).
-pub const Snapshot = struct {
-    /// `std.time.milliTimestamp()` at the moment the snapshot was generated.
-    generated_at_ms: i64,
-    formulas: []const OutdatedEntry,
-    casks: []const OutdatedEntry,
-};
-
-/// Parse the worker-count override env var. Anything non-positive or
-/// non-numeric falls back to the default — matches the lenient style
-/// the rest of the CLI uses for tuning knobs.
-pub fn parseWorkersEnv(s: ?[]const u8) ?usize {
-    const raw = s orelse return null;
-    if (raw.len == 0) return null;
-    const n = std.fmt.parseInt(usize, raw, 10) catch return null;
-    if (n == 0) return null;
-    return n;
-}
-
-/// Resolve the snapshot max-age threshold (in hours) from an env value.
-/// Returns `null` for unset / empty / non-numeric so the caller can apply
-/// `SNAPSHOT_DEFAULT_MAX_AGE_HOURS`; preserves an explicit `"0"` as `0`
-/// so users who set the env to 0 actually get "always stale".
-pub fn parseMaxAgeHoursEnv(s: ?[]const u8) ?u64 {
-    const raw = s orelse return null;
-    if (raw.len == 0) return null;
-    return std.fmt.parseInt(u64, raw, 10) catch null;
-}
-
-/// True when `now_ms - generated_at_ms` exceeds the threshold. Future-
-/// dated snapshots (clock skew) are treated as fresh — better than
-/// surprising the user with a "stale" warning right after `mt update`.
-pub fn isStale(generated_at_ms: i64, now_ms: i64, max_age_hours: u64) bool {
-    if (now_ms <= generated_at_ms) return false;
-    const age_ms: u64 = @intCast(now_ms - generated_at_ms);
-    // Saturating multiply: a pathological env value (e.g. u64 max) folds
-    // to "never stale" rather than wrapping to 0 and reporting fresh
-    // snapshots as stale.
-    const max_ms = std.math.mul(u64, max_age_hours, 60 * 60 * 1000) catch std.math.maxInt(u64);
-    return age_ms > max_ms;
-}
-
-pub const RenderError = error{ OutOfMemory, WriteFailed };
-
-/// Render `snap` as a UTF-8 JSON document. Caller owns the returned
-/// slice. Shape: `{ "version": N, "generated_at_ms": ms, "formulas":
-/// [...], "casks": [...] }` — small enough to stream, stable enough to
-/// parse on a downgrade.
-pub fn renderSnapshot(allocator: std.mem.Allocator, snap: Snapshot) RenderError![]u8 {
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    const w = &aw.writer;
-
-    try w.print("{{\"version\":{d},\"generated_at_ms\":{d},\"formulas\":[", .{ SNAPSHOT_VERSION, snap.generated_at_ms });
-    for (snap.formulas, 0..) |e, i| {
-        if (i != 0) try w.writeAll(",");
-        try writeEntryJson(w, e);
-    }
-    try w.writeAll("],\"casks\":[");
-    for (snap.casks, 0..) |e, i| {
-        if (i != 0) try w.writeAll(",");
-        try writeEntryJson(w, e);
-    }
-    try w.writeAll("]}");
-
-    return aw.toOwnedSlice();
-}
-
-fn writeEntryJson(w: *std.Io.Writer, e: OutdatedEntry) !void {
-    try w.writeAll("{\"name\":");
-    try output.jsonStr(w, e.name);
-    try w.writeAll(",\"installed\":");
-    try output.jsonStr(w, e.installed);
-    try w.writeAll(",\"latest\":");
-    try output.jsonStr(w, e.latest);
-    try w.writeAll("}");
-}
-
-/// Owned snapshot returned by `parseSnapshot`. Free with `freeSnapshot`.
-/// Holds its own copy of every string so it outlives the parser arena.
-pub const OwnedSnapshot = struct {
-    generated_at_ms: i64,
-    formulas: []OutdatedEntry,
-    casks: []OutdatedEntry,
-};
-
-/// Per-string cap so a tampered snapshot can't push `std.json` into
-/// an N-MiB allocation. Real names/versions are well under 256 bytes.
-const snapshot_max_value_len: usize = 4 * 1024;
-
-/// Typed schema avoids the `std.json.Value` tree; allocation is bounded
-/// by the input size + the per-string cap above.
-const SnapshotDoc = struct {
-    version: u32,
-    generated_at_ms: i64,
-    formulas: []const EntryDoc,
-    casks: []const EntryDoc,
-};
-
-const EntryDoc = struct {
-    name: []const u8,
-    installed: []const u8,
-    latest: []const u8,
-};
-
-pub const SnapshotParseError = error{ InvalidSnapshot, OutOfMemory };
-
-pub fn parseSnapshot(allocator: std.mem.Allocator, bytes: []const u8) SnapshotParseError!OwnedSnapshot {
-    const opts: std.json.ParseOptions = .{
-        .ignore_unknown_fields = true,
-        .max_value_len = snapshot_max_value_len,
-        // Force allocation so `max_value_len` applies to every string;
-        // the default `.alloc_if_needed` borrows un-escaped values from
-        // the input buffer and bypasses the cap.
-        .allocate = .alloc_always,
-    };
-    const parsed = std.json.parseFromSlice(SnapshotDoc, allocator, bytes, opts) catch |e| switch (e) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidSnapshot,
-    };
-    defer parsed.deinit();
-
-    if (parsed.value.version != SNAPSHOT_VERSION) return error.InvalidSnapshot;
-
-    const formulas = try dupEntryDocs(allocator, parsed.value.formulas);
-    errdefer freeEntrySlice(allocator, formulas);
-    const casks = try dupEntryDocs(allocator, parsed.value.casks);
-
-    return .{
-        .generated_at_ms = parsed.value.generated_at_ms,
-        .formulas = formulas,
-        .casks = casks,
-    };
-}
-
-fn dupEntryDocs(
-    allocator: std.mem.Allocator,
-    docs: []const EntryDoc,
-) std.mem.Allocator.Error![]OutdatedEntry {
-    const out = try allocator.alloc(OutdatedEntry, docs.len);
-    var filled: usize = 0;
-    errdefer {
-        for (out[0..filled]) |e| {
-            allocator.free(e.name);
-            allocator.free(e.installed);
-            allocator.free(e.latest);
-        }
-        allocator.free(out);
-    }
-    for (docs) |d| {
-        const name = try allocator.dupe(u8, d.name);
-        errdefer allocator.free(name);
-        const installed = try allocator.dupe(u8, d.installed);
-        errdefer allocator.free(installed);
-        const latest = try allocator.dupe(u8, d.latest);
-        out[filled] = .{ .name = name, .installed = installed, .latest = latest };
-        filled += 1;
-    }
-    return out;
-}
-
-fn freeEntrySlice(allocator: std.mem.Allocator, slice: []OutdatedEntry) void {
-    for (slice) |e| {
-        allocator.free(e.name);
-        allocator.free(e.installed);
-        allocator.free(e.latest);
-    }
-    allocator.free(slice);
-}
-
-/// Resolve the absolute snapshot path under `cache_dir`. Caller frees.
-pub fn snapshotPath(allocator: std.mem.Allocator, cache_dir: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ cache_dir, SNAPSHOT_FILE });
-}
-
-/// Atomically write `snap` to `{cache_dir}/outdated.json`. Creates the
-/// cache dir if missing — `mt update --check` may run before any other
-/// command has touched the cache.
-pub fn writeSnapshot(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    cache_dir: []const u8,
-    snap: Snapshot,
-) !void {
-    // Best-effort: a real error here gets surfaced by atomicWriteFile below.
-    std.Io.Dir.cwd().createDirPath(io, cache_dir) catch {};
-
-    const path = try snapshotPath(allocator, cache_dir);
-    defer allocator.free(path);
-    const json = try renderSnapshot(allocator, snap);
-    defer allocator.free(json);
-    try atomic.atomicWriteFile(io, path, json);
-}
-
-/// Realistic snapshots are tens of KiB; 1 MiB refuses any inflated file
-/// before bytes reach `std.json`.
-const snapshot_read_cap: usize = 1 * 1024 * 1024;
-
-/// Read the snapshot at `{cache_dir}/outdated.json`. Snapshot trades
-/// freshness for instant startup; on any read or parse failure we
-/// return null so callers fall back to a live recompute.
-pub fn readSnapshot(io: std.Io, allocator: std.mem.Allocator, cache_dir: []const u8) ?OwnedSnapshot {
-    const path = snapshotPath(allocator, cache_dir) catch return null;
-    defer allocator.free(path);
-    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
-    defer file.close(io);
-    const st = file.stat(io) catch return null;
-    const size: usize = @intCast(@min(@as(u64, snapshot_read_cap), st.size));
-    const buf = allocator.alloc(u8, size) catch return null;
-    const n = file.readPositionalAll(io, buf, 0) catch {
-        allocator.free(buf);
-        return null;
-    };
-    // Short read: shrink so caller-side free length matches.
-    const bytes = if (n == buf.len) buf else blk: {
-        if (allocator.resize(buf, n)) break :blk buf[0..n];
-        const trimmed = allocator.alloc(u8, n) catch {
-            allocator.free(buf);
-            return null;
-        };
-        @memcpy(trimmed, buf[0..n]);
-        allocator.free(buf);
-        break :blk trimmed;
-    };
-    defer allocator.free(bytes);
-    return parseSnapshot(allocator, bytes) catch null;
-}
-
+// Worker-pool tuning + live-audit pipeline live in `outdated/refresh.zig`.
+// Snapshot codec lives in `outdated/snapshot.zig`; the constants and
+// public surface are re-exported below so downstream callers (and
+// existing tests) keep the same `outdated_mod.X` path.
+// DB row loaders live in `outdated/rows.zig`; re-exported so existing
+// callers (and `tests/outdated_test.zig`) keep using `outdated_mod.X`.
 /// Filter `snap_entries` against the current DB so a stale snapshot
 /// never names an uninstalled or already-upgraded keg. Match key is
 /// `(name, installed)`; a name-only match would let a manual upgrade
@@ -366,49 +122,6 @@ pub const EmitPlan = enum {
     recompute,
 };
 
-/// Recompute every outdated entry (formulas + casks) and overwrite the
-/// snapshot at `{cache_dir}/outdated.json`. Best-effort: failures are
-/// folded into the caller's `catch {}` so a snapshot write never blocks
-/// the user-facing output that already succeeded.
-pub fn refreshSnapshot(
-    ctx: *const AppCtx,
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
-    api: *api_mod.BrewApi,
-    cache_dir: []const u8,
-    workers_override: ?usize,
-) !void {
-    const formula_rows = try loadFormulaRows(allocator, db, .all);
-    defer freeKegRows(allocator, formula_rows);
-    const cask_rows = try loadCaskRows(allocator, db, .all);
-    defer freeKegRows(allocator, cask_rows);
-
-    const formulas = try collectOutdatedFormulas(ctx, allocator, api, cache_dir, formula_rows, workers_override);
-    defer {
-        for (formulas) |e| {
-            allocator.free(e.name);
-            allocator.free(e.installed);
-            allocator.free(e.latest);
-        }
-        allocator.free(formulas);
-    }
-    const casks = try collectOutdatedCasks(ctx, allocator, api, cache_dir, cask_rows, workers_override);
-    defer {
-        for (casks) |e| {
-            allocator.free(e.name);
-            allocator.free(e.installed);
-            allocator.free(e.latest);
-        }
-        allocator.free(casks);
-    }
-
-    try writeSnapshot(ctx.io, allocator, cache_dir, .{
-        .generated_at_ms = std.Io.Clock.real.now(ctx.io).toMilliseconds(),
-        .formulas = formulas,
-        .casks = casks,
-    });
-}
-
 /// Decide whether to read the snapshot or recompute. Pure; tested.
 pub fn planEmit(
     args: []const []const u8,
@@ -429,27 +142,6 @@ pub fn planEmit(
     return .use_snapshot_fresh;
 }
 
-/// Free both arrays + every duped string in `snap`.
-pub fn freeSnapshot(allocator: std.mem.Allocator, snap: OwnedSnapshot) void {
-    freeEntrySlice(allocator, snap.formulas);
-    freeEntrySlice(allocator, snap.casks);
-}
-
-/// Resolve the actual worker count for `jobs`. Capped at `jobs` so we
-/// never spawn idle workers, and at the env override (or the default
-/// ceiling) so we never starve the network.
-pub fn outdatedWorkerCount(jobs: usize, env_override: ?usize) usize {
-    const cap = env_override orelse OUTDATED_DEFAULT_WORKERS;
-    return @min(cap, jobs);
-}
-
-/// Below this we keep the single-client serial path — the pool's
-/// thread-spawn + HTTP-pool init overhead is not worth it for a
-/// handful of round-trips.
-pub fn shouldUsePool(jobs: usize) bool {
-    return jobs >= OUTDATED_DEFAULT_WORKERS;
-}
-
 /// "All clear" summary line for the current scope, or null when at
 /// least one outdated row was already emitted (so we never claim
 /// "everything's fine" alongside a list of outdated packages).
@@ -458,176 +150,6 @@ fn summaryMessage(formula_count: usize, cask_count: usize, formula_only: bool, c
     if (formula_only) return "All formulas are up to date.";
     if (cask_only) return "All casks are up to date.";
     return "All packages are up to date.";
-}
-
-test "outdatedWorkerCount caps at the default for large N" {
-    try std.testing.expectEqual(
-        @as(usize, OUTDATED_DEFAULT_WORKERS),
-        outdatedWorkerCount(50, null),
-    );
-}
-
-test "outdatedWorkerCount returns N when N is below the default" {
-    try std.testing.expectEqual(@as(usize, 3), outdatedWorkerCount(3, null));
-    try std.testing.expectEqual(@as(usize, 0), outdatedWorkerCount(0, null));
-}
-
-test "outdatedWorkerCount respects env overrides above and below the default" {
-    try std.testing.expectEqual(@as(usize, 4), outdatedWorkerCount(50, 4));
-    // Power-user override: env wins over the default ceiling.
-    try std.testing.expectEqual(@as(usize, 16), outdatedWorkerCount(50, 16));
-}
-
-test "shouldUsePool flips at the default-worker boundary" {
-    try std.testing.expect(!shouldUsePool(0));
-    try std.testing.expect(!shouldUsePool(OUTDATED_DEFAULT_WORKERS - 1));
-    try std.testing.expect(shouldUsePool(OUTDATED_DEFAULT_WORKERS));
-    try std.testing.expect(shouldUsePool(50));
-}
-
-test "parseWorkersEnv parses a positive integer" {
-    try std.testing.expectEqual(@as(?usize, 4), parseWorkersEnv("4"));
-    try std.testing.expectEqual(@as(?usize, 16), parseWorkersEnv("16"));
-}
-
-test "parseWorkersEnv rejects null, empty, zero, and non-numeric values" {
-    try std.testing.expectEqual(@as(?usize, null), parseWorkersEnv(null));
-    try std.testing.expectEqual(@as(?usize, null), parseWorkersEnv(""));
-    try std.testing.expectEqual(@as(?usize, null), parseWorkersEnv("0"));
-    try std.testing.expectEqual(@as(?usize, null), parseWorkersEnv("abc"));
-    try std.testing.expectEqual(@as(?usize, null), parseWorkersEnv("-3"));
-}
-
-test "parseMaxAgeHoursEnv yields null for null/empty/garbage so callers default" {
-    try std.testing.expectEqual(@as(?u64, null), parseMaxAgeHoursEnv(null));
-    try std.testing.expectEqual(@as(?u64, null), parseMaxAgeHoursEnv(""));
-    try std.testing.expectEqual(@as(?u64, null), parseMaxAgeHoursEnv("nope"));
-    try std.testing.expectEqual(@as(?u64, null), parseMaxAgeHoursEnv("-3"));
-}
-
-test "parseMaxAgeHoursEnv preserves explicit 0 as 'always stale'" {
-    // The user reaches for 0 to opt out of caching; treating it as
-    // 'fall back to default' would silently re-enable the snapshot.
-    try std.testing.expectEqual(@as(?u64, 0), parseMaxAgeHoursEnv("0"));
-}
-
-test "parseMaxAgeHoursEnv parses positive integers verbatim" {
-    try std.testing.expectEqual(@as(?u64, 1), parseMaxAgeHoursEnv("1"));
-    try std.testing.expectEqual(@as(?u64, 12), parseMaxAgeHoursEnv("12"));
-    try std.testing.expectEqual(@as(?u64, 168), parseMaxAgeHoursEnv("168"));
-}
-
-test "renderSnapshot emits the canonical JSON shape" {
-    const formulas = [_]OutdatedEntry{
-        .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
-    };
-    const casks = [_]OutdatedEntry{
-        .{ .name = @constCast("beta"), .installed = @constCast("3.0"), .latest = @constCast("3.5") },
-    };
-    const snap: Snapshot = .{
-        .generated_at_ms = 1_700_000_000_000,
-        .formulas = &formulas,
-        .casks = &casks,
-    };
-    const json = try renderSnapshot(std.testing.allocator, snap);
-    defer std.testing.allocator.free(json);
-
-    const want =
-        \\{"version":1,"generated_at_ms":1700000000000,"formulas":[{"name":"alpha","installed":"1.0","latest":"2.0"}],"casks":[{"name":"beta","installed":"3.0","latest":"3.5"}]}
-    ;
-    try std.testing.expectEqualStrings(want, json);
-}
-
-test "parseSnapshot round-trips a rendered snapshot" {
-    const formulas = [_]OutdatedEntry{
-        .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
-        .{ .name = @constCast("bravo"), .installed = @constCast("3.0"), .latest = @constCast("3.5") },
-    };
-    const casks = [_]OutdatedEntry{
-        .{ .name = @constCast("charlie"), .installed = @constCast("9.0"), .latest = @constCast("9.5") },
-    };
-    const snap: Snapshot = .{
-        .generated_at_ms = 1_700_000_000_000,
-        .formulas = &formulas,
-        .casks = &casks,
-    };
-    const json = try renderSnapshot(std.testing.allocator, snap);
-    defer std.testing.allocator.free(json);
-
-    const parsed = try parseSnapshot(std.testing.allocator, json);
-    defer freeSnapshot(std.testing.allocator, parsed);
-
-    try std.testing.expectEqual(@as(i64, 1_700_000_000_000), parsed.generated_at_ms);
-    try std.testing.expectEqual(@as(usize, 2), parsed.formulas.len);
-    try std.testing.expectEqualStrings("alpha", parsed.formulas[0].name);
-    try std.testing.expectEqualStrings("1.0", parsed.formulas[0].installed);
-    try std.testing.expectEqualStrings("2.0", parsed.formulas[0].latest);
-    try std.testing.expectEqualStrings("bravo", parsed.formulas[1].name);
-    try std.testing.expectEqual(@as(usize, 1), parsed.casks.len);
-    try std.testing.expectEqualStrings("charlie", parsed.casks[0].name);
-    try std.testing.expectEqualStrings("9.5", parsed.casks[0].latest);
-}
-
-test "parseSnapshot rejects mismatched version, missing fields, garbage" {
-    try std.testing.expectError(error.InvalidSnapshot, parseSnapshot(std.testing.allocator, ""));
-    try std.testing.expectError(error.InvalidSnapshot, parseSnapshot(std.testing.allocator, "not-json"));
-    // Future schema version: refuse rather than guess.
-    try std.testing.expectError(
-        error.InvalidSnapshot,
-        parseSnapshot(std.testing.allocator, "{\"version\":99,\"generated_at_ms\":0,\"formulas\":[],\"casks\":[]}"),
-    );
-    // Missing required field.
-    try std.testing.expectError(
-        error.InvalidSnapshot,
-        parseSnapshot(std.testing.allocator, "{\"version\":1,\"formulas\":[],\"casks\":[]}"),
-    );
-    // Wrong type for formulas.
-    try std.testing.expectError(
-        error.InvalidSnapshot,
-        parseSnapshot(std.testing.allocator, "{\"version\":1,\"generated_at_ms\":0,\"formulas\":\"x\",\"casks\":[]}"),
-    );
-}
-
-test "parseSnapshot bounds per-string allocation against tampered input" {
-    // Build a JSON document with a single name field exceeding the
-    // per-value cap. The typed parser must reject it without inflating
-    // memory to the size of the malicious string.
-    const oversized_len = snapshot_max_value_len + 1;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    try buf.appendSlice(std.testing.allocator, "{\"version\":1,\"generated_at_ms\":0,\"formulas\":[{\"name\":\"");
-    try buf.appendNTimes(std.testing.allocator, 'a', oversized_len);
-    try buf.appendSlice(std.testing.allocator, "\",\"installed\":\"1\",\"latest\":\"2\"}],\"casks\":[]}");
-
-    try std.testing.expectError(
-        error.InvalidSnapshot,
-        parseSnapshot(std.testing.allocator, buf.items),
-    );
-}
-
-test "parseSnapshot tolerates unknown forward-compatible fields" {
-    // Adding a field server-side shouldn't invalidate existing snapshots.
-    const json =
-        \\{"version":1,"generated_at_ms":0,"formulas":[],"casks":[],"future":42}
-    ;
-    const parsed = try parseSnapshot(std.testing.allocator, json);
-    defer freeSnapshot(std.testing.allocator, parsed);
-    try std.testing.expectEqual(@as(usize, 0), parsed.formulas.len);
-}
-
-test "renderSnapshot handles empty formula and cask lists" {
-    const snap: Snapshot = .{
-        .generated_at_ms = 0,
-        .formulas = &[_]OutdatedEntry{},
-        .casks = &[_]OutdatedEntry{},
-    };
-    const json = try renderSnapshot(std.testing.allocator, snap);
-    defer std.testing.allocator.free(json);
-
-    const want =
-        \\{"version":1,"generated_at_ms":0,"formulas":[],"casks":[]}
-    ;
-    try std.testing.expectEqualStrings(want, json);
 }
 
 test "intersectWithDb drops snapshot entries whose keg is no longer installed" {
@@ -723,32 +245,6 @@ test "planEmit recomputes on --refresh even when snapshot is fresh" {
 test "planEmit recomputes when --pinned-only narrows the scope" {
     const args = [_][]const u8{"--pinned-only"};
     try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, 0, 0, 24));
-}
-
-test "isStale flips at the max-age boundary in milliseconds" {
-    const hour_ms: i64 = 60 * 60 * 1000;
-    // Same instant -> fresh.
-    try std.testing.expect(!isStale(0, 0, 24));
-    // Exactly at the boundary -> still fresh.
-    try std.testing.expect(!isStale(0, 24 * hour_ms, 24));
-    // One ms past the boundary -> stale.
-    try std.testing.expect(isStale(0, 24 * hour_ms + 1, 24));
-    // Future-dated snapshot (clock skew) -> treated as fresh.
-    try std.testing.expect(!isStale(100 * hour_ms, 0, 24));
-    // Custom threshold honoured.
-    try std.testing.expect(isStale(0, 2 * hour_ms, 1));
-    try std.testing.expect(!isStale(0, 1 * hour_ms, 2));
-}
-
-test "isStale with max_age_hours == 0 marks any non-zero age as stale" {
-    try std.testing.expect(!isStale(0, 0, 0));
-    try std.testing.expect(isStale(0, 1, 0));
-}
-
-test "isStale folds a u64-overflowing threshold to 'never stale'" {
-    // A pathological MALT_OUTDATED_MAX_AGE shouldn't wrap to 0 ms and
-    // report otherwise-fresh snapshots as stale.
-    try std.testing.expect(!isStale(0, std.math.maxInt(i64), std.math.maxInt(u64)));
 }
 
 test "summaryMessage suppresses 'all up to date' when any row was printed" {
@@ -871,7 +367,7 @@ fn emitFromSnapshot(
         defer freeKegRows(allocator, rows);
         const filtered = try intersectWithDb(allocator, rows, snap.formulas);
         defer freeEntrySlice(allocator, filtered);
-        try writeFormulaEntries(allocator, stdout, filtered, json_mode);
+        try render_mod.writeFormulaEntries(allocator, stdout, filtered, json_mode);
         formula_count = filtered.len;
     }
     if (!scope.formula_only) {
@@ -879,7 +375,7 @@ fn emitFromSnapshot(
         defer freeKegRows(allocator, rows);
         const filtered = try intersectWithDb(allocator, rows, snap.casks);
         defer freeEntrySlice(allocator, filtered);
-        try writeCaskEntries(stdout, filtered, json_mode);
+        try render_mod.writeCaskEntries(stdout, filtered, json_mode);
         cask_count = filtered.len;
     }
 
@@ -929,92 +425,6 @@ fn recomputeAndEmit(
     }
 }
 
-/// Load installed formula rows, optionally narrowed to pinned-only.
-/// Caller frees with `freeKegRows`. Exposed for tests + the audit path
-/// in `cli/upgrade`; both want the same SQL choice.
-pub fn loadFormulaRows(
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
-    filter: KegFilter,
-) ![]KegRow {
-    const sql: [:0]const u8 = switch (filter) {
-        .all => "SELECT name, version FROM kegs ORDER BY name;",
-        .pinned_only => "SELECT name, version FROM kegs WHERE pinned = 1 ORDER BY name;",
-    };
-    return loadKegRows(allocator, db, sql);
-}
-
-/// Cask sibling of `loadFormulaRows`. Same lifetime contract; pinned
-/// filter swaps in `WHERE pinned = 1` so `--pinned-only` walks the
-/// pinned-cask audit path symmetrically with formulas. The `tap`
-/// column comes along for the ride so `upstreamLatest` can pre-route
-/// tap casks to the owning tap's `.rb` instead of the core API.
-pub fn loadCaskRows(
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
-    filter: KegFilter,
-) ![]KegRow {
-    const sql: [:0]const u8 = switch (filter) {
-        .all => "SELECT token, version, tap FROM casks ORDER BY token;",
-        .pinned_only => "SELECT token, version, tap FROM casks WHERE pinned = 1 ORDER BY token;",
-    };
-    return loadKegRows(allocator, db, sql);
-}
-
-/// Caller-side free for any rows returned by `loadFormulaRows` /
-/// `loadCaskRows`. Pairs with the allocator passed in.
-pub fn freeKegRows(allocator: std.mem.Allocator, rows: []KegRow) void {
-    for (rows) |r| {
-        allocator.free(r.name);
-        allocator.free(r.version);
-        if (r.tap) |t| allocator.free(t);
-    }
-    allocator.free(rows);
-}
-
-/// Reads `name, version` (and optionally `tap` as column 2) into
-/// caller-owned `KegRow`s. Tap is left null when the column isn't
-/// part of the SELECT (formula loader) or when the row's value is
-/// SQL NULL (core-API cask, or a v5-era row not yet backfilled).
-fn loadKegRows(
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
-    sql: [:0]const u8,
-) ![]KegRow {
-    var stmt = db.prepare(sql) catch return &.{};
-    defer stmt.finalize();
-
-    var rows: std.ArrayList(KegRow) = .empty;
-    errdefer {
-        for (rows.items) |r| {
-            allocator.free(r.name);
-            allocator.free(r.version);
-            if (r.tap) |t| allocator.free(t);
-        }
-        rows.deinit(allocator);
-    }
-    while (stmt.step() catch false) {
-        const name_ptr = stmt.columnText(0) orelse continue;
-        const ver_ptr = stmt.columnText(1);
-        const name_slice = std.mem.sliceTo(name_ptr, 0);
-        const ver_slice = if (ver_ptr) |v| std.mem.sliceTo(v, 0) else "0";
-        const name_dup = try allocator.dupe(u8, name_slice);
-        errdefer allocator.free(name_dup);
-        const ver_dup = try allocator.dupe(u8, ver_slice);
-        errdefer allocator.free(ver_dup);
-        // Column 2 is the `tap` field for cask loaders; formula
-        // loaders don't SELECT it, so `columnText` returns null and
-        // the row gets a null tap.
-        var tap_dup: ?[]u8 = null;
-        if (stmt.columnText(2)) |tap_ptr| {
-            const tap_slice = std.mem.sliceTo(tap_ptr, 0);
-            tap_dup = try allocator.dupe(u8, tap_slice);
-        }
-        try rows.append(allocator, .{ .name = name_dup, .version = ver_dup, .tap = tap_dup });
-    }
-    return rows.toOwnedSlice(allocator);
-}
-
 fn emitOutdatedFormulas(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -1030,9 +440,9 @@ fn emitOutdatedFormulas(
     defer freeKegRows(allocator, rows);
 
     const entries = try collectOutdatedFormulas(ctx, allocator, api, cache_dir, rows, workers_override);
-    defer freeEntries(allocator, entries);
+    defer freeEntrySlice(allocator, entries);
 
-    try writeFormulaEntries(allocator, stdout, entries, json_mode);
+    try render_mod.writeFormulaEntries(allocator, stdout, entries, json_mode);
     return entries.len;
 }
 
@@ -1051,513 +461,8 @@ fn emitOutdatedCasks(
     defer freeKegRows(allocator, rows);
 
     const entries = try collectOutdatedCasks(ctx, allocator, api, cache_dir, rows, workers_override);
-    defer freeEntries(allocator, entries);
+    defer freeEntrySlice(allocator, entries);
 
-    try writeCaskEntries(stdout, entries, json_mode);
+    try render_mod.writeCaskEntries(stdout, entries, json_mode);
     return entries.len;
-}
-
-fn freeEntries(allocator: std.mem.Allocator, entries: []OutdatedEntry) void {
-    for (entries) |e| {
-        allocator.free(e.name);
-        allocator.free(e.installed);
-        allocator.free(e.latest);
-    }
-    allocator.free(entries);
-}
-
-fn writeFormulaEntries(
-    allocator: std.mem.Allocator,
-    stdout: *std.Io.Writer,
-    entries: []const OutdatedEntry,
-    json_mode: bool,
-) !void {
-    if (json_mode) {
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        const w = &aw.writer;
-        try w.writeAll("[");
-        for (entries, 0..) |e, i| {
-            if (i != 0) try w.writeAll(",");
-            try w.writeAll("{\"name\":");
-            try output.jsonStr(w, e.name);
-            try w.writeAll(",\"installed\":");
-            try output.jsonStr(w, e.installed);
-            try w.writeAll(",\"latest\":");
-            try output.jsonStr(w, e.latest);
-            try w.writeAll(",\"type\":\"formula\"}");
-        }
-        try w.writeAll("]\n");
-        stdout.writeAll(aw.written()) catch return;
-        return;
-    }
-
-    for (entries) |e| writeEntry(stdout, e, null);
-}
-
-fn writeCaskEntries(
-    stdout: *std.Io.Writer,
-    entries: []const OutdatedEntry,
-    json_mode: bool,
-) !void {
-    if (json_mode) {
-        for (entries) |e| {
-            stdout.writeAll("{\"name\":") catch continue;
-            output.jsonStr(stdout, e.name) catch continue;
-            stdout.writeAll(",\"installed\":") catch continue;
-            output.jsonStr(stdout, e.installed) catch continue;
-            stdout.writeAll(",\"latest\":") catch continue;
-            output.jsonStr(stdout, e.latest) catch continue;
-            stdout.writeAll(",\"type\":\"cask\"}\n") catch continue;
-        }
-        return;
-    }
-
-    for (entries) |e| writeEntry(stdout, e, "cask");
-}
-
-/// Match the `mt list` / `mt search` row shape: cyan bullet, plain
-/// name, dimmed `(installed)`, warn-coloured `< latest`, and an
-/// optional dim `[kind]` tag for casks. Honours `NO_COLOR` / pipes
-/// automatically via `color.isColorEnabled()`.
-fn writeEntry(stdout: *std.Io.Writer, e: OutdatedEntry, kind_tag: ?[]const u8) void {
-    if (output.isQuiet()) {
-        stdout.writeAll(e.name) catch return;
-        stdout.writeAll("\n") catch return;
-        return;
-    }
-
-    writeBullet(stdout);
-    stdout.writeAll(e.name) catch return;
-    writeStyledSpan(stdout, color.SemanticStyle.detail.code(), " (", e.installed, ")");
-    writeStyledSpan(stdout, color.SemanticStyle.warn.code(), " < ", e.latest, "");
-    if (kind_tag) |t| writeStyledSpan(stdout, color.SemanticStyle.detail.code(), " [", t, "]");
-    stdout.writeAll("\n") catch return;
-}
-
-fn writeBullet(stdout: *std.Io.Writer) void {
-    if (color.isColorEnabled()) {
-        stdout.writeAll(color.SemanticStyle.info.code()) catch return;
-        stdout.writeAll("  \xe2\x96\xb8 ") catch return;
-        stdout.writeAll(color.Style.reset.code()) catch return;
-    } else {
-        stdout.writeAll("  \xe2\x96\xb8 ") catch return;
-    }
-}
-
-fn writeStyledSpan(
-    stdout: *std.Io.Writer,
-    style_code: []const u8,
-    open: []const u8,
-    body: []const u8,
-    close: []const u8,
-) void {
-    const use_color = color.isColorEnabled();
-    if (use_color) stdout.writeAll(style_code) catch return;
-    stdout.writeAll(open) catch return;
-    stdout.writeAll(body) catch return;
-    stdout.writeAll(close) catch return;
-    if (use_color) stdout.writeAll(color.Style.reset.code()) catch return;
-}
-
-/// Compute outdated formulas for `kegs`. Sort order follows `kegs` —
-/// callers query the DB with `ORDER BY name`. Per-row API failures or
-/// 404s drop silently (matches the old serial behaviour).
-pub fn collectOutdatedFormulas(
-    ctx: *const AppCtx,
-    allocator: std.mem.Allocator,
-    api: *api_mod.BrewApi,
-    cache_dir: []const u8,
-    kegs: []const KegRow,
-    workers_override: ?usize,
-) std.mem.Allocator.Error![]OutdatedEntry {
-    return collectOutdated(ctx, allocator, api, cache_dir, kegs, workers_override, .formula);
-}
-
-/// Cask sibling of `collectOutdatedFormulas`. Same lifetime contract.
-pub fn collectOutdatedCasks(
-    ctx: *const AppCtx,
-    allocator: std.mem.Allocator,
-    api: *api_mod.BrewApi,
-    cache_dir: []const u8,
-    kegs: []const KegRow,
-    workers_override: ?usize,
-) std.mem.Allocator.Error![]OutdatedEntry {
-    return collectOutdated(ctx, allocator, api, cache_dir, kegs, workers_override, .cask);
-}
-
-const Kind = enum { formula, cask };
-
-fn collectOutdated(
-    ctx: *const AppCtx,
-    allocator: std.mem.Allocator,
-    api: *api_mod.BrewApi,
-    cache_dir: []const u8,
-    kegs: []const KegRow,
-    workers_override: ?usize,
-    kind: Kind,
-) std.mem.Allocator.Error![]OutdatedEntry {
-    if (kegs.len == 0) return allocator.alloc(OutdatedEntry, 0);
-
-    // Per-row latest-version slot. Workers fill `latest_versions[i]`
-    // with a caller-allocator-owned string when row `i` is outdated;
-    // null otherwise. Indexed-write keeps the pool free of locks.
-    const latest_versions = try allocator.alloc(?[]u8, kegs.len);
-    defer allocator.free(latest_versions);
-    @memset(latest_versions, null);
-    errdefer for (latest_versions) |maybe| {
-        if (maybe) |v| allocator.free(v);
-    };
-
-    if (!shouldUsePool(kegs.len)) {
-        for (kegs, 0..) |row, i| {
-            latest_versions[i] = try fetchLatest(allocator, api, ctx.io, ctx.environ, kind, row);
-        }
-    } else {
-        try runPool(ctx, allocator, cache_dir, kegs, workers_override, kind, latest_versions);
-    }
-
-    return assembleEntries(allocator, kegs, latest_versions);
-}
-
-fn assembleEntries(
-    allocator: std.mem.Allocator,
-    kegs: []const KegRow,
-    latest_versions: []?[]u8,
-) std.mem.Allocator.Error![]OutdatedEntry {
-    var out: std.ArrayList(OutdatedEntry) = try .initCapacity(allocator, kegs.len);
-    errdefer {
-        for (out.items) |e| {
-            allocator.free(e.name);
-            allocator.free(e.installed);
-            allocator.free(e.latest);
-        }
-        out.deinit(allocator);
-    }
-
-    for (kegs, 0..) |row, i| {
-        const latest = latest_versions[i] orelse continue;
-        // Hand ownership of `latest` over to the entry; clear the
-        // slot so the errdefer above doesn't double-free it.
-        latest_versions[i] = null;
-        errdefer allocator.free(latest);
-
-        const name_dup = try allocator.dupe(u8, row.name);
-        errdefer allocator.free(name_dup);
-        const installed_dup = try allocator.dupe(u8, row.version);
-
-        try out.append(allocator, .{
-            .name = name_dup,
-            .installed = installed_dup,
-            .latest = latest,
-        });
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-/// Fetch + parse the upstream latest version for `row` onto `alloc`.
-/// Best-effort: network or parse failures collapse to null. Shared by
-/// the serial and pool paths so the JSON-shape logic lives once.
-/// `io` and `environ` are only consumed by the tap-cask branch (which
-/// needs them for the per-tap HEAD resolve + raw `.rb` fetch); core-
-/// API formula/cask lookups go through `api` which already wraps the
-/// shared HTTP client.
-fn upstreamLatest(
-    alloc: std.mem.Allocator,
-    api: *api_mod.BrewApi,
-    io: std.Io,
-    environ: std.process.Environ,
-    kind: Kind,
-    row: KegRow,
-) ?[]u8 {
-    return switch (kind) {
-        .formula => blk: {
-            const json = api.fetchFormula(row.name) catch break :blk null;
-            defer alloc.free(json);
-            break :blk parseFormulaLatest(alloc, json);
-        },
-        .cask => blk: {
-            // Pre-route to the owning tap when set: the core API 404s
-            // for third-party-tap casks, so the API path would silently
-            // drop the row from the audit. Same shape as `upgradeCask`.
-            if (row.tap) |tap_label| {
-                if (!install_args_mod.isCoreTap(tap_label)) {
-                    break :blk tapCaskLatestVersion(alloc, io, environ, tap_label, row.name);
-                }
-            }
-            const json = api.fetchCask(row.name) catch break :blk null;
-            defer alloc.free(json);
-            var cask = cask_mod.parseCask(alloc, json) catch break :blk null;
-            defer cask.deinit();
-            break :blk alloc.dupe(u8, cask.version) catch null;
-        },
-    };
-}
-
-/// Surface a tap HEAD-resolve failure during the outdated audit. Pre-
-/// fix this collapsed silently to null and the cask got classified as
-/// up-to-date — a real upgrade could sit unannounced for hours when
-/// the only thing wrong was a transient rate limit. The wording mirrors
-/// `describeResolveError` so the install/upgrade/outdated paths share
-/// one user-actionable line.
-fn warnTapHeadResolveFailed(tap_label: []const u8, err: tap_mod.TapError) void {
-    output.warn(
-        "Could not resolve {s}'s HEAD: {s}",
-        .{ tap_label, tap_mod.describeResolveError(err) },
-    );
-}
-
-/// Companion to `warnTapHeadResolveFailed` for the raw `.rb` fetch /
-/// parse leg. Same intent — never silently drop a cask from the audit.
-fn warnTapCaskFetchFailed(tap_label: []const u8, token: []const u8, reason: []const u8) void {
-    output.warn(
-        "Could not check {s}/{s} for upgrades: {s}",
-        .{ tap_label, token, reason },
-    );
-}
-
-/// Resolve a tap cask's upstream version by fetching the owning tap's
-/// `Casks/<token>.rb` at fresh HEAD and reading the `version` field.
-/// Returns null on any failure so the caller leaves the row alone, but
-/// emits a one-line warning describing what went wrong — users (and
-/// the regression-script skip-guards) can tell "really up to date" from
-/// "couldn't reach the tap".
-fn tapCaskLatestVersion(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    environ: std.process.Environ,
-    tap_label: []const u8,
-    token: []const u8,
-) ?[]u8 {
-    const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse return null;
-    if (slash == 0 or slash == tap_label.len - 1) return null;
-
-    const urls = tap_mod.resolveTapBaseUrls(alloc, tap_label) catch return null;
-    defer urls.deinit(alloc);
-
-    const fresh_sha = tap_mod.resolveHeadCommit(io, environ, alloc, urls.api_head_url) catch |err| {
-        warnTapHeadResolveFailed(tap_label, err);
-        return null;
-    };
-    defer alloc.free(fresh_sha);
-
-    var http = client_mod.HttpClient.init(io, environ, alloc);
-    defer http.deinit();
-
-    var rb_url_buf: [512]u8 = undefined;
-    const rb_url = std.fmt.bufPrint(&rb_url_buf, "{s}/{s}/Casks/{s}.rb", .{ urls.raw_base, fresh_sha, token }) catch return null;
-
-    var rb_resp = http.get(rb_url) catch {
-        warnTapCaskFetchFailed(tap_label, token, "Network failure while reading the .rb");
-        return null;
-    };
-    defer rb_resp.deinit();
-    if (rb_resp.status != 200) {
-        var status_buf: [64]u8 = undefined;
-        const reason = std.fmt.bufPrint(&status_buf, "GitHub returned status {d} for the .rb", .{rb_resp.status}) catch "GitHub returned a non-200 status for the .rb";
-        warnTapCaskFetchFailed(tap_label, token, reason);
-        return null;
-    }
-
-    const rb_info = install_local_mod.parseRubyFormula(rb_resp.body) orelse {
-        warnTapCaskFetchFailed(tap_label, token, "unsupported Ruby DSL shape — use `brew upgrade` for this cask");
-        return null;
-    };
-    return alloc.dupe(u8, rb_info.version) catch null;
-}
-
-test "warnTapHeadResolveFailed surfaces rate-limit reason with the tap label" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    output.beginStderrCapture(std.testing.allocator, &buf);
-    defer output.endStderrCapture();
-
-    warnTapHeadResolveFailed("yuzeguitarist/deck", tap_mod.TapError.RateLimited);
-
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "yuzeguitarist/deck") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Could not resolve") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "rate limit") != null);
-}
-
-test "warnTapHeadResolveFailed surfaces network failure for the regression skip-guards" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    output.beginStderrCapture(std.testing.allocator, &buf);
-    defer output.endStderrCapture();
-
-    warnTapHeadResolveFailed("user/repo", tap_mod.TapError.NetworkError);
-
-    // Wording must hit both the user-facing "Could not resolve" header
-    // and the existing skip-guard regex (`Network failure`) so the
-    // regressions/*.sh scripts can tell a rate-limit fail from a real
-    // assertion miss.
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Could not resolve") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Network failure") != null);
-}
-
-test "warnTapCaskFetchFailed names both the tap and the token" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    output.beginStderrCapture(std.testing.allocator, &buf);
-    defer output.endStderrCapture();
-
-    warnTapCaskFetchFailed("yuzeguitarist/deck", "deckclip", "GitHub returned status 404 for the .rb");
-
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "yuzeguitarist/deck") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "deckclip") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "404") != null);
-}
-
-/// Serial-path single-row check. Returns a caller-owned latest-version
-/// string if `row` is outdated, null otherwise.
-fn fetchLatest(
-    allocator: std.mem.Allocator,
-    api: *api_mod.BrewApi,
-    io: std.Io,
-    environ: std.process.Environ,
-    kind: Kind,
-    row: KegRow,
-) std.mem.Allocator.Error!?[]u8 {
-    const v = upstreamLatest(allocator, api, io, environ, kind, row) orelse return null;
-    if (std.mem.eql(u8, row.version, v)) {
-        allocator.free(v);
-        return null;
-    }
-    return v;
-}
-
-/// Pull `versions.stable` out of a Homebrew formula JSON document.
-/// Returns a fresh caller-owned copy or null if the field is missing /
-/// the document is malformed.
-fn parseFormulaLatest(allocator: std.mem.Allocator, json_bytes: []const u8) ?[]u8 {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch return null;
-    defer parsed.deinit();
-    const obj = switch (parsed.value) {
-        .object => |o| o,
-        else => return null,
-    };
-    const versions_val = obj.get("versions") orelse return null;
-    const versions_obj = switch (versions_val) {
-        .object => |o| o,
-        else => return null,
-    };
-    const stable_val = versions_obj.get("stable") orelse return null;
-    return switch (stable_val) {
-        .string => |s| allocator.dupe(u8, s) catch null,
-        else => null,
-    };
-}
-
-// --- Pool path ---
-
-const WorkerCtx = struct {
-    io: std.Io,
-    /// Carried so tap-cask rows can resolve their owning tap's HEAD
-    /// through `tap_mod.resolveHeadCommit`, which reads GitHub auth
-    /// tokens from the parent process environ.
-    environ: std.process.Environ,
-    arena: std.heap.ArenaAllocator,
-    pool: *client_mod.HttpClientPool,
-    cache_dir: []const u8,
-    row: KegRow,
-    kind: Kind,
-    /// Result allocated on the **caller** allocator so it survives
-    /// arena teardown. Null = up-to-date or fetch failed.
-    out: ?[]u8 = null,
-    /// Out-of-memory from caller-allocator dupe; surfaced after join.
-    /// Other failures stay silent to match the serial behaviour.
-    err: ?std.mem.Allocator.Error = null,
-};
-
-const PoolState = struct {
-    next_idx: std.atomic.Value(usize),
-    ctxs: []WorkerCtx,
-    out_allocator: std.mem.Allocator,
-};
-
-fn poolWorker(state: *PoolState) void {
-    while (true) {
-        const idx = state.next_idx.fetchAdd(1, .acq_rel);
-        if (idx >= state.ctxs.len) return;
-        const wctx = &state.ctxs[idx];
-        runOne(state.out_allocator, wctx);
-    }
-}
-
-fn runOne(out_alloc: std.mem.Allocator, wctx: *WorkerCtx) void {
-    const http = wctx.pool.acquire();
-    defer wctx.pool.release(http);
-
-    const arena_alloc = wctx.arena.allocator();
-    var local_api = api_mod.BrewApi.init(wctx.io, arena_alloc, http, wctx.cache_dir);
-    const latest = upstreamLatest(arena_alloc, &local_api, wctx.io, wctx.environ, wctx.kind, wctx.row) orelse return;
-    if (std.mem.eql(u8, wctx.row.version, latest)) return;
-
-    // Move into the caller's allocator so the result outlives `arena.deinit()`.
-    wctx.out = out_alloc.dupe(u8, latest) catch |e| blk: {
-        wctx.err = e;
-        break :blk null;
-    };
-}
-
-fn runPool(
-    ctx: *const AppCtx,
-    allocator: std.mem.Allocator,
-    cache_dir: []const u8,
-    kegs: []const KegRow,
-    workers_override: ?usize,
-    kind: Kind,
-    latest_versions: []?[]u8,
-) std.mem.Allocator.Error!void {
-    const worker_count = outdatedWorkerCount(kegs.len, workers_override);
-    std.debug.assert(worker_count > 0);
-
-    var http_pool = try client_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, worker_count);
-    defer http_pool.deinit();
-
-    const ctxs = try allocator.alloc(WorkerCtx, kegs.len);
-    defer {
-        for (ctxs) |*c| c.arena.deinit();
-        allocator.free(ctxs);
-    }
-    for (ctxs, 0..) |*c, i| c.* = .{
-        .io = ctx.io,
-        .environ = ctx.environ,
-        .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
-        .pool = &http_pool,
-        .cache_dir = cache_dir,
-        .row = kegs[i],
-        .kind = kind,
-    };
-
-    var state: PoolState = .{
-        .next_idx = std.atomic.Value(usize).init(0),
-        .ctxs = ctxs,
-        .out_allocator = allocator,
-    };
-
-    const threads = try allocator.alloc(std.Thread, worker_count);
-    defer allocator.free(threads);
-
-    var spawned: usize = 0;
-    for (0..worker_count) |_| {
-        if (std.Thread.spawn(.{}, poolWorker, .{&state})) |t| {
-            threads[spawned] = t;
-            spawned += 1;
-        } else |_| {
-            // Spawn failure: drain remaining work inline on this thread.
-            poolWorker(&state);
-        }
-    }
-    for (threads[0..spawned]) |t| t.join();
-
-    // Move every successful out into the caller's slot first so the
-    // caller's errdefer can free partial-success memory if we then
-    // surface a worker OOM.
-    for (ctxs, 0..) |c, i| {
-        latest_versions[i] = c.out;
-    }
-    for (ctxs) |c| {
-        if (c.err) |e| return e;
-    }
 }
