@@ -274,12 +274,167 @@ test "installPoolWorker drains a 3-job pool concurrently across two workers" {
     try testing.expectEqual(@as(usize, 5), pool.next_idx.load(.acquire));
 }
 
-// The materialise-failure → CloneFailed mapping is covered end-to-end by
-// `scripts/regressions/install_zig_clonefail_gh85.sh`, which runs a real
-// install against pre-planted stale Cellar dirs and greps the install
-// log for the `Failed to materialize ... CloneFailed` surface. A purely
-// hermetic CellarFailed is hard to provoke without faking filesystem
-// permissions — the regression script is the source of truth here.
+test "installPoolWorker propagates the specific CellarError variant into result.err on materialise failure" {
+    const prefix = try setupPrefix("matvariant");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    // Pre-seed store/<sha>/ so installKegFromBottle skips download and
+    // hits materializeWithCellar, whose 512-byte cellar-path buffer
+    // overflows on a 230+230 char name+version. The helper captures
+    // the resulting CellarError.OutOfMemory through `cellar_diag`; the
+    // pool worker must forward it into `result.err` instead of falling
+    // back to the historical CloneFailed catch-all.
+    const sha = "f00d" ** 16;
+    const store_inner = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, sha });
+    defer testing.allocator.free(store_inner);
+    try test_io.cwd().createDirPath(std.Options.debug_io, store_inner);
+
+    const long_name = "a" ** 230;
+    const long_ver = "1" ** 230;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const formula_json = try std.fmt.allocPrint(
+        arena.allocator(),
+        \\{{
+        \\  "name": "{s}",
+        \\  "full_name": "{s}",
+        \\  "tap": "homebrew/core",
+        \\  "desc": "",
+        \\  "homepage": "",
+        \\  "versions": {{"stable": "{s}"}},
+        \\  "revision": 0,
+        \\  "dependencies": [],
+        \\  "keg_only": false,
+        \\  "post_install_defined": false,
+        \\  "oldnames": [],
+        \\  "bottle": {{"stable": {{"files": {{"all": {{"cellar": ":any", "url": "https://ghcr.io/v2/homebrew/core/x/blobs/sha256:{s}", "sha256": "{s}"}}}}}}}}
+        \\}}
+    ,
+        .{ long_name, long_name, long_ver, sha, sha },
+    );
+
+    var cache = malt.deps.FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+    _ = try cache.getOrParse(long_name, formula_json);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var http_pool = try malt.client.HttpClientPool.init(ctx.io, ctx.environ, testing.allocator, 1);
+    defer http_pool.deinit();
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, testing.allocator);
+    defer http.deinit();
+    var ghcr = malt.ghcr.GhcrClient.init(ctx.io, testing.allocator, &http);
+    defer ghcr.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var store = malt.store.Store.init(ctx.io, testing.allocator, &db, prefix);
+
+    var jobs = [_]malt.install.DownloadJob{makeJob(long_name, long_ver, sha)};
+    var results: [1]malt.install.MaterializeResult = .{.{ .ok = false, .err = null }};
+
+    var pool: malt.install.InstallPool = .{
+        .ctx = &ctx,
+        .next_idx = std.atomic.Value(usize).init(0),
+        .jobs = &jobs,
+        .prefix = prefix,
+        .ghcr = &ghcr,
+        .http_pool = &http_pool,
+        .store = &store,
+        .cache = &cache,
+        .results = &results,
+    };
+
+    malt.install.installPoolWorker(&pool);
+
+    // Download phase implicitly succeeded (store.exists was true), so
+    // job.succeeded stays true and the serial link phase routes this
+    // into "Failed to materialize" rather than "Download failed".
+    try testing.expect(!results[0].ok);
+    try testing.expectEqual(
+        @as(?malt.cellar.CellarError, malt.cellar.CellarError.OutOfMemory),
+        results[0].err,
+    );
+    try testing.expect(jobs[0].succeeded);
+}
+
+test "installPoolWorker bails between jobs when Ctrl-C fires" {
+    const prefix = try setupPrefix("interrupt");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    // Two warm jobs, but interrupted is set before the worker spawns
+    // so the loop body should never run installKegFromBottle. The
+    // user-facing effect: hitting Ctrl-C during a wide dep-graph
+    // install stops the pool quickly instead of grinding through every
+    // queued keg first.
+    const sha_a = "abab" ** 16;
+    const sha_b = "cdcd" ** 16;
+    try seedWarmStore(prefix, sha_a, "alpha", "1.0");
+    try seedWarmStore(prefix, sha_b, "beta", "2.0");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const json_a = try anyPlatformFormulaJson(arena.allocator(), "alpha", "1.0", sha_a);
+    const json_b = try anyPlatformFormulaJson(arena.allocator(), "beta", "2.0", sha_b);
+
+    var cache = malt.deps.FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+    _ = try cache.getOrParse("alpha", json_a);
+    _ = try cache.getOrParse("beta", json_b);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var http_pool = try malt.client.HttpClientPool.init(ctx.io, ctx.environ, testing.allocator, 1);
+    defer http_pool.deinit();
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, testing.allocator);
+    defer http.deinit();
+    var ghcr = malt.ghcr.GhcrClient.init(ctx.io, testing.allocator, &http);
+    defer ghcr.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var store = malt.store.Store.init(ctx.io, testing.allocator, &db, prefix);
+
+    var jobs = [_]malt.install.DownloadJob{
+        makeJob("alpha", "1.0", sha_a),
+        makeJob("beta", "2.0", sha_b),
+    };
+    var results: [2]malt.install.MaterializeResult = .{
+        .{ .ok = false, .err = null },
+        .{ .ok = false, .err = null },
+    };
+
+    var pool: malt.install.InstallPool = .{
+        .ctx = &ctx,
+        .next_idx = std.atomic.Value(usize).init(0),
+        .jobs = &jobs,
+        .prefix = prefix,
+        .ghcr = &ghcr,
+        .http_pool = &http_pool,
+        .store = &store,
+        .cache = &cache,
+        .results = &results,
+    };
+
+    malt.signals.setInterruptedForTest(true);
+    defer malt.signals.setInterruptedForTest(false);
+
+    malt.install.installPoolWorker(&pool);
+
+    // Nothing got drained: the worker noticed the interrupt before its
+    // first fetchAdd, so both jobs stay in their pre-pool state.
+    try testing.expectEqual(@as(usize, 0), pool.next_idx.load(.acquire));
+    for (results) |r| {
+        try testing.expect(!r.ok);
+        try testing.expect(r.err == null);
+    }
+    for (jobs) |j| try testing.expect(!j.succeeded);
+}
 
 test "installPoolWorker leaves the result untouched and marks job not-succeeded on a missing-formula entry" {
     const prefix = try setupPrefix("nocache");

@@ -17,6 +17,7 @@ const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
 
+const signals = @import("../../core/signals.zig");
 const ghcr_url = @import("ghcr_url.zig");
 const record = @import("record.zig");
 
@@ -669,9 +670,11 @@ pub const InstallPool = struct {
 
 /// Thread entry-point for the install pool. Drains `pool.jobs` via the
 /// atomic index, running one `installKegFromBottle` per job until the
-/// queue is empty.
+/// queue is empty. Honours Ctrl-C between jobs so a wide dep graph
+/// doesn't keep grinding through queued work after the user interrupts.
 pub fn installPoolWorker(pool: *InstallPool) void {
     while (true) {
+        if (signals.isInterrupted()) return;
         const idx = pool.next_idx.fetchAdd(1, .acq_rel);
         if (idx >= pool.jobs.len) return;
         installOneJob(pool, &pool.jobs[idx], &pool.results[idx]);
