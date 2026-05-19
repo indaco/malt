@@ -28,11 +28,12 @@ const c = struct {
 /// Two ordering notes for consumers:
 ///   - For a single-package install, events arrive in this exact order.
 ///   - For a multi-package install (e.g. `mt install wget` with deps),
-///     download-class events (downloaded/extracted/stored) emit for
-///     every job before the first materialized event, because the
-///     protocol downloads in parallel and materialises serially.
-///     Each per-package event carries `name` so consumers group by it
-///     instead of relying on strict per-package linearity.
+///     the pool runs download + materialise per keg, then emits the
+///     four pool events (downloaded/extracted/stored/materialized) for
+///     each keg in jobs order from the main thread. Link and recorded
+///     events follow per keg from the serial link phase. Each event
+///     carries `name` so consumers group by it instead of relying on
+///     strict per-package linearity.
 const install_step_events = [_]output.NdjsonEvent{
     .lock_acquired,
     .resolved,

@@ -47,10 +47,9 @@ pub const dropTopLevelJobs = download_mod.dropTopLevelJobs;
 pub const assignDownloadLineIndices = download_mod.assignDownloadLineIndices;
 pub const isDeterministicDownloadError = download_mod.isDeterministicDownloadError;
 const progressBridge = download_mod.progressBridge;
-const downloadWorker = download_mod.downloadWorker;
-const MaterializeResult = download_mod.MaterializeResult;
-const MaterializePool = download_mod.MaterializePool;
-const materializePoolWorker = download_mod.materializePoolWorker;
+pub const MaterializeResult = download_mod.MaterializeResult;
+pub const InstallPool = download_mod.InstallPool;
+pub const installPoolWorker = download_mod.installPoolWorker;
 const ghcr_url_mod = @import("install/ghcr_url.zig");
 pub const GhcrRef = ghcr_url_mod.GhcrRef;
 pub const parseGhcrUrl = ghcr_url_mod.parseGhcrUrl;
@@ -669,7 +668,10 @@ fn executeWithOpts(
         return;
     }
 
-    // ── Parallel download phase ──────────────────────────────────────
+    // ── Parallel download + materialize phase ────────────────────────
+    // One bounded pool drives `installKegFromBottle` per keg, overlapping
+    // download I/O with codesign CPU inside each worker rather than
+    // staging them across two pools.
 
     // Compute max label width for aligned progress bars
     var max_name_len: u8 = 0;
@@ -691,139 +693,110 @@ fn executeWithOpts(
         }
     }
 
-    if (to_download > 0) {
-        if (to_download == 1) {
-            output.info("Downloading 1 bottle...", .{});
-        } else {
-            output.info("Downloading {d} bottles...", .{to_download});
-        }
+    // Results live across the pool join + the serial link phase below.
+    const mats = allocator.alloc(MaterializeResult, all_jobs.items.len) catch
+        return InstallError.CellarFailed;
+    defer allocator.free(mats);
+    for (mats) |*m| m.* = .{ .ok = false, .err = null };
 
-        // Fold every repo into one multi-scope `/token` round-trip; workers
-        // hit the cache instead of racing. Bookkeeping OOM must propagate —
-        // only the token fetch itself is best-effort.
-        var repo_set: std.StringHashMapUnmanaged(void) = .empty;
-        defer repo_set.deinit(allocator);
-        for (all_jobs.items) |*job| {
-            if (job.succeeded) continue;
-            const ref = parseGhcrUrl(job.bottle_url) orelse continue;
-            try repo_set.put(allocator, ref.repo, {});
-        }
-        if (repo_set.count() > 0) {
-            var repos: std.ArrayList([]const u8) = .empty;
-            defer repos.deinit(allocator);
-            try repos.ensureTotalCapacity(allocator, repo_set.count());
-            var it = repo_set.keyIterator();
-            while (it.next()) |k| try repos.append(allocator, k.*);
-            const pre_http = http_pool.acquire();
-            defer http_pool.release(pre_http);
-            // Best-effort cache warm — any failure (OOM or network) is
-            // absorbed so workers fall back to per-repo fetchToken calls.
-            ghcr.prefetchTokens(pre_http, repos.items) catch {};
-        }
-
-        // Set up multi-progress: assign line indices and create coordinator
-        const download_index = assignDownloadLineIndices(all_jobs.items);
-        var multi = progress_mod.MultiProgress.init(download_index);
-        // Anchor the DECSET pair to scope exit so an early return between
-        // here and the worker join doesn't leave the terminal in DECRESET.
-        defer multi.finish();
-
-        // Main-thread bar allocation — draw an initial frame on every line
-        // before workers spawn, and keep pointers stable for them.
-        var bars: []progress_mod.ProgressBar = &.{};
-        if (allocator.alloc(progress_mod.ProgressBar, download_index)) |s| {
-            bars = s;
-        } else |_| {}
-        defer if (bars.len > 0) allocator.free(bars);
-
-        var bar_idx: usize = 0;
-        for (all_jobs.items) |*job| {
-            if (job.succeeded) continue;
-            job.multi = &multi;
-            if (bar_idx < bars.len) {
-                bars[bar_idx] = progress_mod.ProgressBar.init(job.name, 0);
-                bars[bar_idx].label_width = max_name_len;
-                bars[bar_idx].line_index = job.line_index;
-                bars[bar_idx].multi = &multi;
-                job.bar = &bars[bar_idx];
-                // Draw the initial frame now so this line is not blank while
-                // the worker is waiting to be scheduled.
-                bars[bar_idx].update(0);
-                bar_idx += 1;
-            }
-        }
-
-        var threads: std.ArrayList(std.Thread) = .empty;
-        defer threads.deinit(allocator);
-
-        for (all_jobs.items) |*job| {
-            if (job.succeeded) {
-                continue;
-            }
-            const t = std.Thread.spawn(.{}, downloadWorker, .{
-                ctx.io, allocator, &ghcr, &http_pool, &store, job,
-            }) catch {
-                downloadWorker(ctx.io, allocator, &ghcr, &http_pool, &store, job);
-                continue;
-            };
-            threads.append(allocator, t) catch {
-                t.join();
-                continue;
-            };
-        }
-
-        for (threads.items) |t| t.join();
-    }
-
-    // Emit from the main thread so ndjson order is deterministic
-    // regardless of worker interleaving.
-    if (output.isNdjson()) {
-        for (all_jobs.items) |job| {
-            if (!job.succeeded) continue;
-            output.emitNdjsonEvent(.downloaded, job.name, "ok");
-            output.emitNdjsonEvent(.extracted, job.name, "ok");
-            output.emitNdjsonEvent(.stored, job.name, "ok");
-        }
-    }
-
-    // Check for Ctrl-C between download and materialize phases
-    if (signals.isInterrupted()) {
-        output.warn("Interrupted. Cleaning up...", .{});
-        return;
-    }
-
-    // `--force` pre-materialize: the cellar's clonefile/copy refuses
-    // to overwrite a populated dir, so wipe the resolved-version dir
-    // up front. The destructive part of the cleanup — dropping stale
-    // DB rows, unlinking prior symlinks, sweeping orphan dirs — is
-    // deferred to the serial link phase below so a materialize crash
-    // leaves the user's prior keg + row intact for the revision-bump
-    // case. Pin survives because INSERT OR REPLACE in `recordKeg`
-    // inherits via COALESCE-MAX on `pinned` by name.
+    // `--force` pre-materialize: clonefile refuses to overwrite a populated
+    // keg dir, so wipe the resolved-version dir up front. Destructive DB +
+    // symlink cleanup is deferred to the serial link phase so a materialize
+    // crash leaves the user's prior keg + row intact for the revision-bump
+    // case. Pin survives because `recordKeg` inherits via COALESCE-MAX on
+    // `pinned` by name.
     if (force) {
         for (all_jobs.items) |job| {
             pruneCellarForReinstall(ctx, prefix, job.name, job.version_str);
         }
     }
 
-    // ── Parallel materialize phase ──────────────────────────────────
-    // Materialize steps are per-keg independent; shared state is deferred
-    // to the serial link phase. 4-worker cap — unbounded spawn regressed
-    // warm ffmpeg via page-cache + codesign contention.
-    const mats = allocator.alloc(MaterializeResult, all_jobs.items.len) catch
-        return InstallError.CellarFailed;
-    defer allocator.free(mats);
-    for (mats) |*m| m.* = .{ .ok = false, .err = null };
-
     {
+        if (to_download > 0) {
+            if (to_download == 1) {
+                output.info("Downloading 1 bottle...", .{});
+            } else {
+                output.info("Downloading {d} bottles...", .{to_download});
+            }
+
+            // Fold every repo into one multi-scope `/token` round-trip; workers
+            // hit the cache instead of racing. Bookkeeping OOM must propagate —
+            // only the token fetch itself is best-effort.
+            var repo_set: std.StringHashMapUnmanaged(void) = .empty;
+            defer repo_set.deinit(allocator);
+            for (all_jobs.items) |*job| {
+                if (job.succeeded) continue;
+                const ref = parseGhcrUrl(job.bottle_url) orelse continue;
+                try repo_set.put(allocator, ref.repo, {});
+            }
+            if (repo_set.count() > 0) {
+                var repos: std.ArrayList([]const u8) = .empty;
+                defer repos.deinit(allocator);
+                try repos.ensureTotalCapacity(allocator, repo_set.count());
+                var it = repo_set.keyIterator();
+                while (it.next()) |k| try repos.append(allocator, k.*);
+                const pre_http = http_pool.acquire();
+                defer http_pool.release(pre_http);
+                // Best-effort cache warm — any failure (OOM or network) is
+                // absorbed so workers fall back to per-repo fetchToken calls.
+                ghcr.prefetchTokens(pre_http, repos.items) catch {};
+            }
+        }
+
+        // Multi-progress + bars only exist when at least one job downloads.
+        // Warm-only installs skip terminal setup entirely; their pool
+        // workers materialise without a progress callback.
+        const has_multi = to_download > 0;
+        const download_index: u16 = if (has_multi)
+            assignDownloadLineIndices(all_jobs.items)
+        else
+            0;
+        var multi: progress_mod.MultiProgress = undefined;
+        if (has_multi) multi = progress_mod.MultiProgress.init(download_index);
+        // Anchor the DECSET pair to scope exit so an early return between
+        // here and the worker join doesn't leave the terminal in DECRESET.
+        defer if (has_multi) multi.finish();
+
+        var bars: []progress_mod.ProgressBar = &.{};
+        defer if (bars.len > 0) allocator.free(bars);
+
+        if (has_multi) {
+            if (allocator.alloc(progress_mod.ProgressBar, download_index)) |s| {
+                bars = s;
+            } else |_| {}
+            var bar_idx: usize = 0;
+            for (all_jobs.items) |*job| {
+                if (job.succeeded) continue;
+                job.multi = &multi;
+                if (bar_idx < bars.len) {
+                    bars[bar_idx] = progress_mod.ProgressBar.init(job.name, 0);
+                    bars[bar_idx].label_width = max_name_len;
+                    bars[bar_idx].line_index = job.line_index;
+                    bars[bar_idx].multi = &multi;
+                    job.bar = &bars[bar_idx];
+                    // Draw the initial frame now so this line is not blank
+                    // while the worker is waiting to be scheduled.
+                    bars[bar_idx].update(0);
+                    bar_idx += 1;
+                }
+            }
+        }
+
+        // 4-worker cap — overlap download I/O with codesign CPU inside each
+        // worker. Unbounded spawn regressed warm ffmpeg via page-cache +
+        // codesign contention.
         const max_workers: usize = 4;
         const worker_count = @min(max_workers, all_jobs.items.len);
 
-        var pool_ctx: MaterializePool = .{
-            .io = ctx.io,
+        var pool_ctx: InstallPool = .{
+            .ctx = ctx,
             .next_idx = std.atomic.Value(usize).init(0),
             .jobs = all_jobs.items,
             .prefix = prefix,
+            .ghcr = &ghcr,
+            .http_pool = &http_pool,
+            .store = &store,
+            .cache = &formula_cache,
             .results = mats,
         };
 
@@ -833,16 +806,36 @@ fn executeWithOpts(
 
         var spawned: usize = 0;
         for (0..worker_count) |_| {
-            if (std.Thread.spawn(.{}, materializePoolWorker, .{&pool_ctx})) |t| {
+            if (std.Thread.spawn(.{}, installPoolWorker, .{&pool_ctx})) |t| {
                 pool_threads[spawned] = t;
                 spawned += 1;
             } else |_| {
                 // Fall back to inline execution if spawn fails. The pool
                 // loop will pick up remaining jobs on this thread.
-                materializePoolWorker(&pool_ctx);
+                installPoolWorker(&pool_ctx);
             }
         }
         for (pool_threads[0..spawned]) |t| t.join();
+    }
+
+    // Emit from the main thread so ndjson order is deterministic
+    // regardless of worker interleaving. Per-keg sequence groups each
+    // package's events together; consumers group by `name` either way.
+    if (output.isNdjson()) {
+        for (all_jobs.items, 0..) |job, i| {
+            if (!job.succeeded) continue;
+            output.emitNdjsonEvent(.downloaded, job.name, "ok");
+            output.emitNdjsonEvent(.extracted, job.name, "ok");
+            output.emitNdjsonEvent(.stored, job.name, "ok");
+            const mat_status: []const u8 = if (mats[i].ok) "ok" else "failed";
+            output.emitNdjsonEvent(.materialized, job.name, mat_status);
+        }
+    }
+
+    // Check for Ctrl-C between the pool and the serial link phase
+    if (signals.isInterrupted()) {
+        output.warn("Interrupted. Cleaning up...", .{});
+        return;
     }
 
     // ── Serial link + record phase ──────────────────────────────────
@@ -874,12 +867,10 @@ fn executeWithOpts(
                 "Failed to materialize {s}: {s} ({s})",
                 .{ job.name, @errorName(err), cellar_mod.describeError(err) },
             );
-            output.emitNdjsonEvent(.materialized, job.name, "failed");
             try failed_kegs.put(job.name, {});
             failed_count += 1;
             continue;
         }
-        output.emitNdjsonEvent(.materialized, job.name, "ok");
 
         // Failed-dep → skip: installing on a broken graph yields a dyld-unresolvable
         // keg. Remove the already-materialised keg so orphans don't linger.
