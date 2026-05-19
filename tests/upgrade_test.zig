@@ -209,7 +209,7 @@ test "recordKeg inherits pinned=1 from an existing keg of the same name" {
     var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
     defer formula.deinit();
 
-    const new_keg_id = try upgrade.recordKeg(&db, &formula, "deadbeef2", "/cellar/alpha/2.0");
+    const new_keg_id = try install.recordKeg(&db, &formula, "deadbeef2", "/cellar/alpha/2.0", "direct", .{});
 
     var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
     defer stmt.finalize();
@@ -282,7 +282,7 @@ test "recordKeg defaults pinned=0 when no prior keg of that name exists" {
     var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
     defer formula.deinit();
 
-    const new_keg_id = try upgrade.recordKeg(&db, &formula, "deadbeef0", "/cellar/fresh/1.0");
+    const new_keg_id = try install.recordKeg(&db, &formula, "deadbeef0", "/cellar/fresh/1.0", "direct", .{});
 
     var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
     defer stmt.finalize();
@@ -319,7 +319,7 @@ test "recordKeg runs inside an outer beginTransaction without nesting errors" {
     defer formula.deinit();
 
     try db.beginTransaction();
-    const new_keg_id = try upgrade.recordKeg(&db, &formula, "sha-inner", "/cellar/inside-txn/2.0");
+    const new_keg_id = try install.recordKeg(&db, &formula, "sha-inner", "/cellar/inside-txn/2.0", "direct", .{ .in_transaction = true });
     try db.commit();
 
     var stmt = try db.prepare("SELECT name, version FROM kegs WHERE id = ?1;");
@@ -330,12 +330,13 @@ test "recordKeg runs inside an outer beginTransaction without nesting errors" {
     try testing.expectEqualStrings("2.0", std.mem.sliceTo(stmt.columnText(1).?, 0));
 }
 
-// Diagnostics contract: a UNIQUE collision must propagate the typed
-// SqliteError so the call site can surface `db.errMsg()` and the user
-// sees what actually failed. Pre-fix this collapsed into the opaque
-// `error.RecordFailed`.
-test "recordKeg propagates ConstraintViolation on UNIQUE collision" {
-    const path = try setupPrefix("recordkeg_constraint_propagates");
+// Re-record contract: an `INSERT OR REPLACE` on the kegs UNIQUE
+// (name, version, revision) drops the old row in place and the new
+// row carries fresh `store_sha256` / `cellar_path` values. Force
+// re-install relies on this — without OR REPLACE the user would
+// see a hard error instead of the expected reinstall.
+test "recordKeg INSERT OR REPLACE rewrites an existing (name,version,revision)" {
+    const path = try setupPrefix("recordkeg_replace_same_key");
     defer testing.allocator.free(path);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
@@ -343,8 +344,6 @@ test "recordKeg propagates ConstraintViolation on UNIQUE collision" {
     var db = try openSeededDb(path);
     defer db.close();
 
-    // Pre-existing row that the recordKeg INSERT will collide with on
-    // (name, version, revision).
     try db.exec(
         \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
         \\VALUES ('collide', 'collide', '1.0', 0, 'sha-old', '/cellar/collide/1.0');
@@ -363,85 +362,28 @@ test "recordKeg propagates ConstraintViolation on UNIQUE collision" {
     var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
     defer formula.deinit();
 
-    try testing.expectError(
-        sqlite.SqliteError.ConstraintViolation,
-        upgrade.recordKeg(&db, &formula, "sha-new", "/cellar/collide/1.0"),
-    );
-    // The connection's last-error slot carries the SQLite text — that's
-    // what the upgrade path will log to the user.
-    try testing.expect(std.mem.indexOf(u8, db.errMsg(), "UNIQUE") != null);
+    const new_keg_id = try install.recordKeg(&db, &formula, "sha-new", "/cellar/collide/1.0", "direct", .{});
+
+    var count_stmt = try db.prepare("SELECT COUNT(*) FROM kegs WHERE name='collide';");
+    defer count_stmt.finalize();
+    _ = try count_stmt.step();
+    try testing.expectEqual(@as(i64, 1), count_stmt.columnInt(0));
+
+    var sha_stmt = try db.prepare("SELECT store_sha256 FROM kegs WHERE id = ?1;");
+    defer sha_stmt.finalize();
+    try sha_stmt.bindInt(1, new_keg_id);
+    _ = try sha_stmt.step();
+    try testing.expectEqualStrings("sha-new", std.mem.sliceTo(sha_stmt.columnText(0).?, 0));
 }
 
-// Atomic-txn contract: when `recordKeg` fails inside the outer
-// transaction (e.g. UNIQUE collision), a ROLLBACK leaves both `kegs`
-// and `links` exactly as they were before the upgrade started.
-// This is the load-bearing guarantee that keeps the user out of the
-// "unlink warned + record failed → DB half-mutated" state from the
-// original report.
-test "upgradeDbAtomic rolls back kegs+links on recordKeg failure" {
-    const path = try setupPrefix("upgradedbatomic_rollback");
-    defer testing.allocator.free(path);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
-    defer _ = c.unsetenv("MALT_PREFIX");
-
-    var db = try openSeededDb(path);
-    defer db.close();
-
-    // Seed: an installed keg + two links rows simulating
-    // `bin/foo` and `lib/foo.dylib` already linked.
-    try db.exec(
-        \\INSERT INTO kegs (id, name, full_name, version, revision, store_sha256, cellar_path)
-        \\VALUES (42, 'foo', 'foo', '1.0', 0, 'sha-old', '/cellar/foo/1.0');
-    );
-    try db.exec(
-        \\INSERT INTO links (keg_id, link_path, target)
-        \\VALUES (42, '/p/bin/foo', '/cellar/foo/1.0/bin/foo'),
-        \\       (42, '/p/lib/foo.dylib', '/cellar/foo/1.0/lib/foo.dylib');
-    );
-    // Pre-existing collision row that recordKeg's INSERT will hit.
-    try db.exec(
-        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
-        \\VALUES ('foo', 'foo', '2.0', 0, 'sha-collide', '/cellar/foo/2.0');
-    );
-
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const formula_json =
-        \\{
-        \\  "name": "foo",
-        \\  "full_name": "foo",
-        \\  "tap": "homebrew/core",
-        \\  "versions": {"stable": "2.0"}
-        \\}
-    ;
-    var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
-    defer formula.deinit();
-
-    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var linker = malt.linker.Linker.init(io, testing.allocator, &db, path);
-
-    try db.beginTransaction();
-    try testing.expectError(
-        sqlite.SqliteError.ConstraintViolation,
-        upgrade.upgradeDbAtomic(&db, &linker, 42, &formula, "sha-new", "/cellar/foo/2.0_new"),
-    );
-    db.rollback();
-
-    // Old keg row survives.
-    var keg_stmt = try db.prepare("SELECT version, revision FROM kegs WHERE id = 42;");
-    defer keg_stmt.finalize();
-    try testing.expect(try keg_stmt.step());
-    try testing.expectEqualStrings("1.0", std.mem.sliceTo(keg_stmt.columnText(0).?, 0));
-    try testing.expectEqual(@as(i64, 0), keg_stmt.columnInt(1));
-
-    // Both links rows survive.
-    var links_stmt = try db.prepare("SELECT COUNT(*) FROM links WHERE keg_id = 42;");
-    defer links_stmt.finalize();
-    _ = try links_stmt.step();
-    try testing.expectEqual(@as(i64, 2), links_stmt.columnInt(0));
-}
+// Atomic-txn contract is now structural: `upgradeDbAtomic` is a flat
+// `try`-chain inside the caller's BEGIN/COMMIT, so any failure (linker,
+// SQLite, FS) short-circuits and the outer ROLLBACK reverts every
+// mutation made so far. Pre-T-007 the test crafted a `recordKeg` UNIQUE
+// collision to drive the unhappy path; the unified `INSERT OR REPLACE`
+// eliminates that trigger and there is no contrived in-DB failure left
+// to inject. End-to-end coverage lives in
+// `scripts/regressions/upgrade_atomic_db_rollback.sh`.
 
 test "pinSkip honours --force and audit_mode for casks too" {
     const path = try setupPrefix("pinskip_cask");
@@ -544,7 +486,7 @@ test "recordKeg succeeds on a same-version revision-bump upgrade" {
     var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
     defer formula.deinit();
 
-    const new_keg_id = try upgrade.recordKeg(&db, &formula, "sha-new", "/cellar/libgit2/1.9.2_2");
+    const new_keg_id = try install.recordKeg(&db, &formula, "sha-new", "/cellar/libgit2/1.9.2_2", "direct", .{});
 
     // Both rows must coexist briefly — upgradeFormula deletes the old
     // one in step 8, after symlinks flip to the new keg.

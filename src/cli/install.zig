@@ -974,7 +974,7 @@ fn linkAndRecord(
 
     // Link + record
     if (!job.keg_only) {
-        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason) catch |err| {
+        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason, .{}) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
@@ -998,7 +998,7 @@ fn linkAndRecord(
         };
         recordDeps(db, keg_id, formula);
     } else {
-        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason) catch |err| {
+        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason, .{}) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;

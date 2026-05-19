@@ -689,6 +689,148 @@ fn materializeOne(
     result.keg_path_len = keg.path.len;
 }
 
+/// Long-lived collaborators that the per-keg materialize pipeline borrows.
+/// Caller owns the lifetimes; the function never closes or deinits them.
+pub const InstallKegDeps = struct {
+    ghcr: *ghcr_mod.GhcrClient,
+    http: *client_mod.HttpClient,
+    store: *store_mod.Store,
+    /// Optional progress bar fed by the per-blob download callback. `null`
+    /// is fine — the download still runs but emits no bar updates.
+    bar: ?*progress_mod.ProgressBar = null,
+};
+
+/// Result of `installKegFromBottle`. `sha256` borrows from the formula's
+/// bottle entry; `keg` borrows from the cellar materialise call. Both
+/// stay valid as long as the formula and on-disk keg do.
+pub const InstallKegResult = struct {
+    sha256: []const u8,
+    keg: cellar_mod.Keg,
+};
+
+/// Materialise a keg from a formula's bottle URL.
+///
+/// Composes the install pipeline's per-keg work — bottle resolve, GHCR
+/// download with bounded retry, store commit + refcount, cellar
+/// materialize — so the install pool worker and the upgrade per-keg
+/// loop share one implementation instead of drifting in two places.
+///
+/// On a warm store the download branch is skipped entirely and the
+/// function proceeds straight to `cellar_mod.materializeWithCellar`,
+/// honouring the bottle's declared cellar type so `:any` /
+/// `:any_skip_relocation` bottles skip Mach-O patching.
+///
+/// Returned slices borrow from `formula` and from the materialised keg
+/// directory — callers must keep both alive while the result is in use.
+pub fn installKegFromBottle(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    deps: InstallKegDeps,
+    formula: *const formula_mod.Formula,
+    target_prefix: []const u8,
+) InstallError!InstallKegResult {
+    const bottle = formula_mod.resolveBottle(formula) catch return InstallError.NoBottle;
+
+    if (!deps.store.exists(bottle.sha256)) {
+        const ref = ghcr_url.parseGhcrUrl(bottle.url) orelse return InstallError.DownloadFailed;
+
+        const tmp_dir = atomic.createTempDir(ctx.io, allocator, formula.name) catch
+            return InstallError.DownloadFailed;
+
+        const progress_cb: ?client_mod.ProgressCallback = if (deps.bar) |bar| .{
+            .context = @ptrCast(bar),
+            .func = &progressBridge,
+        } else null;
+
+        const max_attempts: u8 = 3;
+        const retry_delays_ms = [_]u64{ 100, 400 };
+        var dl_attempt: u8 = 0;
+        var dl_ok = false;
+        var last_err: bottle_mod.BottleError = bottle_mod.BottleError.DownloadFailed;
+        var last_mismatch: ?bottle_mod.MismatchInfo = null;
+        while (dl_attempt < max_attempts) : (dl_attempt += 1) {
+            var mismatch: bottle_mod.MismatchInfo = undefined;
+            if (bottle_mod.download(
+                ctx.io,
+                allocator,
+                deps.ghcr,
+                deps.http,
+                ref.repo,
+                ref.digest,
+                bottle.sha256,
+                tmp_dir,
+                progress_cb,
+                &mismatch,
+            )) |_| {
+                dl_ok = true;
+                break;
+            } else |dl_err| {
+                last_err = dl_err;
+                atomic.cleanupTempDir(ctx.io, tmp_dir);
+                if (dl_err == bottle_mod.BottleError.DownloadPermanent) {
+                    output.err("  {s}: permanent HTTP error (404/410), not retrying", .{formula.name});
+                    break;
+                }
+                if (dl_err == bottle_mod.BottleError.Sha256Mismatch) {
+                    last_mismatch = mismatch;
+                } else if (isDeterministicDownloadError(dl_err)) {
+                    output.err("  {s}: {s}", .{ formula.name, @errorName(dl_err) });
+                    break;
+                }
+                if (dl_attempt + 1 < max_attempts) {
+                    if (!cancellableBackoff(ctx.io, retry_delays_ms[dl_attempt])) break;
+                }
+            }
+        }
+
+        if (!dl_ok and last_err == bottle_mod.BottleError.Sha256Mismatch) {
+            if (last_mismatch) |m| {
+                output.err(
+                    "  {s}: Sha256Mismatch (expected={s} got={s} bytes={d})",
+                    .{ formula.name, m.expected[0..@min(64, m.expected.len)], m.computed[0..], m.body_len },
+                );
+            } else {
+                output.err("  {s}: Sha256Mismatch", .{formula.name});
+            }
+        }
+
+        if (!dl_ok) {
+            if (deps.bar) |bar| bar.finish();
+            if (dl_attempt >= max_attempts) {
+                output.err("  {s}: {s} (after {d} attempts)", .{ formula.name, @errorName(last_err), max_attempts });
+            }
+            allocator.free(tmp_dir);
+            return InstallError.DownloadFailed;
+        }
+        if (deps.bar) |bar| bar.finish();
+
+        deps.store.commitFrom(bottle.sha256, tmp_dir) catch {
+            atomic.cleanupTempDir(ctx.io, tmp_dir);
+            allocator.free(tmp_dir);
+            return InstallError.StoreFailed;
+        };
+        allocator.free(tmp_dir);
+
+        // Advisory refcount: commit succeeded so the bytes are ours; a
+        // bumped warning is not a failure of the materialize.
+        deps.store.incrementRef(bottle.sha256) catch |e| {
+            std.log.warn("refcount increment failed for {s}: {s}", .{ bottle.sha256, @errorName(e) });
+        };
+    }
+
+    const keg = cellar_mod.materializeWithCellar(
+        ctx.io,
+        allocator,
+        target_prefix,
+        bottle.sha256,
+        formula.name,
+        formula.pkg_version,
+        bottle.cellar,
+    ) catch return InstallError.CellarFailed;
+
+    return .{ .sha256 = bottle.sha256, .keg = keg };
+}
+
 fn testJob(succeeded: bool) DownloadJob {
     return .{
         .name = "",
@@ -857,4 +999,57 @@ test "isDeterministicDownloadError: every BottleError variant has an explicit ve
         const tag = @field(bottle_mod.BottleError, err.name);
         _ = isDeterministicDownloadError(tag);
     }
+}
+
+// installKegFromBottle is exercised end-to-end by the install + upgrade
+// integration suites — the inline test below pins only the early-return
+// contract that the unified pipeline routes a missing-bottle formula
+// through `InstallError.NoBottle` without touching the network deps.
+test "installKegFromBottle returns NoBottle before reaching ghcr/store when no platform bottle resolves" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const formula_json =
+        \\{
+        \\  "name": "noplatform",
+        \\  "full_name": "noplatform",
+        \\  "tap": "homebrew/core",
+        \\  "desc": "",
+        \\  "homepage": "",
+        \\  "versions": {"stable": "1.0"},
+        \\  "revision": 0,
+        \\  "dependencies": [],
+        \\  "keg_only": false,
+        \\  "post_install_defined": false,
+        \\  "oldnames": [],
+        \\  "bottle": {"stable": {"files": {}}}
+        \\}
+    ;
+    var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
+    defer formula.deinit();
+
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx_value: AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    // Real deps so the function compiles, but the resolveBottle short-circuit
+    // returns before any of them are dereferenced for I/O.
+    var http = client_mod.HttpClient.init(ctx_value.io, ctx_value.environ, std.testing.allocator);
+    defer http.deinit();
+    var ghcr = ghcr_mod.GhcrClient.init(ctx_value.io, std.testing.allocator, &http);
+    defer ghcr.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var store = store_mod.Store.init(ctx_value.io, std.testing.allocator, &db, "/tmp/malt_iknfb_test");
+
+    try std.testing.expectError(
+        InstallError.NoBottle,
+        installKegFromBottle(
+            &ctx_value,
+            std.testing.allocator,
+            .{ .ghcr = &ghcr, .http = &http, .store = &store },
+            &formula,
+            "/tmp/malt_iknfb_test",
+        ),
+    );
 }

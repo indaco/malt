@@ -12,7 +12,6 @@ const client_mod = @import("../net/client.zig");
 const api_mod = @import("../net/api.zig");
 const cask_mod = @import("../core/cask.zig");
 const formula_mod = @import("../core/formula.zig");
-const bottle_mod = @import("../core/bottle.zig");
 const store_mod = @import("../core/store.zig");
 const cellar_mod = @import("../core/cellar.zig");
 const linker_mod = @import("../core/linker.zig");
@@ -23,6 +22,8 @@ const install_mod = @import("install.zig");
 const install_local_mod = @import("install/local.zig");
 const install_args_mod = @import("install/args.zig");
 const install_download_mod = @import("install/download.zig");
+const install_record_mod = @import("install/record.zig");
+const InstallError = install_record_mod.InstallError;
 const progress_mod = @import("../ui/progress.zig");
 const tap_mod = @import("../core/tap.zig");
 const deps_mod = @import("../core/deps.zig");
@@ -39,16 +40,6 @@ const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     .{ "-f", .force },
     .{ "--pinned", .pinned },
 });
-
-/// Build the `ProgressCallback` that `bottle_mod.download` feeds. Mirrors the
-/// install + migrate wiring so `mt upgrade` shows the same per-keg bar as the
-/// rest of the suite instead of a bare "Downloading…" line.
-fn bottleProgress(bar: *progress_mod.ProgressBar) client_mod.ProgressCallback {
-    return .{
-        .context = @ptrCast(bar),
-        .func = &install_download_mod.progressBridge,
-    };
-}
 
 /// True when this name should be skipped due to a user pin. Pure gate so
 /// the `--force` semantics are testable without dragging in the API.
@@ -302,84 +293,38 @@ fn upgradeFormula(
         }
     }
 
-    // Step 3: Resolve bottle for new version
-    const bottle = formula_mod.resolveBottle(&formula) catch {
-        output.err("No bottle available for {s} on this platform", .{name});
-        return error.Aborted;
-    };
-
-    // Step 4: Download bottle
+    // Steps 3–5: download + cellar materialize via the shared install
+    // pipeline. One primitive means upgrade inherits the install path's
+    // retry-with-backoff and `:any` skip-relocation hot path for free.
     var ghcr = ghcr_mod.GhcrClient.init(ctx.io, allocator, http);
     defer ghcr.deinit();
 
     var store = store_mod.Store.init(ctx.io, allocator, db, prefix);
 
-    if (!store.exists(bottle.sha256)) {
-        // Parse GHCR URL to extract repo + digest
-        const ghcr_prefix_str = "https://ghcr.io/v2/";
-        var repo_buf: [256]u8 = undefined;
-        var digest_buf: [128]u8 = undefined;
-
-        if (!std.mem.startsWith(u8, bottle.url, ghcr_prefix_str)) {
-            output.err("Unsupported bottle URL for {s}", .{name});
-            return error.Aborted;
+    var bar = progress_mod.ProgressBar.init(name, 0);
+    const fetch = install_download_mod.installKegFromBottle(
+        ctx,
+        allocator,
+        .{ .ghcr = &ghcr, .http = http, .store = &store, .bar = &bar },
+        &formula,
+        prefix,
+    ) catch |e| {
+        if (e == InstallError.NoBottle) {
+            output.err("No bottle available for {s} on this platform", .{name});
+        } else if (e == InstallError.CellarFailed) {
+            output.err("Failed to materialize {s}", .{name});
+            output.emitNdjsonEvent(.materialized, name, "failed");
         }
-        const path = bottle.url[ghcr_prefix_str.len..];
-        const blobs_pos = std.mem.indexOf(u8, path, "/blobs/") orelse {
-            output.err("Malformed bottle URL for {s}", .{name});
-            return error.Aborted;
-        };
-        const repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return;
-        const digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return;
+        return error.Aborted;
+    };
+    const new_keg = fetch.keg;
 
-        const tmp_dir = atomic.createTempDir(ctx.io, allocator, name) catch {
-            output.err("Failed to create temp dir for {s}", .{name});
-            return error.Aborted;
-        };
-
-        var bar = progress_mod.ProgressBar.init(name, 0);
-        const progress_cb = bottleProgress(&bar);
-        _ = bottle_mod.download(ctx.io, allocator, &ghcr, http, repo, digest, bottle.sha256, tmp_dir, progress_cb, null) catch {
-            bar.finish();
-            output.err("  Download failed: {s}", .{name});
-            atomic.cleanupTempDir(ctx.io, tmp_dir);
-            allocator.free(tmp_dir);
-            return error.Aborted;
-        };
-        bar.finish();
-
-        store.commitFrom(bottle.sha256, tmp_dir) catch {
-            output.err("Failed to commit bottle to store for {s}", .{name});
-            atomic.cleanupTempDir(ctx.io, tmp_dir);
-            allocator.free(tmp_dir);
-            return error.Aborted;
-        };
-        allocator.free(tmp_dir);
-
-        // refcount is advisory; commit succeeded, store now owns the bytes.
-        store.incrementRef(bottle.sha256) catch {};
-    }
     // Emit even on warm-cache so the cold/warm event sequence matches.
     if (output.isNdjson()) {
         output.emitNdjsonEvent(.downloaded, name, "ok");
         output.emitNdjsonEvent(.extracted, name, "ok");
         output.emitNdjsonEvent(.stored, name, "ok");
     }
-
-    // Step 5: Materialize new version to Cellar
-    output.dim("Materializing {s} to cellar...", .{name});
-    const new_keg = cellar_mod.materialize(
-        ctx.io,
-        allocator,
-        prefix,
-        bottle.sha256,
-        formula.name,
-        formula.pkg_version,
-    ) catch {
-        output.err("Failed to materialize {s}", .{name});
-        output.emitNdjsonEvent(.materialized, name, "failed");
-        return error.Aborted;
-    };
     output.emitNdjsonEvent(.materialized, name, "ok");
 
     // Steps 6–8 (DB part): atomic. unlink-old → recordKeg → link-new →
@@ -398,7 +343,7 @@ fn upgradeFormula(
         return error.Aborted;
     };
 
-    const new_keg_id = upgradeDbAtomic(db, &linker, old_keg_id, &formula, bottle.sha256, new_keg.path) catch |db_err| {
+    const new_keg_id = upgradeDbAtomic(db, &linker, old_keg_id, &formula, fetch.sha256, new_keg.path) catch |db_err| {
         output.err(
             "Failed to record new version of {s} in database: {s} ({s})",
             .{ name, @errorName(db_err), db.errMsg() },
@@ -727,9 +672,19 @@ pub fn upgradeDbAtomic(
     new_cellar_path: []const u8,
 ) !i64 {
     try linker.unlink(old_keg_id);
-    const new_keg_id = try recordKeg(db, formula, store_sha256, new_cellar_path);
+    // `in_transaction = true` so the upgrade wrapper's outer BEGIN/COMMIT
+    // owns atomicity for unlink → record → link → delete; the unified
+    // recordKeg never nests BEGIN IMMEDIATE here.
+    const new_keg_id = try install_record_mod.recordKeg(
+        db,
+        formula,
+        store_sha256,
+        new_cellar_path,
+        "direct",
+        .{ .in_transaction = true },
+    );
     try linker.link(new_cellar_path, formula.name, new_keg_id);
-    deleteKeg(db, old_keg_id);
+    install_record_mod.deleteKeg(db, old_keg_id);
     return new_keg_id;
 }
 
@@ -745,74 +700,6 @@ fn restoreOldLinks(
     linker.link(old_cellar_path, name, old_keg_id) catch {
         output.err("CRITICAL: Failed to restore old symlinks for {s}. Manual intervention may be required.", .{name});
     };
-}
-
-/// Record a keg in the database for upgrade. Returns the keg_id.
-/// The COALESCE on `pinned` inherits any existing user pin from the
-/// row(s) being replaced so a force-upgrade preserves the hold rather
-/// than silently clearing it. Fresh installs (no prior row) default to 0.
-///
-/// Inherits the caller's transaction (no internal BEGIN/COMMIT) so
-/// upgradeFormula can wrap unlink → recordKeg → link in a single txn:
-/// nesting `BEGIN IMMEDIATE` would error out as "cannot start a
-/// transaction within a transaction" and leave the upgrade half-mutated.
-/// A standalone caller still gets atomicity from SQLite's implicit
-/// per-statement transaction.
-pub fn recordKeg(
-    db: *sqlite.Database,
-    formula: *const formula_mod.Formula,
-    store_sha256: []const u8,
-    cellar_path: []const u8,
-) sqlite.SqliteError!i64 {
-    var stmt = try db.prepare(
-        "INSERT INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, pinned)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'direct', COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));",
-    );
-    defer stmt.finalize();
-
-    try stmt.bindText(1, formula.name);
-    try stmt.bindText(2, formula.full_name);
-    try stmt.bindText(3, formula.version);
-    try stmt.bindInt(4, formula.revision);
-    try stmt.bindText(5, formula.tap);
-    try stmt.bindText(6, store_sha256);
-    try stmt.bindText(7, cellar_path);
-
-    _ = try stmt.step();
-
-    return try getLastInsertId(db);
-}
-
-/// Delete a keg record from the database (rollback helper). The whole
-/// function is best-effort: a rollback failure is logged upstream via the
-/// caller's `output.err`, and a stale row cleans itself up on next doctor.
-fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
-    {
-        var dep_stmt = db.prepare("DELETE FROM dependencies WHERE keg_id = ?1;") catch return;
-        defer dep_stmt.finalize();
-        dep_stmt.bindInt(1, keg_id) catch return;
-        _ = dep_stmt.step() catch {};
-    }
-    {
-        var link_stmt = db.prepare("DELETE FROM links WHERE keg_id = ?1;") catch return;
-        defer link_stmt.finalize();
-        link_stmt.bindInt(1, keg_id) catch return;
-        _ = link_stmt.step() catch {};
-    }
-    var stmt = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return;
-    defer stmt.finalize();
-    stmt.bindInt(1, keg_id) catch return;
-    _ = stmt.step() catch {};
-}
-
-/// Get the last inserted row id from SQLite. Propagates the typed
-/// SqliteError so callers can route it through `db.errMsg()`.
-fn getLastInsertId(db: *sqlite.Database) sqlite.SqliteError!i64 {
-    var stmt = try db.prepare("SELECT last_insert_rowid();");
-    defer stmt.finalize();
-    const has_row = try stmt.step();
-    if (!has_row) return sqlite.SqliteError.StepFailed;
-    return stmt.columnInt(0);
 }
 
 /// Check if a formula is installed.
@@ -1103,14 +990,3 @@ pub fn collectMissingDepNames(
 // `collectMissingDepNames` now consults the filesystem (cellar_path +
 // opt symlink), so coverage lives in `tests/upgrade_test.zig` where a
 // real MALT_PREFIX fixture is available.
-
-test "bottleProgress wires byte updates into a ProgressBar" {
-    // Guards the core-formula upgrade path against silently dropping the
-    // progress callback (the bug where `bottle_mod.download(..., null, null)`
-    // skipped the bar entirely).
-    var bar = progress_mod.ProgressBar.init("yazi", 0);
-    const cb = bottleProgress(&bar);
-    cb.report(100, 1000);
-    try std.testing.expectEqual(@as(u64, 1000), bar.total);
-    try std.testing.expectEqual(@as(u64, 100), bar.current);
-}
