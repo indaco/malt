@@ -506,6 +506,13 @@ pub const InstallKegDeps = struct {
     /// Optional progress bar fed by the per-blob download callback. `null`
     /// is fine — the download still runs but emits no bar updates.
     bar: ?*progress_mod.ProgressBar = null,
+    /// Optional sink for the specific `CellarError` variant when the
+    /// cellar materialise step fails. The function still returns
+    /// `InstallError.CellarFailed` for control flow; the variant is
+    /// captured here so callers (the install pool) can preserve the
+    /// historical "Failed to materialize X: <variant>" diagnostic
+    /// without rerouting through a wider error set.
+    cellar_diag: ?*?cellar_mod.CellarError = null,
 };
 
 /// Result of `installKegFromBottle`. `sha256` borrows from the formula's
@@ -634,7 +641,10 @@ pub fn installKegFromBottle(
         formula.name,
         formula.pkg_version,
         bottle.cellar,
-    ) catch return InstallError.CellarFailed;
+    ) catch |err| {
+        if (deps.cellar_diag) |out| out.* = err;
+        return InstallError.CellarFailed;
+    };
 
     return .{ .sha256 = bottle.sha256, .keg = keg };
 }
@@ -695,20 +705,31 @@ fn installOneJob(pool: *InstallPool, job: *DownloadJob, result: *MaterializeResu
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
+    // `cellar_diag` captures the specific `CellarError` variant when
+    // materialise fails so the serial link phase below can still print
+    // "Failed to materialize X: <variant>" with the real cause instead
+    // of a generic catch-all.
+    var cellar_diag: ?cellar_mod.CellarError = null;
+
     const fetch = installKegFromBottle(
         pool.ctx,
         arena.allocator(),
-        .{ .ghcr = pool.ghcr, .http = http, .store = pool.store, .bar = job.bar },
+        .{
+            .ghcr = pool.ghcr,
+            .http = http,
+            .store = pool.store,
+            .bar = job.bar,
+            .cellar_diag = &cellar_diag,
+        },
         formula,
         pool.prefix,
     ) catch |err| {
         if (err == InstallError.CellarFailed) {
             // Download (or warm-store skip) succeeded; only the cellar
-            // step failed. `installKegFromBottle` collapses every
-            // `CellarError` into one `CellarFailed`, so the serial loop
-            // gets the historical catch-all `CloneFailed` — the same
-            // label the materialise-error regression scripts grep for.
-            result.* = .{ .ok = false, .err = cellar_mod.CellarError.CloneFailed };
+            // step failed. Preserve the specific variant the helper
+            // captured into `cellar_diag` so user-facing diagnostics
+            // (and the gh-85 regression script) see the real cause.
+            result.* = .{ .ok = false, .err = cellar_diag };
             job.succeeded = true;
         } else {
             // Every other variant means the download (or store commit)

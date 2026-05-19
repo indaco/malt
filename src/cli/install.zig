@@ -746,33 +746,30 @@ fn executeWithOpts(
         // Multi-progress + bars only exist when at least one job downloads.
         // Warm-only installs skip terminal setup entirely; their pool
         // workers materialise without a progress callback.
-        const has_multi = to_download > 0;
-        const download_index: u16 = if (has_multi)
-            assignDownloadLineIndices(all_jobs.items)
+        var multi: ?progress_mod.MultiProgress = if (to_download > 0)
+            progress_mod.MultiProgress.init(assignDownloadLineIndices(all_jobs.items))
         else
-            0;
-        var multi: progress_mod.MultiProgress = undefined;
-        if (has_multi) multi = progress_mod.MultiProgress.init(download_index);
+            null;
         // Anchor the DECSET pair to scope exit so an early return between
         // here and the worker join doesn't leave the terminal in DECRESET.
-        defer if (has_multi) multi.finish();
+        defer if (multi) |*m| m.finish();
 
         var bars: []progress_mod.ProgressBar = &.{};
         defer if (bars.len > 0) allocator.free(bars);
 
-        if (has_multi) {
-            if (allocator.alloc(progress_mod.ProgressBar, download_index)) |s| {
+        if (multi) |*m| {
+            if (allocator.alloc(progress_mod.ProgressBar, m.total_lines)) |s| {
                 bars = s;
             } else |_| {}
             var bar_idx: usize = 0;
             for (all_jobs.items) |*job| {
                 if (job.succeeded) continue;
-                job.multi = &multi;
+                job.multi = m;
                 if (bar_idx < bars.len) {
                     bars[bar_idx] = progress_mod.ProgressBar.init(job.name, 0);
                     bars[bar_idx].label_width = max_name_len;
                     bars[bar_idx].line_index = job.line_index;
-                    bars[bar_idx].multi = &multi;
+                    bars[bar_idx].multi = m;
                     job.bar = &bars[bar_idx];
                     // Draw the initial frame now so this line is not blank
                     // while the worker is waiting to be scheduled.
@@ -819,16 +816,17 @@ fn executeWithOpts(
     }
 
     // Emit from the main thread so ndjson order is deterministic
-    // regardless of worker interleaving. Per-keg sequence groups each
-    // package's events together; consumers group by `name` either way.
+    // regardless of worker interleaving. Cross-keg invariant: every
+    // succeeded job's `downloaded/extracted/stored` triple lands
+    // before any `materialized` event — `.materialized` fires from
+    // the serial link phase below so it stays interleaved with the
+    // per-keg `linked/recorded` pair the consumers already expect.
     if (output.isNdjson()) {
-        for (all_jobs.items, 0..) |job, i| {
+        for (all_jobs.items) |job| {
             if (!job.succeeded) continue;
             output.emitNdjsonEvent(.downloaded, job.name, "ok");
             output.emitNdjsonEvent(.extracted, job.name, "ok");
             output.emitNdjsonEvent(.stored, job.name, "ok");
-            const mat_status: []const u8 = if (mats[i].ok) "ok" else "failed";
-            output.emitNdjsonEvent(.materialized, job.name, mat_status);
         }
     }
 
@@ -867,10 +865,12 @@ fn executeWithOpts(
                 "Failed to materialize {s}: {s} ({s})",
                 .{ job.name, @errorName(err), cellar_mod.describeError(err) },
             );
+            output.emitNdjsonEvent(.materialized, job.name, "failed");
             try failed_kegs.put(job.name, {});
             failed_count += 1;
             continue;
         }
+        output.emitNdjsonEvent(.materialized, job.name, "ok");
 
         // Failed-dep → skip: installing on a broken graph yields a dyld-unresolvable
         // keg. Remove the already-materialised keg so orphans don't linger.
