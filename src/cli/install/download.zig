@@ -17,6 +17,7 @@ const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
 
+const signals = @import("../../core/signals.zig");
 const ghcr_url = @import("ghcr_url.zig");
 const record = @import("record.zig");
 
@@ -104,135 +105,10 @@ pub fn isDeterministicDownloadError(err: bottle_mod.BottleError) bool {
     };
 }
 
-/// Download a bottle and commit to store. Runs in a worker thread.
-/// `http_pool` is shared across all download workers — each worker
-/// borrows a client for the duration of a single blob download and
-/// releases it so another worker can reuse the same TLS context.
-pub fn downloadWorker(
-    io: std.Io,
-    _: std.mem.Allocator,
-    ghcr: *ghcr_mod.GhcrClient,
-    http_pool: *client_mod.HttpClientPool,
-    store: *store_mod.Store,
-    job: *DownloadJob,
-) void {
-    // Each thread gets its own arena — the parent arena is not thread-safe.
-    var thread_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer thread_arena.deinit();
-    const allocator = thread_arena.allocator();
-
-    // Skip if already in store
-    if (store.exists(job.sha256)) {
-        job.store_sha256 = job.sha256;
-        job.succeeded = true;
-        return;
-    }
-
-    // Extract repo + digest from bottle URL via the shared parser so
-    // the token-prefetch path in `execute` can collect scopes without
-    // duplicating this logic. Slices borrow from `job.bottle_url`,
-    // which outlives the worker.
-    const ref = ghcr_url.parseGhcrUrl(job.bottle_url) orelse return;
-    const repo = ref.repo;
-    const digest = ref.digest;
-
-    // Create temp dir
-    const tmp_dir = atomic.createTempDir(io, allocator, job.name) catch return;
-
-    // The progress bar was created and pre-rendered by the main thread so that
-    // every reserved line has content even before this worker starts producing
-    // bytes. We just feed updates into it via the progress callback.
-    const bar = job.bar orelse return;
-    const progress_cb = client_mod.ProgressCallback{
-        .context = @ptrCast(bar),
-        .func = &progressBridge,
-    };
-
-    // Borrow a client from the shared pool for the duration of this
-    // download. The pool blocks if all clients are in use by other
-    // workers, then hands us one with its TLS context already warm.
-    const http = http_pool.acquire();
-    defer http_pool.release(http);
-
-    const max_attempts: u8 = 3;
-    const retry_delays_ms = [_]u64{ 100, 400 };
-    var dl_attempt: u8 = 0;
-    var dl_ok = false;
-    var last_err: bottle_mod.BottleError = bottle_mod.BottleError.DownloadFailed;
-    var last_mismatch: ?bottle_mod.MismatchInfo = null;
-    while (dl_attempt < max_attempts) : (dl_attempt += 1) {
-        var mismatch: bottle_mod.MismatchInfo = undefined;
-        if (bottle_mod.download(io, allocator, ghcr, http, repo, digest, job.sha256, tmp_dir, progress_cb, &mismatch)) |_| {
-            dl_ok = true;
-            break;
-        } else |dl_err| {
-            last_err = dl_err;
-            atomic.cleanupTempDir(io, tmp_dir);
-            if (dl_err == bottle_mod.BottleError.DownloadPermanent) {
-                output.err("  {s}: permanent HTTP error (404/410), not retrying", .{job.name});
-                break;
-            }
-            if (dl_err == bottle_mod.BottleError.Sha256Mismatch) {
-                last_mismatch = mismatch;
-                // SHA mismatch is usually deterministic (wrong blob, wrong
-                // expected hash) but in-flight corruption is real, so a
-                // bounded retry rescues a real class of transient
-                // failures. Each retry pays a fresh download — bytes,
-                // hash, all of it — so a malicious server that returns
-                // a wrong-SHA blob cannot have its blob accepted by
-                // exhausting the budget.
-            } else if (isDeterministicDownloadError(dl_err)) {
-                output.err("  {s}: {s}", .{ job.name, @errorName(dl_err) });
-                break;
-            }
-            if (dl_attempt + 1 < max_attempts) {
-                if (!cancellableBackoff(io, retry_delays_ms[dl_attempt])) break;
-            }
-        }
-    }
-    if (!dl_ok and last_err == bottle_mod.BottleError.Sha256Mismatch) {
-        // Same blob hashed the same wrong value across every attempt —
-        // log expected/got/length so the failure is debuggable in the
-        // wild without a re-run under --debug.
-        if (last_mismatch) |m| {
-            output.err(
-                "  {s}: Sha256Mismatch (expected={s} got={s} bytes={d})",
-                .{ job.name, m.expected[0..@min(64, m.expected.len)], m.computed[0..], m.body_len },
-            );
-        } else {
-            output.err("  {s}: Sha256Mismatch", .{job.name});
-        }
-    }
-    if (!dl_ok) {
-        bar.finish();
-        if (dl_attempt >= max_attempts) {
-            output.err("  {s}: {s} (after {d} attempts)", .{ job.name, @errorName(last_err), max_attempts });
-        }
-        allocator.free(tmp_dir);
-        return;
-    }
-    bar.finish();
-
-    // Commit to store
-    store.commitFrom(job.sha256, tmp_dir) catch {
-        atomic.cleanupTempDir(io, tmp_dir);
-        allocator.free(tmp_dir);
-        return;
-    };
-    allocator.free(tmp_dir);
-
-    store.incrementRef(job.sha256) catch |e| {
-        std.log.warn("refcount increment failed for {s}: {s}", .{ job.sha256, @errorName(e) });
-    };
-
-    job.store_sha256 = job.sha256;
-    job.succeeded = true;
-}
-
 /// Per-dep worker context for parallel formula fetching. Owns its own
 /// `ArenaAllocator` backed by `page_allocator` so workers never touch
-/// a shared bump-pointer — matches the `downloadWorker` pattern and
-/// removes the last cross-thread allocator on the resolve path.
+/// a shared bump-pointer and the resolve path stays off the caller's
+/// allocator on a cross-thread boundary.
 ///
 /// Why the pool on the HTTP side: creating a fresh `HttpClient` per
 /// worker paid a full TLS context + cert store setup per dep. For
@@ -270,8 +146,8 @@ pub fn collectFetchWorkerCount(deps_to_fetch: usize) usize {
     return @min(MAX_COLLECT_FETCH_WORKERS, deps_to_fetch);
 }
 
-/// Shared state for the dep-fetch pool. Mirrors `MaterializePool`: a
-/// single atomic index hands out `ctxs` slots to workers until the
+/// Shared state for the dep-fetch pool. Mirrors `InstallPool` below:
+/// a single atomic index hands out `ctxs` slots to workers until the
 /// array is drained. Already-installed deps are skipped in-thread.
 const FetchJobsPool = struct {
     next_idx: std.atomic.Value(usize),
@@ -421,7 +297,7 @@ pub fn collectFormulaJobs(
         // Bounded pool: one-thread-per-dep over-allocated stacks and
         // queued on the 4-slot HTTP client pool anyway. Workers share
         // an atomic index and drain `ctxs` — same pattern as
-        // `materializePoolWorker`.
+        // `installPoolWorker`.
         var to_fetch: usize = 0;
         for (deps) |d| {
             if (!d.already_installed) to_fetch += 1;
@@ -622,73 +498,6 @@ pub const MaterializeResult = struct {
     }
 };
 
-/// Shared state for a bounded work-stealing thread pool that executes
-/// the materialize phase. `next_idx` hands out jobs atomically so
-/// workers grab the next available job until the queue is drained —
-/// natural load-balancing without waves.
-pub const MaterializePool = struct {
-    io: std.Io,
-    next_idx: std.atomic.Value(usize),
-    jobs: []DownloadJob,
-    prefix: []const u8,
-    results: []MaterializeResult,
-};
-
-/// Thread entry-point for the bounded materialize pool. Each worker
-/// loops grabbing the next job index atomically and running
-/// `materializeOne` on it until the index passes the end of the jobs
-/// array. The pool is capped at 4 workers (see the call site in
-/// `execute`) to keep file-I/O and codesign-subprocess contention low.
-pub fn materializePoolWorker(pool: *MaterializePool) void {
-    while (true) {
-        const idx = pool.next_idx.fetchAdd(1, .acq_rel);
-        if (idx >= pool.jobs.len) return;
-        const job = &pool.jobs[idx];
-        if (!job.succeeded) continue;
-        materializeOne(pool.io, job, pool.prefix, &pool.results[idx]);
-    }
-}
-
-/// Runs the clonefile + Mach-O patching + codesign pipeline for one
-/// job and stores the result. Thread-safe because each call operates
-/// on its own keg path (different name/version) and the cellar
-/// module's I/O paths never overlap between jobs.
-///
-/// Uses a per-call arena for short-lived allocations (walker, patcher
-/// buffers, etc.). The keg path is copied into the result's inline
-/// buffer so it outlives the arena without crossing thread boundaries
-/// through a global allocator.
-fn materializeOne(
-    io: std.Io,
-    job: *DownloadJob,
-    prefix: []const u8,
-    result: *MaterializeResult,
-) void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const tmp_allocator = arena.allocator();
-
-    const keg = cellar_mod.materializeWithCellar(
-        io,
-        tmp_allocator,
-        prefix,
-        job.store_sha256,
-        job.name,
-        job.version_str,
-        job.cellar_type,
-    ) catch |err| {
-        result.* = .{ .ok = false, .err = err };
-        return;
-    };
-
-    // Cellar paths are bounded by the OS PATH_MAX; assert the invariant.
-    std.debug.assert(keg.path.len <= result.keg_path_buf.len);
-    @memcpy(result.keg_path_buf[0..keg.path.len], keg.path);
-    result.ok = true;
-    result.err = null;
-    result.keg_path_len = keg.path.len;
-}
-
 /// Long-lived collaborators that the per-keg materialize pipeline borrows.
 /// Caller owns the lifetimes; the function never closes or deinits them.
 pub const InstallKegDeps = struct {
@@ -698,6 +507,13 @@ pub const InstallKegDeps = struct {
     /// Optional progress bar fed by the per-blob download callback. `null`
     /// is fine — the download still runs but emits no bar updates.
     bar: ?*progress_mod.ProgressBar = null,
+    /// Optional sink for the specific `CellarError` variant when the
+    /// cellar materialise step fails. The function still returns
+    /// `InstallError.CellarFailed` for control flow; the variant is
+    /// captured here so callers (the install pool) can preserve the
+    /// historical "Failed to materialize X: <variant>" diagnostic
+    /// without rerouting through a wider error set.
+    cellar_diag: ?*?cellar_mod.CellarError = null,
 };
 
 /// Result of `installKegFromBottle`. `sha256` borrows from the formula's
@@ -826,9 +642,116 @@ pub fn installKegFromBottle(
         formula.name,
         formula.pkg_version,
         bottle.cellar,
-    ) catch return InstallError.CellarFailed;
+    ) catch |err| {
+        if (deps.cellar_diag) |out| out.* = err;
+        return InstallError.CellarFailed;
+    };
 
     return .{ .sha256 = bottle.sha256, .keg = keg };
+}
+
+/// Shared state for the install-time per-keg worker pool. Each worker
+/// grabs the next slot in `jobs` atomically, borrows an HTTP client
+/// from `http_pool`, and calls `installKegFromBottle` against the
+/// formula already cached in `cache` by `collectFormulaJobs`. Results
+/// land in `MaterializeResult` slots so the serial link phase below
+/// reads them by index without caring how they were produced.
+pub const InstallPool = struct {
+    ctx: *const AppCtx,
+    next_idx: std.atomic.Value(usize),
+    jobs: []DownloadJob,
+    prefix: []const u8,
+    ghcr: *ghcr_mod.GhcrClient,
+    http_pool: *client_mod.HttpClientPool,
+    store: *store_mod.Store,
+    cache: *deps_mod.FormulaCache,
+    results: []MaterializeResult,
+};
+
+/// Thread entry-point for the install pool. Drains `pool.jobs` via the
+/// atomic index, running one `installKegFromBottle` per job until the
+/// queue is empty. Honours Ctrl-C between jobs so a wide dep graph
+/// doesn't keep grinding through queued work after the user interrupts.
+pub fn installPoolWorker(pool: *InstallPool) void {
+    while (true) {
+        if (signals.isInterrupted()) return;
+        const idx = pool.next_idx.fetchAdd(1, .acq_rel);
+        if (idx >= pool.jobs.len) return;
+        installOneJob(pool, &pool.jobs[idx], &pool.results[idx]);
+    }
+}
+
+/// Per-job body of the install pool: look up the pre-parsed formula,
+/// borrow an HTTP client, drive `installKegFromBottle`, and stamp the
+/// keg path into the result's inline buffer so it outlives the per-
+/// call arena. Error mapping splits along the download/materialise
+/// boundary: cellar failures keep `job.succeeded = true` so the serial
+/// loop reports "Failed to materialize"; every other variant marks the
+/// job not-succeeded so the serial loop reports "Download failed".
+fn installOneJob(pool: *InstallPool, job: *DownloadJob, result: *MaterializeResult) void {
+    // `collectFormulaJobs` is the only legitimate path into the pool and
+    // always pre-caches every formula it queues. A miss here is a bug
+    // upstream — surface it as a not-succeeded job so the serial link
+    // phase routes the package into the "Download failed" branch.
+    const formula = pool.cache.get(job.name) orelse {
+        result.* = .{ .ok = false, .err = null };
+        job.succeeded = false;
+        return;
+    };
+
+    const http = pool.http_pool.acquire();
+    defer pool.http_pool.release(http);
+
+    // Short-lived arena: keg.path is duped out of `materializeWithCellar`
+    // using this allocator, so we copy it into the result's inline
+    // buffer before the arena drops.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    // `cellar_diag` captures the specific `CellarError` variant when
+    // materialise fails so the serial link phase below can still print
+    // "Failed to materialize X: <variant>" with the real cause instead
+    // of a generic catch-all.
+    var cellar_diag: ?cellar_mod.CellarError = null;
+
+    const fetch = installKegFromBottle(
+        pool.ctx,
+        arena.allocator(),
+        .{
+            .ghcr = pool.ghcr,
+            .http = http,
+            .store = pool.store,
+            .bar = job.bar,
+            .cellar_diag = &cellar_diag,
+        },
+        formula,
+        pool.prefix,
+    ) catch |err| {
+        if (err == InstallError.CellarFailed) {
+            // Download (or warm-store skip) succeeded; only the cellar
+            // step failed. Preserve the specific variant the helper
+            // captured into `cellar_diag` so user-facing diagnostics
+            // (and the gh-85 regression script) see the real cause.
+            result.* = .{ .ok = false, .err = cellar_diag };
+            job.succeeded = true;
+        } else {
+            // Every other variant means the download (or store commit)
+            // never produced bytes — route into the serial loop's
+            // "Download failed" branch.
+            result.* = .{ .ok = false, .err = null };
+            job.succeeded = false;
+        }
+        return;
+    };
+
+    std.debug.assert(fetch.keg.path.len <= result.keg_path_buf.len);
+    @memcpy(result.keg_path_buf[0..fetch.keg.path.len], fetch.keg.path);
+    result.keg_path_len = fetch.keg.path.len;
+    result.ok = true;
+    result.err = null;
+
+    job.store_sha256 = fetch.sha256;
+    job.succeeded = true;
 }
 
 fn testJob(succeeded: bool) DownloadJob {

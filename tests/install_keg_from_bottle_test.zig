@@ -167,3 +167,80 @@ test "installKegFromBottle skips the download branch when the store already hold
     defer testing.allocator.free(cellar_readme);
     try std.Io.Dir.accessAbsolute(std.Options.debug_io, cellar_readme, .{});
 }
+
+test "installKegFromBottle stamps the specific CellarError variant into cellar_diag on materialise failure" {
+    const prefix = try setupPrefix("diag");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    // Pre-seed `store/<sha>/` so `installKegFromBottle` skips the
+    // download branch and goes straight to `materializeWithCellar`.
+    const sha = "feed" ** 16;
+    const store_inner = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}", .{ prefix, sha });
+    defer testing.allocator.free(store_inner);
+    try test_io.cwd().createDirPath(std.Options.debug_io, store_inner);
+
+    // A 230 + 230 char name+version overflows the cellar-path 512-byte
+    // stack buffer in `materializeWithCellar`, which surfaces as
+    // `CellarError.OutOfMemory`. We pin that specific variant to prove
+    // `cellar_diag` carries the real cause, not a generic catch-all.
+    const long_name = "a" ** 230;
+    const long_ver = "1" ** 230;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const formula_json = try std.fmt.allocPrint(
+        arena.allocator(),
+        \\{{
+        \\  "name": "{s}",
+        \\  "full_name": "{s}",
+        \\  "tap": "homebrew/core",
+        \\  "desc": "",
+        \\  "homepage": "",
+        \\  "versions": {{"stable": "{s}"}},
+        \\  "revision": 0,
+        \\  "dependencies": [],
+        \\  "keg_only": false,
+        \\  "post_install_defined": false,
+        \\  "oldnames": [],
+        \\  "bottle": {{"stable": {{"files": {{"all": {{"cellar": ":any", "url": "https://ghcr.io/v2/homebrew/core/x/blobs/sha256:{s}", "sha256": "{s}"}}}}}}}}
+        \\}}
+    ,
+        .{ long_name, long_name, long_ver, sha, sha },
+    );
+    var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
+    defer formula.deinit();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, testing.allocator);
+    defer http.deinit();
+    var ghcr = malt.ghcr.GhcrClient.init(ctx.io, testing.allocator, &http);
+    defer ghcr.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    var store = malt.store.Store.init(ctx.io, testing.allocator, &db, prefix);
+
+    var cellar_diag: ?malt.cellar.CellarError = null;
+    try testing.expectError(
+        malt.install.InstallError.CellarFailed,
+        malt.install.installKegFromBottle(
+            &ctx,
+            testing.allocator,
+            .{
+                .ghcr = &ghcr,
+                .http = &http,
+                .store = &store,
+                .cellar_diag = &cellar_diag,
+            },
+            &formula,
+            prefix,
+        ),
+    );
+    try testing.expectEqual(
+        @as(?malt.cellar.CellarError, malt.cellar.CellarError.OutOfMemory),
+        cellar_diag,
+    );
+}
