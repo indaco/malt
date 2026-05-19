@@ -80,48 +80,92 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
     };
 }
 
+/// Options for `recordKeg`. Defaults keep the install path's pre-T-007
+/// observable behaviour: a user pin survives a force-reinstall (via
+/// COALESCE-MAX), and `recordKeg` opens its own SQLite transaction.
+pub const RecordOpts = struct {
+    /// `true` → new row inherits any existing pin on this name via
+    /// COALESCE-MAX. `false` → new row's `pinned` is hard-coded to 0,
+    /// even if a prior row was pinned.
+    inherit_pin: bool = true,
+    /// `true` → caller already opened a transaction. `recordKeg`
+    /// performs no BEGIN/COMMIT/ROLLBACK so atomicity is the caller's
+    /// responsibility (used by `upgradeDbAtomic` to wrap
+    /// unlink → record → link → delete in a single txn).
+    in_transaction: bool = false,
+};
+
 /// Record a keg in the database. Returns the keg_id.
+/// Errors propagate as `sqlite.SqliteError` so callers can route the
+/// underlying cause through `db.errMsg()` instead of seeing a flat
+/// `RecordFailed` — particularly load-bearing for the upgrade path
+/// where a UNIQUE collision must surface to the user.
 pub fn recordKeg(
     db: *sqlite.Database,
     formula: *const formula_mod.Formula,
     store_sha256: []const u8,
     cellar_path: []const u8,
     install_reason: []const u8,
-) !i64 {
-    db.beginTransaction() catch return InstallError.RecordFailed;
-    errdefer db.rollback();
+    opts: RecordOpts,
+) sqlite.SqliteError!i64 {
+    if (!opts.in_transaction) {
+        try db.beginTransaction();
+    }
+    errdefer if (!opts.in_transaction) db.rollback();
 
-    // The COALESCE on `pinned` carries any existing user pin across
-    // INSERT OR REPLACE so a force-reinstall preserves the hold; fresh
-    // installs default to 0.
-    var stmt = db.prepare(
+    // Pin column: inherit any existing pin on this name via COALESCE-MAX
+    // (default), or hard-code 0 when the caller opts out. INSERT OR
+    // REPLACE handles same-(name, version) re-records (install --force,
+    // revision bumps); upgrade (different version) just INSERTs alongside.
+    const sql = if (opts.inherit_pin)
         "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, pinned)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));",
-    ) catch return InstallError.RecordFailed;
+            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));"
+    else
+        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, pinned)" ++
+            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0);";
+
+    var stmt = try db.prepare(sql);
     defer stmt.finalize();
 
-    stmt.bindText(1, formula.name) catch return InstallError.RecordFailed;
-    stmt.bindText(2, formula.full_name) catch return InstallError.RecordFailed;
-    stmt.bindText(3, formula.version) catch return InstallError.RecordFailed;
-    stmt.bindInt(4, formula.revision) catch return InstallError.RecordFailed;
-    stmt.bindText(5, formula.tap) catch return InstallError.RecordFailed;
-    stmt.bindText(6, store_sha256) catch return InstallError.RecordFailed;
-    stmt.bindText(7, cellar_path) catch return InstallError.RecordFailed;
-    stmt.bindText(8, install_reason) catch return InstallError.RecordFailed;
+    try stmt.bindText(1, formula.name);
+    try stmt.bindText(2, formula.full_name);
+    try stmt.bindText(3, formula.version);
+    try stmt.bindInt(4, formula.revision);
+    try stmt.bindText(5, formula.tap);
+    try stmt.bindText(6, store_sha256);
+    try stmt.bindText(7, cellar_path);
+    try stmt.bindText(8, install_reason);
 
-    _ = stmt.step() catch return InstallError.RecordFailed;
+    _ = try stmt.step();
 
-    // Get last inserted row id
-    const keg_id = getLastInsertId(db) catch return InstallError.RecordFailed;
+    const keg_id = try getLastInsertId(db);
 
-    db.commit() catch return InstallError.RecordFailed;
+    if (!opts.in_transaction) {
+        try db.commit();
+    }
 
     return keg_id;
 }
 
-/// Delete a keg record. Rollback helper — the caller is already in an
-/// error path, so a failed delete leaves a stale row that `doctor` cleans.
+/// Delete a keg record (rollback / replaced-old-row helper). Wipes
+/// `dependencies` and `links` rows before the kegs row so the upgrade
+/// path can call this on a fully-populated old keg; the install
+/// rollback path arrives before those rows exist, where the extra
+/// deletes are harmless no-ops. Best-effort: a failed delete leaves a
+/// stale row that `doctor` cleans.
 pub fn deleteKeg(db: *sqlite.Database, keg_id: i64) void {
+    {
+        var dep_stmt = db.prepare("DELETE FROM dependencies WHERE keg_id = ?1;") catch return;
+        defer dep_stmt.finalize();
+        dep_stmt.bindInt(1, keg_id) catch return;
+        _ = dep_stmt.step() catch {};
+    }
+    {
+        var link_stmt = db.prepare("DELETE FROM links WHERE keg_id = ?1;") catch return;
+        defer link_stmt.finalize();
+        link_stmt.bindInt(1, keg_id) catch return;
+        _ = link_stmt.step() catch {};
+    }
     var stmt = db.prepare("DELETE FROM kegs WHERE id = ?1;") catch return;
     defer stmt.finalize();
     stmt.bindInt(1, keg_id) catch return;
@@ -146,12 +190,13 @@ pub fn recordDeps(db: *sqlite.Database, keg_id: i64, formula: *const formula_mod
 
 /// Get the last inserted row id from SQLite. Pub so the ruby-formula
 /// path in `install/local.zig` can reuse it without re-implementing the
-/// one-row read.
-pub fn getLastInsertId(db: *sqlite.Database) !i64 {
-    var stmt = db.prepare("SELECT last_insert_rowid();") catch return InstallError.RecordFailed;
+/// one-row read. Errors propagate as `sqlite.SqliteError` so the
+/// upgrade path can surface `db.errMsg()` to the user.
+pub fn getLastInsertId(db: *sqlite.Database) sqlite.SqliteError!i64 {
+    var stmt = try db.prepare("SELECT last_insert_rowid();");
     defer stmt.finalize();
-    const has_row = stmt.step() catch return InstallError.RecordFailed;
-    if (!has_row) return InstallError.RecordFailed;
+    const has_row = try stmt.step();
+    if (!has_row) return sqlite.SqliteError.StepFailed;
     return stmt.columnInt(0);
 }
 

@@ -282,11 +282,15 @@ fn kegPresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) bool {
 
 pub const localErrorIsAnnounced = record_mod.localErrorIsAnnounced;
 pub const recordKeg = record_mod.recordKeg;
+pub const RecordOpts = record_mod.RecordOpts;
 pub const deleteKeg = record_mod.deleteKeg;
 pub const recordDeps = record_mod.recordDeps;
 pub const isInstalled = record_mod.isInstalled;
 pub const ensureDirs = record_mod.ensureDirs;
 pub const constantTimeEql = record_mod.constantTimeEql;
+pub const installKegFromBottle = download_mod.installKegFromBottle;
+pub const InstallKegDeps = download_mod.InstallKegDeps;
+pub const InstallKegResult = download_mod.InstallKegResult;
 
 pub const InstallAllOpts = struct {
     /// Treat every package as a cask; equivalent to `--cask`.
@@ -974,7 +978,7 @@ fn linkAndRecord(
 
     // Link + record
     if (!job.keg_only) {
-        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason) catch |err| {
+        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason, .{}) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
@@ -998,7 +1002,7 @@ fn linkAndRecord(
         };
         recordDeps(db, keg_id, formula);
     } else {
-        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason) catch |err| {
+        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason, .{}) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
