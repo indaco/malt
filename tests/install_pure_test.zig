@@ -839,6 +839,66 @@ test "install.recordKeg with inherit_pin=false clears the prior pin (opt-out bra
     try testing.expectEqual(false, stmt.columnBool(0));
 }
 
+test "install.recordKeg with .{ .in_transaction = false } opens its own BEGIN/COMMIT" {
+    // Pinning the default txn-wrapping path: a standalone caller is
+    // not inside a transaction, so `recordKeg` must open + commit one
+    // on its own. The post-call SELECT proves the row landed.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var f = try parseFake(arena.allocator());
+    defer f.deinit();
+    const keg_id = try install.recordKeg(
+        &db,
+        &f,
+        "0" ** 64,
+        "/opt/malt/Cellar/foo/1.0",
+        "direct",
+        .{ .in_transaction = false },
+    );
+
+    var stmt = try db.prepare("SELECT name FROM kegs WHERE id = ?1 LIMIT 1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, keg_id);
+    _ = try stmt.step();
+    try testing.expectEqualStrings("foo", std.mem.sliceTo(stmt.columnText(0).?, 0));
+}
+
+test "install.recordKeg with .{ .in_transaction = true } inside an outer BEGIN does not nest" {
+    // Caller owns the txn — `recordKeg` must skip its own BEGIN/COMMIT,
+    // otherwise SQLite throws "cannot start a transaction within a
+    // transaction" and the upgrade flow's atomic unlink+record+link
+    // wrapper would leave kegs/links half-mutated.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var f = try parseFake(arena.allocator());
+    defer f.deinit();
+
+    try db.beginTransaction();
+    const keg_id = try install.recordKeg(
+        &db,
+        &f,
+        "0" ** 64,
+        "/opt/malt/Cellar/foo/1.0",
+        "direct",
+        .{ .in_transaction = true },
+    );
+    try db.commit();
+
+    var stmt = try db.prepare("SELECT name FROM kegs WHERE id = ?1 LIMIT 1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, keg_id);
+    _ = try stmt.step();
+    try testing.expectEqualStrings("foo", std.mem.sliceTo(stmt.columnText(0).?, 0));
+}
+
 test "install.recordKeg with inherit_pin=true carries the prior pin (option's default branch)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
