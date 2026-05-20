@@ -20,6 +20,7 @@ const help = @import("help.zig");
 const pin_mod = @import("pin.zig");
 const install_mod = @import("install.zig");
 const install_local_mod = @import("install/local.zig");
+const install_rb_parse_mod = @import("install/rb_parse.zig");
 const install_args_mod = @import("install/args.zig");
 const install_download_mod = @import("install/download.zig");
 const install_record_mod = @import("install/record.zig");
@@ -533,7 +534,7 @@ fn upgradeRoutedTapCask(
     defer rb_resp.deinit();
     if (rb_resp.status != 200) return error.NotInTap;
 
-    const rb_info = install_local_mod.parseRubyFormula(rb_resp.body) orelse return error.NotInTap;
+    const rb_info = install_rb_parse_mod.parseRubyFormula(rb_resp.body) orelse return error.NotInTap;
 
     if (!force and std.mem.eql(u8, installed_version, rb_info.version)) {
         output.skip("{s} is already at latest version {s}", .{ token, rb_info.version });

@@ -16,7 +16,7 @@ const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
 const output = @import("../../ui/output.zig");
 const install_args_mod = @import("../install/args.zig");
-const install_local_mod = @import("../install/local.zig");
+const install_rb_parse_mod = @import("../install/rb_parse.zig");
 const rows_mod = @import("rows.zig");
 const KegRow = rows_mod.KegRow;
 const snap_mod = @import("snapshot.zig");
@@ -300,7 +300,7 @@ fn tapCaskLatestVersion(
         return null;
     }
 
-    const rb_info = install_local_mod.parseRubyFormula(rb_resp.body) orelse {
+    const rb_info = install_rb_parse_mod.parseRubyFormula(rb_resp.body) orelse {
         warnTapCaskFetchFailed(tap_label, token, "unsupported Ruby DSL shape — use `brew upgrade` for this cask");
         return null;
     };
