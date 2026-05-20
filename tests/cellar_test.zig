@@ -8,7 +8,7 @@ const testing = std.testing;
 const cellar_mod = @import("malt").cellar;
 const patcher = @import("malt").patcher;
 const parser = @import("malt").parser;
-const install_mod = @import("malt").install;
+const install_args = @import("malt").install_args;
 
 // libc setenv/unsetenv — available because tests link with libc
 const c = struct {
@@ -400,16 +400,16 @@ test "binary files are skipped by text patching without error" {
 // ---------------------------------------------------------------------------
 
 test "checkPrefixSane accepts realistic MALT_PREFIX values" {
-    try install_mod.checkPrefixSane("/opt/malt");
-    try install_mod.checkPrefixSane("/opt/homebrew");
-    try install_mod.checkPrefixSane("/tmp/mt");
-    try install_mod.checkPrefixSane("/tmp/mt_tahoe"); // 13 bytes — formerly rejected
-    try install_mod.checkPrefixSane("/var/folders/abc/def/ghi/jkl/mno/prefix");
+    try install_args.checkPrefixSane("/opt/malt");
+    try install_args.checkPrefixSane("/opt/homebrew");
+    try install_args.checkPrefixSane("/tmp/mt");
+    try install_args.checkPrefixSane("/tmp/mt_tahoe"); // 13 bytes — formerly rejected
+    try install_args.checkPrefixSane("/var/folders/abc/def/ghi/jkl/mno/prefix");
 }
 
 test "checkPrefixSane rejects absurd prefixes at the 256-byte cap" {
     const huge = "/" ++ "x" ** 512;
-    try testing.expectError(error.PrefixAbsurd, install_mod.checkPrefixSane(huge));
+    try testing.expectError(error.PrefixAbsurd, install_args.checkPrefixSane(huge));
 }
 
 // ---------------------------------------------------------------------------

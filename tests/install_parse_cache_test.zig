@@ -11,7 +11,7 @@ const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
 const test_io = @import("test_io");
-const install = malt.install;
+const install_download = malt.install_download;
 const deps_mod = malt.deps;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
@@ -124,7 +124,7 @@ test "collectFormulaJobs parses each formula exactly once via shared cache" {
     var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer {
         for (jobs.items) |job| {
             alloc.free(job.name);
@@ -140,7 +140,7 @@ test "collectFormulaJobs parses each formula exactly once via shared cache" {
     var formula_cache = deps_mod.FormulaCache.init(alloc);
     defer formula_cache.deinit();
 
-    try install.collectFormulaJobs(
+    try install_download.collectFormulaJobs(
         .{
             .io = std.Options.debug_io,
             .allocator = alloc,
@@ -200,7 +200,7 @@ test "FormulaCache holds at most one entry per unique dep across the run" {
     var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer {
         for (jobs.items) |job| {
             alloc.free(job.name);
@@ -216,7 +216,7 @@ test "FormulaCache holds at most one entry per unique dep across the run" {
     var formula_cache = deps_mod.FormulaCache.init(alloc);
     defer formula_cache.deinit();
 
-    try install.collectFormulaJobs(
+    try install_download.collectFormulaJobs(
         .{
             .io = std.Options.debug_io,
             .allocator = alloc,
@@ -375,7 +375,7 @@ test "shared deps across multi-package install collapse to one parse" {
     var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer {
         for (jobs.items) |job| {
             alloc.free(job.name);
@@ -391,7 +391,7 @@ test "shared deps across multi-package install collapse to one parse" {
     var formula_cache = deps_mod.FormulaCache.init(alloc);
     defer formula_cache.deinit();
 
-    const ctx: install.InstallJobDeps = .{
+    const ctx: install_download.InstallJobDeps = .{
         .io = std.Options.debug_io,
         .allocator = alloc,
         .api = &api,
@@ -401,8 +401,8 @@ test "shared deps across multi-package install collapse to one parse" {
         .cache = &formula_cache,
     };
 
-    try install.collectFormulaJobs(ctx, "alpha", alpha_json, false, &jobs);
-    try install.collectFormulaJobs(ctx, "omega", omega_json, false, &jobs);
+    try install_download.collectFormulaJobs(ctx, "alpha", alpha_json, false, &jobs);
+    try install_download.collectFormulaJobs(ctx, "omega", omega_json, false, &jobs);
 
     // 3 unique formulas (alpha, omega, shared_lib); shared_lib parses once.
     try testing.expectEqual(@as(usize, 3), formula_cache.parse_count);
@@ -444,7 +444,7 @@ test "findFailedDep reads from cache without re-parsing the JSON" {
     defer failed.deinit();
     try failed.put("openssl@3", {});
 
-    const result = install.findFailedDep(&cache, &failed, "curl", json) orelse
+    const result = install_download.findFailedDep(&cache, &failed, "curl", json) orelse
         return error.TestExpectedFailedDep;
     try testing.expectEqualStrings("openssl@3", result);
 

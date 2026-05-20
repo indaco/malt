@@ -16,8 +16,8 @@ const testing = std.testing;
 const n_workers: usize = 32;
 const allocs_per_worker: usize = 256;
 
-/// Mirror of `install.FetchFormulaCtx` — per-worker arena plus a
-/// result slice the caller dupes after join.
+/// Mirror of `install/download.FetchFormulaCtx` — per-worker arena
+/// plus a result slice the caller dupes after join.
 const Ctx = struct {
     arena: std.heap.ArenaAllocator,
     seed: u64,

@@ -11,7 +11,6 @@
 
 const std = @import("std");
 const hash = @import("../core/hash.zig");
-const install_cmd = @import("../cli/install.zig");
 
 pub const ChecksumError = error{
     /// `bytes` did not hash to the value named in `expected_hex`.
@@ -29,9 +28,9 @@ pub fn verifySha256(bytes: []const u8, expected_hex: []const u8) ChecksumError!v
     var actual: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &actual, .{});
 
-    // Constant-time SHA compare — mirrors install.zig to close the
-    // byte-by-byte timing oracle on the expected hash.
-    if (!install_cmd.constantTimeEql(u8, &expected, &actual)) return error.ChecksumMismatch;
+    // Constant-time SHA compare closes the byte-by-byte timing
+    // oracle on the expected hash.
+    if (!hash.constantTimeEql(u8, &expected, &actual)) return error.ChecksumMismatch;
 }
 
 /// Find the SHA256 hex for `archive_name` in a GoReleaser-style
@@ -121,7 +120,7 @@ pub fn verifyAll(io: std.Io, allocator: std.mem.Allocator, in: VerifyInputs) Ver
 
     // Stream to bound RSS during self-update — the tarball can be 256 MiB.
     const actual = hash.hashFileSha256Raw(io, in.tarball_path) catch return error.ReadFailed;
-    if (!install_cmd.constantTimeEql(u8, &expected, &actual)) return error.ChecksumMismatch;
+    if (!hash.constantTimeEql(u8, &expected, &actual)) return error.ChecksumMismatch;
 }
 
 /// Shell out to `cosign verify-blob` with the same flags `install.sh` uses.

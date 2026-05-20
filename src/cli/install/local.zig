@@ -12,6 +12,7 @@ const cask_mod = @import("../../core/cask.zig");
 const linker_mod = @import("../../core/linker.zig");
 const tap_mod = @import("../../core/tap.zig");
 const client_mod = @import("../../net/client.zig");
+const hash = @import("../../core/hash.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
 
@@ -529,11 +530,11 @@ fn materializeRubyFormula(
     }
 
     // Verify SHA256 before anything touches the filesystem.
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(download_resp.body, &hash, .{});
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(download_resp.body, &digest, .{});
     var hex_buf: [64]u8 = undefined;
     const hex_chars = "0123456789abcdef";
-    for (hash, 0..) |b, i| {
+    for (digest, 0..) |b, i| {
         hex_buf[i * 2] = hex_chars[b >> 4];
         hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
     }
@@ -542,7 +543,7 @@ fn materializeRubyFormula(
     // Constant-time compare on the SHA256: a stock `mem.eql` leaks
     // per-byte progress via timing, giving an adaptive attacker a
     // byte-by-byte oracle against the expected hash.
-    if (!record.constantTimeEql(u8, computed, resolved.sha256)) {
+    if (!hash.constantTimeEql(u8, computed, resolved.sha256)) {
         output.err("SHA256 mismatch for {s}", .{resolved.name});
         return InstallError.DownloadFailed;
     }

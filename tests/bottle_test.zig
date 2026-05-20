@@ -10,7 +10,7 @@ const std = @import("std");
 const testing = std.testing;
 const malt = @import("malt");
 const bottle = malt.bottle;
-const install = malt.install;
+const install_download = malt.install_download;
 
 // ---------------------------------------------------------------------------
 // MismatchInfo shape — pinned so the worker's log format never drifts
@@ -114,33 +114,33 @@ test "MismatchInfo.computed is independent from MismatchInfo.expected (no aliasi
 // the test isn't tied to internal module layout.
 // ---------------------------------------------------------------------------
 
-test "install.isDeterministicDownloadError: Sha256Mismatch is retriable (regression guard)" {
+test "install_download.isDeterministicDownloadError: Sha256Mismatch is retriable (regression guard)" {
     // The single highest-value assertion in this file: if a future
     // refactor moves Sha256Mismatch back into the deterministic set,
     // a transient corruption-in-flight will fail the install with a
     // non-actionable message. Pin it here.
-    try testing.expect(!install.isDeterministicDownloadError(bottle.BottleError.Sha256Mismatch));
+    try testing.expect(!install_download.isDeterministicDownloadError(bottle.BottleError.Sha256Mismatch));
 }
 
-test "install.isDeterministicDownloadError: ExtractionFailed is non-retriable" {
-    try testing.expect(install.isDeterministicDownloadError(bottle.BottleError.ExtractionFailed));
+test "install_download.isDeterministicDownloadError: ExtractionFailed is non-retriable" {
+    try testing.expect(install_download.isDeterministicDownloadError(bottle.BottleError.ExtractionFailed));
 }
 
-test "install.isDeterministicDownloadError: PathTooLong is non-retriable" {
-    try testing.expect(install.isDeterministicDownloadError(bottle.BottleError.PathTooLong));
+test "install_download.isDeterministicDownloadError: PathTooLong is non-retriable" {
+    try testing.expect(install_download.isDeterministicDownloadError(bottle.BottleError.PathTooLong));
 }
 
-test "install.isDeterministicDownloadError: OutOfMemory is non-retriable" {
-    try testing.expect(install.isDeterministicDownloadError(bottle.BottleError.OutOfMemory));
+test "install_download.isDeterministicDownloadError: OutOfMemory is non-retriable" {
+    try testing.expect(install_download.isDeterministicDownloadError(bottle.BottleError.OutOfMemory));
 }
 
-test "install.isDeterministicDownloadError: transport errors all retry" {
+test "install_download.isDeterministicDownloadError: transport errors all retry" {
     // The full set of network-side errors that should pass back through
     // the retry budget. Listing them explicitly so a new variant can't
     // be silently classified by future maintainers.
-    try testing.expect(!install.isDeterministicDownloadError(bottle.BottleError.DownloadFailed));
-    try testing.expect(!install.isDeterministicDownloadError(bottle.BottleError.DownloadRateLimited));
-    try testing.expect(!install.isDeterministicDownloadError(bottle.BottleError.IoError));
+    try testing.expect(!install_download.isDeterministicDownloadError(bottle.BottleError.DownloadFailed));
+    try testing.expect(!install_download.isDeterministicDownloadError(bottle.BottleError.DownloadRateLimited));
+    try testing.expect(!install_download.isDeterministicDownloadError(bottle.BottleError.IoError));
 }
 
 // ---------------------------------------------------------------------------

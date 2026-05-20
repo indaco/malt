@@ -1,5 +1,12 @@
 //! malt — install command.
 //! 9-step atomic install protocol for formulas, casks, and tap formulas.
+//!
+//! Thin orchestrator: `execute` parses argv, `installAll` is the non-argv
+//! seam, and the rest is per-step `pub fn` + private helpers shared across
+//! `install/*` siblings. The install/* submodules are reachable via
+//! `lib.zig` (`install_args`, `install_download`, etc.) for tests; in-
+//! process production callers reach this file only for `execute`,
+//! `installAll`, and the cellar/link helpers below.
 
 const std = @import("std");
 
@@ -23,58 +30,42 @@ const ghcr_mod = @import("../net/ghcr.zig");
 const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
 const help = @import("help.zig");
+
 const args_mod = @import("install/args.zig");
-pub const max_prefix_sane_len = args_mod.max_prefix_sane_len;
-pub const PrefixError = args_mod.PrefixError;
-pub const checkPrefixSane = args_mod.checkPrefixSane;
-pub const isTapFormula = args_mod.isTapFormula;
-pub const isCoreTap = args_mod.isCoreTap;
-pub const isLocalFormulaPath = args_mod.isLocalFormulaPath;
-pub const isSelfInstall = args_mod.isSelfInstall;
-pub const parseTapName = args_mod.parseTapName;
-pub const isAllowedArchiveUrl = args_mod.isAllowedArchiveUrl;
-pub const interpolateVersion = args_mod.interpolateVersion;
-pub const interpolateUrl = args_mod.interpolateUrl;
-pub const expandTildePath = args_mod.expandTildePath;
 const download_mod = @import("install/download.zig");
-pub const DownloadJob = download_mod.DownloadJob;
-pub const MAX_COLLECT_FETCH_WORKERS = download_mod.MAX_COLLECT_FETCH_WORKERS;
-pub const collectFetchWorkerCount = download_mod.collectFetchWorkerCount;
-pub const collectFormulaJobs = download_mod.collectFormulaJobs;
-pub const InstallJobDeps = download_mod.InstallJobDeps;
-pub const findFailedDep = download_mod.findFailedDep;
-pub const dropTopLevelJobs = download_mod.dropTopLevelJobs;
-pub const assignDownloadLineIndices = download_mod.assignDownloadLineIndices;
-pub const isDeterministicDownloadError = download_mod.isDeterministicDownloadError;
-const progressBridge = download_mod.progressBridge;
-pub const MaterializeResult = download_mod.MaterializeResult;
-pub const InstallPool = download_mod.InstallPool;
-pub const installPoolWorker = download_mod.installPoolWorker;
 const ghcr_url_mod = @import("install/ghcr_url.zig");
-pub const GhcrRef = ghcr_url_mod.GhcrRef;
-pub const parseGhcrUrl = ghcr_url_mod.parseGhcrUrl;
-pub const buildGhcrRepo = ghcr_url_mod.buildGhcrRepo;
 const local_mod = @import("install/local.zig");
-pub const max_local_formula_bytes = local_mod.max_local_formula_bytes;
-pub const LocalPermissionRisk = local_mod.LocalPermissionRisk;
-pub const describeLocalPermissionRisk = local_mod.describeLocalPermissionRisk;
+const post_install_mod = @import("install/post_install.zig");
+const rb_parse_mod = @import("install/rb_parse.zig");
+const record_mod = @import("install/record.zig");
+
+// Internal aliases for names the orchestrator body uses. Names not in
+// this block are reached via their submodule (`args_mod.X`, etc.) or
+// only consumed by tests through `lib.install_<sub>.X`.
+const max_prefix_sane_len = args_mod.max_prefix_sane_len;
+const checkPrefixSane = args_mod.checkPrefixSane;
+const isTapFormula = args_mod.isTapFormula;
+const isLocalFormulaPath = args_mod.isLocalFormulaPath;
+const isSelfInstall = args_mod.isSelfInstall;
+const DownloadJob = download_mod.DownloadJob;
+const collectFormulaJobs = download_mod.collectFormulaJobs;
+const findFailedDep = download_mod.findFailedDep;
+const dropTopLevelJobs = download_mod.dropTopLevelJobs;
+const assignDownloadLineIndices = download_mod.assignDownloadLineIndices;
+const MaterializeResult = download_mod.MaterializeResult;
+const InstallPool = download_mod.InstallPool;
+const installPoolWorker = download_mod.installPoolWorker;
+const progressBridge = download_mod.progressBridge;
+const parseGhcrUrl = ghcr_url_mod.parseGhcrUrl;
 const installTapFormula = local_mod.installTapFormula;
 const installLocalFormula = local_mod.installLocalFormula;
-const rb_parse_mod = @import("install/rb_parse.zig");
-pub const RubyFormulaInfo = rb_parse_mod.RubyFormulaInfo;
-pub const parseRubyFormula = rb_parse_mod.parseRubyFormula;
-pub const parseCaskBinary = rb_parse_mod.parseCaskBinary;
-pub const parseCaskApp = rb_parse_mod.parseCaskApp;
-pub const tapCaskArtifactKind = rb_parse_mod.tapCaskArtifactKind;
-pub const extractQuoted = rb_parse_mod.extractQuoted;
-const post_install_mod = @import("install/post_install.zig");
-pub const PostInstallStatus = post_install_mod.PostInstallStatus;
-pub const routePostInstallOutcome = post_install_mod.routePostInstallOutcome;
-pub const DslPostInstallOutcome = post_install_mod.DslPostInstallOutcome;
-pub const executeDslPostInstall = post_install_mod.executeDslPostInstall;
-pub const drive = post_install_mod.drive;
-const record_mod = @import("install/record.zig");
-pub const InstallError = record_mod.InstallError;
+const drive = post_install_mod.drive;
+const InstallError = record_mod.InstallError;
+const recordKeg = record_mod.recordKeg;
+const deleteKeg = record_mod.deleteKeg;
+const recordDeps = record_mod.recordDeps;
+const ensureDirs = record_mod.ensureDirs;
+const localErrorIsAnnounced = record_mod.localErrorIsAnnounced;
 
 /// Wipe `<prefix>/Cellar/<name>/<version>` so a `--force` reinstall can
 /// re-materialize on top of it. No-op when the dir is missing or the
@@ -279,18 +270,6 @@ fn kegPresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) bool {
     std.Io.Dir.accessAbsolute(ctx.io, cellar_path, .{}) catch return false;
     return true;
 }
-
-pub const localErrorIsAnnounced = record_mod.localErrorIsAnnounced;
-pub const recordKeg = record_mod.recordKeg;
-pub const RecordOpts = record_mod.RecordOpts;
-pub const deleteKeg = record_mod.deleteKeg;
-pub const recordDeps = record_mod.recordDeps;
-pub const isInstalled = record_mod.isInstalled;
-pub const ensureDirs = record_mod.ensureDirs;
-pub const constantTimeEql = record_mod.constantTimeEql;
-pub const installKegFromBottle = download_mod.installKegFromBottle;
-pub const InstallKegDeps = download_mod.InstallKegDeps;
-pub const InstallKegResult = download_mod.InstallKegResult;
 
 pub const InstallAllOpts = struct {
     /// Treat every package as a cask; equivalent to `--cask`.
