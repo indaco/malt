@@ -100,3 +100,16 @@ test "constantTimeEql works on non-u8 elements (generic over T)" {
     try std.testing.expect(constantTimeEql(u32, &a, &b));
     try std.testing.expect(!constantTimeEql(u32, &a, &c));
 }
+
+// SHA-domain shapes: all-zeros at digest size (a wrong implementation
+// that uses `+` instead of `|=` would still pass uniform-zero input)
+// and the 64-byte hex-string size with every byte differing.
+
+test "constantTimeEql: 32-byte all-zeros input compares equal" {
+    const zero = [_]u8{0} ** 32;
+    try std.testing.expect(constantTimeEql(u8, &zero, &zero));
+}
+
+test "constantTimeEql: 64-byte uniform mismatch is detected" {
+    try std.testing.expect(!constantTimeEql(u8, "a" ** 64, "b" ** 64));
+}

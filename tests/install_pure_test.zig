@@ -5,37 +5,43 @@
 const std = @import("std");
 const testing = std.testing;
 const install = @import("malt").install;
+const install_args = @import("malt").install_args;
+const install_download = @import("malt").install_download;
+const install_ghcr_url = @import("malt").install_ghcr_url;
+const install_post_install = @import("malt").install_post_install;
+const install_rb_parse = @import("malt").install_rb_parse;
+const install_record = @import("malt").install_record;
 
 test "extractQuoted returns the string between the prefix and the next quote" {
-    const got = install.extractQuoted("version \"1.2.3\"", "version \"");
+    const got = install_rb_parse.extractQuoted("version \"1.2.3\"", "version \"");
     try testing.expect(got != null);
     try testing.expectEqualStrings("1.2.3", got.?);
 }
 
 test "extractQuoted returns null when the prefix is absent" {
-    try testing.expect(install.extractQuoted("something else", "version \"") == null);
+    try testing.expect(install_rb_parse.extractQuoted("something else", "version \"") == null);
 }
 
 test "extractQuoted returns null when there is no closing quote" {
     // "version \"unterminated" has no closing quote after the prefix.
-    try testing.expect(install.extractQuoted("version \"unterminated", "version \"") == null);
+    try testing.expect(install_rb_parse.extractQuoted("version \"unterminated", "version \"") == null);
 }
 
 test "buildGhcrRepo appends plain names under homebrew/core/" {
     var buf: [128]u8 = undefined;
-    const got = try install.buildGhcrRepo(&buf, "wget");
+    const got = try install_ghcr_url.buildGhcrRepo(&buf, "wget");
     try testing.expectEqualStrings("homebrew/core/wget", got);
 }
 
 test "buildGhcrRepo translates @ into / for versioned formulas" {
     var buf: [128]u8 = undefined;
-    const got = try install.buildGhcrRepo(&buf, "openssl@3");
+    const got = try install_ghcr_url.buildGhcrRepo(&buf, "openssl@3");
     try testing.expectEqualStrings("homebrew/core/openssl/3", got);
 }
 
 test "buildGhcrRepo returns OutOfMemory when the buffer is too small" {
     var buf: [8]u8 = undefined; // not big enough for the prefix
-    try testing.expectError(error.OutOfMemory, install.buildGhcrRepo(&buf, "wget"));
+    try testing.expectError(error.OutOfMemory, install_ghcr_url.buildGhcrRepo(&buf, "wget"));
 }
 
 // S10: parseGhcrUrl — pure splitter used by both the token-prefetch
@@ -44,7 +50,7 @@ test "buildGhcrRepo returns OutOfMemory when the buffer is too small" {
 // sites from drifting apart.
 test "parseGhcrUrl splits a well-formed bottle URL into repo + digest" {
     const url = "https://ghcr.io/v2/homebrew/core/wget/blobs/sha256:abcdef";
-    const ref = install.parseGhcrUrl(url) orelse return error.TestUnexpectedNull;
+    const ref = install_ghcr_url.parseGhcrUrl(url) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("homebrew/core/wget", ref.repo);
     try testing.expectEqualStrings("sha256:abcdef", ref.digest);
 }
@@ -52,56 +58,56 @@ test "parseGhcrUrl splits a well-formed bottle URL into repo + digest" {
 test "parseGhcrUrl handles versioned repos that contain a slash" {
     // openssl@3 maps to homebrew/core/openssl/3 in GHCR's repo layout.
     const url = "https://ghcr.io/v2/homebrew/core/openssl/3/blobs/sha256:ff00";
-    const ref = install.parseGhcrUrl(url) orelse return error.TestUnexpectedNull;
+    const ref = install_ghcr_url.parseGhcrUrl(url) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("homebrew/core/openssl/3", ref.repo);
     try testing.expectEqualStrings("sha256:ff00", ref.digest);
 }
 
 test "parseGhcrUrl returns null for non-GHCR and malformed URLs" {
-    try testing.expect(install.parseGhcrUrl("https://example.com/foo") == null);
-    try testing.expect(install.parseGhcrUrl("https://ghcr.io/v2/no-blobs-segment") == null);
-    try testing.expect(install.parseGhcrUrl("") == null);
+    try testing.expect(install_ghcr_url.parseGhcrUrl("https://example.com/foo") == null);
+    try testing.expect(install_ghcr_url.parseGhcrUrl("https://ghcr.io/v2/no-blobs-segment") == null);
+    try testing.expect(install_ghcr_url.parseGhcrUrl("") == null);
 }
 
 test "isSelfInstall catches every shape that would relink malt" {
     // bare names
-    try testing.expect(install.isSelfInstall("malt"));
-    try testing.expect(install.isSelfInstall("mt"));
+    try testing.expect(install_args.isSelfInstall("malt"));
+    try testing.expect(install_args.isSelfInstall("mt"));
     // tap slugs
-    try testing.expect(install.isSelfInstall("indaco/tap/malt"));
-    try testing.expect(install.isSelfInstall("indaco/homebrew-tap/mt"));
+    try testing.expect(install_args.isSelfInstall("indaco/tap/malt"));
+    try testing.expect(install_args.isSelfInstall("indaco/homebrew-tap/mt"));
     // local .rb paths (relative, absolute, tilde)
-    try testing.expect(install.isSelfInstall("./malt.rb"));
-    try testing.expect(install.isSelfInstall("/tmp/malt.rb"));
-    try testing.expect(install.isSelfInstall("~/f/mt.rb"));
+    try testing.expect(install_args.isSelfInstall("./malt.rb"));
+    try testing.expect(install_args.isSelfInstall("/tmp/malt.rb"));
+    try testing.expect(install_args.isSelfInstall("~/f/mt.rb"));
 }
 
 test "isSelfInstall lets unrelated names through" {
-    try testing.expect(!install.isSelfInstall("wget"));
-    try testing.expect(!install.isSelfInstall("homebrew/core/wget"));
-    try testing.expect(!install.isSelfInstall("./wget.rb"));
+    try testing.expect(!install_args.isSelfInstall("wget"));
+    try testing.expect(!install_args.isSelfInstall("homebrew/core/wget"));
+    try testing.expect(!install_args.isSelfInstall("./wget.rb"));
     // Substring matches must not trip the guard.
-    try testing.expect(!install.isSelfInstall("malted"));
-    try testing.expect(!install.isSelfInstall("mtr"));
-    try testing.expect(!install.isSelfInstall("user/tap/malted"));
+    try testing.expect(!install_args.isSelfInstall("malted"));
+    try testing.expect(!install_args.isSelfInstall("mtr"));
+    try testing.expect(!install_args.isSelfInstall("user/tap/malted"));
     // Empty and slash-only inputs.
-    try testing.expect(!install.isSelfInstall(""));
-    try testing.expect(!install.isSelfInstall("/"));
+    try testing.expect(!install_args.isSelfInstall(""));
+    try testing.expect(!install_args.isSelfInstall("/"));
 }
 
 test "isTapFormula recognises the 'user/repo/formula' shape" {
-    try testing.expect(install.isTapFormula("homebrew/core/wget"));
-    try testing.expect(install.isTapFormula("user/tap/myformula"));
+    try testing.expect(install_args.isTapFormula("homebrew/core/wget"));
+    try testing.expect(install_args.isTapFormula("user/tap/myformula"));
 }
 
 test "isTapFormula rejects other shapes" {
-    try testing.expect(!install.isTapFormula("wget"));
-    try testing.expect(!install.isTapFormula("user/repo"));
-    try testing.expect(!install.isTapFormula("a/b/c/d"));
+    try testing.expect(!install_args.isTapFormula("wget"));
+    try testing.expect(!install_args.isTapFormula("user/repo"));
+    try testing.expect(!install_args.isTapFormula("a/b/c/d"));
 }
 
 test "parseTapName splits into user, repo, formula" {
-    const got = install.parseTapName("user/tap/myformula");
+    const got = install_args.parseTapName("user/tap/myformula");
     try testing.expect(got != null);
     try testing.expectEqualStrings("user", got.?.user);
     try testing.expectEqualStrings("tap", got.?.repo);
@@ -109,24 +115,24 @@ test "parseTapName splits into user, repo, formula" {
 }
 
 test "parseTapName returns null on an incomplete string" {
-    try testing.expect(install.parseTapName("user") == null);
-    try testing.expect(install.parseTapName("user/repo") == null);
+    try testing.expect(install_args.parseTapName("user") == null);
+    try testing.expect(install_args.parseTapName("user/repo") == null);
 }
 
 test "checkPrefixSane accepts realistic prefixes (up to the 256-byte sanity cap)" {
-    try install.checkPrefixSane("/opt/malt");
-    try install.checkPrefixSane("/usr/local");
-    try install.checkPrefixSane("/opt/homebrew");
-    try install.checkPrefixSane("/tmp/mt_tahoe");
-    try install.checkPrefixSane("/Users/someuser/malt");
+    try install_args.checkPrefixSane("/opt/malt");
+    try install_args.checkPrefixSane("/usr/local");
+    try install_args.checkPrefixSane("/opt/homebrew");
+    try install_args.checkPrefixSane("/tmp/mt_tahoe");
+    try install_args.checkPrefixSane("/Users/someuser/malt");
     // Nothing special about 13 bytes any more — install_name_tool's
     // headerpad fallback absorbs the overflow.
-    try install.checkPrefixSane("/var/folders/qp/mt_prefix_under_128_bytes_long_enough_to_matter");
+    try install_args.checkPrefixSane("/var/folders/qp/mt_prefix_under_128_bytes_long_enough_to_matter");
 }
 
 test "checkPrefixSane rejects absurdly long prefixes at the 256-byte cap" {
     const huge = "/" ++ "x" ** 512;
-    try testing.expectError(error.PrefixAbsurd, install.checkPrefixSane(huge));
+    try testing.expectError(error.PrefixAbsurd, install_args.checkPrefixSane(huge));
 }
 
 test "parseRubyFormula extracts version/url/sha256 from a flat formula body" {
@@ -137,7 +143,7 @@ test "parseRubyFormula extracts version/url/sha256 from a flat formula body" {
         \\  sha256 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         \\end
     ;
-    const got = install.parseRubyFormula(src);
+    const got = install_rb_parse.parseRubyFormula(src);
     try testing.expect(got != null);
     try testing.expectEqualStrings("1.0", got.?.version);
     try testing.expectEqualStrings("https://example.com/hello-1.0.tar.gz", got.?.url);
@@ -148,24 +154,24 @@ test "parseRubyFormula extracts version/url/sha256 from a flat formula body" {
 }
 
 test "parseRubyFormula returns null when required fields are missing" {
-    try testing.expect(install.parseRubyFormula("class X end") == null);
+    try testing.expect(install_rb_parse.parseRubyFormula("class X end") == null);
 }
 
 // Hostile / malformed inputs must never crash the parser. `--local`
 // accepts user-supplied `.rb` files up to `max_local_formula_bytes`
 // (1 MiB), so these cases are realistic, not paranoid.
 test "parseRubyFormula survives an empty input" {
-    try testing.expect(install.parseRubyFormula("") == null);
+    try testing.expect(install_rb_parse.parseRubyFormula("") == null);
 }
 
 test "parseRubyFormula survives a single newline" {
-    try testing.expect(install.parseRubyFormula("\n") == null);
+    try testing.expect(install_rb_parse.parseRubyFormula("\n") == null);
 }
 
 test "parseRubyFormula survives a single un-newlined byte" {
     // The state machine has a final-char branch (`idx == len - 1`)
     // that must not read past the end of the slice for 1-byte inputs.
-    try testing.expect(install.parseRubyFormula("x") == null);
+    try testing.expect(install_rb_parse.parseRubyFormula("x") == null);
 }
 
 test "parseRubyFormula survives embedded NULs without scanning past them" {
@@ -173,7 +179,7 @@ test "parseRubyFormula survives embedded NULs without scanning past them" {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nend";
     // The fact that we return at all is the property under test —
     // behavior on NULs is implementation-defined but must not crash.
-    _ = install.parseRubyFormula(src);
+    _ = install_rb_parse.parseRubyFormula(src);
 }
 
 test "parseRubyFormula tolerates a UTF-8 BOM on the first line" {
@@ -183,13 +189,13 @@ test "parseRubyFormula tolerates a UTF-8 BOM on the first line" {
     // the real-world behaviour that a BOM-prefixed file parses as
     // "missing version" rather than panicking.
     const src = "\xEF\xBB\xBFversion \"1.0\"\nurl \"https://e\"\nsha256 \"0000\"\n";
-    _ = install.parseRubyFormula(src);
+    _ = install_rb_parse.parseRubyFormula(src);
 }
 
 test "parseRubyFormula tolerates mixed CRLF and LF line endings" {
     const src = "version \"1.0\"\r\nurl \"https://example.com/h.tar.gz\"\r\nsha256 \"" ++
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\r\n";
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("1.0", got.version);
 }
 
@@ -197,7 +203,7 @@ test "parseRubyFormula tolerates an unterminated quote on a required field" {
     // `extractQuoted` returns null on unterminated content, so the
     // field stays unset and the whole parse returns null — no panic.
     const src = "version \"1.0\nurl \"\nsha256 \"\n";
-    try testing.expect(install.parseRubyFormula(src) == null);
+    try testing.expect(install_rb_parse.parseRubyFormula(src) == null);
 }
 
 test "parseRubyFormula bounds work on an input near the 1 MiB cap" {
@@ -213,7 +219,7 @@ test "parseRubyFormula bounds work on an input near the 1 MiB cap" {
     defer alloc.free(big);
     @memcpy(big[0..header.len], header);
     @memset(big[header.len..], 'x');
-    const got = install.parseRubyFormula(big);
+    const got = install_rb_parse.parseRubyFormula(big);
     try testing.expect(got != null);
     try testing.expectEqualStrings("1.0", got.?.version);
 }
@@ -229,7 +235,7 @@ test "parseRubyFormula refuses when on_arm/on_intel section has no sha256" {
         \\  end
         \\end
     ;
-    try testing.expect(install.parseRubyFormula(src) == null);
+    try testing.expect(install_rb_parse.parseRubyFormula(src) == null);
 }
 
 test "parseRubyFormula prefers the platform-specific section when on_arm/on_intel are present" {
@@ -250,7 +256,7 @@ test "parseRubyFormula prefers the platform-specific section when on_arm/on_inte
         \\  end
         \\end
     ;
-    const got = install.parseRubyFormula(src);
+    const got = install_rb_parse.parseRubyFormula(src);
     try testing.expect(got != null);
     if (is_arm) {
         try testing.expect(std.mem.indexOf(u8, got.?.url, "arm") != null);
@@ -277,7 +283,7 @@ test "parseRubyFormula handles cask DSL multi-arch sha256 + arch directive" {
         \\  app "Rebased.app"
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("1.0.12", got.version);
     try testing.expect(std.mem.indexOf(u8, got.url, "#{arch}") != null);
     if (is_arm) {
@@ -311,7 +317,7 @@ test "parseRubyFormula accepts an empty intel arch token" {
         \\  end
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     if (is_arm) {
         try testing.expectEqualStrings("-arm", got.arch_token);
     } else {
@@ -332,7 +338,7 @@ test "parseRubyFormula handles a cask with no arch directive" {
         \\  end
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("3.1", got.version);
     try testing.expectEqualStrings(
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -356,7 +362,7 @@ test "parseRubyFormula handles single-line multi-arch sha256" {
         \\  end
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     if (is_arm) {
         try testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", got.sha256);
         try testing.expectEqualStrings("_arm", got.arch_token);
@@ -380,7 +386,7 @@ test "parseRubyFormula handles intel-first multi-arch ordering" {
         \\  end
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     if (is_arm) {
         try testing.expectEqualStrings("2222222222222222222222222222222222222222222222222222222222222222", got.sha256);
         try testing.expectEqualStrings("-arm64", got.arch_token);
@@ -404,7 +410,7 @@ test "parseRubyFormula handles CRLF line endings inside multi-arch sha256" {
         "    url \"https://example.com/foo#{arch}.dmg\"\r\n" ++
         "  end\r\n" ++
         "end\r\n";
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     if (is_arm) {
         try testing.expectEqualStrings("3333333333333333333333333333333333333333333333333333333333333333", got.sha256);
         try testing.expectEqualStrings("-arm", got.arch_token);
@@ -430,7 +436,7 @@ test "parseRubyFormula does not mis-detect arm: inside quoted values" {
         \\  end
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     // The url should reach the parser intact (#{arch} interpolated later).
     try testing.expect(std.mem.indexOf(u8, got.url, "notes:arm:thing") != null);
 }
@@ -454,7 +460,7 @@ test "parseRubyFormula falls back to global sha256 when section omits it" {
         \\  end
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("7777777777777777777777777777777777777777777777777777777777777777", got.sha256);
     if (is_arm) {
         try testing.expect(std.mem.indexOf(u8, got.url, "arm") != null);
@@ -480,10 +486,10 @@ test "parseRubyFormula returns null when current platform's kwarg is missing" {
         \\end
     ;
     if (is_arm) {
-        const got = install.parseRubyFormula(src_arm_only) orelse return error.TestUnexpectedNull;
+        const got = install_rb_parse.parseRubyFormula(src_arm_only) orelse return error.TestUnexpectedNull;
         try testing.expectEqualStrings("-arm", got.arch_token);
     } else {
-        try testing.expect(install.parseRubyFormula(src_arm_only) == null);
+        try testing.expect(install_rb_parse.parseRubyFormula(src_arm_only) == null);
     }
 }
 
@@ -504,7 +510,7 @@ test "parseRubyFormula ignores arch directive outside on_macos" {
         \\  end
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("", got.arch_token);
 }
 
@@ -520,7 +526,7 @@ test "parseRubyFormula derives version from /releases/download/<X>/ when version
         \\  sha256 "a76c4e384a0dd155a42b6dc7b2fe4f125de7c5ede04ddb8e7ee8fbab51fc0f34"
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("2.0.0", got.version);
     try testing.expectEqualStrings(
         "https://github.com/aeroxy/ast-outline/releases/download/2.0.0/ast-outline-macos-arm64.zip",
@@ -543,7 +549,7 @@ test "parseRubyFormula derives version stripping a leading v from a release tag"
         \\  sha256 "1111111111111111111111111111111111111111111111111111111111111111"
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("3.1.4", got.version);
 }
 
@@ -558,7 +564,7 @@ test "parseRubyFormula derives version from archive/refs/tags/<X>.tar.gz" {
         \\  sha256 "2222222222222222222222222222222222222222222222222222222222222222"
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("2.23.0", got.version);
 }
 
@@ -571,7 +577,7 @@ test "parseRubyFormula derives version from archive/refs/tags/<X>.zip" {
         \\  sha256 "3333333333333333333333333333333333333333333333333333333333333333"
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("1.0.0", got.version);
 }
 
@@ -585,7 +591,7 @@ test "parseRubyFormula derives version from archive/<X>.tar.gz" {
         \\  sha256 "4444444444444444444444444444444444444444444444444444444444444444"
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("1.0.0", got.version);
 }
 
@@ -599,7 +605,7 @@ test "parseRubyFormula prefers explicit version over a derivable URL token" {
         \\  sha256 "5555555555555555555555555555555555555555555555555555555555555555"
         \\end
     ;
-    const got = install.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    const got = install_rb_parse.parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("9.9.9", got.version);
 }
 
@@ -614,7 +620,7 @@ test "parseRubyFormula rejects floating-tag URLs that are not version-shaped" {
         \\  sha256 "6666666666666666666666666666666666666666666666666666666666666666"
         \\end
     ;
-    try testing.expect(install.parseRubyFormula(src) == null);
+    try testing.expect(install_rb_parse.parseRubyFormula(src) == null);
 }
 
 // URL with none of the three recognised path shapes — the parser does
@@ -626,7 +632,7 @@ test "parseRubyFormula returns null when URL matches no derivation pattern" {
         \\  sha256 "7777777777777777777777777777777777777777777777777777777777777777"
         \\end
     ;
-    try testing.expect(install.parseRubyFormula(src) == null);
+    try testing.expect(install_rb_parse.parseRubyFormula(src) == null);
 }
 
 // A leading `v` must be followed by a digit — otherwise `vendor-build`,
@@ -638,7 +644,7 @@ test "parseRubyFormula rejects a v-prefix that is not followed by a digit" {
         \\  sha256 "8888888888888888888888888888888888888888888888888888888888888888"
         \\end
     ;
-    try testing.expect(install.parseRubyFormula(src) == null);
+    try testing.expect(install_rb_parse.parseRubyFormula(src) == null);
 }
 
 // extractQuoted underpins both legacy and cask DSL extraction; the
@@ -646,7 +652,7 @@ test "parseRubyFormula rejects a v-prefix that is not followed by a digit" {
 // long sha256 directive) so pin a "won't accidentally cut on the
 // wrong line" property here.
 test "extractQuoted does not match across newlines" {
-    const got = install.extractQuoted("sha256 arm:\nintel: \"x\"", "intel: \"");
+    const got = install_rb_parse.extractQuoted("sha256 arm:\nintel: \"x\"", "intel: \"");
     // `intel: \"` only appears on the second line; with line-by-line
     // trimming this is invoked per-line, not on the joined buffer.
     // Calling extractQuoted on the whole string still cuts at the
@@ -666,7 +672,7 @@ test "findFailedDep flags the first dep name that appears in failed_kegs" {
     ;
     var cache = @import("malt").deps.FormulaCache.init(testing.allocator);
     defer cache.deinit();
-    const name = install.findFailedDep(&cache, &failed, "bar", json);
+    const name = install_download.findFailedDep(&cache, &failed, "bar", json);
     try testing.expect(name != null);
     try testing.expectEqualStrings("libfoo", name.?);
 }
@@ -709,13 +715,13 @@ test "isInstalled is false before recordKeg, true after" {
     defer db.close();
     try schema.initSchema(&db);
 
-    try testing.expect(!install.isInstalled(&db, "foo"));
+    try testing.expect(!install_record.isInstalled(&db, "foo"));
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
+    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
     try testing.expect(keg_id > 0);
-    try testing.expect(install.isInstalled(&db, "foo"));
+    try testing.expect(install_record.isInstalled(&db, "foo"));
 }
 
 test "pruneCellarForReinstall wipes an existing Cellar dir so --force can re-materialize" {
@@ -765,7 +771,7 @@ test "pruneCellarForReinstall is a no-op when the destination is missing" {
     install.pruneCellarForReinstall(&malt.app_ctx.debug_ctx, prefix, "ghost", "1.0");
 }
 
-test "install.recordKeg preserves a prior pinned flag on REPLACE (force-reinstall keeps the hold)" {
+test "install_record.recordKeg preserves a prior pinned flag on REPLACE (force-reinstall keeps the hold)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var db = try openDb();
@@ -781,7 +787,7 @@ test "install.recordKeg preserves a prior pinned flag on REPLACE (force-reinstal
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
+    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
 
     var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
     defer stmt.finalize();
@@ -790,7 +796,7 @@ test "install.recordKeg preserves a prior pinned flag on REPLACE (force-reinstal
     try testing.expectEqual(true, stmt.columnBool(0));
 }
 
-test "install.recordKeg defaults pinned=0 when no prior keg of that name exists" {
+test "install_record.recordKeg defaults pinned=0 when no prior keg of that name exists" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var db = try openDb();
@@ -799,7 +805,7 @@ test "install.recordKeg defaults pinned=0 when no prior keg of that name exists"
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
+    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
 
     var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
     defer stmt.finalize();
@@ -808,7 +814,7 @@ test "install.recordKeg defaults pinned=0 when no prior keg of that name exists"
     try testing.expectEqual(false, stmt.columnBool(0));
 }
 
-test "install.recordKeg with inherit_pin=false clears the prior pin (opt-out branch)" {
+test "install_record.recordKeg with inherit_pin=false clears the prior pin (opt-out branch)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var db = try openDb();
@@ -823,7 +829,7 @@ test "install.recordKeg with inherit_pin=false clears the prior pin (opt-out bra
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install.recordKeg(
+    const keg_id = try install_record.recordKeg(
         &db,
         &f,
         "0" ** 64,
@@ -839,7 +845,7 @@ test "install.recordKeg with inherit_pin=false clears the prior pin (opt-out bra
     try testing.expectEqual(false, stmt.columnBool(0));
 }
 
-test "install.recordKeg with .{ .in_transaction = false } opens its own BEGIN/COMMIT" {
+test "install_record.recordKeg with .{ .in_transaction = false } opens its own BEGIN/COMMIT" {
     // Pinning the default txn-wrapping path: a standalone caller is
     // not inside a transaction, so `recordKeg` must open + commit one
     // on its own. The post-call SELECT proves the row landed.
@@ -851,7 +857,7 @@ test "install.recordKeg with .{ .in_transaction = false } opens its own BEGIN/CO
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install.recordKeg(
+    const keg_id = try install_record.recordKeg(
         &db,
         &f,
         "0" ** 64,
@@ -867,7 +873,7 @@ test "install.recordKeg with .{ .in_transaction = false } opens its own BEGIN/CO
     try testing.expectEqualStrings("foo", std.mem.sliceTo(stmt.columnText(0).?, 0));
 }
 
-test "install.recordKeg with .{ .in_transaction = true } inside an outer BEGIN does not nest" {
+test "install_record.recordKeg with .{ .in_transaction = true } inside an outer BEGIN does not nest" {
     // Caller owns the txn — `recordKeg` must skip its own BEGIN/COMMIT,
     // otherwise SQLite throws "cannot start a transaction within a
     // transaction" and the upgrade flow's atomic unlink+record+link
@@ -882,7 +888,7 @@ test "install.recordKeg with .{ .in_transaction = true } inside an outer BEGIN d
     defer f.deinit();
 
     try db.beginTransaction();
-    const keg_id = try install.recordKeg(
+    const keg_id = try install_record.recordKeg(
         &db,
         &f,
         "0" ** 64,
@@ -899,7 +905,7 @@ test "install.recordKeg with .{ .in_transaction = true } inside an outer BEGIN d
     try testing.expectEqualStrings("foo", std.mem.sliceTo(stmt.columnText(0).?, 0));
 }
 
-test "install.recordKeg with inherit_pin=true carries the prior pin (option's default branch)" {
+test "install_record.recordKeg with inherit_pin=true carries the prior pin (option's default branch)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var db = try openDb();
@@ -913,7 +919,7 @@ test "install.recordKeg with inherit_pin=true carries the prior pin (option's de
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install.recordKeg(
+    const keg_id = try install_record.recordKeg(
         &db,
         &f,
         "0" ** 64,
@@ -938,8 +944,8 @@ test "recordDeps inserts one row per dependency in the dependencies table" {
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
-    install.recordDeps(&db, keg_id, &f);
+    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
+    install_record.recordDeps(&db, keg_id, &f);
 
     var stmt = try db.prepare("SELECT COUNT(*) FROM dependencies WHERE keg_id = ?1;");
     defer stmt.finalize();
@@ -957,10 +963,10 @@ test "deleteKeg removes the row and isInstalled reports false again" {
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
-    try testing.expect(install.isInstalled(&db, "foo"));
-    install.deleteKeg(&db, keg_id);
-    try testing.expect(!install.isInstalled(&db, "foo"));
+    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
+    try testing.expect(install_record.isInstalled(&db, "foo"));
+    install_record.deleteKeg(&db, keg_id);
+    try testing.expect(!install_record.isInstalled(&db, "foo"));
 }
 
 test "ensureDirs creates every required subdirectory under a fresh prefix" {
@@ -975,7 +981,7 @@ test "ensureDirs creates every required subdirectory under a fresh prefix" {
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
-    try install.ensureDirs(&malt.app_ctx.debug_ctx, prefix);
+    try install_record.ensureDirs(&malt.app_ctx.debug_ctx, prefix);
 
     const subs = [_][]const u8{ "store", "Cellar", "Caskroom", "opt", "bin", "lib", "include", "share", "sbin", "etc", "tmp", "cache", "db" };
     for (subs) |s| {
@@ -995,7 +1001,7 @@ test "findFailedDep returns null when no dep is in the failed set" {
     ;
     var cache = @import("malt").deps.FormulaCache.init(testing.allocator);
     defer cache.deinit();
-    try testing.expect(install.findFailedDep(&cache, &failed, "bar", json) == null);
+    try testing.expect(install_download.findFailedDep(&cache, &failed, "bar", json) == null);
 }
 
 // ---------------------------------------------------------------------------
@@ -1059,7 +1065,7 @@ fn runRoute(
     const dn = try devnullCtx();
     defer closeDevnullCtx(dn.fd);
 
-    install.routePostInstallOutcome(&dn.ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
+    install_post_install.routePostInstallOutcome(&dn.ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
 
     return buf.toOwnedSlice(testing.allocator);
 }
@@ -1372,7 +1378,7 @@ fn runRouteCaptureStdout(
     const dn = try devnullCtx();
     defer closeDevnullCtx(dn.fd);
 
-    install.routePostInstallOutcome(&dn.ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
+    install_post_install.routePostInstallOutcome(&dn.ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
     return stdout_buf.toOwnedSlice(testing.allocator);
 }
 
@@ -1432,7 +1438,7 @@ test "executeDslPostInstall returns .parse_failed when formula JSON is unparseab
     output_mod.setQuiet(true);
     defer output_mod.setQuiet(prior_quiet);
 
-    const outcome = install.executeDslPostInstall(
+    const outcome = install_post_install.executeDslPostInstall(
         &malt.app_ctx.debug_ctx,
         testing.allocator,
         "bad-json",
@@ -1443,7 +1449,7 @@ test "executeDslPostInstall returns .parse_failed when formula JSON is unparseab
         &.{},
         null,
     );
-    try testing.expectEqual(install.DslPostInstallOutcome.parse_failed, outcome);
+    try testing.expectEqual(install_post_install.DslPostInstallOutcome.parse_failed, outcome);
 }
 
 test "executeDslPostInstall returns .handled when DSL executes against a valid formula" {
@@ -1458,7 +1464,7 @@ test "executeDslPostInstall returns .handled when DSL executes against a valid f
     const json =
         \\{"name":"hello","full_name":"hello","versions":{"stable":"1.0"},"dependencies":[],"oldnames":[]}
     ;
-    const outcome = install.executeDslPostInstall(
+    const outcome = install_post_install.executeDslPostInstall(
         &malt.app_ctx.debug_ctx,
         testing.allocator,
         "hello",
@@ -1469,7 +1475,7 @@ test "executeDslPostInstall returns .handled when DSL executes against a valid f
         &.{},
         null,
     );
-    try testing.expectEqual(install.DslPostInstallOutcome.handled, outcome);
+    try testing.expectEqual(install_post_install.DslPostInstallOutcome.handled, outcome);
 }
 
 test "executeDslPostInstall routes through the shared FormulaCache once per name" {
@@ -1488,7 +1494,7 @@ test "executeDslPostInstall routes through the shared FormulaCache once per name
     var cache = malt.deps.FormulaCache.init(testing.allocator);
     defer cache.deinit();
 
-    const first = install.executeDslPostInstall(
+    const first = install_post_install.executeDslPostInstall(
         &malt.app_ctx.debug_ctx,
         testing.allocator,
         "hello",
@@ -1499,10 +1505,10 @@ test "executeDslPostInstall routes through the shared FormulaCache once per name
         &.{},
         &cache,
     );
-    try testing.expectEqual(install.DslPostInstallOutcome.handled, first);
+    try testing.expectEqual(install_post_install.DslPostInstallOutcome.handled, first);
     try testing.expectEqual(@as(usize, 1), cache.parse_count);
 
-    const second = install.executeDslPostInstall(
+    const second = install_post_install.executeDslPostInstall(
         &malt.app_ctx.debug_ctx,
         testing.allocator,
         "hello",
@@ -1513,7 +1519,7 @@ test "executeDslPostInstall routes through the shared FormulaCache once per name
         &.{},
         &cache,
     );
-    try testing.expectEqual(install.DslPostInstallOutcome.handled, second);
+    try testing.expectEqual(install_post_install.DslPostInstallOutcome.handled, second);
     try testing.expectEqual(@as(usize, 1), cache.parse_count);
 }
 
@@ -1534,7 +1540,7 @@ test "executeDslPostInstall reuses an entry the install pipeline already parsed"
     _ = try cache.getOrParse("hello", json);
     try testing.expectEqual(@as(usize, 1), cache.parse_count);
 
-    const outcome = install.executeDslPostInstall(
+    const outcome = install_post_install.executeDslPostInstall(
         &malt.app_ctx.debug_ctx,
         testing.allocator,
         "hello",
@@ -1545,7 +1551,7 @@ test "executeDslPostInstall reuses an entry the install pipeline already parsed"
         &.{},
         &cache,
     );
-    try testing.expectEqual(install.DslPostInstallOutcome.handled, outcome);
+    try testing.expectEqual(install_post_install.DslPostInstallOutcome.handled, outcome);
     try testing.expectEqual(@as(usize, 1), cache.parse_count);
 }
 
@@ -1571,7 +1577,7 @@ test "drive: no DSL source and no scope match emits the unified skip hint" {
     // A name guaranteed to miss every DSL source: not a real formula, no
     // .rb on disk, no pin manifest entry → fetchPostInstallFromGitHub
     // returns null, so drive lands on the skip leaf.
-    install.drive(
+    install_post_install.drive(
         &malt.app_ctx.debug_ctx,
         testing.allocator,
         "__nonexistent_test_formula_xyz__",

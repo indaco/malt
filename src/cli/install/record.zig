@@ -6,7 +6,6 @@ const std = @import("std");
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const sqlite = @import("../../db/sqlite.zig");
 const formula_mod = @import("../../core/formula.zig");
-const hash = @import("../../core/hash.zig");
 const output = @import("../../ui/output.zig");
 
 pub const InstallError = error{
@@ -244,8 +243,3 @@ pub fn ensureDirs(ctx: *const AppCtx, prefix: []const u8) !void {
         };
     }
 }
-
-/// Back-compat alias: callers reach `constantTimeEql` via
-/// `install.zig` and `record.zig`. Canonical home is `core/hash`.
-/// Drop once the install facade settles.
-pub const constantTimeEql = hash.constantTimeEql;

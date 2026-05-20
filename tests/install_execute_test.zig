@@ -8,6 +8,7 @@ const malt = @import("malt");
 const test_io = @import("test_io");
 const testing = std.testing;
 const install = @import("malt").install;
+const install_record = @import("malt").install_record;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -42,7 +43,7 @@ test "execute with no positional args reports NoPackages" {
     defer _ = c.unsetenv("MALT_PREFIX");
     _ = c.setenv("MALT_PREFIX", "/tmp/malt_install_exec_nopkg", 1);
     try testing.expectError(
-        install.InstallError.NoPackages,
+        install_record.InstallError.NoPackages,
         install.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--force", "--dry-run" }),
     );
 }
@@ -188,7 +189,7 @@ test "execute refuses to run when MALT_PREFIX is absurdly long (> 256 bytes)" {
     defer _ = c.unsetenv("MALT_PREFIX");
     _ = c.setenv("MALT_PREFIX", too_long, 1);
     try testing.expectError(
-        install.InstallError.PrefixAbsurd,
+        install_record.InstallError.PrefixAbsurd,
         install.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{"wget"}),
     );
 }

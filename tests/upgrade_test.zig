@@ -10,6 +10,7 @@ const test_io = @import("test_io");
 const testing = std.testing;
 const upgrade = malt.upgrade;
 const install = malt.install;
+const install_record = malt.install_record;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const formula_mod = malt.formula;
@@ -209,7 +210,7 @@ test "recordKeg inherits pinned=1 from an existing keg of the same name" {
     var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
     defer formula.deinit();
 
-    const new_keg_id = try install.recordKeg(&db, &formula, "deadbeef2", "/cellar/alpha/2.0", "direct", .{});
+    const new_keg_id = try install_record.recordKeg(&db, &formula, "deadbeef2", "/cellar/alpha/2.0", "direct", .{});
 
     var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
     defer stmt.finalize();
@@ -282,7 +283,7 @@ test "recordKeg defaults pinned=0 when no prior keg of that name exists" {
     var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
     defer formula.deinit();
 
-    const new_keg_id = try install.recordKeg(&db, &formula, "deadbeef0", "/cellar/fresh/1.0", "direct", .{});
+    const new_keg_id = try install_record.recordKeg(&db, &formula, "deadbeef0", "/cellar/fresh/1.0", "direct", .{});
 
     var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
     defer stmt.finalize();
@@ -319,7 +320,7 @@ test "recordKeg runs inside an outer beginTransaction without nesting errors" {
     defer formula.deinit();
 
     try db.beginTransaction();
-    const new_keg_id = try install.recordKeg(&db, &formula, "sha-inner", "/cellar/inside-txn/2.0", "direct", .{ .in_transaction = true });
+    const new_keg_id = try install_record.recordKeg(&db, &formula, "sha-inner", "/cellar/inside-txn/2.0", "direct", .{ .in_transaction = true });
     try db.commit();
 
     var stmt = try db.prepare("SELECT name, version FROM kegs WHERE id = ?1;");
@@ -362,7 +363,7 @@ test "recordKeg INSERT OR REPLACE rewrites an existing (name,version,revision)" 
     var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
     defer formula.deinit();
 
-    const new_keg_id = try install.recordKeg(&db, &formula, "sha-new", "/cellar/collide/1.0", "direct", .{});
+    const new_keg_id = try install_record.recordKeg(&db, &formula, "sha-new", "/cellar/collide/1.0", "direct", .{});
 
     var count_stmt = try db.prepare("SELECT COUNT(*) FROM kegs WHERE name='collide';");
     defer count_stmt.finalize();
@@ -486,7 +487,7 @@ test "recordKeg succeeds on a same-version revision-bump upgrade" {
     var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
     defer formula.deinit();
 
-    const new_keg_id = try install.recordKeg(&db, &formula, "sha-new", "/cellar/libgit2/1.9.2_2", "direct", .{});
+    const new_keg_id = try install_record.recordKeg(&db, &formula, "sha-new", "/cellar/libgit2/1.9.2_2", "direct", .{});
 
     // Both rows must coexist briefly — upgradeFormula deletes the old
     // one in step 8, after symlinks flip to the new keg.

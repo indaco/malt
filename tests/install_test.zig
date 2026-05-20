@@ -10,6 +10,11 @@ const testing = std.testing;
 const malt = @import("malt");
 const test_io = @import("test_io");
 const install = malt.install;
+const install_args = malt.install_args;
+const install_download = malt.install_download;
+const install_ghcr_url = malt.install_ghcr_url;
+const install_rb_parse = malt.install_rb_parse;
+const install_record = malt.install_record;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 
@@ -95,13 +100,13 @@ test "collectFormulaJobs queues a formula with a post_install hook" {
 
     var store_inst: malt.store.Store = undefined;
 
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
     var cache = malt.deps.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    try install.collectFormulaJobs(
+    try install_download.collectFormulaJobs(
         .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst, .cache = &cache },
         "needs-ruby",
         json,
@@ -119,66 +124,66 @@ test "collectFormulaJobs queues a formula with a post_install hook" {
 // --- Pure helper tests (no DB / network) ---
 
 test "checkPrefixSane accepts a realistic developer-length prefix" {
-    try install.checkPrefixSane("/Users/somebody/malt");
+    try install_args.checkPrefixSane("/Users/somebody/malt");
 }
 
 test "checkPrefixSane accepts a short prefix" {
-    try install.checkPrefixSane("/opt/m");
+    try install_args.checkPrefixSane("/opt/m");
 }
 
 test "checkPrefixSane rejects an absurdly long prefix" {
     const huge = "/" ++ "a" ** 300;
-    try testing.expectError(install.PrefixError.PrefixAbsurd, install.checkPrefixSane(huge));
+    try testing.expectError(install_args.PrefixError.PrefixAbsurd, install_args.checkPrefixSane(huge));
 }
 
 test "isTapFormula detects three-part user/repo/formula names" {
-    try testing.expect(install.isTapFormula("user/repo/formula"));
-    try testing.expect(!install.isTapFormula("formula"));
-    try testing.expect(!install.isTapFormula("user/formula"));
-    try testing.expect(!install.isTapFormula("a/b/c/d"));
+    try testing.expect(install_args.isTapFormula("user/repo/formula"));
+    try testing.expect(!install_args.isTapFormula("formula"));
+    try testing.expect(!install_args.isTapFormula("user/formula"));
+    try testing.expect(!install_args.isTapFormula("a/b/c/d"));
 }
 
 test "parseTapName splits user/repo/formula" {
-    const parts = install.parseTapName("homebrew/core/wget") orelse unreachable;
+    const parts = install_args.parseTapName("homebrew/core/wget") orelse unreachable;
     try testing.expectEqualStrings("homebrew", parts.user);
     try testing.expectEqualStrings("core", parts.repo);
     try testing.expectEqualStrings("wget", parts.formula);
 }
 
 test "parseTapName returns null for non-tap names" {
-    try testing.expect(install.parseTapName("wget") == null);
-    try testing.expect(install.parseTapName("user/repo") == null);
+    try testing.expect(install_args.parseTapName("wget") == null);
+    try testing.expect(install_args.parseTapName("user/repo") == null);
 }
 
 test "buildGhcrRepo prepends homebrew/core" {
     var buf: [128]u8 = undefined;
-    const out = try install.buildGhcrRepo(&buf, "wget");
+    const out = try install_ghcr_url.buildGhcrRepo(&buf, "wget");
     try testing.expectEqualStrings("homebrew/core/wget", out);
 }
 
 test "buildGhcrRepo replaces @ with /" {
     var buf: [128]u8 = undefined;
-    const out = try install.buildGhcrRepo(&buf, "openssl@3");
+    const out = try install_ghcr_url.buildGhcrRepo(&buf, "openssl@3");
     try testing.expectEqualStrings("homebrew/core/openssl/3", out);
 }
 
 test "buildGhcrRepo errors when buffer too small" {
     var buf: [4]u8 = undefined;
-    try testing.expectError(error.OutOfMemory, install.buildGhcrRepo(&buf, "wget"));
+    try testing.expectError(error.OutOfMemory, install_ghcr_url.buildGhcrRepo(&buf, "wget"));
 }
 
 test "extractQuoted returns the quoted value after a prefix" {
     const line = "  version \"1.2.3\"";
-    const value = install.extractQuoted(line, "version \"") orelse unreachable;
+    const value = install_rb_parse.extractQuoted(line, "version \"") orelse unreachable;
     try testing.expectEqualStrings("1.2.3", value);
 }
 
 test "extractQuoted returns null when prefix missing" {
-    try testing.expect(install.extractQuoted("foo bar", "version \"") == null);
+    try testing.expect(install_rb_parse.extractQuoted("foo bar", "version \"") == null);
 }
 
 test "extractQuoted returns null when closing quote missing" {
-    try testing.expect(install.extractQuoted("version \"unterminated", "version \"") == null);
+    try testing.expect(install_rb_parse.extractQuoted("version \"unterminated", "version \"") == null);
 }
 
 test "parseRubyFormula extracts version url and sha from a platform block" {
@@ -198,7 +203,7 @@ test "parseRubyFormula extracts version url and sha from a platform block" {
         \\  end
         \\end
     ;
-    const info = install.parseRubyFormula(rb) orelse unreachable;
+    const info = install_rb_parse.parseRubyFormula(rb) orelse unreachable;
     try testing.expectEqualStrings("1.0.0", info.version);
     try testing.expect(std.mem.startsWith(u8, info.url, "https://example.com/malt-"));
     try testing.expect(info.sha256.len == 64);
@@ -212,7 +217,7 @@ test "parseRubyFormula fallback uses global url and sha when no platform block" 
         \\  sha256 "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         \\end
     ;
-    const info = install.parseRubyFormula(rb) orelse unreachable;
+    const info = install_rb_parse.parseRubyFormula(rb) orelse unreachable;
     try testing.expectEqualStrings("2.0.0", info.version);
     try testing.expectEqualStrings("https://example.com/simple.tar.gz", info.url);
 }
@@ -224,7 +229,7 @@ test "parseRubyFormula returns null when version missing" {
         \\  sha256 "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
         \\end
     ;
-    try testing.expect(install.parseRubyFormula(rb) == null);
+    try testing.expect(install_rb_parse.parseRubyFormula(rb) == null);
 }
 
 test "findFailedDep reports the first dep already known-broken" {
@@ -249,7 +254,7 @@ test "findFailedDep reports the first dep already known-broken" {
     ;
     var cache = malt.deps.FormulaCache.init(testing.allocator);
     defer cache.deinit();
-    const result = install.findFailedDep(&cache, &failed, "curl", json) orelse unreachable;
+    const result = install_download.findFailedDep(&cache, &failed, "curl", json) orelse unreachable;
     try testing.expectEqualStrings("openssl@3", result);
 }
 
@@ -275,7 +280,7 @@ test "findFailedDep returns null when no dep is known-broken" {
     ;
     var cache = malt.deps.FormulaCache.init(testing.allocator);
     defer cache.deinit();
-    try testing.expect(install.findFailedDep(&cache, &failed, "hello", json) == null);
+    try testing.expect(install_download.findFailedDep(&cache, &failed, "hello", json) == null);
 }
 
 test "findFailedDep returns null on unparseable JSON" {
@@ -283,7 +288,7 @@ test "findFailedDep returns null on unparseable JSON" {
     defer failed.deinit();
     var cache = malt.deps.FormulaCache.init(testing.allocator);
     defer cache.deinit();
-    try testing.expect(install.findFailedDep(&cache, &failed, "broken", "not-json") == null);
+    try testing.expect(install_download.findFailedDep(&cache, &failed, "broken", "not-json") == null);
 }
 
 // --- collectFormulaJobs happy path (seeded BrewApi cache, no network) ---
@@ -337,13 +342,13 @@ test "collectFormulaJobs queues the main formula when nothing is installed" {
     var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
     var cache = malt.deps.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    try install.collectFormulaJobs(
+    try install_download.collectFormulaJobs(
         .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst, .cache = &cache },
         "hello",
         json,
@@ -378,13 +383,13 @@ test "collectFormulaJobs no-ops when the formula is already installed" {
     var http: malt.client.HttpClientPool = undefined;
     var api: malt.api.BrewApi = undefined;
     var store_inst: malt.store.Store = undefined;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
     var cache = malt.deps.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    try install.collectFormulaJobs(
+    try install_download.collectFormulaJobs(
         .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst, .cache = &cache },
         "hello",
         json,
@@ -464,13 +469,13 @@ test "collectFormulaJobs queues a dep and its parent from a seeded cache" {
     var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
     var cache = malt.deps.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    try install.collectFormulaJobs(
+    try install_download.collectFormulaJobs(
         .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http_pool, .db = &tdb.db, .store = &store_inst, .cache = &cache },
         "alpha",
         root_json,
@@ -514,15 +519,15 @@ test "collectFormulaJobs deduplicates deps already queued by a prior call" {
     var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
     var cache = malt.deps.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const deps_ctx: install.InstallJobDeps = .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http_pool, .db = &tdb.db, .store = &store_inst, .cache = &cache };
-    try install.collectFormulaJobs(deps_ctx, "alpha", root_a, false, &jobs);
-    try install.collectFormulaJobs(deps_ctx, "omega", root_b, false, &jobs);
+    const deps_ctx: install_download.InstallJobDeps = .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http_pool, .db = &tdb.db, .store = &store_inst, .cache = &cache };
+    try install_download.collectFormulaJobs(deps_ctx, "alpha", root_a, false, &jobs);
+    try install_download.collectFormulaJobs(deps_ctx, "omega", root_b, false, &jobs);
 
     // beta should appear exactly once. jobs: [beta, alpha, omega]
     var beta_count: usize = 0;
@@ -544,15 +549,15 @@ test "collectFormulaJobs surfaces FormulaNotFound for unparseable JSON" {
     var http: malt.client.HttpClientPool = undefined;
     var api: malt.api.BrewApi = undefined;
     var store_inst: malt.store.Store = undefined;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
     var cache = malt.deps.FormulaCache.init(alloc);
     defer cache.deinit();
 
     try testing.expectError(
-        install.InstallError.FormulaNotFound,
-        install.collectFormulaJobs(
+        install_record.InstallError.FormulaNotFound,
+        install_download.collectFormulaJobs(
             .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst, .cache = &cache },
             "broken",
             "not-a-json",
@@ -584,13 +589,13 @@ test "collectFormulaJobs with post_install leaves the DB untouched" {
 
     var store_inst: malt.store.Store = undefined;
 
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
     var cache = malt.deps.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    _ = install.collectFormulaJobs(
+    _ = install_download.collectFormulaJobs(
         .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst, .cache = &cache },
         "needs-ruby",
         json,
@@ -647,13 +652,13 @@ test "collectFormulaJobs carries the _<revision> suffix in version_str" {
     var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
     var cache = malt.deps.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    try install.collectFormulaJobs(
+    try install_download.collectFormulaJobs(
         .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst, .cache = &cache },
         "rev",
         json,
@@ -687,13 +692,13 @@ test "collectFormulaJobs leaves plain-version formulas unchanged" {
     var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer jobs.deinit(alloc);
 
     var cache = malt.deps.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    try install.collectFormulaJobs(
+    try install_download.collectFormulaJobs(
         .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http, .db = &tdb.db, .store = &store_inst, .cache = &cache },
         "needs-ruby",
         json,
@@ -788,7 +793,7 @@ test "collectFormulaJobs leaves no parsed-tree leaks under testing.allocator (>=
     var api = malt.api.BrewApi.init(std.Options.debug_io, alloc, &real_http, cache_dir);
 
     var store_inst: malt.store.Store = undefined;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer {
         // Caller-owned job strings: name/version/sha/url/cellar are duped
         // into `alloc` so collectFormulaJobs can drop the parsed tree.
@@ -808,7 +813,7 @@ test "collectFormulaJobs leaves no parsed-tree leaks under testing.allocator (>=
     var cache = malt.deps.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    try install.collectFormulaJobs(
+    try install_download.collectFormulaJobs(
         .{ .io = std.Options.debug_io, .allocator = alloc, .api = &api, .http_pool = &http_pool, .db = &tdb.db, .store = &store_inst, .cache = &cache },
         "root",
         root_json,
@@ -827,14 +832,14 @@ test "collectFetchWorkerCount clamps to MAX_COLLECT_FETCH_WORKERS" {
     // MAX_COLLECT_FETCH_WORKERS threads, even on heavy graphs (40+ deps).
     // The old one-thread-per-dep loop would scale linearly; the pool
     // caps it so threads never outnumber HTTP client pool slots.
-    const cap = install.MAX_COLLECT_FETCH_WORKERS;
+    const cap = install_download.MAX_COLLECT_FETCH_WORKERS;
 
-    try testing.expectEqual(@as(usize, 0), install.collectFetchWorkerCount(0));
-    try testing.expectEqual(@as(usize, 1), install.collectFetchWorkerCount(1));
-    try testing.expectEqual(cap, install.collectFetchWorkerCount(cap));
-    try testing.expectEqual(cap, install.collectFetchWorkerCount(cap + 1));
-    try testing.expectEqual(cap, install.collectFetchWorkerCount(40));
-    try testing.expectEqual(cap, install.collectFetchWorkerCount(128));
+    try testing.expectEqual(@as(usize, 0), install_download.collectFetchWorkerCount(0));
+    try testing.expectEqual(@as(usize, 1), install_download.collectFetchWorkerCount(1));
+    try testing.expectEqual(cap, install_download.collectFetchWorkerCount(cap));
+    try testing.expectEqual(cap, install_download.collectFetchWorkerCount(cap + 1));
+    try testing.expectEqual(cap, install_download.collectFetchWorkerCount(40));
+    try testing.expectEqual(cap, install_download.collectFetchWorkerCount(128));
 }
 
 // --- dropTopLevelJobs (--only-dependencies seam) ---
@@ -845,7 +850,7 @@ test "collectFetchWorkerCount clamps to MAX_COLLECT_FETCH_WORKERS" {
 /// (`is_dep=false`).
 fn appendOwnedJob(
     alloc: std.mem.Allocator,
-    jobs: *std.ArrayList(install.DownloadJob),
+    jobs: *std.ArrayList(install_download.DownloadJob),
     name: []const u8,
     is_dep: bool,
     borrowed_json: []const u8,
@@ -874,7 +879,7 @@ test "dropTopLevelJobs removes the top-level job and frees its owned strings" {
     // Under testing.allocator the helper must free the dropped job's name,
     // version, sha, url, and cellar_type; otherwise the runner reports a leak.
     const alloc = testing.allocator;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer {
         for (jobs.items) |j| {
             alloc.free(j.name);
@@ -890,7 +895,7 @@ test "dropTopLevelJobs removes the top-level job and frees its owned strings" {
     try appendOwnedJob(alloc, &jobs, "beta", true, "{}");
     try appendOwnedJob(alloc, &jobs, "alpha", false, "{}");
 
-    install.dropTopLevelJobs(alloc, &jobs);
+    install_download.dropTopLevelJobs(alloc, &jobs);
 
     try testing.expectEqual(@as(usize, 1), jobs.items.len);
     try testing.expectEqualStrings("beta", jobs.items[0].name);
@@ -899,7 +904,7 @@ test "dropTopLevelJobs removes the top-level job and frees its owned strings" {
 
 test "dropTopLevelJobs is a no-op when every job is a dep" {
     const alloc = testing.allocator;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer {
         for (jobs.items) |j| {
             alloc.free(j.name);
@@ -915,7 +920,7 @@ test "dropTopLevelJobs is a no-op when every job is a dep" {
     try appendOwnedJob(alloc, &jobs, "beta", true, "{}");
     try appendOwnedJob(alloc, &jobs, "gamma", true, "{}");
 
-    install.dropTopLevelJobs(alloc, &jobs);
+    install_download.dropTopLevelJobs(alloc, &jobs);
 
     try testing.expectEqual(@as(usize, 2), jobs.items.len);
     try testing.expectEqualStrings("beta", jobs.items[0].name);
@@ -928,7 +933,7 @@ test "dropTopLevelJobs preserves dep order across mixed lists" {
     // beta). Order matters because the link phase walks deps before
     // dependents — anything out of order regresses findFailedDep.
     const alloc = testing.allocator;
-    var jobs: std.ArrayList(install.DownloadJob) = .empty;
+    var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
     defer {
         for (jobs.items) |j| {
             alloc.free(j.name);
@@ -946,7 +951,7 @@ test "dropTopLevelJobs preserves dep order across mixed lists" {
     try appendOwnedJob(alloc, &jobs, "dep_b", true, "{}");
     try appendOwnedJob(alloc, &jobs, "beta", false, "{}");
 
-    install.dropTopLevelJobs(alloc, &jobs);
+    install_download.dropTopLevelJobs(alloc, &jobs);
 
     try testing.expectEqual(@as(usize, 2), jobs.items.len);
     try testing.expectEqualStrings("dep_a", jobs.items[0].name);

@@ -8,6 +8,10 @@ const testing = std.testing;
 const malt = @import("malt");
 const test_io = @import("test_io");
 const install = @import("malt").install;
+const install_args = @import("malt").install_args;
+const install_local = @import("malt").install_local;
+const install_rb_parse = @import("malt").install_rb_parse;
+const install_record = @import("malt").install_record;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -17,67 +21,67 @@ const c = struct {
 // ─── isLocalFormulaPath ──────────────────────────────────────────────
 
 test "isLocalFormulaPath accepts a dot-relative .rb path" {
-    try testing.expect(install.isLocalFormulaPath("./wget.rb"));
-    try testing.expect(install.isLocalFormulaPath("../foo/wget.rb"));
+    try testing.expect(install_args.isLocalFormulaPath("./wget.rb"));
+    try testing.expect(install_args.isLocalFormulaPath("../foo/wget.rb"));
 }
 
 test "isLocalFormulaPath accepts an absolute .rb path" {
-    try testing.expect(install.isLocalFormulaPath("/tmp/wget.rb"));
-    try testing.expect(install.isLocalFormulaPath("/Users/me/formulas/wget.rb"));
+    try testing.expect(install_args.isLocalFormulaPath("/tmp/wget.rb"));
+    try testing.expect(install_args.isLocalFormulaPath("/Users/me/formulas/wget.rb"));
 }
 
 test "isLocalFormulaPath accepts a tilde-prefixed .rb path" {
-    try testing.expect(install.isLocalFormulaPath("~/formulas/wget.rb"));
+    try testing.expect(install_args.isLocalFormulaPath("~/formulas/wget.rb"));
 }
 
 test "isLocalFormulaPath accepts any slash-bearing .rb path" {
-    try testing.expect(install.isLocalFormulaPath("a/b/c/d.rb"));
+    try testing.expect(install_args.isLocalFormulaPath("a/b/c/d.rb"));
 }
 
 test "isLocalFormulaPath treats a tap-shape .rb path as local (tie-break)" {
     // The `.rb` suffix wins over the three-slash tap shape so the user
     // gets a clean "file not found" instead of a confusing GitHub 404.
-    try testing.expect(install.isLocalFormulaPath("user/repo/formula.rb"));
+    try testing.expect(install_args.isLocalFormulaPath("user/repo/formula.rb"));
 }
 
 test "isLocalFormulaPath rejects bare names, tap slugs, and non-rb paths" {
-    try testing.expect(!install.isLocalFormulaPath("wget"));
-    try testing.expect(!install.isLocalFormulaPath("user/repo/formula"));
-    try testing.expect(!install.isLocalFormulaPath("user/repo"));
-    try testing.expect(!install.isLocalFormulaPath("./notaformula"));
-    try testing.expect(!install.isLocalFormulaPath("/tmp/notaformula"));
-    try testing.expect(!install.isLocalFormulaPath(""));
+    try testing.expect(!install_args.isLocalFormulaPath("wget"));
+    try testing.expect(!install_args.isLocalFormulaPath("user/repo/formula"));
+    try testing.expect(!install_args.isLocalFormulaPath("user/repo"));
+    try testing.expect(!install_args.isLocalFormulaPath("./notaformula"));
+    try testing.expect(!install_args.isLocalFormulaPath("/tmp/notaformula"));
+    try testing.expect(!install_args.isLocalFormulaPath(""));
 }
 
 test "isLocalFormulaPath rejects a bare .rb filename with no separator" {
     // A bare `wget.rb` could shadow an API formula — require `--local`
     // or a `./` prefix for that case so the user opts in deliberately.
-    try testing.expect(!install.isLocalFormulaPath("wget.rb"));
+    try testing.expect(!install_args.isLocalFormulaPath("wget.rb"));
 }
 
 // ─── isAllowedArchiveUrl ─────────────────────────────────────────────
 
 test "isAllowedArchiveUrl accepts an https URL with a path" {
-    try testing.expect(install.isAllowedArchiveUrl("https://example.com/foo.tar.gz"));
-    try testing.expect(install.isAllowedArchiveUrl("https://ghcr.io/v2/a/b/blobs/sha256:abc"));
+    try testing.expect(install_args.isAllowedArchiveUrl("https://example.com/foo.tar.gz"));
+    try testing.expect(install_args.isAllowedArchiveUrl("https://ghcr.io/v2/a/b/blobs/sha256:abc"));
 }
 
 test "isAllowedArchiveUrl rejects plaintext HTTP (downgrade attack)" {
-    try testing.expect(!install.isAllowedArchiveUrl("http://example.com/foo.tar.gz"));
+    try testing.expect(!install_args.isAllowedArchiveUrl("http://example.com/foo.tar.gz"));
 }
 
 test "isAllowedArchiveUrl rejects file://, ftp://, data:, javascript:" {
-    try testing.expect(!install.isAllowedArchiveUrl("file:///etc/passwd"));
-    try testing.expect(!install.isAllowedArchiveUrl("ftp://example.com/foo"));
-    try testing.expect(!install.isAllowedArchiveUrl("data:text/plain,boom"));
-    try testing.expect(!install.isAllowedArchiveUrl("javascript:alert(1)"));
+    try testing.expect(!install_args.isAllowedArchiveUrl("file:///etc/passwd"));
+    try testing.expect(!install_args.isAllowedArchiveUrl("ftp://example.com/foo"));
+    try testing.expect(!install_args.isAllowedArchiveUrl("data:text/plain,boom"));
+    try testing.expect(!install_args.isAllowedArchiveUrl("javascript:alert(1)"));
 }
 
 test "isAllowedArchiveUrl rejects empty and whitespace" {
-    try testing.expect(!install.isAllowedArchiveUrl(""));
-    try testing.expect(!install.isAllowedArchiveUrl(" https://example.com/foo"));
-    try testing.expect(!install.isAllowedArchiveUrl("https"));
-    try testing.expect(!install.isAllowedArchiveUrl("https:/example.com"));
+    try testing.expect(!install_args.isAllowedArchiveUrl(""));
+    try testing.expect(!install_args.isAllowedArchiveUrl(" https://example.com/foo"));
+    try testing.expect(!install_args.isAllowedArchiveUrl("https"));
+    try testing.expect(!install_args.isAllowedArchiveUrl("https:/example.com"));
 }
 
 test "isAllowedArchiveUrl rejects scheme confusion (case sensitivity)" {
@@ -85,8 +89,8 @@ test "isAllowedArchiveUrl rejects scheme confusion (case sensitivity)" {
     // schemes are valid per RFC 3986 but almost never legitimate for
     // the archive URL of a real tap formula, and permitting them here
     // would make the allowlist attacker-tunable via case.
-    try testing.expect(!install.isAllowedArchiveUrl("HTTPS://example.com/foo"));
-    try testing.expect(!install.isAllowedArchiveUrl("Https://example.com/foo"));
+    try testing.expect(!install_args.isAllowedArchiveUrl("HTTPS://example.com/foo"));
+    try testing.expect(!install_args.isAllowedArchiveUrl("Https://example.com/foo"));
 }
 
 // ─── localErrorIsAnnounced ───────────────────────────────────────────
@@ -95,25 +99,25 @@ test "localErrorIsAnnounced covers errors with specific user-facing messages" {
     // Every error set variant that installLocalFormula / the shared
     // helper emits with its own `output.err` line must return true
     // here so the dispatch loop can skip the generic summary.
-    try testing.expect(install.localErrorIsAnnounced(install.InstallError.LocalFormulaNotReadable));
-    try testing.expect(install.localErrorIsAnnounced(install.InstallError.FormulaNotFound));
-    try testing.expect(install.localErrorIsAnnounced(install.InstallError.InsecureArchiveUrl));
-    try testing.expect(install.localErrorIsAnnounced(install.InstallError.DownloadFailed));
-    try testing.expect(install.localErrorIsAnnounced(install.InstallError.CellarFailed));
+    try testing.expect(install_record.localErrorIsAnnounced(install_record.InstallError.LocalFormulaNotReadable));
+    try testing.expect(install_record.localErrorIsAnnounced(install_record.InstallError.FormulaNotFound));
+    try testing.expect(install_record.localErrorIsAnnounced(install_record.InstallError.InsecureArchiveUrl));
+    try testing.expect(install_record.localErrorIsAnnounced(install_record.InstallError.DownloadFailed));
+    try testing.expect(install_record.localErrorIsAnnounced(install_record.InstallError.CellarFailed));
 }
 
 test "localErrorIsAnnounced returns false for unexpected errors" {
     // DB/record failures reach the dispatch loop without a dedicated
     // user-facing line, so the generic summary stays on for them.
-    try testing.expect(!install.localErrorIsAnnounced(install.InstallError.RecordFailed));
-    try testing.expect(!install.localErrorIsAnnounced(install.InstallError.LockError));
+    try testing.expect(!install_record.localErrorIsAnnounced(install_record.InstallError.RecordFailed));
+    try testing.expect(!install_record.localErrorIsAnnounced(install_record.InstallError.LockError));
 }
 
 test "localErrorIsAnnounced parameter is narrowed to InstallError" {
     // A widened `anyerror` makes the inner switch meaningless — any new
     // InstallError tag compiles without a handler. Pin the narrowing.
-    const info = @typeInfo(@TypeOf(install.localErrorIsAnnounced)).@"fn";
-    try testing.expect(info.params[0].type.? == install.InstallError);
+    const info = @typeInfo(@TypeOf(install_record.localErrorIsAnnounced)).@"fn";
+    try testing.expect(info.params[0].type.? == install_record.InstallError);
 }
 
 test "localErrorIsAnnounced handles every InstallError tag" {
@@ -121,60 +125,38 @@ test "localErrorIsAnnounced handles every InstallError tag" {
     // the exhaustive check in `localErrorIsAnnounced` already fails to
     // compile. This test also fails the whole module to compile, making
     // the missing coverage visible from `zig build test` output.
-    inline for (@typeInfo(install.InstallError).error_set.?) |err| {
-        const tag = @field(install.InstallError, err.name);
-        _ = install.localErrorIsAnnounced(tag);
+    inline for (@typeInfo(install_record.InstallError).error_set.?) |err| {
+        const tag = @field(install_record.InstallError, err.name);
+        _ = install_record.localErrorIsAnnounced(tag);
     }
 }
 
 // ─── describeLocalPermissionRisk ─────────────────────────────────────
 
 test "describeLocalPermissionRisk returns null when owner == euid and not world-writable" {
-    try testing.expect(install.describeLocalPermissionRisk(0o644, 501, 501) == null);
-    try testing.expect(install.describeLocalPermissionRisk(0o600, 501, 501) == null);
+    try testing.expect(install_local.describeLocalPermissionRisk(0o644, 501, 501) == null);
+    try testing.expect(install_local.describeLocalPermissionRisk(0o600, 501, 501) == null);
     // Other-readable is fine; only the write bit for 'other' is risky.
-    try testing.expect(install.describeLocalPermissionRisk(0o664, 501, 501) == null);
+    try testing.expect(install_local.describeLocalPermissionRisk(0o664, 501, 501) == null);
 }
 
 test "describeLocalPermissionRisk flags world-writable files" {
     // mode & 0o002 != 0 — anyone on the box can rewrite the formula
     // between checkout and install.
-    const got = install.describeLocalPermissionRisk(0o666, 501, 501) orelse return error.TestUnexpectedNull;
-    try testing.expectEqual(install.LocalPermissionRisk.world_writable, got);
+    const got = install_local.describeLocalPermissionRisk(0o666, 501, 501) orelse return error.TestUnexpectedNull;
+    try testing.expectEqual(install_local.LocalPermissionRisk.world_writable, got);
 }
 
 test "describeLocalPermissionRisk flags files not owned by effective user" {
-    const got = install.describeLocalPermissionRisk(0o644, 0, 501) orelse return error.TestUnexpectedNull;
-    try testing.expectEqual(install.LocalPermissionRisk.other_owner, got);
+    const got = install_local.describeLocalPermissionRisk(0o644, 0, 501) orelse return error.TestUnexpectedNull;
+    try testing.expectEqual(install_local.LocalPermissionRisk.other_owner, got);
 }
 
 test "describeLocalPermissionRisk prefers world_writable when both risks apply" {
     // World-writable is strictly worse than wrong-owner (any local
     // user can win the race), so it wins the single-risk-label slot.
-    const got = install.describeLocalPermissionRisk(0o666, 0, 501) orelse return error.TestUnexpectedNull;
-    try testing.expectEqual(install.LocalPermissionRisk.world_writable, got);
-}
-
-// ─── constantTimeEql ─────────────────────────────────────────────────
-
-test "constantTimeEql reports equal for identical slices" {
-    try testing.expect(install.constantTimeEql(u8, "deadbeef", "deadbeef"));
-    const zero = [_]u8{0} ** 32;
-    try testing.expect(install.constantTimeEql(u8, &zero, &zero));
-}
-
-test "constantTimeEql reports not-equal for differing content" {
-    try testing.expect(!install.constantTimeEql(u8, "deadbeef", "deadbeee"));
-    try testing.expect(!install.constantTimeEql(u8, "a" ** 64, "b" ** 64));
-}
-
-test "constantTimeEql reports not-equal for length mismatch" {
-    try testing.expect(!install.constantTimeEql(u8, "abc", "abcd"));
-    try testing.expect(!install.constantTimeEql(u8, "", "x"));
-}
-
-test "constantTimeEql handles empty slices" {
-    try testing.expect(install.constantTimeEql(u8, "", ""));
+    const got = install_local.describeLocalPermissionRisk(0o666, 0, 501) orelse return error.TestUnexpectedNull;
+    try testing.expectEqual(install_local.LocalPermissionRisk.world_writable, got);
 }
 
 // ─── parseCaskBinary ─────────────────────────────────────────────────
@@ -186,7 +168,7 @@ test "parseCaskBinary: extracts the basic binary directive" {
         \\  binary "longbridge"
         \\end
     ;
-    try testing.expectEqualStrings("longbridge", install.parseCaskBinary(rb).?);
+    try testing.expectEqualStrings("longbridge", install_rb_parse.parseCaskBinary(rb).?);
 }
 
 test "parseCaskBinary: tolerates extra arguments on the directive" {
@@ -198,7 +180,7 @@ test "parseCaskBinary: tolerates extra arguments on the directive" {
         \\  binary "longbridge", target: "lb"
         \\end
     ;
-    try testing.expectEqualStrings("longbridge", install.parseCaskBinary(rb).?);
+    try testing.expectEqualStrings("longbridge", install_rb_parse.parseCaskBinary(rb).?);
 }
 
 test "parseCaskBinary: returns null on formulas with no binary directive" {
@@ -209,7 +191,7 @@ test "parseCaskBinary: returns null on formulas with no binary directive" {
         \\  sha256 "deadbeef"
         \\end
     ;
-    try testing.expect(install.parseCaskBinary(rb) == null);
+    try testing.expect(install_rb_parse.parseCaskBinary(rb) == null);
 }
 
 test "parseCaskBinary: ignores mid-line 'binary' substrings" {
@@ -220,12 +202,12 @@ test "parseCaskBinary: ignores mid-line 'binary' substrings" {
         \\  desc "binary \"fake\" is just a comment"
         \\end
     ;
-    try testing.expect(install.parseCaskBinary(rb) == null);
+    try testing.expect(install_rb_parse.parseCaskBinary(rb) == null);
 }
 
 test "parseCaskBinary: indented directive still matches" {
     const rb = "  binary \"sley\"\n";
-    try testing.expectEqualStrings("sley", install.parseCaskBinary(rb).?);
+    try testing.expectEqualStrings("sley", install_rb_parse.parseCaskBinary(rb).?);
 }
 
 // ─── parseCaskApp ────────────────────────────────────────────────────
@@ -238,7 +220,7 @@ test "parseCaskApp: extracts the bundle from a DMG-shipping cask" {
         \\  app "Deck.app"
         \\end
     ;
-    try testing.expectEqualStrings("Deck.app", install.parseCaskApp(rb).?);
+    try testing.expectEqualStrings("Deck.app", install_rb_parse.parseCaskApp(rb).?);
 }
 
 test "parseCaskApp: returns null for formulas and binary-only casks" {
@@ -249,14 +231,14 @@ test "parseCaskApp: returns null for formulas and binary-only casks" {
         \\  bin.install "wget"
         \\end
     ;
-    try testing.expect(install.parseCaskApp(formula) == null);
+    try testing.expect(install_rb_parse.parseCaskApp(formula) == null);
 
     const bin_cask =
         \\cask "tool" do
         \\  binary "tool"
         \\end
     ;
-    try testing.expect(install.parseCaskApp(bin_cask) == null);
+    try testing.expect(install_rb_parse.parseCaskApp(bin_cask) == null);
 }
 
 test "parseCaskApp: ignores mid-line 'app' substrings" {
@@ -267,7 +249,7 @@ test "parseCaskApp: ignores mid-line 'app' substrings" {
         \\  desc "the app \"Bogus.app\" is just text here"
         \\end
     ;
-    try testing.expect(install.parseCaskApp(rb) == null);
+    try testing.expect(install_rb_parse.parseCaskApp(rb) == null);
 }
 
 // ─── tapCaskArtifactKind ─────────────────────────────────────────────
@@ -275,47 +257,47 @@ test "parseCaskApp: ignores mid-line 'app' substrings" {
 const cask_mod = malt.cask;
 
 test "tapCaskArtifactKind: .dmg URLs always route to the cask installer" {
-    try testing.expectEqual(cask_mod.ArtifactType.dmg, install.tapCaskArtifactKind("https://example.com/Tool.dmg", false).?);
-    try testing.expectEqual(cask_mod.ArtifactType.dmg, install.tapCaskArtifactKind("https://cdn.example.com/Tool.dmg?token=abc", false).?);
+    try testing.expectEqual(cask_mod.ArtifactType.dmg, install_rb_parse.tapCaskArtifactKind("https://example.com/Tool.dmg", false).?);
+    try testing.expectEqual(cask_mod.ArtifactType.dmg, install_rb_parse.tapCaskArtifactKind("https://cdn.example.com/Tool.dmg?token=abc", false).?);
 }
 
 test "tapCaskArtifactKind: .pkg URLs always route to the cask installer" {
-    try testing.expectEqual(cask_mod.ArtifactType.pkg, install.tapCaskArtifactKind("https://example.com/Tool.pkg", false).?);
+    try testing.expectEqual(cask_mod.ArtifactType.pkg, install_rb_parse.tapCaskArtifactKind("https://example.com/Tool.pkg", false).?);
 }
 
 test "tapCaskArtifactKind: .zip routes only when an app directive is set" {
     // Without `app`, the URL likely points at a formula bottle — leave
     // it on the existing extract-to-Cellar path.
-    try testing.expect(install.tapCaskArtifactKind("https://example.com/tool.zip", false) == null);
+    try testing.expect(install_rb_parse.tapCaskArtifactKind("https://example.com/tool.zip", false) == null);
     // With `app`, the zip wraps an `.app` bundle, so dispatch to cask.
-    try testing.expectEqual(cask_mod.ArtifactType.zip, install.tapCaskArtifactKind("https://example.com/Tool.zip", true).?);
+    try testing.expectEqual(cask_mod.ArtifactType.zip, install_rb_parse.tapCaskArtifactKind("https://example.com/Tool.zip", true).?);
 }
 
 test "tapCaskArtifactKind: tar.gz formula archives stay on the keg path" {
-    try testing.expect(install.tapCaskArtifactKind("https://example.com/tool.tar.gz", false) == null);
-    try testing.expect(install.tapCaskArtifactKind("https://example.com/tool.tgz", true) == null);
-    try testing.expect(install.tapCaskArtifactKind("https://example.com/tool.tar.xz", false) == null);
+    try testing.expect(install_rb_parse.tapCaskArtifactKind("https://example.com/tool.tar.gz", false) == null);
+    try testing.expect(install_rb_parse.tapCaskArtifactKind("https://example.com/tool.tgz", true) == null);
+    try testing.expect(install_rb_parse.tapCaskArtifactKind("https://example.com/tool.tar.xz", false) == null);
 }
 
 // ─── interpolateVersion ──────────────────────────────────────────────
 
 test "interpolateVersion substitutes #{version} once in the URL" {
     var buf: [256]u8 = undefined;
-    const got = install.interpolateVersion(&buf, "https://example.com/v#{version}/foo-#{version}.tar.gz", "1.2.3");
+    const got = install_args.interpolateVersion(&buf, "https://example.com/v#{version}/foo-#{version}.tar.gz", "1.2.3");
     // Only the first occurrence is replaced (matches the tap-install contract).
     try testing.expect(std.mem.indexOf(u8, got, "1.2.3") != null);
 }
 
 test "interpolateVersion passes through an URL without the needle" {
     var buf: [256]u8 = undefined;
-    const got = install.interpolateVersion(&buf, "https://example.com/foo.tar.gz", "1.2.3");
+    const got = install_args.interpolateVersion(&buf, "https://example.com/foo.tar.gz", "1.2.3");
     try testing.expectEqualStrings("https://example.com/foo.tar.gz", got);
 }
 
 test "interpolateVersion falls back to the raw URL when the buffer is too small" {
     var buf: [8]u8 = undefined;
     const url = "https://example.com/v#{version}/foo.tar.gz";
-    const got = install.interpolateVersion(&buf, url, "1.2.3");
+    const got = install_args.interpolateVersion(&buf, url, "1.2.3");
     try testing.expectEqualStrings(url, got);
 }
 
@@ -323,7 +305,7 @@ test "interpolateVersion falls back to the raw URL when the buffer is too small"
 
 test "interpolateUrl substitutes #{version} and #{arch} together" {
     var buf: [256]u8 = undefined;
-    const got = install.interpolateUrl(
+    const got = install_args.interpolateUrl(
         &buf,
         "https://example.com/tool-#{version}/tool#{arch}.dmg",
         "1.2.3",
@@ -339,7 +321,7 @@ test "interpolateUrl elides #{arch} when the captured token is empty" {
     // Intel rows in real casks routinely set `intel: ""` — substituting
     // the empty string is the correct behaviour, not "skip the needle".
     var buf: [256]u8 = undefined;
-    const got = install.interpolateUrl(
+    const got = install_args.interpolateUrl(
         &buf,
         "https://example.com/tool#{arch}.dmg",
         "1.2.3",
@@ -350,7 +332,7 @@ test "interpolateUrl elides #{arch} when the captured token is empty" {
 
 test "interpolateUrl is a no-op when neither needle is present" {
     var buf: [256]u8 = undefined;
-    const got = install.interpolateUrl(
+    const got = install_args.interpolateUrl(
         &buf,
         "https://example.com/static.tar.gz",
         "9.9.9",
@@ -362,7 +344,7 @@ test "interpolateUrl is a no-op when neither needle is present" {
 test "interpolateUrl falls back to the raw URL when the buffer is too small" {
     var buf: [8]u8 = undefined;
     const url = "https://example.com/v#{version}/tool#{arch}.dmg";
-    const got = install.interpolateUrl(&buf, url, "1.2.3", "-aarch64");
+    const got = install_args.interpolateUrl(&buf, url, "1.2.3", "-aarch64");
     try testing.expectEqualStrings(url, got);
 }
 
@@ -370,7 +352,7 @@ test "interpolateUrl falls back to the raw URL when the buffer is too small" {
 // cask DSL allows a URL like `.../#{version}/foo-#{version}.tar.gz`.
 test "interpolateUrl substitutes every #{version} occurrence" {
     var buf: [256]u8 = undefined;
-    const got = install.interpolateUrl(
+    const got = install_args.interpolateUrl(
         &buf,
         "https://example.com/v#{version}/foo-#{version}.tar.gz",
         "1.2.3",
@@ -387,7 +369,7 @@ test "interpolateUrl substitutes every #{version} occurrence" {
 // the single-pass walker pins this.
 test "interpolateUrl does not double-substitute when version contains arch needle" {
     var buf: [256]u8 = undefined;
-    const got = install.interpolateUrl(
+    const got = install_args.interpolateUrl(
         &buf,
         "https://example.com/#{version}/foo#{arch}.dmg",
         "v#{arch}",
@@ -403,7 +385,7 @@ test "interpolateUrl does not double-substitute when version contains arch needl
 // Treat them as opaque text.
 test "interpolateUrl treats arch_token as opaque text" {
     var buf: [256]u8 = undefined;
-    const got = install.interpolateUrl(
+    const got = install_args.interpolateUrl(
         &buf,
         "https://example.com/foo#{arch}.tar.gz",
         "1.0",
@@ -420,7 +402,7 @@ test "interpolateUrl treats arch_token as opaque text" {
 test "interpolateUrl succeeds when the buffer is exactly the output length" {
     const expected = "https://example.com/foo-x86.dmg";
     var buf: [expected.len]u8 = undefined;
-    const got = install.interpolateUrl(
+    const got = install_args.interpolateUrl(
         &buf,
         "https://example.com/foo#{arch}.dmg",
         "1.0",
@@ -434,7 +416,7 @@ test "interpolateUrl succeeds when the buffer is exactly the output length" {
 test "expandTildePath passes non-tilde input through unchanged" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.app_ctx.processEnviron() };
     var buf: [256]u8 = undefined;
-    const got = install.expandTildePath(&ctx, &buf, "./foo.rb") orelse return error.TestUnexpectedNull;
+    const got = install_args.expandTildePath(&ctx, &buf, "./foo.rb") orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("./foo.rb", got);
 }
 
@@ -445,14 +427,14 @@ test "expandTildePath rewrites ~/ into $HOME/" {
 
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.app_ctx.processEnviron() };
     var buf: [256]u8 = undefined;
-    const got = install.expandTildePath(&ctx, &buf, "~/formulas/wget.rb") orelse return error.TestUnexpectedNull;
+    const got = install_args.expandTildePath(&ctx, &buf, "~/formulas/wget.rb") orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("/tmp/fake_home_for_tilde_test/formulas/wget.rb", got);
 }
 
 test "expandTildePath leaves `~alice/foo` alone (no `/` after `~`)" {
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.app_ctx.processEnviron() };
     var buf: [256]u8 = undefined;
-    const got = install.expandTildePath(&ctx, &buf, "~alice/foo.rb") orelse return error.TestUnexpectedNull;
+    const got = install_args.expandTildePath(&ctx, &buf, "~alice/foo.rb") orelse return error.TestUnexpectedNull;
     try testing.expectEqualStrings("~alice/foo.rb", got);
 }
 
@@ -460,7 +442,7 @@ test "expandTildePath returns null when HOME is unset and ~/ is used" {
     _ = c.unsetenv("HOME");
     const ctx: malt.app_ctx.AppCtx = .{ .io = std.Options.debug_io, .environ = malt.app_ctx.processEnviron() };
     var buf: [256]u8 = undefined;
-    try testing.expect(install.expandTildePath(&ctx, &buf, "~/foo.rb") == null);
+    try testing.expect(install_args.expandTildePath(&ctx, &buf, "~/foo.rb") == null);
 }
 
 // ─── execute() --local dispatch tests ────────────────────────────────
@@ -811,7 +793,7 @@ test "isInstalled sees a locally-recorded keg by name" {
 
     var db = try sqlite.Database.open(db_path);
     defer db.close();
-    try testing.expect(install.isInstalled(&db, "wget"));
+    try testing.expect(install_record.isInstalled(&db, "wget"));
 }
 
 test "uninstall + purge CLI flow treats tap='local' rows like any other keg" {

@@ -76,7 +76,7 @@ fn anyPlatformFormulaJson(
     , .{ name, name, version, name, sha, sha });
 }
 
-fn makeJob(name: []const u8, version: []const u8, sha: []const u8) malt.install.DownloadJob {
+fn makeJob(name: []const u8, version: []const u8, sha: []const u8) malt.install_download.DownloadJob {
     return .{
         .name = name,
         .version_str = version,
@@ -137,16 +137,16 @@ test "installPoolWorker drains every job against a warm store and stamps each re
     try schema.initSchema(&db);
     var store = malt.store.Store.init(ctx.io, testing.allocator, &db, prefix);
 
-    var jobs = [_]malt.install.DownloadJob{
+    var jobs = [_]malt.install_download.DownloadJob{
         makeJob("alpha", "1.0", sha_a),
         makeJob("beta", "2.0", sha_b),
     };
-    var results: [2]malt.install.MaterializeResult = .{
+    var results: [2]malt.install_download.MaterializeResult = .{
         .{ .ok = false, .err = null },
         .{ .ok = false, .err = null },
     };
 
-    var pool: malt.install.InstallPool = .{
+    var pool: malt.install_download.InstallPool = .{
         .ctx = &ctx,
         .next_idx = std.atomic.Value(usize).init(0),
         .jobs = &jobs,
@@ -158,7 +158,7 @@ test "installPoolWorker drains every job against a warm store and stamps each re
         .results = &results,
     };
 
-    malt.install.installPoolWorker(&pool);
+    malt.install_download.installPoolWorker(&pool);
 
     // Every slot must have been touched — atomic index handed each one
     // out exactly once; success means warm path landed both kegs.
@@ -231,18 +231,18 @@ test "installPoolWorker drains a 3-job pool concurrently across two workers" {
     try schema.initSchema(&db);
     var store = malt.store.Store.init(ctx.io, testing.allocator, &db, prefix);
 
-    var jobs = [_]malt.install.DownloadJob{
+    var jobs = [_]malt.install_download.DownloadJob{
         makeJob("one", "1.0", sha_a),
         makeJob("two", "2.0", sha_b),
         makeJob("three", "3.0", sha_c),
     };
-    var results: [3]malt.install.MaterializeResult = .{
+    var results: [3]malt.install_download.MaterializeResult = .{
         .{ .ok = false, .err = null },
         .{ .ok = false, .err = null },
         .{ .ok = false, .err = null },
     };
 
-    var pool: malt.install.InstallPool = .{
+    var pool: malt.install_download.InstallPool = .{
         .ctx = &ctx,
         .next_idx = std.atomic.Value(usize).init(0),
         .jobs = &jobs,
@@ -254,8 +254,8 @@ test "installPoolWorker drains a 3-job pool concurrently across two workers" {
         .results = &results,
     };
 
-    const t1 = try std.Thread.spawn(.{}, malt.install.installPoolWorker, .{&pool});
-    const t2 = try std.Thread.spawn(.{}, malt.install.installPoolWorker, .{&pool});
+    const t1 = try std.Thread.spawn(.{}, malt.install_download.installPoolWorker, .{&pool});
+    const t2 = try std.Thread.spawn(.{}, malt.install_download.installPoolWorker, .{&pool});
     t1.join();
     t2.join();
 
@@ -333,10 +333,10 @@ test "installPoolWorker propagates the specific CellarError variant into result.
     try schema.initSchema(&db);
     var store = malt.store.Store.init(ctx.io, testing.allocator, &db, prefix);
 
-    var jobs = [_]malt.install.DownloadJob{makeJob(long_name, long_ver, sha)};
-    var results: [1]malt.install.MaterializeResult = .{.{ .ok = false, .err = null }};
+    var jobs = [_]malt.install_download.DownloadJob{makeJob(long_name, long_ver, sha)};
+    var results: [1]malt.install_download.MaterializeResult = .{.{ .ok = false, .err = null }};
 
-    var pool: malt.install.InstallPool = .{
+    var pool: malt.install_download.InstallPool = .{
         .ctx = &ctx,
         .next_idx = std.atomic.Value(usize).init(0),
         .jobs = &jobs,
@@ -348,7 +348,7 @@ test "installPoolWorker propagates the specific CellarError variant into result.
         .results = &results,
     };
 
-    malt.install.installPoolWorker(&pool);
+    malt.install_download.installPoolWorker(&pool);
 
     // Download phase implicitly succeeded (store.exists was true), so
     // job.succeeded stays true and the serial link phase routes this
@@ -400,16 +400,16 @@ test "installPoolWorker bails between jobs when Ctrl-C fires" {
     try schema.initSchema(&db);
     var store = malt.store.Store.init(ctx.io, testing.allocator, &db, prefix);
 
-    var jobs = [_]malt.install.DownloadJob{
+    var jobs = [_]malt.install_download.DownloadJob{
         makeJob("alpha", "1.0", sha_a),
         makeJob("beta", "2.0", sha_b),
     };
-    var results: [2]malt.install.MaterializeResult = .{
+    var results: [2]malt.install_download.MaterializeResult = .{
         .{ .ok = false, .err = null },
         .{ .ok = false, .err = null },
     };
 
-    var pool: malt.install.InstallPool = .{
+    var pool: malt.install_download.InstallPool = .{
         .ctx = &ctx,
         .next_idx = std.atomic.Value(usize).init(0),
         .jobs = &jobs,
@@ -424,7 +424,7 @@ test "installPoolWorker bails between jobs when Ctrl-C fires" {
     malt.signals.setInterruptedForTest(true);
     defer malt.signals.setInterruptedForTest(false);
 
-    malt.install.installPoolWorker(&pool);
+    malt.install_download.installPoolWorker(&pool);
 
     // Nothing got drained: the worker noticed the interrupt before its
     // first fetchAdd, so both jobs stay in their pre-pool state.
@@ -460,10 +460,10 @@ test "installPoolWorker leaves the result untouched and marks job not-succeeded 
     try schema.initSchema(&db);
     var store = malt.store.Store.init(ctx.io, testing.allocator, &db, prefix);
 
-    var jobs = [_]malt.install.DownloadJob{makeJob("ghost", "0.1", "deadbeef" ** 8)};
-    var results: [1]malt.install.MaterializeResult = .{.{ .ok = false, .err = null }};
+    var jobs = [_]malt.install_download.DownloadJob{makeJob("ghost", "0.1", "deadbeef" ** 8)};
+    var results: [1]malt.install_download.MaterializeResult = .{.{ .ok = false, .err = null }};
 
-    var pool: malt.install.InstallPool = .{
+    var pool: malt.install_download.InstallPool = .{
         .ctx = &ctx,
         .next_idx = std.atomic.Value(usize).init(0),
         .jobs = &jobs,
@@ -475,7 +475,7 @@ test "installPoolWorker leaves the result untouched and marks job not-succeeded 
         .results = &results,
     };
 
-    malt.install.installPoolWorker(&pool);
+    malt.install_download.installPoolWorker(&pool);
 
     // collectFormulaJobs is the only legitimate path into the pool and
     // always pre-caches the formula; a miss here is a programming error.

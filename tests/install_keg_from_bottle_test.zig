@@ -68,8 +68,8 @@ test "installKegFromBottle short-circuits to NoBottle when no platform bottle re
     var store = malt.store.Store.init(ctx.io, testing.allocator, &db, prefix);
 
     try testing.expectError(
-        malt.install.InstallError.NoBottle,
-        malt.install.installKegFromBottle(
+        malt.install_record.InstallError.NoBottle,
+        malt.install_download.installKegFromBottle(
             &ctx,
             testing.allocator,
             .{ .ghcr = &ghcr, .http = &http, .store = &store },
@@ -141,7 +141,7 @@ test "installKegFromBottle skips the download branch when the store already hold
     try schema.initSchema(&db);
     var store = malt.store.Store.init(ctx.io, testing.allocator, &db, prefix);
 
-    const result = try malt.install.installKegFromBottle(
+    const result = try malt.install_download.installKegFromBottle(
         &ctx,
         testing.allocator,
         .{ .ghcr = &ghcr, .http = &http, .store = &store },
@@ -225,8 +225,8 @@ test "installKegFromBottle stamps the specific CellarError variant into cellar_d
 
     var cellar_diag: ?malt.cellar.CellarError = null;
     try testing.expectError(
-        malt.install.InstallError.CellarFailed,
-        malt.install.installKegFromBottle(
+        malt.install_record.InstallError.CellarFailed,
+        malt.install_download.installKegFromBottle(
             &ctx,
             testing.allocator,
             .{
