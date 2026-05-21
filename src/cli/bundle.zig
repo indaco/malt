@@ -21,34 +21,46 @@ const services_cmd = @import("services.zig");
 // install/tap/services primitives. The opaque `ctx` slot carries the
 // process-wide AppCtx so the dispatch helpers can thread io / environ
 // through to install/tap/services without re-deriving them.
-fn cliInstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
-    const app_ctx = appCtxFromOpaque(ctx);
-    return install_cmd.installAll(app_ctx, allocator, &.{name}, .{});
+//
+// CLI primitives already print rich per-failure diagnostics before
+// returning, so the wrapper narrows everything except OOM to
+// DispatchFailed — the runner records the kind+name and the dispatcher
+// type stays closed.
+fn narrowDispatch(e: anyerror) runner_mod.DispatchError {
+    return switch (e) {
+        error.OutOfMemory => runner_mod.DispatchError.OutOfMemory,
+        else => runner_mod.DispatchError.DispatchFailed,
+    };
 }
 
-fn cliInstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+fn cliInstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
     const app_ctx = appCtxFromOpaque(ctx);
-    return install_cmd.installAll(app_ctx, allocator, &.{name}, .{ .cask = true });
+    install_cmd.installAll(app_ctx, allocator, &.{name}, .{}) catch |e| return narrowDispatch(e);
 }
 
-fn cliTapAdd(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+fn cliInstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
     const app_ctx = appCtxFromOpaque(ctx);
-    return tap_cmd.tapAdd(app_ctx, allocator, name);
+    install_cmd.installAll(app_ctx, allocator, &.{name}, .{ .cask = true }) catch |e| return narrowDispatch(e);
 }
 
-fn cliServiceStart(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+fn cliTapAdd(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
     const app_ctx = appCtxFromOpaque(ctx);
-    return services_cmd.servicesStart(app_ctx, allocator, name);
+    tap_cmd.tapAdd(app_ctx, allocator, name) catch |e| return narrowDispatch(e);
 }
 
-fn cliUninstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+fn cliServiceStart(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
     const app_ctx = appCtxFromOpaque(ctx);
-    return uninstall_cmd.execute(app_ctx, allocator, &.{name});
+    services_cmd.servicesStart(app_ctx, allocator, name) catch |e| return narrowDispatch(e);
 }
 
-fn cliUninstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+fn cliUninstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) cleanup_mod.DispatchError!void {
     const app_ctx = appCtxFromOpaque(ctx);
-    return uninstall_cmd.execute(app_ctx, allocator, &.{ "--cask", name });
+    uninstall_cmd.execute(app_ctx, allocator, &.{name}) catch |e| return narrowDispatch(e);
+}
+
+fn cliUninstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) cleanup_mod.DispatchError!void {
+    const app_ctx = appCtxFromOpaque(ctx);
+    uninstall_cmd.execute(app_ctx, allocator, &.{ "--cask", name }) catch |e| return narrowDispatch(e);
 }
 
 /// Cast the dispatcher's opaque `ctx` slot back to a borrowed AppCtx pointer.
