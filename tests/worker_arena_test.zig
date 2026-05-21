@@ -1,8 +1,11 @@
-//! malt — worker-local arena stress test (S7)
+//! malt — worker-local arena stress test
 //!
-//! Validates the invariant S7 introduced: each parallel worker in the
-//! install / search paths owns its own `ArenaAllocator` on
-//! `page_allocator`, never sharing a bump-pointer across threads.
+//! Validates the cross-thread invariant: each parallel worker in the
+//! install / search paths owns its own `ArenaAllocator` and never shares
+//! a bump-pointer across threads. Workers now take their arena backing
+//! from the caller (production uses `smp_allocator`); the stress here
+//! drives the same shape under `testing.allocator` so leak coverage
+//! extends across the worker boundary.
 //!
 //! The test does not exercise `install.zig` / `search.zig` directly —
 //! those pull in the full HTTP + DB stack. Instead it mirrors the
@@ -54,7 +57,7 @@ test "each parallel worker has its own arena; results survive per-worker deinit"
     }
     for (ctxs, 0..) |*c, i| {
         c.* = .{
-            .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+            .arena = std.heap.ArenaAllocator.init(testing.allocator),
             .seed = @as(u64, i) + 1,
         };
     }
@@ -98,7 +101,7 @@ test "spawn-failure fallback path still runs the worker inline" {
     // context's `run` must be callable on the caller thread and
     // produce the same result shape as the spawned variant.
     var ctx: Ctx = .{
-        .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+        .arena = std.heap.ArenaAllocator.init(testing.allocator),
         .seed = 42,
     };
     defer ctx.arena.deinit();

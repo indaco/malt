@@ -30,23 +30,13 @@ const ghcr_mod = @import("../net/ghcr.zig");
 const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
 const help = @import("help.zig");
-
 const args_mod = @import("install/args.zig");
-const download_mod = @import("install/download.zig");
-const ghcr_url_mod = @import("install/ghcr_url.zig");
-const local_mod = @import("install/local.zig");
-const post_install_mod = @import("install/post_install.zig");
-const rb_parse_mod = @import("install/rb_parse.zig");
-const record_mod = @import("install/record.zig");
-
-// Internal aliases for names the orchestrator body uses. Names not in
-// this block are reached via their submodule (`args_mod.X`, etc.) or
-// only consumed by tests through `lib.install_<sub>.X`.
 const max_prefix_sane_len = args_mod.max_prefix_sane_len;
 const checkPrefixSane = args_mod.checkPrefixSane;
 const isTapFormula = args_mod.isTapFormula;
 const isLocalFormulaPath = args_mod.isLocalFormulaPath;
 const isSelfInstall = args_mod.isSelfInstall;
+const download_mod = @import("install/download.zig");
 const DownloadJob = download_mod.DownloadJob;
 const collectFormulaJobs = download_mod.collectFormulaJobs;
 const findFailedDep = download_mod.findFailedDep;
@@ -56,10 +46,15 @@ const MaterializeResult = download_mod.MaterializeResult;
 const InstallPool = download_mod.InstallPool;
 const installPoolWorker = download_mod.installPoolWorker;
 const progressBridge = download_mod.progressBridge;
+const ghcr_url_mod = @import("install/ghcr_url.zig");
 const parseGhcrUrl = ghcr_url_mod.parseGhcrUrl;
+const local_mod = @import("install/local.zig");
 const installTapFormula = local_mod.installTapFormula;
 const installLocalFormula = local_mod.installLocalFormula;
+const post_install_mod = @import("install/post_install.zig");
 const drive = post_install_mod.drive;
+const rb_parse_mod = @import("install/rb_parse.zig");
+const record_mod = @import("install/record.zig");
 const InstallError = record_mod.InstallError;
 const recordKeg = record_mod.recordKeg;
 const deleteKeg = record_mod.deleteKeg;
@@ -67,6 +62,9 @@ const recordDeps = record_mod.recordDeps;
 const ensureDirs = record_mod.ensureDirs;
 const localErrorIsAnnounced = record_mod.localErrorIsAnnounced;
 
+// Internal aliases for names the orchestrator body uses. Names not in
+// this block are reached via their submodule (`args_mod.X`, etc.) or
+// only consumed by tests through `lib.install_<sub>.X`.
 /// Wipe `<prefix>/Cellar/<name>/<version>` so a `--force` reinstall can
 /// re-materialize on top of it. No-op when the dir is missing or the
 /// path overflows the buffer; failures are best-effort because the
@@ -618,6 +616,7 @@ fn executeWithOpts(
                 .db = &db,
                 .store = &store,
                 .cache = &formula_cache,
+                .worker_backing = std.heap.smp_allocator,
             }, pkg_name, formula_json, force, &all_jobs) catch |e| {
                 output.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
                 continue;
@@ -775,6 +774,7 @@ fn executeWithOpts(
             .store = &store,
             .cache = &formula_cache,
             .results = mats,
+            .worker_backing = std.heap.smp_allocator,
         };
 
         const pool_threads = allocator.alloc(std.Thread, worker_count) catch

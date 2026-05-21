@@ -419,10 +419,11 @@ fn runPool(
         for (ctxs) |*c| c.arena.deinit();
         allocator.free(ctxs);
     }
+    // Thread-safe heap for per-row worker arenas.
     for (ctxs, 0..) |*c, i| c.* = .{
         .io = ctx.io,
         .environ = ctx.environ,
-        .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+        .arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator),
         .pool = &http_pool,
         .cache_dir = cache_dir,
         .row = kegs[i],
@@ -459,6 +460,27 @@ fn runPool(
     for (ctxs) |c| {
         if (c.err) |e| return e;
     }
+}
+
+test "WorkerCtx: per-row arena accepts testing.allocator backing without leaking" {
+    // Pin the per-row dupe + KB-scale alloc + deinit shape. Production
+    // backs the same arena with `smp_allocator`; the inline test
+    // guarantees `testing.allocator` still works so future leak coverage
+    // can land here without re-plumbing.
+    var wctx: WorkerCtx = .{
+        .io = std.Options.debug_io,
+        .environ = std.process.Environ.empty,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+        .pool = undefined,
+        .cache_dir = "",
+        .row = .{ .name = "", .version = "" },
+        .kind = .formula,
+    };
+    defer wctx.arena.deinit();
+
+    const a = wctx.arena.allocator();
+    _ = try a.dupe(u8, "wget");
+    _ = try a.alloc(u8, 1024);
 }
 
 test "outdatedWorkerCount caps at the default for large N" {

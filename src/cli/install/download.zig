@@ -3,24 +3,23 @@
 //! worker pools used by `collectFormulaJobs` and the execute flow.
 
 const std = @import("std");
+
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
-const sqlite = @import("../../db/sqlite.zig");
-const formula_mod = @import("../../core/formula.zig");
 const bottle_mod = @import("../../core/bottle.zig");
-const store_mod = @import("../../core/store.zig");
 const cellar_mod = @import("../../core/cellar.zig");
 const deps_mod = @import("../../core/deps.zig");
+const formula_mod = @import("../../core/formula.zig");
+const signals = @import("../../core/signals.zig");
+const store_mod = @import("../../core/store.zig");
+const sqlite = @import("../../db/sqlite.zig");
+const atomic = @import("../../fs/atomic.zig");
+const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
 const ghcr_mod = @import("../../net/ghcr.zig");
-const api_mod = @import("../../net/api.zig");
-const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
-
-const signals = @import("../../core/signals.zig");
 const ghcr_url = @import("ghcr_url.zig");
 const record = @import("record.zig");
-
 const InstallError = record.InstallError;
 
 /// Named-field bundle for `collectFormulaJobs` so callers stop threading
@@ -35,6 +34,10 @@ pub const InstallJobDeps = struct {
     store: *store_mod.Store,
     /// Shared parsed-formula cache for the whole install run.
     cache: *deps_mod.FormulaCache,
+    /// Per-worker arena backing for the dep-fetch pool. Caller-supplied
+    /// so tests run workers under `testing.allocator` for leak coverage;
+    /// production keeps a thread-safe heap (typically `smp_allocator`).
+    worker_backing: std.mem.Allocator,
 };
 
 /// A bottle download job for parallel processing.
@@ -106,9 +109,9 @@ pub fn isDeterministicDownloadError(err: bottle_mod.BottleError) bool {
 }
 
 /// Per-dep worker context for parallel formula fetching. Owns its own
-/// `ArenaAllocator` backed by `page_allocator` so workers never touch
-/// a shared bump-pointer and the resolve path stays off the caller's
-/// allocator on a cross-thread boundary.
+/// `ArenaAllocator` backed by `InstallJobDeps.worker_backing` so workers
+/// never touch a shared bump-pointer and the resolve path stays off the
+/// caller's allocator on a cross-thread boundary.
 ///
 /// Why the pool on the HTTP side: creating a fresh `HttpClient` per
 /// worker paid a full TLS context + cert store setup per dep. For
@@ -269,8 +272,8 @@ pub fn collectFormulaJobs(
     // borrows a client from the shared `http_pool` for the duration
     // of its request so TLS contexts are reused across deps.
     //
-    // Allocator strategy (S7): each worker owns a `FetchFormulaCtx`
-    // with its own `ArenaAllocator` on `page_allocator` — no shared
+    // Allocator strategy: each worker owns a `FetchFormulaCtx` with its
+    // own `ArenaAllocator` over `ctx.worker_backing` — no shared
     // bump-pointer across threads. JSON bodies live in the worker's
     // arena until after `join`, then get duped into the caller's
     // `allocator` so they outlive the per-worker deinit.
@@ -287,7 +290,7 @@ pub fn collectFormulaJobs(
         for (ctxs, 0..) |*c, i| {
             c.* = .{
                 .io = ctx.io,
-                .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+                .arena = std.heap.ArenaAllocator.init(ctx.worker_backing),
                 .pool = http_pool,
                 .cache_dir = api.cache_dir,
                 .dep_name = deps[i].name,
@@ -666,6 +669,10 @@ pub const InstallPool = struct {
     store: *store_mod.Store,
     cache: *deps_mod.FormulaCache,
     results: []MaterializeResult,
+    /// Per-job arena backing for `installOneJob`. Caller-supplied so
+    /// tests can drive the pool under `testing.allocator`; production
+    /// keeps a thread-safe heap (typically `smp_allocator`).
+    worker_backing: std.mem.Allocator,
 };
 
 /// Thread entry-point for the install pool. Drains `pool.jobs` via the
@@ -705,7 +712,7 @@ fn installOneJob(pool: *InstallPool, job: *DownloadJob, result: *MaterializeResu
     // Short-lived arena: keg.path is duped out of `materializeWithCellar`
     // using this allocator, so we copy it into the result's inline
     // buffer before the arena drops.
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(pool.worker_backing);
     defer arena.deinit();
 
     // `cellar_diag` captures the specific `CellarError` variant when
@@ -975,4 +982,27 @@ test "installKegFromBottle returns NoBottle before reaching ghcr/store when no p
             "/tmp/malt_iknfb_test",
         ),
     );
+}
+
+test "FetchFormulaCtx: arena backed by testing.allocator runs leak-clean across the dupe-then-deinit shape" {
+    // Pin the worker arena's KB-scale alloc + dupe + deinit shape so a
+    // future regression where the backing reverts to `page_allocator`
+    // immediately loses `testing.allocator`'s leak detection.
+    var ctx_value: FetchFormulaCtx = .{
+        .io = std.Options.debug_io,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+        .pool = undefined,
+        .cache_dir = "",
+        .dep_name = "",
+    };
+    defer ctx_value.arena.deinit();
+
+    const a = ctx_value.arena.allocator();
+    // Mirror the worker's real allocation mix: a name dupe + KB-shaped
+    // body buffer + a result string built via `allocPrint`.
+    _ = try a.dupe(u8, "wget");
+    _ = try a.alloc(u8, 4096);
+    const result = try std.fmt.allocPrint(a, "fetched-{s}", .{"wget"});
+    ctx_value.result = result;
+    try std.testing.expectEqualStrings("fetched-wget", ctx_value.result.?);
 }

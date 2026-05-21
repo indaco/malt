@@ -3,16 +3,17 @@
 //! a shared mutex so transactions stay atomic across threads.
 
 const std = @import("std");
+
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
-const sqlite = @import("../../db/sqlite.zig");
-const store_mod = @import("../../core/store.zig");
 const linker_mod = @import("../../core/linker.zig");
+const signals = @import("../../core/signals.zig");
+const store_mod = @import("../../core/store.zig");
+const sqlite = @import("../../db/sqlite.zig");
+const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
 const ghcr_mod = @import("../../net/ghcr.zig");
-const api_mod = @import("../../net/api.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
-const signals = @import("../../core/signals.zig");
 const keg_mod = @import("keg.zig");
 const manifest_mod = @import("manifest.zig");
 const post_install_queue_mod = @import("post_install_queue.zig");
@@ -79,6 +80,11 @@ pub const Pool = struct {
 
     post_install_queue: *post_install_queue_mod.Queue,
 
+    /// Per-iteration arena backing for the worker. Caller-supplied so
+    /// tests can drive the pool under `testing.allocator`; production
+    /// keeps a thread-safe heap (typically `smp_allocator`).
+    worker_backing: std.mem.Allocator,
+
     /// Per-keg bar pointer. Length matches `keg_names`; an entry is null
     /// when the orchestrator pre-filtered that keg (already installed
     /// per manifest+DB at run start) and didn't reserve a multi-progress
@@ -124,7 +130,7 @@ fn worker(pool: *Pool) void {
             continue;
         }
 
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        var arena = std.heap.ArenaAllocator.init(pool.worker_backing);
         defer arena.deinit();
         const a = arena.allocator();
 
@@ -262,6 +268,7 @@ test "worker interrupt branch routes untouched kegs to .cancelled" {
         .manifest_path = "",
         .manifest_allocator = std.testing.allocator,
         .post_install_queue = undefined,
+        .worker_backing = std.testing.allocator,
     };
     try run(std.testing.allocator, &pool, 2);
 
