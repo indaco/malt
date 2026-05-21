@@ -170,7 +170,7 @@ fn fetchPostInstallFromGitHubTagged(
     if (resp.status != 200) return .fetch_failed;
     if (resp.body.len == 0 or resp.body.len > max_formula_rb_bytes) return .fetch_failed;
 
-    var actual_hex: [pins.SHA256_HEX_LEN]u8 = undefined;
+    var actual_hex: [pins.sha256_hex_len]u8 = undefined;
     pins.sha256Hex(resp.body, &actual_hex);
     if (!std.mem.eql(u8, actual_hex[0..], expected_hash)) return .fetch_failed;
 
@@ -688,7 +688,7 @@ pub fn runPostInstallWithBody(
     const home = std.process.Environ.getPosix(environ, "HOME") orelse "/tmp";
     const env: sandbox.ScrubbedEnv = .{
         .home = home,
-        .path = sandbox.SANDBOX_PATH,
+        .path = sandbox.sandbox_path,
         .malt_prefix = prefix,
         .tmpdir = "/tmp",
     };

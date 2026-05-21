@@ -26,11 +26,11 @@ const OutdatedEntry = snap_mod.OutdatedEntry;
 /// dominates `mt outdated` on machines with many installed packages, so
 /// we hand the work to a bounded pool the same way `cli/install` and
 /// `cli/search` do.
-pub const OUTDATED_DEFAULT_WORKERS: usize = 8;
+pub const outdated_default_workers: usize = 8;
 
 /// Env var that lets users tune the pool size (e.g. crank it on a fat
 /// uplink, or lower it to one to reproduce serial behaviour).
-pub const OUTDATED_WORKERS_ENV = "MALT_OUTDATED_WORKERS";
+pub const outdated_workers_env = "MALT_OUTDATED_WORKERS";
 
 /// Parse the worker-count override env var. Anything non-positive or
 /// non-numeric falls back to the default — matches the lenient style
@@ -47,7 +47,7 @@ pub fn parseWorkersEnv(s: ?[]const u8) ?usize {
 /// never spawn idle workers, and at the env override (or the default
 /// ceiling) so we never starve the network.
 pub fn outdatedWorkerCount(jobs: usize, env_override: ?usize) usize {
-    const cap = env_override orelse OUTDATED_DEFAULT_WORKERS;
+    const cap = env_override orelse outdated_default_workers;
     return @min(cap, jobs);
 }
 
@@ -55,7 +55,7 @@ pub fn outdatedWorkerCount(jobs: usize, env_override: ?usize) usize {
 /// thread-spawn + HTTP-pool init overhead is not worth it for a
 /// handful of round-trips.
 pub fn shouldUsePool(jobs: usize) bool {
-    return jobs >= OUTDATED_DEFAULT_WORKERS;
+    return jobs >= outdated_default_workers;
 }
 
 /// Recompute every outdated entry (formulas + casks) and overwrite the
@@ -485,7 +485,7 @@ test "WorkerCtx: per-row arena accepts testing.allocator backing without leaking
 
 test "outdatedWorkerCount caps at the default for large N" {
     try std.testing.expectEqual(
-        @as(usize, OUTDATED_DEFAULT_WORKERS),
+        @as(usize, outdated_default_workers),
         outdatedWorkerCount(50, null),
     );
 }
@@ -503,8 +503,8 @@ test "outdatedWorkerCount respects env overrides above and below the default" {
 
 test "shouldUsePool flips at the default-worker boundary" {
     try std.testing.expect(!shouldUsePool(0));
-    try std.testing.expect(!shouldUsePool(OUTDATED_DEFAULT_WORKERS - 1));
-    try std.testing.expect(shouldUsePool(OUTDATED_DEFAULT_WORKERS));
+    try std.testing.expect(!shouldUsePool(outdated_default_workers - 1));
+    try std.testing.expect(shouldUsePool(outdated_default_workers));
     try std.testing.expect(shouldUsePool(50));
 }
 
