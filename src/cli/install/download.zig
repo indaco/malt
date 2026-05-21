@@ -140,13 +140,13 @@ const FetchFormulaCtx = struct {
 /// `collectFormulaJobs`. Matches the install-time HTTP client pool so
 /// workers never block on `pool.acquire` — extra workers would just sit
 /// idle waiting for a client.
-pub const MAX_COLLECT_FETCH_WORKERS: usize = 4;
+pub const max_collect_fetch_workers: usize = 4;
 
 /// Bounded worker count for a given dep-fetch load. Exposed so tests
 /// can pin the "no more than N threads" invariant without scraping
 /// `std.Thread.spawn` call counts.
 pub fn collectFetchWorkerCount(deps_to_fetch: usize) usize {
-    return @min(MAX_COLLECT_FETCH_WORKERS, deps_to_fetch);
+    return @min(max_collect_fetch_workers, deps_to_fetch);
 }
 
 /// Shared state for the dep-fetch pool. Mirrors `InstallPool` below:

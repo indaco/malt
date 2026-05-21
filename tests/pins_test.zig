@@ -29,7 +29,7 @@ test "expectedSha256 rejects empty name" {
 }
 
 test "sha256Hex — empty input matches SHA256('')" {
-    var out: [pins.SHA256_HEX_LEN]u8 = undefined;
+    var out: [pins.sha256_hex_len]u8 = undefined;
     pins.sha256Hex("", &out);
     try testing.expectEqualStrings(
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -38,7 +38,7 @@ test "sha256Hex — empty input matches SHA256('')" {
 }
 
 test "sha256Hex — short known vector" {
-    var out: [pins.SHA256_HEX_LEN]u8 = undefined;
+    var out: [pins.sha256_hex_len]u8 = undefined;
     pins.sha256Hex("abc", &out);
     try testing.expectEqualStrings(
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
@@ -123,7 +123,7 @@ test "lookupIn — CRLF line endings tolerated" {
 }
 
 test "lookupIn — trailing text after hash ignored (length gate)" {
-    // lookupIn slices exactly SHA256_HEX_LEN chars; anything after is
+    // lookupIn slices exactly sha256_hex_len chars; anything after is
     // out of bounds of the returned hash but mustn't crash the parser.
     const m = "node " ++ good_hash ++ "  # with comment\n";
     const h = pins.lookupIn(m, "node") orelse return error.TestUnexpectedResult;

@@ -37,7 +37,7 @@ pub const ScrubbedEnv = struct {
 };
 
 /// Minimal PATH — keeps a hostile formula off user-owned bin prefixes.
-pub const SANDBOX_PATH: []const u8 = "/usr/bin:/bin:/usr/sbin:/sbin";
+pub const sandbox_path: []const u8 = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 /// Where the sandboxed child's stdout/stderr land. Production passes the
 /// process's real fd 1/2; tests redirect to `/dev/null` so subprocess

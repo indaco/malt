@@ -118,7 +118,7 @@ test "collectOutdatedFormulas (large-N, pool path) preserves sorted order" {
     defer dir.deinit();
 
     // 10 fake formulas, all outdated (installed=1.0, latest=2.0).
-    // 10 > OUTDATED_DEFAULT_WORKERS so the pool path runs.
+    // 10 > outdated_default_workers so the pool path runs.
     const names = [_][]const u8{
         "f00", "f01", "f02", "f03", "f04",
         "f05", "f06", "f07", "f08", "f09",

@@ -13,8 +13,8 @@ const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 const refresh_mod = @import("outdated/refresh.zig");
-pub const OUTDATED_DEFAULT_WORKERS = refresh_mod.OUTDATED_DEFAULT_WORKERS;
-pub const OUTDATED_WORKERS_ENV = refresh_mod.OUTDATED_WORKERS_ENV;
+pub const outdated_default_workers = refresh_mod.outdated_default_workers;
+pub const outdated_workers_env = refresh_mod.outdated_workers_env;
 pub const parseWorkersEnv = refresh_mod.parseWorkersEnv;
 pub const outdatedWorkerCount = refresh_mod.outdatedWorkerCount;
 pub const shouldUsePool = refresh_mod.shouldUsePool;
@@ -29,10 +29,10 @@ pub const loadFormulaRows = rows_mod.loadFormulaRows;
 pub const loadCaskRows = rows_mod.loadCaskRows;
 pub const freeKegRows = rows_mod.freeKegRows;
 const snap_mod = @import("outdated/snapshot.zig");
-pub const SNAPSHOT_DEFAULT_MAX_AGE_HOURS = snap_mod.SNAPSHOT_DEFAULT_MAX_AGE_HOURS;
-pub const SNAPSHOT_MAX_AGE_ENV = snap_mod.SNAPSHOT_MAX_AGE_ENV;
-pub const SNAPSHOT_VERSION = snap_mod.SNAPSHOT_VERSION;
-pub const SNAPSHOT_FILE = snap_mod.SNAPSHOT_FILE;
+pub const snapshot_default_max_age_hours = snap_mod.snapshot_default_max_age_hours;
+pub const snapshot_max_age_env = snap_mod.snapshot_max_age_env;
+pub const snapshot_version = snap_mod.snapshot_version;
+pub const snapshot_file = snap_mod.snapshot_file;
 pub const OutdatedEntry = snap_mod.OutdatedEntry;
 pub const Snapshot = snap_mod.Snapshot;
 pub const OwnedSnapshot = snap_mod.OwnedSnapshot;
@@ -309,8 +309,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer db.close();
     schema.initSchema(&db) catch return;
 
-    const max_age_hours = parseMaxAgeHoursEnv(std.process.Environ.getPosix(ctx.environ, SNAPSHOT_MAX_AGE_ENV)) orelse
-        SNAPSHOT_DEFAULT_MAX_AGE_HOURS;
+    const max_age_hours = parseMaxAgeHoursEnv(std.process.Environ.getPosix(ctx.environ, snapshot_max_age_env)) orelse
+        snapshot_default_max_age_hours;
     const snap_opt = readSnapshot(ctx.io, allocator, cache_dir);
     defer if (snap_opt) |s| freeSnapshot(allocator, s);
 
@@ -399,7 +399,7 @@ fn recomputeAndEmit(
     defer http.deinit();
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
 
-    const workers_override = parseWorkersEnv(std.process.Environ.getPosix(ctx.environ, OUTDATED_WORKERS_ENV));
+    const workers_override = parseWorkersEnv(std.process.Environ.getPosix(ctx.environ, outdated_workers_env));
 
     var formula_count: usize = 0;
     var cask_count: usize = 0;

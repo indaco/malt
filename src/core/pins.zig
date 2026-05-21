@@ -25,7 +25,7 @@ pub const homebrew_core_commit_sha: [40]u8 = "1292ccec721918a4ebe7208c8383cfb11a
 const MANIFEST_TEXT: []const u8 = @embedFile("pins_manifest.txt");
 
 /// Length of a lowercase hex SHA256 digest.
-pub const SHA256_HEX_LEN: usize = 64;
+pub const sha256_hex_len: usize = 64;
 
 /// Look up the expected SHA256 (as lowercase hex) for a formula at the
 /// pinned commit. Returns null when no entry exists — the caller must
@@ -55,8 +55,8 @@ pub fn lookupIn(manifest: []const u8, name: []const u8) ?[]const u8 {
         if (!std.mem.eql(u8, entry_name, name)) continue;
 
         const rest = std.mem.trimStart(u8, line[sep..], " \t");
-        if (rest.len < SHA256_HEX_LEN) return null;
-        const hash = rest[0..SHA256_HEX_LEN];
+        if (rest.len < sha256_hex_len) return null;
+        const hash = rest[0..sha256_hex_len];
         if (!isHexLower(hash)) return null;
         return hash;
     }
@@ -72,8 +72,8 @@ fn isHexLower(s: []const u8) bool {
 }
 
 /// Compute the SHA256 of `bytes` as lowercase hex. Returns the caller-
-/// owned `[SHA256_HEX_LEN]u8` written in-place to `out`.
-pub fn sha256Hex(bytes: []const u8, out: *[SHA256_HEX_LEN]u8) void {
+/// owned `[sha256_hex_len]u8` written in-place to `out`.
+pub fn sha256Hex(bytes: []const u8, out: *[sha256_hex_len]u8) void {
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     const hex = std.fmt.bytesToHex(digest, .lower);
@@ -108,7 +108,7 @@ test "lookupIn — rejects entry with non-hex hash" {
 }
 
 test "sha256Hex — known vector" {
-    var out: [SHA256_HEX_LEN]u8 = undefined;
+    var out: [sha256_hex_len]u8 = undefined;
     sha256Hex("hello", &out);
     try std.testing.expectEqualStrings(
         "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",

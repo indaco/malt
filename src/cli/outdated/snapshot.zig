@@ -13,18 +13,18 @@ const output = @import("../../ui/output.zig");
 /// Default max age (hours) for the cached `outdated.json` snapshot. Picked
 /// to match the analysis doc: "shell-prompt integrations want instant
 /// startup; ~daily refresh is plenty for security awareness".
-pub const SNAPSHOT_DEFAULT_MAX_AGE_HOURS: u64 = 24;
+pub const snapshot_default_max_age_hours: u64 = 24;
 
-/// Env var override for `SNAPSHOT_DEFAULT_MAX_AGE_HOURS`. Same lenient
-/// parsing rules as `OUTDATED_WORKERS_ENV`.
-pub const SNAPSHOT_MAX_AGE_ENV = "MALT_OUTDATED_MAX_AGE";
+/// Env var override for `snapshot_default_max_age_hours`. Same lenient
+/// parsing rules as `outdated_workers_env`.
+pub const snapshot_max_age_env = "MALT_OUTDATED_MAX_AGE";
 
 /// On-disk snapshot version. Mismatched snapshots are treated as misses
 /// so a downgrade never tries to read a future shape.
-pub const SNAPSHOT_VERSION: u32 = 1;
+pub const snapshot_version: u32 = 1;
 
 /// Snapshot filename under `{cache}/`.
-pub const SNAPSHOT_FILE = "outdated.json";
+pub const snapshot_file = "outdated.json";
 
 /// Result row for a single outdated package. All slices are owned by
 /// the caller's allocator.
@@ -55,7 +55,7 @@ pub const OwnedSnapshot = struct {
 
 /// Resolve the snapshot max-age threshold (in hours) from an env value.
 /// Returns `null` for unset / empty / non-numeric so the caller can apply
-/// `SNAPSHOT_DEFAULT_MAX_AGE_HOURS`; preserves an explicit `"0"` as `0`
+/// `snapshot_default_max_age_hours`; preserves an explicit `"0"` as `0`
 /// so users who set the env to 0 actually get "always stale".
 pub fn parseMaxAgeHoursEnv(s: ?[]const u8) ?u64 {
     const raw = s orelse return null;
@@ -87,7 +87,7 @@ pub fn renderSnapshot(allocator: std.mem.Allocator, snap: Snapshot) RenderError!
     defer aw.deinit();
     const w = &aw.writer;
 
-    try w.print("{{\"version\":{d},\"generated_at_ms\":{d},\"formulas\":[", .{ SNAPSHOT_VERSION, snap.generated_at_ms });
+    try w.print("{{\"version\":{d},\"generated_at_ms\":{d},\"formulas\":[", .{ snapshot_version, snap.generated_at_ms });
     for (snap.formulas, 0..) |e, i| {
         if (i != 0) try w.writeAll(",");
         try writeEntryJson(w, e);
@@ -148,7 +148,7 @@ pub fn parseSnapshot(allocator: std.mem.Allocator, bytes: []const u8) SnapshotPa
     };
     defer parsed.deinit();
 
-    if (parsed.value.version != SNAPSHOT_VERSION) return error.InvalidSnapshot;
+    if (parsed.value.version != snapshot_version) return error.InvalidSnapshot;
 
     const formulas = try dupEntryDocs(allocator, parsed.value.formulas);
     errdefer freeEntrySlice(allocator, formulas);
@@ -200,7 +200,7 @@ pub fn freeEntrySlice(allocator: std.mem.Allocator, slice: []OutdatedEntry) void
 
 /// Resolve the absolute snapshot path under `cache_dir`. Caller frees.
 pub fn snapshotPath(allocator: std.mem.Allocator, cache_dir: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ cache_dir, SNAPSHOT_FILE });
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ cache_dir, snapshot_file });
 }
 
 /// Atomically write `snap` to `{cache_dir}/outdated.json`. Creates the

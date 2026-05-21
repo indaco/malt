@@ -75,9 +75,9 @@ test "ScrubbedEnv type smoke — only allowlisted keys" {
     try testing.expectEqualStrings("tmpdir", info.fields[3].name);
 }
 
-test "SANDBOX_PATH restricts to system directories only" {
+test "sandbox_path restricts to system directories only" {
     // Nothing in the minimal PATH should be user-writable.
-    try testing.expectEqualStrings("/usr/bin:/bin:/usr/sbin:/sbin", sandbox.SANDBOX_PATH);
+    try testing.expectEqualStrings("/usr/bin:/bin:/usr/sbin:/sbin", sandbox.sandbox_path);
 }
 
 test "std.posix.rlimit_resource tags resolve on macOS for CPU/FSIZE/AS" {
@@ -116,7 +116,7 @@ test "spawnFilteredWithHooks reaps child when first reader-thread spawn fails" {
 
     const envp = try sandbox.buildEnvp(testing.allocator, .{
         .home = "/tmp",
-        .path = sandbox.SANDBOX_PATH,
+        .path = sandbox.sandbox_path,
         .malt_prefix = "/tmp",
         .tmpdir = "/tmp",
     });
@@ -144,7 +144,7 @@ test "spawnFilteredWithHooks reaps child and joins out-thread when second spawn 
 
     const envp = try sandbox.buildEnvp(testing.allocator, .{
         .home = "/tmp",
-        .path = sandbox.SANDBOX_PATH,
+        .path = sandbox.sandbox_path,
         .malt_prefix = "/tmp",
         .tmpdir = "/tmp",
     });
@@ -177,7 +177,7 @@ test "spawnFilteredWithHooks routes child stderr to the configured fd" {
 
     const envp = try sandbox.buildEnvp(testing.allocator, .{
         .home = "/tmp",
-        .path = sandbox.SANDBOX_PATH,
+        .path = sandbox.sandbox_path,
         .malt_prefix = "/tmp",
         .tmpdir = "/tmp",
     });
