@@ -2,7 +2,12 @@
 //! Human + JSON output formatting.
 
 const std = @import("std");
+/// Process-wide io seeded once from `main` via `setRuntime`. Defaults to
+/// `debug_io` so tests that don't seed see deterministic, allocation-
+/// free behaviour.
+var pkg_io: std.Io = std.Options.debug_io;
 const builtin = @import("builtin");
+
 const color = @import("color.zig");
 
 pub const OutputMode = enum {
@@ -23,10 +28,6 @@ var mode: OutputMode = .human;
 /// without losing the final summary.
 var ndjson: bool = false;
 
-/// Process-wide io seeded once from `main` via `setRuntime`. Defaults to
-/// `debug_io` so tests that don't seed see deterministic, allocation-
-/// free behaviour.
-var pkg_io: std.Io = std.Options.debug_io;
 var pkg_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } };
 /// Stdio sinks seeded by `main`. Default `-1` so unconfigured tests
 /// silently drop writes (BadFileDescriptor) instead of leaking onto fd 1
@@ -189,7 +190,7 @@ pub fn endStdoutCapture() void {
 /// Serialises stderr writes so parallel migrate workers can't tear an
 /// ANSI prefix across a sibling's message body. Held over each
 /// `writeStderrAll` call individually and over the full multi-write
-/// `writePrefixedLine` sequence (via `writeStderrUnlocked`).
+/// `writePrefixLine` sequence (via `writeStderrUnlocked`).
 var stderr_mutex: std.atomic.Mutex = .unlocked;
 
 fn lockStderr() void {
@@ -236,68 +237,117 @@ fn writeStdout(bytes: []const u8) void {
     writeStdoutAll(bytes);
 }
 
-/// Shared implementation for info/warn/success/err. One concrete
-/// function so the binary carries a single copy regardless of how
-/// many call sites route through it. Locks once around the whole
-/// 4-write sequence so a concurrent worker can't slot its own prefix
-/// between this line's prefix and message.
-fn writePrefixedLine(
-    msg: []const u8,
+/// Closed vocabulary of the prefix-line variants. The comptime table
+/// below drives one shared `writePrefixLine` body so the seven public
+/// helpers each shrink to a tiny bufPrint + one call.
+const PrefixLineKind = enum { info, warn, success, err, notice, dim, skip };
+
+/// `.prefix_wrap` wraps only the glyph in role colour and leaves the
+/// message bare (info/warn/success/err/notice). `.line_wrap` wraps the
+/// whole `prefix + msg` in a single ANSI block so the line recedes
+/// visually as a unit (dim/skip).
+const PrefixLineShape = enum { prefix_wrap, line_wrap };
+
+const PrefixLineSpec = struct {
     role: color.SemanticStyle,
     emoji_prefix: []const u8,
     plain_prefix: []const u8,
+    shape: PrefixLineShape,
+    /// Errors always print; everything else hides under `--quiet`.
+    respect_quiet: bool,
+};
+
+fn prefixLineSpec(comptime kind: PrefixLineKind) PrefixLineSpec {
+    return switch (kind) {
+        .info => .{ .role = .info, .emoji_prefix = "  ▸ ", .plain_prefix = "  > ", .shape = .prefix_wrap, .respect_quiet = true },
+        .warn => .{ .role = .warn, .emoji_prefix = "  ⚠ ", .plain_prefix = "  ! ", .shape = .prefix_wrap, .respect_quiet = true },
+        .success => .{ .role = .success, .emoji_prefix = "  ✓ ", .plain_prefix = "  * ", .shape = .prefix_wrap, .respect_quiet = true },
+        .err => .{ .role = .err, .emoji_prefix = "  ✗ ", .plain_prefix = "  x ", .shape = .prefix_wrap, .respect_quiet = false },
+        .notice => .{ .role = .notice, .emoji_prefix = "  ⓘ ", .plain_prefix = "  i ", .shape = .prefix_wrap, .respect_quiet = true },
+        .dim => .{ .role = .detail, .emoji_prefix = "  ▸ ", .plain_prefix = "  > ", .shape = .line_wrap, .respect_quiet = true },
+        .skip => .{ .role = .detail, .emoji_prefix = "  · ", .plain_prefix = "  . ", .shape = .line_wrap, .respect_quiet = true },
+    };
+}
+
+/// Single copy of the write sequence in the binary. Picks the emoji-
+/// vs-plain prefix and the role colour here so each public wrapper
+/// stays tiny. Locks once around the full multi-write so a concurrent
+/// worker can't slot its own prefix between this line's prefix and
+/// message.
+fn writePrefixLine(
+    role: color.SemanticStyle,
+    emoji_prefix: []const u8,
+    plain_prefix: []const u8,
+    shape: PrefixLineShape,
+    msg: []const u8,
 ) void {
     const prefix: []const u8 = if (color.isEmojiEnabled()) emoji_prefix else plain_prefix;
     const colorize = color.isColorEnabled();
     lockStderr();
     defer unlockStderr();
-    if (colorize) {
-        writeStderrUnlocked(role.code());
-        writeStderrUnlocked(prefix);
-        writeStderrUnlocked(color.Style.reset.code());
-    } else {
-        writeStderrUnlocked(prefix);
+    switch (shape) {
+        .prefix_wrap => {
+            if (colorize) {
+                writeStderrUnlocked(role.code());
+                writeStderrUnlocked(prefix);
+                writeStderrUnlocked(color.Style.reset.code());
+            } else {
+                writeStderrUnlocked(prefix);
+            }
+            writeStderrUnlocked(msg);
+        },
+        .line_wrap => {
+            if (colorize) {
+                writeStderrUnlocked(role.code());
+                writeStderrUnlocked(prefix);
+                writeStderrUnlocked(msg);
+                writeStderrUnlocked(color.Style.reset.code());
+            } else {
+                writeStderrUnlocked(prefix);
+                writeStderrUnlocked(msg);
+            }
+        },
     }
-    writeStderrUnlocked(msg);
     writeStderrUnlocked("\n");
 }
 
-pub fn info(comptime fmt: []const u8, args: anytype) void {
-    if (quiet) return;
+/// Comptime spec lookup + bufPrint specialised per `fmt`. The kind
+/// resolves at comptime so each public wrapper compiles to a tiny
+/// bufPrint + one call into `writePrefixLine`.
+inline fn emitPrefixLine(
+    comptime kind: PrefixLineKind,
+    comptime fmt: []const u8,
+    args: anytype,
+) void {
+    const spec = comptime prefixLineSpec(kind);
+    if (spec.respect_quiet and quiet) return;
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writePrefixedLine(msg, .info, "  ▸ ", "  > ");
+    writePrefixLine(spec.role, spec.emoji_prefix, spec.plain_prefix, spec.shape, msg);
+}
+
+pub fn info(comptime fmt: []const u8, args: anytype) void {
+    emitPrefixLine(.info, fmt, args);
 }
 
 pub fn warn(comptime fmt: []const u8, args: anytype) void {
-    if (quiet) return;
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writePrefixedLine(msg, .warn, "  ⚠ ", "  ! ");
+    emitPrefixLine(.warn, fmt, args);
 }
 
 pub fn success(comptime fmt: []const u8, args: anytype) void {
-    if (quiet) return;
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writePrefixedLine(msg, .success, "  ✓ ", "  * ");
+    emitPrefixLine(.success, fmt, args);
 }
 
 pub fn err(comptime fmt: []const u8, args: anytype) void {
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writePrefixedLine(msg, .err, "  ✗ ", "  x ");
+    emitPrefixLine(.err, fmt, args);
 }
 
 /// "FYI / explanation" line — a passive heads-up that is neither a warning
-/// nor a failure. Each tier picks an info-shaped glyph (`ⓘ` / `i`) so the
-/// line reads distinctly from `warn`'s `⚠`/`!` on every (color, emoji)
-/// combination, including NO_COLOR + MALT_NO_EMOJI.
+/// nor a failure. The notice glyph (`ⓘ` / `i`) stays distinct from
+/// `warn`'s `⚠`/`!` on every (color, emoji) combination, including
+/// NO_COLOR + MALT_NO_EMOJI.
 pub fn notice(comptime fmt: []const u8, args: anytype) void {
-    if (quiet) return;
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writePrefixedLine(msg, .notice, "  ⓘ ", "  i ");
+    emitPrefixLine(.notice, fmt, args);
 }
 
 /// Print a confirmation prompt: info-coloured `?` icon, bold message,
@@ -368,45 +418,13 @@ pub fn boldPlain(comptime fmt: []const u8, args: anytype) void {
 
 /// Print a dim/faint info message for low-priority status lines.
 pub fn dim(comptime fmt: []const u8, args: anytype) void {
-    if (quiet) return;
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    const prefix: []const u8 = if (color.isEmojiEnabled()) "  ▸ " else "  > ";
-    const colorize = color.isColorEnabled();
-    lockStderr();
-    defer unlockStderr();
-    if (colorize) {
-        writeStderrUnlocked(color.SemanticStyle.detail.code());
-        writeStderrUnlocked(prefix);
-        writeStderrUnlocked(msg);
-        writeStderrUnlocked(color.Style.reset.code());
-    } else {
-        writeStderrUnlocked(prefix);
-        writeStderrUnlocked(msg);
-    }
-    writeStderrUnlocked("\n");
+    emitPrefixLine(.dim, fmt, args);
 }
 
 /// Dim "nothing to do" status line (e.g. already-at-latest). The bullet
 /// glyph makes it recede next to `▸` activity lines in bulk commands.
 pub fn skip(comptime fmt: []const u8, args: anytype) void {
-    if (quiet) return;
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    const prefix: []const u8 = if (color.isEmojiEnabled()) "  · " else "  . ";
-    const colorize = color.isColorEnabled();
-    lockStderr();
-    defer unlockStderr();
-    if (colorize) {
-        writeStderrUnlocked(color.SemanticStyle.detail.code());
-        writeStderrUnlocked(prefix);
-        writeStderrUnlocked(msg);
-        writeStderrUnlocked(color.Style.reset.code());
-    } else {
-        writeStderrUnlocked(prefix);
-        writeStderrUnlocked(msg);
-    }
-    writeStderrUnlocked("\n");
+    emitPrefixLine(.skip, fmt, args);
 }
 
 /// Read a single line from stdin and return true iff the trimmed input
@@ -588,7 +606,7 @@ pub fn emitNdjsonEvent(
 // and `--quiet` suppresses it like every other informational line.
 // Sister tests for the other prefix-line helpers live alongside the public
 // API surface in tests/output_test.zig; these are kept inline because the
-// helper is a thin wrapper over the already-tested writePrefixedLine.
+// helper is a thin wrapper over the shared `emitPrefixLine`.
 test "notice wraps the magenta prefix and uses the circled-i glyph (dark + basic)" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
@@ -717,12 +735,12 @@ test "pushPostInstallEvent serialises concurrent producers" {
     try std.testing.expectEqual(thread_count * Worker.events_per_thread, drained.len);
 }
 
-// Concurrent emit stress for `writePrefixedLine`. Without serialisation
+// Concurrent emit stress for `writePrefixLine`. Without serialisation
 // the helper's 4-write sequence (ANSI prefix, glyph, reset, msg, newline)
 // races the test capture's `appendSlice` and tears another worker's line
 // in two — exactly the parallel-migrate symptom. 8 threads × 64 lines
 // surfaces it on plain x86/arm64 within microseconds.
-test "writePrefixedLine serialises concurrent prefix+msg writes" {
+test "writePrefixLine serialises concurrent prefix+msg writes" {
     const prior_quiet = isQuiet();
     color.setForTest(true, true);
     color.setBackgroundForTest(color.Background.dark);
