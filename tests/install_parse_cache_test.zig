@@ -9,12 +9,13 @@
 
 const std = @import("std");
 const testing = std.testing;
+
 const malt = @import("malt");
-const test_io = @import("test_io");
 const install_download = malt.install_download;
 const deps_mod = malt.deps;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
+const test_io = @import("test_io");
 
 const TempDb = struct {
     dir: []const u8,
@@ -149,6 +150,7 @@ test "collectFormulaJobs parses each formula exactly once via shared cache" {
             .db = &tdb.db,
             .store = &store_inst,
             .cache = &formula_cache,
+            .worker_backing = alloc,
         },
         "root",
         root_json,
@@ -225,6 +227,7 @@ test "FormulaCache holds at most one entry per unique dep across the run" {
             .db = &tdb.db,
             .store = &store_inst,
             .cache = &formula_cache,
+            .worker_backing = alloc,
         },
         "root",
         root_json,
@@ -399,6 +402,7 @@ test "shared deps across multi-package install collapse to one parse" {
         .db = &tdb.db,
         .store = &store_inst,
         .cache = &formula_cache,
+        .worker_backing = alloc,
     };
 
     try install_download.collectFormulaJobs(ctx, "alpha", alpha_json, false, &jobs);

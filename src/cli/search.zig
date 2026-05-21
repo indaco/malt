@@ -2,13 +2,16 @@
 //! Search formulas and casks.
 
 const std = @import("std");
+const testing = std.testing;
+
 const AppCtx = @import("../app_ctx.zig").AppCtx;
+const schema = @import("../db/schema.zig");
+const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
-const output = @import("../ui/output.zig");
-const color = @import("../ui/color.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
-const sqlite = @import("../db/sqlite.zig");
+const color = @import("../ui/color.zig");
+const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
 /// Where a `mt search` query should look. Default is local-first with a
@@ -107,9 +110,6 @@ pub fn searchLocalKind(
 
     return out.toOwnedSlice(allocator);
 }
-
-const testing = std.testing;
-const schema = @import("../db/schema.zig");
 
 test "parseScope: no scope flags returns default" {
     try testing.expectEqual(Scope.default, parseScope(&.{"wget"}));
@@ -392,11 +392,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     const json_mode = output.isJson();
 
-    // One arena per kind: the worker-thread API path keeps each `KindResults`
-    // bump-pointer disjoint, and local matches join later in the same arena.
-    var f_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    // One arena per kind: the worker-thread API path keeps each
+    // `KindResults` bump-pointer disjoint, and local matches join later
+    // in the same arena. `smp_allocator` stays thread-safe across
+    // the cask/formula worker.
+    var f_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer f_arena.deinit();
-    var c_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var c_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer c_arena.deinit();
     const f_alloc = f_arena.allocator();
     const c_alloc = c_arena.allocator();

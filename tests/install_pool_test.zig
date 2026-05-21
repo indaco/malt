@@ -8,12 +8,13 @@
 //! pipeline runs the same store + cellar code paths production hits.
 
 const std = @import("std");
-const malt = @import("malt");
-const test_io = @import("test_io");
 const testing = std.testing;
+
+const malt = @import("malt");
 const formula_mod = malt.formula;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
+const test_io = @import("test_io");
 
 fn setupPrefix(suffix: []const u8) ![:0]u8 {
     const path = try std.fmt.allocPrintSentinel(
@@ -156,6 +157,7 @@ test "installPoolWorker drains every job against a warm store and stamps each re
         .store = &store,
         .cache = &cache,
         .results = &results,
+        .worker_backing = testing.allocator,
     };
 
     malt.install_download.installPoolWorker(&pool);
@@ -252,6 +254,7 @@ test "installPoolWorker drains a 3-job pool concurrently across two workers" {
         .store = &store,
         .cache = &cache,
         .results = &results,
+        .worker_backing = testing.allocator,
     };
 
     const t1 = try std.Thread.spawn(.{}, malt.install_download.installPoolWorker, .{&pool});
@@ -346,6 +349,7 @@ test "installPoolWorker propagates the specific CellarError variant into result.
         .store = &store,
         .cache = &cache,
         .results = &results,
+        .worker_backing = testing.allocator,
     };
 
     malt.install_download.installPoolWorker(&pool);
@@ -419,6 +423,7 @@ test "installPoolWorker bails between jobs when Ctrl-C fires" {
         .store = &store,
         .cache = &cache,
         .results = &results,
+        .worker_backing = testing.allocator,
     };
 
     malt.signals.setInterruptedForTest(true);
@@ -473,6 +478,7 @@ test "installPoolWorker leaves the result untouched and marks job not-succeeded 
         .store = &store,
         .cache = &cache,
         .results = &results,
+        .worker_backing = testing.allocator,
     };
 
     malt.install_download.installPoolWorker(&pool);

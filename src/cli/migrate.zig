@@ -5,30 +5,30 @@
 //! install protocol. Never modifies the Homebrew installation.
 
 const std = @import("std");
+
 const AppCtx = @import("../app_ctx.zig").AppCtx;
-const sqlite = @import("../db/sqlite.zig");
-const schema = @import("../db/schema.zig");
-const lock_mod = @import("../db/lock.zig");
+const linker_mod = @import("../core/linker.zig");
 const signals = @import("../core/signals.zig");
 const store_mod = @import("../core/store.zig");
-const linker_mod = @import("../core/linker.zig");
+const lock_mod = @import("../db/lock.zig");
+const schema = @import("../db/schema.zig");
+const sqlite = @import("../db/sqlite.zig");
+const atomic = @import("../fs/atomic.zig");
+const codesign = @import("../macho/codesign.zig");
+const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
-const api_mod = @import("../net/api.zig");
-const atomic = @import("../fs/atomic.zig");
 const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
-const codesign = @import("../macho/codesign.zig");
 const help = @import("help.zig");
 const keg_mod = @import("migrate/keg.zig");
-const manifest_mod = @import("migrate/manifest.zig");
-const parallel_mod = @import("migrate/parallel.zig");
-const post_install_queue_mod = @import("migrate/post_install_queue.zig");
-
 const KegResult = keg_mod.KegResult;
 const MigrateDeps = keg_mod.MigrateDeps;
 const migrateKeg = keg_mod.migrateKeg;
+const manifest_mod = @import("migrate/manifest.zig");
+const parallel_mod = @import("migrate/parallel.zig");
+const post_install_queue_mod = @import("migrate/post_install_queue.zig");
 
 /// Test seam — pins dispatch decisions without relying on observable
 /// side-effects. Reset on every `execute` entry.
@@ -377,6 +377,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             .manifest_path = manifest_path,
             .manifest_allocator = allocator,
             .post_install_queue = &post_install_queue,
+            .worker_backing = std.heap.smp_allocator,
             .bar_for_keg = bar_for_keg,
         };
         try parallel_mod.run(allocator, &pool, worker_count);
