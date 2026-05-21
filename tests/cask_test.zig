@@ -411,8 +411,26 @@ test "isOutdated detects version mismatch" {
     defer threaded.deinit();
     var installer = cask.CaskInstaller.init(threaded.io(), malt.app_ctx.processEnviron(), std.testing.allocator, &db, prefix);
 
-    try std.testing.expect(installer.isOutdated("firefox", "124.0"));
-    try std.testing.expect(!installer.isOutdated("firefox", "123.0"));
+    try std.testing.expect(try installer.isOutdated("firefox", "124.0"));
+    try std.testing.expect(!try installer.isOutdated("firefox", "123.0"));
+}
+
+// A schema-less DB makes `prepare` fail. Swallowing that into `false`
+// silently flagged corrupt rows as "not outdated"; the typed error lets
+// the caller log `db.errMsg()` and decide.
+test "isOutdated surfaces SqliteError when schema is missing" {
+    var db = try openTestDb();
+    defer db.close();
+
+    const prefix: [:0]const u8 = "/tmp/malt_test_isoutdated_noschema";
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .environ = malt.app_ctx.processEnviron() });
+    defer threaded.deinit();
+    var installer = cask.CaskInstaller.init(threaded.io(), malt.app_ctx.processEnviron(), std.testing.allocator, &db, prefix);
+
+    try std.testing.expectError(
+        sqlite.SqliteError.PrepareFailed,
+        installer.isOutdated("firefox", "1.0"),
+    );
 }
 
 // ─── hashFileSha256 / verifyFileSha256 ───────────────────────────────

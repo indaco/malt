@@ -18,6 +18,10 @@ pub const CaskError = error{
     OutOfMemory,
 };
 
+/// `uninstall` lets the `removeRecord` SQLite failure bubble through so
+/// the CLI caller can log `db.errMsg()` instead of swallowing it.
+pub const UninstallError = CaskError || sqlite.SqliteError;
+
 /// Parsed Homebrew cask. Every `[]const u8` borrows from `parsed`; valid
 /// only until `deinit()`. Callers holding strings past that point must dupe.
 pub const Cask = struct {
@@ -542,26 +546,39 @@ pub const CaskInstaller = struct {
     }
 
     /// Uninstall a cask by token. Looks up app_path from DB, removes app, cleans up.
-    pub fn uninstall(self: *CaskInstaller, token: []const u8) CaskError!void {
-        // Look up from DB
-        var stmt = self.db.prepare(
-            "SELECT app_path FROM casks WHERE token = ?1 LIMIT 1;",
-        ) catch return CaskError.UninstallFailed;
-        defer stmt.finalize();
-        stmt.bindText(1, token) catch return CaskError.UninstallFailed;
+    /// `removeRecord` propagates its SQLite failure so the CLI caller can
+    /// log `db.errMsg()` instead of marking a half-cleaned DB as success.
+    pub fn uninstall(self: *CaskInstaller, token: []const u8) UninstallError!void {
+        // Copy app_path out of SQLite-owned memory and finalize the SELECT
+        // before any later DB op. Otherwise the SELECT's deferred finalize
+        // runs *after* `removeRecord` fails and resets `db.errMsg()` to
+        // "not an error", blanking the message the caller wants to log.
+        var app_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var app_path_len: usize = 0;
+        {
+            var stmt = self.db.prepare(
+                "SELECT app_path FROM casks WHERE token = ?1 LIMIT 1;",
+            ) catch return CaskError.UninstallFailed;
+            defer stmt.finalize();
+            stmt.bindText(1, token) catch return CaskError.UninstallFailed;
 
-        const found = stmt.step() catch return CaskError.UninstallFailed;
-        if (!found) return CaskError.UninstallFailed;
+            const found = stmt.step() catch return CaskError.UninstallFailed;
+            if (!found) return CaskError.UninstallFailed;
 
-        const path_ptr = stmt.columnText(0);
-        if (path_ptr) |p| {
-            // sqlite3_column_text returns a null-terminated UTF-8 string per
-            // the SQLite C API contract, so `sliceTo(.., 0)` is safe here.
-            // There is an inherent TOCTOU window between this read and the
-            // `deleteTreeAbsolute` below — accepted because cask uninstall
-            // is a single-user operation and the bundle is protected by
-            // filesystem permissions.
-            const app_path = std.mem.sliceTo(p, 0);
+            if (stmt.columnText(0)) |p| {
+                // sqlite3_column_text returns a null-terminated UTF-8 string per
+                // the SQLite C API contract. There is an inherent TOCTOU window
+                // between this read and the `deleteTree` below — accepted
+                // because cask uninstall is a single-user operation and the
+                // bundle is protected by filesystem permissions.
+                const slice = std.mem.sliceTo(p, 0);
+                app_path_len = @min(slice.len, app_path_buf.len);
+                @memcpy(app_path_buf[0..app_path_len], slice[0..app_path_len]);
+            }
+        }
+
+        if (app_path_len > 0) {
+            const app_path = app_path_buf[0..app_path_len];
 
             // Check if the app is running (best-effort)
             if (isAppRunning(self.io, app_path)) return CaskError.UninstallFailed;
@@ -594,8 +611,10 @@ pub const CaskInstaller = struct {
             _ = hist_stmt.step() catch false;
         } else |_| {}
 
-        // DB row cleanup; uninstall already did the user-visible work.
-        removeRecord(self.db, token) catch {};
+        // DB row cleanup. User-visible work is done; surfacing the
+        // failure lets the CLI caller log `db.errMsg()` instead of
+        // silently leaving the row behind.
+        try removeRecord(self.db, token);
     }
 
     /// Reinstall a previously-installed cask version from history. Drives
@@ -661,16 +680,25 @@ pub const CaskInstaller = struct {
     }
 
     /// Check installed version vs API version. Returns true if outdated.
-    pub fn isOutdated(self: *CaskInstaller, token: []const u8, latest_version: []const u8) bool {
-        var stmt = self.db.prepare(
+    /// SQLite errors flow up as `SqliteError` so the caller can log
+    /// `db.errMsg()` instead of silently treating a broken row as fresh.
+    pub fn isOutdated(
+        self: *CaskInstaller,
+        token: []const u8,
+        latest_version: []const u8,
+    ) sqlite.SqliteError!bool {
+        var stmt = try self.db.prepare(
             "SELECT version FROM casks WHERE token = ?1 LIMIT 1;",
-        ) catch return false;
+        );
         defer stmt.finalize();
-        stmt.bindText(1, token) catch return false;
+        try stmt.bindText(1, token);
 
-        const found = stmt.step() catch return false;
+        const found = try stmt.step();
         if (!found) return false;
 
+        // SQLite NULL in `version` is structurally impossible (NOT NULL
+        // column); treat the absent pointer as "no installed row" so the
+        // caller's not-outdated default still kicks in for that one case.
         const ver_ptr = stmt.columnText(0) orelse return false;
         const installed = std.mem.sliceTo(ver_ptr, 0);
         return !std.mem.eql(u8, installed, latest_version);

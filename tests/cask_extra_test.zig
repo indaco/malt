@@ -47,7 +47,7 @@ test "CaskInstaller.isOutdated returns false for an unknown token" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
     defer threaded.deinit();
     var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix);
-    try testing.expect(!installer.isOutdated("nope-nope", "1.0"));
+    try testing.expect(!try installer.isOutdated("nope-nope", "1.0"));
 }
 
 test "CaskInstaller.install rejects a cask with an unknown artifact URL extension" {
@@ -100,6 +100,54 @@ test "artifact_type_override bypasses URL detection" {
     const result = installer.install(&c);
     // Should fail on download, not on the type gate
     try testing.expectError(cask.CaskError.DownloadFailed, result);
+}
+
+// Locking the connection read-only after the row is staged makes the
+// `removeRecord` DELETE fail at `sqlite3_step`. The previous `catch {}`
+// swallowed the failure into "uninstall succeeded"; the typed error path
+// gives the CLI caller something to log `db.errMsg()` for.
+test "CaskInstaller.uninstall propagates removeRecord SqliteError" {
+    const test_cask_json =
+        \\{"token":"firefox","name":["Firefox"],"version":"123.0","desc":"","homepage":"",
+        \\ "url":"https://example.com/firefox.dmg",
+        \\ "sha256":"00000000000000000000000000000000000000000000000000000000deadbeef",
+        \\ "auto_updates":false,"artifacts":[{"app":["Firefox.app"]}]}
+    ;
+    var c = try cask.parseCask(testing.allocator, test_cask_json);
+    defer c.deinit();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const base = "/tmp/malt_cask_uninstall_readonly_test";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+
+    const app_path_z = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/Firefox.app",
+        .{base},
+        0,
+    );
+    defer testing.allocator.free(app_path_z);
+    try test_io.makeDirAbsolute(std.Options.debug_io, app_path_z);
+
+    try cask.recordInstall(&db, &c, app_path_z, null);
+
+    // Writes now fail at step; SELECT keeps working so uninstall reaches
+    // the previously-swallowed `removeRecord` call.
+    try db.exec("PRAGMA query_only=ON;");
+
+    const prefix: [:0]const u8 = "/tmp/mc-uninstall-readonly";
+    test_io.cwd().createDirPath(std.Options.debug_io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    var installer = cask.CaskInstaller.init(threaded.io(), testEnviron(), testing.allocator, &db, prefix);
+
+    try testing.expectError(sqlite.SqliteError.StepFailed, installer.uninstall("firefox"));
 }
 
 test "CaskInstaller.uninstall removes app_path, caskroom, cache, and the DB row" {
