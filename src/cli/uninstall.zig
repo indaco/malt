@@ -270,8 +270,11 @@ fn uninstallCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []cons
     output.info("Uninstalling cask {s}...", .{token});
 
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
-    installer.uninstall(token) catch {
-        output.err("Failed to uninstall cask {s}", .{token});
+    installer.uninstall(token) catch |un_err| {
+        output.err(
+            "Failed to uninstall cask {s}: {s} ({s})",
+            .{ token, @errorName(un_err), db.errMsg() },
+        );
         return error.Aborted;
     };
 

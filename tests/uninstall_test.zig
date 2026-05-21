@@ -13,6 +13,7 @@ const uninstall = malt.cli_uninstall;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const output = malt.output;
+const cask = malt.cask;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -285,6 +286,75 @@ test "execute --force bypasses the dependents check" {
     // --force breaks through the guard.
     try uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--force", "foo" });
     try testing.expect(!try kegRowExists(prefix.path, "foo"));
+}
+
+// A BEFORE DELETE trigger on `casks` makes `removeRecord` fail with
+// SQLITE_CONSTRAINT after the app teardown has already succeeded. The
+// previous catch{} treated this as a clean uninstall; the CLI catch
+// must now surface the SQLite error name AND `db.errMsg()` so the user
+// has something to act on instead of "looks fine, row still there".
+test "execute on a cask surfaces removeRecord SqliteError with db.errMsg in the log" {
+    var prefix = try ScratchPrefix.init(testing.allocator, "cask_errmsg");
+    defer prefix.deinit(testing.allocator);
+
+    const token = "firefox";
+
+    // Stage a cask row + a BEFORE DELETE trigger that aborts the row's
+    // removal. `RAISE(ABORT, 'cask-row-pinned-by-test-trigger')` sets the
+    // SQLite error message verbatim — that's what we expect in the log.
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+
+        const cask_json =
+            \\{"token":"firefox","name":["Firefox"],"version":"123.0","desc":"","homepage":"",
+            \\ "url":"https://example.com/firefox.dmg",
+            \\ "sha256":"00000000000000000000000000000000000000000000000000000000deadbeef",
+            \\ "auto_updates":false,"artifacts":[{"app":["Firefox.app"]}]}
+        ;
+        var parsed = try cask.parseCask(testing.allocator, cask_json);
+        defer parsed.deinit();
+
+        const app_path = try std.fmt.allocPrint(testing.allocator, "{s}/Firefox.app", .{prefix.path});
+        defer testing.allocator.free(app_path);
+        try cask.recordInstall(&db, &parsed, app_path, null);
+
+        try db.exec(
+            \\CREATE TRIGGER block_cask_delete BEFORE DELETE ON casks
+            \\BEGIN SELECT RAISE(ABORT, 'cask-row-pinned-by-test-trigger'); END;
+        );
+    }
+
+    // Stage the app directory so the `isAppRunning` and `deleteTree`
+    // steps inside uninstall reach the DB step where the trigger fires.
+    const app_path_z = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/Firefox.app",
+        .{prefix.path},
+        0,
+    );
+    defer testing.allocator.free(app_path_z);
+    try test_io.makeDirAbsolute(std.Options.debug_io, app_path_z);
+
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(false);
+    defer output.setQuiet(prior_quiet);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    try testing.expectError(
+        error.Aborted,
+        uninstall.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{token}),
+    );
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "cask-row-pinned-by-test-trigger") != null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "ConstraintViolation") != null);
 }
 
 test "execute drops the kegs row and decrements the store ref together" {
