@@ -250,6 +250,16 @@ test "warn wraps the yellow prefix and uses the warning glyph" {
     try testing.expectEqualStrings("\x1b[33m  ⚠ \x1b[0mcareful\n", buf.items);
 }
 
+test "warn falls back to ASCII prefix with color and emoji disabled" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, false, false, false);
+    defer cap.deinit();
+
+    output.warn("careful", .{});
+    try testing.expectEqualStrings("  ! careful\n", buf.items);
+}
+
 test "success wraps the green prefix and uses the check glyph" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
@@ -258,6 +268,16 @@ test "success wraps the green prefix and uses the check glyph" {
 
     output.success("done", .{});
     try testing.expectEqualStrings("\x1b[32m  ✓ \x1b[0mdone\n", buf.items);
+}
+
+test "success falls back to ASCII prefix with color and emoji disabled" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, false, false, false);
+    defer cap.deinit();
+
+    output.success("done", .{});
+    try testing.expectEqualStrings("  * done\n", buf.items);
 }
 
 test "err wraps the red prefix and uses the cross glyph" {
@@ -320,6 +340,19 @@ test "err is NOT suppressed by --quiet" {
     try testing.expectEqualStrings("  x boom\n", buf.items);
 }
 
+// Sister assertion in TTY mode: the colour-wrapped path must also ignore
+// `--quiet` for `err`, otherwise the bypass would silently regress to
+// plain-mode-only.
+test "err is NOT suppressed by --quiet in TTY mode" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, true, true, true);
+    defer cap.deinit();
+
+    output.err("boom", .{});
+    try testing.expectEqualStrings("\x1b[31m  ✗ \x1b[0mboom\n", buf.items);
+}
+
 // `dim` and `skip` are full-line wrappers — the dim ANSI must span the
 // whole line (prefix + msg) rather than just the prefix, so the entire
 // line visually recedes.
@@ -331,6 +364,16 @@ test "dim wraps prefix and msg in a single dim ANSI block" {
 
     output.dim("background", .{});
     try testing.expectEqualStrings("\x1b[2m  ▸ background\x1b[0m\n", buf.items);
+}
+
+test "dim falls back to ASCII prefix with color and emoji disabled" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    const cap = Capture.init(&buf, false, false, false);
+    defer cap.deinit();
+
+    output.dim("background", .{});
+    try testing.expectEqualStrings("  > background\n", buf.items);
 }
 
 test "skip uses the bullet glyph and wraps the whole line in dim" {
