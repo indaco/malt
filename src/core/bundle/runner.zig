@@ -34,6 +34,23 @@ pub const RunnerError = error{
     NoDispatcher,
 };
 
+/// Closed error set every dispatcher exit must land on. Kept in
+/// `core/bundle/runner.zig` so neither runner nor `cleanup.zig` has to
+/// depend on `cli/*` to spell its members' failure modes; the CLI layer
+/// narrows underlying CLI errors at the boundary (see `cli/bundle.zig`),
+/// keeping the type-system check exhaustive without reverse-layering.
+pub const DispatchError = error{
+    /// In-process runner needs a dispatcher (and none was wired).
+    NoDispatcher,
+    /// Subprocess dispatch (`malt_bin`) exited non-zero.
+    MemberFailed,
+    /// Boundary narrowing tag: the underlying CLI primitive already
+    /// surfaced a user-facing diagnostic; the runner records the failure
+    /// without re-rendering the cause.
+    DispatchFailed,
+    OutOfMemory,
+};
+
 pub fn describeError(err: RunnerError) []const u8 {
     return switch (err) {
         RunnerError.DatabaseError => "database error during bundle install",
@@ -52,7 +69,7 @@ pub const MemberKind = enum { tap, formula, cask, service_start };
 pub const MemberError = struct {
     kind: MemberKind,
     name: []const u8,
-    err: anyerror,
+    err: DispatchError,
 };
 
 /// Entry in the dry-run preview list — what the CLI would render as
@@ -88,10 +105,10 @@ pub const Report = struct {
 /// interface is what lets `core/bundle/runner.zig` avoid a `cli/*` import.
 pub const Dispatcher = struct {
     ctx: ?*anyopaque = null,
-    installFormula: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void,
-    installCask: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void,
-    tapAdd: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void,
-    serviceStart: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void,
+    installFormula: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) DispatchError!void,
+    installCask: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) DispatchError!void,
+    tapAdd: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) DispatchError!void,
+    serviceStart: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) DispatchError!void,
 };
 
 pub const Options = struct {
@@ -169,6 +186,7 @@ pub fn run(
     // 5. Record bundle and members in DB (even on partial failure). Skipped
     //    in dry-run so the preview path stays read-only.
     if (!opts.dry_run) recordBundle(io, db, manifest) catch |e| {
+        // recordBundle's inferred set spans sqlite + clock; keep @errorName.
         db_record_error = @errorName(e);
     };
 
@@ -234,12 +252,12 @@ fn recordMember(
     };
 }
 
-fn callMember(io: std.Io, allocator: std.mem.Allocator, call: MemberCall, opts: Options) !void {
+fn callMember(io: std.Io, allocator: std.mem.Allocator, call: MemberCall, opts: Options) DispatchError!void {
     // Test escape hatch: when malt_bin is set, fall back to subprocess so
     // tests can substitute /usr/bin/false to assert exit-code propagation.
     if (opts.malt_bin) |bin| return runSubprocess(io, allocator, bin, call);
 
-    const d = opts.dispatcher orelse return RunnerError.NoDispatcher;
+    const d = opts.dispatcher orelse return DispatchError.NoDispatcher;
     switch (call) {
         .tap => |n| try d.tapAdd(d.ctx, allocator, n),
         .formula => |n| try d.installFormula(d.ctx, allocator, n),
@@ -248,37 +266,25 @@ fn callMember(io: std.Io, allocator: std.mem.Allocator, call: MemberCall, opts: 
     }
 }
 
-fn runSubprocess(io: std.Io, allocator: std.mem.Allocator, bin: []const u8, call: MemberCall) !void {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(allocator);
-    try argv.append(allocator, bin);
-    switch (call) {
-        .tap => |n| {
-            try argv.append(allocator, "tap");
-            try argv.append(allocator, n);
-        },
-        .formula => |n| {
-            try argv.append(allocator, "install");
-            try argv.append(allocator, n);
-        },
-        .cask => |n| {
-            try argv.append(allocator, "install");
-            try argv.append(allocator, "--cask");
-            try argv.append(allocator, n);
-        },
-        .service_start => |n| {
-            try argv.append(allocator, "services");
-            try argv.append(allocator, "start");
-            try argv.append(allocator, n);
-        },
-    }
+fn runSubprocess(io: std.Io, allocator: std.mem.Allocator, bin: []const u8, call: MemberCall) DispatchError!void {
+    const argv = buildSubprocessArgv(allocator, bin, call) catch return DispatchError.OutOfMemory;
+    defer allocator.free(argv);
 
-    var child = std.process.spawn(io, .{ .argv = argv.items }) catch return error.MemberFailed;
-    const term = child.wait(io) catch return error.MemberFailed;
+    var child = std.process.spawn(io, .{ .argv = argv }) catch return DispatchError.MemberFailed;
+    const term = child.wait(io) catch return DispatchError.MemberFailed;
     switch (term) {
-        .exited => |code| if (code != 0) return error.MemberFailed,
-        else => return error.MemberFailed,
+        .exited => |code| if (code != 0) return DispatchError.MemberFailed,
+        else => return DispatchError.MemberFailed,
     }
+}
+
+fn buildSubprocessArgv(allocator: std.mem.Allocator, bin: []const u8, call: MemberCall) ![][]const u8 {
+    return switch (call) {
+        .tap => |n| try allocator.dupe([]const u8, &.{ bin, "tap", n }),
+        .formula => |n| try allocator.dupe([]const u8, &.{ bin, "install", n }),
+        .cask => |n| try allocator.dupe([]const u8, &.{ bin, "install", "--cask", n }),
+        .service_start => |n| try allocator.dupe([]const u8, &.{ bin, "services", "start", n }),
+    };
 }
 
 fn recordBundle(

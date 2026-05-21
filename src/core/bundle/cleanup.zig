@@ -7,12 +7,17 @@
 const std = @import("std");
 const manifest_mod = @import("manifest.zig");
 const sqlite = @import("../../db/sqlite.zig");
+const runner_mod = @import("runner.zig");
 
 pub const CleanupError = error{
     OutOfMemory,
     NoDispatcher,
     DatabaseError,
 };
+
+/// Shared with the install dispatcher in `runner.zig`: one closed error
+/// set means `@errorName` on `MemberError.err` is bounded at comptime.
+pub const DispatchError = runner_mod.DispatchError;
 
 pub const MemberKind = enum { formula, cask };
 
@@ -24,7 +29,7 @@ pub const MemberPreview = struct {
 pub const MemberError = struct {
     kind: MemberKind,
     name: []const u8,
-    err: anyerror,
+    err: DispatchError,
 };
 
 /// Layering seam: the CLI wires `cli/uninstall` behind this. Keeping the
@@ -32,8 +37,8 @@ pub const MemberError = struct {
 /// imports, mirroring the existing bundle runner.
 pub const Dispatcher = struct {
     ctx: ?*anyopaque = null,
-    uninstallFormula: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void,
-    uninstallCask: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void,
+    uninstallFormula: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) DispatchError!void,
+    uninstallCask: *const fn (ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) DispatchError!void,
 };
 
 pub const Options = struct {
@@ -459,14 +464,14 @@ const TestDispatcher = struct {
         return @ptrCast(@alignCast(ctx.?));
     }
 
-    fn uninstallFormulaFn(ctx: ?*anyopaque, _: std.mem.Allocator, name: []const u8) anyerror!void {
+    fn uninstallFormulaFn(ctx: ?*anyopaque, _: std.mem.Allocator, name: []const u8) DispatchError!void {
         const self = unwrap(ctx);
-        try self.formulas.append(self.allocator, name);
+        self.formulas.append(self.allocator, name) catch return DispatchError.OutOfMemory;
     }
 
-    fn uninstallCaskFn(ctx: ?*anyopaque, _: std.mem.Allocator, name: []const u8) anyerror!void {
+    fn uninstallCaskFn(ctx: ?*anyopaque, _: std.mem.Allocator, name: []const u8) DispatchError!void {
         const self = unwrap(ctx);
-        try self.casks.append(self.allocator, name);
+        self.casks.append(self.allocator, name) catch return DispatchError.OutOfMemory;
     }
 };
 
@@ -542,8 +547,8 @@ test "run records per-member failures and keeps going" {
     defer plan.deinit();
 
     const Failer = struct {
-        fn alwaysFails(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8) anyerror!void {
-            return error.MemberFailed;
+        fn alwaysFails(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8) DispatchError!void {
+            return DispatchError.MemberFailed;
         }
     };
     const dispatcher = Dispatcher{
@@ -559,6 +564,12 @@ test "run records per-member failures and keeps going" {
     try testing.expectEqualStrings("jq", report.failures[0].name);
     try testing.expectEqual(MemberKind.cask, report.failures[2].kind);
     try testing.expectEqualStrings("ghostty", report.failures[2].name);
+    // Pins MemberError.err to the closed DispatchError set; an `anyerror`
+    // regression would fail the explicit coercion below at comptime.
+    for (report.failures) |f| {
+        const expected: DispatchError = DispatchError.MemberFailed;
+        try testing.expectEqual(expected, f.err);
+    }
 }
 
 test "orderForRemoval reorders formulas so dependents land before their deps" {

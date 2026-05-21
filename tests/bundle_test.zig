@@ -90,6 +90,11 @@ test "non-dry runner with mocked malt_bin records bundle even on member failure"
     defer report.deinit();
     try testing.expect(report.hasFailure());
     try testing.expectEqual(@as(usize, 4), report.failures.len);
+    // Subprocess exit-code propagation lands as the typed MemberFailed tag.
+    for (report.failures) |f| {
+        const expected: runner.DispatchError = runner.DispatchError.MemberFailed;
+        try testing.expectEqual(expected, f.err);
+    }
 
     var stmt = try t.db.prepare("SELECT COUNT(*) FROM bundles WHERE name='devtools';");
     defer stmt.finalize();
@@ -175,21 +180,21 @@ const Calls = struct {
         return @ptrCast(@alignCast(ctx.?));
     }
 
-    fn tapAddFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+    fn tapAddFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner.DispatchError!void {
         const self = unwrap(ctx);
-        try record(&self.taps, allocator, name);
+        record(&self.taps, allocator, name) catch return runner.DispatchError.OutOfMemory;
     }
-    fn installFormulaFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+    fn installFormulaFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner.DispatchError!void {
         const self = unwrap(ctx);
-        try record(&self.formulas, allocator, name);
+        record(&self.formulas, allocator, name) catch return runner.DispatchError.OutOfMemory;
     }
-    fn installCaskFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+    fn installCaskFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner.DispatchError!void {
         const self = unwrap(ctx);
-        try record(&self.casks, allocator, name);
+        record(&self.casks, allocator, name) catch return runner.DispatchError.OutOfMemory;
     }
-    fn serviceStartFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) anyerror!void {
+    fn serviceStartFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner.DispatchError!void {
         const self = unwrap(ctx);
-        try record(&self.services, allocator, name);
+        record(&self.services, allocator, name) catch return runner.DispatchError.OutOfMemory;
     }
 };
 
@@ -258,8 +263,15 @@ test "runner refuses in-process bundle install with no dispatcher and no malt_bi
     defer report.deinit();
     try testing.expect(report.hasFailure());
     try testing.expectEqual(@as(usize, 4), report.failures.len);
-    // Each member's err is RunnerError.NoDispatcher on this path.
-    for (report.failures) |f| try testing.expectEqual(anyerror.NoDispatcher, f.err);
+    // Each member's err is DispatchError.NoDispatcher. The explicit type
+    // coercion on the literal pins that MemberError.err is the closed
+    // DispatchError set, not anyerror — a regression here surfaces at
+    // comptime before the runtime assertion ever fires.
+    for (report.failures) |f| {
+        const expected: runner.DispatchError = runner.DispatchError.NoDispatcher;
+        try testing.expectEqual(expected, f.err);
+        try testing.expectEqualStrings("NoDispatcher", @errorName(f.err));
+    }
 
     var stmt = try t.db.prepare("SELECT COUNT(*) FROM bundles WHERE name='devtools';");
     defer stmt.finalize();
@@ -267,6 +279,43 @@ test "runner refuses in-process bundle install with no dispatcher and no malt_bi
     // recordBundle still runs even on partial failure, matching the
     // existing `/usr/bin/false` test — this pins that invariant.
     try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+}
+
+test "dispatcher returning DispatchFailed lands as a typed MemberError" {
+    // Pins the boundary contract: cli/bundle.zig narrows underlying CLI
+    // errors to DispatchFailed before the runner sees them. A regression
+    // that re-widens to anyerror would fail the comptime coercion below.
+    var t = try TempDb.init("typed_dispatch_failed");
+    defer t.deinit();
+
+    const Failing = struct {
+        fn fail(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8) runner.DispatchError!void {
+            return runner.DispatchError.DispatchFailed;
+        }
+    };
+    const dispatcher = runner.Dispatcher{
+        .installFormula = Failing.fail,
+        .installCask = Failing.fail,
+        .tapAdd = Failing.fail,
+        .serviceStart = Failing.fail,
+    };
+
+    var m = try buildManifest(testing.allocator);
+    defer m.deinit();
+
+    var report = try runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{
+        .dry_run = false,
+        .prefix = t.dir,
+        .dispatcher = &dispatcher,
+    });
+    defer report.deinit();
+    try testing.expect(report.hasFailure());
+    try testing.expectEqual(@as(usize, 4), report.failures.len);
+    for (report.failures) |f| {
+        const expected: runner.DispatchError = runner.DispatchError.DispatchFailed;
+        try testing.expectEqual(expected, f.err);
+        try testing.expectEqualStrings("DispatchFailed", @errorName(f.err));
+    }
 }
 
 test "round-trip: parse Brewfile fixture, run dry, no panic" {
