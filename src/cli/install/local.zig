@@ -379,16 +379,10 @@ pub fn installLocalFormula(
         output.err("Cannot read local formula: {s}", .{realpath});
         return InstallError.LocalFormulaNotReadable;
     };
-    const body = if (n == body_buf.len) body_buf else blk: {
-        if (allocator.resize(body_buf, n)) break :blk body_buf[0..n];
-        const trimmed = allocator.alloc(u8, n) catch {
-            allocator.free(body_buf);
-            output.err("Cannot read local formula: {s}", .{realpath});
-            return InstallError.LocalFormulaNotReadable;
-        };
-        @memcpy(trimmed, body_buf[0..n]);
+    const body = if (n == body_buf.len) body_buf else allocator.realloc(body_buf, n) catch {
         allocator.free(body_buf);
-        break :blk trimmed;
+        output.err("Cannot read local formula: {s}", .{realpath});
+        return InstallError.LocalFormulaNotReadable;
     };
     defer allocator.free(body);
 
