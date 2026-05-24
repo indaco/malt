@@ -816,7 +816,7 @@ pub const Parser = struct {
             self.skipNewlines();
             const elsif_body = try self.parseBlock();
             elsif_branches.append(self.allocator, .{
-                .condition = try self.makeNodePtr(elsif_cond),
+                .condition = elsif_cond,
                 .body = elsif_body,
             }) catch return DslError.OutOfMemory;
         }
@@ -835,7 +835,7 @@ pub const Parser = struct {
         return self.allocNode(.{
             .loc = loc,
             .kind = .{ .if_else = .{
-                .condition = try self.makeNodePtr(condition),
+                .condition = condition,
                 .then_body = then_body,
                 .elsif_branches = elsif_slice,
                 .else_body = else_body,
@@ -864,7 +864,7 @@ pub const Parser = struct {
         return self.allocNode(.{
             .loc = loc,
             .kind = .{ .unless_statement = .{
-                .condition = try self.makeNodePtr(condition),
+                .condition = condition,
                 .body = body,
                 .else_body = else_body,
             } },
@@ -1153,13 +1153,6 @@ pub const Parser = struct {
         const ptr = self.allocator.create(Node) catch return DslError.OutOfMemory;
         ptr.* = node;
         return ptr;
-    }
-
-    fn makeNodePtr(self: *Parser, node: anytype) DslError!*const Node {
-        // If already a pointer, return it directly
-        if (@TypeOf(node) == *const Node) return node;
-        // Otherwise it's a Node value — need to allocate
-        return self.emitError("internal: cannot convert to node pointer");
     }
 
     fn emitError(self: *Parser, message: []const u8) DslError {
