@@ -142,12 +142,11 @@ pub fn routePostInstallOutcomeWithBody(
             if (output.isVerbose()) flog.printUnknown(name);
             if (output.isDebug()) flog.printFatal(name);
             const ruby_stdio: sandbox.Stdio = .{ .out = ctx.stdout.handle, .err = ctx.stderr.handle };
-            const ruby_result: anyerror!void = if (pre_resolved_body) |body|
+            const ruby_result: ruby_sub.RubyError!void = if (pre_resolved_body) |body|
                 ruby_sub.runPostInstallWithBody(ctx.io, ctx.environ, allocator, name, version_str, prefix, body, ruby_stdio)
             else
                 ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix, ruby_stdio);
-            ruby_result catch |e| {
-                const err: ruby_sub.RubyError = @errorCast(e);
+            ruby_result catch |err| {
                 output.warn("post_install subprocess failed for {s}: {s}", .{ name, ruby_sub.describeError(err) });
                 break :blk .ruby_fallback_failed;
             };

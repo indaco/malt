@@ -841,10 +841,9 @@ fn executeWithOpts(
 
         if (!mats[i].ok) {
             const err = mats[i].err orelse cellar_mod.CellarError.CloneFailed;
-            output.err(
-                "Failed to materialize {s}: {s} ({s})",
-                .{ job.name, @errorName(err), cellar_mod.describeError(err) },
-            );
+            var msg_buf: [256]u8 = undefined;
+            const msg = formatMaterializeFailure(&msg_buf, job.name, err);
+            output.err("{s}", .{msg});
             output.emitNdjsonEvent(.materialized, job.name, "failed");
             try failed_kegs.put(job.name, {});
             failed_count += 1;
@@ -1140,6 +1139,36 @@ fn installCask(
     allocator.free(app_path);
 
     output.success("{s} {s} installed", .{ cask.token, cask.version });
+}
+
+// Format the user-facing materialize-failure line. Trivial cellar tags
+// (where describeError == @errorName) drop the parenthetical so the
+// message reads `Failed to materialize X: CloneFailed` instead of
+// `Failed to materialize X: CloneFailed (CloneFailed)`.
+fn formatMaterializeFailure(buf: []u8, name: []const u8, err: cellar_mod.CellarError) []const u8 {
+    const tag = @errorName(err);
+    const desc = cellar_mod.describeError(err);
+    const result = if (std.mem.eql(u8, tag, desc))
+        std.fmt.bufPrint(buf, "Failed to materialize {s}: {s}", .{ name, tag })
+    else
+        std.fmt.bufPrint(buf, "Failed to materialize {s}: {s} ({s})", .{ name, tag, desc });
+    // Overflow only fires on pathologically long names; fall back to a
+    // truncated form rather than swallowing the failure silently.
+    return result catch "Failed to materialize <truncated>";
+}
+
+test "formatMaterializeFailure: trivial tag drops the parenthetical" {
+    var buf: [256]u8 = undefined;
+    const msg = formatMaterializeFailure(&buf, "lld@21", cellar_mod.CellarError.CloneFailed);
+    try std.testing.expectEqualStrings("Failed to materialize lld@21: CloneFailed", msg);
+}
+
+test "formatMaterializeFailure: action-hint tag keeps the parenthetical prose" {
+    var buf: [256]u8 = undefined;
+    const msg = formatMaterializeFailure(&buf, "pkg", cellar_mod.CellarError.InstallNameToolMissing);
+    try std.testing.expect(std.mem.startsWith(u8, msg, "Failed to materialize pkg: InstallNameToolMissing ("));
+    try std.testing.expect(std.mem.endsWith(u8, msg, ")"));
+    try std.testing.expect(std.mem.indexOf(u8, msg, "install_name_tool not found on PATH") != null);
 }
 
 test "kegPresent returns true only when <prefix>/Cellar/<name> exists" {

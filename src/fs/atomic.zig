@@ -183,12 +183,7 @@ fn atomicWriteFileImpl(
 ) !void {
     var rand_bytes: [4]u8 = undefined;
     std.c.arc4random_buf(&rand_bytes, rand_bytes.len);
-    const hex_chars = "0123456789abcdef";
-    var hex: [8]u8 = undefined;
-    for (rand_bytes, 0..) |b, i| {
-        hex[i * 2] = hex_chars[b >> 4];
-        hex[i * 2 + 1] = hex_chars[b & 0x0f];
-    }
+    const hex = std.fmt.bytesToHex(rand_bytes, .lower);
 
     var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
     const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.{s}.tmp", .{ dst_path, &hex }) catch
@@ -235,13 +230,7 @@ pub fn createTempDir(io: std.Io, allocator: std.mem.Allocator, label: []const u8
     // Generate 8 random bytes -> 16 hex chars.
     var rand_bytes: [8]u8 = undefined;
     std.c.arc4random_buf(&rand_bytes, rand_bytes.len);
-
-    var hex_buf: [16]u8 = undefined;
-    const hex_chars = "0123456789abcdef";
-    for (rand_bytes, 0..) |b, i| {
-        hex_buf[i * 2] = hex_chars[b >> 4];
-        hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
-    }
+    const hex_buf = std.fmt.bytesToHex(rand_bytes, .lower);
 
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/tmp/{s}_{s}", .{ prefix, label, &hex_buf });
 

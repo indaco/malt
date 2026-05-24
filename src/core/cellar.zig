@@ -32,15 +32,12 @@ pub const CellarError = error{
 /// Human-readable description for a CellarError tag.
 /// Used by `mt install` when surfacing a materialize failure.
 pub fn describeError(err: CellarError) []const u8 {
+    // Only spell out the mappings that carry user-actionable hints;
+    // trivial tags speak for themselves via @errorName.
     return switch (err) {
-        CellarError.CloneFailed => "APFS clonefile or copy failed",
-        CellarError.PatchFailed => "Mach-O or text-file path patching failed",
-        CellarError.PathTooLong => "new prefix path is longer than the bottle was built with",
         CellarError.InsufficientHeaderPad => "install_name_tool: bottle built without -headerpad_max_install_names",
         CellarError.InstallNameToolMissing => "install_name_tool not found on PATH (install Xcode Command Line Tools)",
-        CellarError.CodesignFailed => "codesign re-signing failed",
-        CellarError.RemoveFailed => "cellar directory removal failed",
-        CellarError.OutOfMemory => "out of memory",
+        else => @errorName(err),
     };
 }
 
@@ -498,4 +495,23 @@ pub fn remove(io: std.Io, prefix: []const u8, name: []const u8, version: []const
     const cellar_path = std.fmt.bufPrint(&buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, version }) catch
         return CellarError.OutOfMemory;
     std.Io.Dir.cwd().deleteTree(io, cellar_path) catch return CellarError.RemoveFailed;
+}
+
+// Pins the describeError split: only the user-actionable mappings carry
+// prose; every other tag falls through to @errorName.
+test "describeError: action-hint tags keep prose, trivial tags fall back to @errorName" {
+    try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.InsufficientHeaderPad), "-headerpad_max_install_names") != null);
+    try std.testing.expect(std.mem.indexOf(u8, describeError(CellarError.InstallNameToolMissing), "install_name_tool not found on PATH") != null);
+
+    const fallback_tags = [_]CellarError{
+        CellarError.CloneFailed,
+        CellarError.PatchFailed,
+        CellarError.PathTooLong,
+        CellarError.CodesignFailed,
+        CellarError.RemoveFailed,
+        CellarError.OutOfMemory,
+    };
+    inline for (fallback_tags) |e| {
+        try std.testing.expectEqualStrings(@errorName(e), describeError(e));
+    }
 }
