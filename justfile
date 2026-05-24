@@ -71,13 +71,13 @@ fmt:
 # Lint shell scripts with shellcheck + shfmt.
 [group('lint')]
 shell-lint:
-    shellcheck scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh
-    shfmt -i 2 -d scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh
+    shellcheck scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh scripts/release/*.sh
+    shfmt -i 2 -d scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh scripts/release/*.sh
 
 # Apply shfmt formatting in place. Run after a failing `shell-lint`.
 [group('lint')]
 shell-fmt:
-    shfmt -i 2 -w scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh
+    shfmt -i 2 -w scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh scripts/release/*.sh
 
 # Lint: format check + build + test
 [group('lint')]
@@ -300,6 +300,26 @@ patch:
     #   sley tag create --push
     echo "▸ Bump + changelog ready on $branch."
     echo "▸ Review, then run: git push origin $branch && sley tag create --push"
+
+# Cross-check every `binary "..."` / `#{staged_path}/...` declared by the
+# rendered cask against the extracted release tarball in dist/. Run after
+# `goreleaser release --snapshot --clean` to catch a cask/tarball path
+# mismatch locally before CI does — the same check runs in
+# verify-artifacts at release time.
+[group('release')]
+verify-cask-paths:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    tarball=$(find dist -maxdepth 1 -name '*_darwin_all.tar.gz' | head -1)
+    cask=$(find dist -name '*.rb' | head -1)
+    [ -n "$tarball" ] || { echo "no tarball in dist/ - run 'goreleaser release --snapshot --clean --skip=sign' first" >&2; exit 1; }
+    [ -n "$cask" ] || { echo "no rendered cask in dist/" >&2; exit 1; }
+
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    tar -xzf "$tarball" -C "$tmp"
+    bash scripts/release/verify_cask_paths.sh "$tmp" "$cask"
 
 # Roll back a published release. Flips the GitHub release back to draft,
 # re-promotes the previous release to --latest, and reverts the matching
