@@ -35,7 +35,6 @@ archives:
       # archive root.
       - src: "dist/*_darwin_all*/mt"
         dst: "."
-    wrap_in_directory: true
 
 checksum:
   name_template: checksums.txt
