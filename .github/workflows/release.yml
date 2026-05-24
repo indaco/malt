@@ -212,10 +212,8 @@ jobs:
             exit 1
           fi
           tar -xzf "$TARBALL"
-          # archives.wrap_in_directory=true → tarball roots at <name>/.
-          EXTRACTED_DIR=$(tar -tzf "$TARBALL" | head -1 | cut -d/ -f1)
-          "./${EXTRACTED_DIR}/malt" --version
-          "./${EXTRACTED_DIR}/mt" --version
+          ./malt --version
+          ./mt --version
 
   # Push the rendered cask to indaco/homebrew-tap. Runs only after
   # verify-artifacts so a failed smoke leaves the tap untouched — the

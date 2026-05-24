@@ -88,16 +88,16 @@ make_release_fixture() {
   local archive_name="malt_${version}_darwin_all.tar.gz"
   local stage="$TMP/stage_${version}"
   rm -rf "$stage"
-  mkdir -p "$stage/malt_${version}_darwin_all"
+  mkdir -p "$stage"
   # Minimal contents: install.sh does a `find -name malt -type f -perm
   # -u+x` after extraction. A shell script with the exec bit satisfies
   # it without requiring a real binary.
-  cat >"$stage/malt_${version}_darwin_all/malt" <<'SH'
+  cat >"$stage/malt" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$stage/malt_${version}_darwin_all/malt"
-  tar -C "$stage" -czf "$dest/v${version}/${archive_name}" "malt_${version}_darwin_all"
+  chmod +x "$stage/malt"
+  tar -C "$stage" -czf "$dest/v${version}/${archive_name}" malt
   # Correct checksum so the happy path passes. install.sh itself uses
   # /usr/bin/shasum; the fixture generator avoids it because some
   # developer environments ship a broken perl-backed shasum ahead of
