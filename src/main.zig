@@ -94,7 +94,7 @@ const Command = enum {
     pin,
     unpin,
     run,
-    version_cmd,
+    version,
     completions,
     shellenv,
     backup,
@@ -107,7 +107,7 @@ const Command = enum {
     deps,
     which,
     help,
-    version,
+    version_flag,
 };
 
 /// Aliases live beside their canonical tag so there's one source of
@@ -134,7 +134,7 @@ const command_names = [_]struct {
     .{ .tag = .pin, .names = &.{"pin"} },
     .{ .tag = .unpin, .names = &.{"unpin"} },
     .{ .tag = .run, .names = &.{"run"} },
-    .{ .tag = .version_cmd, .names = &.{"version"} },
+    .{ .tag = .version, .names = &.{"version"} },
     .{ .tag = .completions, .names = &.{"completions"} },
     .{ .tag = .shellenv, .names = &.{"shellenv"} },
     .{ .tag = .backup, .names = &.{"backup"} },
@@ -147,7 +147,7 @@ const command_names = [_]struct {
     .{ .tag = .deps, .names = &.{"deps"} },
     .{ .tag = .which, .names = &.{"which"} },
     .{ .tag = .help, .names = &.{ "help", "--help", "-h" } },
-    .{ .tag = .version, .names = &.{"--version"} },
+    .{ .tag = .version_flag, .names = &.{"--version"} },
 };
 
 const command_map = blk: {
@@ -442,7 +442,7 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         .uses => try uses.execute(ctx, allocator, cmd_args),
         .deps => try deps_cmd.execute(ctx, allocator, cmd_args),
         .which => try which_cmd.execute(ctx, allocator, cmd_args),
-        .version_cmd => {
+        .version => {
             // "mt version" — check for "mt version update" subcommand
             if (cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "update")) {
                 try version_update.execute(ctx, allocator, cmd_args[1..]);
@@ -451,7 +451,7 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
             }
         },
         .help => printUsage(ctx),
-        .version => printVersion(ctx),
+        .version_flag => printVersion(ctx),
     }
 }
 
