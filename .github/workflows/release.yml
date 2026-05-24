@@ -163,6 +163,12 @@ jobs:
     environment:
       name: Release
     steps:
+      - name: Checkout repo
+        # Needed so the cask-paths cross-check helper
+        # (scripts/release/verify_cask_paths.sh) is on disk for the
+        # verify step below.
+        uses: actions/checkout@v6
+
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.1
 
@@ -178,6 +184,15 @@ jobs:
             --repo "${{ github.repository }}" \
             --dir /tmp/verify
           ls -la /tmp/verify
+
+      - name: Download rendered cask
+        # Same artifact publish-cask consumes downstream — pulling it
+        # here lets us cross-check the cask's declared paths against
+        # the tarball *before* the tap push happens.
+        uses: actions/download-artifact@v8
+        with:
+          name: homebrew-cask
+          path: /tmp/cask
 
       - name: Verify cosign signature on checksums
         run: |
@@ -214,6 +229,20 @@ jobs:
           tar -xzf "$TARBALL"
           ./malt --version
           ./mt --version
+
+      - name: Verify cask paths resolve in tarball
+        # Static cross-check: every `binary "..."` and `#{staged_path}/...`
+        # declared by the rendered cask must exist under the extracted
+        # tarball root. Closes the gap that let #375 ship — a tarball
+        # that ran fine via install.sh but broke `brew install --cask`.
+        run: |
+          mapfile -t found < <(find /tmp/cask -type f -name '*.rb')
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one .rb in cask artifact, got ${#found[@]}"
+            printf '  %s\n' "${found[@]}" >&2
+            exit 1
+          fi
+          bash scripts/release/verify_cask_paths.sh /tmp/verify "${found[0]}"
 
   # Push the rendered cask to indaco/homebrew-tap. Runs only after
   # verify-artifacts so a failed smoke leaves the tap untouched — the
