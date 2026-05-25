@@ -315,6 +315,7 @@ const InstallFlag = enum {
     quiet,
     json,
     only_dependencies,
+    download_only,
 };
 
 const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
@@ -328,6 +329,7 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "-q", .quiet },
     .{ "--json", .json },
     .{ "--only-dependencies", .only_dependencies },
+    .{ "--download-only", .download_only },
 });
 
 /// `allocator` must be an arena (see `installAll`).
@@ -363,6 +365,10 @@ fn executeWithOpts(
     // brew parity: resolve the dep graph, bail before the requested package's
     // materialise+link. Deps stay marked `dependency` for `mt purge --unused-deps`.
     var only_dependencies = false;
+    // Warm the bottle store; skip materialise/link/record. Refcount stays
+    // at 0 so warmed entries are invisible to `purge --store-orphans`
+    // until a follow-up install picks them up.
+    var download_only = false;
 
     // StaticStringMap + exhaustive switch: the compiler checks every flag
     // has a handler, so adding a new variant without wiring it fails to build.
@@ -385,6 +391,7 @@ fn executeWithOpts(
             .quiet => output.setQuiet(true),
             .json => output.setMode(.json),
             .only_dependencies => only_dependencies = true,
+            .download_only => download_only = true,
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             packages.append(allocator, arg) catch return error.OutOfMemory;
         }
@@ -410,6 +417,14 @@ fn executeWithOpts(
             output.err("--local does not run post_install; --use-system-ruby has no effect and is refused", .{});
             return error.Aborted;
         }
+    }
+
+    // The two flags pull in opposite directions: --only-dependencies skips
+    // the requested package, --download-only skips materialise+link entirely.
+    // Document the refusal up front rather than silently picking a winner.
+    if (download_only and only_dependencies) {
+        output.err("--download-only cannot be combined with --only-dependencies", .{});
+        return error.Aborted;
     }
 
     if (packages.items.len == 0) {
@@ -595,7 +610,7 @@ fn executeWithOpts(
                     continue;
                 }
                 // Try cask
-                installCask(ctx, allocator, pkg_name, &db, &api, dry_run) catch |e| {
+                installCask(ctx, allocator, pkg_name, &db, &api, dry_run, download_only) catch |e| {
                     output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                 };
                 continue;
@@ -625,7 +640,7 @@ fn executeWithOpts(
             };
             output.emitNdjsonEvent(.resolved, pkg_name, null);
         } else {
-            installCask(ctx, allocator, pkg_name, &db, &api, dry_run) catch |e| {
+            installCask(ctx, allocator, pkg_name, &db, &api, dry_run, download_only) catch |e| {
                 output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
             };
         }
@@ -679,6 +694,15 @@ fn executeWithOpts(
         return InstallError.CellarFailed;
     defer allocator.free(mats);
     for (mats) |*m| m.* = .{ .ok = false, .err = null };
+
+    // `--download-only`: emit per-job `download_started` from the main
+    // thread before the pool spawns so consumers see a deterministic
+    // pre-fetch line. Paired with `download_complete` after the join.
+    if (download_only and output.isNdjson()) {
+        for (all_jobs.items) |job| {
+            output.emitNdjsonEvent(.download_started, job.name, null);
+        }
+    }
 
     // `--force` pre-materialize: clonefile refuses to overwrite a populated
     // keg dir, so wipe the resolved-version dir up front. Destructive DB +
@@ -777,6 +801,7 @@ fn executeWithOpts(
             .cache = &formula_cache,
             .results = mats,
             .worker_backing = std.heap.smp_allocator,
+            .download_only = download_only,
         };
 
         const pool_threads = allocator.alloc(std.Thread, worker_count) catch
@@ -810,6 +835,27 @@ fn executeWithOpts(
             output.emitNdjsonEvent(.extracted, job.name, "ok");
             output.emitNdjsonEvent(.stored, job.name, "ok");
         }
+    }
+
+    // --download-only stops here. Skip the serial link phase and surface
+    // each warmed bottle's `<prefix>/store/<sha>` path so a follow-up
+    // real install can consume the bytes.
+    if (download_only) {
+        for (all_jobs.items) |job| {
+            if (!job.succeeded) {
+                output.emitNdjsonEvent(.download_complete, job.name, "failed");
+                output.err("Download failed for {s}", .{job.name});
+                continue;
+            }
+            output.emitNdjsonEvent(.download_complete, job.name, "ok");
+            output.success("{s} {s} downloaded to {s}/store/{s}", .{
+                job.name,
+                job.version_str,
+                prefix,
+                job.store_sha256,
+            });
+        }
+        return;
     }
 
     // Check for Ctrl-C between the pool and the serial link phase
@@ -1056,7 +1102,9 @@ fn resolveCaskArtifactViaHead(ctx: *const AppCtx, allocator: std.mem.Allocator, 
     return cask_mod.resolveArtifactType(allocator, resolved.final_url, resolved.content_disposition);
 }
 
-/// Install a cask (DMG, ZIP, or PKG).
+/// Install a cask (DMG, ZIP, or PKG). When `download_only` is set, the
+/// flow stops after `<prefix>/cache/Cask/<file>` is sha-verified — no
+/// `/Applications` writes, no DB inserts.
 fn installCask(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -1064,6 +1112,7 @@ fn installCask(
     db: *sqlite.Database,
     api: *api_mod.BrewApi,
     dry_run: bool,
+    download_only: bool,
 ) !void {
     const cask_json = api.fetchCask(token) catch {
         output.err("Cask '{s}' not found", .{token});
@@ -1077,8 +1126,11 @@ fn installCask(
     };
     defer cask.deinit();
 
-    // Check if already installed
-    if (cask_mod.isInstalled(db, cask.token)) {
+    // `--download-only` deliberately ignores `isInstalled` so a user can
+    // refresh the cached artefact ahead of an `mt upgrade` even when an
+    // older revision is on disk. The real install path keeps the
+    // "already installed" short-circuit.
+    if (!download_only and cask_mod.isInstalled(db, cask.token)) {
         output.info("{s} is already installed", .{cask.token});
         return;
     }
@@ -1111,8 +1163,6 @@ fn installCask(
         output.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
     }
 
-    output.info("Installing cask {s} {s}...", .{ cask.token, cask.version });
-
     const prefix = atomic.maltPrefixOrAbort();
 
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
@@ -1124,6 +1174,23 @@ fn installCask(
         .context = @ptrCast(&bar),
         .func = &progressBridge,
     };
+
+    if (download_only) {
+        output.emitNdjsonEvent(.download_started, cask.token, null);
+        const cache_path = installer.downloadOnly(&cask) catch |e| {
+            bar.finish();
+            output.emitNdjsonEvent(.download_complete, cask.token, "failed");
+            output.err("Failed to download cask {s}: {s}", .{ cask.token, @errorName(e) });
+            return InstallError.CaskNotFound;
+        };
+        bar.finish();
+        defer allocator.free(cache_path);
+        output.emitNdjsonEvent(.download_complete, cask.token, "ok");
+        output.success("{s} {s} downloaded to {s}", .{ cask.token, cask.version, cache_path });
+        return;
+    }
+
+    output.info("Installing cask {s} {s}...", .{ cask.token, cask.version });
 
     const app_path = installer.install(&cask) catch |e| {
         bar.finish();

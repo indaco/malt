@@ -482,13 +482,14 @@ pub const CaskInstaller = struct {
         return .{ .allocator = allocator, .io = io, .environ = environ, .db = db, .prefix = prefix, .progress = null };
     }
 
-    /// Install a cask. Downloads, verifies SHA256, and installs based on artifact type.
-    /// Returns the installed app path on success.
-    pub fn install(self: *CaskInstaller, cask: *const Cask) CaskError![]const u8 {
+    /// Fetch + sha-verify the cask artefact into `<prefix>/cache/Cask/` and
+    /// return the on-disk path. No `/Applications` writes, no DB inserts —
+    /// the seam `mt install --download-only --cask <token>` reuses to warm
+    /// the cache before going offline. Caller owns the returned slice.
+    pub fn downloadOnly(self: *CaskInstaller, cask: *const Cask) CaskError![]const u8 {
         const artifact_type = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
         if (artifact_type == .unknown) return CaskError.InstallFailed;
 
-        // Ensure cache/Cask/ directory exists
         var cache_buf: [512]u8 = undefined;
         const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask", .{self.prefix}) catch
             return CaskError.OutOfMemory;
@@ -497,18 +498,30 @@ pub const CaskInstaller = struct {
             else => return CaskError.InstallFailed,
         };
 
-        // Download to cache
         const cache_path = self.downloadToCache(cask, cache_dir, self.progress) catch
             return CaskError.DownloadFailed;
         errdefer {
-            // cache already leaked to disk; nothing to do on cleanup failure.
             std.Io.Dir.cwd().deleteFile(self.io, cache_path) catch {};
             self.allocator.free(cache_path);
         }
 
-        // Verify SHA256
         self.verifySha256(cache_path, cask.sha256) catch
             return CaskError.Sha256Mismatch;
+
+        return cache_path;
+    }
+
+    /// Install a cask. Downloads, verifies SHA256, and installs based on artifact type.
+    /// Returns the installed app path on success.
+    pub fn install(self: *CaskInstaller, cask: *const Cask) CaskError![]const u8 {
+        const artifact_type = self.artifact_type_override orelse artifactTypeFromUrl(cask.url);
+        if (artifact_type == .unknown) return CaskError.InstallFailed;
+
+        const cache_path = try self.downloadOnly(cask);
+        errdefer {
+            std.Io.Dir.cwd().deleteFile(self.io, cache_path) catch {};
+            self.allocator.free(cache_path);
+        }
 
         // Determine target: prefix-aware sandbox / /Applications / ~/Applications.
         var app_dir_buf: [512]u8 = undefined;

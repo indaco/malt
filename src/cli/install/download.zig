@@ -555,86 +555,8 @@ pub fn installKegFromBottle(
 ) InstallError!InstallKegResult {
     const bottle = formula_mod.resolveBottle(formula) catch return InstallError.NoBottle;
 
-    if (!deps.store.exists(bottle.sha256)) {
-        const ref = ghcr_url.parseGhcrUrl(bottle.url) orelse return InstallError.DownloadFailed;
-
-        const tmp_dir = atomic.createTempDir(ctx.io, allocator, formula.name) catch
-            return InstallError.DownloadFailed;
-
-        const progress_cb: ?client_mod.ProgressCallback = if (deps.bar) |bar| .{
-            .context = @ptrCast(bar),
-            .func = &progressBridge,
-        } else null;
-
-        const max_attempts: u8 = 3;
-        const retry_delays_ms = [_]u64{ 100, 400 };
-        var dl_attempt: u8 = 0;
-        var dl_ok = false;
-        var last_err: bottle_mod.BottleError = bottle_mod.BottleError.DownloadFailed;
-        var last_mismatch: ?bottle_mod.MismatchInfo = null;
-        while (dl_attempt < max_attempts) : (dl_attempt += 1) {
-            var mismatch: bottle_mod.MismatchInfo = undefined;
-            if (bottle_mod.download(
-                ctx.io,
-                allocator,
-                deps.ghcr,
-                deps.http,
-                ref.repo,
-                ref.digest,
-                bottle.sha256,
-                tmp_dir,
-                progress_cb,
-                &mismatch,
-            )) |_| {
-                dl_ok = true;
-                break;
-            } else |dl_err| {
-                last_err = dl_err;
-                atomic.cleanupTempDir(ctx.io, tmp_dir);
-                if (dl_err == bottle_mod.BottleError.DownloadPermanent) {
-                    output.err("  {s}: permanent HTTP error (404/410), not retrying", .{formula.name});
-                    break;
-                }
-                if (dl_err == bottle_mod.BottleError.Sha256Mismatch) {
-                    last_mismatch = mismatch;
-                } else if (isDeterministicDownloadError(dl_err)) {
-                    output.err("  {s}: {s}", .{ formula.name, @errorName(dl_err) });
-                    break;
-                }
-                if (dl_attempt + 1 < max_attempts) {
-                    if (!cancellableBackoff(ctx.io, retry_delays_ms[dl_attempt])) break;
-                }
-            }
-        }
-
-        if (!dl_ok and last_err == bottle_mod.BottleError.Sha256Mismatch) {
-            if (last_mismatch) |m| {
-                output.err(
-                    "  {s}: Sha256Mismatch (expected={s} got={s} bytes={d})",
-                    .{ formula.name, m.expected[0..@min(64, m.expected.len)], m.computed[0..], m.body_len },
-                );
-            } else {
-                output.err("  {s}: Sha256Mismatch", .{formula.name});
-            }
-        }
-
-        if (!dl_ok) {
-            if (deps.bar) |bar| bar.finish();
-            if (dl_attempt >= max_attempts) {
-                output.err("  {s}: {s} (after {d} attempts)", .{ formula.name, @errorName(last_err), max_attempts });
-            }
-            allocator.free(tmp_dir);
-            return InstallError.DownloadFailed;
-        }
-        if (deps.bar) |bar| bar.finish();
-
-        deps.store.commitFrom(bottle.sha256, tmp_dir) catch {
-            atomic.cleanupTempDir(ctx.io, tmp_dir);
-            allocator.free(tmp_dir);
-            return InstallError.StoreFailed;
-        };
-        allocator.free(tmp_dir);
-
+    const committed = try downloadBottleToStore(ctx, allocator, deps, formula, bottle);
+    if (committed) {
         // Advisory refcount: commit succeeded so the bytes are ours; a
         // bumped warning is not a failure of the materialize.
         deps.store.incrementRef(bottle.sha256) catch |e| {
@@ -658,6 +580,102 @@ pub fn installKegFromBottle(
     return .{ .sha256 = bottle.sha256, .keg = keg };
 }
 
+/// Ensure the bottle bytes live at `<prefix>/store/<sha>/`. Returns
+/// `true` when a fresh commit happened (i.e. the store didn't already
+/// hold the SHA), `false` for the warm-store skip. The refcount and
+/// materialise steps are the caller's job — this seam is shared by
+/// `installKegFromBottle` and the `--download-only` pool worker.
+pub fn downloadBottleToStore(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    deps: InstallKegDeps,
+    formula: *const formula_mod.Formula,
+    bottle: formula_mod.BottleFile,
+) InstallError!bool {
+    if (deps.store.exists(bottle.sha256)) return false;
+
+    const ref = ghcr_url.parseGhcrUrl(bottle.url) orelse return InstallError.DownloadFailed;
+
+    const tmp_dir = atomic.createTempDir(ctx.io, allocator, formula.name) catch
+        return InstallError.DownloadFailed;
+
+    const progress_cb: ?client_mod.ProgressCallback = if (deps.bar) |bar| .{
+        .context = @ptrCast(bar),
+        .func = &progressBridge,
+    } else null;
+
+    const max_attempts: u8 = 3;
+    const retry_delays_ms = [_]u64{ 100, 400 };
+    var dl_attempt: u8 = 0;
+    var dl_ok = false;
+    var last_err: bottle_mod.BottleError = bottle_mod.BottleError.DownloadFailed;
+    var last_mismatch: ?bottle_mod.MismatchInfo = null;
+    while (dl_attempt < max_attempts) : (dl_attempt += 1) {
+        var mismatch: bottle_mod.MismatchInfo = undefined;
+        if (bottle_mod.download(
+            ctx.io,
+            allocator,
+            deps.ghcr,
+            deps.http,
+            ref.repo,
+            ref.digest,
+            bottle.sha256,
+            tmp_dir,
+            progress_cb,
+            &mismatch,
+        )) |_| {
+            dl_ok = true;
+            break;
+        } else |dl_err| {
+            last_err = dl_err;
+            atomic.cleanupTempDir(ctx.io, tmp_dir);
+            if (dl_err == bottle_mod.BottleError.DownloadPermanent) {
+                output.err("  {s}: permanent HTTP error (404/410), not retrying", .{formula.name});
+                break;
+            }
+            if (dl_err == bottle_mod.BottleError.Sha256Mismatch) {
+                last_mismatch = mismatch;
+            } else if (isDeterministicDownloadError(dl_err)) {
+                output.err("  {s}: {s}", .{ formula.name, @errorName(dl_err) });
+                break;
+            }
+            if (dl_attempt + 1 < max_attempts) {
+                if (!cancellableBackoff(ctx.io, retry_delays_ms[dl_attempt])) break;
+            }
+        }
+    }
+
+    if (!dl_ok and last_err == bottle_mod.BottleError.Sha256Mismatch) {
+        if (last_mismatch) |m| {
+            output.err(
+                "  {s}: Sha256Mismatch (expected={s} got={s} bytes={d})",
+                .{ formula.name, m.expected[0..@min(64, m.expected.len)], m.computed[0..], m.body_len },
+            );
+        } else {
+            output.err("  {s}: Sha256Mismatch", .{formula.name});
+        }
+    }
+
+    if (!dl_ok) {
+        if (deps.bar) |bar| bar.finish();
+        if (dl_attempt >= max_attempts) {
+            output.err("  {s}: {s} (after {d} attempts)", .{ formula.name, @errorName(last_err), max_attempts });
+        }
+        allocator.free(tmp_dir);
+        return InstallError.DownloadFailed;
+    }
+    if (deps.bar) |bar| bar.finish();
+
+    deps.store.commitFrom(bottle.sha256, tmp_dir) catch {
+        atomic.cleanupTempDir(ctx.io, tmp_dir);
+        allocator.free(tmp_dir);
+        return InstallError.StoreFailed;
+    };
+    allocator.free(tmp_dir);
+
+    return true;
+}
+
 /// Shared state for the install-time per-keg worker pool. Each worker
 /// grabs the next slot in `jobs` atomically, borrows an HTTP client
 /// from `http_pool`, and calls `installKegFromBottle` against the
@@ -678,6 +696,10 @@ pub const InstallPool = struct {
     /// tests can drive the pool under `testing.allocator`; production
     /// keeps a thread-safe heap (typically `smp_allocator`).
     worker_backing: std.mem.Allocator,
+    /// When set, workers stop after the per-keg download phase. The
+    /// caller's serial link loop bails on this flag; refcount stays at 0
+    /// so warmed bytes are invisible to `purge --store-orphans`.
+    download_only: bool = false,
 };
 
 /// Thread entry-point for the install pool. Drains `pool.jobs` via the
@@ -719,6 +741,31 @@ fn installOneJob(pool: *InstallPool, job: *DownloadJob, result: *MaterializeResu
     // buffer before the arena drops.
     var arena = std.heap.ArenaAllocator.init(pool.worker_backing);
     defer arena.deinit();
+
+    if (pool.download_only) {
+        const bottle = formula_mod.resolveBottle(formula) catch {
+            result.* = .{ .ok = false, .err = null };
+            job.succeeded = false;
+            return;
+        };
+        _ = downloadBottleToStore(
+            pool.ctx,
+            arena.allocator(),
+            .{ .ghcr = pool.ghcr, .http = http, .store = pool.store, .bar = job.bar },
+            formula,
+            bottle,
+        ) catch {
+            result.* = .{ .ok = false, .err = null };
+            job.succeeded = false;
+            return;
+        };
+        // No keg path — materialise is skipped. The serial loop bails
+        // on `pool.download_only` before it would read `keg_path_buf`.
+        result.* = .{ .ok = true, .err = null };
+        job.store_sha256 = bottle.sha256;
+        job.succeeded = true;
+        return;
+    }
 
     // `cellar_diag` captures the specific `CellarError` variant when
     // materialise fails so the serial link phase below can still print
@@ -987,6 +1034,76 @@ test "installKegFromBottle returns NoBottle before reaching ghcr/store when no p
             "/tmp/malt_iknfb_test",
         ),
     );
+}
+
+// `downloadBottleToStore` returning `false` on the warm-store path is
+// the contract `installKegFromBottle` relies on to skip the refcount
+// bump, and that the `--download-only` pool worker relies on to keep
+// the warm fast path zero-I/O.
+test "downloadBottleToStore returns false when the store already holds the bottle" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx_value: AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    const ts = std.Io.Clock.real.now(ctx_value.io).toNanoseconds();
+    const prefix_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "/tmp/malt_dlonly_skip_{d}",
+        .{ts},
+    );
+    defer std.testing.allocator.free(prefix_path);
+    std.Io.Dir.cwd().deleteTree(ctx_value.io, prefix_path) catch {};
+    try std.Io.Dir.cwd().createDirPath(ctx_value.io, prefix_path);
+    defer std.Io.Dir.cwd().deleteTree(ctx_value.io, prefix_path) catch {};
+
+    const sha = "ba" ** 32;
+    const seeded = try std.fmt.allocPrint(std.testing.allocator, "{s}/store/{s}", .{ prefix_path, sha });
+    defer std.testing.allocator.free(seeded);
+    try std.Io.Dir.cwd().createDirPath(ctx_value.io, seeded);
+
+    var http = client_mod.HttpClient.init(ctx_value.io, ctx_value.environ, std.testing.allocator);
+    defer http.deinit();
+    var ghcr = ghcr_mod.GhcrClient.init(ctx_value.io, std.testing.allocator, &http);
+    defer ghcr.deinit();
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    var store = store_mod.Store.init(ctx_value.io, std.testing.allocator, &db, prefix_path);
+
+    // Build a minimal Formula via the public parser so the test stays
+    // independent of internal field shape changes.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const formula_json = try std.fmt.allocPrint(
+        arena.allocator(),
+        \\{{
+        \\  "name": "warm",
+        \\  "full_name": "warm",
+        \\  "tap": "homebrew/core",
+        \\  "desc": "",
+        \\  "homepage": "",
+        \\  "versions": {{"stable": "1.0"}},
+        \\  "revision": 0,
+        \\  "dependencies": [],
+        \\  "keg_only": false,
+        \\  "post_install_defined": false,
+        \\  "oldnames": [],
+        \\  "bottle": {{"stable": {{"files": {{"all": {{"cellar": ":any", "url": "https://ghcr.io/v2/x/blobs/sha256:{s}", "sha256": "{s}"}}}}}}}}
+        \\}}
+    ,
+        .{ sha, sha },
+    );
+    var formula = try formula_mod.parseFormula(arena.allocator(), formula_json);
+    defer formula.deinit();
+    const bottle = try formula_mod.resolveBottle(&formula);
+
+    const committed = try downloadBottleToStore(
+        &ctx_value,
+        std.testing.allocator,
+        .{ .ghcr = &ghcr, .http = &http, .store = &store },
+        &formula,
+        bottle,
+    );
+    try std.testing.expect(!committed);
 }
 
 test "FetchFormulaCtx: arena backed by testing.allocator runs leak-clean across the dupe-then-deinit shape" {

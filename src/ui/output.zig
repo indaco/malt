@@ -563,6 +563,12 @@ pub const NdjsonEvent = enum {
     linked,
     recorded,
     install_complete,
+    // Bracketing pair for the `--download-only` warm-cache path. Distinct
+    // from `.downloaded` so consumers (CI pipelines, Docker layer warmers)
+    // can time per-bottle work without conflating it with the install-time
+    // emit shape.
+    download_started,
+    download_complete,
     // Shared with --json's existing post_install summary line.
     post_install,
     // No-transition outcomes.
