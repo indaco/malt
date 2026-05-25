@@ -302,6 +302,87 @@ install_only_deps_wget() {
   fi
 }
 
+# Warm-cache reuse for the tap-archive cache: `--download-only` populates
+# `$PREFIX/cache/Tap/<sha>.<ext>` and leaves Cellar+kegs untouched; a
+# follow-up `mt install` consumes the warmed bytes without growing the
+# cache. The single new install-surface contract from T-048 — the
+# bottle/cask warm-reuse paths are pinned by
+# `scripts/regressions/install_download_only.sh`.
+#
+# Transient tap-resolution failures (rate limit, DNS blip) shape-match
+# the existing `install_tap_tmp_cleanup` regression handling: SKIP, not
+# FAIL, so the smoke stays honest about what's verifiable today.
+install_download_only_tap_reuse() {
+  local tag="smoke.install.download_only.tap"
+  local slug="indaco/tap/sley"
+  local name="sley"
+  local cache_dir="$PREFIX/cache/Tap"
+
+  local dl_log
+  dl_log="$LOGDIR/$(printf '%s' "$tag.dl" | tr -c 'A-Za-z0-9' _).log"
+  printf '  RUN   [%s.dl] %s install --download-only %s\n' "$tag" "$MT_BIN" "$slug"
+  if ! "$MT_BIN" install --download-only "$slug" >"$dl_log" 2>&1; then
+    if grep -qE "rate limit|Network failure|Cannot fetch tap from GitHub|Tap formula/cask not found" "$dl_log"; then
+      printf '  SKIP  [%s] %s: transient classified failure\n' "$tag" "$slug"
+      SKIP=$((SKIP + 1))
+      SKIPS+=("$tag")
+      return
+    fi
+    printf '  FAIL  [%s.dl] %s --download-only failed\n' "$tag" "$slug"
+    tail -30 "$dl_log" | sed 's/^/        | /'
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$tag.dl")
+    return
+  fi
+  printf '  PASS  [%s.dl] %s --download-only completed\n' "$tag" "$slug"
+  PASS=$((PASS + 1))
+
+  if [[ -d "$PREFIX/Cellar/$name" ]]; then
+    printf '  FAIL  [%s.dl.cellar] Cellar/%s populated by --download-only\n' "$tag" "$name"
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$tag.dl.cellar")
+    return
+  fi
+  printf '  PASS  [%s.dl.cellar] Cellar/%s absent after --download-only\n' "$tag" "$name"
+  PASS=$((PASS + 1))
+
+  local cache_before
+  cache_before=$(find "$cache_dir" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$cache_before" -lt 1 ]]; then
+    printf '  FAIL  [%s.dl.cache] cache/Tap empty after --download-only\n' "$tag"
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$tag.dl.cache")
+    return
+  fi
+  printf '  PASS  [%s.dl.cache] cache/Tap holds %s archive(s)\n' "$tag" "$cache_before"
+  PASS=$((PASS + 1))
+
+  if ! run "$tag.reuse" "$MT_BIN" install "$slug"; then
+    return
+  fi
+  INSTALLED_FORMULAS+=("$name")
+
+  if [[ ! -d "$PREFIX/Cellar/$name" ]]; then
+    printf '  FAIL  [%s.reuse.cellar] Cellar/%s missing after follow-up install\n' "$tag" "$name"
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$tag.reuse.cellar")
+    return
+  fi
+  printf '  PASS  [%s.reuse.cellar] Cellar/%s populated by follow-up install\n' "$tag" "$name"
+  PASS=$((PASS + 1))
+
+  local cache_after
+  cache_after=$(find "$cache_dir" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$cache_after" != "$cache_before" ]]; then
+    printf '  FAIL  [%s.reuse.cache] cache/Tap grew on follow-up (before=%s after=%s)\n' "$tag" "$cache_before" "$cache_after"
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$tag.reuse.cache")
+    return
+  fi
+  printf '  PASS  [%s.reuse.cache] cache/Tap stable across reuse (count=%s)\n' "$tag" "$cache_after"
+  PASS=$((PASS + 1))
+}
+
 # Reverse what we installed. Casks first because they touch /Applications;
 # formulas second (they live entirely under MALT_PREFIX, but uninstalling
 # also exercises the uninstall path). Best-effort: a stuck uninstall must
@@ -327,6 +408,7 @@ printf '  CACHE=%s\n' "$CACHE"
 printf '  MT_BIN=%s\n\n' "$MT_BIN"
 
 run smoke.update "$MT_BIN" update
+install_download_only_tap_reuse
 install_formula smoke.install.node node
 install_formula smoke.install.zig zig
 install_formula smoke.install.rust rust
