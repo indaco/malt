@@ -47,6 +47,10 @@ pub const CheckCtx = struct {
     /// "Mirror overrides" row. Defaults to upstream so tests and
     /// `debug_ctx`-shaped fixtures keep working without plumbing.
     mirrors: mirror_mod.Mirrors = .{},
+    /// `MALT_OFFLINE` / `--offline` snapshot. Drives the "Offline mode"
+    /// row and short-circuits the API-reachable probe so an air-gapped
+    /// machine doesn't get a warn row for an expected network gap.
+    offline: bool = false,
 };
 
 /// One entry in the health walk. `run` prints its row(s) and returns
@@ -73,6 +77,7 @@ pub const checks = [_]Check{
     .{ .name = "APFS volume", .run = checkApfs },
     .{ .name = "Prefix permissions", .run = checkPrefixPermissions },
     .{ .name = "Mirror overrides", .run = checkMirrorOverrides },
+    .{ .name = "Offline mode", .run = checkOfflineMode },
     .{ .name = "API reachable", .run = checkApiReachable },
     .{ .name = "Orphaned store entries", .run = checkOrphanedStore },
     .{ .name = "Missing kegs", .run = checkMissingKegs },
@@ -189,6 +194,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         .io = ctx.io,
         .environ = ctx.environ,
         .mirrors = ctx.mirrors,
+        .offline = ctx.offline,
     }, &checks);
 
     emitCaskHistoryReport(allocator, ctx.io, prefix);
@@ -520,7 +526,31 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
     return .warn_status;
 }
 
+/// Report offline-mode state so operators can confirm `MALT_OFFLINE` /
+/// `--offline` landed correctly without re-grepping their shell config.
+/// Always `.ok` — offline is a user choice, not a fault.
+fn checkOfflineMode(ctx: CheckCtx, name: []const u8) CheckResult {
+    printCheck(name, .ok, formatOfflineDetail(ctx.offline));
+    return .ok;
+}
+
+/// Pure formatter for `checkOfflineMode`'s detail string. `pub` so the
+/// doctor render test can pin the exact text without a process fixture.
+pub fn formatOfflineDetail(offline: bool) []const u8 {
+    return if (offline)
+        "active — every fetch must serve from the snapshot cache"
+    else
+        "off";
+}
+
 fn checkApiReachable(ctx: CheckCtx, name: []const u8) CheckResult {
+    // Offline mode flips the API-reachable check into a skip rather
+    // than a warn: under offline there's no expectation of network
+    // reachability, so a "Cannot reach" row would be noise.
+    if (ctx.offline) {
+        printCheck(name, .ok, "skipped — offline mode");
+        return .ok;
+    }
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, ctx.allocator);
     defer http.deinit();
     const probe_url = mirror_mod.hostProbeUrl(ctx.mirrors.api_base);

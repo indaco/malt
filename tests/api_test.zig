@@ -372,6 +372,113 @@ test "cachedExists discriminates formula vs cask cache files" {
     try testing.expect(!api.cachedExists("node", .cask));
 }
 
+test "fetchFormula under offline returns OfflineRequired on cache miss" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("offline_formula_miss");
+    defer dir.deinit();
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+    try testing.expectError(api_mod.ApiError.OfflineRequired, api.fetchFormula("ghost"));
+}
+
+test "fetchCask under offline returns OfflineRequired on cache miss" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("offline_cask_miss");
+    defer dir.deinit();
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+    try testing.expectError(api_mod.ApiError.OfflineRequired, api.fetchCask("ghost"));
+}
+
+test "fetchFormula under offline serves a fresh cache hit" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("offline_formula_fresh");
+    defer dir.deinit();
+
+    const json =
+        \\{"name":"wget","versions":{"stable":"1.0"}}
+    ;
+    try dir.writeCacheFile("formula_wget.json", json);
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+    const out = try api.fetchFormula("wget");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(json, out);
+}
+
+test "fetchFormula under offline serves a stale cache hit (no TTL gate)" {
+    // The whole point of offline is "use the snapshot, no matter how old".
+    // The default 5-minute TTL gate is bypassed when `offline` is true so
+    // a user on a plane still gets bytes from disk.
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("offline_formula_stale");
+    defer dir.deinit();
+
+    const json =
+        \\{"name":"jq","versions":{"stable":"1.7"}}
+    ;
+    try dir.writeCacheFile("formula_jq.json", json);
+
+    // Backdate mtime so the regular TTL would reject it.
+    var path_buf: [512]u8 = undefined;
+    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/formula_jq.json", .{dir.path});
+    const file = try test_io.cwd().openFile(std.Options.debug_io, full, .{ .mode = .write_only });
+    defer file.close(std.Options.debug_io);
+    try file.setTimestamps(std.Options.debug_io, .{
+        .access_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+        .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+    });
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+    const out = try api.fetchFormula("jq");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(json, out);
+}
+
+test "fetchFormula under offline still honours a fresh NotFound marker" {
+    // 404 markers stay authoritative — the snapshot already learned this
+    // name doesn't exist upstream, so OfflineRequired would be misleading.
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("offline_notfound");
+    defer dir.deinit();
+
+    try dir.writeCacheFile("formula_ghost.404", "");
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+    try testing.expectError(api_mod.ApiError.NotFound, api.fetchFormula("ghost"));
+}
+
+test "fetchNamesIndex under offline returns OfflineRequired on miss" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("offline_names_miss");
+    defer dir.deinit();
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+    try testing.expectError(api_mod.ApiError.OfflineRequired, api.fetchNamesIndex(.formula));
+}
+
+test "BrewApi.offline defaults to false" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("offline_default_off");
+    defer dir.deinit();
+
+    const api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    try testing.expect(!api.offline);
+}
+
 test "readNotFoundCache returns false for stale marker" {
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();

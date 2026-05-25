@@ -49,6 +49,7 @@ fn fetchLatestTag(ctx: *const AppCtx, allocator: std.mem.Allocator) ![]u8 {
     // SIGINT on the prompt-after-success window collapses the probe
     // instead of stalling the user behind the 1.5 s deadline.
     http.cancel = signals.isInterrupted;
+    http.offline = ctx.offline;
     defer http.deinit();
     var resp = try http.get(release.releases_latest_url);
     defer resp.deinit();

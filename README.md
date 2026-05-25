@@ -54,7 +54,7 @@ If you're scanning rather than reading, here is the surface area in one place.
 - **Atomic install protocol.** New versions verified before old versions are touched; `mt rollback --to <version>` reverts from the store with no re-download. Streaming SHA256 + parallel downloads + a 30 s advisory file lock against concurrent mutations.
 - **Ephemeral run.** `mt run <pkg> -- <args...>` extracts and `execvp`s without a permanent install; `--keep` caches the bottle for next time.
 - **Full operational surface.** `mt services` with `status` and `logs --tail/--follow`. `mt bundle` reading both `Brewfile` and `Maltfile.json`. `mt doctor --fix` with a planner and a manual-only set. `mt purge` with composable scopes (`--cache`, `--unused-deps`, `--store-orphans`, `--old-versions`, `--wipe`) and typed-confirmation gates. `mt backup`/`mt restore` for hand-editable manifests. `mt migrate` that relocates a Homebrew install rather than inventorying it. `mt uses` for reverse-dependency queries via SQL.
-- **Scriptable.** `--json` and `--output-format=ndjson` everywhere it makes sense; orthogonal flags. `--quiet`, `--verbose`, `--debug`, `--dry-run` are global. `NO_COLOR`, `MALT_NO_EMOJI`, `MALT_PROGRESS`, `MALT_THEME` for shaping output.
+- **Scriptable.** `--json` and `--output-format=ndjson` everywhere it makes sense; orthogonal flags. `--quiet`, `--verbose`, `--debug`, `--dry-run`, `--offline` are global. `NO_COLOR`, `MALT_NO_EMOJI`, `MALT_PROGRESS`, `MALT_THEME` for shaping output.
 - **Signed, verifiable releases.** Every release is cosign-signed keyless via GitHub OIDC; `install.sh` and `mt version update` verify the signature before trusting the SHA256 checksum. Tap commits are pinned and formula source is SHA256-verified against an embedded manifest. Advance a pin with `mt tap --refresh user/repo`.
 - **Sandboxed `post_install`.** The `--use-system-ruby` path runs inside a `sandbox-exec` profile scoped to the formula's cellar, with a scrubbed environment and `RLIMIT_CPU`/`AS`/`FSIZE` caps. Every mutating op in the native interpreter is validated against the Cellar/malt prefix.
 
@@ -474,38 +474,39 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 
 ### Global flags
 
-| Flag              | Description                                                                     |
-| ----------------- | ------------------------------------------------------------------------------- |
-| `--verbose`, `-v` | Verbose output                                                                  |
-| `--debug`         | Surface every DSL diagnostic (implies verbose); pair with issue reports         |
-| `--quiet`, `-q`   | Suppress non-error output                                                       |
-| `--json`          | JSON output (read commands; also emits per-package `post_install` status lines) |
-| `--dry-run`       | Preview without executing                                                       |
-| `--help`, `-h`    | Show help                                                                       |
-| `--version`       | Show version                                                                    |
+| Flag              | Description                                                                                                      |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `--verbose`, `-v` | Verbose output                                                                                                   |
+| `--debug`         | Surface every DSL diagnostic (implies verbose); pair with issue reports                                          |
+| `--quiet`, `-q`   | Suppress non-error output                                                                                        |
+| `--json`          | JSON output (read commands; also emits per-package `post_install` status lines)                                  |
+| `--dry-run`       | Preview without executing                                                                                        |
+| `--offline`       | Serve every fetch from the snapshot cache; fail fast with `OfflineRequired` on a miss (mirrors `MALT_OFFLINE=1`) |
+| `--help`, `-h`    | Show help                                                                                                        |
+| `--version`       | Show version                                                                                                     |
 
 ### Environment variables
 
-| Variable                        | Description                                                                                                                                     | Default                        |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| `MALT_PREFIX`                   | Override install prefix                                                                                                                         | `/opt/malt`                    |
-| `MALT_CACHE`                    | Override cache directory                                                                                                                        | `{prefix}/cache`               |
-| `NO_COLOR`                      | Disable colored output                                                                                                                          | unset                          |
-| `MALT_NO_EMOJI`                 | Disable emoji in output                                                                                                                         | unset                          |
-| `MALT_NO_VERSION_NOTIFIER`      | Set to `1` to suppress the "newer malt available" notice                                                                                        | unset                          |
-| `MALT_PROGRESS`                 | Progress reporter for `install`/`upgrade`/`migrate`: `tty`, `plain`, or `none` (`CI=true` or `GITHUB_ACTIONS=true` flip the default to `plain`) | `tty`                          |
-| `MALT_THEME`                    | Force the output palette: `light`, `dark`, or `auto` (detects via OSC 11)                                                                       | `auto`                         |
-| `HOMEBREW_GITHUB_API_TOKEN`     | GitHub token for higher API rate limits                                                                                                         | unset                          |
-| `MALT_GITHUB_TOKEN`             | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only                                                                  | unset                          |
-| `MALT_HTTP_IDLE_TIMEOUT_SECS`   | HTTP idle (no-progress) read timeout in seconds (clamped to `[5, 600]`)                                                                         | `30`                           |
-| `MALT_API_DOMAIN`               | Override metadata API base URL; HTTPS only; falls back to `HOMEBREW_API_DOMAIN`                                                                 | `https://formulae.brew.sh/api` |
-| `MALT_BOTTLE_DOMAIN`            | Override bottle registry base URL; HTTPS only; falls back to `HOMEBREW_BOTTLE_DOMAIN`                                                           | `https://ghcr.io`              |
-| `MALT_OFFLINE`                  | Set to `1`/`true` to force `mt search` to the local DB (mirrors `--offline`)                                                                    | unset                          |
-| `MALT_MIGRATE_PARALLEL_WORKERS` | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                                                                                 | `4`                            |
-| `MALT_OUTDATED_MAX_AGE`         | TTL in hours for the `outdated.json` snapshot                                                                                                   | `24`                           |
-| `MALT_ALLOW_RAW_POST_INSTALL`   | Disable terminal escape filter on ruby `post_install` output                                                                                    | unset                          |
-| `MALT_ALLOW_UNVERIFIED`         | Skip cosign signature check in `install.sh` (use only when cosign is unavailable)                                                               | unset                          |
-| `MALT_ALLOW_UNVERIFIED_SOURCE`  | Allow `install.sh` to clone `main` when no release tag resolves                                                                                 | unset                          |
+| Variable                        | Description                                                                                                                                              | Default                        |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| `MALT_PREFIX`                   | Override install prefix                                                                                                                                  | `/opt/malt`                    |
+| `MALT_CACHE`                    | Override cache directory                                                                                                                                 | `{prefix}/cache`               |
+| `NO_COLOR`                      | Disable colored output                                                                                                                                   | unset                          |
+| `MALT_NO_EMOJI`                 | Disable emoji in output                                                                                                                                  | unset                          |
+| `MALT_NO_VERSION_NOTIFIER`      | Set to `1` to suppress the "newer malt available" notice                                                                                                 | unset                          |
+| `MALT_PROGRESS`                 | Progress reporter for `install`/`upgrade`/`migrate`: `tty`, `plain`, or `none` (`CI=true` or `GITHUB_ACTIONS=true` flip the default to `plain`)          | `tty`                          |
+| `MALT_THEME`                    | Force the output palette: `light`, `dark`, or `auto` (detects via OSC 11)                                                                                | `auto`                         |
+| `HOMEBREW_GITHUB_API_TOKEN`     | GitHub token for higher API rate limits                                                                                                                  | unset                          |
+| `MALT_GITHUB_TOKEN`             | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only                                                                           | unset                          |
+| `MALT_HTTP_IDLE_TIMEOUT_SECS`   | HTTP idle (no-progress) read timeout in seconds (clamped to `[5, 600]`)                                                                                  | `30`                           |
+| `MALT_API_DOMAIN`               | Override metadata API base URL; HTTPS only; falls back to `HOMEBREW_API_DOMAIN`                                                                          | `https://formulae.brew.sh/api` |
+| `MALT_BOTTLE_DOMAIN`            | Override bottle registry base URL; HTTPS only; falls back to `HOMEBREW_BOTTLE_DOMAIN`                                                                    | `https://ghcr.io`              |
+| `MALT_OFFLINE`                  | Set to `1`/`true` to route every fetch through the snapshot cache; misses surface `OfflineRequired` instead of stalling on connect (mirrors `--offline`) | unset                          |
+| `MALT_MIGRATE_PARALLEL_WORKERS` | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                                                                                          | `4`                            |
+| `MALT_OUTDATED_MAX_AGE`         | TTL in hours for the `outdated.json` snapshot                                                                                                            | `24`                           |
+| `MALT_ALLOW_RAW_POST_INSTALL`   | Disable terminal escape filter on ruby `post_install` output                                                                                             | unset                          |
+| `MALT_ALLOW_UNVERIFIED`         | Skip cosign signature check in `install.sh` (use only when cosign is unavailable)                                                                        | unset                          |
+| `MALT_ALLOW_UNVERIFIED_SOURCE`  | Allow `install.sh` to clone `main` when no release tag resolves                                                                                          | unset                          |
 
 ## Architecture
 

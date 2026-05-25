@@ -223,7 +223,7 @@ fn upstreamLatest(
             // drop the row from the audit. Same shape as `upgradeCask`.
             if (row.tap) |tap_label| {
                 if (!install_args_mod.isCoreTap(tap_label)) {
-                    break :blk tapCaskLatestVersion(alloc, io, environ, tap_label, row.name);
+                    break :blk tapCaskLatestVersion(alloc, io, environ, tap_label, row.name, api.offline);
                 }
             }
             const json = api.fetchCask(row.name) catch break :blk null;
@@ -269,6 +269,7 @@ fn tapCaskLatestVersion(
     environ: std.process.Environ,
     tap_label: []const u8,
     token: []const u8,
+    offline: bool,
 ) ?[]u8 {
     const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse return null;
     if (slash == 0 or slash == tap_label.len - 1) return null;
@@ -284,6 +285,7 @@ fn tapCaskLatestVersion(
 
     var http = client_mod.HttpClient.init(io, environ, alloc);
     defer http.deinit();
+    http.offline = offline;
 
     var rb_url_buf: [512]u8 = undefined;
     const rb_url = std.fmt.bufPrint(&rb_url_buf, "{s}/{s}/Casks/{s}.rb", .{ urls.raw_base, fresh_sha, token }) catch return null;
@@ -361,6 +363,9 @@ const WorkerCtx = struct {
     /// Snapshot of `ctx.mirrors.api_base` so workers inherit the
     /// mirror override without re-walking the env on a worker thread.
     api_base: []const u8,
+    /// Snapshot of `ctx.offline` so workers gate fetches identically
+    /// to the serial path without re-walking the env per thread.
+    offline: bool,
     row: KegRow,
     kind: Kind,
     /// Result allocated on the **caller** allocator so it survives
@@ -393,6 +398,7 @@ fn runOne(out_alloc: std.mem.Allocator, wctx: *WorkerCtx) void {
     const arena_alloc = wctx.arena.allocator();
     var local_api = api_mod.BrewApi.init(wctx.io, arena_alloc, http, wctx.cache_dir);
     local_api.base_url = wctx.api_base;
+    local_api.offline = wctx.offline;
     const latest = upstreamLatest(arena_alloc, &local_api, wctx.io, wctx.environ, wctx.kind, wctx.row) orelse return;
     if (std.mem.eql(u8, wctx.row.version, latest)) return;
 
@@ -417,6 +423,7 @@ fn runPool(
 
     var http_pool = try client_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, worker_count);
     defer http_pool.deinit();
+    http_pool.setOfflineAll(ctx.offline);
 
     const ctxs = try allocator.alloc(WorkerCtx, kegs.len);
     defer {
@@ -431,6 +438,7 @@ fn runPool(
         .pool = &http_pool,
         .cache_dir = cache_dir,
         .api_base = ctx.mirrors.api_base,
+        .offline = ctx.offline,
         .row = kegs[i],
         .kind = kind,
     };
@@ -479,6 +487,7 @@ test "WorkerCtx: per-row arena accepts testing.allocator backing without leaking
         .pool = undefined,
         .cache_dir = "",
         .api_base = "",
+        .offline = false,
         .row = .{ .name = "", .version = "" },
         .kind = .formula,
     };

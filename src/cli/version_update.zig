@@ -65,9 +65,14 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
+    http.offline = ctx.offline;
 
-    var resp = http.get(release.releases_latest_url) catch {
-        output.err("Cannot reach GitHub API", .{});
+    var resp = http.get(release.releases_latest_url) catch |e| {
+        if (e == error.OfflineRequired) {
+            output.err("Offline mode active; self-update requires network access.", .{});
+        } else {
+            output.err("Cannot reach GitHub API", .{});
+        }
         return error.Aborted;
     };
     defer resp.deinit();

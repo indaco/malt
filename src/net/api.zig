@@ -19,6 +19,11 @@ pub const ApiError = error{
     InvalidResponse,
     InvalidName,
     CacheError,
+    /// Offline mode is active and the snapshot cache had no entry for
+    /// this key. Distinct from `ApiUnreachable` so the CLI can route
+    /// straight to "offline mode: <kind> '<name>' not cached" instead
+    /// of the generic network-failure message.
+    OfflineRequired,
     OutOfMemory,
 };
 
@@ -127,6 +132,10 @@ pub const BrewApi = struct {
     /// drop in `ctx.mirrors.api_base`; mirror precedence + HTTPS
     /// validation are enforced upstream by `mirror.resolve`.
     base_url: []const u8 = mirror_mod.default_api_base_url,
+    /// When true, every fetch serves from the snapshot cache (any age)
+    /// and returns `OfflineRequired` on a miss instead of dialing out.
+    /// Set by cli/ call sites from `ctx.offline`.
+    offline: bool = false,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, http: *client_mod.HttpClient, cache_dir: []const u8) BrewApi {
         return .{
@@ -247,6 +256,13 @@ pub const BrewApi = struct {
         };
         if (self.readNamesIndex(key)) |cached| return cached;
 
+        if (self.offline) {
+            // Names index has no 404 form — a miss in offline mode means
+            // the user never warmed the index, so search can't run at all.
+            if (self.readNamesIndexUnchecked(key)) |cached| return cached;
+            return ApiError.OfflineRequired;
+        }
+
         var url_buf: [512]u8 = undefined;
         const url = try buildNamesIndexUrl(&url_buf, self.base_url, kind);
         var resp = self.http.get(url) catch return ApiError.ApiUnreachable;
@@ -270,6 +286,29 @@ pub const BrewApi = struct {
         const now = std.Io.Clock.real.now(self.io).toSeconds();
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         if (now - mtime_secs > index_ttl_secs) return null;
+
+        const file = std.Io.Dir.cwd().openFile(self.io, p, .{}) catch return null;
+        defer file.close(self.io);
+        const s = file.stat(self.io) catch return null;
+        const buf = self.allocator.alloc(u8, s.size) catch return null;
+        const n = file.readPositionalAll(self.io, buf, 0) catch {
+            self.allocator.free(buf);
+            return null;
+        };
+        if (n < buf.len) {
+            self.allocator.free(buf);
+            return null;
+        }
+        return buf;
+    }
+
+    /// TTL-bypass names-index read. Offline mode falls through here when
+    /// the freshness-gated `readNamesIndex` rejects a stale snapshot —
+    /// stale-but-present beats OfflineRequired when the user just wants
+    /// to grep their last warmed list.
+    fn readNamesIndexUnchecked(self: *BrewApi, key: []const u8) ?[]const u8 {
+        var path_buf: [512]u8 = undefined;
+        const p = std.fmt.bufPrint(&path_buf, "{s}/api/names_{s}.txt", .{ self.cache_dir, key }) catch return null;
 
         const file = std.Io.Dir.cwd().openFile(self.io, p, .{}) catch return null;
         defer file.close(self.io);
@@ -321,6 +360,15 @@ pub const BrewApi = struct {
         // never cached.
         if (self.readNotFoundCache(key, prefix)) return ApiError.NotFound;
 
+        // Offline mode: serve from the snapshot at any age, or hard-fail
+        // with OfflineRequired. Skipping the TTL gate matches the
+        // air-gapped use case: a stale entry is still bytes the user
+        // can install from.
+        if (self.offline) {
+            if (self.readCacheBytes(key, prefix)) |cached| return cached;
+            return ApiError.OfflineRequired;
+        }
+
         // Try the normal success cache.
         if (self.readCache(key, prefix)) |cached| return cached;
 
@@ -351,7 +399,17 @@ pub const BrewApi = struct {
         const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
         if (now - mtime_secs > cache_ttl_secs) return null;
 
-        // Read file
+        return self.readCacheBytes(key, prefix);
+    }
+
+    /// TTL-bypass cache read. Returns caller-owned bytes if the file
+    /// exists and is readable, regardless of mtime. Used by the offline
+    /// path so a stale snapshot still serves bytes; the regular
+    /// `readCache` adds the freshness gate on top.
+    pub fn readCacheBytes(self: *BrewApi, key: []const u8, prefix: []const u8) ?[]const u8 {
+        var path_buf: [512]u8 = undefined;
+        const cache_path = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.json", .{ self.cache_dir, prefix, key }) catch return null;
+
         const file = std.Io.Dir.cwd().openFile(self.io, cache_path, .{}) catch return null;
         defer file.close(self.io);
         const file_stat = file.stat(self.io) catch return null;

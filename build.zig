@@ -133,6 +133,7 @@ pub fn build(b: *std.Build) void {
         "tests/install_parse_cache_test.zig",
         "tests/deps_leak_test.zig",
         "tests/api_test.zig",
+        "tests/offline_mode_test.zig",
         "tests/clonefile_test.zig",
         "tests/dsl_lexer_test.zig",
         "tests/dsl_parser_test.zig",

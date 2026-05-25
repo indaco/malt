@@ -33,6 +33,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer allocator.free(cache_dir);
 
     if (check_only) {
+        // Offline mode means no network — refusing here is the kind
+        // "we can't do this, but you knew that" message the task doc
+        // calls for, ahead of any HTTP attempt that would fail anyway.
+        if (ctx.offline) {
+            output.err("offline mode: `mt update --check` requires network access.", .{});
+            return error.Aborted;
+        }
         refreshSnapshot(ctx, allocator, cache_dir) catch |e| {
             output.err("Failed to refresh outdated snapshot: {s}", .{@errorName(e)});
             return error.Aborted;
@@ -80,8 +87,10 @@ fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: 
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
+    http.offline = ctx.offline;
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
+    api.offline = ctx.offline;
 
     try outdated_mod.refreshSnapshot(ctx, allocator, &db, &api, cache_dir, null);
 }

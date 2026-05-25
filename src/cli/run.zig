@@ -125,11 +125,13 @@ fn ephemeralRun(
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
+    http.offline = ctx.offline;
 
     var cache_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch return;
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
+    api.offline = ctx.offline;
 
     const formula_json = api.fetchFormula(pkg_name) catch {
         output.err("Formula '{s}' not found", .{pkg_name});

@@ -578,8 +578,10 @@ fn runKindIsolated(
 ) KindResults {
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
+    http.offline = ctx.offline;
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
+    api.offline = ctx.offline;
     var r: KindResults = .{};
     r.exact = api.exists(query, kind) catch false;
     if (api.fetchNamesIndex(kind)) |idx| {

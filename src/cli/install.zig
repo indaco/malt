@@ -536,6 +536,7 @@ fn executeWithOpts(
     // Main-thread HTTP client; workers borrow from `http_pool` instead.
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
+    http.offline = ctx.offline;
 
     // 4-slot worker pool — same budget as the materialize pool; enough to
     // saturate cold installs while reusing TLS contexts.
@@ -544,12 +545,14 @@ fn executeWithOpts(
         return InstallError.DownloadFailed;
     };
     defer http_pool.deinit();
+    http_pool.setOfflineAll(ctx.offline);
 
     // Set up API client
     var cache_dir_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
+    api.offline = ctx.offline;
 
     // Set up GHCR client
     var ghcr = ghcr_mod.GhcrClient.init(ctx.io, allocator, &http);
@@ -604,14 +607,25 @@ fn executeWithOpts(
 
         // Try formula
         if (!force_cask) {
-            const formula_json = api.fetchFormula(pkg_name) catch {
+            const formula_json = api.fetchFormula(pkg_name) catch |fetch_err| {
+                // Offline misses route straight to a typed "snapshot
+                // didn't have it" line instead of falling through to a
+                // cask probe that would also miss with the same noise.
+                if (fetch_err == api_mod.ApiError.OfflineRequired) {
+                    output.err("offline mode: formula '{s}' not cached", .{pkg_name});
+                    continue;
+                }
                 if (force_formula) {
                     output.err("Formula '{s}' not found", .{pkg_name});
                     continue;
                 }
                 // Try cask
                 installCask(ctx, allocator, pkg_name, &db, &api, dry_run, download_only) catch |e| {
-                    output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+                    if (e == api_mod.ApiError.OfflineRequired) {
+                        output.err("offline mode: '{s}' not cached as formula or cask", .{pkg_name});
+                    } else {
+                        output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+                    }
                 };
                 continue;
             };
@@ -1095,6 +1109,7 @@ fn maybeRegisterService(
 fn resolveCaskArtifactViaHead(ctx: *const AppCtx, allocator: std.mem.Allocator, url: []const u8) cask_mod.ArtifactType {
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
+    http.offline = ctx.offline;
 
     var resolved = http.headResolved(url) catch return .unknown;
     defer resolved.deinit();
@@ -1114,7 +1129,10 @@ fn installCask(
     dry_run: bool,
     download_only: bool,
 ) !void {
-    const cask_json = api.fetchCask(token) catch {
+    const cask_json = api.fetchCask(token) catch |e| {
+        // Propagate the typed OfflineRequired so the outer dispatch
+        // surfaces the snapshot-miss message instead of "not found".
+        if (e == api_mod.ApiError.OfflineRequired) return e;
         output.err("Cask '{s}' not found", .{token});
         return InstallError.CaskNotFound;
     };
@@ -1167,6 +1185,7 @@ fn installCask(
 
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
     installer.artifact_type_override = artifact_type;
+    installer.offline = ctx.offline;
 
     // Progress bar for cask download
     var bar = progress_mod.ProgressBar.init(cask.token, 0);

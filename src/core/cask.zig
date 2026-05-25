@@ -477,6 +477,10 @@ pub const CaskInstaller = struct {
     progress: ?client_mod.ProgressCallback,
     /// Pre-resolved type for extensionless URLs (HEAD fallback).
     artifact_type_override: ?ArtifactType = null,
+    /// Mirrors `ctx.offline` from the cli/ caller. Threaded onto the
+    /// internal HttpClient so a download miss surfaces `OfflineRequired`
+    /// instead of stalling on connect.
+    offline: bool = false,
 
     pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]const u8) CaskInstaller {
         return .{ .allocator = allocator, .io = io, .environ = environ, .db = db, .prefix = prefix, .progress = null };
@@ -738,6 +742,7 @@ pub const CaskInstaller = struct {
         // Download via HTTP client
         var http = client_mod.HttpClient.init(self.io, self.environ, self.allocator);
         defer http.deinit();
+        http.offline = self.offline;
 
         var resp = try http.getWithHeaders(cask.url, &.{}, progress);
         defer resp.deinit();

@@ -88,7 +88,7 @@ pub const bash_script =
     \\    cword=$COMP_CWORD
     \\
     \\    local commands="install uninstall remove upgrade update outdated list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services bundle help"
-    \\    local global_flags="--verbose -v --quiet -q --json --output-format=ndjson --dry-run --help -h --version"
+    \\    local global_flags="--verbose -v --quiet -q --json --output-format=ndjson --dry-run --offline --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
     \\    local cmd="" i
@@ -235,6 +235,7 @@ pub const zsh_script =
     \\        '--json[JSON output]' \
     \\        '--output-format=ndjson[Stream one JSON event per state transition]' \
     \\        '--dry-run[Preview without executing]' \
+    \\        '--offline[Serve every fetch from the snapshot cache; fail fast on a miss]' \
     \\        '(- : *)'{--help,-h}'[Show help]' \
     \\        '(- : *)--version[Show version]' \
     \\        '1: :->command' \
@@ -476,6 +477,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin      -l json    -d 'JSON output'
     \\    complete -c $__malt_bin      -l output-format=ndjson -d 'Stream one JSON event per state transition'
     \\    complete -c $__malt_bin      -l dry-run -d 'Preview without executing'
+    \\    complete -c $__malt_bin      -l offline -d 'Serve every fetch from the snapshot cache; fail fast on a miss'
     \\    complete -c $__malt_bin -s h -l help    -d 'Show help'
     \\    complete -c $__malt_bin      -l version -d 'Show version'
     \\

@@ -82,6 +82,7 @@ pub const api = @import("net/api.zig");
 pub const client = @import("net/client.zig");
 pub const ghcr = @import("net/ghcr.zig");
 pub const mirror = @import("net/mirror.zig");
+pub const offline = @import("net/offline.zig");
 pub const text_replace = @import("text_replace.zig");
 pub const color = @import("ui/color.zig");
 pub const output = @import("ui/output.zig");
