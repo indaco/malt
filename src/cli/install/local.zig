@@ -11,6 +11,7 @@ const atomic = @import("../../fs/atomic.zig");
 const cask_mod = @import("../../core/cask.zig");
 const linker_mod = @import("../../core/linker.zig");
 const tap_mod = @import("../../core/tap.zig");
+const tap_cache = @import("../../core/tap_cache.zig");
 const client_mod = @import("../../net/client.zig");
 const hash = @import("../../core/hash.zig");
 const output = @import("../../ui/output.zig");
@@ -39,8 +40,11 @@ pub const max_local_formula_bytes: usize = 1 * 1024 * 1024;
 
 /// Post-parse payload shared by the tap and local-file install paths.
 /// Slices point into caller-owned memory (parsed `.rb`, interpolated
-/// URL buffer) and must outlive `materializeRubyFormula`.
-const ResolvedRubyFormula = struct {
+/// URL buffer) and must outlive `materializeRubyFormula`. `pub` so
+/// `tests/install_download_only_test.zig` can drive the materialise
+/// path with a fabricated payload (cache-hit fixtures, ndjson event
+/// shape).
+pub const ResolvedRubyFormula = struct {
     /// Short formula name — becomes the Cellar dir, bin basename, and
     /// `kegs.name` column.
     name: []const u8,
@@ -150,14 +154,17 @@ pub fn installTapFormula(
     prefix: []const u8,
     dry_run: bool,
     force: bool,
+    download_only: bool,
 ) !void {
-    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, .formula_or_cask);
+    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, download_only, .formula_or_cask);
 }
 
 /// Install a tap cask whose owning tap is already known. Skips the
 /// `Formula/` probe — safe to call from inside an open DB transaction
 /// because the formula branch of `materializeRubyFormula` (which
-/// begins its own transaction) is structurally unreachable.
+/// begins its own transaction) is structurally unreachable. Upgrade
+/// callers never opt into `download_only`, so the legacy false is
+/// hard-wired here rather than forwarded.
 pub fn installTapCask(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -168,7 +175,7 @@ pub fn installTapCask(
     dry_run: bool,
     force: bool,
 ) !void {
-    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, .cask_only);
+    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, false, .cask_only);
 }
 
 fn installTapRb(
@@ -180,6 +187,7 @@ fn installTapRb(
     prefix: []const u8,
     dry_run: bool,
     force: bool,
+    download_only: bool,
     kind: TapResolveKind,
 ) !void {
     const parts = args.parseTapName(pkg_name) orelse {
@@ -287,7 +295,7 @@ fn installTapRb(
         .app_name = parseCaskApp(resp.body),
         .tap_registration = .{ .url = urls.repo_url, .commit_sha = commit_sha },
     };
-    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force);
+    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, download_only);
 }
 
 /// Install a formula from a local `.rb` file on disk. Gated by the
@@ -417,7 +425,10 @@ pub fn installLocalFormula(
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
-    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force);
+    // `--local` is out of scope for `--download-only`: the user already
+    // holds the archive on disk so warming a tap-cache entry adds no
+    // value. Hard-wire false here rather than threading the flag.
+    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, false);
 }
 
 /// Ordered set of advisory risk labels that may fire on a `.rb` file
@@ -465,7 +476,10 @@ pub fn formatTapDownloadName(
 /// Shared "from parsed `.rb` to linked keg" path, used by the tap and
 /// local installers. Does the network fetch for the archive, SHA256
 /// verification, cellar materialisation, and DB + linker commit.
-fn materializeRubyFormula(
+/// `pub` so the integration tests can drive the materialise flow with
+/// a fabricated `ResolvedRubyFormula` (cache-hit fixtures, ndjson
+/// shape) without standing up a tap-resolution stub.
+pub fn materializeRubyFormula(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     resolved: ResolvedRubyFormula,
@@ -475,6 +489,7 @@ fn materializeRubyFormula(
     prefix: []const u8,
     dry_run: bool,
     force: bool,
+    download_only: bool,
 ) InstallError!void {
     output.info("Found {s} {s}", .{ resolved.name, resolved.version });
 
@@ -491,7 +506,7 @@ fn materializeRubyFormula(
     // mounting, ditto, and `installer` live there. Tar.gz/tar.xz/zip
     // formula archives keep the simple-extract path below.
     if (tapCaskArtifactKind(resolved.url, resolved.app_name != null)) |kind| {
-        return materializeTapCask(ctx, allocator, resolved, db, kind, dry_run, force);
+        return materializeTapCask(ctx, allocator, resolved, db, kind, dry_run, force, download_only);
     }
 
     if (dry_run) {
@@ -499,47 +514,121 @@ fn materializeRubyFormula(
         return;
     }
 
-    // Skip silently when the keg is already present (unless --force).
-    if (!force and record.isInstalled(db, resolved.name)) {
+    // `--download-only` deliberately skips `isInstalled`: a warm
+    // request must refresh the cache regardless of install state.
+    if (!download_only and !force and record.isInstalled(db, resolved.name)) {
         output.info("{s} is already installed", .{resolved.name});
         return;
     }
 
-    // Stream with a progress bar, matching formula/cask downloads.
-    var bar = progress_mod.ProgressBar.init(resolved.name, 0);
-    var download_resp = http.getWithHeaders(resolved.url, &.{}, .{
-        .context = @ptrCast(&bar),
-        .func = &download.progressBridge,
-    }) catch {
-        bar.finish();
-        output.err("Failed to download {s}", .{resolved.name});
+    // Pick the archive kind early so the cache-or-fetch step below
+    // can compose `<prefix>/cache/Tap/<sha>.<ext>` before any HTTP
+    // work. Unknown formats fail fast — no point fetching bytes we
+    // can't extract.
+    const archive_kind = TapArchiveKind.fromUrl(resolved.url) orelse {
+        output.err("Unsupported archive format for {s}: {s}", .{ resolved.name, resolved.url });
+        output.err("Supported formats: .tar.gz, .tar.xz, .zip.", .{});
         return InstallError.DownloadFailed;
     };
-    defer download_resp.deinit();
-    bar.finish();
+    const archive_ext = archive_kind.extension();
 
-    if (download_resp.status != 200) {
-        output.err("Download failed with status {d}", .{download_resp.status});
-        return InstallError.DownloadFailed;
-    }
+    // Same ndjson event shape as the bottle + cask paths so CI
+    // pipelines see one event vocabulary across the dispatcher.
+    if (download_only) output.emitNdjsonEvent(.download_started, resolved.name, null);
+    // Errdefer guarantees a paired `download_complete` even on the
+    // error paths below; the success branch sets the flag first so we
+    // never double-fire.
+    var dl_complete_emitted = false;
+    errdefer if (download_only and !dl_complete_emitted) {
+        output.emitNdjsonEvent(.download_complete, resolved.name, "failed");
+    };
 
-    // Verify SHA256 before anything touches the filesystem.
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(download_resp.body, &digest, .{});
-    var hex_buf: [64]u8 = undefined;
-    const hex_chars = "0123456789abcdef";
-    for (digest, 0..) |b, i| {
-        hex_buf[i * 2] = hex_chars[b >> 4];
-        hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
-    }
-    const computed: []const u8 = &hex_buf;
+    // Prefer the persistent cache; fall back to a network fetch that
+    // publishes via atomic rename. Either branch yields `cache_path`
+    // as the on-disk source the extractor reads from below.
+    var cache_path_buf: [512]u8 = undefined;
+    const cache_path = blk: {
+        if (tap_cache.exists(ctx.io, prefix, resolved.sha256, archive_ext)) {
+            // Warm cache: skip the fetch. SHA-keyed filename is its
+            // own verification — a follow-up install of the same
+            // formula consumes the warmed bytes instead of refetching.
+            break :blk tap_cache.cachePath(&cache_path_buf, prefix, resolved.sha256, archive_ext) catch
+                return InstallError.DownloadFailed;
+        }
 
-    // Constant-time compare on the SHA256: a stock `mem.eql` leaks
-    // per-byte progress via timing, giving an adaptive attacker a
-    // byte-by-byte oracle against the expected hash.
-    if (!hash.constantTimeEql(u8, computed, resolved.sha256)) {
-        output.err("SHA256 mismatch for {s}", .{resolved.name});
-        return InstallError.DownloadFailed;
+        // Cold cache: stream the archive into pid-suffixed staging,
+        // SHA-verify the in-memory body, then atomic-rename to the
+        // permanent cache path. A crash mid-write leaves only the
+        // staging file (which `mt doctor --fix` and the tap-tmp
+        // cleanup regression already reclaim).
+        var bar = progress_mod.ProgressBar.init(resolved.name, 0);
+        var download_resp = http.getWithHeaders(resolved.url, &.{}, .{
+            .context = @ptrCast(&bar),
+            .func = &download.progressBridge,
+        }) catch {
+            bar.finish();
+            output.err("Failed to download {s}", .{resolved.name});
+            return InstallError.DownloadFailed;
+        };
+        defer download_resp.deinit();
+        bar.finish();
+
+        if (download_resp.status != 200) {
+            output.err("Download failed with status {d}", .{download_resp.status});
+            return InstallError.DownloadFailed;
+        }
+
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(download_resp.body, &digest, .{});
+        var hex_buf: [64]u8 = undefined;
+        const hex_chars = "0123456789abcdef";
+        for (digest, 0..) |b, i| {
+            hex_buf[i * 2] = hex_chars[b >> 4];
+            hex_buf[i * 2 + 1] = hex_chars[b & 0x0f];
+        }
+        const computed: []const u8 = &hex_buf;
+
+        // Constant-time compare on the SHA256: a stock `mem.eql`
+        // leaks per-byte progress via timing, giving an adaptive
+        // attacker a byte-by-byte oracle against the expected hash.
+        if (!hash.constantTimeEql(u8, computed, resolved.sha256)) {
+            output.err("SHA256 mismatch for {s}", .{resolved.name});
+            return InstallError.DownloadFailed;
+        }
+
+        var tmp_buf: [512]u8 = undefined;
+        const tmp_archive = formatTapDownloadName(&tmp_buf, prefix, archive_ext, std.c.getpid()) catch
+            return InstallError.DownloadFailed;
+
+        const tmp_file = std.Io.Dir.createFileAbsolute(ctx.io, tmp_archive, .{}) catch return InstallError.DownloadFailed;
+        tmp_file.writeStreamingAll(ctx.io, download_resp.body) catch {
+            tmp_file.close(ctx.io);
+            std.Io.Dir.cwd().deleteFile(ctx.io, tmp_archive) catch {};
+            return InstallError.DownloadFailed;
+        };
+        tmp_file.close(ctx.io);
+        // promoteStagingToCache succeeds → tmp_archive no longer
+        // exists at its source path. On failure we still wipe it so
+        // the next run's pid collision space stays clean.
+        errdefer std.Io.Dir.cwd().deleteFile(ctx.io, tmp_archive) catch {};
+        break :blk tap_cache.promoteStagingToCache(
+            ctx.io,
+            prefix,
+            resolved.sha256,
+            archive_ext,
+            tmp_archive,
+            &cache_path_buf,
+        ) catch return InstallError.DownloadFailed;
+    };
+
+    // `--download-only` stops once the cache holds the SHA-verified
+    // bytes — no Cellar writes, no DB inserts. A follow-up
+    // `mt install` consumes the warmed entry above.
+    if (download_only) {
+        output.emitNdjsonEvent(.download_complete, resolved.name, "ok");
+        dl_complete_emitted = true;
+        output.success("{s} {s} downloaded to {s}", .{ resolved.name, resolved.version, cache_path });
+        return;
     }
 
     // Extract to Cellar directly (tap-style binaries are simple archives).
@@ -575,38 +664,17 @@ fn materializeRubyFormula(
         else => return InstallError.CellarFailed,
     };
 
-    // Pick archive kind from the URL suffix; reject unknown formats
-    // rather than feeding them to tar and printing a generic "failed".
-    const archive_kind = TapArchiveKind.fromUrl(resolved.url) orelse {
-        output.err("Unsupported archive format for {s}: {s}", .{ resolved.name, resolved.url });
-        output.err("Supported formats: .tar.gz, .tar.xz, .zip.", .{});
-        return InstallError.DownloadFailed;
-    };
-    var tmp_buf: [512]u8 = undefined;
-    const tmp_archive = formatTapDownloadName(&tmp_buf, prefix, archive_kind.extension(), std.c.getpid()) catch
-        return InstallError.DownloadFailed;
-
-    const tmp_file = std.Io.Dir.createFileAbsolute(ctx.io, tmp_archive, .{}) catch return InstallError.DownloadFailed;
-    tmp_file.writeStreamingAll(ctx.io, download_resp.body) catch {
-        tmp_file.close(ctx.io);
-        return InstallError.DownloadFailed;
-    };
-    tmp_file.close(ctx.io);
-    // Best-effort cleanup; the per-pid name keeps a leak (panic / SIGKILL)
-    // from colliding with the next install's archive.
-    defer std.Io.Dir.cwd().deleteFile(ctx.io, tmp_archive) catch {};
-
     const archive_mod = @import("../../fs/archive.zig");
     switch (archive_kind) {
-        .tar_gz => archive_mod.extractTarGz(ctx.io, tmp_archive, cellar_path) catch {
+        .tar_gz => archive_mod.extractTarGz(ctx.io, cache_path, cellar_path) catch {
             output.err("Failed to extract archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
-        .tar_xz => archive_mod.extractTarXzFile(ctx.io, tmp_archive, cellar_path) catch {
+        .tar_xz => archive_mod.extractTarXzFile(ctx.io, cache_path, cellar_path) catch {
             output.err("Failed to extract .tar.xz archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
-        .zip => archive_mod.extractZip(ctx.io, tmp_archive, cellar_path) catch {
+        .zip => archive_mod.extractZip(ctx.io, cache_path, cellar_path) catch {
             output.err("Failed to extract .zip archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
@@ -713,7 +781,9 @@ fn materializeRubyFormula(
 /// minting a Homebrew-API-shaped JSON document from the parsed Ruby
 /// directives. Reuses every download/SHA/extract path the brew-API
 /// cask flow already exercises — the only thing the tap path adds is
-/// the JSON adapter.
+/// the JSON adapter. When `download_only` is set, the cask installer's
+/// `downloadOnly` seam reuses the existing `<prefix>/cache/Cask/`
+/// layout established by T-028 instead of writing to `cache/Tap/`.
 fn materializeTapCask(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -722,8 +792,13 @@ fn materializeTapCask(
     kind: cask_mod.ArtifactType,
     dry_run: bool,
     force: bool,
+    download_only: bool,
 ) InstallError!void {
-    if (!force and cask_mod.isInstalled(db, resolved.name)) {
+    // `--download-only` deliberately ignores `isInstalled` so a user
+    // can refresh the cached artefact ahead of an `mt upgrade` even
+    // when an older revision is on disk. The regular install path
+    // keeps the "already installed" short-circuit.
+    if (!download_only and !force and cask_mod.isInstalled(db, resolved.name)) {
         output.info("{s} is already installed", .{resolved.name});
         return;
     }
@@ -759,6 +834,29 @@ fn materializeTapCask(
 
     if (kind == .pkg) {
         output.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
+    }
+
+    // `--download-only` for a cask-shaped tap entry reuses the cask
+    // cache established by T-028 (`<prefix>/cache/Cask/`). The shared
+    // `downloadOnly` seam handles sha-verify against the archive
+    // bytes; we stop before /Applications writes and DB inserts.
+    if (download_only) {
+        output.emitNdjsonEvent(.download_started, cask.token, null);
+        const cache_path = installer.downloadOnly(&cask) catch |e| {
+            bar.finish();
+            output.emitNdjsonEvent(.download_complete, cask.token, "failed");
+            output.err("Failed to download cask {s}: {s}", .{ cask.token, @errorName(e) });
+            return switch (e) {
+                error.DownloadFailed, error.Sha256Mismatch => InstallError.DownloadFailed,
+                error.OutOfMemory => InstallError.RecordFailed,
+                else => InstallError.CaskNotFound,
+            };
+        };
+        bar.finish();
+        defer allocator.free(cache_path);
+        output.emitNdjsonEvent(.download_complete, cask.token, "ok");
+        output.success("{s} {s} downloaded to {s}", .{ cask.token, cask.version, cache_path });
+        return;
     }
 
     const app_path = installer.install(&cask) catch |e| {

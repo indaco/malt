@@ -68,6 +68,7 @@ pub const services_supervisor = @import("core/services/supervisor.zig");
 pub const signals = @import("core/signals.zig");
 pub const store = @import("core/store.zig");
 pub const tap = @import("core/tap.zig");
+pub const tap_cache = @import("core/tap_cache.zig");
 pub const lock = @import("db/lock.zig");
 pub const schema = @import("db/schema.zig");
 pub const sqlite = @import("db/sqlite.zig");

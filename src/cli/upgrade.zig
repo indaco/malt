@@ -478,7 +478,7 @@ fn upgradeTapFormula(
     defer allocator.free(full_name);
 
     var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
-    install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true) catch {
+    install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false) catch {
         output.err("Failed to upgrade tap formula {s}", .{full_name});
         return error.Aborted;
     };

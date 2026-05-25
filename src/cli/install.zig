@@ -596,7 +596,7 @@ fn executeWithOpts(
 
         // Handle tap formulas separately (they don't use GHCR)
         if (isTapFormula(pkg_name)) {
-            installTapFormula(ctx, allocator, pkg_name, &db, &linker, prefix, dry_run, force) catch |e| {
+            installTapFormula(ctx, allocator, pkg_name, &db, &linker, prefix, dry_run, force, download_only) catch |e| {
                 output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
             };
             continue;
