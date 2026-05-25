@@ -612,9 +612,9 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 | Package | malt | nanobrew | zerobrew | Homebrew |
 | ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.651±0.024s | 0.672±0.048s | 1.267±0.131s | 5.102±0.537s |
-| **wget** (6 deps) | 3.903±0.425s | 3.985±0.564s | 8.641±1.651s | 5.787±0.638s |
-| **ffmpeg** (11 deps) | 4.605±0.473s | 4.410±0.506s | 10.822±1.086s | 23.573±1.815s |
+| **tree** (0 deps) | 0.444±0.085s | 0.357±0.038s | 0.873±0.083s | 4.592±0.419s |
+| **wget** (6 deps) | 5.714±4.993s | 3.539±2.294s | 6.948±0.761s | 5.860±0.763s |
+| **ffmpeg** (11 deps) | 3.071±0.508s | 3.033±0.254s | 7.331±0.599s | 19.591±0.742s |
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
@@ -622,9 +622,9 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 
 | Package | malt | nanobrew | zerobrew |
 | ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.009s | 0.014s | 0.364s |
-| **wget** (6 deps) | 0.020s | 0.018s | 1.327s |
-| **ffmpeg** (11 deps) | 0.046s | 0.027s | 4.450s |
+| **tree** (0 deps) | 0.011s | 0.012s | 0.348s |
+| **wget** (6 deps) | 0.014s | 0.019s | 0.872s |
+| **ffmpeg** (11 deps) | 0.045s | 0.019s | 2.927s |
 <!-- BENCH:WARM:END -->
 
 <!-- BENCH:SIZE:START -->
@@ -637,7 +637,7 @@ Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew
 | zerobrew | 8.6 MB |
 <!-- BENCH:SIZE:END -->
 
-Apple Silicon (GitHub Actions macos-14), 2026-05-18. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
+Apple Silicon (GitHub Actions macos-14), 2026-05-25. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
 
 ### What's in the 3 MB
 
