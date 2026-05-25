@@ -525,6 +525,79 @@ pub const HttpClient = struct {
         return self.doGetWithRetry(url, extra_headers, max_metadata_bytes, null);
     }
 
+    /// Read a response body with the same decompress + idle/total
+    /// watchdog + size cap that the legacy `doGetLimited` path uses.
+    /// Both the generic GET and the conditional GET converge here so
+    /// the single transport policy is enforced in one place — only the
+    /// `total_timeout_ns` differs between callers (blob downloads scale
+    /// it from `content_length`; metadata reads pin it to `self.timeout_ns`).
+    fn readResponseBody(
+        self: *HttpClient,
+        req: *std.http.Client.Request,
+        response: *std.http.Client.Response,
+        max_bytes: usize,
+        progress: ?ProgressCallback,
+        total_timeout_ns: u64,
+    ) !([]const u8) {
+        const content_length: ?u64 = response.head.content_length;
+
+        var body_writer: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer body_writer.deinit();
+
+        const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+            .identity => &.{},
+            .zstd => try self.getZstdWindow(),
+            .deflate, .gzip => try self.getFlateWindow(),
+            .compress => return error.ReadFailed,
+        };
+
+        var transfer_buffer: [16384]u8 = undefined;
+        var decompress: std.http.Decompress = undefined;
+        var body_reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+
+        var counting = CountingWriter{
+            .inner = &body_writer,
+            .bytes_written = std.atomic.Value(u64).init(0),
+            .max_bytes = max_bytes,
+            .limit_exceeded = false,
+            .progress = progress,
+            .content_length = content_length,
+        };
+
+        const idle_timeout = idleTimeoutNsFromEnv(
+            std.process.Environ.getPosix(self.environ, "MALT_HTTP_IDLE_TIMEOUT_SECS"),
+        );
+        var wake = try Wake.init();
+        const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
+            self.io,
+            wake.read_fd,
+            &counting.bytes_written,
+            idle_timeout,
+            total_timeout_ns,
+            req,
+            self.cancel,
+        }) catch {
+            wake.deinit();
+            return error.WatchdogSpawnFailed;
+        };
+        defer {
+            wake.signal();
+            watchdog.join();
+            wake.deinit();
+        }
+        _ = body_reader.streamRemaining(&counting.writer) catch |e| switch (e) {
+            error.WriteFailed => {
+                if (counting.limit_exceeded) return error.ResponseTooLarge;
+                return error.ReadFailed;
+            },
+            error.ReadFailed => return error.ReadFailed,
+        };
+
+        if (counting.limit_exceeded) return error.ResponseTooLarge;
+
+        return try body_writer.toOwnedSlice();
+    }
+
     /// Cancellable backoff between retry attempts. Common to every
     /// retry loop so a Ctrl-C during the wait surfaces immediately
     /// instead of being swallowed by std.Io.sleep's silent return.
@@ -609,67 +682,9 @@ pub const HttpClient = struct {
             };
         }
 
-        // Body-read path mirrors doGetLimited (decompress + watchdog +
-        // size cap). Capped at `max_metadata_bytes` — conditional GETs
-        // target tiny JSON, never blobs.
-        const content_length: ?u64 = response.head.content_length;
-
-        var body_writer: std.Io.Writer.Allocating = .init(self.allocator);
-        errdefer body_writer.deinit();
-
-        const decompress_buffer: []u8 = switch (response.head.content_encoding) {
-            .identity => &.{},
-            .zstd => try self.getZstdWindow(),
-            .deflate, .gzip => try self.getFlateWindow(),
-            .compress => return error.ReadFailed,
-        };
-
-        var transfer_buffer: [16384]u8 = undefined;
-        var decompress: std.http.Decompress = undefined;
-        var body_reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
-
-        var counting = CountingWriter{
-            .inner = &body_writer,
-            .bytes_written = std.atomic.Value(u64).init(0),
-            .max_bytes = max_metadata_bytes,
-            .limit_exceeded = false,
-            .progress = null,
-            .content_length = content_length,
-        };
-
-        const total_timeout = self.timeout_ns;
-        const idle_timeout = idleTimeoutNsFromEnv(
-            std.process.Environ.getPosix(self.environ, "MALT_HTTP_IDLE_TIMEOUT_SECS"),
-        );
-        var wake = try Wake.init();
-        const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
-            self.io,
-            wake.read_fd,
-            &counting.bytes_written,
-            idle_timeout,
-            total_timeout,
-            &req,
-            self.cancel,
-        }) catch {
-            wake.deinit();
-            return error.WatchdogSpawnFailed;
-        };
-        defer {
-            wake.signal();
-            watchdog.join();
-            wake.deinit();
-        }
-        _ = body_reader.streamRemaining(&counting.writer) catch |e| switch (e) {
-            error.WriteFailed => {
-                if (counting.limit_exceeded) return error.ResponseTooLarge;
-                return error.ReadFailed;
-            },
-            error.ReadFailed => return error.ReadFailed,
-        };
-
-        if (counting.limit_exceeded) return error.ResponseTooLarge;
-
-        const body = try body_writer.toOwnedSlice();
+        // Conditional GETs target tiny JSON, never blobs — pin both
+        // size cap and total timeout to the metadata constants.
+        const body = try self.readResponseBody(&req, &response, max_metadata_bytes, null, self.timeout_ns);
         return .{
             .status = status,
             .not_modified = false,
@@ -746,81 +761,14 @@ pub const HttpClient = struct {
 
         const status: u16 = @intFromEnum(response.head.status);
 
-        // Content-Length from HTTP headers (may be null for chunked transfer).
-        // Note: this reflects the *compressed* size when content-encoding is set.
-        const content_length: ?u64 = response.head.content_length;
-
-        // Read response body with decompression (servers may send gzip).
-        // Enforce MAX_RESPONSE_BYTES to prevent OOM from oversized responses.
-        var body_writer: std.Io.Writer.Allocating = .init(self.allocator);
-        errdefer body_writer.deinit();
-
-        // Pooled decompression windows (see HttpClient.zstd_window / flate_window).
-        const decompress_buffer: []u8 = switch (response.head.content_encoding) {
-            .identity => &.{},
-            .zstd => try self.getZstdWindow(),
-            .deflate, .gzip => try self.getFlateWindow(),
-            .compress => return error.ReadFailed,
-        };
-
-        var transfer_buffer: [16384]u8 = undefined;
-        var decompress: std.http.Decompress = undefined;
-        var body_reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
-
-        // `CountingWriter` enforces `max_bytes` per-write so oversized bodies
-        // are rejected mid-stream, not after buffering. Created before the
-        // watchdog spawns so its atomic byte counter is the watchdog's
-        // progress signal.
-        var counting = CountingWriter{
-            .inner = &body_writer,
-            .bytes_written = std.atomic.Value(u64).init(0),
-            .max_bytes = max_bytes,
-            .limit_exceeded = false,
-            .progress = progress,
-            .content_length = content_length,
-        };
-
-        // Two-deadline watchdog: idle (no bytes in `idle_timeout_ns`) +
-        // whole-transfer (`scaledTimeoutNs` backstop). Idle is the
-        // fail-fast for genuine 0 B/s stalls; total catches a slow
-        // trickle that would otherwise sit forever under just the
-        // idle clock if the server dribbles a byte every few seconds.
+        // Blob downloads scale the total deadline from the projected
+        // transfer time; metadata reads keep the per-request constant.
+        // Idle-timeout backstop lives inside `readResponseBody`.
         const total_timeout = if (max_bytes > max_metadata_bytes)
-            @max(blob_timeout_ns, scaledTimeoutNs(content_length))
+            @max(blob_timeout_ns, scaledTimeoutNs(response.head.content_length))
         else
             self.timeout_ns;
-        const idle_timeout = idleTimeoutNsFromEnv(
-            std.process.Environ.getPosix(self.environ, "MALT_HTTP_IDLE_TIMEOUT_SECS"),
-        );
-        var wake = try Wake.init();
-        const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
-            self.io,
-            wake.read_fd,
-            &counting.bytes_written,
-            idle_timeout,
-            total_timeout,
-            &req,
-            self.cancel,
-        }) catch {
-            wake.deinit();
-            return error.WatchdogSpawnFailed;
-        };
-        defer {
-            wake.signal();
-            watchdog.join();
-            wake.deinit();
-        }
-        _ = body_reader.streamRemaining(&counting.writer) catch |e| switch (e) {
-            error.WriteFailed => {
-                if (counting.limit_exceeded) return error.ResponseTooLarge;
-                return error.ReadFailed;
-            },
-            error.ReadFailed => return error.ReadFailed,
-        };
-
-        if (counting.limit_exceeded) return error.ResponseTooLarge;
-
-        const body = try body_writer.toOwnedSlice();
+        const body = try self.readResponseBody(&req, &response, max_bytes, progress, total_timeout);
 
         return .{
             .status = status,
