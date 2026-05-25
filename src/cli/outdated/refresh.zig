@@ -75,7 +75,7 @@ pub fn refreshSnapshot(
     const cask_rows = try rows_mod.loadCaskRows(allocator, db, .all);
     defer rows_mod.freeKegRows(allocator, cask_rows);
 
-    const formulas = try collectOutdatedFormulas(ctx, allocator, api, cache_dir, formula_rows, workers_override);
+    const formulas = try collectOutdatedFormulas(ctx, allocator, db, api, cache_dir, formula_rows, workers_override);
     defer {
         for (formulas) |e| {
             allocator.free(e.name);
@@ -84,7 +84,7 @@ pub fn refreshSnapshot(
         }
         allocator.free(formulas);
     }
-    const casks = try collectOutdatedCasks(ctx, allocator, api, cache_dir, cask_rows, workers_override);
+    const casks = try collectOutdatedCasks(ctx, allocator, db, api, cache_dir, cask_rows, workers_override);
     defer {
         for (casks) |e| {
             allocator.free(e.name);
@@ -107,24 +107,26 @@ pub fn refreshSnapshot(
 pub fn collectOutdatedFormulas(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
+    db: *sqlite.Database,
     api: *api_mod.BrewApi,
     cache_dir: []const u8,
     kegs: []const KegRow,
     workers_override: ?usize,
 ) std.mem.Allocator.Error![]OutdatedEntry {
-    return collectOutdated(ctx, allocator, api, cache_dir, kegs, workers_override, .formula);
+    return collectOutdated(ctx, allocator, db, api, cache_dir, kegs, workers_override, .formula);
 }
 
 /// Cask sibling of `collectOutdatedFormulas`. Same lifetime contract.
 pub fn collectOutdatedCasks(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
+    db: *sqlite.Database,
     api: *api_mod.BrewApi,
     cache_dir: []const u8,
     kegs: []const KegRow,
     workers_override: ?usize,
 ) std.mem.Allocator.Error![]OutdatedEntry {
-    return collectOutdated(ctx, allocator, api, cache_dir, kegs, workers_override, .cask);
+    return collectOutdated(ctx, allocator, db, api, cache_dir, kegs, workers_override, .cask);
 }
 
 const Kind = enum { formula, cask };
@@ -132,6 +134,7 @@ const Kind = enum { formula, cask };
 fn collectOutdated(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
+    db: *sqlite.Database,
     api: *api_mod.BrewApi,
     cache_dir: []const u8,
     kegs: []const KegRow,
@@ -152,10 +155,10 @@ fn collectOutdated(
 
     if (!shouldUsePool(kegs.len)) {
         for (kegs, 0..) |row, i| {
-            latest_versions[i] = try fetchLatest(allocator, api, ctx.io, ctx.environ, kind, row);
+            latest_versions[i] = try fetchLatest(allocator, db, api, ctx.io, ctx.environ, kind, row);
         }
     } else {
-        try runPool(ctx, allocator, cache_dir, kegs, workers_override, kind, latest_versions);
+        try runPool(ctx, allocator, db, cache_dir, kegs, workers_override, kind, latest_versions);
     }
 
     return assembleEntries(allocator, kegs, latest_versions);
@@ -205,6 +208,7 @@ fn assembleEntries(
 /// shared HTTP client.
 fn upstreamLatest(
     alloc: std.mem.Allocator,
+    db: *sqlite.Database,
     api: *api_mod.BrewApi,
     io: std.Io,
     environ: std.process.Environ,
@@ -223,7 +227,7 @@ fn upstreamLatest(
             // drop the row from the audit. Same shape as `upgradeCask`.
             if (row.tap) |tap_label| {
                 if (!install_args_mod.isCoreTap(tap_label)) {
-                    break :blk tapCaskLatestVersion(alloc, io, environ, tap_label, row.name, api.offline);
+                    break :blk tapCaskLatestVersion(alloc, db, io, environ, tap_label, row.name, api.offline);
                 }
             }
             const json = api.fetchCask(row.name) catch break :blk null;
@@ -265,6 +269,7 @@ fn warnTapCaskFetchFailed(tap_label: []const u8, token: []const u8, reason: []co
 /// "couldn't reach the tap".
 fn tapCaskLatestVersion(
     alloc: std.mem.Allocator,
+    db: *sqlite.Database,
     io: std.Io,
     environ: std.process.Environ,
     tap_label: []const u8,
@@ -277,11 +282,37 @@ fn tapCaskLatestVersion(
     const urls = tap_mod.resolveTapBaseUrls(alloc, tap_label) catch return null;
     defer urls.deinit(alloc);
 
-    const fresh_sha = tap_mod.resolveHeadCommit(io, environ, alloc, urls.api_head_url) catch |err| {
+    // Send the cached etag so a second `mt outdated` against the same
+    // prefix 304s for free — the core acceptance criterion for this
+    // task. 304 keeps `fresh_sha` pointing at the cached value.
+    const cached_sha_opt = tap_mod.getCommitSha(alloc, db, tap_label) catch null;
+    defer if (cached_sha_opt) |s| alloc.free(s);
+    const cached_etag_opt = tap_mod.getHeadEtag(alloc, db, tap_label) catch null;
+    defer if (cached_etag_opt) |e| alloc.free(e);
+
+    var head_res = tap_mod.resolveHeadCommit(io, environ, alloc, urls.api_head_url, cached_etag_opt) catch |err| {
         warnTapHeadResolveFailed(tap_label, err);
         return null;
     };
-    defer alloc.free(fresh_sha);
+    defer head_res.deinit();
+
+    const fresh_sha = if (head_res.not_modified)
+        (cached_sha_opt orelse {
+            warnTapHeadResolveFailed(tap_label, tap_mod.TapError.ResolveFailed);
+            return null;
+        })
+    else
+        (head_res.sha orelse {
+            warnTapHeadResolveFailed(tap_label, tap_mod.TapError.MalformedJson);
+            return null;
+        });
+
+    // Best-effort etag persistence on 200 — failure here only costs an
+    // extra API call next round, never a wrong sha. SQLite SERIALIZED
+    // mode handles concurrent writes from sibling workers safely.
+    if (!head_res.not_modified) {
+        if (head_res.etag) |et| tap_mod.updateHead(db, tap_label, fresh_sha, et) catch {};
+    }
 
     var http = client_mod.HttpClient.init(io, environ, alloc);
     defer http.deinit();
@@ -313,13 +344,14 @@ fn tapCaskLatestVersion(
 /// string if `row` is outdated, null otherwise.
 fn fetchLatest(
     allocator: std.mem.Allocator,
+    db: *sqlite.Database,
     api: *api_mod.BrewApi,
     io: std.Io,
     environ: std.process.Environ,
     kind: Kind,
     row: KegRow,
 ) std.mem.Allocator.Error!?[]u8 {
-    const v = upstreamLatest(allocator, api, io, environ, kind, row) orelse return null;
+    const v = upstreamLatest(allocator, db, api, io, environ, kind, row) orelse return null;
     if (std.mem.eql(u8, row.version, v)) {
         allocator.free(v);
         return null;
@@ -357,6 +389,10 @@ const WorkerCtx = struct {
     /// through `tap_mod.resolveHeadCommit`, which reads GitHub auth
     /// tokens from the parent process environ.
     environ: std.process.Environ,
+    /// Shared DB pointer for cached-etag lookup / persist. Safe under
+    /// SQLite SERIALIZED mode (the build sets THREADSAFE=1) — sibling
+    /// workers serialise on the per-statement mutex.
+    db: *sqlite.Database,
     arena: std.heap.ArenaAllocator,
     pool: *client_mod.HttpClientPool,
     cache_dir: []const u8,
@@ -399,7 +435,7 @@ fn runOne(out_alloc: std.mem.Allocator, wctx: *WorkerCtx) void {
     var local_api = api_mod.BrewApi.init(wctx.io, arena_alloc, http, wctx.cache_dir);
     local_api.base_url = wctx.api_base;
     local_api.offline = wctx.offline;
-    const latest = upstreamLatest(arena_alloc, &local_api, wctx.io, wctx.environ, wctx.kind, wctx.row) orelse return;
+    const latest = upstreamLatest(arena_alloc, wctx.db, &local_api, wctx.io, wctx.environ, wctx.kind, wctx.row) orelse return;
     if (std.mem.eql(u8, wctx.row.version, latest)) return;
 
     // Move into the caller's allocator so the result outlives `arena.deinit()`.
@@ -412,6 +448,7 @@ fn runOne(out_alloc: std.mem.Allocator, wctx: *WorkerCtx) void {
 fn runPool(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
+    db: *sqlite.Database,
     cache_dir: []const u8,
     kegs: []const KegRow,
     workers_override: ?usize,
@@ -434,6 +471,7 @@ fn runPool(
     for (ctxs, 0..) |*c, i| c.* = .{
         .io = ctx.io,
         .environ = ctx.environ,
+        .db = db,
         .arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator),
         .pool = &http_pool,
         .cache_dir = cache_dir,
@@ -480,9 +518,13 @@ test "WorkerCtx: per-row arena accepts testing.allocator backing without leaking
     // backs the same arena with `smp_allocator`; the inline test
     // guarantees `testing.allocator` still works so future leak coverage
     // can land here without re-plumbing.
+    // Field-only smoke: db isn't dereferenced, so an undefined ptr is
+    // safe here (mirrors `.pool = undefined`). Real workers always get
+    // a live DB from `runPool`.
     var wctx: WorkerCtx = .{
         .io = std.Options.debug_io,
         .environ = std.process.Environ.empty,
+        .db = undefined,
         .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .pool = undefined,
         .cache_dir = "",

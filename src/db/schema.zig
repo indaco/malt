@@ -122,7 +122,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 7;
+pub const known_schema_version: i64 = 8;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -139,6 +139,7 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 5) try migrateV4toV5(db);
     if (ver < 6) try migrateV5toV6(db);
     if (ver < 7) try migrateV6toV7(db);
+    if (ver < 8) try migrateV7toV8(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -413,6 +414,42 @@ fn migrateV6toV7(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
+/// v8 — persist the GitHub ETag for `/commits/HEAD` alongside the
+/// commit SHA so subsequent resolves can send `If-None-Match` and let
+/// 304 responses short-circuit the GitHub rate-limit cost. Same
+/// PRAGMA-guarded ALTER shape as v2→v3 / v3→v4 / v5→v6 so re-runs
+/// against partially migrated fixtures stay idempotent.
+fn migrateV7toV8(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    // PRAGMA table_info returns zero rows when the table is missing — the
+    // forensic/partial-shape fixtures exercised by the v6→v7 migration
+    // tests sometimes ship without a `taps` table, and aborting the
+    // chain there would surface as a hard "schema_init" failure later.
+    var have_table = false;
+    var have_column = false;
+    {
+        var stmt = try db.prepare("PRAGMA table_info(taps);");
+        defer stmt.finalize();
+        while (try stmt.step()) {
+            have_table = true;
+            const name = stmt.columnText(1) orelse continue;
+            if (std.mem.eql(u8, std.mem.sliceTo(name, 0), "head_etag")) {
+                have_column = true;
+                break;
+            }
+        }
+    }
+    if (have_table and !have_column) {
+        try db.exec("ALTER TABLE taps ADD COLUMN head_etag TEXT;");
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (8);");
+
+    try db.commit();
+}
+
 /// Return true iff every column in `wanted` is present on the `casks`
 /// table. Mirrors the PRAGMA-guarded probes used by v2→v3 / v3→v4 /
 /// v5→v6; centralised here because the v6→v7 backfill needs five
@@ -568,7 +605,7 @@ test "v6→v7 migration backfills cask_versions from existing casks rows" {
     const token1 = stmt.columnText(0) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("flux-markdown", std.mem.sliceTo(token1, 0));
 
-    try testing.expectEqual(@as(i64, 7), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 8), try currentVersion(&db));
 }
 
 test "v6→v7 migration is idempotent when cask_versions already carries the rows" {
@@ -594,6 +631,85 @@ test "v6→v7 migration is idempotent when cask_versions already carries the row
     defer cnt.finalize();
     _ = try cnt.step();
     try testing.expectEqual(@as(i64, 1), cnt.columnInt(0));
+}
+
+// v7→v8 adds taps.head_etag so resolveHeadCommit can send
+// `If-None-Match` and let GitHub answer 304 without spending a
+// rate-limit token. Fresh and upgraded DBs must converge on the same
+// shape; the migration is PRAGMA-guarded so re-runs against partially
+// migrated fixtures stay idempotent.
+test "fresh DB ships with taps.head_etag (v8 shape)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    var stmt = try db.prepare("PRAGMA table_info(taps);");
+    defer stmt.finalize();
+    var found = false;
+    while (try stmt.step()) {
+        const name = stmt.columnText(1) orelse continue;
+        if (std.mem.eql(u8, std.mem.sliceTo(name, 0), "head_etag")) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+    try testing.expectEqual(@as(i64, 8), try currentVersion(&db));
+}
+
+test "v7→v8 migration adds head_etag and preserves existing tap rows" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    // Seed a tap row on the current shape, then rewind the version marker
+    // to v7 so `migrate` re-enters the v7→v8 step against the seeded row.
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha)
+        \\VALUES ('aeroxy/tap', 'https://github.com/aeroxy/homebrew-tap',
+        \\        '0123456789abcdef0123456789abcdef01234567');
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 8;");
+
+    try migrate(&db);
+
+    var probe = try db.prepare(
+        "SELECT commit_sha, head_etag FROM taps WHERE name='aeroxy/tap';",
+    );
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    const sha = probe.columnText(0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(
+        "0123456789abcdef0123456789abcdef01234567",
+        std.mem.sliceTo(sha, 0),
+    );
+    // Pre-v8 rows must carry NULL until a conditional GET populates it.
+    try testing.expect(probe.columnText(1) == null);
+    try testing.expectEqual(@as(i64, 8), try currentVersion(&db));
+}
+
+test "v7→v8 migration is idempotent when head_etag is already present" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    // Stamp the column with a value, rewind, re-run the migration. The
+    // PRAGMA guard must skip the ALTER and leave the value untouched.
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, head_etag)
+        \\VALUES ('aeroxy/tap', 'https://github.com/aeroxy/homebrew-tap',
+        \\        '0123456789abcdef0123456789abcdef01234567',
+        \\        'W/"deadbeef"');
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 8;");
+
+    try migrate(&db);
+
+    var probe = try db.prepare("SELECT head_etag FROM taps WHERE name='aeroxy/tap';");
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    const et = probe.columnText(0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("W/\"deadbeef\"", std.mem.sliceTo(et, 0));
 }
 
 test "migrate refuses a DB whose schema_version exceeds the known max" {

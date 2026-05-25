@@ -442,7 +442,7 @@ fn emitOutdatedFormulas(
     const rows = try loadFormulaRows(allocator, db, filter);
     defer freeKegRows(allocator, rows);
 
-    const entries = try collectOutdatedFormulas(ctx, allocator, api, cache_dir, rows, workers_override);
+    const entries = try collectOutdatedFormulas(ctx, allocator, db, api, cache_dir, rows, workers_override);
     defer freeEntrySlice(allocator, entries);
 
     try render_mod.writeFormulaEntries(allocator, stdout, entries, json_mode);
@@ -463,7 +463,7 @@ fn emitOutdatedCasks(
     const rows = try loadCaskRows(allocator, db, filter);
     defer freeKegRows(allocator, rows);
 
-    const entries = try collectOutdatedCasks(ctx, allocator, api, cache_dir, rows, workers_override);
+    const entries = try collectOutdatedCasks(ctx, allocator, db, api, cache_dir, rows, workers_override);
     defer freeEntrySlice(allocator, entries);
 
     try render_mod.writeCaskEntries(stdout, entries, json_mode);

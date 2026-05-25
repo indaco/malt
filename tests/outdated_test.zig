@@ -60,6 +60,18 @@ fn freeEntries(allocator: std.mem.Allocator, entries: []outdated_mod.OutdatedEnt
     allocator.free(entries);
 }
 
+/// In-memory DB primed with the malt schema. Tests that don't exercise
+/// the tap-cask branch still need a live DB pointer for the etag-cache
+/// lookup that `tap_mod.getCommitSha` / `getHeadEtag` perform — they
+/// no-op against an empty taps table and the rest of the test runs
+/// untouched.
+fn openTestDb() !sqlite.Database {
+    var db = try sqlite.Database.open(":memory:");
+    errdefer db.close();
+    try schema.initSchema(&db);
+    return db;
+}
+
 fn seedFormula(dir: *TempCacheDir, name: []const u8, latest: []const u8) !void {
     var key_buf: [128]u8 = undefined;
     const file = try std.fmt.bufPrint(&key_buf, "formula_{s}.json", .{name});
@@ -99,7 +111,9 @@ test "collectOutdatedFormulas (small-N, single-client path) returns sorted outda
         .{ .name = "charlie", .version = "3.0" }, // outdated
     };
 
-    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &api, dir.path, &kegs, null);
+    var db = try openTestDb();
+    defer db.close();
+    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, 2), out.len);
@@ -129,7 +143,9 @@ test "collectOutdatedFormulas (large-N, pool path) preserves sorted order" {
     for (names, 0..) |n, i| rows_buf[i] = .{ .name = n, .version = "1.0" };
 
     var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
-    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &api, dir.path, &rows_buf, null);
+    var db = try openTestDb();
+    defer db.close();
+    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &rows_buf, null);
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, names.len), out.len);
@@ -161,7 +177,9 @@ test "collectOutdatedFormulas tolerates a missing/404 entry without aborting" {
         .{ .name = "zulu", .version = "1.0" },
     };
 
-    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &api, dir.path, &kegs, null);
+    var db = try openTestDb();
+    defer db.close();
+    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, 2), out.len);
@@ -187,7 +205,9 @@ test "collectOutdatedCasks (small-N) returns sorted outdated rows only" {
         .{ .name = "apptwo", .version = "1.0" }, // outdated
     };
 
-    const out = try outdated_mod.collectOutdatedCasks(&malt.app_ctx.debug_ctx, testing.allocator, &api, dir.path, &kegs, null);
+    var db = try openTestDb();
+    defer db.close();
+    const out = try outdated_mod.collectOutdatedCasks(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, 2), out.len);
@@ -211,7 +231,9 @@ test "collectOutdatedCasks (large-N, pool path) preserves sorted order" {
     for (tokens, 0..) |t, i| rows_buf[i] = .{ .name = t, .version = "1.0" };
 
     var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
-    const out = try outdated_mod.collectOutdatedCasks(&malt.app_ctx.debug_ctx, testing.allocator, &api, dir.path, &rows_buf, null);
+    var db = try openTestDb();
+    defer db.close();
+    const out = try outdated_mod.collectOutdatedCasks(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &rows_buf, null);
     defer freeEntries(testing.allocator, out);
 
     try testing.expectEqual(@as(usize, tokens.len), out.len);

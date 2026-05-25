@@ -199,6 +199,38 @@ pub const Response = struct {
     }
 };
 
+/// Result of `HttpClient.getConditional`. `not_modified` is true iff
+/// the server answered 304 — `body` is empty in that case and the
+/// caller can keep using the cached payload. `etag`, when set, is the
+/// server's current ETag (sent on both 200 and 304); callers persist
+/// it so the next round can short-circuit again.
+pub const ConditionalResponse = struct {
+    status: u16,
+    not_modified: bool,
+    body: []const u8,
+    etag: ?[]const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *ConditionalResponse) void {
+        self.allocator.free(self.body);
+        if (self.etag) |e| self.allocator.free(e);
+    }
+};
+
+/// Find the `ETag` value in a parsed `Response.Head.bytes` buffer.
+/// Returns a slice borrowed from `bytes` (caller dupes if it needs to
+/// outlive the response). GitHub sends weak ETags as `W/"abc"` — the
+/// `W/` prefix is preserved verbatim because the server compares the
+/// `If-None-Match` value textually and stripping it breaks the 304
+/// short-circuit.
+pub fn extractEtagFromHead(bytes: []const u8) ?[]const u8 {
+    var it = std.http.HeaderIterator.init(bytes);
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "etag")) return h.value;
+    }
+    return null;
+}
+
 /// True if the URI scheme is exactly "https" (ascii case-insensitive).
 pub fn schemeIsHttps(scheme: []const u8) bool {
     return std.ascii.eqlIgnoreCase(scheme, "https");
@@ -338,6 +370,36 @@ pub const HttpClient = struct {
 
     const max_head_redirects = 5;
 
+    /// Conditional GET — sends `If-None-Match: <etag>` when `if_none_match`
+    /// is non-null and returns a `ConditionalResponse` that surfaces the
+    /// server's ETag plus a `not_modified` flag when the server answered
+    /// 304. Caller passes any extra headers (e.g. `Authorization`); the
+    /// `If-None-Match` header is prepended internally. Caller owns the
+    /// returned `ConditionalResponse`.
+    pub fn getConditional(
+        self: *HttpClient,
+        url: []const u8,
+        if_none_match: ?[]const u8,
+        extra_headers: []const std.http.Header,
+    ) !ConditionalResponse {
+        if (self.offline) return error.OfflineRequired;
+
+        // Stack-buffered header list: today's only callers add at most
+        // `If-None-Match` + `Authorization`. Bump if a real caller exceeds.
+        var hdr_buf: [8]std.http.Header = undefined;
+        var hdr_len: usize = 0;
+        if (if_none_match) |inm| {
+            hdr_buf[hdr_len] = .{ .name = "If-None-Match", .value = inm };
+            hdr_len += 1;
+        }
+        for (extra_headers) |h| {
+            std.debug.assert(hdr_len < hdr_buf.len);
+            hdr_buf[hdr_len] = h;
+            hdr_len += 1;
+        }
+        return self.doGetConditionalWithRetry(url, hdr_buf[0..hdr_len]);
+    }
+
     /// HEAD with manual redirect follow — stdlib skips redirects on HEAD.
     pub fn headResolved(self: *HttpClient, url: []const u8) !HeadResolved {
         if (self.offline) return error.OfflineRequired;
@@ -461,6 +523,160 @@ pub const HttpClient = struct {
         extra_headers: []const std.http.Header,
     ) !Response {
         return self.doGetWithRetry(url, extra_headers, max_metadata_bytes, null);
+    }
+
+    /// Cancellable backoff between retry attempts. Common to every
+    /// retry loop so a Ctrl-C during the wait surfaces immediately
+    /// instead of being swallowed by std.Io.sleep's silent return.
+    fn retrySleep(self: *HttpClient, attempt: usize) error{Canceled}!void {
+        std.Io.sleep(
+            self.io,
+            std.Io.Duration.fromNanoseconds(@intCast(retry_delays_ms[attempt] * std.time.ns_per_ms)),
+            .awake,
+        ) catch |e| switch (e) {
+            error.Canceled => return error.Canceled,
+        };
+    }
+
+    fn doGetConditionalWithRetry(
+        self: *HttpClient,
+        url: []const u8,
+        extra_headers: []const std.http.Header,
+    ) !ConditionalResponse {
+        var attempt: usize = 0;
+        while (true) {
+            const result = self.doGetConditionalOnce(url, extra_headers);
+            if (result) |resp| {
+                if (classifyStatus(resp.status)) |dl_err| {
+                    if (isTransientError(dl_err) and attempt < max_retries) {
+                        var r = resp;
+                        r.deinit();
+                        try self.retrySleep(attempt);
+                        attempt += 1;
+                        continue;
+                    }
+                }
+                return resp;
+            } else |err| {
+                if (attempt < max_retries) {
+                    try self.retrySleep(attempt);
+                    attempt += 1;
+                    continue;
+                }
+                return err;
+            }
+        }
+    }
+
+    fn doGetConditionalOnce(
+        self: *HttpClient,
+        url: []const u8,
+        extra_headers: []const std.http.Header,
+    ) !ConditionalResponse {
+        const uri = try std.Uri.parse(url);
+        const https_origin = schemeIsHttps(uri.scheme);
+
+        var req = try self.client.request(.GET, uri, .{ .extra_headers = extra_headers });
+        defer req.deinit();
+
+        try req.sendBodiless();
+
+        var redirect_buf: [32 * 1024]u8 = undefined;
+        var response = try req.receiveHead(&redirect_buf);
+
+        if (https_origin and !schemeIsHttps(req.uri.scheme))
+            return error.TlsDowngradeRefused;
+
+        const status: u16 = @intFromEnum(response.head.status);
+        // Etag is borrowed from response.head.bytes; dupe before the head
+        // buffer is dropped on function exit.
+        const etag_owned: ?[]const u8 = if (extractEtagFromHead(response.head.bytes)) |e|
+            try self.allocator.dupe(u8, e)
+        else
+            null;
+        errdefer if (etag_owned) |e| self.allocator.free(e);
+
+        // 304 has no body per HTTP spec — return immediately with an
+        // empty owned slice so deinit's `free(body)` stays uniform.
+        if (status == 304) {
+            const empty = try self.allocator.alloc(u8, 0);
+            return .{
+                .status = status,
+                .not_modified = true,
+                .body = empty,
+                .etag = etag_owned,
+                .allocator = self.allocator,
+            };
+        }
+
+        // Body-read path mirrors doGetLimited (decompress + watchdog +
+        // size cap). Capped at `max_metadata_bytes` — conditional GETs
+        // target tiny JSON, never blobs.
+        const content_length: ?u64 = response.head.content_length;
+
+        var body_writer: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer body_writer.deinit();
+
+        const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+            .identity => &.{},
+            .zstd => try self.getZstdWindow(),
+            .deflate, .gzip => try self.getFlateWindow(),
+            .compress => return error.ReadFailed,
+        };
+
+        var transfer_buffer: [16384]u8 = undefined;
+        var decompress: std.http.Decompress = undefined;
+        var body_reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+
+        var counting = CountingWriter{
+            .inner = &body_writer,
+            .bytes_written = std.atomic.Value(u64).init(0),
+            .max_bytes = max_metadata_bytes,
+            .limit_exceeded = false,
+            .progress = null,
+            .content_length = content_length,
+        };
+
+        const total_timeout = self.timeout_ns;
+        const idle_timeout = idleTimeoutNsFromEnv(
+            std.process.Environ.getPosix(self.environ, "MALT_HTTP_IDLE_TIMEOUT_SECS"),
+        );
+        var wake = try Wake.init();
+        const watchdog = std.Thread.spawn(.{}, watchdogFn, .{
+            self.io,
+            wake.read_fd,
+            &counting.bytes_written,
+            idle_timeout,
+            total_timeout,
+            &req,
+            self.cancel,
+        }) catch {
+            wake.deinit();
+            return error.WatchdogSpawnFailed;
+        };
+        defer {
+            wake.signal();
+            watchdog.join();
+            wake.deinit();
+        }
+        _ = body_reader.streamRemaining(&counting.writer) catch |e| switch (e) {
+            error.WriteFailed => {
+                if (counting.limit_exceeded) return error.ResponseTooLarge;
+                return error.ReadFailed;
+            },
+            error.ReadFailed => return error.ReadFailed,
+        };
+
+        if (counting.limit_exceeded) return error.ResponseTooLarge;
+
+        const body = try body_writer.toOwnedSlice();
+        return .{
+            .status = status,
+            .not_modified = false,
+            .body = body,
+            .etag = etag_owned,
+            .allocator = self.allocator,
+        };
     }
 
     fn doGetWithRetry(
@@ -737,6 +953,70 @@ pub const HttpClientPool = struct {
     }
 };
 
+test "extractEtagFromHead: finds ETag header by exact name" {
+    const bytes = "200 OK\r\nServer: github\r\nETag: \"abc123\"\r\nContent-Length: 0\r\n\r\n";
+    const et = extractEtagFromHead(bytes);
+    try std.testing.expectEqualStrings("\"abc123\"", et.?);
+}
+
+test "extractEtagFromHead: header lookup is case-insensitive" {
+    // GitHub spells it `ETag`; reverse proxies sometimes downcase to `etag`.
+    const bytes = "200 OK\r\netag: \"abc123\"\r\n\r\n";
+    const et = extractEtagFromHead(bytes);
+    try std.testing.expectEqualStrings("\"abc123\"", et.?);
+}
+
+test "extractEtagFromHead: preserves GitHub's weak-ETag W/ prefix verbatim" {
+    // Stripping W/ would break the 304 path — GitHub compares textually.
+    const bytes = "304 Not Modified\r\nETag: W/\"deadbeef\"\r\n\r\n";
+    const et = extractEtagFromHead(bytes);
+    try std.testing.expectEqualStrings("W/\"deadbeef\"", et.?);
+}
+
+test "extractEtagFromHead: returns null when ETag header is absent" {
+    const bytes = "200 OK\r\nContent-Length: 0\r\n\r\n";
+    try std.testing.expectEqual(@as(?[]const u8, null), extractEtagFromHead(bytes));
+}
+
+test "extractEtagFromHead: skips lookalikes (`If-None-Match`, prefix matches)" {
+    const bytes = "200 OK\r\nIf-None-Match: \"req-side\"\r\nETagged: \"nope\"\r\n\r\n";
+    try std.testing.expectEqual(@as(?[]const u8, null), extractEtagFromHead(bytes));
+}
+
+test "ConditionalResponse.deinit: frees body and etag together" {
+    var cr: ConditionalResponse = .{
+        .status = 200,
+        .not_modified = false,
+        .body = try std.testing.allocator.dupe(u8, "{}"),
+        .etag = try std.testing.allocator.dupe(u8, "W/\"abc\""),
+        .allocator = std.testing.allocator,
+    };
+    cr.deinit();
+}
+
+test "ConditionalResponse.deinit: tolerates null etag (server omitted the header)" {
+    var cr: ConditionalResponse = .{
+        .status = 200,
+        .not_modified = false,
+        .body = try std.testing.allocator.dupe(u8, "{}"),
+        .etag = null,
+        .allocator = std.testing.allocator,
+    };
+    cr.deinit();
+}
+
+test "ConditionalResponse.deinit: 304 path with empty body frees correctly" {
+    var cr: ConditionalResponse = .{
+        .status = 304,
+        .not_modified = true,
+        // 304 has no body but the wrapper still owns a (possibly empty) slice.
+        .body = try std.testing.allocator.alloc(u8, 0),
+        .etag = try std.testing.allocator.dupe(u8, "W/\"abc\""),
+        .allocator = std.testing.allocator,
+    };
+    cr.deinit();
+}
+
 test "HttpClient.offline defaults to false" {
     var http = HttpClient.init(std.Options.debug_io, std.process.Environ.empty, std.testing.allocator);
     defer http.deinit();
@@ -750,6 +1030,16 @@ test "HttpClient.get returns OfflineRequired when offline is set" {
     // Use a host that would 404/connect-refuse in the real world — the
     // gate must trip before any DNS / TCP work happens.
     try std.testing.expectError(error.OfflineRequired, http.get("https://example.invalid/x"));
+}
+
+test "HttpClient.getConditional returns OfflineRequired when offline is set" {
+    var http = HttpClient.init(std.Options.debug_io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.offline = true;
+    try std.testing.expectError(
+        error.OfflineRequired,
+        http.getConditional("https://example.invalid/x", null, &.{}),
+    );
 }
 
 test "HttpClient.head returns OfflineRequired when offline is set" {

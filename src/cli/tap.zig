@@ -476,16 +476,40 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             defer urls.deinit(allocator);
 
             // Resolve HEAD so the tap is pinned from day one. Failing
-            // here beats silently registering an unpinned tap.
-            const sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch |e| {
+            // here beats silently registering an unpinned tap. Idempotent
+            // re-adds reuse the cached etag so a second `tap add` against
+            // a stable tap costs zero rate-limit tokens.
+            const cached_sha_opt = tap_mod.getCommitSha(allocator, &db, name) catch null;
+            defer if (cached_sha_opt) |s| allocator.free(s);
+            const cached_etag_opt = tap_mod.getHeadEtag(allocator, &db, name) catch null;
+            defer if (cached_etag_opt) |e| allocator.free(e);
+
+            var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, cached_etag_opt) catch |e| {
                 output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
                 return error.Aborted;
             };
-            defer allocator.free(sha);
+            defer head_res.deinit();
+            const sha = if (head_res.not_modified)
+                (cached_sha_opt orelse {
+                    output.err("Could not resolve {s}'s HEAD commit: 304 without cached sha", .{name});
+                    return error.Aborted;
+                })
+            else
+                (head_res.sha orelse {
+                    output.err("Could not resolve {s}'s HEAD commit: empty response", .{name});
+                    return error.Aborted;
+                });
             tap_mod.add(&db, name, urls.repo_url, sha) catch {
                 output.err("Failed to add tap {s}", .{name});
                 return error.Aborted;
             };
+            // Stamp the etag in the same row so the next resolve sends
+            // If-None-Match. Best-effort — a failure here only costs us
+            // an extra API call on the next round, never a wrong sha.
+            // 304 path keeps the cached etag — it's still current.
+            if (!head_res.not_modified) {
+                if (head_res.etag) |et| tap_mod.updateHead(&db, name, sha, et) catch {};
+            }
             output.info("Tapped {s} @ {s}", .{ name, sha[0..@min(sha.len, 7)] });
         },
         .remove => {
@@ -517,9 +541,11 @@ fn pinTap(
     // Route reachability through the same HTTP path as HEAD resolution so a
     // 200 here proves the SHA is fetchable from the exact repo subsequent
     // installs will use. A 404 means GitHub has no such commit on this repo.
+    // /commits/<sha> is sha-pinned so the ETag has no caching value — pass
+    // null and ignore any etag the server happens to return.
     const commit_url = try tap_mod.resolveCommitUrl(allocator, slug, sha);
     defer allocator.free(commit_url);
-    const echoed = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, commit_url) catch |e| {
+    var echoed_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, commit_url, null) catch |e| {
         if (e == error.NotFound) {
             output.err("Cannot pin {s} @ {s}: GitHub has no such commit on this tap.", .{ slug, sha[0..@min(sha.len, 7)] });
         } else {
@@ -527,7 +553,11 @@ fn pinTap(
         }
         return error.Aborted;
     };
-    defer allocator.free(echoed);
+    defer echoed_res.deinit();
+    const echoed = echoed_res.sha orelse {
+        output.err("Cannot pin {s} @ {s}: GitHub returned an empty response.", .{ slug, sha[0..@min(sha.len, 7)] });
+        return error.Aborted;
+    };
 
     // Defensive: GitHub's `commits/<sha>` echoes the resolved full SHA. If
     // it differs, treat as unreachable rather than store a mismatched pin.
@@ -569,21 +599,29 @@ fn refreshAll(
 
     // Resolve each tap's HEAD up-front so the diff display reflects the
     // full plan before any write happens — including the case where the
-    // user immediately passes `--yes`.
+    // user immediately passes `--yes`. Etag travels alongside the sha so
+    // the post-confirm apply step writes both atomically via updateHead.
     var new_shas: std.ArrayList(?[]const u8) = .empty;
+    var new_etags: std.ArrayList(?[]const u8) = .empty;
     defer {
         for (new_shas.items) |maybe_sha| if (maybe_sha) |sha| allocator.free(sha);
         new_shas.deinit(allocator);
+        for (new_etags.items) |maybe_et| if (maybe_et) |et| allocator.free(et);
+        new_etags.deinit(allocator);
     }
     try new_shas.ensureTotalCapacityPrecise(allocator, taps.len);
+    try new_etags.ensureTotalCapacityPrecise(allocator, taps.len);
 
     var rows: std.ArrayList(RefreshRow) = .empty;
     defer rows.deinit(allocator);
     try rows.ensureTotalCapacityPrecise(allocator, taps.len);
 
     for (taps) |t| {
-        const new_sha = resolveOneHead(ctx, allocator, t.name) catch null;
+        const pair = resolveOneHead(ctx, allocator, t.name) catch null;
+        const new_sha: ?[]const u8 = if (pair) |p| p.sha else null;
+        const new_et: ?[]const u8 = if (pair) |p| p.etag else null;
         new_shas.appendAssumeCapacity(new_sha);
+        new_etags.appendAssumeCapacity(new_et);
         rows.appendAssumeCapacity(.{
             .name = t.name,
             .old_sha = t.commit_sha,
@@ -600,25 +638,40 @@ fn refreshAll(
     }
 
     // Apply only the rows that actually moved; unchanged is a no-op and
-    // failed has no SHA to write.
-    for (rows.items) |row| {
+    // failed has no SHA to write. updateHead atomically pairs the new
+    // sha with its etag — the next non-refresh resolve short-circuits.
+    for (rows.items, new_etags.items) |row, maybe_et| {
         if (row.status != .moved) continue;
         const new_sha = row.new_sha orelse continue;
-        tap_mod.updateCommit(db, row.name, new_sha) catch {
+        tap_mod.updateHead(db, row.name, new_sha, maybe_et) catch {
             output.err("Failed to update commit pin for {s}", .{row.name});
             return error.Aborted;
         };
     }
 }
 
+/// Resolve a tap's HEAD on the `--refresh` path. Caller takes ownership
+/// of both `sha` and `etag`; deinit by freeing each individually.
+const RefreshedHead = struct { sha: []const u8, etag: ?[]const u8 };
+
 fn resolveOneHead(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
     slug: []const u8,
-) ![]const u8 {
+) !RefreshedHead {
     const urls = try tap_mod.resolveTapBaseUrls(allocator, slug);
     defer urls.deinit(allocator);
-    return tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url);
+    // `tap --refresh` is the explicit "force fresh" verb — never send
+    // If-None-Match so a stale-but-unmoved upstream still surfaces a
+    // fresh body and the operator can confirm the tap really hasn't
+    // budged. Per task implementation notes.
+    var res = try tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, null);
+    defer res.deinit();
+    const sha = res.sha orelse return error.MalformedJson;
+    const sha_owned = try allocator.dupe(u8, sha);
+    errdefer allocator.free(sha_owned);
+    const et_owned: ?[]const u8 = if (res.etag) |e| try allocator.dupe(u8, e) else null;
+    return .{ .sha = sha_owned, .etag = et_owned };
 }
 
 fn emitRefreshAll(ctx: *const AppCtx, rows: []const RefreshRow) !void {
@@ -642,12 +695,22 @@ fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Data
     };
     const urls = try tap_mod.resolveTapBaseUrls(allocator, name);
     defer urls.deinit(allocator);
-    const sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch |e| {
+    // Force fresh: bypass the cached etag so the operator sees the
+    // current body. The new etag is still persisted afterwards so the
+    // *next* non-refresh resolve can short-circuit.
+    var res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, null) catch |e| {
         output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
         return error.Aborted;
     };
-    defer allocator.free(sha);
-    tap_mod.updateCommit(db, name, sha) catch {
+    defer res.deinit();
+    const sha = res.sha orelse {
+        output.err("Could not resolve {s}'s HEAD commit: empty response", .{name});
+        return error.Aborted;
+    };
+    // updateHead pairs the new sha with the new etag atomically; falling
+    // back to updateCommit if the row is absent isn't a concern here —
+    // refresh runs against rows the user already `tap added`.
+    tap_mod.updateHead(db, name, sha, res.etag) catch {
         output.err("Failed to update commit pin for {s}", .{name});
         return error.Aborted;
     };

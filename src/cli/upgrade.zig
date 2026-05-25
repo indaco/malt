@@ -444,16 +444,33 @@ fn upgradeTapFormula(
     const urls = try tap_mod.resolveTapBaseUrls(allocator, tap_label);
     defer urls.deinit(allocator);
 
-    // The whole point of `mt upgrade` is "give me the latest", so we
-    // ignore any cached pin and force-resolve HEAD.
-    const fresh_sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch |e| {
+    // `mt upgrade` asks GitHub "has HEAD moved?". Sending the cached
+    // etag lets a stable tap answer 304 for free — same outcome as
+    // before (we still see whether the sha moved) without burning a
+    // rate-limit token.
+    const cached_sha_opt = tap_mod.getCommitSha(allocator, db, tap_label) catch null;
+    defer if (cached_sha_opt) |s| allocator.free(s);
+    const cached_etag_opt = tap_mod.getHeadEtag(allocator, db, tap_label) catch null;
+    defer if (cached_etag_opt) |e| allocator.free(e);
+
+    var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, cached_etag_opt) catch |e| {
         output.err("Could not resolve {s} HEAD: {s}", .{ tap_label, tap_mod.describeResolveError(e) });
         return error.Aborted;
     };
-    defer allocator.free(fresh_sha);
+    defer head_res.deinit();
 
-    const cached_sha_opt = tap_mod.getCommitSha(allocator, db, tap_label) catch null;
-    defer if (cached_sha_opt) |s| allocator.free(s);
+    // 304 → cached_sha is still authoritative. 200 → use the fresh sha
+    // and persist (sha, etag) below so the next round can short-circuit.
+    const fresh_sha = if (head_res.not_modified)
+        (cached_sha_opt orelse {
+            output.err("Could not resolve {s} HEAD: 304 without cached sha", .{tap_label});
+            return error.Aborted;
+        })
+    else
+        (head_res.sha orelse {
+            output.err("Could not resolve {s} HEAD: empty response", .{tap_label});
+            return error.Aborted;
+        });
     const same_commit = if (cached_sha_opt) |c| std.mem.eql(u8, c, fresh_sha) else false;
 
     if (!force and same_commit) {
@@ -475,6 +492,11 @@ fn upgradeTapFormula(
         output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
         return error.Aborted;
     };
+    // Refresh the etag on 200 so the next upgrade short-circuits. On 304
+    // the etag we already hold is by definition still current.
+    if (!head_res.not_modified) {
+        if (head_res.etag) |et| tap_mod.updateHead(db, tap_label, fresh_sha, et) catch {};
+    }
 
     const full_name = std.fmt.allocPrint(allocator, "{s}/{s}", .{ tap_label, name }) catch return error.Aborted;
     defer allocator.free(full_name);
@@ -515,15 +537,23 @@ fn upgradeRoutedTapCask(
     const urls = tap_mod.resolveTapBaseUrls(allocator, tap_label) catch return error.Aborted;
     defer urls.deinit(allocator);
 
-    // Always force-resolve HEAD: the whole point of `mt upgrade` is
-    // "give me the latest", so we ignore any cached pin here. Same
-    // error shape as `upgradeTapFormula` so probe-loop callers can
-    // grep for the resolve failure consistently.
-    const fresh_sha = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch |e| {
+    // Send the cached etag so a stable tap 304s for free; on 200 we
+    // still pick up the moved sha. Same error shape as `upgradeTapFormula`
+    // so probe-loop callers can grep for the resolve failure consistently.
+    const cached_sha_opt = tap_mod.getCommitSha(allocator, db, tap_label) catch null;
+    defer if (cached_sha_opt) |s| allocator.free(s);
+    const cached_etag_opt = tap_mod.getHeadEtag(allocator, db, tap_label) catch null;
+    defer if (cached_etag_opt) |e| allocator.free(e);
+
+    var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, cached_etag_opt) catch |e| {
         output.err("Could not resolve {s} HEAD: {s}", .{ tap_label, tap_mod.describeResolveError(e) });
         return error.Aborted;
     };
-    defer allocator.free(fresh_sha);
+    defer head_res.deinit();
+    const fresh_sha = if (head_res.not_modified)
+        (cached_sha_opt orelse return error.Aborted)
+    else
+        (head_res.sha orelse return error.Aborted);
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
@@ -559,6 +589,11 @@ fn upgradeRoutedTapCask(
         output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
         return error.Aborted;
     };
+    // On 200, refresh the etag so the next round can 304. On 304 the
+    // cached etag is by definition still current.
+    if (!head_res.not_modified) {
+        if (head_res.etag) |et| tap_mod.updateHead(db, tap_label, fresh_sha, et) catch {};
+    }
 
     output.info("Upgrading {s} {s} -> {s}...", .{ token, installed_version, rb_info.version });
 
