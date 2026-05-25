@@ -3,11 +3,18 @@
 # real GitHub API.
 #
 # Pinned behaviour:
-#   1. Cold-start `mt tap add <user/repo>` resolves HEAD and stamps
-#      both `taps.commit_sha` and `taps.head_etag`.
-#   2. A second `mt tap add <user/repo>` against the same tap sends
-#      `If-None-Match` — GitHub answers 304, and the GitHub REST rate
-#      limit's `core.remaining` does NOT decrement on the second call.
+#   1. Cold-start `mt tap <user/repo>` resolves HEAD and stamps both
+#      `taps.commit_sha` and `taps.head_etag`.
+#   2. A second `mt tap <user/repo>` against the same tap sends
+#      `If-None-Match` — GitHub answers 304, and the conditional GET
+#      does NOT decrement `X-RateLimit-Remaining`.
+#
+# Methodology: GitHub's `/rate_limit` endpoint is a cached snapshot
+# that lags reality by several seconds. The truth is the
+# `X-RateLimit-Remaining` response header on the actual call. So we
+# probe `/repos/.../commits/HEAD` directly before and after each
+# `mt tap` invocation and read the live header — the inter-probe
+# delta minus the probe's own cost is what `mt` spent.
 #
 # Requirements: a built malt binary, a MALT_GITHUB_TOKEN with REST
 # read scope (any classic PAT or fine-grained "public read" works).
@@ -38,56 +45,68 @@ fi
 # commit between calls 1 and 2 the test would (correctly) fail —
 # re-running once the dust settles is the right response.
 TAP=${MALT_TAP_REGRESSION:-aeroxy/tap}
+SLASH_IDX=$(awk -v s="$TAP" 'BEGIN{print index(s, "/")}')
+USER=${TAP:0:$((SLASH_IDX - 1))}
+REPO=${TAP:SLASH_IDX}
+PROBE_URL="https://api.github.com/repos/${USER}/homebrew-${REPO}/commits/HEAD"
 
-PREFIX=$(mktemp -d -t malt_etag_reg.XXXXXX)
+PREFIX=$(mktemp -d -t mt_etag.XXXXXX)
+mkdir -p "$PREFIX/db"
 trap 'rm -rf "$PREFIX"' EXIT
 
-remaining_before_call() {
-  curl -fsSL \
+# Issue an unconditional probe to the same endpoint malt resolves and
+# extract `X-RateLimit-Remaining` from the response header. The header
+# reflects post-call state (i.e. includes this very call), which is
+# exactly what we want.
+probe_remaining() {
+  local hdr
+  hdr=$(curl -fsSL -o /dev/null -D - \
     -H "Authorization: Bearer $MALT_GITHUB_TOKEN" \
     -H "Accept: application/vnd.github+json" \
-    https://api.github.com/rate_limit |
-    python3 -c 'import json,sys; print(json.load(sys.stdin)["resources"]["core"]["remaining"])'
+    "$PROBE_URL")
+  awk 'BEGIN{IGNORECASE=1} /^x-ratelimit-remaining:/{gsub(/[\r\n ]/, "", $2); print $2; exit}' <<<"$hdr"
 }
 
-probe_etag_persisted() {
-  MALT_PREFIX="$PREFIX" "$MALT_BIN" tap --json 2>/dev/null
-}
+# ---- Probe A: baseline before any mt call ----
+a=$(probe_remaining)
 
-# ---- Cold start: tap add against a fresh prefix ----
-before_cold=$(remaining_before_call)
-MALT_PREFIX="$PREFIX" "$MALT_BIN" tap add "$TAP" >/dev/null
-after_cold=$(remaining_before_call)
-cold_delta=$((before_cold - after_cold))
-if ((cold_delta < 1)); then
-  printf 'FAIL: cold tap add did not move rate-limit remaining (before=%d after=%d).\n' \
-    "$before_cold" "$after_cold" >&2
-  printf '       Either GitHub returned 304 (impossible without a cached etag)\n' >&2
-  printf '       or the rate-limit endpoint diverged from the tap-resolve path.\n' >&2
+# ---- Cold start: tap against a fresh prefix ----
+MALT_PREFIX="$PREFIX" "$MALT_BIN" tap "$TAP" >/dev/null
+
+# ---- Probe B: shows post-cold state (b = a - mt_cold_cost - 1) ----
+b=$(probe_remaining)
+cold_cost=$((a - b - 1))
+if ((cold_cost < 1)); then
+  printf 'FAIL: cold tap resolve did not spend a token (a=%d b=%d cold=%d).\n' \
+    "$a" "$b" "$cold_cost" >&2
+  printf '       Expected at least 1 — the unconditional GET should have hit the limit.\n' >&2
   exit 1
 fi
 
-# ---- Hot start: same `tap add`, cached etag in play ----
-before_hot=$(remaining_before_call)
-MALT_PREFIX="$PREFIX" "$MALT_BIN" tap add "$TAP" >/dev/null
-after_hot=$(remaining_before_call)
-hot_delta=$((before_hot - after_hot))
-if ((hot_delta != 0)); then
-  printf 'FAIL: hot tap add decremented rate-limit by %d (expected 0 — 304 is free).\n' \
-    "$hot_delta" >&2
-  printf '       before=%d after=%d. The cached ETag was not sent or the\n' \
-    "$before_hot" "$after_hot" >&2
-  printf '       server returned 200 instead of 304.\n' >&2
+# ---- Hot start: same tap, cached etag now persisted ----
+MALT_PREFIX="$PREFIX" "$MALT_BIN" tap "$TAP" >/dev/null
+
+# ---- Probe C: shows post-hot state (c = b - mt_hot_cost - 1) ----
+c=$(probe_remaining)
+hot_cost=$((b - c - 1))
+if ((hot_cost != 0)); then
+  printf 'FAIL: hot tap re-resolve spent %d token(s) (expected 0 — 304 is free).\n' \
+    "$hot_cost" >&2
+  printf '       a=%d b=%d c=%d. The cached ETag was not sent or the server\n' \
+    "$a" "$b" "$c" >&2
+  printf '       returned 200 instead of 304.\n' >&2
   exit 1
 fi
 
-# ---- Sanity: the etag was actually stored ----
-tap_json=$(probe_etag_persisted)
-if ! grep -q '"commit_sha"' <<<"$tap_json"; then
-  printf 'FAIL: tap list does not surface a commit_sha for %s after the\n' "$TAP" >&2
-  printf '       cold-start resolve.\n%s\n' "$tap_json" >&2
-  exit 1
+# ---- Sanity: the etag actually landed in the DB ----
+if command -v sqlite3 >/dev/null; then
+  et=$(sqlite3 "$PREFIX/db/malt.db" \
+    "SELECT head_etag FROM taps WHERE name='$TAP';" 2>/dev/null || true)
+  if [[ -z "$et" ]]; then
+    printf 'FAIL: head_etag not persisted for %s after cold-start resolve.\n' "$TAP" >&2
+    exit 1
+  fi
 fi
 
-printf 'PASS: cold start spent %d token(s); hot start spent %d (304 short-circuit).\n' \
-  "$cold_delta" "$hot_delta"
+printf 'PASS: cold spent %d token; hot spent %d (304 short-circuit) — a=%d b=%d c=%d\n' \
+  "$cold_cost" "$hot_cost" "$a" "$b" "$c"
