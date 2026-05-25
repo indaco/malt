@@ -315,6 +315,7 @@ const InstallFlag = enum {
     quiet,
     json,
     only_dependencies,
+    download_only,
 };
 
 const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
@@ -328,6 +329,7 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "-q", .quiet },
     .{ "--json", .json },
     .{ "--only-dependencies", .only_dependencies },
+    .{ "--download-only", .download_only },
 });
 
 /// `allocator` must be an arena (see `installAll`).
@@ -363,6 +365,10 @@ fn executeWithOpts(
     // brew parity: resolve the dep graph, bail before the requested package's
     // materialise+link. Deps stay marked `dependency` for `mt purge --unused-deps`.
     var only_dependencies = false;
+    // Warm the bottle store; skip materialise/link/record. Refcount stays
+    // at 0 so warmed entries are invisible to `purge --store-orphans`
+    // until a follow-up install picks them up.
+    var download_only = false;
 
     // StaticStringMap + exhaustive switch: the compiler checks every flag
     // has a handler, so adding a new variant without wiring it fails to build.
@@ -385,6 +391,7 @@ fn executeWithOpts(
             .quiet => output.setQuiet(true),
             .json => output.setMode(.json),
             .only_dependencies => only_dependencies = true,
+            .download_only => download_only = true,
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             packages.append(allocator, arg) catch return error.OutOfMemory;
         }
@@ -410,6 +417,14 @@ fn executeWithOpts(
             output.err("--local does not run post_install; --use-system-ruby has no effect and is refused", .{});
             return error.Aborted;
         }
+    }
+
+    // The two flags pull in opposite directions: --only-dependencies skips
+    // the requested package, --download-only skips materialise+link entirely.
+    // Document the refusal up front rather than silently picking a winner.
+    if (download_only and only_dependencies) {
+        output.err("--download-only cannot be combined with --only-dependencies", .{});
+        return error.Aborted;
     }
 
     if (packages.items.len == 0) {
@@ -680,6 +695,15 @@ fn executeWithOpts(
     defer allocator.free(mats);
     for (mats) |*m| m.* = .{ .ok = false, .err = null };
 
+    // `--download-only`: emit per-job `download_started` from the main
+    // thread before the pool spawns so consumers see a deterministic
+    // pre-fetch line. Paired with `download_complete` after the join.
+    if (download_only and output.isNdjson()) {
+        for (all_jobs.items) |job| {
+            output.emitNdjsonEvent(.download_started, job.name, null);
+        }
+    }
+
     // `--force` pre-materialize: clonefile refuses to overwrite a populated
     // keg dir, so wipe the resolved-version dir up front. Destructive DB +
     // symlink cleanup is deferred to the serial link phase so a materialize
@@ -777,6 +801,7 @@ fn executeWithOpts(
             .cache = &formula_cache,
             .results = mats,
             .worker_backing = std.heap.smp_allocator,
+            .download_only = download_only,
         };
 
         const pool_threads = allocator.alloc(std.Thread, worker_count) catch
@@ -810,6 +835,27 @@ fn executeWithOpts(
             output.emitNdjsonEvent(.extracted, job.name, "ok");
             output.emitNdjsonEvent(.stored, job.name, "ok");
         }
+    }
+
+    // --download-only stops here. Skip the serial link phase and surface
+    // each warmed bottle's `<prefix>/store/<sha>` path so a follow-up
+    // real install can consume the bytes.
+    if (download_only) {
+        for (all_jobs.items) |job| {
+            if (!job.succeeded) {
+                output.emitNdjsonEvent(.download_complete, job.name, "failed");
+                output.err("Download failed for {s}", .{job.name});
+                continue;
+            }
+            output.emitNdjsonEvent(.download_complete, job.name, "ok");
+            output.success("{s} {s} downloaded to {s}/store/{s}", .{
+                job.name,
+                job.version_str,
+                prefix,
+                job.store_sha256,
+            });
+        }
+        return;
     }
 
     // Check for Ctrl-C between the pool and the serial link phase
