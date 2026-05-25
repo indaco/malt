@@ -267,11 +267,16 @@ pub const TapHeadResolve = struct {
     /// don't retry the same dead endpoint within one invocation.
     map: std.StringHashMap(?[]const u8),
 
-    pub const ResolverFn = *const fn (
+    /// Bundled userdata + fn pointer — mirrors `client.ProgressCallback`'s
+    /// shape so call sites read uniformly across the codebase.
+    pub const Resolver = struct {
         userdata: *anyopaque,
-        alloc: std.mem.Allocator,
-        tap_label: []const u8,
-    ) ?[]const u8;
+        resolve: *const fn (
+            userdata: *anyopaque,
+            alloc: std.mem.Allocator,
+            tap_label: []const u8,
+        ) ?[]const u8,
+    };
 
     pub fn init(backing: std.mem.Allocator, io: std.Io) TapHeadResolve {
         return .{
@@ -293,8 +298,7 @@ pub const TapHeadResolve = struct {
     pub fn getOrResolve(
         self: *TapHeadResolve,
         tap_label: []const u8,
-        userdata: *anyopaque,
-        resolve: ResolverFn,
+        resolver: Resolver,
     ) ?[]const u8 {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -302,10 +306,10 @@ pub const TapHeadResolve = struct {
         if (self.map.get(tap_label)) |maybe_sha| return maybe_sha;
 
         const a = self.arena.allocator();
-        const sha = resolve(userdata, a, tap_label);
-        // If the key dupe / map put fails (OOM), skip caching but still
-        // return the resolved sha — losing the cache slot is recoverable;
-        // returning null because of an alloc hiccup is not.
+        const sha = resolver.resolve(resolver.userdata, a, tap_label);
+        // catch return sha: cache-insert OOM degrades to "no cache hit
+        // next time" — sibling workers re-resolve but no correctness
+        // issue. Returning null instead would hide a successful resolve.
         const key_owned = a.dupe(u8, tap_label) catch return sha;
         self.map.put(key_owned, sha) catch return sha;
         return sha;
@@ -326,8 +330,8 @@ test "TapHeadResolve: second call for same label returns cached value (no second
     Counter.count = 0;
     var dummy: u8 = 0;
 
-    const a1 = cache.getOrResolve("user/repo", &dummy, Counter.resolve);
-    const a2 = cache.getOrResolve("user/repo", &dummy, Counter.resolve);
+    const a1 = cache.getOrResolve("user/repo", .{ .userdata = &dummy, .resolve = Counter.resolve });
+    const a2 = cache.getOrResolve("user/repo", .{ .userdata = &dummy, .resolve = Counter.resolve });
     try std.testing.expect(a1 != null);
     try std.testing.expect(a2 != null);
     try std.testing.expectEqualStrings(a1.?, a2.?);
@@ -348,10 +352,11 @@ test "TapHeadResolve: distinct labels resolve independently (1 call each)" {
     Counter.count = 0;
     var dummy: u8 = 0;
 
-    _ = cache.getOrResolve("user/repo-a", &dummy, Counter.resolve);
-    _ = cache.getOrResolve("user/repo-b", &dummy, Counter.resolve);
-    _ = cache.getOrResolve("user/repo-a", &dummy, Counter.resolve);
-    _ = cache.getOrResolve("user/repo-b", &dummy, Counter.resolve);
+    const r: TapHeadResolve.Resolver = .{ .userdata = &dummy, .resolve = Counter.resolve };
+    _ = cache.getOrResolve("user/repo-a", r);
+    _ = cache.getOrResolve("user/repo-b", r);
+    _ = cache.getOrResolve("user/repo-a", r);
+    _ = cache.getOrResolve("user/repo-b", r);
     try std.testing.expectEqual(@as(usize, 2), Counter.count);
 }
 
@@ -369,9 +374,10 @@ test "TapHeadResolve: caches a null result so sibling workers don't retry a dead
     Counter.count = 0;
     var dummy: u8 = 0;
 
-    _ = cache.getOrResolve("user/repo", &dummy, Counter.resolve);
-    _ = cache.getOrResolve("user/repo", &dummy, Counter.resolve);
-    _ = cache.getOrResolve("user/repo", &dummy, Counter.resolve);
+    const r: TapHeadResolve.Resolver = .{ .userdata = &dummy, .resolve = Counter.resolve };
+    _ = cache.getOrResolve("user/repo", r);
+    _ = cache.getOrResolve("user/repo", r);
+    _ = cache.getOrResolve("user/repo", r);
     try std.testing.expectEqual(@as(usize, 1), Counter.count);
 }
 
@@ -387,6 +393,7 @@ const ConcurrentResolveCtx = struct {
     expected: usize,
 
     fn resolve(userdata: *anyopaque, a: std.mem.Allocator, _: []const u8) ?[]const u8 {
+        // Unpack the userdata pointer the cache hands back per call.
         const self: *ConcurrentResolveCtx = @ptrCast(@alignCast(userdata));
         _ = self.counter.fetchAdd(1, .acq_rel);
         return a.dupe(u8, "0123456789abcdef0123456789abcdef01234567") catch null;
@@ -395,7 +402,7 @@ const ConcurrentResolveCtx = struct {
     fn worker(self: *ConcurrentResolveCtx) void {
         _ = self.barrier.fetchAdd(1, .acq_rel);
         while (self.barrier.load(.acquire) < self.expected) {} // spin until everyone arrived
-        _ = self.cache.getOrResolve(self.label, self, ConcurrentResolveCtx.resolve);
+        _ = self.cache.getOrResolve(self.label, .{ .userdata = self, .resolve = ConcurrentResolveCtx.resolve });
     }
 };
 
@@ -457,9 +464,13 @@ const HeadResolverCtx = struct {
     db: *sqlite.Database,
 
     fn resolve(userdata: *anyopaque, a: std.mem.Allocator, tap_label: []const u8) ?[]const u8 {
+        // Unpack the userdata pointer the cache hands back per call.
         const self: *HeadResolverCtx = @ptrCast(@alignCast(userdata));
         const urls = tap_mod.resolveTapBaseUrls(a, tap_label) catch return null;
 
+        // catch null: a DB hiccup here just degrades to "no cached pin /
+        // etag" — the resolve then runs unconditional (same as a cold
+        // start), which is the right fallback.
         const cached_sha = tap_mod.getCommitSha(a, self.db, tap_label) catch null;
         const cached_etag = tap_mod.getHeadEtag(a, self.db, tap_label) catch null;
 
@@ -512,7 +523,10 @@ fn tapCaskLatestVersion(
     // Dedup'd HEAD resolve: N workers for the same tap pay 1 API call,
     // not N (and the rare moved-tap race costs 1 token, not N).
     var rctx = HeadResolverCtx{ .io = io, .environ = environ, .db = db };
-    const fresh_sha = head_cache.getOrResolve(tap_label, &rctx, HeadResolverCtx.resolve) orelse return null;
+    const fresh_sha = head_cache.getOrResolve(tap_label, .{
+        .userdata = &rctx,
+        .resolve = HeadResolverCtx.resolve,
+    }) orelse return null;
 
     // The .rb fetch is per-cask (different token per row), so it stays
     // out of the cache — only the tap-HEAD resolve dedups.
