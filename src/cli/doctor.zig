@@ -12,6 +12,7 @@ const lock_mod = @import("../db/lock.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const tap_cache_mod = @import("../core/tap_cache.zig");
 const clonefile = @import("../fs/clonefile.zig");
 const parser = @import("../macho/parser.zig");
 const client_mod = @import("../net/client.zig");
@@ -125,6 +126,46 @@ pub fn emitCaskHistoryReport(allocator: std.mem.Allocator, io: std.Io, prefix: [
     output.writeStderrAll(aw.written());
 }
 
+/// Walk `<prefix>/cache/Tap` and emit the warmed tap-archive size
+/// alongside doctor's other reports. Routes to stdout (JSON) with a
+/// stable schema (zero values, not omission) or to stderr (human),
+/// which stays silent when the cache is empty so the clean case adds
+/// no noise. Pure read; safe to invoke from `execute` post-checks.
+pub fn emitTapCacheReport(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) void {
+    const bytes = tap_cache_mod.bytesUnder(io, allocator, prefix);
+
+    if (output.isJson()) {
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+        aw.writer.print("{{\"tap_cache\":{{\"bytes\":{d}}}}}\n", .{bytes}) catch return;
+        output.writeStdoutAll(aw.written());
+        return;
+    }
+
+    if (bytes == 0) return;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var size_buf: [32]u8 = undefined;
+    const size = formatBytes(bytes, &size_buf);
+    aw.writer.print("  > Tap archive cache: {s}. Run: mt purge --cache\n", .{size}) catch return;
+    output.writeStderrAll(aw.written());
+}
+
+/// Local mirror of `cli/purge/util.zig::formatBytes` / the cask-history
+/// formatter — doctor can't reach across the sibling-CLI boundary into
+/// `cli/purge`, and the byte format must match what `purge --cache`
+/// would surface so users see one number shape across both commands.
+fn formatBytes(bytes: u64, buf: []u8) []const u8 {
+    const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB" };
+    var value: f64 = @floatFromInt(bytes);
+    var unit: usize = 0;
+    while (value >= 1024.0 and unit + 1 < units.len) {
+        value /= 1024.0;
+        unit += 1;
+    }
+    return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ value, units[unit] }) catch "?";
+}
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "doctor")) return;
 
@@ -151,6 +192,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     }, &checks);
 
     emitCaskHistoryReport(allocator, ctx.io, prefix);
+    emitTapCacheReport(allocator, ctx.io, prefix);
 
     if (fix_requested) {
         output.plain("", .{});
@@ -971,6 +1013,80 @@ test "resetFixHint: clears a previously-armed flag" {
     var captured = try captureFixEmit(testing.allocator, false);
     defer captured.deinit(testing.allocator);
     try testing.expect(!fixHintEmitted(captured.items));
+}
+
+test "emitTapCacheReport: silent on stderr when cache is empty" {
+    // No `cache/Tap` entries → no extra line under the check rows.
+    // A change that surfaced an "always-on" zero line would noise up
+    // every clean run, so pin the silent shape.
+    const allocator = testing.allocator;
+    const ts = std.Io.Clock.real.now(std.Options.debug_io).toNanoseconds();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_doctor_tap_empty_{d}", .{ts});
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, prefix);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &buf);
+    defer output.endStderrCapture();
+    emitTapCacheReport(allocator, std.Options.debug_io, prefix);
+
+    try testing.expectEqualStrings("", buf.items);
+}
+
+test "emitTapCacheReport: emits stable JSON schema even when cache is empty" {
+    // Doctor's JSON consumers must always be able to read
+    // `tap_cache.bytes` — omitting the field on the empty case
+    // forces every consumer to special-case a null/missing path.
+    const allocator = testing.allocator;
+    const ts = std.Io.Clock.real.now(std.Options.debug_io).toNanoseconds();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_doctor_tap_json_empty_{d}", .{ts});
+
+    output.setMode(.json);
+    defer output.setMode(.human);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    output.beginStdoutCapture(allocator, &buf);
+    defer output.endStdoutCapture();
+    emitTapCacheReport(allocator, std.Options.debug_io, prefix);
+
+    try testing.expectEqualStrings("{\"tap_cache\":{\"bytes\":0}}\n", buf.items);
+}
+
+test "emitTapCacheReport: human one-liner when cache holds bytes" {
+    const allocator = testing.allocator;
+    const ts = std.Io.Clock.real.now(std.Options.debug_io).toNanoseconds();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_doctor_tap_full_{d}", .{ts});
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+
+    var cache_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache/Tap", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, cache_dir);
+
+    var entry_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const entry = try std.fmt.bufPrint(&entry_buf, "{s}/{s}.tar.gz", .{ cache_dir, "ab" ** 32 });
+    {
+        const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, entry, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "x" ** 256);
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &buf);
+    defer output.endStderrCapture();
+    emitTapCacheReport(allocator, std.Options.debug_io, prefix);
+
+    try testing.expectEqualStrings(
+        "  > Tap archive cache: 256.0 B. Run: mt purge --cache\n",
+        buf.items,
+    );
 }
 
 test "checks table includes the mirror-overrides row" {

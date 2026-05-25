@@ -12,12 +12,16 @@
 # This script asserts the end-to-end install against a live tap whose
 # formula has no `version` directive:
 #   1. `malt install aeroxy/tap/ast-outline` exits 0.
-#   2. The install log surfaces the derived version (`Found ast-outline 2.0.0`),
+#   2. The install log surfaces the derived version (`Found ast-outline 2.1.1`),
 #      proving the parser took the URL-derivation branch rather than an
 #      explicit-version branch.
-#   3. The keg is materialised at `$PREFIX/Cellar/ast-outline/2.0.0/...`
+#   3. The keg is materialised at `$PREFIX/Cellar/ast-outline/2.1.1/...`
 #      and `$PREFIX/bin/ast-outline` symlinks into it.
-#   4. The installed binary runs `--version` and reports `2.0.0`.
+#   4. The installed binary runs `--version` and reports `2.1.1`.
+#
+# `EXPECTED_VERSION` tracks the upstream tap's latest release — bump
+# it when `aeroxy/ast-outline` cuts a new tag, since the formula
+# always points at HEAD.
 #
 # Usage: scripts/regressions/tap_formula_url_version.sh
 # Requirements: built malt at $MALT_BIN or zig-out/bin/malt, network
@@ -50,7 +54,7 @@ fail() {
 
 SLUG="aeroxy/tap/ast-outline"
 TOKEN="ast-outline"
-EXPECTED_VERSION="2.0.0"
+EXPECTED_VERSION="2.1.1"
 LOG="$PREFIX/install.log"
 
 printf '▸ malt install %s (logs → %s)\n' "$SLUG" "$LOG"

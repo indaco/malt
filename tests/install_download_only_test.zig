@@ -389,6 +389,274 @@ test "--download-only --cask is plumbed into the cask path and threads the flag"
     try testing.expect(std.mem.indexOf(u8, captured.items, "Cask 'ghost-cask' not found") != null);
 }
 
+test "--download-only on tap formula with warm tap cache prints path + skips Cellar" {
+    // Pin the new tap exit point: when `<prefix>/cache/Tap/<sha>.<ext>`
+    // already holds the archive, `materializeRubyFormula` must short-
+    // circuit before the HTTP fetch, print the resolved cache path, and
+    // leave the Cellar + kegs untouched. The URL is deliberately a
+    // non-resolvable host so a regression that drops the cache-hit
+    // branch would surface as a network failure instead of a silent
+    // pass.
+    const prefix = try setupPrefix("tap_warm");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha = "ee" ** 32;
+
+    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache/Tap", .{prefix});
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_parent);
+
+    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    {
+        const f = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "warm-tap-archive-fixture\n");
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/db/malt.db",
+        .{prefix},
+        0,
+    );
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "tappkg",
+        .full_name = "user/repo/tappkg",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-tap-test.invalid/tappkg-1.0.tar.gz",
+        .sha256 = sha,
+    };
+
+    try malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        false, // force
+        true, // download_only
+    );
+
+    const want = try std.fmt.allocPrint(
+        testing.allocator,
+        "tappkg 1.0 downloaded to {s}",
+        .{cache_path},
+    );
+    defer testing.allocator.free(want);
+    try testing.expect(std.mem.indexOf(u8, captured.items, want) != null);
+
+    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/tappkg", .{prefix});
+    defer testing.allocator.free(cellar);
+    try testing.expect(!pathExists(cellar));
+
+    try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
+}
+
+test "--download-only --force on tap formula with warm cache is a no-op refresh" {
+    // `--force` semantics for a regular install pre-wipe the Cellar
+    // dir; for `--download-only` there's no Cellar to wipe, and the
+    // cache filename is the SHA so a "force" cannot mean refetch the
+    // same bytes. Pin that the combination prints the cache path,
+    // leaves the cache file intact, and never touches Cellar or kegs.
+    const prefix = try setupPrefix("tap_force");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha = "22" ** 32;
+
+    var cache_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache/Tap", .{prefix});
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_dir);
+
+    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    {
+        const f = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "force-tap-fixture\n");
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/db/malt.db",
+        .{prefix},
+        0,
+    );
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "forcetap",
+        .full_name = "user/repo/forcetap",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-tap-test.invalid/forcetap-1.0.tar.gz",
+        .sha256 = sha,
+    };
+
+    try malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        true, // force
+        true, // download_only
+    );
+
+    // Cache file untouched.
+    try test_io.accessAbsolute(std.Options.debug_io, cache_path, .{});
+
+    // Cellar untouched.
+    const cellar = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/forcetap", .{prefix});
+    defer testing.allocator.free(cellar);
+    try testing.expect(!pathExists(cellar));
+
+    try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
+}
+
+test "--download-only --ndjson on tap formula emits download_started + complete around fetch" {
+    // Pin the ndjson event vocabulary for the tap path so CI pipelines
+    // can rely on the same `download_started` / `download_complete`
+    // bracket they see on the bottle + cask paths. Warm-cache fixture
+    // keeps the test offline; the events fire either way.
+    const prefix = try setupPrefix("tap_nd");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha = "11" ** 32;
+
+    var cache_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_dir = try std.fmt.bufPrint(&cache_dir_buf, "{s}/cache/Tap", .{prefix});
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_dir);
+
+    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    {
+        const f = try test_io.cwd().createFile(std.Options.debug_io, cache_path, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "ndjson-tap-fixture\n");
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/db/malt.db",
+        .{prefix},
+        0,
+    );
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const prior_nd = malt.output.isNdjson();
+    malt.output.setNdjson(true);
+    defer malt.output.setNdjson(prior_nd);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &captured);
+    defer malt.output.endStdoutCapture();
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "ndtap",
+        .full_name = "user/repo/ndtap",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-tap-test.invalid/ndtap-1.0.tar.gz",
+        .sha256 = sha,
+    };
+
+    try malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        false, // force
+        true, // download_only
+    );
+
+    try testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, captured.items, "\"event\":\"download_started\",\"name\":\"ndtap\""),
+    );
+    try testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, captured.items, "\"event\":\"download_complete\",\"name\":\"ndtap\",\"status\":\"ok\""),
+    );
+}
+
 test "--download-only populates the store and skips Cellar + kegs" {
     // Pre-seed the store so the warm-path branch inside the install pool
     // skips the network entirely. The new exit point must short-circuit

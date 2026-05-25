@@ -253,7 +253,7 @@ pub const zsh_script =
     \\                        '--local[Install from a local .rb path]:formula:_files -g "*.rb"' \
     \\                        '--dry-run[Show what would be installed]' \
     \\                        '--force[Overwrite existing installations]' \
-    \\                        '--download-only[Warm the bottle store or cask cache; skip install]' \
+    \\                        '--download-only[Warm the bottle, cask, or tap-archive cache; skip install]' \
     \\                        '--only-dependencies[Install transitive deps, skip the requested package]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
     \\                        '--json[Output result as JSON]' \
@@ -520,7 +520,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l local   -d 'Install from a local .rb path'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l force   -d 'Overwrite existing'
-    \\    complete -c $__malt_bin -n '__malt_using_command install' -l download-only -d 'Warm the bottle store or cask cache; skip install'
+    \\    complete -c $__malt_bin -n '__malt_using_command install' -l download-only -d 'Warm the bottle, cask, or tap-archive cache; skip install'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l only-dependencies -d 'Install transitive deps; skip the requested package'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l json    -d 'JSON output'
     \\
