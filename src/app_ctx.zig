@@ -25,6 +25,11 @@ pub const AppCtx = struct {
     /// sites read this instead of re-walking the env per request;
     /// tests and `debug_ctx` get the upstream Homebrew defaults.
     mirrors: mirror.Mirrors = .{},
+    /// `MALT_OFFLINE=1` or `--offline`. When true, every net/* call
+    /// must serve from the snapshot cache and surface `OfflineRequired`
+    /// on a miss rather than waiting for a connect timeout. Resolved
+    /// once at boot so per-call sites read a single bool.
+    offline: bool = false,
 };
 
 /// Parent `environ` as `std.process.Environ`. Production `main` builds an
@@ -61,4 +66,17 @@ test "debug_ctx returns null for any environ lookup" {
 test "debug_ctx stdio defaults are sentinel -1" {
     try std.testing.expectEqual(@as(std.c.fd_t, -1), debug_ctx.stdout.handle);
     try std.testing.expectEqual(@as(std.c.fd_t, -1), debug_ctx.stderr.handle);
+}
+
+test "AppCtx.offline defaults to false" {
+    try std.testing.expect(!debug_ctx.offline);
+}
+
+test "AppCtx round-trips an explicit offline=true" {
+    const ctx: AppCtx = .{
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .offline = true,
+    };
+    try std.testing.expect(ctx.offline);
 }

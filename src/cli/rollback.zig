@@ -281,6 +281,7 @@ fn dispatchCask(
 
     const prefix = atomic.maltPrefixOrAbort();
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
+    installer.offline = ctx.offline;
     installer.reinstallFromHistory(token, target_pkg_version) catch |e| {
         output.err("failed to reinstall {s} {s} ({s})", .{ token, target_pkg_version, @errorName(e) });
         return error.Aborted;

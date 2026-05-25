@@ -116,11 +116,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
+    http.offline = ctx.offline;
 
     var cache_dir_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
+    api.offline = ctx.offline;
 
     // Per-package errors must not be swallowed: a batch that fails every
     // item used to exit 0, hiding the failure from CI. We aggregate here
@@ -525,6 +527,7 @@ fn upgradeRoutedTapCask(
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
+    http.offline = ctx.offline;
 
     var rb_url_buf: [512]u8 = undefined;
     const rb_url = std.fmt.bufPrint(&rb_url_buf, "{s}/{s}/Casks/{s}.rb", .{ urls.raw_base, fresh_sha, token }) catch return error.Aborted;
@@ -566,6 +569,7 @@ fn upgradeRoutedTapCask(
     // Mirrors the core-API path in `upgradeCask` so a partial failure
     // can't leave the casks row missing once the new app is on disk.
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
+    installer.offline = ctx.offline;
     db.beginTransaction() catch |txn_err| {
         output.err("Could not begin DB transaction for {s}: {s} ({s})", .{ token, @errorName(txn_err), db.errMsg() });
         return error.Aborted;
@@ -854,6 +858,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // against other malt writers, so holding the SQLite txn across the
     // (potentially slow) install is harmless to other connections.
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
+    installer.offline = ctx.offline;
     db.beginTransaction() catch |txn_err| {
         output.err(
             "Could not begin DB transaction for {s}: {s} ({s})",

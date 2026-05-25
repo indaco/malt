@@ -196,6 +196,17 @@ test "formatMirrorOverrideDetail falls back to a non-overridden message" {
     try testing.expectEqualStrings("using upstream Homebrew defaults", detail);
 }
 
+test "formatOfflineDetail reports off when offline is false" {
+    try testing.expectEqualStrings("off", doctor.formatOfflineDetail(false));
+}
+
+test "formatOfflineDetail reports active when offline is true" {
+    try testing.expectEqualStrings(
+        "active — every fetch must serve from the snapshot cache",
+        doctor.formatOfflineDetail(true),
+    );
+}
+
 // ── countMissingLocalSources ────────────────────────────────────────
 //
 // The local-source check walks `kegs WHERE tap='local'` and reports

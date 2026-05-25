@@ -437,8 +437,10 @@ fn collectGraph(
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
+    http.offline = ctx.offline;
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
+    api.offline = ctx.offline;
     var api_ctx = ApiCtx{ .allocator = allocator, .api = &api };
     const api_lookup = apiDepLookup(&api_ctx);
 

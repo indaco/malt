@@ -13,6 +13,10 @@ pub const DownloadError = error{
     /// Without the watchdog a stalled download has no fail-fast, so we
     /// surface the error rather than silently degrade.
     WatchdogSpawnFailed,
+    /// Offline mode active and no cached body to serve. Non-transient so
+    /// retry-with-backoff bails immediately instead of waiting out the
+    /// network on a guaranteed miss.
+    OfflineRequired,
 };
 
 pub const DownloadDiagnostic = struct {
@@ -44,7 +48,7 @@ pub fn classifyStatus(status: u16) ?DownloadError {
 pub fn isTransientError(err: DownloadError) bool {
     return switch (err) {
         error.Timeout, error.ConnectionReset, error.HttpServerError, error.RateLimited, error.ReadFailed, error.WatchdogSpawnFailed => true,
-        error.HttpClientError, error.TlsDowngradeRefused, error.ResponseTooLarge => false,
+        error.HttpClientError, error.TlsDowngradeRefused, error.ResponseTooLarge, error.OfflineRequired => false,
     };
 }
 
@@ -215,6 +219,12 @@ pub const HttpClient = struct {
     /// `net/client` to the SIGINT mechanism the caller chose.
     cancel: ?*const fn () bool = null,
 
+    /// When true, `get` / `getWithHeaders` / `head` / `headResolved`
+    /// short-circuit with `error.OfflineRequired` before any DNS / TCP
+    /// work. cli/ call sites set this from `ctx.offline` so a user on a
+    /// plane fails fast instead of waiting for connect timeouts.
+    offline: bool = false,
+
     /// Reused across requests; each HttpClient is borrowed single-threaded
     /// from a pool, so no concurrent access.
     zstd_window: ?[]u8 = null,
@@ -256,6 +266,7 @@ pub const HttpClient = struct {
     /// GET request; auto-injects HOMEBREW_GITHUB_API_TOKEN as Authorization
     /// for GitHub/Homebrew hosts. Caller owns the returned `Response`.
     pub fn get(self: *HttpClient, url: []const u8) !Response {
+        if (self.offline) return error.OfflineRequired;
         if (std.process.Environ.getPosix(self.environ, "HOMEBREW_GITHUB_API_TOKEN")) |token| {
             // Apply token to GitHub and Homebrew API requests
             if (std.mem.indexOf(u8, url, "github.com") != null or
@@ -281,11 +292,13 @@ pub const HttpClient = struct {
         extra_headers: []const std.http.Header,
         progress: ?ProgressCallback,
     ) !Response {
+        if (self.offline) return error.OfflineRequired;
         return self.doGetWithRetry(url, extra_headers, max_blob_bytes, progress);
     }
 
     /// Perform a HEAD request and return only the HTTP status code.
     pub fn head(self: *HttpClient, url: []const u8) !u16 {
+        if (self.offline) return error.OfflineRequired;
         const uri = try std.Uri.parse(url);
 
         var req = try self.client.request(.HEAD, uri, .{
@@ -327,6 +340,7 @@ pub const HttpClient = struct {
 
     /// HEAD with manual redirect follow — stdlib skips redirects on HEAD.
     pub fn headResolved(self: *HttpClient, url: []const u8) !HeadResolved {
+        if (self.offline) return error.OfflineRequired;
         // Build the result eagerly so a single errdefer covers every dupe
         // inside the redirect loop; on success the caller takes ownership.
         var resolved: HeadResolved = .{
@@ -703,6 +717,13 @@ pub const HttpClientPool = struct {
         }
     }
 
+    /// Mirror `offline` onto every pooled client. Cli/ call sites use
+    /// this right after `init` so workers borrowed under offline mode
+    /// short-circuit with `OfflineRequired` rather than dialing out.
+    pub fn setOfflineAll(self: *HttpClientPool, offline: bool) void {
+        for (self.clients) |*c| c.offline = offline;
+    }
+
     /// Return an acquired client; foreign pointers are a programmer error.
     pub fn release(self: *HttpClientPool, client: *HttpClient) void {
         self.mutex.lockUncancelable(self.io);
@@ -715,6 +736,28 @@ pub const HttpClientPool = struct {
         self.cond.signal(self.io);
     }
 };
+
+test "HttpClient.offline defaults to false" {
+    var http = HttpClient.init(std.Options.debug_io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    try std.testing.expect(!http.offline);
+}
+
+test "HttpClient.get returns OfflineRequired when offline is set" {
+    var http = HttpClient.init(std.Options.debug_io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.offline = true;
+    // Use a host that would 404/connect-refuse in the real world — the
+    // gate must trip before any DNS / TCP work happens.
+    try std.testing.expectError(error.OfflineRequired, http.get("https://example.invalid/x"));
+}
+
+test "HttpClient.head returns OfflineRequired when offline is set" {
+    var http = HttpClient.init(std.Options.debug_io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    http.offline = true;
+    try std.testing.expectError(error.OfflineRequired, http.head("https://example.invalid/x"));
+}
 
 test "idleTimeoutNsFromEnv: null falls back to default" {
     try std.testing.expectEqual(default_idle_timeout_ns, idleTimeoutNsFromEnv(null));

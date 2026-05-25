@@ -221,6 +221,7 @@ fn installTapRb(
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
+    http.offline = ctx.offline;
 
     // First probe: Formula/ for the default mode, Casks/ when the
     // caller has pinned the resolve to cask-only.
@@ -425,6 +426,7 @@ pub fn installLocalFormula(
 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
+    http.offline = ctx.offline;
     // `--local` is out of scope for `--download-only`: the user already
     // holds the archive on disk so warming a tap-cache entry adds no
     // value. Hard-wire false here rather than threading the flag.
@@ -825,6 +827,7 @@ fn materializeTapCask(
 
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix_z);
     installer.artifact_type_override = kind;
+    installer.offline = ctx.offline;
 
     var bar = progress_mod.ProgressBar.init(cask.token, 0);
     installer.progress = .{

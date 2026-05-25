@@ -32,6 +32,7 @@ const version_update = @import("cli/version_update.zig");
 const which_cmd = @import("cli/which.zig");
 const signals = @import("core/signals.zig");
 const mirror_mod = @import("net/mirror.zig");
+const offline_mod = @import("net/offline.zig");
 const color_mod = @import("ui/color.zig");
 const output_mod = @import("ui/output.zig");
 const progress_mod = @import("ui/progress.zig");
@@ -248,6 +249,13 @@ test "dispatch accepts AppCtx and routes help without panic" {
     try dispatch(std.testing.allocator, &ctx, .help, &.{});
 }
 
+test "applyGlobalFlag does not consume --offline (handled inline by main)" {
+    // `--offline` lives on ctx, not module state; if applyGlobalFlag
+    // ever started consuming it the inline branch in `main` would be
+    // dead code and ctx.offline would silently stop tracking the flag.
+    try std.testing.expect(!applyGlobalFlag("--offline"));
+}
+
 test "command_map resolves cleanup to the cleanup tag" {
     // `mt cleanup` is the Homebrew-shaped alias for `mt purge --housekeeping`.
     // Pin the tag so a rename can't silently break the dispatch arm.
@@ -343,12 +351,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
         },
     };
 
-    const ctx: AppCtx = .{
+    // `MALT_OFFLINE` is resolved once at boot; `--offline` may flip it
+    // on later in the dispatch loop (parsed below alongside other globals).
+    var ctx: AppCtx = .{
         .io = threaded.io(),
         .environ = init.environ,
         .stdout = std.Io.File.stdout(),
         .stderr = std.Io.File.stderr(),
         .mirrors = mirrors,
+        .offline = offline_mod.resolveFromEnv(init.environ),
     };
 
     // Seed the ui package state once so output/progress/color stop
@@ -393,6 +404,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
         {
             cmd_str = arg;
             found_cmd = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--offline")) {
+            // `--offline` lives on ctx (not module state) so subcommands
+            // read it via the typed pointer rather than a hidden global.
+            ctx.offline = true;
             continue;
         }
         if (!applyGlobalFlag(arg)) try filtered.append(allocator, arg);
@@ -524,6 +541,8 @@ fn printUsage(ctx: *const AppCtx) void {
         \\                  Stream one JSON event per state transition for
         \\                  install/upgrade/migrate (orthogonal to --json)
         \\  --dry-run       Preview without executing
+        \\  --offline       Serve every fetch from the snapshot cache; fail
+        \\                  fast with OfflineRequired on a miss
         \\  --help, -h      Show help
         \\  --version       Show version
         \\
@@ -535,6 +554,8 @@ fn printUsage(ctx: *const AppCtx) void {
         \\  MALT_PROGRESS=tty|plain|none
         \\                    Choose how install/upgrade/migrate report progress;
         \\                    default auto-detects (CI=true flips to plain)
+        \\  MALT_OFFLINE=1    Same as --offline: every fetch must serve from
+        \\                    the snapshot cache
         \\  MALT_NO_VERSION_NOTIFIER=1
         \\                    Suppress the "newer malt available" stderr notice
         \\
