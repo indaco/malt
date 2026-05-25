@@ -100,4 +100,39 @@ pass "--only-dependencies combo refused"
 [[ -d "$PREFIX/Cellar/$TARGET" ]] || fail "Cellar/$TARGET missing after follow-up install"
 pass "follow-up install populated Cellar/$TARGET"
 
+# ── 5. Cask --download-only: cache filled, no Caskroom row, no app. ───
+# copilot-cli is a binary cask with no /Applications slot — safe to
+# exercise without touching shared system state.
+CASK_TARGET="${CASK_TARGET:-copilot-cli}"
+CASK_LOG="$PREFIX/cask_install.log"
+printf '▸ malt install --download-only --cask %s\n' "$CASK_TARGET"
+"$BIN" install --download-only --cask "$CASK_TARGET" >"$CASK_LOG" 2>&1 || {
+  printf '---- last 40 lines of cask download log ----\n' >&2
+  tail -40 "$CASK_LOG" >&2
+  fail "--download-only --cask failed for $CASK_TARGET — see $CASK_LOG"
+}
+pass "--download-only --cask ran cleanly"
+
+# Cache file must exist; nothing should live under Caskroom or the casks table.
+cache_count=$(find "$PREFIX/cache/Cask" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+[[ "$cache_count" -ge 1 ]] || fail "cache/Cask empty after --download-only --cask"
+pass "cache/Cask holds $cache_count artefact(s)"
+
+casks_rows=$(sqlite3 "$DB" "SELECT COUNT(*) FROM casks WHERE token = '$CASK_TARGET';")
+[[ "$casks_rows" = "0" ]] || fail "casks row created by --download-only --cask (rows=$casks_rows)"
+pass "casks table untouched"
+
+grep -q "downloaded to $PREFIX/cache/Cask/" "$CASK_LOG" || fail "cask cache path not printed"
+pass "cask cache path printed"
+
+# Follow-up real cask install must consume the cache (no second fetch).
+"$BIN" install --cask "$CASK_TARGET" >>"$CASK_LOG" 2>&1 || {
+  printf '---- last 40 lines of cask install log ----\n' >&2
+  tail -40 "$CASK_LOG" >&2
+  fail "follow-up cask install failed — see $CASK_LOG"
+}
+follow_rows=$(sqlite3 "$DB" "SELECT COUNT(*) FROM casks WHERE token = '$CASK_TARGET';")
+[[ "$follow_rows" = "1" ]] || fail "follow-up cask install did not record (rows=$follow_rows)"
+pass "follow-up cask install populated casks row"
+
 printf '\n✔ install-download-only regression test passed\n'

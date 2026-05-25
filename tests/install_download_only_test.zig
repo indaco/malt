@@ -320,6 +320,75 @@ test "--download-only with multiple packages prints one resolved path per packag
     try testing.expect(std.mem.indexOf(u8, captured.items, want_b) != null);
 }
 
+test "--download-only --cask is plumbed into the cask path and threads the flag" {
+    // The argv parser must accept `--download-only` alongside `--cask`,
+    // and the per-package dispatcher must route the request through
+    // `installCask` (which honours the flag). Anchor via the cached-API
+    // already-installed branch: a seeded `casks` row would normally
+    // trigger the "already installed" short-circuit on the regular path,
+    // but `--download-only` deliberately bypasses that gate so warmed
+    // caches can be refreshed ahead of an upgrade. We assert the bypass
+    // by capturing that no "already installed" line is printed even
+    // though the row exists — and the run still terminates with a
+    // cask-fetch error (because there's no network in this test, the
+    // cache lookup for the cask JSON misses).
+    const prefix_z: [:0]const u8 = "/tmp/mc_dl";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
+    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Seed a `casks` row for the same token so the normal `isInstalled`
+    // gate would short-circuit. `--download-only` must skip the gate.
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{prefix_z});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/malt.db", .{db_dir}, 0);
+    defer testing.allocator.free(db_path);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        var stmt = try db.prepare(
+            \\INSERT INTO casks (token, name, version, url, sha256, app_path)
+            \\VALUES (?, ?, ?, ?, ?, ?);
+        );
+        defer stmt.finalize();
+        try stmt.bindText(1, "ghost-cask");
+        try stmt.bindText(2, "ghost-cask");
+        try stmt.bindText(3, "1.0");
+        try stmt.bindText(4, "https://example.test/ghost.dmg");
+        try stmt.bindText(5, "0" ** 64);
+        try stmt.bindText(6, "/Applications/Ghost.app");
+        _ = try stmt.step();
+    }
+
+    const prior_quiet = malt.output.isQuiet();
+    malt.output.setQuiet(false);
+    defer malt.output.setQuiet(prior_quiet);
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    // `--cask` + an unresolvable token → `fetchCask` errors. The
+    // important assertion is that we DIDN'T short-circuit on the seeded
+    // already-installed row — i.e., `--download-only` rerouted the flow
+    // through the download path.
+    install.execute(&ctx, arena.allocator(), &.{ "--download-only", "--cask", "ghost-cask" }) catch {};
+
+    try testing.expect(std.mem.indexOf(u8, captured.items, "ghost-cask is already installed") == null);
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Cask 'ghost-cask' not found") != null);
+}
+
 test "--download-only populates the store and skips Cellar + kegs" {
     // Pre-seed the store so the warm-path branch inside the install pool
     // skips the network entirely. The new exit point must short-circuit

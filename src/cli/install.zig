@@ -610,7 +610,7 @@ fn executeWithOpts(
                     continue;
                 }
                 // Try cask
-                installCask(ctx, allocator, pkg_name, &db, &api, dry_run) catch |e| {
+                installCask(ctx, allocator, pkg_name, &db, &api, dry_run, download_only) catch |e| {
                     output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                 };
                 continue;
@@ -640,7 +640,7 @@ fn executeWithOpts(
             };
             output.emitNdjsonEvent(.resolved, pkg_name, null);
         } else {
-            installCask(ctx, allocator, pkg_name, &db, &api, dry_run) catch |e| {
+            installCask(ctx, allocator, pkg_name, &db, &api, dry_run, download_only) catch |e| {
                 output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
             };
         }
@@ -1102,7 +1102,9 @@ fn resolveCaskArtifactViaHead(ctx: *const AppCtx, allocator: std.mem.Allocator, 
     return cask_mod.resolveArtifactType(allocator, resolved.final_url, resolved.content_disposition);
 }
 
-/// Install a cask (DMG, ZIP, or PKG).
+/// Install a cask (DMG, ZIP, or PKG). When `download_only` is set, the
+/// flow stops after `<prefix>/cache/Cask/<file>` is sha-verified — no
+/// `/Applications` writes, no DB inserts.
 fn installCask(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -1110,6 +1112,7 @@ fn installCask(
     db: *sqlite.Database,
     api: *api_mod.BrewApi,
     dry_run: bool,
+    download_only: bool,
 ) !void {
     const cask_json = api.fetchCask(token) catch {
         output.err("Cask '{s}' not found", .{token});
@@ -1123,8 +1126,11 @@ fn installCask(
     };
     defer cask.deinit();
 
-    // Check if already installed
-    if (cask_mod.isInstalled(db, cask.token)) {
+    // `--download-only` deliberately ignores `isInstalled` so a user can
+    // refresh the cached artefact ahead of an `mt upgrade` even when an
+    // older revision is on disk. The real install path keeps the
+    // "already installed" short-circuit.
+    if (!download_only and cask_mod.isInstalled(db, cask.token)) {
         output.info("{s} is already installed", .{cask.token});
         return;
     }
@@ -1157,8 +1163,6 @@ fn installCask(
         output.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
     }
 
-    output.info("Installing cask {s} {s}...", .{ cask.token, cask.version });
-
     const prefix = atomic.maltPrefixOrAbort();
 
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
@@ -1170,6 +1174,23 @@ fn installCask(
         .context = @ptrCast(&bar),
         .func = &progressBridge,
     };
+
+    if (download_only) {
+        output.emitNdjsonEvent(.download_started, cask.token, null);
+        const cache_path = installer.downloadOnly(&cask) catch |e| {
+            bar.finish();
+            output.emitNdjsonEvent(.download_complete, cask.token, "failed");
+            output.err("Failed to download cask {s}: {s}", .{ cask.token, @errorName(e) });
+            return InstallError.CaskNotFound;
+        };
+        bar.finish();
+        defer allocator.free(cache_path);
+        output.emitNdjsonEvent(.download_complete, cask.token, "ok");
+        output.success("{s} {s} downloaded to {s}", .{ cask.token, cask.version, cache_path });
+        return;
+    }
+
+    output.info("Installing cask {s} {s}...", .{ cask.token, cask.version });
 
     const app_path = installer.install(&cask) catch |e| {
         bar.finish();
