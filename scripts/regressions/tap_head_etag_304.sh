@@ -108,5 +108,58 @@ if command -v sqlite3 >/dev/null; then
   fi
 fi
 
-printf 'PASS: cold spent %d token; hot spent %d (304 short-circuit) — a=%d b=%d c=%d\n' \
+printf 'PASS (etag round-trip): cold spent %d token; hot spent %d (304 short-circuit) — a=%d b=%d c=%d\n' \
   "$cold_cost" "$hot_cost" "$a" "$b" "$c"
+
+# ---- Within-process dedup (gap #2): N casks from one tap → 1 HEAD ----
+# Seed 10 fake casks routed to TAP so `mt outdated` walks them through
+# the tap-resolve path. The .rb fetches will 404 on the raw CDN (not
+# rate-limited) — only the HEAD resolve spends an API token. Clobber
+# the cached etag first so the HEAD call returns 200 (not 304), making
+# the dedup distinguishable at the rate-limit level: with dedup the
+# 10 workers share 1 HEAD call; without dedup they each pay one.
+if ! command -v sqlite3 >/dev/null; then
+  printf 'SKIP (dedup check): sqlite3 not on PATH — skipping the within-process\n' >&2
+  printf '      dedup assertion. The cross-process etag path was verified above.\n' >&2
+  exit 0
+fi
+
+sqlite3 "$PREFIX/db/malt.db" \
+  "UPDATE taps SET head_etag = 'W/\"stale-force-200\"' WHERE name='$TAP';" 2>/dev/null
+
+# 10 > outdated_default_workers (8) so this exercises the pool path.
+sqlite3 "$PREFIX/db/malt.db" "$(
+  cat <<SQL
+INSERT INTO casks (token, name, version, url, tap) VALUES
+  ('zzfake1', 'zzfake1', '0', 'https://example.invalid/x.dmg', '$TAP'),
+  ('zzfake2', 'zzfake2', '0', 'https://example.invalid/x.dmg', '$TAP'),
+  ('zzfake3', 'zzfake3', '0', 'https://example.invalid/x.dmg', '$TAP'),
+  ('zzfake4', 'zzfake4', '0', 'https://example.invalid/x.dmg', '$TAP'),
+  ('zzfake5', 'zzfake5', '0', 'https://example.invalid/x.dmg', '$TAP'),
+  ('zzfake6', 'zzfake6', '0', 'https://example.invalid/x.dmg', '$TAP'),
+  ('zzfake7', 'zzfake7', '0', 'https://example.invalid/x.dmg', '$TAP'),
+  ('zzfake8', 'zzfake8', '0', 'https://example.invalid/x.dmg', '$TAP'),
+  ('zzfake9', 'zzfake9', '0', 'https://example.invalid/x.dmg', '$TAP'),
+  ('zzfakeA', 'zzfakeA', '0', 'https://example.invalid/x.dmg', '$TAP');
+SQL
+)" 2>/dev/null
+
+d=$(probe_remaining)
+# `--json` suppresses the per-row "couldn't check" warnings the fake
+# tokens trigger. Exit code may be non-zero (snapshot write may fail
+# on a partial prefix) — we only care about the rate-limit delta.
+MALT_PREFIX="$PREFIX" "$MALT_BIN" outdated --json >/dev/null 2>&1 || true
+e=$(probe_remaining)
+dedup_cost=$((d - e - 1))
+
+# With dedup: 1 HEAD (200, stale etag) = 1 token. Without: 10.
+if ((dedup_cost > 1)); then
+  printf 'FAIL: within-process dedup leaked %d token(s) for 10 same-tap casks (expected ≤1).\n' \
+    "$dedup_cost" >&2
+  printf '       d=%d e=%d. Workers sharing a tap should pay 1 HEAD call,\n' "$d" "$e" >&2
+  printf '       not N — the TapHeadResolve cache is missing or unwired.\n' >&2
+  exit 1
+fi
+
+printf 'PASS (dedup): 10 same-tap casks shared %d HEAD token (d=%d e=%d)\n' \
+  "$dedup_cost" "$d" "$e"
