@@ -183,11 +183,9 @@ test "pre-v8 DB upgrades to v8 and carries existing tap rows forward (etag NULL)
 
 // ── Concurrent writers: SERIALIZED-mode SQLite tolerates dup writes ─
 
-test "multiple workers writing the same (sha, etag) last-writer-wins, no corruption" {
-    // Outdated's worker pool: N parallel resolveHeadCommit calls for
-    // casks sharing one tap. Each gets the same response, each calls
-    // updateHead. SERIALIZED mode (THREADSAFE=1 in build) serialises
-    // per-statement; the row always ends with the agreed values.
+test "sequential writers of the same (sha, etag) last-writer-wins" {
+    // Sanity floor for the concurrent test below: the same row mutated
+    // 16x in a row must end at the agreed values.
     var db = try openDb();
     defer db.close();
     try tap.add(&db, "aeroxy/tap", "https://github.com/aeroxy/homebrew-tap", null);
@@ -196,6 +194,65 @@ test "multiple workers writing the same (sha, etag) last-writer-wins, no corrupt
         try tap.updateHead(&db, "aeroxy/tap", fresh_sha, fresh_etag);
     }
 
+    const sha = (try tap.getCommitSha(testing.allocator, &db, "aeroxy/tap")).?;
+    defer testing.allocator.free(sha);
+    const et = (try tap.getHeadEtag(testing.allocator, &db, "aeroxy/tap")).?;
+    defer testing.allocator.free(et);
+    try testing.expectEqualStrings(fresh_sha, sha);
+    try testing.expectEqualStrings(fresh_etag, et);
+}
+
+// Real-thread concurrency check. The outdated worker pool can have N
+// workers hitting `updateHead` / `getHeadEtag` on the shared DB pointer
+// at once when several installed casks share a tap. SERIALIZED mode
+// (THREADSAFE=1 in build.zig) serialises per-API call inside SQLite —
+// this test exercises that empirically rather than trusting the docs.
+const ConcurrentCtx = struct {
+    db: *sqlite.Database,
+    iterations: usize,
+    // SqliteError is the only failure modeled; the runner widens to
+    // anyerror so a stray OOM from getHeadEtag's allocator surfaces too.
+    err: ?anyerror = null,
+
+    fn run(self: *ConcurrentCtx) void {
+        var i: usize = 0;
+        while (i < self.iterations) : (i += 1) {
+            tap.updateHead(self.db, "aeroxy/tap", fresh_sha, fresh_etag) catch |e| {
+                self.err = e;
+                return;
+            };
+            // Mix read + write so the serialisation has to cover both
+            // sides of the API surface, not just writes.
+            const got = tap.getHeadEtag(testing.allocator, self.db, "aeroxy/tap") catch |e| {
+                self.err = e;
+                return;
+            };
+            if (got) |g| testing.allocator.free(g);
+        }
+    }
+};
+
+test "concurrent workers (real threads) leave the row consistent under SQLite SERIALIZED" {
+    var db = try openDb();
+    defer db.close();
+    try tap.add(&db, "aeroxy/tap", "https://github.com/aeroxy/homebrew-tap", null);
+
+    const thread_count: usize = 8;
+    const iterations_per_thread: usize = 64;
+
+    var ctxs: [thread_count]ConcurrentCtx = undefined;
+    for (&ctxs) |*c| c.* = .{ .db = &db, .iterations = iterations_per_thread };
+
+    var threads: [thread_count]std.Thread = undefined;
+    for (&threads, &ctxs) |*t, *c| {
+        t.* = try std.Thread.spawn(.{}, ConcurrentCtx.run, .{c});
+    }
+    for (threads) |t| t.join();
+
+    // No worker tripped on a SQLITE_BUSY / OOM / mapped-error.
+    for (ctxs) |c| try testing.expect(c.err == null);
+
+    // Row converged to the agreed value (all writers wrote the same).
     const sha = (try tap.getCommitSha(testing.allocator, &db, "aeroxy/tap")).?;
     defer testing.allocator.free(sha);
     const et = (try tap.getHeadEtag(testing.allocator, &db, "aeroxy/tap")).?;
