@@ -43,6 +43,35 @@ test "GhcrClient.init/deinit does not leak and starts without cached token" {
     try testing.expectEqual(@as(i64, 0), g.token_expiry);
 }
 
+test "GhcrClient honours a base_url override across token and blob URLs" {
+    // Pins the override on the struct, then exercises the pure URL
+    // builders against the same value to prove the registry endpoints
+    // malt would hit match the mirror.
+    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
+    defer pool.deinit();
+    const http = pool.acquire();
+    defer pool.release(http);
+
+    var g = ghcr.GhcrClient.init(std.Options.debug_io, testing.allocator, http);
+    defer g.deinit();
+    g.base_url = "https://reg.example.com";
+
+    const repos = [_][]const u8{"homebrew/core/wget"};
+    const token_url = try ghcr.GhcrClient.buildTokenUrl(testing.allocator, g.base_url, &repos);
+    defer testing.allocator.free(token_url);
+    try testing.expectEqualStrings(
+        "https://reg.example.com/token?scope=repository:homebrew/core/wget:pull",
+        token_url,
+    );
+
+    var blob_buf: [256]u8 = undefined;
+    const blob_url = try ghcr.GhcrClient.buildBlobUrl(&blob_buf, g.base_url, "homebrew/core/wget", "sha256:deadbeef");
+    try testing.expectEqualStrings(
+        "https://reg.example.com/v2/homebrew/core/wget/blobs/sha256:deadbeef",
+        blob_url,
+    );
+}
+
 // S10: GHCR multi-scope token prefetch. GHCR's /token endpoint accepts
 // multiple `scope=repository:<repo>:pull` query params and returns one
 // token valid for every requested scope. `buildTokenUrl` is the pure
@@ -53,7 +82,7 @@ test "GhcrClient.init/deinit does not leak and starts without cached token" {
 
 test "buildTokenUrl emits one scope param for a single repo" {
     const repos = [_][]const u8{"homebrew/core/wget"};
-    const url = try ghcr.GhcrClient.buildTokenUrl(testing.allocator, &repos);
+    const url = try ghcr.GhcrClient.buildTokenUrl(testing.allocator, "https://ghcr.io", &repos);
     defer testing.allocator.free(url);
     try testing.expectEqualStrings(
         "https://ghcr.io/token?scope=repository:homebrew/core/wget:pull",
@@ -67,7 +96,7 @@ test "buildTokenUrl joins multiple scopes with '&' in input order" {
         "homebrew/core/wget",
         "homebrew/core/openssl/3",
     };
-    const url = try ghcr.GhcrClient.buildTokenUrl(testing.allocator, &repos);
+    const url = try ghcr.GhcrClient.buildTokenUrl(testing.allocator, "https://ghcr.io", &repos);
     defer testing.allocator.free(url);
     try testing.expectEqualStrings(
         "https://ghcr.io/token?" ++
@@ -82,7 +111,7 @@ test "buildTokenUrl returns just the prefix on an empty repo list" {
     // prefetchTokens short-circuits on empty input, but the URL builder
     // stays well-defined — no scope params, just the endpoint path.
     const repos = [_][]const u8{};
-    const url = try ghcr.GhcrClient.buildTokenUrl(testing.allocator, &repos);
+    const url = try ghcr.GhcrClient.buildTokenUrl(testing.allocator, "https://ghcr.io", &repos);
     defer testing.allocator.free(url);
     try testing.expectEqualStrings("https://ghcr.io/token?", url);
 }

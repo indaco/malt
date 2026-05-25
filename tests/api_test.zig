@@ -104,6 +104,48 @@ test "fetchFormula returns a pre-seeded cache without touching the network" {
     try testing.expectEqualStrings(json, out);
 }
 
+test "BrewApi honours a base_url override and threads it through fetchFormula's URL" {
+    // We can't easily intercept the live HTTP call inside fetchFormula
+    // without a fake client, so split the assertion: pin the override
+    // on the struct, then exercise the pure URL builder against the
+    // same value to prove the path malt would request matches the
+    // mirror.
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("fetchformula_override");
+    defer dir.deinit();
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.base_url = "https://mirror.example.com/api";
+    try testing.expectEqualStrings("https://mirror.example.com/api", api.base_url);
+
+    var url_buf: [256]u8 = undefined;
+    const url = try api_mod.BrewApi.buildFormulaUrl(&url_buf, api.base_url, "wget");
+    try testing.expectEqualStrings("https://mirror.example.com/api/formula/wget.json", url);
+}
+
+test "BrewApi cache lookup is shared between the default and the override" {
+    // Pre-seeded cache hits short-circuit before the URL is built, so a
+    // warm cache works regardless of which base_url is active. Pins the
+    // contract that flipping the env knob doesn't invalidate prior cache
+    // bytes for the same formula name.
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("fetchformula_shared_cache");
+    defer dir.deinit();
+
+    const json =
+        \\{"name":"wget","versions":{"stable":"1.0"}}
+    ;
+    try dir.writeCacheFile("formula_wget.json", json);
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.base_url = "https://mirror.example.com/api";
+    const out = try api.fetchFormula("wget");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(json, out);
+}
+
 test "fetchCask returns a pre-seeded cache without touching the network" {
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();

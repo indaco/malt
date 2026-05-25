@@ -398,6 +398,7 @@ fn recomputeAndEmit(
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
+    api.base_url = ctx.mirrors.api_base;
 
     const workers_override = parseWorkersEnv(std.process.Environ.getPosix(ctx.environ, outdated_workers_env));
 

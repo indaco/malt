@@ -4,6 +4,7 @@
 const std = @import("std");
 
 const client_mod = @import("client.zig");
+const mirror_mod = @import("mirror.zig");
 
 pub const GhcrError = error{
     TokenFetchFailed,
@@ -32,6 +33,11 @@ pub const GhcrClient = struct {
     cached_scopes: std.StringHashMapUnmanaged(void),
     token_expiry: i64,
     mutex: std.Io.Mutex,
+    /// Bottle/registry base URL (no trailing slash). Mutable post-init
+    /// so cli/ call sites can drop in `ctx.mirrors.bottle_base`;
+    /// mirror precedence + HTTPS validation are enforced upstream by
+    /// `mirror.resolve`.
+    base_url: []const u8 = mirror_mod.default_bottle_base_url,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, http: *client_mod.HttpClient) GhcrClient {
         return .{
@@ -73,18 +79,27 @@ pub const GhcrClient = struct {
         return self.cached_scopes.contains(repo);
     }
 
-    /// Build the GHCR token URL covering every repo in `repos`. One
-    /// `scope=repository:{repo}:pull` query param per repo; GHCR
-    /// returns a token valid for all of them. Caller owns the result.
-    pub fn buildTokenUrl(allocator: std.mem.Allocator, repos: []const []const u8) ![]u8 {
+    /// Build the registry token URL covering every repo in `repos`. One
+    /// `scope=repository:{repo}:pull` query param per repo; the registry
+    /// returns a token valid for all of them. `base` lets corporate
+    /// mirrors point at their own `/token` endpoint. Caller owns the
+    /// result.
+    pub fn buildTokenUrl(allocator: std.mem.Allocator, base: []const u8, repos: []const []const u8) ![]u8 {
         var aw: std.Io.Writer.Allocating = .init(allocator);
         errdefer aw.deinit();
-        try aw.writer.writeAll("https://ghcr.io/token?");
+        try aw.writer.print("{s}/token?", .{base});
         for (repos, 0..) |repo, i| {
             if (i != 0) try aw.writer.writeByte('&');
             try aw.writer.print("scope=repository:{s}:pull", .{repo});
         }
         return aw.toOwnedSlice();
+    }
+
+    /// Build the registry blob URL for `(repo, digest)`. Pure, `pub`
+    /// so tests can pin the override-honouring shape.
+    pub fn buildBlobUrl(buf: []u8, base: []const u8, repo: []const u8, digest: []const u8) GhcrError![]const u8 {
+        return std.fmt.bufPrint(buf, "{s}/v2/{s}/blobs/{s}", .{ base, repo, digest }) catch
+            GhcrError.OutOfMemory;
     }
 
     /// Fetch one token covering every repo in `repos` with a single
@@ -109,7 +124,7 @@ pub const GhcrClient = struct {
 
         self.clearCache();
 
-        const url = buildTokenUrl(self.allocator, repos) catch return GhcrError.OutOfMemory;
+        const url = buildTokenUrl(self.allocator, self.base_url, repos) catch return GhcrError.OutOfMemory;
         defer self.allocator.free(url);
 
         var resp = http.get(url) catch return GhcrError.TokenFetchFailed;
@@ -173,7 +188,7 @@ pub const GhcrClient = struct {
         }
 
         const repos = [_][]const u8{repo};
-        const url = buildTokenUrl(self.allocator, &repos) catch
+        const url = buildTokenUrl(self.allocator, self.base_url, &repos) catch
             return GhcrError.OutOfMemory;
         defer self.allocator.free(url);
 
@@ -218,8 +233,7 @@ pub const GhcrClient = struct {
         defer self.allocator.free(token);
 
         var url_buf: [512]u8 = undefined;
-        const url = std.fmt.bufPrint(&url_buf, "https://ghcr.io/v2/{s}/blobs/{s}", .{ repo, digest }) catch
-            return GhcrError.OutOfMemory;
+        const url = try buildBlobUrl(&url_buf, self.base_url, repo, digest);
 
         var auth_buf: [2048]u8 = undefined;
         const auth_value = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token}) catch
@@ -269,4 +283,43 @@ pub fn extractTokenField(allocator: std.mem.Allocator, json_bytes: []const u8) !
     };
 
     return allocator.dupe(u8, token_str);
+}
+
+// ── inline tests: base_url default + URL builders honour overrides ──
+
+const testing = std.testing;
+
+test "GhcrClient.init defaults base_url to the upstream GHCR host" {
+    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
+    defer pool.deinit();
+    const http = pool.acquire();
+    defer pool.release(http);
+
+    var g = GhcrClient.init(std.Options.debug_io, testing.allocator, http);
+    defer g.deinit();
+
+    try testing.expectEqualStrings(mirror_mod.default_bottle_base_url, g.base_url);
+}
+
+test "buildTokenUrl emits scope params against a mirror base URL" {
+    const repos = [_][]const u8{ "homebrew/core/wget", "homebrew/core/tree" };
+    const url = try GhcrClient.buildTokenUrl(testing.allocator, "https://reg.example.com", &repos);
+    defer testing.allocator.free(url);
+    try testing.expectEqualStrings(
+        "https://reg.example.com/token?" ++
+            "scope=repository:homebrew/core/wget:pull&" ++
+            "scope=repository:homebrew/core/tree:pull",
+        url,
+    );
+}
+
+test "buildBlobUrl threads the override base into the blob path" {
+    var buf: [256]u8 = undefined;
+    const url = try GhcrClient.buildBlobUrl(&buf, "https://reg.example.com", "homebrew/core/wget", "sha256:abc");
+    try testing.expectEqualStrings("https://reg.example.com/v2/homebrew/core/wget/blobs/sha256:abc", url);
+}
+
+test "buildBlobUrl returns OutOfMemory when the buffer can't hold the URL" {
+    var tiny: [8]u8 = undefined;
+    try testing.expectError(GhcrError.OutOfMemory, GhcrClient.buildBlobUrl(&tiny, "https://reg.example.com", "homebrew/core/wget", "sha256:abc"));
 }

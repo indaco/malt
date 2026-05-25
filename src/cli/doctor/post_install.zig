@@ -41,6 +41,7 @@ pub fn checkPostInstallStatus(ctx: *const AppCtx, allocator: std.mem.Allocator, 
     var cache_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch return;
     var api = api_mod.BrewApi.init(io, allocator, &http, cache_dir);
+    api.base_url = ctx.mirrors.api_base;
 
     while (stmt.step() catch false) {
         const name_raw = stmt.columnText(0) orelse continue;

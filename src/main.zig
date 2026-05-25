@@ -31,7 +31,9 @@ const uses = @import("cli/uses.zig");
 const version_update = @import("cli/version_update.zig");
 const which_cmd = @import("cli/which.zig");
 const signals = @import("core/signals.zig");
+const mirror_mod = @import("net/mirror.zig");
 const color_mod = @import("ui/color.zig");
+const output_mod = @import("ui/output.zig");
 const progress_mod = @import("ui/progress.zig");
 const notifier = @import("update/notifier.zig");
 const version_mod = @import("version.zig");
@@ -325,16 +327,32 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Single Threaded io for the whole process; outlives the ctx it backs.
     var threaded: std.Io.Threaded = .init(backing, .{ .environ = init.environ });
     defer threaded.deinit();
+
+    // Resolve corporate-mirror overrides once, before any net/* call
+    // site can read the env. A non-https override is fatal — refusing
+    // it here keeps the redirect-downgrade guard in `net/client.zig`
+    // load-bearing.
+    const mirrors = mirror_mod.resolve(init.environ) catch |e| switch (e) {
+        error.NonHttpsOverride => {
+            const stderr = std.Io.File.stderr();
+            stderr.writeStreamingAll(
+                threaded.io(),
+                "malt: MALT_API_DOMAIN / MALT_BOTTLE_DOMAIN (and HOMEBREW_* fallbacks) must use https://\n",
+            ) catch {};
+            std.process.exit(1);
+        },
+    };
+
     const ctx: AppCtx = .{
         .io = threaded.io(),
         .environ = init.environ,
         .stdout = std.Io.File.stdout(),
         .stderr = std.Io.File.stderr(),
+        .mirrors = mirrors,
     };
 
     // Seed the ui package state once so output/progress/color stop
     // pulling io/environ/stdio from module-level globals.
-    const output_mod = @import("ui/output.zig");
     output_mod.setRuntime(ctx.io, ctx.environ, ctx.stdout, ctx.stderr);
     progress_mod.setRuntime(ctx.io, ctx.stderr);
     // `MALT_PROGRESS` and CI auto-detect resolve here; per-bar call sites

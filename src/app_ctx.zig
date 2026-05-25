@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const mirror = @import("net/mirror.zig");
 
 pub const AppCtx = struct {
     io: std.Io,
@@ -20,6 +21,10 @@ pub const AppCtx = struct {
     /// tests opt in to a captured or `/dev/null` sink as needed.
     stdout: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } },
     stderr: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } },
+    /// Process-wide mirror snapshot resolved once in `main`. cli/ call
+    /// sites read this instead of re-walking the env per request;
+    /// tests and `debug_ctx` get the upstream Homebrew defaults.
+    mirrors: mirror.Mirrors = .{},
 };
 
 /// Parent `environ` as `std.process.Environ`. Production `main` builds an

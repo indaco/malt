@@ -146,6 +146,56 @@ test "null detail omits the em-dash entirely" {
     try testing.expect(std.mem.indexOf(u8, s, "-") == null);
 }
 
+// ── mirror-override reporting ───────────────────────────────────────
+//
+// Pin the `mt doctor` row that surfaces active corporate-mirror knobs.
+// Pure formatter so the integration assertion stays hermetic — no env
+// fiddling, no AppCtx fixture.
+
+const mirror_mod = @import("malt").mirror;
+
+test "formatMirrorOverrideDetail reports both overrides when both are active" {
+    var buf: [512]u8 = undefined;
+    const detail = doctor.formatMirrorOverrideDetail(&buf, .{
+        .api_base = "https://m-api.example.com",
+        .bottle_base = "https://m-reg.example.com",
+        .api_overridden = true,
+        .bottle_overridden = true,
+    });
+    try testing.expectEqualStrings(
+        "API=https://m-api.example.com, Bottle=https://m-reg.example.com",
+        detail,
+    );
+}
+
+test "formatMirrorOverrideDetail reports the API override on its own" {
+    var buf: [512]u8 = undefined;
+    const detail = doctor.formatMirrorOverrideDetail(&buf, .{
+        .api_base = "https://m-api.example.com",
+        .bottle_base = mirror_mod.default_bottle_base_url,
+        .api_overridden = true,
+        .bottle_overridden = false,
+    });
+    try testing.expectEqualStrings("API=https://m-api.example.com", detail);
+}
+
+test "formatMirrorOverrideDetail reports the bottle override on its own" {
+    var buf: [512]u8 = undefined;
+    const detail = doctor.formatMirrorOverrideDetail(&buf, .{
+        .api_base = mirror_mod.default_api_base_url,
+        .bottle_base = "https://m-reg.example.com",
+        .api_overridden = false,
+        .bottle_overridden = true,
+    });
+    try testing.expectEqualStrings("Bottle=https://m-reg.example.com", detail);
+}
+
+test "formatMirrorOverrideDetail falls back to a non-overridden message" {
+    var buf: [512]u8 = undefined;
+    const detail = doctor.formatMirrorOverrideDetail(&buf, .{});
+    try testing.expectEqualStrings("using upstream Homebrew defaults", detail);
+}
+
 // ── countMissingLocalSources ────────────────────────────────────────
 //
 // The local-source check walks `kegs WHERE tap='local'` and reports
