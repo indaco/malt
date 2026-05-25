@@ -15,6 +15,7 @@ const atomic = @import("../fs/atomic.zig");
 const clonefile = @import("../fs/clonefile.zig");
 const parser = @import("../macho/parser.zig");
 const client_mod = @import("../net/client.zig");
+const mirror_mod = @import("../net/mirror.zig");
 const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
 pub const cask_history = @import("doctor/cask_history.zig");
@@ -41,6 +42,10 @@ pub const CheckCtx = struct {
     prefix: []const u8,
     io: std.Io,
     environ: std.process.Environ,
+    /// Mirror snapshot — drives the API-reachable probe host and the
+    /// "Mirror overrides" row. Defaults to upstream so tests and
+    /// `debug_ctx`-shaped fixtures keep working without plumbing.
+    mirrors: mirror_mod.Mirrors = .{},
 };
 
 /// One entry in the health walk. `run` prints its row(s) and returns
@@ -66,6 +71,7 @@ pub const checks = [_]Check{
     .{ .name = patch.external_tool_name, .run = checkExternalTool },
     .{ .name = "APFS volume", .run = checkApfs },
     .{ .name = "Prefix permissions", .run = checkPrefixPermissions },
+    .{ .name = "Mirror overrides", .run = checkMirrorOverrides },
     .{ .name = "API reachable", .run = checkApiReachable },
     .{ .name = "Orphaned store entries", .run = checkOrphanedStore },
     .{ .name = "Missing kegs", .run = checkMissingKegs },
@@ -141,6 +147,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         .prefix = prefix,
         .io = ctx.io,
         .environ = ctx.environ,
+        .mirrors = ctx.mirrors,
     }, &checks);
 
     emitCaskHistoryReport(allocator, ctx.io, prefix);
@@ -474,8 +481,11 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
 fn checkApiReachable(ctx: CheckCtx, name: []const u8) CheckResult {
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, ctx.allocator);
     defer http.deinit();
-    const status = http.head("https://formulae.brew.sh") catch {
-        printCheck(name, .warn_status, "Cannot reach formulae.brew.sh");
+    const probe_url = mirror_mod.hostProbeUrl(ctx.mirrors.api_base);
+    const status = http.head(probe_url) catch {
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Cannot reach {s}", .{probe_url}) catch "Cannot reach API host";
+        printCheck(name, .warn_status, msg);
         return .warn_status;
     };
     if (status >= 200 and status < 400) {
@@ -484,6 +494,39 @@ fn checkApiReachable(ctx: CheckCtx, name: []const u8) CheckResult {
     }
     printCheck(name, .warn_status, "API returned error status");
     return .warn_status;
+}
+
+/// Report active corporate-mirror overrides so operators can confirm
+/// `MALT_API_DOMAIN` / `MALT_BOTTLE_DOMAIN` (or the `HOMEBREW_*`
+/// fallbacks) landed correctly. Emits the override URLs as the row
+/// detail so the operator can eyeball the value without re-grepping
+/// their shell config.
+fn checkMirrorOverrides(ctx: CheckCtx, name: []const u8) CheckResult {
+    if (!ctx.mirrors.api_overridden and !ctx.mirrors.bottle_overridden) {
+        printCheck(name, .ok, "using upstream Homebrew defaults");
+        return .ok;
+    }
+    var buf: [1024]u8 = undefined;
+    const detail = formatMirrorOverrideDetail(&buf, ctx.mirrors);
+    printCheck(name, .ok, detail);
+    return .ok;
+}
+
+/// Pure formatter for `checkMirrorOverrides`'s detail string. `pub` so
+/// the doctor render test can pin the exact text without a process
+/// fixture.
+pub fn formatMirrorOverrideDetail(buf: []u8, mirrors: mirror_mod.Mirrors) []const u8 {
+    if (mirrors.api_overridden and mirrors.bottle_overridden) {
+        return std.fmt.bufPrint(buf, "API={s}, Bottle={s}", .{ mirrors.api_base, mirrors.bottle_base }) catch
+            "API + Bottle overrides active";
+    }
+    if (mirrors.api_overridden) {
+        return std.fmt.bufPrint(buf, "API={s}", .{mirrors.api_base}) catch "API override active";
+    }
+    if (mirrors.bottle_overridden) {
+        return std.fmt.bufPrint(buf, "Bottle={s}", .{mirrors.bottle_base}) catch "Bottle override active";
+    }
+    return "using upstream Homebrew defaults";
 }
 
 fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
@@ -928,4 +971,17 @@ test "resetFixHint: clears a previously-armed flag" {
     var captured = try captureFixEmit(testing.allocator, false);
     defer captured.deinit(testing.allocator);
     try testing.expect(!fixHintEmitted(captured.items));
+}
+
+test "checks table includes the mirror-overrides row" {
+    // Pins the wiring so a future shuffle of the static table can't
+    // silently drop the operator's only signal that a mirror is active.
+    var found = false;
+    for (checks) |c| {
+        if (std.mem.eql(u8, c.name, "Mirror overrides")) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
 }

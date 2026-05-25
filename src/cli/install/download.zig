@@ -125,6 +125,9 @@ const FetchFormulaCtx = struct {
     arena: std.heap.ArenaAllocator,
     pool: *client_mod.HttpClientPool,
     cache_dir: []const u8,
+    /// Snapshot of `api.base_url` so workers inherit the mirror
+    /// override without re-reading the env on a worker thread.
+    api_base: []const u8,
     dep_name: []const u8,
     result: ?[]const u8 = null,
 
@@ -132,6 +135,7 @@ const FetchFormulaCtx = struct {
         const http = self.pool.acquire();
         defer self.pool.release(http);
         var local_api = api_mod.BrewApi.init(self.io, self.arena.allocator(), http, self.cache_dir);
+        local_api.base_url = self.api_base;
         self.result = local_api.fetchFormula(self.dep_name) catch null;
     }
 };
@@ -293,6 +297,7 @@ pub fn collectFormulaJobs(
                 .arena = std.heap.ArenaAllocator.init(ctx.worker_backing),
                 .pool = http_pool,
                 .cache_dir = api.cache_dir,
+                .api_base = api.base_url,
                 .dep_name = deps[i].name,
             };
         }
@@ -993,6 +998,7 @@ test "FetchFormulaCtx: arena backed by testing.allocator runs leak-clean across 
         .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .pool = undefined,
         .cache_dir = "",
+        .api_base = "",
         .dep_name = "",
     };
     defer ctx_value.arena.deinit();

@@ -358,6 +358,9 @@ const WorkerCtx = struct {
     arena: std.heap.ArenaAllocator,
     pool: *client_mod.HttpClientPool,
     cache_dir: []const u8,
+    /// Snapshot of `ctx.mirrors.api_base` so workers inherit the
+    /// mirror override without re-walking the env on a worker thread.
+    api_base: []const u8,
     row: KegRow,
     kind: Kind,
     /// Result allocated on the **caller** allocator so it survives
@@ -389,6 +392,7 @@ fn runOne(out_alloc: std.mem.Allocator, wctx: *WorkerCtx) void {
 
     const arena_alloc = wctx.arena.allocator();
     var local_api = api_mod.BrewApi.init(wctx.io, arena_alloc, http, wctx.cache_dir);
+    local_api.base_url = wctx.api_base;
     const latest = upstreamLatest(arena_alloc, &local_api, wctx.io, wctx.environ, wctx.kind, wctx.row) orelse return;
     if (std.mem.eql(u8, wctx.row.version, latest)) return;
 
@@ -426,6 +430,7 @@ fn runPool(
         .arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator),
         .pool = &http_pool,
         .cache_dir = cache_dir,
+        .api_base = ctx.mirrors.api_base,
         .row = kegs[i],
         .kind = kind,
     };
@@ -473,6 +478,7 @@ test "WorkerCtx: per-row arena accepts testing.allocator backing without leaking
         .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .pool = undefined,
         .cache_dir = "",
+        .api_base = "",
         .row = .{ .name = "", .version = "" },
         .kind = .formula,
     };

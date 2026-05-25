@@ -137,7 +137,9 @@ fn worker(pool: *Pool) void {
         const http = pool.http_pool.acquire();
         defer pool.http_pool.release(http);
         var api = api_mod.BrewApi.init(io, a, http, pool.cache_dir);
+        api.base_url = pool.app_ctx.mirrors.api_base;
         var ghcr = ghcr_mod.GhcrClient.init(io, a, http);
+        ghcr.base_url = pool.app_ctx.mirrors.bottle_base;
         defer ghcr.deinit();
 
         const result = keg_mod.migrateKeg(pool.app_ctx, a, keg_name, .{

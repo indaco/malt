@@ -120,6 +120,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var cache_dir_buf: [512]u8 = undefined;
     const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
+    api.base_url = ctx.mirrors.api_base;
 
     // Per-package errors must not be swallowed: a batch that fails every
     // item used to exit 0, hiding the failure from CI. We aggregate here
@@ -298,6 +299,7 @@ fn upgradeFormula(
     // pipeline. One primitive means upgrade inherits the install path's
     // retry-with-backoff and `:any` skip-relocation hot path for free.
     var ghcr = ghcr_mod.GhcrClient.init(ctx.io, allocator, http);
+    ghcr.base_url = ctx.mirrors.bottle_base;
     defer ghcr.deinit();
 
     var store = store_mod.Store.init(ctx.io, allocator, db, prefix);

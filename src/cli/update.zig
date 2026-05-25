@@ -81,6 +81,7 @@ fn refreshSnapshot(ctx: *const AppCtx, allocator: std.mem.Allocator, cache_dir: 
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
+    api.base_url = ctx.mirrors.api_base;
 
     try outdated_mod.refreshSnapshot(ctx, allocator, &db, &api, cache_dir, null);
 }

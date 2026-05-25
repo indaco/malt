@@ -4,8 +4,8 @@
 const std = @import("std");
 const atomic = @import("../fs/atomic.zig");
 const client_mod = @import("client.zig");
+const mirror_mod = @import("mirror.zig");
 
-const base_url = "https://formulae.brew.sh/api";
 const cache_ttl_secs: i64 = 300; // 5 minutes
 
 /// Names-index TTL. The full Homebrew name list changes on the order of days
@@ -123,6 +123,10 @@ pub const BrewApi = struct {
     allocator: std.mem.Allocator,
     http: *client_mod.HttpClient,
     cache_dir: []const u8,
+    /// Metadata-API base URL. Mutable post-init so cli/ call sites can
+    /// drop in `ctx.mirrors.api_base`; mirror precedence + HTTPS
+    /// validation are enforced upstream by `mirror.resolve`.
+    base_url: []const u8 = mirror_mod.default_api_base_url,
 
     pub fn init(io: std.Io, allocator: std.mem.Allocator, http: *client_mod.HttpClient, cache_dir: []const u8) BrewApi {
         return .{
@@ -133,12 +137,34 @@ pub const BrewApi = struct {
         };
     }
 
+    /// Build the formula JSON URL for `name`. Pure — `pub` so tests
+    /// can pin the override-honouring shape without driving the cache.
+    pub fn buildFormulaUrl(buf: []u8, base: []const u8, name: []const u8) ApiError![]const u8 {
+        return std.fmt.bufPrint(buf, "{s}/formula/{s}.json", .{ base, name }) catch
+            ApiError.OutOfMemory;
+    }
+
+    /// Build the cask JSON URL for `token`. Pure — see `buildFormulaUrl`.
+    pub fn buildCaskUrl(buf: []u8, base: []const u8, token: []const u8) ApiError![]const u8 {
+        return std.fmt.bufPrint(buf, "{s}/cask/{s}.json", .{ base, token }) catch
+            ApiError.OutOfMemory;
+    }
+
+    /// Build the names-index URL for `kind`. Pure — see `buildFormulaUrl`.
+    pub fn buildNamesIndexUrl(buf: []u8, base: []const u8, kind: Kind) ApiError![]const u8 {
+        const suffix: []const u8 = switch (kind) {
+            .formula => "/formula.json",
+            .cask => "/cask.json",
+        };
+        return std.fmt.bufPrint(buf, "{s}{s}", .{ base, suffix }) catch
+            ApiError.OutOfMemory;
+    }
+
     /// Fetch formula JSON. Returns caller-owned bytes.
     pub fn fetchFormula(self: *BrewApi, name: []const u8) ApiError![]const u8 {
         try validateName(name);
         var url_buf: [512]u8 = undefined;
-        const url = std.fmt.bufPrint(&url_buf, base_url ++ "/formula/{s}.json", .{name}) catch
-            return ApiError.OutOfMemory;
+        const url = try buildFormulaUrl(&url_buf, self.base_url, name);
         return self.fetchCached(name, url, "formula_");
     }
 
@@ -146,8 +172,7 @@ pub const BrewApi = struct {
     pub fn fetchCask(self: *BrewApi, token: []const u8) ApiError![]const u8 {
         try validateName(token);
         var url_buf: [512]u8 = undefined;
-        const url = std.fmt.bufPrint(&url_buf, base_url ++ "/cask/{s}.json", .{token}) catch
-            return ApiError.OutOfMemory;
+        const url = try buildCaskUrl(&url_buf, self.base_url, token);
         return self.fetchCached(token, url, "cask_");
     }
 
@@ -222,10 +247,8 @@ pub const BrewApi = struct {
         };
         if (self.readNamesIndex(key)) |cached| return cached;
 
-        const url: []const u8 = switch (kind) {
-            .formula => base_url ++ "/formula.json",
-            .cask => base_url ++ "/cask.json",
-        };
+        var url_buf: [512]u8 = undefined;
+        const url = try buildNamesIndexUrl(&url_buf, self.base_url, kind);
         var resp = self.http.get(url) catch return ApiError.ApiUnreachable;
         defer resp.deinit();
         if (resp.status != 200) return ApiError.ApiUnreachable;
@@ -466,3 +489,39 @@ pub const BrewApi = struct {
         return total;
     }
 };
+
+// ── inline tests: pure URL builders + base_url default ──────────────────
+
+const testing = std.testing;
+
+test "BrewApi.init defaults base_url to the upstream Homebrew API" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    const api = BrewApi.init(std.Options.debug_io, testing.allocator, &http, "/tmp/mt_api_base_default");
+    try testing.expectEqualStrings(mirror_mod.default_api_base_url, api.base_url);
+}
+
+test "buildFormulaUrl threads the override base into the path" {
+    var buf: [256]u8 = undefined;
+    const url = try BrewApi.buildFormulaUrl(&buf, "https://mirror.example.com/api", "wget");
+    try testing.expectEqualStrings("https://mirror.example.com/api/formula/wget.json", url);
+}
+
+test "buildCaskUrl threads the override base into the path" {
+    var buf: [256]u8 = undefined;
+    const url = try BrewApi.buildCaskUrl(&buf, "https://mirror.example.com/api", "firefox");
+    try testing.expectEqualStrings("https://mirror.example.com/api/cask/firefox.json", url);
+}
+
+test "buildNamesIndexUrl emits formula vs cask paths against the override" {
+    var buf: [256]u8 = undefined;
+    const f = try BrewApi.buildNamesIndexUrl(&buf, "https://mirror.example.com/api", .formula);
+    try testing.expectEqualStrings("https://mirror.example.com/api/formula.json", f);
+    const c = try BrewApi.buildNamesIndexUrl(&buf, "https://mirror.example.com/api", .cask);
+    try testing.expectEqualStrings("https://mirror.example.com/api/cask.json", c);
+}
+
+test "buildFormulaUrl returns OutOfMemory when the buffer can't hold the URL" {
+    var tiny: [4]u8 = undefined;
+    try testing.expectError(ApiError.OutOfMemory, BrewApi.buildFormulaUrl(&tiny, "https://example.com", "wget"));
+}

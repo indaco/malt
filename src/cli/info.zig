@@ -196,6 +196,7 @@ fn emitApiMetadata(
     var http = client_mod.HttpClient.init(ctx.io, ctx.environ, allocator);
     defer http.deinit();
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
+    api.base_url = ctx.mirrors.api_base;
 
     if (!force_cask) {
         if (try emitApiFormula(allocator, &api, name, stdout, json_mode, colorize)) return true;
