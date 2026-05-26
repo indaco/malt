@@ -17,6 +17,7 @@ const malt = @import("malt");
 const test_io = @import("test_io");
 const testing = std.testing;
 const install = malt.install;
+const install_record = malt.install_record;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -382,8 +383,13 @@ test "--download-only --cask is plumbed into the cask path and threads the flag"
     // `--cask` + an unresolvable token → `fetchCask` errors. The
     // important assertion is that we DIDN'T short-circuit on the seeded
     // already-installed row — i.e., `--download-only` rerouted the flow
-    // through the download path.
-    install.execute(&ctx, arena.allocator(), &.{ "--download-only", "--cask", "ghost-cask" }) catch {};
+    // through the download path. The cask-dispatch failure now counts
+    // into `failed_count`, so the single-package run exits with
+    // PartialFailure.
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--download-only", "--cask", "ghost-cask" }),
+    );
 
     try testing.expect(std.mem.indexOf(u8, captured.items, "ghost-cask is already installed") == null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "Cask 'ghost-cask' not found") != null);

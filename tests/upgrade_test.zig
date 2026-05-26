@@ -546,9 +546,13 @@ test "installAll honours skip_lock so an outer holder can re-enter without a sel
     defer output.setQuiet(false);
 
     // skip_lock=true must bypass the per-fd flock entirely. The 404
-    // markers drain the resolution queue, so a clean return proves we
-    // never blocked on the lock.
-    try install.installAll(&ctx, testing.allocator, &.{"zzghost"}, .{ .skip_lock = true });
+    // markers force the formula→cask fall-through to fail, so the
+    // dispatcher surfaces PartialFailure — proving we reached resolution
+    // (i.e. never blocked on the lock) while exiting with the right code.
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.installAll(&ctx, testing.allocator, &.{"zzghost"}, .{ .skip_lock = true }),
+    );
 }
 
 // Regression: when the new bottle of an installed formula introduces a dep

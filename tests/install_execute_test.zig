@@ -106,16 +106,18 @@ test "execute with --formula forces formula-only and errors on an unresolvable n
     defer _ = c.unsetenv("MALT_PREFIX");
 
     // `--formula` + an unknown name → fetchFormula fails → formula-only
-    // early-return without touching the cask path. No PartialFailure is
-    // raised for a single unknown name (the catch branch reports via
-    // output.err but doesn't queue any jobs, so the later all_jobs.len==0
-    // return fires first).
+    // dispatch path emits its error line and counts the failure. The
+    // single-package run exits with PartialFailure so the user-facing
+    // exit code mirrors the printed miss.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
-    try install.execute(&ctx, arena.allocator(), &.{ "--formula", "--dry-run", "--quiet", "zz_nonexistent_formula_xyz" });
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--formula", "--dry-run", "--quiet", "zz_nonexistent_formula_xyz" }),
+    );
 }
 
 test "execute with a tap-formula-shaped name routes through the tap path in dry-run" {
@@ -126,15 +128,78 @@ test "execute with a tap-formula-shaped name routes through the tap path in dry-
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     defer _ = c.unsetenv("MALT_PREFIX");
 
-    // user/repo/formula triggers installTapFormula, which early-returns
-    // when the tap isn't cloned locally. No exception is raised; the error
-    // surfaces via output.err.
+    // user/repo/formula triggers installTapFormula, which fails when the
+    // tap isn't cloned locally. The dispatch loop counts the failure so
+    // a single-package run exits with PartialFailure.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
-    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "zzuser/zzrepo/zzformula" });
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "zzuser/zzrepo/zzformula" }),
+    );
+}
+
+test "execute with neither --formula nor --cask: 404 cache markers route through the cask fall-through and exit PartialFailure" {
+    // Default dispatch shape: `fetchFormula` 404s → cask fall-through →
+    // `installCask`'s `fetchCask` 404s too → both catches now count into
+    // `failed_count` so a single-package miss exits non-zero. The two
+    // `.404` markers keep the test offline-clean — no network roundtrip.
+    const prefix_z: [:0]const u8 = "/tmp/mcft";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
+    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix_z});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    inline for (.{ "formula_zzcft.404", "cask_zzcft.404" }) |name| {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        defer testing.allocator.free(p);
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
+        f.close(std.Options.debug_io);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--quiet", "zzcft" }),
+    );
+}
+
+test "execute in offline mode with no cached snapshot exits PartialFailure on the typed OfflineRequired branch" {
+    // The OfflineRequired branch is a sibling of the cask fall-through:
+    // when `ctx.offline` is set and the formula isn't cached, the catch
+    // prints the snapshot-miss line *without* probing cask. T-049 counts
+    // that miss into `failed_count` so the exit code is non-zero.
+    const prefix_z: [:0]const u8 = "/tmp/mofl";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
+    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = threaded.io(),
+        .environ = .empty,
+        .offline = true,
+    };
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--quiet", "zzoffline" }),
+    );
 }
 
 test "execute --dry-run with an already-installed package short-circuits" {
