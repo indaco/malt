@@ -202,6 +202,58 @@ test "execute in offline mode with no cached snapshot exits PartialFailure on th
     );
 }
 
+test "execute --dry-run with one cached + one 404 package exits PartialFailure" {
+    // Mixed dry-run: `alpha` resolves from the seeded cache so a
+    // surviving job lands in `all_jobs`, while `zzbad` 404s and the
+    // dispatch loop counts the miss. Pre-fix the dry-run early return
+    // ignored `failed_count` and exited 0; the gate now mirrors the
+    // empty-list path so any planned-vs-failed mismatch surfaces.
+    const prefix_z: [:0]const u8 = "/tmp/mmix";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
+    const prefix: []const u8 = prefix_z;
+    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const json =
+        \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"",
+        \\ "versions":{"stable":"1.0"},"revision":0,"dependencies":[],"oldnames":[],
+        \\ "keg_only":false,"post_install_defined":false,
+        \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
+        \\   "files":{
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"}
+        \\   }}}}
+    ;
+    try seedFormulaCache(prefix, "alpha", json);
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
+    defer testing.allocator.free(cache_api);
+    inline for (.{ "formula_zzbad.404", "cask_zzbad.404" }) |name| {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        defer testing.allocator.free(p);
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
+        f.close(std.Options.debug_io);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--quiet", "alpha", "zzbad" }),
+    );
+}
+
 test "execute --dry-run with an already-installed package short-circuits" {
     const prefix_z: [:0]const u8 = "/tmp/mi";
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};

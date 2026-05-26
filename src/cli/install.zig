@@ -696,6 +696,9 @@ fn executeWithOpts(
             // No transition outcome to report on a plan-only run.
             output.emitNdjsonEvent(.would_install, job.name, null);
         }
+        // Mixed runs (one cached + one 404) print a partial plan; mirror
+        // the empty-list gate so the exit code still reflects the miss.
+        if (failed_count > 0) return InstallError.PartialFailure;
         return;
     }
 
