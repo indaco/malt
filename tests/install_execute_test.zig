@@ -254,6 +254,101 @@ test "execute --dry-run with one cached + one 404 package exits PartialFailure" 
     );
 }
 
+test "Ctrl-C between pool and link sweeps !job.succeeded and exits PartialFailure" {
+    // L901 — the pre-link interrupt check. Pre-fix the warn line printed
+    // and execute() returned void even when pool workers left a job
+    // un-materialised. The arm seam flips the flag on the worker's
+    // first poll (poll 3 after L581 + iter 1 L588) so the worker exits
+    // before draining the queue, the pool joins with !job.succeeded,
+    // and the new sweep + gate surfaces PartialFailure.
+    const prefix_z: [:0]const u8 = "/tmp/mirq2";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
+    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Cache the formula so dispatch resolves (1 job lands in all_jobs)
+    // but DON'T seed the store, so the worker would have to fetch — the
+    // armed interrupt makes it exit instead, leaving !job.succeeded.
+    const json =
+        \\{"name":"alpha","full_name":"alpha","tap":"homebrew/core","desc":"","homepage":"",
+        \\ "versions":{"stable":"1.0"},"revision":0,"dependencies":[],"oldnames":[],
+        \\ "keg_only":false,"post_install_defined":false,
+        \\ "bottle":{"stable":{"root_url":"https://ghcr.io/v2/homebrew/core/alpha/blobs",
+        \\   "files":{
+        \\     "arm64_sequoia":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_sonoma":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_ventura":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "arm64_monterey":{"cellar":":any","url":"https://ghcr.io/v2/arm","sha256":"aa"},
+        \\     "sequoia":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
+        \\     "sonoma":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
+        \\     "ventura":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"},
+        \\     "monterey":{"cellar":":any","url":"https://ghcr.io/v2/x86","sha256":"xx"}
+        \\   }}}}
+    ;
+    try seedFormulaCache(prefix_z, "alpha", json);
+
+    const prior_interrupted = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior_interrupted);
+    malt.signals.setInterruptedForTest(false);
+    // 3 polls: L581 → iter 1 L588 → worker's first poll flips the flag.
+    malt.signals.armInterruptAfterForTest(3);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--quiet", "alpha" }),
+    );
+}
+
+test "Ctrl-C mid-resolution after a counted miss exits PartialFailure" {
+    // L588 — the in-resolution interrupt check. Pre-fix the warn line
+    // printed and execute() returned void even after the dispatch loop
+    // had counted a miss. The arm seam flips the flag on the 3rd poll
+    // so iter 1 dispatches (and fails) and iter 2's interrupt check
+    // fires the new gate.
+    const prefix_z: [:0]const u8 = "/tmp/mirq";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
+    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix_z});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    inline for (.{ "formula_zzbad1.404", "cask_zzbad1.404", "formula_zzbad2.404", "cask_zzbad2.404" }) |name| {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        defer testing.allocator.free(p);
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
+        f.close(std.Options.debug_io);
+    }
+
+    const prior_interrupted = malt.signals.isInterrupted();
+    defer malt.signals.setInterruptedForTest(prior_interrupted);
+    malt.signals.setInterruptedForTest(false);
+    // 3 polls until iter 2's L588: poll 1 (L581), poll 2 (iter 1 L588),
+    // poll 3 (iter 2 L588 — flips the flag).
+    malt.signals.armInterruptAfterForTest(3);
+    defer malt.signals.armInterruptAfterForTest(0);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--quiet", "zzbad1", "zzbad2" }),
+    );
+}
+
 test "execute --dry-run with an already-installed package short-circuits" {
     const prefix_z: [:0]const u8 = "/tmp/mi";
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
