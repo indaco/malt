@@ -549,7 +549,10 @@ fn executeWithOpts(
 
     // Set up API client
     var cache_dir_buf: [512]u8 = undefined;
-    const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
+    // Prefix is sanity-capped at max_prefix_sane_len (256); "/cache" adds 6.
+    // The 512-byte buffer cannot overflow — the prior `catch return;` was a
+    // silent exit on a path that never fires.
+    const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch unreachable;
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
     api.offline = ctx.offline;
