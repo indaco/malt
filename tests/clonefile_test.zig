@@ -175,6 +175,45 @@ test "copyTreeFallback is idempotent when the destination already exists" {
     defer f.close(std.Options.debug_io);
 }
 
+// Before per-entry failure capture, a non-APFS materialise that lost
+// `inner/` (e.g. because the destination already had a regular file
+// there) returned success — the keg landed missing files and the
+// install pipeline relocated/re-signed over a partial tree. The
+// function now surfaces the first per-entry failure so callers can
+// treat partial copies as failure rather than silently proceeding.
+test "copyTreeFallback surfaces a per-entry failure as an error" {
+    const root = tmpRoot("fallback_partial");
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    try setupSourceTree(root);
+
+    var src_buf: [512]u8 = undefined;
+    const src = try std.fmt.bufPrint(&src_buf, "{s}/src", .{root});
+    var dst_buf: [512]u8 = undefined;
+    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dst_partial", .{root});
+
+    // Pre-stage dst so the walker's `inner/` directory entry collides
+    // with an existing regular file — createDirPath then fails on the
+    // file collision, and the prior best-effort behaviour would swallow
+    // it. The new code captures and returns it.
+    try test_io.makeDirAbsolute(std.Options.debug_io, dst);
+    var collision_buf: [512]u8 = undefined;
+    const collision = try std.fmt.bufPrint(&collision_buf, "{s}/inner", .{dst});
+    const cf = try test_io.cwd().createFile(std.Options.debug_io, collision, .{});
+    cf.close(std.Options.debug_io);
+
+    try testing.expectError(
+        error.NotDir,
+        clonefile.copyTreeFallback(std.Options.debug_io, testing.allocator, src, dst),
+    );
+
+    // The top-level non-colliding file should still have been copied —
+    // capture-and-continue preserves the partial-tree contract.
+    var top_buf: [512]u8 = undefined;
+    const top = try std.fmt.bufPrint(&top_buf, "{s}/hello.txt", .{dst});
+    const f = try test_io.cwd().openFile(std.Options.debug_io, top, .{});
+    f.close(std.Options.debug_io);
+}
+
 test "copyTreeFallback errors when source directory does not exist" {
     try testing.expectError(
         error.FileNotFound,
