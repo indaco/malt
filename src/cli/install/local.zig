@@ -76,6 +76,12 @@ pub const ResolvedRubyFormula = struct {
 const TapRegistration = struct {
     url: []const u8,
     commit_sha: []const u8,
+    /// GitHub ETag for `/commits/HEAD` captured during cold-start
+    /// resolve. Persisted alongside `commit_sha` so the next resolve
+    /// sends `If-None-Match` and lets stable taps 304 free. Null on
+    /// the warm path (cached SHA hit, no resolve needed) and when
+    /// the server omitted the header.
+    head_etag: ?[]const u8 = null,
 };
 
 /// Archive container formats the tap/local install path extracts.
@@ -208,14 +214,28 @@ fn installTapRb(
     const urls = try tap_mod.resolveTapBaseUrls(allocator, tap_slug);
     defer urls.deinit(allocator);
 
+    // Cold-start: pass null for cached_etag (no pin → no etag either);
+    // warm-start: skip resolve entirely. The etag captured here is
+    // forwarded into TapRegistration so the persist step at the bottom
+    // of materializeRubyFormula writes both fields atomically.
+    var fresh_head_etag: ?[]const u8 = null;
+    defer if (fresh_head_etag) |e| allocator.free(e);
     const commit_sha = blk: {
         if ((tap_mod.getCommitSha(allocator, db, tap_slug) catch null)) |cached| {
             break :blk cached;
         }
-        break :blk tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url) catch |e| {
+        var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, null) catch |e| {
             output.err("Could not resolve {s}'s HEAD commit: {s}", .{ tap_slug, tap_mod.describeResolveError(e) });
             return InstallError.FormulaNotFound;
         };
+        defer head_res.deinit();
+        const sha = head_res.sha orelse {
+            output.err("Could not resolve {s}'s HEAD commit: empty response", .{tap_slug});
+            return InstallError.FormulaNotFound;
+        };
+        const sha_owned = try allocator.dupe(u8, sha);
+        if (head_res.etag) |e| fresh_head_etag = try allocator.dupe(u8, e);
+        break :blk sha_owned;
     };
     defer allocator.free(commit_sha);
 
@@ -294,7 +314,11 @@ fn installTapRb(
         .sha256 = rb.sha256,
         .binary_name = parseCaskBinary(resp.body),
         .app_name = parseCaskApp(resp.body),
-        .tap_registration = .{ .url = urls.repo_url, .commit_sha = commit_sha },
+        .tap_registration = .{
+            .url = urls.repo_url,
+            .commit_sha = commit_sha,
+            .head_etag = fresh_head_etag,
+        },
     };
     try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, download_only);
 }
@@ -755,6 +779,10 @@ pub fn materializeRubyFormula(
             // and leaves later pins untouched. Tap row is advisory — keg
             // is already recorded; a missing tap row self-heals next sync.
             tap_mod.add(db, resolved.tap_label, t.url, t.commit_sha) catch {};
+            // Stamp the captured etag so the next resolve can send
+            // If-None-Match. Warm-path installs leave `head_etag` null —
+            // there's no fresh etag to overwrite an older cached one with.
+            if (t.head_etag) |et| tap_mod.updateHead(db, resolved.tap_label, t.commit_sha, et) catch {};
         }
     }
 
@@ -885,6 +913,7 @@ fn materializeTapCask(
         // Tap row is advisory — the install already succeeded; a missing
         // tap row self-heals on the next sync so swallowing is safe here.
         tap_mod.add(db, resolved.tap_label, t.url, t.commit_sha) catch {};
+        if (t.head_etag) |et| tap_mod.updateHead(db, resolved.tap_label, t.commit_sha, et) catch {};
     }
 
     output.success("{s} {s} installed", .{ cask.token, cask.version });

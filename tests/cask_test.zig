@@ -1148,7 +1148,27 @@ test "v6→v7 migration leaves cask_versions empty when casks has a broken shape
     _ = try stmt.step();
     try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
     // Migration still bumps the schema marker so a future run skips this path.
-    try testing.expectEqual(@as(i64, 7), try schema.currentVersion(&db));
+    try testing.expectEqual(@as(i64, 8), try schema.currentVersion(&db));
+}
+
+// v7→v8 ALTER must skip when `taps` is missing entirely (forensic DBs
+// hand-built without the v3-era table); the migration still bumps the
+// schema marker so a future run treats the chain as caught up.
+test "v7→v8 migration tolerates a missing taps table" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    try db.exec(
+        \\CREATE TABLE schema_version (
+        \\    version INTEGER PRIMARY KEY,
+        \\    applied TEXT NOT NULL DEFAULT (datetime('now'))
+        \\);
+    );
+    try db.exec("INSERT INTO schema_version (version) VALUES (7);");
+
+    try schema.migrate(&db);
+
+    try testing.expectEqual(@as(i64, 8), try schema.currentVersion(&db));
 }
 
 // --- coverage: lookupCaskVersion refuses a malformed row ----------------

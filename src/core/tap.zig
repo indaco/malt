@@ -124,6 +124,52 @@ pub fn getCommitSha(
     return try allocator.dupe(u8, trimmed);
 }
 
+/// Read the cached `head_etag` for a tap, or null when never seen or
+/// stamped empty. Caller owns the returned slice. Sibling of
+/// `getCommitSha`; the two columns travel together at every call site.
+pub fn getHeadEtag(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    name: []const u8,
+) !?[]const u8 {
+    var stmt = try db.prepare("SELECT head_etag FROM taps WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    if (!(try stmt.step())) return null;
+    const raw = stmt.columnText(0) orelse return null;
+    const trimmed = std.mem.sliceTo(raw, 0);
+    if (trimmed.len == 0) return null;
+    return try allocator.dupe(u8, trimmed);
+}
+
+/// Atomic write of both `commit_sha` and `head_etag` for an existing
+/// tap row. Order matters: the etag is paired with the sha that owns
+/// it, so a partial failure cannot leave the DB pointing at the old
+/// sha with a fresh etag (which would freeze the tap at the stale sha
+/// until manual refresh). `etag` may be null when the server omitted
+/// the header — the row's etag is then cleared so the next resolve
+/// falls back to an unconditional GET.
+pub fn updateHead(
+    db: *sqlite.Database,
+    name: []const u8,
+    commit_sha: []const u8,
+    etag: ?[]const u8,
+) !void {
+    try validateCommitSha(commit_sha);
+    var stmt = try db.prepare(
+        "UPDATE taps SET commit_sha = ?1, head_etag = ?2 WHERE name = ?3;",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, commit_sha);
+    if (etag) |e| {
+        try stmt.bindText(2, e);
+    } else {
+        try stmt.bindNull(2);
+    }
+    try stmt.bindText(3, name);
+    _ = try stmt.step();
+}
+
 pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
     var taps: std.ArrayList(TapInfo) = .empty;
     // ArrayList.deinit doesn't reach row sub-allocations; walk them too.
@@ -235,6 +281,232 @@ pub fn resolveTapBaseUrls(
     };
 }
 
+// ── resolveFromConditional: response → HeadResolution conversion ────
+//
+// `resolveHeadCommit` defers all classification to this pure helper so
+// every shape GitHub can return (200+etag, 200 no-etag, 304, 404, 403,
+// 5xx) is testable without spinning an HTTP transport.
+
+fn makeConditional(
+    status: u16,
+    not_modified: bool,
+    body: []const u8,
+    etag: ?[]const u8,
+) !client_mod.ConditionalResponse {
+    return .{
+        .status = status,
+        .not_modified = not_modified,
+        .body = try std.testing.allocator.dupe(u8, body),
+        .etag = if (etag) |e| try std.testing.allocator.dupe(u8, e) else null,
+        .allocator = std.testing.allocator,
+    };
+}
+
+test "resolveFromConditional: 200 with body+etag yields sha and persists etag" {
+    var resp = try makeConditional(
+        200,
+        false,
+        "{\"sha\":\"0123456789abcdef0123456789abcdef01234567\",\"commit\":{}}",
+        "W/\"deadbeef\"",
+    );
+    defer resp.deinit();
+
+    var res = try resolveFromConditional(std.testing.allocator, resp);
+    defer res.deinit();
+    try std.testing.expect(!res.not_modified);
+    try std.testing.expectEqualStrings(
+        "0123456789abcdef0123456789abcdef01234567",
+        res.sha.?,
+    );
+    try std.testing.expectEqualStrings("W/\"deadbeef\"", res.etag.?);
+}
+
+test "resolveFromConditional: 200 without etag still yields sha (etag stays null)" {
+    var resp = try makeConditional(
+        200,
+        false,
+        "{\"sha\":\"0123456789abcdef0123456789abcdef01234567\"}",
+        null,
+    );
+    defer resp.deinit();
+
+    var res = try resolveFromConditional(std.testing.allocator, resp);
+    defer res.deinit();
+    try std.testing.expect(!res.not_modified);
+    try std.testing.expect(res.sha != null);
+    try std.testing.expectEqual(@as(?[]const u8, null), res.etag);
+}
+
+test "resolveFromConditional: 304 yields not_modified=true, sha=null, etag preserved" {
+    var resp = try makeConditional(304, true, "", "W/\"deadbeef\"");
+    defer resp.deinit();
+
+    var res = try resolveFromConditional(std.testing.allocator, resp);
+    defer res.deinit();
+    try std.testing.expect(res.not_modified);
+    try std.testing.expectEqual(@as(?[]const u8, null), res.sha);
+    try std.testing.expectEqualStrings("W/\"deadbeef\"", res.etag.?);
+}
+
+test "resolveFromConditional: 304 without ETag header — caller falls back to cached" {
+    // GitHub always sends ETag on 304, but a stripping reverse proxy in
+    // front of `api.github.com` could violate that — degrade gracefully.
+    var resp = try makeConditional(304, true, "", null);
+    defer resp.deinit();
+
+    var res = try resolveFromConditional(std.testing.allocator, resp);
+    defer res.deinit();
+    try std.testing.expect(res.not_modified);
+    try std.testing.expectEqual(@as(?[]const u8, null), res.etag);
+}
+
+test "resolveFromConditional: 404 classifies as NotFound" {
+    var resp = try makeConditional(404, false, "{\"message\":\"Not Found\"}", null);
+    defer resp.deinit();
+    try std.testing.expectError(
+        TapError.NotFound,
+        resolveFromConditional(std.testing.allocator, resp),
+    );
+}
+
+test "resolveFromConditional: 403 classifies as RateLimited" {
+    var resp = try makeConditional(403, false, "{\"message\":\"API rate limit exceeded\"}", null);
+    defer resp.deinit();
+    try std.testing.expectError(
+        TapError.RateLimited,
+        resolveFromConditional(std.testing.allocator, resp),
+    );
+}
+
+test "resolveFromConditional: 5xx classifies as ResolveFailed" {
+    var resp = try makeConditional(502, false, "<html>bad gateway</html>", null);
+    defer resp.deinit();
+    try std.testing.expectError(
+        TapError.ResolveFailed,
+        resolveFromConditional(std.testing.allocator, resp),
+    );
+}
+
+test "resolveFromConditional: 200 with malformed JSON classifies as MalformedJson" {
+    var resp = try makeConditional(200, false, "{\"sha\":\"too-short\"}", null);
+    defer resp.deinit();
+    try std.testing.expectError(
+        TapError.MalformedJson,
+        resolveFromConditional(std.testing.allocator, resp),
+    );
+}
+
+test "HeadResolution.deinit: tolerates partial sets (sha-only, etag-only, both null)" {
+    var sha_only: HeadResolution = .{
+        .sha = try std.testing.allocator.dupe(u8, "abc"),
+        .etag = null,
+        .not_modified = false,
+        .allocator = std.testing.allocator,
+    };
+    sha_only.deinit();
+
+    var etag_only: HeadResolution = .{
+        .sha = null,
+        .etag = try std.testing.allocator.dupe(u8, "W/\"x\""),
+        .not_modified = true,
+        .allocator = std.testing.allocator,
+    };
+    etag_only.deinit();
+
+    var both_null: HeadResolution = .{
+        .sha = null,
+        .etag = null,
+        .not_modified = true,
+        .allocator = std.testing.allocator,
+    };
+    both_null.deinit();
+}
+
+// ── getHeadEtag / updateHead: per-tap etag persistence ─────────────
+
+test "getHeadEtag returns null on a fresh row (no etag stamped yet)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try add(&db, "user/repo", "https://github.com/user/repo", null);
+    const et = try getHeadEtag(std.testing.allocator, &db, "user/repo");
+    try std.testing.expectEqual(@as(?[]const u8, null), et);
+}
+
+test "updateHead persists sha + etag atomically; getHeadEtag round-trips" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try add(&db, "user/repo", "https://github.com/user/repo", null);
+
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    try updateHead(&db, "user/repo", sha, "W/\"feed\"");
+
+    const stored_sha = (try getCommitSha(std.testing.allocator, &db, "user/repo")).?;
+    defer std.testing.allocator.free(stored_sha);
+    try std.testing.expectEqualStrings(sha, stored_sha);
+
+    const stored_et = (try getHeadEtag(std.testing.allocator, &db, "user/repo")).?;
+    defer std.testing.allocator.free(stored_et);
+    try std.testing.expectEqualStrings("W/\"feed\"", stored_et);
+}
+
+test "updateHead with null etag clears the column (server omitted ETag)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try add(&db, "user/repo", "https://github.com/user/repo", null);
+
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    try updateHead(&db, "user/repo", sha, "W/\"feed\"");
+    try updateHead(&db, "user/repo", sha, null);
+
+    const et = try getHeadEtag(std.testing.allocator, &db, "user/repo");
+    try std.testing.expectEqual(@as(?[]const u8, null), et);
+}
+
+test "getHeadEtag returns null for a tap name that was never added" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    const et = try getHeadEtag(std.testing.allocator, &db, "ghost/tap");
+    try std.testing.expectEqual(@as(?[]const u8, null), et);
+}
+
+test "updateHead is a silent no-op on a missing row (mirrors updateCommit)" {
+    // SQLite UPDATE against a missing row affects zero rows without
+    // raising — same semantics as `updateCommit`. Documented here so
+    // callers don't expect a `NotFound`-style error.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+
+    try updateHead(&db, "ghost/tap", "0123456789abcdef0123456789abcdef01234567", "W/\"x\"");
+    const et = try getHeadEtag(std.testing.allocator, &db, "ghost/tap");
+    try std.testing.expectEqual(@as(?[]const u8, null), et);
+}
+
+test "updateHead rejects an invalid SHA before touching the row" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try add(&db, "user/repo", "https://github.com/user/repo", null);
+    try updateHead(&db, "user/repo", "0123456789abcdef0123456789abcdef01234567", "W/\"feed\"");
+
+    // Validator runs first — DB stays at the prior value.
+    try std.testing.expectError(TapError.InvalidSha, updateHead(&db, "user/repo", "not-a-sha", "W/\"new\""));
+
+    const et = (try getHeadEtag(std.testing.allocator, &db, "user/repo")).?;
+    defer std.testing.allocator.free(et);
+    try std.testing.expectEqualStrings("W/\"feed\"", et);
+}
+
 test "resolveTapBaseUrls synthesises homebrew- prefix once per field" {
     const urls = try resolveTapBaseUrls(std.testing.allocator, "aeroxy/tap");
     defer urls.deinit(std.testing.allocator);
@@ -340,10 +612,70 @@ pub fn parseCommitShaFromJson(body: []const u8) ?[]const u8 {
     return sha;
 }
 
-/// Ask GitHub for the current HEAD commit of a tap's repo. Returns
-/// the 40-char lowercase hex SHA or a classified `TapError` so callers
-/// can surface the actual cause (rate limit, 404, network, JSON). Caller
-/// owns the returned slice.
+/// HEAD-resolve outcome. `sha` is set on a fresh body (200) and null
+/// on 304 — the caller's cached sha is still authoritative in that
+/// case. `etag`, when set, is GitHub's current ETag for `/commits/HEAD`;
+/// callers persist it via `tap_mod.updateHead` so the next round can
+/// short-circuit again. A null `etag` means the server omitted the
+/// header (rare but legal); the caller's previously cached etag, if any,
+/// stays valid.
+pub const HeadResolution = struct {
+    sha: ?[]const u8,
+    etag: ?[]const u8,
+    not_modified: bool,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *HeadResolution) void {
+        if (self.sha) |s| self.allocator.free(s);
+        if (self.etag) |e| self.allocator.free(e);
+    }
+};
+
+/// Convert a `ConditionalResponse` from GitHub's `/commits/HEAD` into a
+/// `HeadResolution`. Pure: takes ownership of `resp.etag` only when the
+/// status is convertible; otherwise reports the classified `TapError`
+/// (`resp.deinit` still frees both body and etag in the error path).
+pub fn resolveFromConditional(
+    allocator: std.mem.Allocator,
+    resp: client_mod.ConditionalResponse,
+) TapError!HeadResolution {
+    if (resp.not_modified) {
+        // 304: keep cached SHA, only the ETag may have rotated.
+        const etag_owned: ?[]const u8 = if (resp.etag) |e|
+            allocator.dupe(u8, e) catch return TapError.OutOfMemory
+        else
+            null;
+        return .{
+            .sha = null,
+            .etag = etag_owned,
+            .not_modified = true,
+            .allocator = allocator,
+        };
+    }
+
+    if (resp.status != 200) return classifyResolveStatus(resp.status);
+
+    const sha = parseCommitShaFromJson(resp.body) orelse return TapError.MalformedJson;
+    const sha_owned = allocator.dupe(u8, sha) catch return TapError.OutOfMemory;
+    errdefer allocator.free(sha_owned);
+
+    const etag_owned: ?[]const u8 = if (resp.etag) |e|
+        allocator.dupe(u8, e) catch return TapError.OutOfMemory
+    else
+        null;
+
+    return .{
+        .sha = sha_owned,
+        .etag = etag_owned,
+        .not_modified = false,
+        .allocator = allocator,
+    };
+}
+
+/// Ask GitHub for the current HEAD commit of a tap's repo, sending
+/// `If-None-Match` when `cached_etag` is set so a stable tap costs
+/// zero rate-limit tokens. Returns a `HeadResolution` so callers can
+/// distinguish "fresh sha" from "304: cached sha is still good".
 ///
 /// `api_head_url` must come from `resolveTapBaseUrls` — that single seam
 /// owns the `homebrew-<repo>` synthesis. A bare-args overload that
@@ -354,21 +686,21 @@ pub fn resolveHeadCommit(
     environ: std.process.Environ,
     allocator: std.mem.Allocator,
     api_head_url: []const u8,
-) TapError![]const u8 {
+    cached_etag: ?[]const u8,
+) TapError!HeadResolution {
     var http = client_mod.HttpClient.init(io, environ, allocator);
     defer http.deinit();
 
-    // MALT_GITHUB_TOKEN takes precedence; otherwise `http.get` falls
-    // back to the HOMEBREW_GITHUB_API_TOKEN auto-inject in net/client.
+    // MALT_GITHUB_TOKEN takes precedence; falling through to `extra=&.{}`
+    // lets net/client's HOMEBREW_GITHUB_API_TOKEN auto-inject still apply
+    // — both authenticate against the same 5000/hr quota that 304s don't
+    // touch.
     var auth_buf: [256]u8 = undefined;
     var resp = if (githubAuthHeader(environ, &auth_buf)) |header| blk: {
         const headers = [_]std.http.Header{header};
-        break :blk http.getWithHeaders(api_head_url, &headers, null) catch return TapError.NetworkError;
-    } else http.get(api_head_url) catch return TapError.NetworkError;
+        break :blk http.getConditional(api_head_url, cached_etag, &headers) catch return TapError.NetworkError;
+    } else http.getConditional(api_head_url, cached_etag, &.{}) catch return TapError.NetworkError;
     defer resp.deinit();
 
-    if (resp.status != 200) return classifyResolveStatus(resp.status);
-
-    const sha = parseCommitShaFromJson(resp.body) orelse return TapError.MalformedJson;
-    return allocator.dupe(u8, sha) catch TapError.OutOfMemory;
+    return resolveFromConditional(allocator, resp);
 }

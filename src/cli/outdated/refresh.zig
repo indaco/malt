@@ -75,7 +75,7 @@ pub fn refreshSnapshot(
     const cask_rows = try rows_mod.loadCaskRows(allocator, db, .all);
     defer rows_mod.freeKegRows(allocator, cask_rows);
 
-    const formulas = try collectOutdatedFormulas(ctx, allocator, api, cache_dir, formula_rows, workers_override);
+    const formulas = try collectOutdatedFormulas(ctx, allocator, db, api, cache_dir, formula_rows, workers_override);
     defer {
         for (formulas) |e| {
             allocator.free(e.name);
@@ -84,7 +84,7 @@ pub fn refreshSnapshot(
         }
         allocator.free(formulas);
     }
-    const casks = try collectOutdatedCasks(ctx, allocator, api, cache_dir, cask_rows, workers_override);
+    const casks = try collectOutdatedCasks(ctx, allocator, db, api, cache_dir, cask_rows, workers_override);
     defer {
         for (casks) |e| {
             allocator.free(e.name);
@@ -107,24 +107,26 @@ pub fn refreshSnapshot(
 pub fn collectOutdatedFormulas(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
+    db: *sqlite.Database,
     api: *api_mod.BrewApi,
     cache_dir: []const u8,
     kegs: []const KegRow,
     workers_override: ?usize,
 ) std.mem.Allocator.Error![]OutdatedEntry {
-    return collectOutdated(ctx, allocator, api, cache_dir, kegs, workers_override, .formula);
+    return collectOutdated(ctx, allocator, db, api, cache_dir, kegs, workers_override, .formula);
 }
 
 /// Cask sibling of `collectOutdatedFormulas`. Same lifetime contract.
 pub fn collectOutdatedCasks(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
+    db: *sqlite.Database,
     api: *api_mod.BrewApi,
     cache_dir: []const u8,
     kegs: []const KegRow,
     workers_override: ?usize,
 ) std.mem.Allocator.Error![]OutdatedEntry {
-    return collectOutdated(ctx, allocator, api, cache_dir, kegs, workers_override, .cask);
+    return collectOutdated(ctx, allocator, db, api, cache_dir, kegs, workers_override, .cask);
 }
 
 const Kind = enum { formula, cask };
@@ -132,6 +134,7 @@ const Kind = enum { formula, cask };
 fn collectOutdated(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
+    db: *sqlite.Database,
     api: *api_mod.BrewApi,
     cache_dir: []const u8,
     kegs: []const KegRow,
@@ -150,12 +153,18 @@ fn collectOutdated(
         if (maybe) |v| allocator.free(v);
     };
 
+    // One dedup cache per `collectOutdated` call shared by every row.
+    // Lifetime: scoped to this function — workers borrow shas back
+    // (cache outlives every worker's resolve usage).
+    var head_cache = TapHeadResolve.init(allocator, ctx.io);
+    defer head_cache.deinit();
+
     if (!shouldUsePool(kegs.len)) {
         for (kegs, 0..) |row, i| {
-            latest_versions[i] = try fetchLatest(allocator, api, ctx.io, ctx.environ, kind, row);
+            latest_versions[i] = try fetchLatest(allocator, &head_cache, db, api, ctx.io, ctx.environ, kind, row);
         }
     } else {
-        try runPool(ctx, allocator, cache_dir, kegs, workers_override, kind, latest_versions);
+        try runPool(ctx, allocator, &head_cache, db, cache_dir, kegs, workers_override, kind, latest_versions);
     }
 
     return assembleEntries(allocator, kegs, latest_versions);
@@ -205,6 +214,8 @@ fn assembleEntries(
 /// shared HTTP client.
 fn upstreamLatest(
     alloc: std.mem.Allocator,
+    head_cache: *TapHeadResolve,
+    db: *sqlite.Database,
     api: *api_mod.BrewApi,
     io: std.Io,
     environ: std.process.Environ,
@@ -223,7 +234,7 @@ fn upstreamLatest(
             // drop the row from the audit. Same shape as `upgradeCask`.
             if (row.tap) |tap_label| {
                 if (!install_args_mod.isCoreTap(tap_label)) {
-                    break :blk tapCaskLatestVersion(alloc, io, environ, tap_label, row.name, api.offline);
+                    break :blk tapCaskLatestVersion(alloc, head_cache, db, io, environ, tap_label, row.name, api.offline);
                 }
             }
             const json = api.fetchCask(row.name) catch break :blk null;
@@ -233,6 +244,192 @@ fn upstreamLatest(
             break :blk alloc.dupe(u8, cask.version) catch null;
         },
     };
+}
+
+/// In-process dedup cache for tap-HEAD resolves during one
+/// `mt outdated` invocation. N installed casks from the same tap
+/// share a single underlying conditional GET — without this, the
+/// worker pool fired N parallel resolves and (in the rare case
+/// upstream just moved) spent N rate-limit tokens for what the
+/// next invocation would coalesce to one. Cross-process caching
+/// still lives in the DB's `head_etag` column.
+///
+/// A single mutex serialises distinct-tap resolves too — the
+/// alternative (per-tap mutex + condition variable) was rejected
+/// as over-engineering for the typical 1–3 distinct taps an
+/// `mt outdated` actually sees. The resolver is injected so tests
+/// can drive dedup mechanics without an HTTP transport.
+pub const TapHeadResolve = struct {
+    arena: std.heap.ArenaAllocator,
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
+    /// `null` value caches a known-failing resolve so sibling workers
+    /// don't retry the same dead endpoint within one invocation.
+    map: std.StringHashMap(?[]const u8),
+
+    /// Bundled userdata + fn pointer — mirrors `client.ProgressCallback`'s
+    /// shape so call sites read uniformly across the codebase.
+    pub const Resolver = struct {
+        userdata: *anyopaque,
+        resolve: *const fn (
+            userdata: *anyopaque,
+            alloc: std.mem.Allocator,
+            tap_label: []const u8,
+        ) ?[]const u8,
+    };
+
+    pub fn init(backing: std.mem.Allocator, io: std.Io) TapHeadResolve {
+        return .{
+            .arena = std.heap.ArenaAllocator.init(backing),
+            .io = io,
+            .map = .init(backing),
+        };
+    }
+
+    pub fn deinit(self: *TapHeadResolve) void {
+        self.map.deinit();
+        self.arena.deinit();
+    }
+
+    /// Lookup-or-resolve. The returned slice (when non-null) is borrowed
+    /// from the cache's arena and stays valid for the cache's lifetime.
+    /// Holds the mutex across the resolver by design: that's the
+    /// invariant that turns N concurrent same-label calls into one.
+    pub fn getOrResolve(
+        self: *TapHeadResolve,
+        tap_label: []const u8,
+        resolver: Resolver,
+    ) ?[]const u8 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.map.get(tap_label)) |maybe_sha| return maybe_sha;
+
+        const a = self.arena.allocator();
+        const sha = resolver.resolve(resolver.userdata, a, tap_label);
+        // catch return sha: cache-insert OOM degrades to "no cache hit
+        // next time" — sibling workers re-resolve but no correctness
+        // issue. Returning null instead would hide a successful resolve.
+        const key_owned = a.dupe(u8, tap_label) catch return sha;
+        self.map.put(key_owned, sha) catch return sha;
+        return sha;
+    }
+};
+
+test "TapHeadResolve: second call for same label returns cached value (no second resolve)" {
+    var cache = TapHeadResolve.init(std.testing.allocator, std.Options.debug_io);
+    defer cache.deinit();
+
+    const Counter = struct {
+        var count: usize = 0;
+        fn resolve(_: *anyopaque, a: std.mem.Allocator, _: []const u8) ?[]const u8 {
+            count += 1;
+            return a.dupe(u8, "0123456789abcdef0123456789abcdef01234567") catch null;
+        }
+    };
+    Counter.count = 0;
+    var dummy: u8 = 0;
+
+    const a1 = cache.getOrResolve("user/repo", .{ .userdata = &dummy, .resolve = Counter.resolve });
+    const a2 = cache.getOrResolve("user/repo", .{ .userdata = &dummy, .resolve = Counter.resolve });
+    try std.testing.expect(a1 != null);
+    try std.testing.expect(a2 != null);
+    try std.testing.expectEqualStrings(a1.?, a2.?);
+    try std.testing.expectEqual(@as(usize, 1), Counter.count);
+}
+
+test "TapHeadResolve: distinct labels resolve independently (1 call each)" {
+    var cache = TapHeadResolve.init(std.testing.allocator, std.Options.debug_io);
+    defer cache.deinit();
+
+    const Counter = struct {
+        var count: usize = 0;
+        fn resolve(_: *anyopaque, a: std.mem.Allocator, label: []const u8) ?[]const u8 {
+            count += 1;
+            return a.dupe(u8, label) catch null;
+        }
+    };
+    Counter.count = 0;
+    var dummy: u8 = 0;
+
+    const r: TapHeadResolve.Resolver = .{ .userdata = &dummy, .resolve = Counter.resolve };
+    _ = cache.getOrResolve("user/repo-a", r);
+    _ = cache.getOrResolve("user/repo-b", r);
+    _ = cache.getOrResolve("user/repo-a", r);
+    _ = cache.getOrResolve("user/repo-b", r);
+    try std.testing.expectEqual(@as(usize, 2), Counter.count);
+}
+
+test "TapHeadResolve: caches a null result so sibling workers don't retry a dead endpoint" {
+    var cache = TapHeadResolve.init(std.testing.allocator, std.Options.debug_io);
+    defer cache.deinit();
+
+    const Counter = struct {
+        var count: usize = 0;
+        fn resolve(_: *anyopaque, _: std.mem.Allocator, _: []const u8) ?[]const u8 {
+            count += 1;
+            return null;
+        }
+    };
+    Counter.count = 0;
+    var dummy: u8 = 0;
+
+    const r: TapHeadResolve.Resolver = .{ .userdata = &dummy, .resolve = Counter.resolve };
+    _ = cache.getOrResolve("user/repo", r);
+    _ = cache.getOrResolve("user/repo", r);
+    _ = cache.getOrResolve("user/repo", r);
+    try std.testing.expectEqual(@as(usize, 1), Counter.count);
+}
+
+const ConcurrentResolveCtx = struct {
+    cache: *TapHeadResolve,
+    label: []const u8,
+    counter: *std.atomic.Value(usize),
+    /// Barrier so all N threads reach the cache call simultaneously —
+    /// otherwise the first thread might finish before the rest start
+    /// and the test passes for the wrong reason (single-thread serial
+    /// rather than locked dedup).
+    barrier: *std.atomic.Value(usize),
+    expected: usize,
+
+    fn resolve(userdata: *anyopaque, a: std.mem.Allocator, _: []const u8) ?[]const u8 {
+        // Unpack the userdata pointer the cache hands back per call.
+        const self: *ConcurrentResolveCtx = @ptrCast(@alignCast(userdata));
+        _ = self.counter.fetchAdd(1, .acq_rel);
+        return a.dupe(u8, "0123456789abcdef0123456789abcdef01234567") catch null;
+    }
+
+    fn worker(self: *ConcurrentResolveCtx) void {
+        _ = self.barrier.fetchAdd(1, .acq_rel);
+        while (self.barrier.load(.acquire) < self.expected) {} // spin until everyone arrived
+        _ = self.cache.getOrResolve(self.label, .{ .userdata = self, .resolve = ConcurrentResolveCtx.resolve });
+    }
+};
+
+test "TapHeadResolve: concurrent same-label calls resolve exactly once" {
+    var cache = TapHeadResolve.init(std.testing.allocator, std.Options.debug_io);
+    defer cache.deinit();
+
+    var counter = std.atomic.Value(usize).init(0);
+    var barrier = std.atomic.Value(usize).init(0);
+    const thread_count: usize = 8;
+    var ctxs: [thread_count]ConcurrentResolveCtx = undefined;
+    for (&ctxs) |*c| c.* = .{
+        .cache = &cache,
+        .label = "user/repo",
+        .counter = &counter,
+        .barrier = &barrier,
+        .expected = thread_count,
+    };
+
+    var threads: [thread_count]std.Thread = undefined;
+    for (&threads, &ctxs) |*t, *c| {
+        t.* = try std.Thread.spawn(.{}, ConcurrentResolveCtx.worker, .{c});
+    }
+    for (threads) |t| t.join();
+
+    // The whole point of this fix: N concurrent same-label calls collapse to 1.
+    try std.testing.expectEqual(@as(usize, 1), counter.load(.acquire));
 }
 
 /// Surface a tap HEAD-resolve failure during the outdated audit. Pre-
@@ -257,6 +454,53 @@ fn warnTapCaskFetchFailed(tap_label: []const u8, token: []const u8, reason: []co
     );
 }
 
+/// Production resolver: the conditional-GET path with DB-cached etag.
+/// Bound to the `*HeadResolverCtx` the cache passes back per call. The
+/// arena `a` is the cache's arena, so returned slices live for the
+/// cache's lifetime without an extra dupe at the call site.
+const HeadResolverCtx = struct {
+    io: std.Io,
+    environ: std.process.Environ,
+    db: *sqlite.Database,
+
+    fn resolve(userdata: *anyopaque, a: std.mem.Allocator, tap_label: []const u8) ?[]const u8 {
+        // Unpack the userdata pointer the cache hands back per call.
+        const self: *HeadResolverCtx = @ptrCast(@alignCast(userdata));
+        const urls = tap_mod.resolveTapBaseUrls(a, tap_label) catch return null;
+
+        // catch null: a DB hiccup here just degrades to "no cached pin /
+        // etag" — the resolve then runs unconditional (same as a cold
+        // start), which is the right fallback.
+        const cached_sha = tap_mod.getCommitSha(a, self.db, tap_label) catch null;
+        const cached_etag = tap_mod.getHeadEtag(a, self.db, tap_label) catch null;
+
+        var res = tap_mod.resolveHeadCommit(self.io, self.environ, a, urls.api_head_url, cached_etag) catch |err| {
+            warnTapHeadResolveFailed(tap_label, err);
+            return null;
+        };
+        defer res.deinit();
+
+        const final_sha = if (res.not_modified)
+            (cached_sha orelse {
+                warnTapHeadResolveFailed(tap_label, tap_mod.TapError.ResolveFailed);
+                return null;
+            })
+        else
+            (res.sha orelse {
+                warnTapHeadResolveFailed(tap_label, tap_mod.TapError.MalformedJson);
+                return null;
+            });
+
+        // Dupe into arena so the cache owns the slice after res.deinit()
+        // (arena's free is a no-op so this is purely for ownership clarity).
+        const sha_owned = a.dupe(u8, final_sha) catch return null;
+        if (!res.not_modified) {
+            if (res.etag) |et| tap_mod.updateHead(self.db, tap_label, sha_owned, et) catch {};
+        }
+        return sha_owned;
+    }
+};
+
 /// Resolve a tap cask's upstream version by fetching the owning tap's
 /// `Casks/<token>.rb` at fresh HEAD and reading the `version` field.
 /// Returns null on any failure so the caller leaves the row alone, but
@@ -265,6 +509,8 @@ fn warnTapCaskFetchFailed(tap_label: []const u8, token: []const u8, reason: []co
 /// "couldn't reach the tap".
 fn tapCaskLatestVersion(
     alloc: std.mem.Allocator,
+    head_cache: *TapHeadResolve,
+    db: *sqlite.Database,
     io: std.Io,
     environ: std.process.Environ,
     tap_label: []const u8,
@@ -274,14 +520,18 @@ fn tapCaskLatestVersion(
     const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse return null;
     if (slash == 0 or slash == tap_label.len - 1) return null;
 
+    // Dedup'd HEAD resolve: N workers for the same tap pay 1 API call,
+    // not N (and the rare moved-tap race costs 1 token, not N).
+    var rctx = HeadResolverCtx{ .io = io, .environ = environ, .db = db };
+    const fresh_sha = head_cache.getOrResolve(tap_label, .{
+        .userdata = &rctx,
+        .resolve = HeadResolverCtx.resolve,
+    }) orelse return null;
+
+    // The .rb fetch is per-cask (different token per row), so it stays
+    // out of the cache — only the tap-HEAD resolve dedups.
     const urls = tap_mod.resolveTapBaseUrls(alloc, tap_label) catch return null;
     defer urls.deinit(alloc);
-
-    const fresh_sha = tap_mod.resolveHeadCommit(io, environ, alloc, urls.api_head_url) catch |err| {
-        warnTapHeadResolveFailed(tap_label, err);
-        return null;
-    };
-    defer alloc.free(fresh_sha);
 
     var http = client_mod.HttpClient.init(io, environ, alloc);
     defer http.deinit();
@@ -313,13 +563,15 @@ fn tapCaskLatestVersion(
 /// string if `row` is outdated, null otherwise.
 fn fetchLatest(
     allocator: std.mem.Allocator,
+    head_cache: *TapHeadResolve,
+    db: *sqlite.Database,
     api: *api_mod.BrewApi,
     io: std.Io,
     environ: std.process.Environ,
     kind: Kind,
     row: KegRow,
 ) std.mem.Allocator.Error!?[]u8 {
-    const v = upstreamLatest(allocator, api, io, environ, kind, row) orelse return null;
+    const v = upstreamLatest(allocator, head_cache, db, api, io, environ, kind, row) orelse return null;
     if (std.mem.eql(u8, row.version, v)) {
         allocator.free(v);
         return null;
@@ -357,6 +609,13 @@ const WorkerCtx = struct {
     /// through `tap_mod.resolveHeadCommit`, which reads GitHub auth
     /// tokens from the parent process environ.
     environ: std.process.Environ,
+    /// Shared dedup cache: N workers checking the same tap_label pay
+    /// 1 API call across the whole `mt outdated` invocation.
+    head_cache: *TapHeadResolve,
+    /// Shared DB pointer for cached-etag lookup / persist. Safe under
+    /// SQLite SERIALIZED mode (the build sets THREADSAFE=1) — sibling
+    /// workers serialise on the per-statement mutex.
+    db: *sqlite.Database,
     arena: std.heap.ArenaAllocator,
     pool: *client_mod.HttpClientPool,
     cache_dir: []const u8,
@@ -399,7 +658,7 @@ fn runOne(out_alloc: std.mem.Allocator, wctx: *WorkerCtx) void {
     var local_api = api_mod.BrewApi.init(wctx.io, arena_alloc, http, wctx.cache_dir);
     local_api.base_url = wctx.api_base;
     local_api.offline = wctx.offline;
-    const latest = upstreamLatest(arena_alloc, &local_api, wctx.io, wctx.environ, wctx.kind, wctx.row) orelse return;
+    const latest = upstreamLatest(arena_alloc, wctx.head_cache, wctx.db, &local_api, wctx.io, wctx.environ, wctx.kind, wctx.row) orelse return;
     if (std.mem.eql(u8, wctx.row.version, latest)) return;
 
     // Move into the caller's allocator so the result outlives `arena.deinit()`.
@@ -412,6 +671,8 @@ fn runOne(out_alloc: std.mem.Allocator, wctx: *WorkerCtx) void {
 fn runPool(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
+    head_cache: *TapHeadResolve,
+    db: *sqlite.Database,
     cache_dir: []const u8,
     kegs: []const KegRow,
     workers_override: ?usize,
@@ -434,6 +695,8 @@ fn runPool(
     for (ctxs, 0..) |*c, i| c.* = .{
         .io = ctx.io,
         .environ = ctx.environ,
+        .head_cache = head_cache,
+        .db = db,
         .arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator),
         .pool = &http_pool,
         .cache_dir = cache_dir,
@@ -480,9 +743,14 @@ test "WorkerCtx: per-row arena accepts testing.allocator backing without leaking
     // backs the same arena with `smp_allocator`; the inline test
     // guarantees `testing.allocator` still works so future leak coverage
     // can land here without re-plumbing.
+    // Field-only smoke: db isn't dereferenced, so an undefined ptr is
+    // safe here (mirrors `.pool = undefined`). Real workers always get
+    // a live DB from `runPool`.
     var wctx: WorkerCtx = .{
         .io = std.Options.debug_io,
         .environ = std.process.Environ.empty,
+        .head_cache = undefined,
+        .db = undefined,
         .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .pool = undefined,
         .cache_dir = "",
