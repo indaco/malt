@@ -588,6 +588,9 @@ fn executeWithOpts(
         // Check for Ctrl-C between packages during resolution
         if (signals.isInterrupted()) {
             output.warn("Interrupted during resolution.", .{});
+            // Surface counted misses so a Ctrl-C after some packages
+            // already failed dispatch still exits non-zero.
+            if (failed_count > 0) return InstallError.PartialFailure;
             return;
         }
 
@@ -907,6 +910,13 @@ fn executeWithOpts(
     // Check for Ctrl-C between the pool and the serial link phase
     if (signals.isInterrupted()) {
         output.warn("Interrupted. Cleaning up...", .{});
+        // Pool already joined; pull its `!job.succeeded` results into
+        // failed_count before bailing so the exit code reflects any
+        // bottle that failed to download alongside earlier dispatch misses.
+        for (all_jobs.items) |job| {
+            if (!job.succeeded) failed_count += 1;
+        }
+        if (failed_count > 0) return InstallError.PartialFailure;
         return;
     }
 
