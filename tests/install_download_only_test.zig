@@ -17,6 +17,7 @@ const malt = @import("malt");
 const test_io = @import("test_io");
 const testing = std.testing;
 const install = malt.install;
+const install_record = malt.install_record;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -320,6 +321,45 @@ test "--download-only with multiple packages prints one resolved path per packag
     try testing.expect(std.mem.indexOf(u8, captured.items, want_b) != null);
 }
 
+test "--download-only with one cached + one 404 package exits PartialFailure" {
+    // Mixed --download-only: alpha is cache-warm + store-seeded so the
+    // pool short-circuits to success; zzbad is .404 so the dispatch loop
+    // counts the miss. Pre-fix the download-only early return ignored
+    // `failed_count` and exited 0 with a printed "Cask 'zzbad' not found"
+    // — the very antipattern T-049 was supposed to close.
+    const prefix = try setupPrefix("dlmix");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha_a = "33" ** 32;
+    try seedStoreBottle(prefix, sha_a, "alpha", "1.0");
+    var arena_json = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_json.deinit();
+    const a_json = try warmFormulaJson(arena_json.allocator(), "alpha", sha_a);
+    try seedFormulaCache(prefix, "alpha", a_json);
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{prefix});
+    defer testing.allocator.free(cache_api);
+    inline for (.{ "formula_zzbad.404", "cask_zzbad.404" }) |name| {
+        const p = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ cache_api, name });
+        defer testing.allocator.free(p);
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, p, .{ .truncate = true });
+        f.close(std.Options.debug_io);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--download-only", "--quiet", "alpha", "zzbad" }),
+    );
+}
+
 test "--download-only --cask is plumbed into the cask path and threads the flag" {
     // The argv parser must accept `--download-only` alongside `--cask`,
     // and the per-package dispatcher must route the request through
@@ -382,8 +422,13 @@ test "--download-only --cask is plumbed into the cask path and threads the flag"
     // `--cask` + an unresolvable token → `fetchCask` errors. The
     // important assertion is that we DIDN'T short-circuit on the seeded
     // already-installed row — i.e., `--download-only` rerouted the flow
-    // through the download path.
-    install.execute(&ctx, arena.allocator(), &.{ "--download-only", "--cask", "ghost-cask" }) catch {};
+    // through the download path. The cask-dispatch failure now counts
+    // into `failed_count`, so the single-package run exits with
+    // PartialFailure.
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--download-only", "--cask", "ghost-cask" }),
+    );
 
     try testing.expect(std.mem.indexOf(u8, captured.items, "ghost-cask is already installed") == null);
     try testing.expect(std.mem.indexOf(u8, captured.items, "Cask 'ghost-cask' not found") != null);

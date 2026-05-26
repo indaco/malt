@@ -549,7 +549,10 @@ fn executeWithOpts(
 
     // Set up API client
     var cache_dir_buf: [512]u8 = undefined;
-    const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch return;
+    // Pin the unreachable: prefix is sanity-capped + format suffix is fixed,
+    // so a future bump to either side fails the build instead of the catch.
+    comptime std.debug.assert(max_prefix_sane_len + "/cache".len + 1 <= cache_dir_buf.len);
+    const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch unreachable;
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
     api.offline = ctx.offline;
@@ -571,6 +574,10 @@ fn executeWithOpts(
     var all_jobs: std.ArrayList(DownloadJob) = .empty;
     defer all_jobs.deinit(allocator);
 
+    // Shared across resolution + link so a dispatch-time miss
+    // surfaces the same PartialFailure the bottle phase already does.
+    var failed_count: usize = 0;
+
     // Check for Ctrl-C before resolution phase
     if (signals.isInterrupted()) {
         output.warn("Interrupted before resolution.", .{});
@@ -581,6 +588,9 @@ fn executeWithOpts(
         // Check for Ctrl-C between packages during resolution
         if (signals.isInterrupted()) {
             output.warn("Interrupted during resolution.", .{});
+            // Surface counted misses so a Ctrl-C after some packages
+            // already failed dispatch still exits non-zero.
+            if (failed_count > 0) return InstallError.PartialFailure;
             return;
         }
 
@@ -593,6 +603,7 @@ fn executeWithOpts(
                 if (!localErrorIsAnnounced(e)) {
                     output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                 }
+                failed_count += 1;
             };
             continue;
         }
@@ -601,6 +612,7 @@ fn executeWithOpts(
         if (isTapFormula(pkg_name)) {
             installTapFormula(ctx, allocator, pkg_name, &db, &linker, prefix, dry_run, force, download_only) catch |e| {
                 output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+                failed_count += 1;
             };
             continue;
         }
@@ -613,6 +625,7 @@ fn executeWithOpts(
                 // cask probe that would also miss with the same noise.
                 if (fetch_err == api_mod.ApiError.OfflineRequired) {
                     output.err("offline mode: formula '{s}' not cached", .{pkg_name});
+                    failed_count += 1;
                     continue;
                 }
                 if (force_formula) {
@@ -621,6 +634,7 @@ fn executeWithOpts(
                     } else {
                         output.err("Formula '{s}' not found", .{pkg_name});
                     }
+                    failed_count += 1;
                     continue;
                 }
                 // Try cask
@@ -630,6 +644,7 @@ fn executeWithOpts(
                     } else {
                         output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                     }
+                    failed_count += 1;
                 };
                 continue;
             };
@@ -654,12 +669,14 @@ fn executeWithOpts(
                 .worker_backing = std.heap.smp_allocator,
             }, pkg_name, formula_json, force, &all_jobs) catch |e| {
                 output.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
+                failed_count += 1;
                 continue;
             };
             output.emitNdjsonEvent(.resolved, pkg_name, null);
         } else {
             installCask(ctx, allocator, pkg_name, &db, &api, dry_run, download_only) catch |e| {
                 output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+                failed_count += 1;
             };
         }
     }
@@ -669,7 +686,13 @@ fn executeWithOpts(
     // and `mt purge --unused-deps` reclaims them once nothing direct retains them.
     if (only_dependencies) dropTopLevelJobs(allocator, &all_jobs);
 
-    if (all_jobs.items.len == 0) return;
+    if (all_jobs.items.len == 0) {
+        // Resolution-only failures never reach the link loop's trailing
+        // PartialFailure; surface it here so the exit code matches the
+        // printed error. Clean empty runs (cask-only happy path) keep 0.
+        if (failed_count > 0) return InstallError.PartialFailure;
+        return;
+    }
 
     if (dry_run) {
         output.info("Dry run: would install {d} package(s):", .{all_jobs.items.len});
@@ -679,6 +702,9 @@ fn executeWithOpts(
             // No transition outcome to report on a plan-only run.
             output.emitNdjsonEvent(.would_install, job.name, null);
         }
+        // Mixed runs (one cached + one 404) print a partial plan; mirror
+        // the empty-list gate so the exit code still reflects the miss.
+        if (failed_count > 0) return InstallError.PartialFailure;
         return;
     }
 
@@ -863,6 +889,7 @@ fn executeWithOpts(
             if (!job.succeeded) {
                 output.emitNdjsonEvent(.download_complete, job.name, "failed");
                 output.err("Download failed for {s}", .{job.name});
+                failed_count += 1;
                 continue;
             }
             output.emitNdjsonEvent(.download_complete, job.name, "ok");
@@ -873,12 +900,23 @@ fn executeWithOpts(
                 job.store_sha256,
             });
         }
+        // Symmetric with the link-phase trailer: surface a non-zero exit
+        // when any bottle failed to download or any dispatch-time miss
+        // was already counted upstream.
+        if (failed_count > 0) return InstallError.PartialFailure;
         return;
     }
 
     // Check for Ctrl-C between the pool and the serial link phase
     if (signals.isInterrupted()) {
         output.warn("Interrupted. Cleaning up...", .{});
+        // Pool already joined; pull its `!job.succeeded` results into
+        // failed_count before bailing so the exit code reflects any
+        // bottle that failed to download alongside earlier dispatch misses.
+        for (all_jobs.items) |job| {
+            if (!job.succeeded) failed_count += 1;
+        }
+        if (failed_count > 0) return InstallError.PartialFailure;
         return;
     }
 
@@ -887,7 +925,6 @@ fn executeWithOpts(
     // graph; linker + SQLite writes cannot be parallelised.
     var failed_kegs = std.StringHashMap(void).init(allocator);
     defer failed_kegs.deinit();
-    var failed_count: usize = 0;
 
     for (all_jobs.items, 0..) |*job, i| {
         if (signals.isInterrupted()) {

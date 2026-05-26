@@ -72,19 +72,9 @@ pass "${SLUG}: installed"
 DB="$PREFIX/db/malt.db"
 [[ -f "$DB" ]] || fail "expected DB at $DB after install"
 
-# Row precondition: install exited 0 but the dispatch loop swallows
-# tap-install errors today, so a transient upstream condition can hand
-# us exit 0 with no row. Classified-log = upstream transient → skip;
-# clean log = real partial-success bug → loud fail.
 installed_version=$(sqlite3 "$DB" "SELECT version FROM casks WHERE token='${TOKEN}';")
-if [[ -z "$installed_version" ]]; then
-  if grep -qE "rate limit|Network failure|Tap formula/cask not found|Failed to (install|download)|Sha256Mismatch|DownloadFailed|failed to record installed cask" "$INSTALL_LOG"; then
-    skip "${TOKEN}: install hit a classified upstream condition; row not persisted"
-    exit 0
-  fi
-  tail -30 "$INSTALL_LOG" >&2
-  fail "${TOKEN}: install reported success but no casks row exists (installed=ø)"
-fi
+[[ -n "$installed_version" ]] ||
+  fail "${TOKEN}: post-install row missing (install exited 0, dispatch contract broken)"
 pass "${TOKEN}: post-install casks row present (version='${installed_version}')"
 
 # Force a version mismatch by tampering the installed version.

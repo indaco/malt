@@ -539,10 +539,10 @@ test "execute --local without a path operand exits cleanly (error.Aborted)" {
     );
 }
 
-test "execute --local with a missing file reports gracefully and continues" {
-    // installLocalFormula catches its own error and logs via output.err so
-    // execute() returns normally. The key invariant is that no panic
-    // escapes and no DB writes happen for a missing file.
+test "execute --local with a missing file exits with PartialFailure" {
+    // installLocalFormula catches its own error and logs via output.err.
+    // execute() counts the dispatch-time failure into `failed_count` so a
+    // single-package miss surfaces as a non-zero exit instead of silent 0.
     const prefix: [:0]const u8 = "/tmp/mlb";
     try setupPrefix(prefix);
     defer cleanupPrefix(prefix);
@@ -552,12 +552,16 @@ test "execute --local with a missing file reports gracefully and continues" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
-    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", "/tmp/mlb_missing.rb" });
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", "/tmp/mlb_missing.rb" }),
+    );
 }
 
 test "execute --local with a non-.rb realpath is rejected before parse" {
     // Pass a real file whose basename does not end in .rb. The realpath
-    // + basename check rejects it cleanly.
+    // + basename check rejects it cleanly and the dispatcher surfaces the
+    // miss as PartialFailure.
     const prefix: [:0]const u8 = "/tmp/mlc";
     try setupPrefix(prefix);
     defer cleanupPrefix(prefix);
@@ -571,7 +575,10 @@ test "execute --local with a non-.rb realpath is rejected before parse" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
-    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", rb_path });
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", rb_path }),
+    );
 }
 
 test "execute --local --dry-run with a valid .rb prints a plan" {
@@ -662,13 +669,17 @@ test "execute --local rejects a .rb whose archive URL is not https" {
 
     // Non-dry-run so the URL check is exercised (dry-run short-circuits
     // before the URL gate). installLocalFormula catches the returned
-    // InsecureArchiveUrl so execute() itself returns cleanly.
+    // InsecureArchiveUrl; the dispatch loop now counts the miss into
+    // `failed_count` so execute() exits with PartialFailure.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
-    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", rb_path });
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--local", "--quiet", rb_path }),
+    );
 }
 
 test "execute --local --dry-run accepts a cask DSL multi-arch fixture and reaches materialise" {
@@ -730,15 +741,18 @@ test "execute --local rejects a malformed .rb (missing version/url/sha256)" {
     defer testing.allocator.free(rb_path);
     try writeFile(rb_path, "class Broken < Formula\nend\n");
 
-    // installLocalFormula catches the error and reports via output.err;
-    // execute() itself returns normally so the batch install doesn't
-    // abort on one bad entry.
+    // installLocalFormula catches the error and reports via output.err.
+    // The dispatch loop counts the failure so a single-package run exits
+    // with PartialFailure instead of swallowing the miss.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
-    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", "--quiet", rb_path });
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", "--quiet", rb_path }),
+    );
 }
 
 // ─── Cross-command integration: uninstall/info/list on a local keg ──
@@ -838,5 +852,8 @@ test "execute --local rejects a directory path (not a regular file)" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
-    try install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", "--quiet", dir_path });
+    try testing.expectError(
+        install_record.InstallError.PartialFailure,
+        install.execute(&ctx, arena.allocator(), &.{ "--local", "--dry-run", "--quiet", dir_path }),
+    );
 }
