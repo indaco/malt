@@ -549,9 +549,9 @@ fn executeWithOpts(
 
     // Set up API client
     var cache_dir_buf: [512]u8 = undefined;
-    // Prefix is sanity-capped at max_prefix_sane_len (256); "/cache" adds 6.
-    // The 512-byte buffer cannot overflow — the prior `catch return;` was a
-    // silent exit on a path that never fires.
+    // Pin the unreachable: prefix is sanity-capped + format suffix is fixed,
+    // so a future bump to either side fails the build instead of the catch.
+    comptime std.debug.assert(max_prefix_sane_len + "/cache".len + 1 <= cache_dir_buf.len);
     const cache_dir = std.fmt.bufPrint(&cache_dir_buf, "{s}/cache", .{prefix}) catch unreachable;
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
