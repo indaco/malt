@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const pins = @import("pins.zig");
+const hash_mod = @import("hash.zig");
 const http_client = @import("../net/client.zig");
 const api_mod = @import("../net/api.zig");
 const sandbox = @import("sandbox/macos.zig");
@@ -172,7 +173,10 @@ fn fetchPostInstallFromGitHubTagged(
 
     var actual_hex: [pins.sha256_hex_len]u8 = undefined;
     pins.sha256Hex(resp.body, &actual_hex);
-    if (!std.mem.eql(u8, actual_hex[0..], expected_hash)) return .fetch_failed;
+    // Constant-time compare matches every other SHA check in the install
+    // / bottle / verify path; no timing oracle today, but the consistency
+    // makes the spawn-audit guard's job easier.
+    if (!hash_mod.constantTimeEql(u8, actual_hex[0..], expected_hash)) return .fetch_failed;
 
     if (extractPostInstallFromSource(allocator, resp.body)) |body| {
         return .{ .body = body };
