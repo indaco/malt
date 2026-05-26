@@ -241,17 +241,24 @@ fn migrateV3toV4(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
-/// Best-effort restore of FK enforcement after the v5 rebuild window.
-/// `defer` cannot return an error, so a silent `catch {}` would leave
-/// the connection running without FKs for the rest of its lifetime if
-/// the re-enable hit a transient SQLITE_BUSY. One retry covers that
-/// case; surfacing remaining failures via `std.log.warn` is the only
-/// recourse left.
-fn reenableForeignKeys(db: *sqlite.Database) void {
+/// Restore FK enforcement after the v5 rebuild. Retries once on a
+/// transient SQLITE_BUSY, then escalates: a connection that stays
+/// FK-off would silently turn `ON DELETE CASCADE` into a no-op for the
+/// rest of its lifetime. Use this on the success path so the migration
+/// fails loud rather than committing the table rebuild over a dirty
+/// connection.
+fn ensureForeignKeysOn(db: *sqlite.Database) sqlite.SqliteError!void {
     db.exec("PRAGMA foreign_keys=ON;") catch {
-        db.exec("PRAGMA foreign_keys=ON;") catch |err| {
-            std.log.warn("foreign_keys re-enable failed: {s}", .{@errorName(err)});
-        };
+        return db.exec("PRAGMA foreign_keys=ON;");
+    };
+}
+
+/// Error-unwind variant: `errdefer` can't propagate, so all we can do
+/// when the rebuild itself failed is log and move on. The caller is
+/// already returning an error to its own caller.
+fn bestEffortEnableForeignKeys(db: *sqlite.Database) void {
+    ensureForeignKeysOn(db) catch |err| {
+        std.log.warn("foreign_keys re-enable failed during error unwind: {s}", .{@errorName(err)});
     };
 }
 
@@ -292,7 +299,8 @@ fn migrateV4toV5(db: *sqlite.Database) sqlite.SqliteError!void {
     // DROP `kegs` without tripping `dependencies.keg_id` / `links.keg_id`;
     // the RENAME then rewrites those references at the new table.
     try db.exec("PRAGMA foreign_keys=OFF;");
-    defer reenableForeignKeys(db);
+    // Split safety net: best-effort on unwind, hard re-enable on success.
+    errdefer bestEffortEnableForeignKeys(db);
 
     try db.beginTransaction();
     errdefer db.rollback();
@@ -338,6 +346,11 @@ fn migrateV4toV5(db: *sqlite.Database) sqlite.SqliteError!void {
     }
 
     try db.commit();
+
+    // Success path: FK enforcement must come back on or the connection
+    // stays dirty for its lifetime — a partial re-enable would silently
+    // demote every later ON DELETE CASCADE to a no-op.
+    try ensureForeignKeysOn(db);
 }
 
 /// v6 — record the originating tap on every cask row so `mt upgrade`
@@ -481,6 +494,46 @@ pub fn currentVersion(db: *sqlite.Database) sqlite.SqliteError!i64 {
 }
 
 const testing = std.testing;
+
+fn foreignKeysOn(db: *sqlite.Database) !bool {
+    var stmt = try db.prepare("PRAGMA foreign_keys;");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    return stmt.columnInt(0) == 1;
+}
+
+test "ensureForeignKeysOn turns FKs on against a fresh connection" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    try db.exec("PRAGMA foreign_keys=OFF;");
+    try testing.expect(!try foreignKeysOn(&db));
+
+    try ensureForeignKeysOn(&db);
+    try testing.expect(try foreignKeysOn(&db));
+}
+
+test "ensureForeignKeysOn is idempotent when FKs are already on" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    try db.exec("PRAGMA foreign_keys=ON;");
+    try ensureForeignKeysOn(&db);
+    try ensureForeignKeysOn(&db);
+    try testing.expect(try foreignKeysOn(&db));
+}
+
+// Without the success-path hard re-enable, a SQLITE_BUSY storm during
+// the v5 commit window would leave the connection FK-off for the rest
+// of its lifetime — every later ON DELETE CASCADE would silently
+// no-op. This nails down the happy-path post-condition.
+test "migrate leaves PRAGMA foreign_keys ON after a successful v5 rebuild" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    try initSchema(&db);
+    try testing.expect(try foreignKeysOn(&db));
+}
 
 // Regression: a Homebrew revision-bump upgrade ("1.9.2" → "1.9.2_2")
 // transiently coexists with the old row inside upgradeFormula's
