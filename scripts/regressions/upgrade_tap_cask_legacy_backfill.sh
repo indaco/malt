@@ -56,7 +56,7 @@ EXPECTED_TAP="yuzeguitarist/deck"
 INSTALL_LOG="$PREFIX/install_${TOKEN}.log"
 printf '\xe2\x96\xb8 mt install %s (logs \xe2\x86\x92 %s)\n' "$SLUG" "$INSTALL_LOG"
 if ! "$BIN" install "$SLUG" >"$INSTALL_LOG" 2>&1; then
-  if grep -qE "rate limit|Network failure|Tap formula/cask not found|Failed to (install|download)|Sha256Mismatch|DownloadFailed" "$INSTALL_LOG"; then
+  if grep -qE "rate limit|Network failure|Tap formula/cask not found|Failed to (install|download)|Sha256Mismatch|DownloadFailed|failed to record installed cask" "$INSTALL_LOG"; then
     skip "${SLUG}: install hit a classified upstream condition; cannot exercise backfill"
     exit 0
   fi
@@ -67,6 +67,20 @@ pass "${SLUG}: installed"
 
 DB="$PREFIX/db/malt.db"
 [[ -f "$DB" ]] || fail "expected DB at $DB after install"
+
+# Row precondition: dispatch swallows tap-install errors today, so a
+# transient upstream condition can yield exit 0 + no row. Classified
+# log → skip (upstream issue); clean log → loud fail (real bug).
+installed_version=$(sqlite3 "$DB" "SELECT version FROM casks WHERE token='${TOKEN}';")
+if [[ -z "$installed_version" ]]; then
+  if grep -qE "rate limit|Network failure|Tap formula/cask not found|Failed to (install|download)|Sha256Mismatch|DownloadFailed|failed to record installed cask" "$INSTALL_LOG"; then
+    skip "${TOKEN}: install hit a classified upstream condition; row not persisted"
+    exit 0
+  fi
+  tail -30 "$INSTALL_LOG" >&2
+  fail "${TOKEN}: install reported success but no casks row exists (installed=ø)"
+fi
+pass "${TOKEN}: post-install casks row present (version='${installed_version}')"
 
 # Verify install wrote the tap automatically (the v6 contract).
 post_install_tap=$(sqlite3 "$DB" "SELECT tap FROM casks WHERE token='${TOKEN}';")

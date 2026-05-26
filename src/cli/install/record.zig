@@ -3,9 +3,10 @@
 //! narrow set and the dispatch loop can classify errors exhaustively.
 
 const std = @import("std");
+
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
-const sqlite = @import("../../db/sqlite.zig");
 const formula_mod = @import("../../core/formula.zig");
+const sqlite = @import("../../db/sqlite.zig");
 const output = @import("../../ui/output.zig");
 
 pub const InstallError = error{
@@ -46,6 +47,13 @@ pub const InstallError = error{
     /// `ftp://`, or plaintext `http://` URL cannot be turned into an
     /// exploit just by `malt install --local`-ing the file.
     InsecureArchiveUrl,
+    /// GitHub-API rate limit hit while resolving a tap's HEAD commit.
+    /// Distinct from `FormulaNotFound` so the user-facing summary
+    /// names the real cause instead of "formula does not exist."
+    RateLimited,
+    /// Network-layer failure (no HTTP status) while resolving a tap.
+    /// Distinct tag so retry policies can differentiate from 4xx/5xx.
+    NetworkError,
 };
 
 /// True when the given error has already surfaced a specific,
@@ -61,6 +69,8 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
         InstallError.FormulaNotFound,
         InstallError.DownloadFailed,
         InstallError.CellarFailed,
+        InstallError.RateLimited,
+        InstallError.NetworkError,
         => true,
 
         InstallError.NoPackages,
@@ -70,6 +80,9 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
         InstallError.NoBottle,
         InstallError.StoreFailed,
         InstallError.LinkFailed,
+        // Some RecordFailed paths emit a classified err first, others
+        // (db.beginTransaction failure) do not — leave the generic
+        // dispatch summary on so the silent path still surfaces.
         InstallError.RecordFailed,
         InstallError.PartialFailure,
         InstallError.PrefixAbsurd,
