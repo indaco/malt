@@ -29,11 +29,12 @@ pub const Store = struct {
     pub fn commitFrom(self: *Store, sha256: []const u8, src_path: ?[]const u8) StoreError!void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const src = src_path orelse blk: {
-            var src_buf: [512]u8 = undefined;
-            break :blk std.fmt.bufPrint(&src_buf, "{s}/tmp/{s}", .{ self.prefix, sha256 }) catch return StoreError.OutOfMemory;
-        };
+        // src_buf must outlive any subsequent stack-buf write below — if a
+        // future optimizer overlays it with dst_buf, the rename target
+        // could be clobbered.
+        var src_buf: [512]u8 = undefined;
         var dst_buf: [512]u8 = undefined;
+        const src = src_path orelse std.fmt.bufPrint(&src_buf, "{s}/tmp/{s}", .{ self.prefix, sha256 }) catch return StoreError.OutOfMemory;
         const dst = std.fmt.bufPrint(&dst_buf, "{s}/store/{s}", .{ self.prefix, sha256 }) catch return StoreError.OutOfMemory;
 
         // Check if already committed (idempotent)

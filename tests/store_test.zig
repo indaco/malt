@@ -61,6 +61,56 @@ test "commit moves directory to store and exists returns true" {
     try testing.expect(ctx.store.exists("abc123sha"));
 }
 
+test "commitFrom with null src renames from {prefix}/tmp/{sha}" {
+    var ctx = try setupTestStore(testing.allocator);
+    defer {
+        ctx.db.close();
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
+        testing.allocator.free(ctx.prefix);
+    }
+
+    const sha = "default_src_sha";
+
+    const tmp_dir = try std.fmt.allocPrint(testing.allocator, "{s}/tmp", .{ctx.prefix});
+    defer testing.allocator.free(tmp_dir);
+    test_io.makeDirAbsolute(std.Options.debug_io, tmp_dir) catch {};
+
+    const default_src = try std.fmt.allocPrint(testing.allocator, "{s}/tmp/{s}", .{ ctx.prefix, sha });
+    defer testing.allocator.free(default_src);
+    test_io.makeDirAbsolute(std.Options.debug_io, default_src) catch {};
+
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/marker.txt", .{default_src});
+    defer testing.allocator.free(marker);
+    const f = try test_io.createFileAbsolute(std.Options.debug_io, marker, .{});
+    try f.writeStreamingAll(std.Options.debug_io, "moved");
+    f.close(std.Options.debug_io);
+
+    try ctx.store.commitFrom(sha, null);
+
+    try testing.expect(ctx.store.exists(sha));
+    // The marker must have moved with the directory, not stayed behind.
+    const moved_marker = try std.fmt.allocPrint(testing.allocator, "{s}/store/{s}/marker.txt", .{ ctx.prefix, sha });
+    defer testing.allocator.free(moved_marker);
+    var probe = try test_io.openFileAbsolute(std.Options.debug_io, moved_marker, .{});
+    probe.close(std.Options.debug_io);
+}
+
+test "commitFrom with null src returns CommitFailed when default tmp path is missing" {
+    var ctx = try setupTestStore(testing.allocator);
+    defer {
+        ctx.db.close();
+        test_io.deleteTreeAbsolute(std.Options.debug_io, ctx.prefix) catch {};
+        testing.allocator.free(ctx.prefix);
+    }
+
+    // No {prefix}/tmp/{sha} on disk, no {prefix}/store/{sha} either —
+    // atomicRename surfaces the missing source as CommitFailed.
+    try testing.expectError(
+        store_mod.StoreError.CommitFailed,
+        ctx.store.commitFrom("missing_default_src_sha", null),
+    );
+}
+
 test "duplicate commit is idempotent" {
     var ctx = try setupTestStore(testing.allocator);
     defer {
