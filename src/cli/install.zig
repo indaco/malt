@@ -883,6 +883,7 @@ fn executeWithOpts(
             if (!job.succeeded) {
                 output.emitNdjsonEvent(.download_complete, job.name, "failed");
                 output.err("Download failed for {s}", .{job.name});
+                failed_count += 1;
                 continue;
             }
             output.emitNdjsonEvent(.download_complete, job.name, "ok");
@@ -893,6 +894,10 @@ fn executeWithOpts(
                 job.store_sha256,
             });
         }
+        // Symmetric with the link-phase trailer: surface a non-zero exit
+        // when any bottle failed to download or any dispatch-time miss
+        // was already counted upstream.
+        if (failed_count > 0) return InstallError.PartialFailure;
         return;
     }
 
