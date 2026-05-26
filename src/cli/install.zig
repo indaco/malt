@@ -616,7 +616,11 @@ fn executeWithOpts(
                     continue;
                 }
                 if (force_formula) {
-                    output.err("Formula '{s}' not found", .{pkg_name});
+                    if (mapApiFetchError(fetch_err) != null) {
+                        output.err("Cannot reach Homebrew API for formula '{s}'", .{pkg_name});
+                    } else {
+                        output.err("Formula '{s}' not found", .{pkg_name});
+                    }
                     continue;
                 }
                 // Try cask
@@ -1104,6 +1108,24 @@ fn maybeRegisterService(
     };
 }
 
+/// Classify a Homebrew-API fetch failure. Network-layer failures map
+/// to `NetworkError` so the user-facing summary names the real cause
+/// instead of the path-specific "not found" fallback. `null` means
+/// the caller picks its own fallback (formula vs. cask). Exhaustive
+/// so a new `ApiError` tag fails compilation here.
+fn mapApiFetchError(e: api_mod.ApiError) ?InstallError {
+    return switch (e) {
+        error.ApiUnreachable => InstallError.NetworkError,
+        error.NotFound,
+        error.InvalidResponse,
+        error.InvalidName,
+        error.CacheError,
+        error.OfflineRequired,
+        error.OutOfMemory,
+        => null,
+    };
+}
+
 /// HEAD-based fallback for extensionless cask URLs.
 /// Follows redirects to discover the real file extension.
 fn resolveCaskArtifactViaHead(ctx: *const AppCtx, allocator: std.mem.Allocator, url: []const u8) cask_mod.ArtifactType {
@@ -1133,6 +1155,10 @@ fn installCask(
         // Propagate the typed OfflineRequired so the outer dispatch
         // surfaces the snapshot-miss message instead of "not found".
         if (e == api_mod.ApiError.OfflineRequired) return e;
+        if (mapApiFetchError(e)) |mapped| {
+            output.err("Cannot reach Homebrew API for cask '{s}'", .{token});
+            return mapped;
+        }
         output.err("Cask '{s}' not found", .{token});
         return InstallError.CaskNotFound;
     };
@@ -1243,6 +1269,21 @@ fn formatMaterializeFailure(buf: []u8, name: []const u8, err: cellar_mod.CellarE
     // Overflow only fires on pathologically long names; fall back to a
     // truncated form rather than swallowing the failure silently.
     return result catch "Failed to materialize <truncated>";
+}
+
+test "mapApiFetchError surfaces ApiUnreachable as NetworkError" {
+    // Pre-fix the bottle/cask paths collapsed any fetch failure to a
+    // path-specific "not found" tag, so the dispatch summary said
+    // FormulaNotFound or CaskNotFound when the cause was a flaky DNS.
+    try std.testing.expectEqual(InstallError.NetworkError, mapApiFetchError(error.ApiUnreachable).?);
+}
+
+test "mapApiFetchError leaves other ApiError variants for the path's own fallback" {
+    try std.testing.expect(mapApiFetchError(error.NotFound) == null);
+    try std.testing.expect(mapApiFetchError(error.OfflineRequired) == null);
+    try std.testing.expect(mapApiFetchError(error.InvalidResponse) == null);
+    try std.testing.expect(mapApiFetchError(error.InvalidName) == null);
+    try std.testing.expect(mapApiFetchError(error.CacheError) == null);
 }
 
 test "formatMaterializeFailure: trivial tag drops the parenthetical" {

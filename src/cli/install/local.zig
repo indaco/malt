@@ -226,7 +226,7 @@ fn installTapRb(
         }
         var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, null) catch |e| {
             output.err("Could not resolve {s}'s HEAD commit: {s}", .{ tap_slug, tap_mod.describeResolveError(e) });
-            return InstallError.FormulaNotFound;
+            return mapTapResolveError(e);
         };
         defer head_res.deinit();
         const sha = head_res.sha orelse {
@@ -902,19 +902,8 @@ fn materializeTapCask(
     bar.finish();
     defer allocator.free(app_path);
 
-    // tap_label is the third-party tap origin (`user/repo`) — drives
-    // pre-routing in `mt upgrade` so subsequent invocations skip the
-    // multi-tap probe loop.
-    cask_mod.recordInstall(db, &cask, app_path, resolved.tap_label) catch {
-        output.warn("Failed to record cask {s} in database", .{cask.token});
-    };
-
-    if (resolved.tap_registration) |t| {
-        // Tap row is advisory — the install already succeeded; a missing
-        // tap row self-heals on the next sync so swallowing is safe here.
-        tap_mod.add(db, resolved.tap_label, t.url, t.commit_sha) catch {};
-        if (t.head_etag) |et| tap_mod.updateHead(db, resolved.tap_label, t.commit_sha, et) catch {};
-    }
+    // `try` is the invariant: success line never fires without a row.
+    try finalizeTapCaskInstall(db, &cask, app_path, resolved.tap_label, resolved.tap_registration);
 
     output.success("{s} {s} installed", .{ cask.token, cask.version });
 }
@@ -971,6 +960,45 @@ fn writeJsonString(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []c
     try out.append(allocator, '"');
 }
 
+/// Map `tap_mod` resolve errors to specific `InstallError` tags so the
+/// dispatch line ("Failed to install X: <tag>") names the cause —
+/// `RateLimited` / `NetworkError` instead of collapsing every failure
+/// to the misleading `FormulaNotFound`.
+fn mapTapResolveError(e: tap_mod.TapError) InstallError {
+    return switch (e) {
+        error.RateLimited => InstallError.RateLimited,
+        error.NetworkError => InstallError.NetworkError,
+        error.NotFound,
+        error.MalformedJson,
+        error.InvalidSha,
+        error.ResolveFailed,
+        => InstallError.FormulaNotFound,
+        error.OutOfMemory => InstallError.RecordFailed,
+    };
+}
+
+/// Persist before print: any failure surfaces as `RecordFailed` so
+/// the caller cannot print "installed" without a committed row. The
+/// err wording is a public contract for `scripts/regressions/*.sh`.
+fn finalizeTapCaskInstall(
+    db: *sqlite.Database,
+    cask: *const cask_mod.Cask,
+    app_path: ?[]const u8,
+    tap_label: []const u8,
+    tap_registration: ?TapRegistration,
+) InstallError!void {
+    cask_mod.recordInstall(db, cask, app_path, tap_label) catch {
+        output.err("failed to record installed cask {s}", .{cask.token});
+        return InstallError.RecordFailed;
+    };
+    // Tap row + etag are advisory; the cask row is the install
+    // source of truth and tap_mod state self-heals on next sync.
+    if (tap_registration) |t| {
+        tap_mod.add(db, tap_label, t.url, t.commit_sha) catch {};
+        if (t.head_etag) |et| tap_mod.updateHead(db, tap_label, t.commit_sha, et) catch {};
+    }
+}
+
 test "formatTapDownloadName encodes pid + extension into tmp/ path" {
     var buf: [128]u8 = undefined;
     const got = try formatTapDownloadName(&buf, "/opt/h", ".tar.gz", 4242);
@@ -991,4 +1019,180 @@ test "formatTapDownloadName distinct pids produce distinct paths" {
 test "formatTapDownloadName surfaces NoSpaceLeft instead of truncating" {
     var buf: [4]u8 = undefined;
     try std.testing.expectError(error.NoSpaceLeft, formatTapDownloadName(&buf, "/opt/h", ".tar.gz", 4242));
+}
+
+test "mapTapResolveError surfaces rate limit and network failure as their own tags" {
+    // Bug repro: pre-fix every resolve error collapsed to FormulaNotFound,
+    // so "Failed to install X: FormulaNotFound" told the user the wrong
+    // story when the real cause was a 60/hr rate-limit or a flaky DNS.
+    try std.testing.expectEqual(InstallError.RateLimited, mapTapResolveError(error.RateLimited));
+    try std.testing.expectEqual(InstallError.NetworkError, mapTapResolveError(error.NetworkError));
+}
+
+test "mapTapResolveError keeps non-classified causes on FormulaNotFound" {
+    try std.testing.expectEqual(InstallError.FormulaNotFound, mapTapResolveError(error.NotFound));
+    try std.testing.expectEqual(InstallError.FormulaNotFound, mapTapResolveError(error.MalformedJson));
+    try std.testing.expectEqual(InstallError.FormulaNotFound, mapTapResolveError(error.InvalidSha));
+    try std.testing.expectEqual(InstallError.FormulaNotFound, mapTapResolveError(error.ResolveFailed));
+}
+
+test "mapTapResolveError handles every TapError tag" {
+    // Comptime sweep: a future TapError addition without a switch arm
+    // fails to compile here, surfacing the gap loudly.
+    inline for (@typeInfo(tap_mod.TapError).error_set.?) |err| {
+        const tag = @field(tap_mod.TapError, err.name);
+        const mapped = mapTapResolveError(tag);
+        try std.testing.expect(mapped == InstallError.RateLimited or
+            mapped == InstallError.NetworkError or
+            mapped == InstallError.FormulaNotFound or
+            mapped == InstallError.RecordFailed);
+    }
+}
+
+test "finalizeTapCaskInstall persists the cask row on the happy path" {
+    // Guards against "always RecordFailed" or a recordInstall arg-swap
+    // regression that the failure-mode test alone would not catch.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec(
+        \\CREATE TABLE casks (
+        \\    id INTEGER PRIMARY KEY,
+        \\    token TEXT NOT NULL UNIQUE,
+        \\    name TEXT NOT NULL,
+        \\    version TEXT NOT NULL,
+        \\    url TEXT NOT NULL,
+        \\    sha256 TEXT,
+        \\    app_path TEXT,
+        \\    auto_updates INTEGER NOT NULL DEFAULT 0,
+        \\    pinned INTEGER NOT NULL DEFAULT 0,
+        \\    tap TEXT
+        \\);
+    );
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(std.testing.allocator);
+    try buildSyntheticCaskJson(std.testing.allocator, &json_buf, .{
+        .name = "deckclip",
+        .full_name = "yuzeguitarist/deck/deckclip",
+        .tap_label = "yuzeguitarist/deck",
+        .version = "1.4.5",
+        .url = "https://example.com/Deck.dmg",
+        .sha256 = "deadbeefcafe",
+        .app_name = "Deck.app",
+    });
+
+    var cask = try cask_mod.parseCask(std.testing.allocator, json_buf.items);
+    defer cask.deinit();
+
+    try finalizeTapCaskInstall(&db, &cask, "/tmp/Deck.app", "yuzeguitarist/deck", null);
+
+    var stmt = try db.prepare("SELECT version, tap FROM casks WHERE token = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, "deckclip");
+    try std.testing.expect(try stmt.step());
+    try std.testing.expectEqualStrings("1.4.5", std.mem.sliceTo(stmt.columnText(0) orelse "", 0));
+    try std.testing.expectEqualStrings("yuzeguitarist/deck", std.mem.sliceTo(stmt.columnText(1) orelse "", 0));
+}
+
+test "finalizeTapCaskInstall stamps the owning tap when tap_registration is set" {
+    // tap row + etag must persist so subsequent `mt upgrade` pre-routes
+    // via `casks.tap` instead of probing every registered tap.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try db.exec(
+        \\CREATE TABLE casks (
+        \\    id INTEGER PRIMARY KEY,
+        \\    token TEXT NOT NULL UNIQUE,
+        \\    name TEXT NOT NULL,
+        \\    version TEXT NOT NULL,
+        \\    url TEXT NOT NULL,
+        \\    sha256 TEXT,
+        \\    app_path TEXT,
+        \\    auto_updates INTEGER NOT NULL DEFAULT 0,
+        \\    pinned INTEGER NOT NULL DEFAULT 0,
+        \\    tap TEXT
+        \\);
+    );
+    try db.exec(
+        \\CREATE TABLE taps (
+        \\    name TEXT PRIMARY KEY,
+        \\    url TEXT NOT NULL,
+        \\    commit_sha TEXT,
+        \\    head_etag TEXT
+        \\);
+    );
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(std.testing.allocator);
+    try buildSyntheticCaskJson(std.testing.allocator, &json_buf, .{
+        .name = "deckclip",
+        .full_name = "yuzeguitarist/deck/deckclip",
+        .tap_label = "yuzeguitarist/deck",
+        .version = "1.4.5",
+        .url = "https://example.com/Deck.dmg",
+        .sha256 = "deadbeefcafe",
+        .app_name = "Deck.app",
+    });
+
+    var cask = try cask_mod.parseCask(std.testing.allocator, json_buf.items);
+    defer cask.deinit();
+
+    // updateHead validates SHA shape; a short SHA silently skips etag.
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    try finalizeTapCaskInstall(&db, &cask, "/tmp/Deck.app", "yuzeguitarist/deck", .{
+        .url = "https://github.com/yuzeguitarist/homebrew-deck",
+        .commit_sha = sha,
+        .head_etag = "\"etag-abc\"",
+    });
+
+    var stmt = try db.prepare("SELECT commit_sha, head_etag FROM taps WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, "yuzeguitarist/deck");
+    try std.testing.expect(try stmt.step());
+    try std.testing.expectEqualStrings(sha, std.mem.sliceTo(stmt.columnText(0) orelse "", 0));
+    try std.testing.expectEqualStrings("\"etag-abc\"", std.mem.sliceTo(stmt.columnText(1) orelse "", 0));
+}
+
+test "finalizeTapCaskInstall fails loud when the cask DB row cannot persist" {
+    // Reproduces the partial-success bug: persist failure must NOT
+    // collapse to "installed" stdout + exit 0.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    // No schema → recordInstall fails at prepare (no casks table).
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(std.testing.allocator);
+    try buildSyntheticCaskJson(std.testing.allocator, &json_buf, .{
+        .name = "deckclip",
+        .full_name = "yuzeguitarist/deck/deckclip",
+        .tap_label = "yuzeguitarist/deck",
+        .version = "1.4.5",
+        .url = "https://example.com/Deck.dmg",
+        .sha256 = "deadbeefcafe",
+        .app_name = "Deck.app",
+    });
+
+    var cask = try cask_mod.parseCask(std.testing.allocator, json_buf.items);
+    defer cask.deinit();
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &captured);
+    defer output.endStderrCapture();
+
+    // Mirror the materializeTapCask call site shape.
+    var finalize_err: ?InstallError = null;
+    finalizeTapCaskInstall(&db, &cask, null, "yuzeguitarist/deck", null) catch |e| {
+        finalize_err = e;
+    };
+    if (finalize_err == null) {
+        output.success("{s} {s} installed", .{ cask.token, cask.version });
+        return error.TestExpectedRecordFailed;
+    }
+    try std.testing.expectEqual(InstallError.RecordFailed, finalize_err.?);
+
+    // Substring is the public contract for the regression skip-classifier.
+    try std.testing.expect(std.mem.indexOf(u8, captured.items, "failed to record installed cask") != null);
+    // Success line must never fire on a failed persist.
+    try std.testing.expect(std.mem.indexOf(u8, captured.items, "deckclip 1.4.5 installed") == null);
 }
