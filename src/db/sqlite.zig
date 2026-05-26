@@ -178,7 +178,19 @@ pub const Database = struct {
     }
 };
 
+/// Reports the linked SQLite's compile-time threading mode:
+///   0 = single-thread, 1 = serialized, 2 = multi-thread.
+/// Callers that spawn workers across the same handle rely on 1.
+pub fn threadsafeMode() c_int {
+    return c.sqlite3_threadsafe();
+}
+
 const testing = std.testing;
+
+test "threadsafeMode returns one of the three documented values" {
+    const m = threadsafeMode();
+    try testing.expect(m == 0 or m == 1 or m == 2);
+}
 
 test "errMsg returns the underlying SQLite error string after a failed exec" {
     var db = try Database.open(":memory:");

@@ -18,6 +18,24 @@ const keg_mod = @import("keg.zig");
 const manifest_mod = @import("manifest.zig");
 const post_install_queue_mod = @import("post_install_queue.zig");
 
+/// Surfaced when the linked SQLite isn't in serialized threading mode.
+/// The pool's lock-free reads (`isInstalled` outside `db_mu`) rely on
+/// the build-time `-DSQLITE_THREADSAFE=1` flag; without it those reads
+/// would race the writers that hold `db_mu`.
+pub const ThreadsafeError = error{SqliteNotSerialized};
+
+/// Refuses to run when the linked SQLite isn't serialized. Defer to
+/// `ensureSerializedThreadingMode` so tests can exercise both branches
+/// without depending on a real SQLite link.
+pub fn ensureSerializedThreading() ThreadsafeError!void {
+    return ensureSerializedThreadingMode(sqlite.threadsafeMode());
+}
+
+/// Test seam over `ensureSerializedThreading` — same policy, injectable mode.
+pub fn ensureSerializedThreadingMode(mode: c_int) ThreadsafeError!void {
+    if (mode != 1) return error.SqliteNotSerialized;
+}
+
 /// 4 matches the install-side HTTP client pool; higher just queues on TLS contexts.
 pub const default_workers: u32 = 4;
 
@@ -198,6 +216,19 @@ pub fn run(allocator: std.mem.Allocator, pool: *Pool, worker_count: u32) !void {
 }
 
 // ── Inline unit tests ──────────────────────────────────────────────
+
+test "ensureSerializedThreadingMode passes on mode 1 (serialized)" {
+    try ensureSerializedThreadingMode(1);
+}
+
+test "ensureSerializedThreadingMode rejects single-thread (0) and multi-thread (2)" {
+    try std.testing.expectError(ThreadsafeError.SqliteNotSerialized, ensureSerializedThreadingMode(0));
+    try std.testing.expectError(ThreadsafeError.SqliteNotSerialized, ensureSerializedThreadingMode(2));
+}
+
+test "ensureSerializedThreading agrees with the linked SQLite (built with SQLITE_THREADSAFE=1)" {
+    try ensureSerializedThreading();
+}
 
 test "workerCountFromEnv returns default when env is null" {
     try std.testing.expectEqual(default_workers, workerCountFromEnv(null));

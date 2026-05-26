@@ -61,25 +61,39 @@ pub fn copyTreeFallback(io: std.Io, allocator: std.mem.Allocator, src_path: []co
     var walker = src_dir.walk(allocator) catch return error.OutOfMemory;
     defer walker.deinit();
 
-    // Per-entry clone is opportunistic: any single-entry failure skips that
-    // path and continues the walk. Callers verify the final tree shape.
+    // Per-entry clone is best-effort: a single failure must not abort
+    // the walk (so callers still get most of the tree), but the first
+    // failure is captured and returned so a half-cloned keg can't be
+    // mistaken for a complete one.
+    var first_err: ?anyerror = null;
     while (walker.next(io) catch return error.AccessDenied) |entry| {
         switch (entry.kind) {
             .directory => {
-                dst_dir.createDirPath(io, entry.path) catch {};
+                dst_dir.createDirPath(io, entry.path) catch |err| captureFirst(&first_err, err);
             },
             .file => {
                 if (std.fs.path.dirname(entry.path)) |parent| {
-                    dst_dir.createDirPath(io, parent) catch {};
+                    dst_dir.createDirPath(io, parent) catch |err| captureFirst(&first_err, err);
                 }
-                std.Io.Dir.copyFile(entry.dir, entry.basename, dst_dir, entry.path, io, .{}) catch {};
+                std.Io.Dir.copyFile(entry.dir, entry.basename, dst_dir, entry.path, io, .{}) catch |err|
+                    captureFirst(&first_err, err);
             },
             .sym_link => {
                 var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-                const n = std.Io.Dir.readLink(entry.dir, io, entry.basename, &link_buf) catch continue;
-                dst_dir.symLink(io, link_buf[0..n], entry.path, .{}) catch {};
+                const n = std.Io.Dir.readLink(entry.dir, io, entry.basename, &link_buf) catch |err| {
+                    captureFirst(&first_err, err);
+                    continue;
+                };
+                dst_dir.symLink(io, link_buf[0..n], entry.path, .{}) catch |err|
+                    captureFirst(&first_err, err);
             },
             else => {},
         }
     }
+
+    if (first_err) |e| return e;
+}
+
+fn captureFirst(slot: *?anyerror, err: anyerror) void {
+    if (slot.* == null) slot.* = err;
 }

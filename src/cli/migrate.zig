@@ -301,6 +301,17 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             keg_names.items.len,
         );
 
+        // Enforce the SQLite-threadsafe contract the pool depends on
+        // (lock-free `isInstalled` reads vs `db_mu`-holding writers).
+        // Skip when only one worker will actually run — single-thread
+        // can't race.
+        if (worker_count >= 2) {
+            parallel_mod.ensureSerializedThreading() catch {
+                output.err("malt was built without SQLite serialized threading; parallel migrate disabled. Rebuild with -DSQLITE_THREADSAFE=1 or set MALT_MIGRATE_PARALLEL_WORKERS=1.", .{});
+                return error.Aborted;
+            };
+        }
+
         // Borrowed clients keep TLS contexts warm across kegs without
         // paying a fresh handshake per worker.
         var http_pool = client_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, @intCast(@max(worker_count, 1))) catch {

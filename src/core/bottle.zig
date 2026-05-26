@@ -119,7 +119,10 @@ pub fn download(
     var tmp_path_buf: [512]u8 = undefined;
     const tmp_path = try buildTmpArchivePath(&tmp_path_buf, dest_dir);
 
-    const tmp_file = std.Io.Dir.createFileAbsolute(io, tmp_path, .{}) catch return BottleError.IoError;
+    // `truncate = true` so a leftover tmp from a prior attempt (e.g. a
+    // shared-tmp caller or a future retry that reuses the same path)
+    // can't leak a longer tail into the extract step.
+    const tmp_file = std.Io.Dir.createFileAbsolute(io, tmp_path, .{ .truncate = true }) catch return BottleError.IoError;
     tmp_file.writeStreamingAll(io, body.items) catch {
         tmp_file.close(io);
         return BottleError.IoError;
