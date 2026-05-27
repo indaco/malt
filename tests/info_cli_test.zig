@@ -14,6 +14,7 @@ const info = malt.cli_info;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const output = malt.output;
+const color = malt.color;
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -115,6 +116,10 @@ fn captureExecute(
     args: []const []const u8,
     tag: []const u8,
 ) ![]u8 {
+    // Pin color off so byte-level human assertions don't break when
+    // stderr is a TTY (e.g. under `kcov`).
+    color.setForTest(false, null);
+
     const ts = test_io.nanoTimestamp(std.Options.debug_io);
     const cap_path = try std.fmt.allocPrintSentinel(
         allocator,
