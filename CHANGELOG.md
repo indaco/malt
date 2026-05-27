@@ -4,6 +4,85 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.14.0 - 2026-05-27
+
+### Highlights
+
+v0.14.0 makes malt usable on the networks people actually have - corporate proxies, air-gapped fleets, and machines that go offline without warning.
+
+- **Corporate mirrors via env.** `MALT_API_DOMAIN` and `MALT_BOTTLE_DOMAIN` retarget the formula API and bottle downloads at internal mirrors.
+- **`mt install --download-only` prefetches bottles, casks, and tap formulas without installing them.** The seed step for air-gapped machines fed from a connected one.
+- **`MALT_OFFLINE` / `--offline` makes refusal a contract.** Reads serve from cache; mutators that would silently hit the network fail fast instead.
+- **ETag-aware tap HEAD resolve.** `mt outdated` against third-party taps reuses cached commit SHAs, keeping routine audits inside GitHub's anonymous rate limit.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🚀 Enhancements
+
+- etag aware tap head resolve ([159fdc7](https://github.com/indaco/malt/commit/159fdc7)) ([#386](https://github.com/indaco/malt/pull/386))
+- honour MALT_OFFLINE and --offline ([7dec164](https://github.com/indaco/malt/commit/7dec164)) ([#385](https://github.com/indaco/malt/pull/385))
+- **cli/install:** extend --download-only mode to tap formulas ([bc9b277](https://github.com/indaco/malt/commit/bc9b277)) ([#384](https://github.com/indaco/malt/pull/384))
+- **cli/install:** add --download-only mode for bottles and casks ([827094d](https://github.com/indaco/malt/commit/827094d)) ([#382](https://github.com/indaco/malt/pull/382))
+- **net:** honour MALT_API_DOMAIN and MALT_BOTTLE_DOMAIN ([974c5f8](https://github.com/indaco/malt/commit/974c5f8)) ([#380](https://github.com/indaco/malt/pull/380))
+
+### 🩹 Fixes
+
+- opportunistic latent low-severity hardening ([cbee732](https://github.com/indaco/malt/commit/cbee732)) ([#389](https://github.com/indaco/malt/pull/389))
+- **cli/install:** propagate single-package install failures to a non-zero exit ([8aa6025](https://github.com/indaco/malt/commit/8aa6025)) ([#388](https://github.com/indaco/malt/pull/388))
+- **cli/install:** exit non-zero when the cask DB row didn't persist ([308e9f7](https://github.com/indaco/malt/commit/308e9f7)) ([#387](https://github.com/indaco/malt/pull/387))
+- **core:** plug temp-clone leak and surface broken opt symlinks ([9bdd624](https://github.com/indaco/malt/commit/9bdd624)) ([#363](https://github.com/indaco/malt/pull/363))
+
+### 💅 Refactors
+
+- small Zig idiom cleanups ([d1fdd19](https://github.com/indaco/malt/commit/d1fdd19)) ([#377](https://github.com/indaco/malt/pull/377))
+- **main:** rename version flag to break version_cmd collision ([8f709fc](https://github.com/indaco/malt/commit/8f709fc)) ([#374](https://github.com/indaco/malt/pull/374))
+- rename SCREAMING_SNAKE_CASE constants to snake_case ([118a4a7](https://github.com/indaco/malt/commit/118a4a7)) ([#373](https://github.com/indaco/malt/pull/373))
+- **ui/output:** collapse info/warn/success scaffold via comptime ([e3726e9](https://github.com/indaco/malt/commit/e3726e9)) ([#372](https://github.com/indaco/malt/pull/372))
+- **core/cask:** surface sqlite errors at the boundary ([74c4b8d](https://github.com/indaco/malt/commit/74c4b8d)) ([#371](https://github.com/indaco/malt/pull/371))
+- **core/bundle:** type dispatcher errors ([2784213](https://github.com/indaco/malt/commit/2784213)) ([#370](https://github.com/indaco/malt/pull/370))
+- thread caller allocator into worker arenas ([c2ed157](https://github.com/indaco/malt/commit/c2ed157)) ([#369](https://github.com/indaco/malt/pull/369))
+- **cli/install:** commit to the thin-orchestrator shape ([b230f11](https://github.com/indaco/malt/commit/b230f11)) ([#368](https://github.com/indaco/malt/pull/368))
+- **cli/install:** split rb-parse from local orchestration ([cb7ee84](https://github.com/indaco/malt/commit/cb7ee84)) ([#367](https://github.com/indaco/malt/pull/367))
+- **cli/install:** drive the install pool through installKegFromBottle ([2a34ef6](https://github.com/indaco/malt/commit/2a34ef6)) ([#366](https://github.com/indaco/malt/pull/366))
+- **cli/upgrade:** share install pipeline and dedup recordKeg ([9e2dba4](https://github.com/indaco/malt/commit/9e2dba4)) ([#365](https://github.com/indaco/malt/pull/365))
+- **cli/outdated:** split snapshot, rows, refresh, orchestrator ([7386ba4](https://github.com/indaco/malt/commit/7386ba4)) ([#364](https://github.com/indaco/malt/pull/364))
+- **update/notifier:** split policy and cache ([22efdda](https://github.com/indaco/malt/commit/22efdda)) ([#362](https://github.com/indaco/malt/pull/362))
+- **core:** extract signals module from main ([aef438f](https://github.com/indaco/malt/commit/aef438f)) ([#361](https://github.com/indaco/malt/pull/361))
+- **core/hash:** host constantTimeEql, guard core→cli boundary ([d5f59a9](https://github.com/indaco/malt/commit/d5f59a9)) ([#360](https://github.com/indaco/malt/pull/360))
+
+### 📖 Documentation
+
+- update badges and release notes ([5767539](https://github.com/indaco/malt/commit/5767539)) ([#392](https://github.com/indaco/malt/pull/392))
+- **benchmark:** update results 2026-05-26 ([d324a58](https://github.com/indaco/malt/commit/d324a58)) ([#390](https://github.com/indaco/malt/pull/390))
+- **readme:** add MALT_API_DOMAIN and MALT_BOTTLE_DOMAIN env vars ([6fd12c4](https://github.com/indaco/malt/commit/6fd12c4)) ([#383](https://github.com/indaco/malt/pull/383))
+- **benchmark:** update results 2026-05-25 ([049aedd](https://github.com/indaco/malt/commit/049aedd)) ([#381](https://github.com/indaco/malt/pull/381))
+
+### ✅ Tests
+
+- stabilize info_cli human-output assertions under TTY stderr ([4fee64c](https://github.com/indaco/malt/commit/4fee64c)) ([#391](https://github.com/indaco/malt/pull/391))
+
+### 🏡 Chores
+
+- **release:** cross-check cask binary paths against the tarball layout ([df61a3f](https://github.com/indaco/malt/commit/df61a3f)) ([#379](https://github.com/indaco/malt/pull/379))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+
 ## v0.13.1 - 2026-05-24
 
 ### 🩹 Fixes
