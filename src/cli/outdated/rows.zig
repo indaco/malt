@@ -76,11 +76,22 @@ pub fn loadCaskRows(
     return loadKegRows(allocator, db, sql, bind);
 }
 
-/// True iff the given `<user/repo>` label is a tap registered in the
-/// local `taps` table. Used by `outdated`'s `--tap` flag to fail
-/// clearly on typos before any network or cache I/O.
+/// True iff the given `<user/repo>` label is known anywhere the
+/// `--tap` audit can act on: the local `taps` registry, or any
+/// installed row's `tap` column. Used by `outdated`'s `--tap` flag
+/// to fail clearly on typos without rejecting taps the user has
+/// `untap`ped while keeping their installs.
 pub fn tapExists(db: *sqlite.Database, label: []const u8) !bool {
-    var stmt = try db.prepare("SELECT 1 FROM taps WHERE name = ?1 LIMIT 1;");
+    // Three sources, single round-trip: `?1` is reused across the
+    // UNION ALL legs. `LIMIT 1` short-circuits after the first match.
+    var stmt = try db.prepare(
+        \\SELECT 1 FROM taps  WHERE name = ?1
+        \\UNION ALL
+        \\SELECT 1 FROM kegs  WHERE tap  = ?1
+        \\UNION ALL
+        \\SELECT 1 FROM casks WHERE tap  = ?1
+        \\LIMIT 1;
+    );
     defer stmt.finalize();
     try stmt.bindText(1, label);
     return stmt.step() catch false;

@@ -538,6 +538,74 @@ test "tapExists is true for a registered tap and false otherwise" {
     try testing.expect(!try outdated_mod.tapExists(&db, "missing/tap"));
 }
 
+test "tapExists accepts a label still referenced by an installed keg after untap" {
+    // Real-world: `mt untap user/repo` drops the taps row but leaves
+    // installed kegs/casks tagged with that label. The audit must
+    // still scope to those rows; rejecting would surface as a typo
+    // error for a tap the user clearly still has packages from.
+    const path = try setupPinnedPrefix("tap_exists_after_untap_keg");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    // No taps row — the user untapped but kept the install.
+    try insertKegWithTap(&db, "leftover", "user/repo");
+
+    try testing.expect(try outdated_mod.tapExists(&db, "user/repo"));
+}
+
+test "tapExists accepts a label still referenced by an installed cask after untap" {
+    const path = try setupPinnedPrefix("tap_exists_after_untap_cask");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertCaskWithTap(&db, "leftover-cask", "user/repo");
+
+    try testing.expect(try outdated_mod.tapExists(&db, "user/repo"));
+}
+
+test "tapExists rejects a label with no row in taps, kegs, or casks" {
+    // Typo guard — the audit still has to fail clearly when the
+    // label simply doesn't exist anywhere in the local DB.
+    const path = try setupPinnedPrefix("tap_exists_typo_guard");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertTap(&db, "user/repo");
+    try insertKegWithTap(&db, "from-known", "user/repo");
+    try insertCaskWithTap(&db, "known-cask", "user/repo");
+
+    try testing.expect(!try outdated_mod.tapExists(&db, "typo/tap"));
+}
+
+test "outdated execute --tap accepts a label kept alive only by installed rows" {
+    // End-to-end: post-untap, the user runs `mt outdated --tap user/repo`
+    // expecting the audit to still scope to their lingering installs.
+    const path = try setupPinnedPrefix("exec_tap_after_untap");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openSeededDb(path);
+        defer db.close();
+        try insertKegWithTap(&db, "leftover", "user/repo");
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try outdated_mod.execute(&ctx, testing.allocator, &.{ "--tap", "user/repo" });
+}
+
 test "outdated execute --tap rejects an unknown tap before any cache write" {
     const path = try setupPinnedPrefix("exec_tap_unknown");
     defer testing.allocator.free(path);
