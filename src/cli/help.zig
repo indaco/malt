@@ -137,6 +137,9 @@ const outdated_help =
     \\  --formula      Show outdated formulas only
     \\  --cask         Show outdated casks only
     \\  --pinned-only  Audit pinned formulas + casks only (CVE watch)
+    \\  --tap <label>  Only packages from <label> (e.g. `user/repo`).
+    \\                 Strict equality: legacy v6-era casks with no
+    \\                 recorded tap won't match. Forces a live recompute.
     \\  --refresh      Force live recompute, bypassing the cached snapshot
     \\  --quiet, -q    Suppress status messages
     \\
