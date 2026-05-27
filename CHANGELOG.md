@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.13.1 - 2026-05-24
+
+### 🩹 Fixes
+
+- **release:** drop wrap_in_directory so cask paths resolve ([6369a2a](https://github.com/indaco/malt/commit/6369a2a)) ([#376](https://github.com/indaco/malt/pull/376))
+
+### 🎉 New Contributors
+
+- [@buggerman](https://github.com/buggerman) made their first contribution in [#376](https://github.com/indaco/malt/pull/376)
+
+### ❤️ Contributors
+
+- [@buggerman](https://github.com/buggerman)
+
 ## v0.13.0 - 2026-05-18
 
 ### Highlights
