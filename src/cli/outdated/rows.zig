@@ -46,7 +46,8 @@ pub fn loadFormulaRows(
     const sql: [:0]const u8 = switch (filter) {
         .all => "SELECT name, version FROM kegs ORDER BY name;",
         .pinned_only => "SELECT name, version FROM kegs WHERE pinned = 1 ORDER BY name;",
-        .by_tap => "SELECT name, version FROM kegs WHERE tap = ?1 ORDER BY name;",
+        // NOCASE so `--tap User/Repo` resolves a row stored lowercase.
+        .by_tap => "SELECT name, version FROM kegs WHERE tap = ?1 COLLATE NOCASE ORDER BY name;",
     };
     const bind: ?[]const u8 = switch (filter) {
         .by_tap => |label| label,
@@ -67,7 +68,8 @@ pub fn loadCaskRows(
     const sql: [:0]const u8 = switch (filter) {
         .all => "SELECT token, version, tap FROM casks ORDER BY token;",
         .pinned_only => "SELECT token, version, tap FROM casks WHERE pinned = 1 ORDER BY token;",
-        .by_tap => "SELECT token, version, tap FROM casks WHERE tap = ?1 ORDER BY token;",
+        // NOCASE so `--tap User/Repo` resolves a row stored lowercase.
+        .by_tap => "SELECT token, version, tap FROM casks WHERE tap = ?1 COLLATE NOCASE ORDER BY token;",
     };
     const bind: ?[]const u8 = switch (filter) {
         .by_tap => |label| label,
@@ -83,18 +85,21 @@ pub fn loadCaskRows(
 /// `untap`ped while keeping their installs.
 pub fn tapExists(db: *sqlite.Database, label: []const u8) !bool {
     // Three sources, single round-trip: `?1` is reused across the
-    // UNION ALL legs. `LIMIT 1` short-circuits after the first match.
+    // UNION ALL legs; `COLLATE NOCASE` matches `--tap User/Repo`
+    // against a lowercase row; `LIMIT 1` short-circuits after the
+    // first match. Caller propagates `error.PrepareFailed` so a
+    // broken schema is diagnosed distinctly from a typo.
     var stmt = try db.prepare(
-        \\SELECT 1 FROM taps  WHERE name = ?1
+        \\SELECT 1 FROM taps  WHERE name = ?1 COLLATE NOCASE
         \\UNION ALL
-        \\SELECT 1 FROM kegs  WHERE tap  = ?1
+        \\SELECT 1 FROM kegs  WHERE tap  = ?1 COLLATE NOCASE
         \\UNION ALL
-        \\SELECT 1 FROM casks WHERE tap  = ?1
+        \\SELECT 1 FROM casks WHERE tap  = ?1 COLLATE NOCASE
         \\LIMIT 1;
     );
     defer stmt.finalize();
     try stmt.bindText(1, label);
-    return stmt.step() catch false;
+    return try stmt.step();
 }
 
 /// Caller-side free for any rows returned by `loadFormulaRows` /

@@ -144,6 +144,15 @@ pub fn planEmit(
     return .use_snapshot_fresh;
 }
 
+/// Trim ASCII whitespace from a `--tap` label; return null when the
+/// trimmed result is empty so the caller can fail with a precise
+/// error instead of running the DB lookup against `""`.
+pub fn normalizeTapLabel(label: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, label, " \t\n\r");
+    if (trimmed.len == 0) return null;
+    return trimmed;
+}
+
 /// "All clear" summary line for the current scope, or null when at
 /// least one outdated row was already emitted (so we never claim
 /// "everything's fine" alongside a list of outdated packages).
@@ -259,6 +268,17 @@ test "planEmit recomputes when --tap= narrows the scope (equals form)" {
     try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, 0, 0, 24));
 }
 
+test "normalizeTapLabel returns null for empty and whitespace-only labels" {
+    try std.testing.expectEqual(@as(?[]const u8, null), normalizeTapLabel(""));
+    try std.testing.expectEqual(@as(?[]const u8, null), normalizeTapLabel("   "));
+    try std.testing.expectEqual(@as(?[]const u8, null), normalizeTapLabel("\t\n"));
+}
+
+test "normalizeTapLabel trims surrounding whitespace from a valid label" {
+    try std.testing.expectEqualStrings("user/repo", normalizeTapLabel("  user/repo  ").?);
+    try std.testing.expectEqualStrings("user/repo", normalizeTapLabel("user/repo").?);
+}
+
 test "summaryMessage suppresses 'all up to date' when any row was printed" {
     try std.testing.expectEqual(@as(?[]const u8, null), summaryMessage(3, 0, false, false));
     try std.testing.expectEqual(@as(?[]const u8, null), summaryMessage(0, 2, false, false));
@@ -335,8 +355,19 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     // Validate --tap before any cache/network I/O so a typo never
     // writes a partial snapshot or warms an API cache for nothing.
-    if (tap_filter) |label| {
-        const known = tapExists(&db, label) catch false;
+    if (tap_filter) |raw_label| {
+        const label = normalizeTapLabel(raw_label) orelse {
+            output.err("--tap requires a non-empty label (e.g. `--tap user/repo`)", .{});
+            return error.Aborted;
+        };
+        tap_filter = label;
+        const known = tapExists(&db, label) catch |e| {
+            // Distinct from "Unknown tap": prepare/bind failed, so the
+            // schema is mid-migration or the DB is malformed. Point the
+            // user at the right diagnostic instead of "unknown tap".
+            output.err("Could not query taps registry ({s}). Try `mt doctor`.", .{@errorName(e)});
+            return error.Aborted;
+        };
         if (!known) {
             output.err("Unknown tap: '{s}'. Run `mt tap` to list installed taps.", .{label});
             return error.Aborted;

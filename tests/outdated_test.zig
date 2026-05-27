@@ -569,6 +569,94 @@ test "tapExists accepts a label still referenced by an installed cask after unta
     try testing.expect(try outdated_mod.tapExists(&db, "user/repo"));
 }
 
+test "tapExists matches case-insensitively across every source table" {
+    // Tap labels are conventionally lowercase, but the column type is
+    // plain TEXT — a user typing `--tap User/Repo` against a row stored
+    // as `user/repo` must still resolve. Strict equality is a UX trap
+    // we explicitly reject.
+    const path = try setupPinnedPrefix("tap_exists_case_insensitive");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertTap(&db, "user/repo");
+
+    try testing.expect(try outdated_mod.tapExists(&db, "User/Repo"));
+    try testing.expect(try outdated_mod.tapExists(&db, "USER/REPO"));
+}
+
+test "loadFormulaRows .by_tap matches case-insensitively" {
+    const path = try setupPinnedPrefix("by_tap_formula_case");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertKegWithTap(&db, "kegA", "user/repo");
+
+    const rows = try outdated_mod.loadFormulaRows(testing.allocator, &db, .{ .by_tap = "User/Repo" });
+    defer outdated_mod.freeKegRows(testing.allocator, rows);
+
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("kegA", rows[0].name);
+}
+
+test "loadCaskRows .by_tap matches case-insensitively" {
+    const path = try setupPinnedPrefix("by_tap_cask_case");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertCaskWithTap(&db, "caskA", "user/repo");
+
+    const rows = try outdated_mod.loadCaskRows(testing.allocator, &db, .{ .by_tap = "USER/repo" });
+    defer outdated_mod.freeKegRows(testing.allocator, rows);
+
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("caskA", rows[0].name);
+}
+
+test "tapExists surfaces a SqliteError when the source tables are missing" {
+    // Open the DB without ever running initSchema; the UNION ALL has
+    // nothing to prepare against and the error must propagate so
+    // `execute` can distinguish "broken schema" from "unknown tap".
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+
+    const res = outdated_mod.tapExists(&db, "user/repo");
+    try testing.expectError(error.PrepareFailed, res);
+}
+
+test "outdated execute --tap with an empty label fails clearly" {
+    const path = try setupPinnedPrefix("exec_tap_empty");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    {
+        var db = try openSeededDb(path);
+        defer db.close();
+        try insertTap(&db, "user/repo");
+    }
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        error.Aborted,
+        outdated_mod.execute(&ctx, testing.allocator, &.{ "--tap", "" }),
+    );
+    try testing.expectError(
+        error.Aborted,
+        outdated_mod.execute(&ctx, testing.allocator, &.{ "--tap", "   " }),
+    );
+}
+
 test "tapExists rejects a label with no row in taps, kegs, or casks" {
     // Typo guard — the audit still has to fail clearly when the
     // label simply doesn't exist anywhere in the local DB.
