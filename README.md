@@ -199,6 +199,7 @@ Usage: malt <command> [options] [arguments]
 
 Commands:
   install       Install formulas, casks, or tap formulas
+  reinstall     Wipe and re-materialise an installed package
   uninstall     Remove installed packages
   upgrade       Upgrade installed packages
   update        Refresh metadata cache
@@ -247,6 +248,8 @@ mt install --dry-run jq                  # preview without installing
 ```
 
 Other flags: `--force` (overwrite existing), `--use-system-ruby[=<name>,…]` (delegate `post_install` to system Ruby, sandboxed, per-formula), `--quiet`/`-q`, `--json`.
+
+`mt reinstall <pkg>` is the discoverable peer of `mt install --force`. It looks the package up in the DB, refuses cleanly if it isn't installed, and otherwise forwards through the shared install pipeline with `--force` so the existing keg or cask is wiped and re-materialised. Reinstall is package-scoped — transitive dependencies are not reinstalled. Global flags (`--json`, `--quiet`, `--dry-run`) pass through unchanged.
 
 `mt run <pkg> -- <args...>` runs a binary without a permanent install. Useful for one-off invocations:
 

@@ -17,6 +17,7 @@ const migrate = @import("cli/migrate.zig");
 const outdated = @import("cli/outdated.zig");
 const pin_cmd = @import("cli/pin.zig");
 const purge = @import("cli/purge.zig");
+const reinstall = @import("cli/reinstall.zig");
 const restore = @import("cli/restore.zig");
 const rollback = @import("cli/rollback.zig");
 const run_cmd = @import("cli/run.zig");
@@ -80,6 +81,7 @@ fn maltLogFn(
 // CLI command modules
 const Command = enum {
     install,
+    reinstall,
     uninstall,
     upgrade,
     update,
@@ -120,6 +122,7 @@ const command_names = [_]struct {
     names: []const []const u8,
 }{
     .{ .tag = .install, .names = &.{"install"} },
+    .{ .tag = .reinstall, .names = &.{"reinstall"} },
     .{ .tag = .uninstall, .names = &.{ "uninstall", "remove" } },
     .{ .tag = .upgrade, .names = &.{"upgrade"} },
     .{ .tag = .update, .names = &.{"update"} },
@@ -260,6 +263,12 @@ test "command_map resolves cleanup to the cleanup tag" {
     // `mt cleanup` is the Homebrew-shaped alias for `mt purge --housekeeping`.
     // Pin the tag so a rename can't silently break the dispatch arm.
     try std.testing.expectEqual(@as(?Command, .cleanup), command_map.get("cleanup"));
+}
+
+test "command_map resolves reinstall to the reinstall tag" {
+    // `mt reinstall` is the discoverable verb for `mt install --force`.
+    // Pin the tag so a rename can't silently break the dispatch arm.
+    try std.testing.expectEqual(@as(?Command, .reinstall), command_map.get("reinstall"));
 }
 
 test "dispatch clears stale interrupt under the test runner" {
@@ -449,6 +458,7 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
     }
     switch (cmd) {
         .install => try install.execute(ctx, allocator, cmd_args),
+        .reinstall => try reinstall.execute(ctx, allocator, cmd_args),
         .uninstall => try uninstall.execute(ctx, allocator, cmd_args),
         .upgrade => try upgrade.execute(ctx, allocator, cmd_args),
         .update => try update.execute(ctx, allocator, cmd_args),
@@ -500,6 +510,7 @@ fn printUsage(ctx: *const AppCtx) void {
         \\
         \\Commands:
         \\  install       Install formulas, casks, or tap formulas
+        \\  reinstall     Wipe and re-materialise an installed package
         \\  uninstall     Remove installed packages
         \\  upgrade       Upgrade installed packages
         \\  update        Refresh metadata cache

@@ -87,7 +87,7 @@ pub const bash_script =
     \\    words=("${COMP_WORDS[@]}")
     \\    cword=$COMP_CWORD
     \\
-    \\    local commands="install uninstall remove upgrade update outdated list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services bundle help"
+    \\    local commands="install reinstall uninstall remove upgrade update outdated list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services bundle help"
     \\    local global_flags="--verbose -v --quiet -q --json --output-format=ndjson --dry-run --offline --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
@@ -138,6 +138,7 @@ pub const bash_script =
     \\    local cmd_flags=""
     \\    case "$cmd" in
     \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-dependencies --quiet -q --json" ;;
+    \\        reinstall)        cmd_flags="--cask --dry-run --quiet -q --json" ;;
     \\        backup)           cmd_flags="--output -o --versions --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
@@ -195,6 +196,7 @@ pub const zsh_script =
     \\
     \\    commands=(
     \\        'install:Install formulas, casks, or tap formulas'
+    \\        'reinstall:Wipe and re-materialise an installed package'
     \\        'uninstall:Remove installed packages'
     \\        'remove:Remove installed packages (alias for uninstall)'
     \\        'upgrade:Upgrade installed packages'
@@ -256,6 +258,14 @@ pub const zsh_script =
     \\                        '--force[Overwrite existing installations]' \
     \\                        '--download-only[Warm the bottle, cask, or tap-archive cache; skip install]' \
     \\                        '--only-dependencies[Install transitive deps, skip the requested package]' \
+    \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
+    \\                        '--json[Output result as JSON]' \
+    \\                        '*::package:'
+    \\                    ;;
+    \\                reinstall)
+    \\                    _arguments \
+    \\                        '--cask[Force cask path (auto-detected from the DB)]' \
+    \\                        '--dry-run[Show what would be reinstalled]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
     \\                        '--json[Output result as JSON]' \
     \\                        '*::package:'
@@ -484,6 +494,7 @@ pub const fish_script =
     \\
     \\    # Subcommands
     \\    complete -c $__malt_bin -n __malt_needs_command -a install     -d 'Install formulas, casks, or tap formulas'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a reinstall   -d 'Wipe and re-materialise an installed package'
     \\    complete -c $__malt_bin -n __malt_needs_command -a uninstall   -d 'Remove installed packages'
     \\    complete -c $__malt_bin -n __malt_needs_command -a remove      -d 'Remove installed packages (alias)'
     \\    complete -c $__malt_bin -n __malt_needs_command -a upgrade     -d 'Upgrade installed packages'
@@ -526,6 +537,11 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l download-only -d 'Warm the bottle, cask, or tap-archive cache; skip install'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l only-dependencies -d 'Install transitive deps; skip the requested package'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l json    -d 'JSON output'
+    \\
+    \\    # reinstall
+    \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l cask    -d 'Force cask path (auto-detected from the DB)'
+    \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l dry-run -d 'Preview'
+    \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l json    -d 'JSON output'
     \\
     \\    # uninstall / remove
     \\    complete -c $__malt_bin -n '__malt_using_command uninstall' -l force   -d 'Remove even if depended on'

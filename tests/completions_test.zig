@@ -36,14 +36,14 @@ test "scriptFor routes each shell to a non-empty script" {
 }
 
 const all_commands = [_][]const u8{
-    "install", "uninstall",   "remove",   "upgrade",
-    "update",  "outdated",    "list",     "ls",
-    "info",    "search",      "doctor",   "tap",
-    "untap",   "migrate",     "rollback", "link",
-    "unlink",  "pin",         "unpin",    "run",
-    "version", "completions", "shellenv", "backup",
-    "restore", "purge",       "cleanup",  "services",
-    "bundle",  "which",       "deps",
+    "install",  "reinstall", "uninstall",   "remove",
+    "upgrade",  "update",    "outdated",    "list",
+    "ls",       "info",      "search",      "doctor",
+    "tap",      "untap",     "migrate",     "rollback",
+    "link",     "unlink",    "pin",         "unpin",
+    "run",      "version",   "completions", "shellenv",
+    "backup",   "restore",   "purge",       "cleanup",
+    "services", "bundle",    "which",       "deps",
 };
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
@@ -155,6 +155,15 @@ test "purge completions surface --json and --output-format=ndjson" {
     // surfaces as a purge-specific failure.
     try expectContains(completions.bash_script, "--output-format=ndjson");
     try expectContains(completions.fish_script, "output-format=ndjson");
+}
+
+test "all completions expose reinstall as a top-level verb" {
+    // Substring presence isn't enough — `restore`/`reinstall` overlap
+    // English-wise, so pin the per-shell token shapes used for the
+    // top-level command row.
+    try expectContains(completions.bash_script, "install reinstall uninstall");
+    try expectContains(completions.zsh_script, "'reinstall:");
+    try expectContains(completions.fish_script, "__malt_needs_command -a reinstall");
 }
 
 test "all completions expose cleanup as a top-level verb" {
