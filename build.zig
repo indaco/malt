@@ -174,6 +174,7 @@ pub fn build(b: *std.Build) void {
         "tests/install_ambiguity_test.zig",
         "tests/install_download_only_test.zig",
         "tests/install_idempotent_test.zig",
+        "tests/reinstall_test.zig",
         "tests/no_readall_in_loop_test.zig",
         "tests/test_io_primitives_test.zig",
         "tests/no_io_mod_in_src_test.zig",

@@ -22,6 +22,7 @@ pub fn showIfRequested(ctx: *const AppCtx, args: []const []const u8, command: []
 pub fn helpFor(command: []const u8) []const u8 {
     const map = std.StaticStringMap([]const u8).initComptime(.{
         .{ "install", install_help },
+        .{ "reinstall", reinstall_help },
         .{ "uninstall", uninstall_help },
         .{ "upgrade", upgrade_help },
         .{ "update", update_help },
@@ -84,6 +85,31 @@ const install_help =
     \\                     package; use =<name>,... to scope when installing multiple.
     \\  --quiet, -q        Suppress non-error output
     \\  --json             Output result as JSON
+    \\
+;
+
+const reinstall_help =
+    \\Usage: malt reinstall <package> [flags]
+    \\
+    \\Wipe and re-materialise an already-installed package through the
+    \\shared install pipeline. The discoverable peer of `malt install
+    \\--force`; lets you fix a corrupted Cellar entry or re-run the
+    \\install protocol without retyping the --force flag.
+    \\
+    \\Reinstall is package-scoped — transitive dependencies are NOT
+    \\reinstalled. To rebuild a dep, name it explicitly.
+    \\
+    \\Flags pass through to `install`; the common ones:
+    \\  --cask               Force cask path (auto-detected from the DB row)
+    \\  --dry-run            Show what would be reinstalled
+    \\  --quiet, -q          Suppress non-error output
+    \\  --json               JSON output (mirrors `mt install --json`)
+    \\  --output-format=ndjson
+    \\                       Stream one event per state transition
+    \\
+    \\Examples:
+    \\  malt reinstall wget
+    \\  malt reinstall --cask firefox
     \\
 ;
 

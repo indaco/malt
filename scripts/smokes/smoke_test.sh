@@ -154,7 +154,7 @@ else
 fi
 
 # Per-command --help on everything documented.
-for cmd in install uninstall upgrade update outdated list info search uses deps which \
+for cmd in install reinstall uninstall upgrade update outdated list info search uses deps which \
   doctor purge cleanup tap untap migrate backup restore services bundle \
   rollback run link unlink pin unpin version completions shellenv; do
   run_ok "t1.help.$cmd" -- "$MT_BIN" "$cmd" --help

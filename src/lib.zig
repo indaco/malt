@@ -29,6 +29,7 @@ pub const cli_pin = @import("cli/pin.zig");
 pub const purge = @import("cli/purge.zig");
 pub const purge_json = @import("cli/purge/json.zig");
 pub const purge_report = @import("cli/purge/report.zig");
+pub const cli_reinstall = @import("cli/reinstall.zig");
 pub const cli_restore = @import("cli/restore.zig");
 pub const cli_rollback = @import("cli/rollback.zig");
 pub const cli_run = @import("cli/run.zig");
