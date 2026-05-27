@@ -2,7 +2,7 @@
 
 **A fast, drop-in Homebrew alternative for macOS. Warm installs in milliseconds. `post_install` scripts that actually run. Goes wider than `install` and `uninstall`.**
 
-Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosystem; installs to its own prefix; ~3 MB single binary; ~3 ms cold start. `mt services` with `logs --follow`, `mt bundle` with full Brewfile parity, `mt doctor --fix`, `mt purge` with composable scopes, `mt backup`/`restore`, `mt uses` for reverse dependencies. Designed by a human and implemented by AI.
+Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosystem; installs to its own prefix; ~3 MB single binary; ~3 ms cold start. Designed by a human and implemented by AI.
 
 ![macOS only](https://img.shields.io/badge/platform-macOS-blue)
 ![Version](https://img.shields.io/github/v/tag/indaco/malt?label=version&sort=semver&color=4c1)
@@ -65,7 +65,7 @@ If you're scanning rather than reading, here is the surface area in one place.
 
 Three install paths - pick the one that matches your setup.
 
-### One-liner script (recommended)
+### One-liner script
 
 The script downloads the latest release, verifies the SHA256 checksum **and a cosign keyless signature** against the GitHub Actions workflow that produced it, installs the binary to `/usr/local/bin/`, and creates `/opt/malt` with proper ownership.
 
@@ -611,33 +611,39 @@ For installing malt from a local checkout (the end-user path), see [From source]
 Install times on macOS 14 (Apple Silicon), comparing malt against other Homebrew-compatible package managers.
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install (median ±σ)
 
-| Package | malt | nanobrew | zerobrew | Homebrew |
-| ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.449±0.093s | 0.482±0.086s | 0.909±0.112s | 3.733±0.427s |
-| **wget** (6 deps) | 2.623±0.347s | 2.894±0.283s | 7.336±0.732s | 4.736±0.318s |
+| Package              | malt         | nanobrew     | zerobrew     | Homebrew      |
+| -------------------- | ------------ | ------------ | ------------ | ------------- |
+| **tree** (0 deps)    | 0.449±0.093s | 0.482±0.086s | 0.909±0.112s | 3.733±0.427s  |
+| **wget** (6 deps)    | 2.623±0.347s | 2.894±0.283s | 7.336±0.732s | 4.736±0.318s  |
 | **ffmpeg** (11 deps) | 3.728±0.631s | 3.532±0.275s | 8.534±0.930s | 23.689±1.734s |
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew |
-| ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.010s | 0.012s | 0.302s |
-| **wget** (6 deps) | 0.013s | 0.019s | 1.020s |
-| **ffmpeg** (11 deps) | 0.041s | 0.020s | 3.843s |
+| Package              | malt   | nanobrew | zerobrew |
+| -------------------- | ------ | -------- | -------- |
+| **tree** (0 deps)    | 0.010s | 0.012s   | 0.302s   |
+| **wget** (6 deps)    | 0.013s | 0.019s   | 1.020s   |
+| **ffmpeg** (11 deps) | 0.041s | 0.020s   | 3.843s   |
+
 <!-- BENCH:WARM:END -->
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size   |
+| -------- | ------ |
 | **malt** | 3.6 MB |
 | nanobrew | 2.6 MB |
 | zerobrew | 8.6 MB |
+
 <!-- BENCH:SIZE:END -->
 
 Apple Silicon (GitHub Actions macos-14), 2026-05-26. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
