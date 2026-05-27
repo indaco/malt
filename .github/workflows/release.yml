@@ -233,10 +233,14 @@ jobs:
       - name: Verify cask paths resolve in tarball
         # Static cross-check: every `binary "..."` and `#{staged_path}/...`
         # declared by the rendered cask must exist under the extracted
-        # tarball root. Closes the gap that let #375 ship — a tarball
-        # that ran fine via install.sh but broke `brew install --cask`.
+        # tarball root. Closes the gap that let a prior release ship a
+        # tarball that ran fine via install.sh but broke `brew install --cask`.
         run: |
-          mapfile -t found < <(find /tmp/cask -type f -name '*.rb')
+          # macos-14's /bin/bash is 3.2; avoid bash 4+ builtins (mapfile).
+          found=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && found+=("$line")
+          done < <(find /tmp/cask -type f -name '*.rb')
           if [ "${#found[@]}" -ne 1 ]; then
             echo "::error::expected exactly one .rb in cask artifact, got ${#found[@]}"
             printf '  %s\n' "${found[@]}" >&2
