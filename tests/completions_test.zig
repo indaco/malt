@@ -186,3 +186,12 @@ test "all bundle completions expose the cleanup subcommand and its flags" {
     try expectContains(completions.zsh_script, "cleanup[");
     try expectContains(completions.fish_script, "-l yes");
 }
+
+test "backup completions expose --services across every shell" {
+    // `mt backup --services` is the user-visible verb that closes the
+    // launchd-bootstrap round-trip; the completions must surface it so
+    // it's discoverable without consulting --help.
+    try expectContains(completions.bash_script, "--services");
+    try expectContains(completions.zsh_script, "'--services[");
+    try expectContains(completions.fish_script, "-l services");
+}

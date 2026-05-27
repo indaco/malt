@@ -6,11 +6,12 @@
 //! the install tests — restore just emits the argv and forwards.
 
 const std = @import("std");
-const malt = @import("malt");
-const test_io = @import("test_io");
 const testing = std.testing;
+
+const malt = @import("malt");
 const restore = malt.cli_restore;
 const output = malt.output;
+const test_io = @import("test_io");
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -168,4 +169,95 @@ test "execute treats unknown kinds as comments and reports zero entries" {
     output.setQuiet(true);
     defer output.setQuiet(false);
     try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
+}
+
+// --- service-entry dispatch ---------------------------------------------
+
+test "execute summary line carries formula + cask + service counts in that order" {
+    // Pin the exact summary phrasing so users grepping for "service(s)"
+    // in their restore output don't suddenly miss it after a future
+    // formatting tweak.
+    var s = try Scratch.init(testing.allocator, "summary");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\formula wget
+        \\cask firefox
+        \\service postgresql@16
+        \\
+    );
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    output.setDryRun(true);
+    defer output.setDryRun(false);
+
+    try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1 formula(e), 1 cask(s) and 1 service(s)") != null);
+}
+
+test "execute --dry-run buckets a service entry and prints it after formulas/casks" {
+    // T-042 surface contract: services arrive ordered after kegs so the
+    // launchd bootstrap happens once the keg backing each service exists.
+    var s = try Scratch.init(testing.allocator, "dry_services");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    try writeFile(path,
+        \\formula postgresql@16
+        \\service postgresql@16
+        \\
+    );
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    output.setDryRun(true);
+    defer output.setDryRun(false);
+
+    try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
+
+    // Summary line counts services alongside formulae and casks.
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "1 service(s)") != null);
+    // Per-entry dry-run line for the service surfaces with the full label.
+    const svc_line = std.mem.indexOf(u8, stderr_buf.items, "service postgresql@16") orelse
+        return error.MissingServiceDryRunLine;
+    const formula_line = std.mem.indexOf(u8, stderr_buf.items, "formula postgresql@16") orelse
+        return error.MissingFormulaDryRunLine;
+    // Services must come after kegs in dispatch order.
+    try testing.expect(svc_line > formula_line);
+}
+
+test "execute warns-and-continues when a service entry can't be bootstrapped" {
+    // Acceptance: missing kegs (no services row to look up) must not
+    // fail the restore. The supervisor returns ServiceNotFound; restore
+    // catches it, surfaces a warning naming the service, and returns
+    // success so the rest of the backup keeps applying.
+    var s = try Scratch.init(testing.allocator, "missing_keg_service");
+    defer s.deinit(testing.allocator);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(path);
+    // db/ must exist so services_cmd can open the DB and init the schema.
+    const db_dir = try std.fmt.allocPrint(testing.allocator, "{s}/db", .{s.path});
+    defer testing.allocator.free(db_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, db_dir);
+
+    try writeFile(path, "service ghost_service\n");
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    // Not dry-run — exercise the real dispatch arm.
+    try restore.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{path});
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "ghost_service") != null);
 }

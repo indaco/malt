@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+
 const malt = @import("malt");
 const backup = malt.backup;
 
@@ -102,6 +103,7 @@ test "parseLine returns null for unknown kinds and malformed lines" {
     // Kind prefix without a name.
     try testing.expect(backup.parseLine("formula ") == null);
     try testing.expect(backup.parseLine("cask   ") == null);
+    try testing.expect(backup.parseLine("service ") == null);
     // No space between kind and name (missed prefix).
     try testing.expect(backup.parseLine("formulagit") == null);
 }
@@ -187,11 +189,16 @@ test "writeEntry + parseBackup round-trip preserves every entry" {
         kind: backup.Kind,
         name: []const u8,
         version: []const u8,
+        expected_version: []const u8,
     }{
-        .{ .kind = .formula, .name = "git", .version = "2.44.0" },
-        .{ .kind = .formula, .name = "wget", .version = "1.24.5" },
-        .{ .kind = .cask, .name = "firefox", .version = "124.0" },
-        .{ .kind = .cask, .name = "slack", .version = "4.36.140" },
+        .{ .kind = .formula, .name = "git", .version = "2.44.0", .expected_version = "2.44.0" },
+        .{ .kind = .formula, .name = "wget", .version = "1.24.5", .expected_version = "1.24.5" },
+        .{ .kind = .cask, .name = "firefox", .version = "124.0", .expected_version = "124.0" },
+        .{ .kind = .cask, .name = "slack", .version = "4.36.140", .expected_version = "4.36.140" },
+        // Services round-trip with the full `name@channel` intact and no
+        // version surfaced — the schema doesn't carry one.
+        .{ .kind = .service, .name = "postgresql@16", .version = "", .expected_version = "" },
+        .{ .kind = .service, .name = "redis", .version = "", .expected_version = "" },
     };
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -209,7 +216,7 @@ test "writeEntry + parseBackup round-trip preserves every entry" {
     inline for (fixtures, 0..) |f, i| {
         try testing.expectEqual(f.kind, entries[i].kind);
         try testing.expectEqualStrings(f.name, entries[i].name);
-        try testing.expectEqualStrings(f.version, entries[i].version);
+        try testing.expectEqualStrings(f.expected_version, entries[i].version);
     }
 }
 

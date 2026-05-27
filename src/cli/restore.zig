@@ -4,11 +4,13 @@
 //! the heavy lifting (DB lock, download, dependency resolution).
 
 const std = @import("std");
+
 const AppCtx = @import("../app_ctx.zig").AppCtx;
-const backup_mod = @import("backup.zig");
-const install_mod = @import("install.zig");
 const output = @import("../ui/output.zig");
+const backup_mod = @import("backup.zig");
 const help = @import("help.zig");
+const install_mod = @import("install.zig");
+const services_mod = @import("services.zig");
 
 pub const Error = error{
     MissingFileArgument,
@@ -72,7 +74,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         return;
     }
 
-    // ── Split into formula / cask arg lists ──────────────────────────────
+    // ── Split into formula / cask / service arg lists ────────────────────
     var formulae: std.ArrayList([]const u8) = .empty;
     defer {
         // Each item is an owned `<name>` or `<name>@<version>` slice.
@@ -85,6 +87,11 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         for (casks.items) |item| allocator.free(item);
         casks.deinit(allocator);
     }
+    var services: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (services.items) |item| allocator.free(item);
+        services.deinit(allocator);
+    }
 
     for (entries) |e| {
         // Reconstruct the install-style argument: `<name>` or `<name>@<version>`
@@ -96,18 +103,21 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         switch (e.kind) {
             .formula => try formulae.append(allocator, arg),
             .cask => try casks.append(allocator, arg),
+            .service => try services.append(allocator, arg),
         }
     }
 
-    output.info("Restoring {d} formula(e) and {d} cask(s) from {s}", .{
+    output.info("Restoring {d} formula(e), {d} cask(s) and {d} service(s) from {s}", .{
         formulae.items.len,
         casks.items.len,
+        services.items.len,
         path,
     });
 
     if (dry_run) {
         for (formulae.items) |name| output.info("  formula {s}", .{name});
         for (casks.items) |name| output.info("  cask    {s}", .{name});
+        for (services.items) |name| output.info("  service {s}", .{name});
         output.info("Dry run — no packages installed.", .{});
         return;
     }
@@ -140,6 +150,16 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         install_mod.execute(ctx, allocator, argv.items) catch |e| {
             output.err("Cask restore returned error: {s}", .{@errorName(e)});
             any_failed = true;
+        };
+    }
+
+    // Services come last so each plist's owning keg already exists. A
+    // missing keg surfaces as ServiceNotFound from the supervisor; we
+    // warn and continue so one missing service doesn't abort the rest
+    // of the restore.
+    for (services.items) |name| {
+        services_mod.servicesStart(ctx, allocator, name) catch |e| {
+            output.warn("service {s} skipped: {s}", .{ name, @errorName(e) });
         };
     }
 

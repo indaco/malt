@@ -426,12 +426,15 @@ const backup_help =
     \\Flags:
     \\  --output, -o <path>  Write to a specific file (use `-` for stdout)
     \\  --versions           Pin each entry to its current version (@ver)
+    \\  --services           Include auto-start services so `malt restore`
+    \\                       re-bootstraps launchd state on the destination
     \\  --quiet, -q          Suppress non-error output
     \\
     \\Examples:
     \\  malt backup
     \\  malt backup -o ~/dotfiles/packages.txt
     \\  malt backup --versions -o - > snapshot.txt
+    \\  malt backup --services -o ~/dotfiles/packages.txt
     \\
 ;
 
