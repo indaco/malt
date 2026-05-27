@@ -6,13 +6,14 @@
 //! fills the dispatch + DB-walk + output-routing branches.
 
 const std = @import("std");
-const malt = @import("malt");
-const test_io = @import("test_io");
 const testing = std.testing;
+
+const malt = @import("malt");
 const backup = malt.backup;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
 const output = malt.output;
+const test_io = @import("test_io");
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -568,8 +569,11 @@ test "execute --json --services composes with --versions and --output -" {
     try testing.expect(parsed.value.object.get("casks") != null);
 }
 
-test "execute --services on plain-text backup is a silent no-op (no `service` line)" {
-    var s = try Scratch.init(testing.allocator, "text_services_noop");
+test "execute --services on plain-text backup emits a `service <name>` line per auto_start row" {
+    // Plain-text parity with the JSON path: `--services` carries the
+    // auto_start invariant into the file `mt restore` consumes, so
+    // launchd state survives a host migration.
+    var s = try Scratch.init(testing.allocator, "text_services_emits");
     defer s.deinit(testing.allocator);
     try seedServices(s.path);
 
@@ -582,8 +586,87 @@ test "execute --services on plain-text backup is a silent no-op (no `service` li
 
     const body = try readAll(testing.allocator, out_path);
     defer testing.allocator.free(body);
+    // auto_start=1 row surfaces with the full `name@channel` intact.
+    try testing.expect(std.mem.indexOf(u8, body, "service postgresql@16\n") != null);
+    // auto_start=0 row stays off the file — the backup carries only the
+    // re-bootstrap invariant, not the full services table.
+    try testing.expect(std.mem.indexOf(u8, body, "service redis") == null);
+}
+
+test "execute without --services omits service lines from plain-text backup" {
+    // Backward compat: the default plain-text shape is unchanged so
+    // pre-T-042 readers and existing user scripts keep parsing byte-
+    // identical files when the flag isn't passed.
+    var s = try Scratch.init(testing.allocator, "text_services_default_off");
+    defer s.deinit(testing.allocator);
+    try seedServices(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", out_path });
+
+    const body = try readAll(testing.allocator, out_path);
+    defer testing.allocator.free(body);
     try testing.expect(std.mem.indexOf(u8, body, "service ") == null);
     try testing.expect(std.mem.indexOf(u8, body, "postgresql@16") == null);
+}
+
+test "execute --services on an empty services table is a clean no-op (plain text)" {
+    // Pin the "presence implies auto_start" contract under the empty
+    // case for plain text: opting in shouldn't synthesise lines.
+    var s = try Scratch.init(testing.allocator, "text_services_empty");
+    defer s.deinit(testing.allocator);
+    // schema only — no services seeded.
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+    }
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--services", "--output", out_path });
+
+    const body = try readAll(testing.allocator, out_path);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "service ") == null);
+}
+
+test "execute --services --versions never appends @version to a service line" {
+    // `--versions` is a formula/cask concern; bleeding into a service
+    // line would re-introduce the `name@channel` ambiguity parseLine
+    // explicitly avoids.
+    var s = try Scratch.init(testing.allocator, "text_services_versions");
+    defer s.deinit(testing.allocator);
+    try seedServices(s.path);
+    try seedRows(s.path);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/snap.txt", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    try backup.execute(
+        &malt.app_ctx.debug_ctx,
+        testing.allocator,
+        &.{ "--services", "--versions", "--output", out_path },
+    );
+
+    const body = try readAll(testing.allocator, out_path);
+    defer testing.allocator.free(body);
+    // Formulas still pinned; the service line stays unsuffixed.
+    try testing.expect(std.mem.indexOf(u8, body, "formula wget@1.21") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "service postgresql@16\n") != null);
+    // No `postgresql@16@<...>` artefact from the version writer.
+    try testing.expect(std.mem.indexOf(u8, body, "postgresql@16@") == null);
 }
 
 test "execute --json with --output <path> writes JSON to the file" {

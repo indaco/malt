@@ -139,7 +139,7 @@ pub const bash_script =
     \\    case "$cmd" in
     \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-dependencies --quiet -q --json" ;;
     \\        reinstall)        cmd_flags="--cask --dry-run --quiet -q --json" ;;
-    \\        backup)           cmd_flags="--output -o --versions --quiet -q" ;;
+    \\        backup)           cmd_flags="--output -o --versions --services --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
     \\        uninstall|remove) cmd_flags="--force --zap --dry-run" ;;
@@ -367,6 +367,7 @@ pub const zsh_script =
     \\                    _arguments \
     \\                        '(--output -o)'{--output,-o}'[Write to a specific file]:path:_files' \
     \\                        '--versions[Pin each entry to its current version]' \
+    \\                        '--services[Include auto-start services so restore re-bootstraps launchd]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]'
     \\                    ;;
     \\                restore)
@@ -641,6 +642,7 @@ pub const fish_script =
     \\    # backup
     \\    complete -c $__malt_bin -n '__malt_using_command backup' -s o -l output   -r -d 'Output file (use - for stdout)'
     \\    complete -c $__malt_bin -n '__malt_using_command backup'      -l versions    -d 'Pin each entry to its current version'
+    \\    complete -c $__malt_bin -n '__malt_using_command backup'      -l services    -d 'Include auto-start services for restore'
     \\
     \\    # restore — positional backup file
     \\    complete -c $__malt_bin -n '__malt_using_command restore' -l dry-run -d 'Preview without installing'

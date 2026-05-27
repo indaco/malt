@@ -93,5 +93,31 @@ echo "=== stop"
 echo "=== final list (expect status=not-loaded after bootout)"
 "$BIN" services list
 
+# --- backup --services + restore round-trip ----------------------------
+# Pins the plain-text half of the bundle/backup round-trip: the
+# service must surface in the file, and restore must re-bootstrap it.
+
+echo "=== mark smoke-echo as auto_start so backup picks it up"
+sqlite3 "$PREFIX/db/malt.db" "UPDATE services SET auto_start = 1 WHERE name = 'smoke-echo';"
+
+SNAP="$PREFIX/snap.txt"
+echo "=== mt backup --services -o $SNAP"
+"$BIN" backup --services -o "$SNAP"
+
+grep -q '^service smoke-echo$' "$SNAP" || {
+  echo "FAIL: expected 'service smoke-echo' line in $SNAP"
+  cat "$SNAP"
+  exit 1
+}
+echo "  ✓ backup carries 'service smoke-echo'"
+
+echo "=== mt restore $SNAP (re-bootstrap via services dispatcher)"
+"$BIN" restore "$SNAP"
+
+# Re-bootstrap means launchd loaded the plist again — clean up so the
+# trap's `services stop` is a no-op rather than a leak across runs.
+echo "=== post-restore stop"
+"$BIN" services stop smoke-echo
+
 echo
 echo "OK — smoke test passed"

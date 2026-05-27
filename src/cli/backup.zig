@@ -15,14 +15,15 @@
 //! honoured by `malt restore`.
 
 const std = @import("std");
+
 const AppCtx = @import("../app_ctx.zig").AppCtx;
-const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
+const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
-pub const Kind = enum { formula, cask };
+pub const Kind = enum { formula, cask, service };
 
 /// A parsed backup entry. For entries produced by `parseBackup`, `name` and
 /// `version` are slices into the input text and live as long as that text.
@@ -61,7 +62,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         } else if (std.mem.eql(u8, arg, "--versions")) {
             include_versions = true;
         } else if (std.mem.eql(u8, arg, "--services")) {
-            // Honoured by the JSON writer below; plain-text has no service line.
+            // Honoured by both writers; plain-text emits `service <name>`
+            // lines per auto_start row, JSON adds a `services` array.
             include_services = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             output.setQuiet(true);
@@ -147,6 +149,22 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 try writeEntry(w, .cask, token, version, include_versions);
             }
             count += 1;
+        }
+    }
+
+    // Mirrors the JSON path's auto_start filter so both writers carry
+    // the same re-bootstrap invariant — presence of the line implies
+    // auto_start, no extra token needed.
+    if (include_services) {
+        var sstmt = db.prepare("SELECT name FROM services WHERE auto_start = 1 ORDER BY name;") catch null;
+        if (sstmt) |*st| {
+            defer st.finalize();
+            while (st.step() catch false) {
+                const name_ptr = st.columnText(0) orelse continue;
+                const name = std.mem.sliceTo(name_ptr, 0);
+                try writeEntry(w, .service, name, "", false);
+                count += 1;
+            }
         }
     }
 
@@ -370,10 +388,13 @@ pub fn writeEntry(w: *std.Io.Writer, kind: Kind, name: []const u8, version: []co
     const prefix: []const u8 = switch (kind) {
         .formula => "formula ",
         .cask => "cask ",
+        .service => "service ",
     };
     try w.writeAll(prefix);
     try w.writeAll(name);
-    if (include_versions and version.len > 0) {
+    // Services don't carry a version; the suffix would collide with
+    // their `name@channel` shape (e.g. `postgresql@16`) on parse.
+    if (kind != .service and include_versions and version.len > 0) {
         try w.writeAll("@");
         try w.writeAll(version);
     }
@@ -395,10 +416,17 @@ pub fn parseLine(line: []const u8) ?Entry {
     } else if (std.mem.startsWith(u8, s, "cask ")) {
         kind = .cask;
         s = std.mem.trim(u8, s["cask ".len..], " \t\r\n");
+    } else if (std.mem.startsWith(u8, s, "service ")) {
+        kind = .service;
+        s = std.mem.trim(u8, s["service ".len..], " \t\r\n");
     } else {
         return null;
     }
     if (s.len == 0) return null;
+
+    // Services keep `@` as part of their label (e.g. `postgresql@16`);
+    // only formulas/casks split a trailing `@<version>` off the name.
+    if (kind == .service) return .{ .kind = kind, .name = s, .version = "" };
 
     var name = s;
     var version: []const u8 = "";
@@ -453,4 +481,56 @@ pub fn defaultBackupPath(ctx: *const AppCtx, allocator: std.mem.Allocator) ![]u8
             day_seconds.getSecondsIntoMinute(),
         },
     );
+}
+
+// ── inline unit tests ──────────────────────────────────────────────────
+// CLI-level integration coverage lives under `tests/backup_cli_test.zig`;
+// the pure-helper coverage for the .service variant sits next to the
+// code it pins.
+
+test "writeEntry emits `service <name>` with no version suffix" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeEntry(&aw.writer, .service, "postgresql@16", "", false);
+    try std.testing.expectEqualStrings("service postgresql@16\n", aw.written());
+}
+
+test "writeEntry never appends a version suffix to a service entry" {
+    // Services don't carry a version in the schema; `include_versions`
+    // must be a no-op here so a future caller can't smuggle one in.
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeEntry(&aw.writer, .service, "redis", "8.0", true);
+    try std.testing.expectEqualStrings("service redis\n", aw.written());
+}
+
+test "parseLine parses a service line and keeps `@` inside the name" {
+    // Service labels like `postgresql@16` keep the `@channel` suffix as
+    // part of the name — versioning is keg-side, not service-side, so
+    // the parser must not split on `@`.
+    const a = parseLine("service postgresql@16").?;
+    try std.testing.expectEqual(Kind.service, a.kind);
+    try std.testing.expectEqualStrings("postgresql@16", a.name);
+    try std.testing.expectEqualStrings("", a.version);
+
+    const b = parseLine("service redis").?;
+    try std.testing.expectEqual(Kind.service, b.kind);
+    try std.testing.expectEqualStrings("redis", b.name);
+    try std.testing.expectEqualStrings("", b.version);
+}
+
+test "parseBackup silently drops any future unknown kind (forward-compat)" {
+    // Pre-T-042 binaries see new `service` lines as unknown kinds and
+    // skip them. Pin the same contract for any future variant so a
+    // newer malt can ship a new line shape without breaking the backups
+    // an older malt is asked to read.
+    const text =
+        "formula git\n" ++
+        "widget acme\n" ++ // hypothetical newer-than-this-reader kind
+        "cask firefox\n";
+    const entries = try parseBackup(std.testing.allocator, text);
+    defer std.testing.allocator.free(entries);
+    try std.testing.expectEqual(@as(usize, 2), entries.len);
+    try std.testing.expectEqualStrings("git", entries[0].name);
+    try std.testing.expectEqualStrings("firefox", entries[1].name);
 }
