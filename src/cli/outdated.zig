@@ -28,6 +28,7 @@ pub const KegFilter = rows_mod.KegFilter;
 pub const loadFormulaRows = rows_mod.loadFormulaRows;
 pub const loadCaskRows = rows_mod.loadCaskRows;
 pub const freeKegRows = rows_mod.freeKegRows;
+pub const tapExists = rows_mod.tapExists;
 const snap_mod = @import("outdated/snapshot.zig");
 pub const snapshot_default_max_age_hours = snap_mod.snapshot_default_max_age_hours;
 pub const snapshot_max_age_env = snap_mod.snapshot_max_age_env;
@@ -133,9 +134,10 @@ pub fn planEmit(
     for (args) |a| {
         if (std.mem.eql(u8, a, "--refresh")) return .recompute;
         // The cached snapshot is "all-installed" by construction; pinned
-        // membership lives in the DB. Anything that filters by it has to
-        // round-trip the DB, which means a recompute.
+        // membership and tap attribution live in the DB. Anything that
+        // filters by them has to round-trip the DB, which means a recompute.
         if (std.mem.eql(u8, a, "--pinned-only")) return .recompute;
+        if (std.mem.eql(u8, a, "--tap") or std.mem.startsWith(u8, a, "--tap=")) return .recompute;
     }
     if (!snap_present) return .recompute;
     if (isStale(snap_generated_at_ms, now_ms, max_age_hours)) return .use_snapshot_stale;
@@ -247,6 +249,16 @@ test "planEmit recomputes when --pinned-only narrows the scope" {
     try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, 0, 0, 24));
 }
 
+test "planEmit recomputes when --tap narrows the scope (space form)" {
+    const args = [_][]const u8{ "--tap", "user/repo" };
+    try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, 0, 0, 24));
+}
+
+test "planEmit recomputes when --tap= narrows the scope (equals form)" {
+    const args = [_][]const u8{"--tap=user/repo"};
+    try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, 0, 0, 24));
+}
+
 test "summaryMessage suppresses 'all up to date' when any row was printed" {
     try std.testing.expectEqual(@as(?[]const u8, null), summaryMessage(3, 0, false, false));
     try std.testing.expectEqual(@as(?[]const u8, null), summaryMessage(0, 2, false, false));
@@ -274,14 +286,26 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var cask_only = false;
     var formula_only = false;
     var pinned_only = false;
+    var tap_filter: ?[]const u8 = null;
 
-    for (args) |arg| {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (std.mem.eql(u8, arg, "--cask")) {
             cask_only = true;
         } else if (std.mem.eql(u8, arg, "--formula") or std.mem.eql(u8, arg, "--formulae")) {
             formula_only = true;
         } else if (std.mem.eql(u8, arg, "--pinned-only")) {
             pinned_only = true;
+        } else if (std.mem.eql(u8, arg, "--tap")) {
+            if (i + 1 >= args.len) {
+                output.err("--tap requires a label (e.g. `--tap user/repo`)", .{});
+                return error.Aborted;
+            }
+            i += 1;
+            tap_filter = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--tap=")) {
+            tap_filter = arg["--tap=".len..];
         }
     }
     // `--json` and `--quiet` are stripped by the global parser in main.zig.
@@ -308,6 +332,16 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
     defer db.close();
     schema.initSchema(&db) catch return;
+
+    // Validate --tap before any cache/network I/O so a typo never
+    // writes a partial snapshot or warms an API cache for nothing.
+    if (tap_filter) |label| {
+        const known = tapExists(&db, label) catch false;
+        if (!known) {
+            output.err("Unknown tap: '{s}'. Run `mt tap` to list installed taps.", .{label});
+            return error.Aborted;
+        }
+    }
 
     const max_age_hours = parseMaxAgeHoursEnv(std.process.Environ.getPosix(ctx.environ, snapshot_max_age_env)) orelse
         snapshot_default_max_age_hours;
@@ -339,6 +373,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             .cask_only = cask_only,
             .formula_only = formula_only,
             .pinned_only = pinned_only,
+            .tap = tap_filter,
         }),
     }
 }
@@ -347,7 +382,19 @@ const ScopeFlags = struct {
     cask_only: bool = false,
     formula_only: bool = false,
     pinned_only: bool = false,
+    /// Caller-owned slice (CLI arg); not duplicated.
+    tap: ?[]const u8 = null,
 };
+
+/// Compressed `(tap, pinned_only)` state so the SQL-filter selection
+/// dispatches via a single exhaustive `switch` (mirrors `list.zig`).
+const FilterPick = enum { all, pinned, tap };
+
+fn filterPick(scope: ScopeFlags) FilterPick {
+    if (scope.tap != null) return .tap;
+    if (scope.pinned_only) return .pinned;
+    return .all;
+}
 
 /// Emit the snapshot through the live DB so an uninstalled or
 /// upgraded keg never appears in the output.
@@ -404,20 +451,32 @@ fn recomputeAndEmit(
 
     const workers_override = parseWorkersEnv(std.process.Environ.getPosix(ctx.environ, outdated_workers_env));
 
+    // --tap wins over --pinned-only when both are present: tap filtering
+    // is the more specific intent. A combined "pinned AND tap" filter is
+    // intentionally not in scope yet.
+    const filter: KegFilter = switch (filterPick(scope)) {
+        .all => .all,
+        .pinned => .pinned_only,
+        .tap => .{ .by_tap = scope.tap.? },
+    };
+
     var formula_count: usize = 0;
     var cask_count: usize = 0;
     if (!scope.cask_only) {
-        const filter: KegFilter = if (scope.pinned_only) .pinned_only else .all;
         formula_count = try emitOutdatedFormulas(ctx, allocator, db, &api, cache_dir, workers_override, stdout, json_mode, filter);
     }
     if (!scope.formula_only) {
-        const filter: KegFilter = if (scope.pinned_only) .pinned_only else .all;
         cask_count = try emitOutdatedCasks(ctx, allocator, db, &api, cache_dir, workers_override, stdout, json_mode, filter);
     }
-    // Refresh the snapshot only when we walked the full keg set; a
-    // partial recompute would mislead the next reader. Best-effort:
-    // a write failure shouldn't shadow the listing the user already saw.
-    if (!scope.pinned_only and !scope.cask_only and !scope.formula_only) {
+    // Refresh the snapshot only when we walked the full keg set; any
+    // narrowed recompute (pinned, tap, formula-only, cask-only) would
+    // mislead the next reader. Best-effort: a write failure shouldn't
+    // shadow the listing the user already saw.
+    const refresh_ok = switch (filter) {
+        .all => !scope.cask_only and !scope.formula_only,
+        .pinned_only, .by_tap => false,
+    };
+    if (refresh_ok) {
         refreshSnapshot(ctx, allocator, db, &api, cache_dir, workers_override) catch {};
     }
 

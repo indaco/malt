@@ -83,6 +83,15 @@ test "install help documents --local and its code-exec warning" {
     try testing.expect(std.mem.indexOf(u8, text, "trust") != null);
 }
 
+test "outdated help documents --tap and notes the tap-equality rule" {
+    // Discoverability guard: the flag only meaningfully exists if the
+    // help output advertises it and warns about strict-equality (legacy
+    // casks with NULL tap silently miss the filter).
+    const text = help.helpFor("outdated");
+    try testing.expect(std.mem.indexOf(u8, text, "--tap") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "user/repo") != null);
+}
+
 test "deps help documents --recursive, --installed, and --json" {
     // Discoverability guard: deps is the forward complement of `uses`,
     // and the three flags below define what the command can do beyond

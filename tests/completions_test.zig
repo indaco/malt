@@ -109,6 +109,16 @@ test "all outdated completions expose --refresh" {
     try expectContains(completions.fish_script, "-l refresh");
 }
 
+test "all outdated completions expose --tap" {
+    // bash carries `--tap` in the outdated cmd_flags list; zsh's
+    // per-command _arguments block names it with a `:tap label:` slot;
+    // fish declares it with `-x` so the next token is treated as the
+    // label and not eaten by file completion.
+    try expectContains(completions.bash_script, "outdated)         cmd_flags=\"--json --formula --cask --pinned-only --tap");
+    try expectContains(completions.zsh_script, "'--tap[Only packages from <label> (e.g. user/repo)]:tap label:'");
+    try expectContains(completions.fish_script, "'__malt_using_command outdated' -l tap");
+}
+
 test "all update completions expose --check" {
     try expectContains(completions.bash_script, "--check");
     try expectContains(completions.zsh_script, "--check");
