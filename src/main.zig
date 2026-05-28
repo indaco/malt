@@ -293,6 +293,14 @@ test "dispatch preserves interrupt once the signal handler is installed" {
     try std.testing.expect(signals.isInterrupted());
 }
 
+test "formatBrewFallbackNotice names the input and signals the brew handoff" {
+    var buf: [256]u8 = undefined;
+    const notice = try formatBrewFallbackNotice(&buf, "pfoo");
+    try std.testing.expect(std.mem.indexOf(u8, notice, "'pfoo'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, notice, "is not a malt command") != null);
+    try std.testing.expect(std.mem.indexOf(u8, notice, "brew") != null);
+}
+
 test "formatSlugHint for 2-segment slug names both install and tap verbs" {
     var buf: [256]u8 = undefined;
     const hint = try formatSlugHint(&buf, .tap_slug_2, "aeroxy/ast-outline");
@@ -474,9 +482,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         notifier.maybeNotify(&ctx, allocator, version, cmd_str);
     } else {
         // Unknown command — slug-shaped inputs (`user/repo`,
-        // `user/repo/formula`) get a malt-native hint; everything else
-        // falls through to brew so `mt isntall jq` or `mt cellar` still
-        // reach the real binary.
+        // `user/repo/formula`) exit with a malt-native verb hint;
+        // anything else gets a one-line "not a malt command" notice
+        // and then forwards to brew so `mt isntall jq` or `mt cellar`
+        // still reach the real binary.
         const kind = classifyFirstPositional(cmd_str);
         switch (kind) {
             .tap_slug_2, .tap_slug_3 => {
@@ -487,7 +496,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 output_mod.err("{s}", .{hint});
                 std.process.exit(1);
             },
-            .brew_fallback => try brewFallback(&ctx, args),
+            .brew_fallback => try brewFallback(&ctx, cmd_str, args),
         }
     }
 }
@@ -645,6 +654,14 @@ fn classifyFirstPositional(arg: []const u8) FirstPositional {
     };
 }
 
+fn formatBrewFallbackNotice(buf: []u8, cmd: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "'{s}' is not a malt command — malt forwards unknown commands to brew. Output below is brew's.",
+        .{cmd},
+    );
+}
+
 fn formatSlugHint(buf: []u8, kind: FirstPositional, slug: []const u8) ![]const u8 {
     return switch (kind) {
         .tap_slug_2 => std.fmt.bufPrint(
@@ -661,7 +678,7 @@ fn formatSlugHint(buf: []u8, kind: FirstPositional, slug: []const u8) ![]const u
     };
 }
 
-fn brewFallback(ctx: *const AppCtx, args: []const []const u8) !void {
+fn brewFallback(ctx: *const AppCtx, cmd: []const u8, args: []const []const u8) !void {
     // Try to find and exec the real brew binary
     const brew_paths = [_][]const u8{
         "/opt/homebrew/bin/brew",
@@ -671,6 +688,16 @@ fn brewFallback(ctx: *const AppCtx, args: []const []const u8) !void {
 
     for (brew_paths) |brew_path| {
         std.Io.Dir.accessAbsolute(ctx.io, brew_path, .{}) catch continue;
+
+        // Announce the handoff once we know brew is reachable so the
+        // user sees a malt-native context line before brew's own
+        // output. Passive notice — brew owns success/failure reporting.
+        var notice_buf: [1024]u8 = undefined;
+        // Cmd came from argv; 1024 is generous, so bufPrint cannot overflow.
+        const notice = formatBrewFallbackNotice(&notice_buf, cmd) catch unreachable;
+        output_mod.notice("{s}", .{notice});
+        // Visual gap so brew's output reads as a distinct block.
+        ctx.stderr.writeStreamingAll(ctx.io, "\n") catch {};
 
         // Build argv: [brew] ++ args
         var argv_buf: [128][]const u8 = undefined;
