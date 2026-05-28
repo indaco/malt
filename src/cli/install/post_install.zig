@@ -432,6 +432,33 @@ pub fn driveTap(
     );
 }
 
+/// ca-certificates' macOS post_install regenerates the trust store from
+/// the system keychain — Ruby surface the native DSL can't run, so it
+/// lands no `cert.pem`. Mirror the formula's own documented fallback
+/// natively: when a keg ships `share/<name>/cacert.pem` but post_install
+/// left `etc/<name>/cert.pem` absent, symlink the shipped Mozilla bundle
+/// into place. opt-anchored so the link survives version bumps; no-op for
+/// any keg that ships no CA bundle, and idempotent once it is present.
+pub fn provisionShippedCaBundle(io: std.Io, prefix: []const u8, name: []const u8) void {
+    var shipped_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shipped = std.fmt.bufPrint(&shipped_buf, "{s}/opt/{s}/share/{s}/cacert.pem", .{ prefix, name, name }) catch return;
+    // Keg ships no CA bundle → nothing to provision.
+    std.Io.Dir.cwd().access(io, shipped, .{}) catch return;
+
+    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dest = std.fmt.bufPrint(&dest_buf, "{s}/etc/{s}/cert.pem", .{ prefix, name }) catch return;
+    // post_install (or a prior provision) already landed a bundle → leave it.
+    if (std.Io.Dir.cwd().access(io, dest, .{})) |_| return else |_| {}
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = std.fmt.bufPrint(&dir_buf, "{s}/etc/{s}", .{ prefix, name }) catch return;
+    // Same non-raising fs contract as the DSL fs builtins: a failed link
+    // surfaces downstream (doctor/shellenv report the missing bundle).
+    std.Io.Dir.cwd().createDirPath(io, dir) catch return;
+    std.Io.Dir.cwd().deleteFile(io, dest) catch {}; // replace a stale dangling link
+    std.Io.Dir.symLinkAbsolute(io, shipped, dest, .{}) catch {};
+}
+
 test "extractRbPostInstallBody: returns the body when the .rb defines post_install" {
     const dir = "/tmp/malt_pi_decl_yes";
     std.Io.Dir.cwd().deleteTree(std.Options.debug_io, dir) catch {};
@@ -501,4 +528,89 @@ test "isSelfHostingRubyKeg: non-ruby kegs and lookalikes are rejected" {
     try std.testing.expect(!isSelfHostingRubyKeg("ruby@"));
     try std.testing.expect(!isSelfHostingRubyKeg("ruby@stable"));
     try std.testing.expect(!isSelfHostingRubyKeg("ruby@3-rc1"));
+}
+
+/// Lay down `<prefix>/opt/<name>/share/<name>/cacert.pem` with `content`,
+/// mimicking a freshly linked CA-bundle keg.
+fn writeShippedBundle(prefix: []const u8, name: []const u8, content: []const u8) !void {
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const share_dir = try std.fmt.bufPrint(&dir_buf, "{s}/opt/{s}/share/{s}", .{ prefix, name, name });
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, share_dir);
+    var f_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shipped = try std.fmt.bufPrint(&f_buf, "{s}/cacert.pem", .{share_dir});
+    const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, shipped, .{ .truncate = true });
+    try f.writeStreamingAll(std.Options.debug_io, content);
+    f.close(std.Options.debug_io);
+}
+
+test "provisionShippedCaBundle: links cert.pem to the shipped cacert.pem when absent" {
+    const prefix = "/tmp/malt_ca_provision_link";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    try writeShippedBundle(prefix, "ca-certificates", "MOZILLA-BUNDLE");
+
+    provisionShippedCaBundle(std.Options.debug_io, prefix, "ca-certificates");
+
+    // cert.pem now resolves (opt-anchored) to the shipped bundle.
+    const dest = prefix ++ "/etc/ca-certificates/cert.pem";
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.cwd().readLink(std.Options.debug_io, dest, &buf);
+    try std.testing.expectEqualStrings(prefix ++ "/opt/ca-certificates/share/ca-certificates/cacert.pem", buf[0..n]);
+}
+
+test "provisionShippedCaBundle: leaves an existing cert.pem untouched" {
+    const prefix = "/tmp/malt_ca_provision_keep";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    try writeShippedBundle(prefix, "ca-certificates", "MOZILLA-BUNDLE");
+
+    // A post_install (or system-Ruby regeneration) already wrote a real bundle.
+    const etc_dir = prefix ++ "/etc/ca-certificates";
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, etc_dir);
+    const dest = etc_dir ++ "/cert.pem";
+    {
+        const f = try std.Io.Dir.createFileAbsolute(std.Options.debug_io, dest, .{ .truncate = true });
+        try f.writeStreamingAll(std.Options.debug_io, "REAL-KEYCHAIN-BUNDLE");
+        f.close(std.Options.debug_io);
+    }
+
+    provisionShippedCaBundle(std.Options.debug_io, prefix, "ca-certificates");
+
+    // Untouched: still the regular file we wrote, not replaced by a symlink.
+    const st = try std.Io.Dir.cwd().statFile(std.Options.debug_io, dest, .{});
+    try std.testing.expect(st.kind == .file);
+}
+
+test "provisionShippedCaBundle: no-op when the keg ships no cacert.pem" {
+    const prefix = "/tmp/malt_ca_provision_noop";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+
+    provisionShippedCaBundle(std.Options.debug_io, prefix, "tree");
+
+    const dest = prefix ++ "/etc/tree/cert.pem";
+    if (std.Io.Dir.cwd().access(std.Options.debug_io, dest, .{})) |_| {
+        return error.TestUnexpectedResult; // a non-CA keg must not get a cert.pem
+    } else |_| {}
+}
+
+test "provisionShippedCaBundle: self-heals a stale dangling cert.pem symlink" {
+    const prefix = "/tmp/malt_ca_provision_dangle";
+    std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.Options.debug_io, prefix) catch {};
+    try writeShippedBundle(prefix, "ca-certificates", "MOZILLA-BUNDLE");
+
+    // A prior install left cert.pem pointing at a now-removed target.
+    const etc_dir = prefix ++ "/etc/ca-certificates";
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, etc_dir);
+    const dest = etc_dir ++ "/cert.pem";
+    try std.Io.Dir.symLinkAbsolute(std.Options.debug_io, prefix ++ "/gone/cacert.pem", dest, .{});
+
+    provisionShippedCaBundle(std.Options.debug_io, prefix, "ca-certificates");
+
+    // Repointed at the shipped bundle rather than left dangling.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.cwd().readLink(std.Options.debug_io, dest, &buf);
+    try std.testing.expectEqualStrings(prefix ++ "/opt/ca-certificates/share/ca-certificates/cacert.pem", buf[0..n]);
 }

@@ -1332,6 +1332,33 @@ test "coverage: install_symlink creates link" {
     try testing.expect(err == null);
 }
 
+test "coverage: openssl@3 chain links etc/openssl@3/cert.pem to a sibling formula's pkgetc" {
+    // openssl@3's post_install runs
+    //   openssldir.install_symlink Formula["ca-certificates"].pkgetc/"cert.pem"
+    // The link target must resolve to <prefix>/etc/ca-certificates/cert.pem,
+    // proving the cross-formula pkgetc re-anchor lands a valid (non-dangling
+    // shape) symlink rather than <opt>/ca-certificates/etc/cert.pem.
+    var arena = testArena();
+    defer arena.deinit();
+
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const src = "(etc/\"openssl@3\").install_symlink Formula[\"ca-certificates\"].pkgetc/\"cert.pem\"";
+    const err = try runSnippet(&arena, src, prefix);
+    try testing.expect(err == null);
+
+    const link = try std.fs.path.join(testing.allocator, &.{ prefix, "etc", "openssl@3", "cert.pem" });
+    defer testing.allocator.free(link);
+    var buf: [test_io.max_path_bytes]u8 = undefined;
+    const n = try std.Io.Dir.cwd().readLink(std.Options.debug_io, link, &buf);
+    const target = buf[0..n];
+
+    const want = try std.fs.path.join(testing.allocator, &.{ prefix, "etc", "ca-certificates", "cert.pem" });
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, target);
+}
+
 // ---------------------------------------------------------------------------
 // Coverage gap tests — UI
 // ---------------------------------------------------------------------------
