@@ -181,7 +181,7 @@ pub fn migrateKeg(
             return .failed_install;
         };
 
-        deps.linker.link(keg.path, formula.name, keg_id) catch {
+        deps.linker.link(keg.path, formula.name, keg_id, false) catch {
             output.warn("    {s}: some links could not be created", .{keg_name});
             output.emitNdjsonEvent(.linked, keg_name, "failed");
             // Rollback: unlink partial links and delete keg row; user already warned above.
@@ -333,7 +333,7 @@ fn migrateFromLocalCellar(
         return .failed_install;
     };
 
-    deps.linker.link(keg.path, keg_name, keg_id) catch {
+    deps.linker.link(keg.path, keg_name, keg_id, false) catch {
         output.warn("    {s}: some links could not be created", .{keg_name});
         deps.linker.unlink(keg_id) catch {};
         deleteKeg(deps.db, keg_id) catch {};

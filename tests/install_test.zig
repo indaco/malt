@@ -1036,7 +1036,7 @@ test "stale-keg sweep (unlink + drop) clears the prior row, its symlinks, and it
     const keep_id = try insertKegRow(&tdb.db, "foo", "2.0", 0, keep_keg);
 
     var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
-    try linker.link(stale_keg, "foo", stale_id);
+    try linker.link(stale_keg, "foo", stale_id, false);
 
     // Sanity: stale row exists, stale symlink resolves.
     try testing.expectEqual(@as(i64, 2), try kegRowCount(&tdb.db, "foo"));
@@ -1123,7 +1123,7 @@ test "unlinkSameVersionKegLinks removes symlinks + links rows for the matching k
     const keg_id = try insertKegRow(&tdb.db, "foo", "1.0", 0, keg);
 
     var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
-    try linker.link(keg, "foo", keg_id);
+    try linker.link(keg, "foo", keg_id, false);
 
     var link_buf: [512]u8 = undefined;
     const link_path = try std.fmt.bufPrint(&link_buf, "{s}/bin/foo-tool", .{prefix});
@@ -1152,7 +1152,7 @@ test "unlinkSameVersionKegLinks is a no-op when no row matches the keep path" {
     const keg_id = try insertKegRow(&tdb.db, "foo", "1.0", 0, keg);
 
     var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
-    try linker.link(keg, "foo", keg_id);
+    try linker.link(keg, "foo", keg_id, false);
 
     // Different cellar_path than the seeded row → must not unlink.
     const other = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/foo/2.0", .{prefix});
@@ -1178,8 +1178,8 @@ test "unlinkSameVersionKegLinks leaves other packages untouched" {
     const bar_id = try insertKegRow(&tdb.db, "bar", "1.0", 0, bar);
 
     var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
-    try linker.link(foo, "foo", foo_id);
-    try linker.link(bar, "bar", bar_id);
+    try linker.link(foo, "foo", foo_id, false);
+    try linker.link(bar, "bar", bar_id, false);
 
     install.unlinkSameVersionKegLinks(&linker, &tdb.db, "foo", foo);
 
@@ -1282,7 +1282,7 @@ test "two-phase sweep preserves a pin set on the stale revision through INSERT O
     }
 
     var linker = malt.linker.Linker.init(std.Options.debug_io, testing.allocator, &tdb.db, prefix);
-    try linker.link(stale_keg, "foo", stale_id);
+    try linker.link(stale_keg, "foo", stale_id, false);
 
     // Pre-link: clear the stale install's symlinks so the new
     // linker.link does not collide. Row + pin flag stay.

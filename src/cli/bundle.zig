@@ -33,24 +33,38 @@ fn narrowDispatch(e: anyerror) runner_mod.DispatchError {
     };
 }
 
+/// Per-`bundle install` invocation context. Carries the user's
+/// `--isolate-deps` intent so the runner's per-member install calls
+/// honour the same flag without it having to thread through the
+/// dispatcher's fn-pointer ABI.
+const BundleInstallCtx = struct {
+    app: *const AppCtx,
+    isolate_deps: bool,
+};
+
+fn bundleInstallCtxFromOpaque(ctx: ?*anyopaque) *const BundleInstallCtx {
+    const non_null = ctx orelse @panic("bundle: install dispatcher invoked without BundleInstallCtx");
+    return @ptrCast(@alignCast(non_null));
+}
+
 fn cliInstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
-    const app_ctx = appCtxFromOpaque(ctx);
-    install_cmd.installAll(app_ctx, allocator, &.{name}, .{}) catch |e| return narrowDispatch(e);
+    const bd = bundleInstallCtxFromOpaque(ctx);
+    install_cmd.installAll(bd.app, allocator, &.{name}, .{ .isolate_deps = bd.isolate_deps }) catch |e| return narrowDispatch(e);
 }
 
 fn cliInstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
-    const app_ctx = appCtxFromOpaque(ctx);
-    install_cmd.installAll(app_ctx, allocator, &.{name}, .{ .cask = true }) catch |e| return narrowDispatch(e);
+    const bd = bundleInstallCtxFromOpaque(ctx);
+    install_cmd.installAll(bd.app, allocator, &.{name}, .{ .cask = true, .isolate_deps = bd.isolate_deps }) catch |e| return narrowDispatch(e);
 }
 
 fn cliTapAdd(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
-    const app_ctx = appCtxFromOpaque(ctx);
-    tap_cmd.tapAdd(app_ctx, allocator, name) catch |e| return narrowDispatch(e);
+    const bd = bundleInstallCtxFromOpaque(ctx);
+    tap_cmd.tapAdd(bd.app, allocator, name) catch |e| return narrowDispatch(e);
 }
 
 fn cliServiceStart(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
-    const app_ctx = appCtxFromOpaque(ctx);
-    services_cmd.servicesStart(app_ctx, allocator, name) catch |e| return narrowDispatch(e);
+    const bd = bundleInstallCtxFromOpaque(ctx);
+    services_cmd.servicesStart(bd.app, allocator, name) catch |e| return narrowDispatch(e);
 }
 
 fn cliUninstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) cleanup_mod.DispatchError!void {
@@ -72,9 +86,9 @@ fn appCtxFromOpaque(ctx: ?*anyopaque) *const AppCtx {
     return @ptrCast(@alignCast(non_null));
 }
 
-fn runDispatcher(ctx: *const AppCtx) runner_mod.Dispatcher {
+fn runDispatcher(bd: *const BundleInstallCtx) runner_mod.Dispatcher {
     return .{
-        .ctx = @ptrCast(@constCast(ctx)),
+        .ctx = @ptrCast(@constCast(bd)),
         .installFormula = cliInstallFormula,
         .installCask = cliInstallCask,
         .tapAdd = cliTapAdd,
@@ -140,8 +154,11 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     // subcommand (install, upgrade, purge, …) and with its envelope.
     const dry_run = output.isDryRun();
     var explicit_path: ?[]const u8 = null;
+    var isolate_deps = false;
     for (rest) |a| {
-        if (std.mem.startsWith(u8, a, "-")) {
+        if (std.mem.eql(u8, a, "--isolate-deps")) {
+            isolate_deps = true;
+        } else if (std.mem.startsWith(u8, a, "-")) {
             output.warn("ignored flag: {s}", .{a});
         } else {
             explicit_path = a;
@@ -161,7 +178,8 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     var db = try openDb(ctx);
     defer db.close();
 
-    const dispatcher = runDispatcher(ctx);
+    const bd = BundleInstallCtx{ .app = ctx, .isolate_deps = isolate_deps };
+    const dispatcher = runDispatcher(&bd);
     var report = runner_mod.run(ctx.io, allocator, &db, manifest, .{
         .dry_run = dry_run,
         .dispatcher = &dispatcher,
@@ -626,7 +644,10 @@ fn printHelp(ctx: *const AppCtx) !void {
         \\Usage: malt bundle <subcommand> [args]
         \\
         \\Subcommands:
-        \\  install [file]              Install formulae/casks/taps/services from a Brewfile or Maltfile.json.
+        \\  install [--isolate-deps] [file]
+        \\                              Install formulae/casks/taps/services from a Brewfile or Maltfile.json.
+        \\                              --isolate-deps keeps transitive runtime deps out of <prefix>/bin
+        \\                              and <prefix>/sbin (per-keg state, replays on upgrade).
         \\  cleanup [--yes] [--dry-run] [file]
         \\                              Uninstall packages present on disk but absent from the Brewfile.
         \\  create  [--format brewfile|json] [--services] [path]

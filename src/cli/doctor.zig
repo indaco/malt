@@ -85,6 +85,7 @@ pub const checks = [_]Check{
     .{ .name = "Mach-O placeholders", .run = checkMachOPlaceholders },
     .{ .name = "Disk space", .run = checkDiskSpace },
     .{ .name = "Local formula sources", .run = checkLocalSources },
+    .{ .name = "Dependency bin/sbin leaks", .run = checkIsolationLeaks },
 };
 
 /// Walks the table and tallies warn/err contributions. Exposed so
@@ -867,6 +868,71 @@ fn checkDiskSpace(ctx: CheckCtx, name: []const u8) CheckResult {
         .{free_mb},
     ) catch "Low disk space (< 1 GB free)";
     printCheck(name, .warn_status, msg);
+    return .warn_status;
+}
+
+/// Enumerate dep kegs whose bin/sbin are still linked into the prefix —
+/// the leak the isolation feature targets. Reports a count by default;
+/// verbose mode lists each offender with the `mt link --isolate <name>`
+/// remediation. Warning (not error) severity: nothing is broken, the
+/// user simply has more in PATH than they may want.
+fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    var db = sqlite.Database.open(db_path) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer db.close();
+
+    var stmt = db.prepare(
+        \\SELECT k.name
+        \\FROM kegs k
+        \\JOIN links l ON l.keg_id = k.id
+        \\WHERE k.install_reason = 'dependency'
+        \\  AND k.bin_isolated = 0
+        \\  AND (l.link_path LIKE '%/bin/%' OR l.link_path LIKE '%/sbin/%')
+        \\GROUP BY k.id
+        \\ORDER BY k.name;
+    ) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer stmt.finalize();
+
+    var offenders: std.ArrayList([]u8) = .empty;
+    defer freeOwnedStringList(ctx.allocator, &offenders);
+
+    while (stmt.step() catch false) {
+        const k_name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
+        const row = std.fmt.allocPrint(
+            ctx.allocator,
+            "{s}   (remediation: mt link --isolate {s})",
+            .{ k_name, k_name },
+        ) catch continue;
+        offenders.append(ctx.allocator, row) catch {
+            ctx.allocator.free(row);
+            continue;
+        };
+    }
+
+    if (offenders.items.len == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+
+    var msg_buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "{d} dependency keg(s) still link bin/sbin. Run `mt link --isolate <name>` to hide them from PATH.",
+        .{offenders.items.len},
+    ) catch "Dependency kegs are still linked into bin/sbin.";
+    printCheck(name, .warn_status, msg);
+    armVerboseHint();
+    writeVerboseList(offenders.items);
     return .warn_status;
 }
 

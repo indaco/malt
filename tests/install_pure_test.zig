@@ -719,7 +719,7 @@ test "isInstalled is false before recordKeg, true after" {
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
+    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
     try testing.expect(keg_id > 0);
     try testing.expect(install_record.isInstalled(&db, "foo"));
 }
@@ -787,7 +787,7 @@ test "install_record.recordKeg preserves a prior pinned flag on REPLACE (force-r
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
+    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
 
     var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
     defer stmt.finalize();
@@ -805,7 +805,7 @@ test "install_record.recordKeg defaults pinned=0 when no prior keg of that name 
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
+    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
 
     var stmt = try db.prepare("SELECT pinned FROM kegs WHERE id = ?1 LIMIT 1;");
     defer stmt.finalize();
@@ -835,6 +835,7 @@ test "install_record.recordKeg with inherit_pin=false clears the prior pin (opt-
         "0" ** 64,
         "/opt/malt/Cellar/foo/1.0",
         "direct",
+        false,
         .{ .inherit_pin = false },
     );
 
@@ -863,6 +864,7 @@ test "install_record.recordKeg with .{ .in_transaction = false } opens its own B
         "0" ** 64,
         "/opt/malt/Cellar/foo/1.0",
         "direct",
+        false,
         .{ .in_transaction = false },
     );
 
@@ -894,6 +896,7 @@ test "install_record.recordKeg with .{ .in_transaction = true } inside an outer 
         "0" ** 64,
         "/opt/malt/Cellar/foo/1.0",
         "direct",
+        false,
         .{ .in_transaction = true },
     );
     try db.commit();
@@ -903,6 +906,61 @@ test "install_record.recordKeg with .{ .in_transaction = true } inside an outer 
     try stmt.bindInt(1, keg_id);
     _ = try stmt.step();
     try testing.expectEqualStrings("foo", std.mem.sliceTo(stmt.columnText(0).?, 0));
+}
+
+// `bin_isolated` is the user's intent flag — it must round-trip
+// through the INSERT so a subsequent upgrade can replay the policy
+// without the caller re-passing it.
+test "install_record.recordKeg writes bin_isolated=1 when the caller passes true" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var f = try parseFake(arena.allocator());
+    defer f.deinit();
+    const keg_id = try install_record.recordKeg(
+        &db,
+        &f,
+        "0" ** 64,
+        "/opt/malt/Cellar/foo/1.0",
+        "dependency",
+        true,
+        .{},
+    );
+
+    var stmt = try db.prepare("SELECT bin_isolated FROM kegs WHERE id = ?1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, keg_id);
+    _ = try stmt.step();
+    try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+}
+
+test "install_record.recordKeg writes bin_isolated=0 when the caller passes false" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var f = try parseFake(arena.allocator());
+    defer f.deinit();
+    const keg_id = try install_record.recordKeg(
+        &db,
+        &f,
+        "0" ** 64,
+        "/opt/malt/Cellar/foo/1.0",
+        "direct",
+        false,
+        .{},
+    );
+
+    var stmt = try db.prepare("SELECT bin_isolated FROM kegs WHERE id = ?1;");
+    defer stmt.finalize();
+    try stmt.bindInt(1, keg_id);
+    _ = try stmt.step();
+    try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
 }
 
 test "install_record.recordKeg with inherit_pin=true carries the prior pin (option's default branch)" {
@@ -925,6 +983,7 @@ test "install_record.recordKeg with inherit_pin=true carries the prior pin (opti
         "0" ** 64,
         "/opt/malt/Cellar/foo/1.0",
         "direct",
+        false,
         .{ .inherit_pin = true },
     );
 
@@ -944,7 +1003,7 @@ test "recordDeps inserts one row per dependency in the dependencies table" {
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
+    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
     install_record.recordDeps(&db, keg_id, &f);
 
     var stmt = try db.prepare("SELECT COUNT(*) FROM dependencies WHERE keg_id = ?1;");
@@ -963,7 +1022,7 @@ test "deleteKeg removes the row and isInstalled reports false again" {
 
     var f = try parseFake(arena.allocator());
     defer f.deinit();
-    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", .{});
+    const keg_id = try install_record.recordKeg(&db, &f, "0" ** 64, "/opt/malt/Cellar/foo/1.0", "direct", false, .{});
     try testing.expect(install_record.isInstalled(&db, "foo"));
     install_record.deleteKeg(&db, keg_id);
     try testing.expect(!install_record.isInstalled(&db, "foo"));

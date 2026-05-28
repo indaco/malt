@@ -17,7 +17,8 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
         \\);
     );
 
-    // 2. kegs
+    // 2. kegs. `bin_isolated` is added by v10's ALTER on upgraded DBs;
+    //    the fresh shape ships with it so both paths converge.
     try db.exec(
         \\CREATE TABLE IF NOT EXISTS kegs (
         \\    id            INTEGER PRIMARY KEY,
@@ -31,6 +32,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
         \\    installed_at  TEXT NOT NULL DEFAULT (datetime('now')),
         \\    pinned        INTEGER NOT NULL DEFAULT 0,
         \\    install_reason TEXT NOT NULL DEFAULT 'direct',
+        \\    bin_isolated  INTEGER NOT NULL DEFAULT 0,
         \\    UNIQUE(name, version)
         \\);
     );
@@ -124,7 +126,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 9;
+pub const known_schema_version: i64 = 10;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -143,6 +145,7 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 7) try migrateV6toV7(db);
     if (ver < 8) try migrateV7toV8(db);
     if (ver < 9) try migrateV8toV9(db);
+    if (ver < 10) try migrateV9toV10(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -526,6 +529,43 @@ fn migrateV8toV9(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
+/// v10 — record per-keg "this keg's bin/sbin are deliberately not
+/// linked into prefix" so the linker can skip them on install and
+/// replay the policy on upgrades without the user re-passing a flag.
+/// Default 0 keeps every pre-feature row behaving exactly like today.
+fn migrateV9toV10(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    // PRAGMA table_info returns zero rows when the table is missing —
+    // same partial-shape fixture defensiveness as v7→v8 / v8→v9 so a
+    // forensic DB without a `kegs` table still bumps the marker rather
+    // than aborting the whole chain.
+    var have_table = false;
+    var have_column = false;
+    {
+        var stmt = try db.prepare("PRAGMA table_info(kegs);");
+        defer stmt.finalize();
+        while (try stmt.step()) {
+            have_table = true;
+            const name = stmt.columnText(1) orelse continue;
+            if (std.mem.eql(u8, std.mem.sliceTo(name, 0), "bin_isolated")) {
+                have_column = true;
+                break;
+            }
+        }
+    }
+    if (have_table and !have_column) {
+        try db.exec(
+            "ALTER TABLE kegs ADD COLUMN bin_isolated INTEGER NOT NULL DEFAULT 0;",
+        );
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (10);");
+
+    try db.commit();
+}
+
 /// Return true iff every column in `wanted` is present on the `casks`
 /// table. Mirrors the PRAGMA-guarded probes used by v2→v3 / v3→v4 /
 /// v5→v6; centralised here because the v6→v7 backfill needs five
@@ -719,7 +759,7 @@ test "v6→v7 migration backfills cask_versions from existing casks rows" {
     const token1 = stmt.columnText(0) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("flux-markdown", std.mem.sliceTo(token1, 0));
 
-    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
 }
 
 test "v6→v7 migration is idempotent when cask_versions already carries the rows" {
@@ -768,7 +808,7 @@ test "fresh DB ships with taps.head_etag (v8 shape)" {
         }
     }
     try testing.expect(found);
-    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
 }
 
 test "v7→v8 migration adds head_etag and preserves existing tap rows" {
@@ -799,7 +839,7 @@ test "v7→v8 migration adds head_etag and preserves existing tap rows" {
     );
     // Pre-v8 rows must carry NULL until a conditional GET populates it.
     try testing.expect(probe.columnText(1) == null);
-    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
 }
 
 test "v7→v8 migration is idempotent when head_etag is already present" {
@@ -848,7 +888,7 @@ test "fresh DB ships with taps.github_owner and taps.github_repo (v9 shape)" {
     }
     try testing.expect(owner_seen);
     try testing.expect(repo_seen);
-    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
 }
 
 test "v8→v9 migration backfills (user, \"homebrew-\" || repo) from existing slugs" {
@@ -868,7 +908,7 @@ test "v8→v9 migration backfills (user, \"homebrew-\" || repo) from existing sl
 
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
 
     var probe = try db.prepare(
         "SELECT name, github_owner, github_repo FROM taps ORDER BY name;",
@@ -930,7 +970,7 @@ test "v8→v9 migration bumps the marker even when taps is empty" {
     try db.exec("DELETE FROM schema_version WHERE version >= 9;");
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
 }
 
 // Pre-v3 rows could in theory have escaped slug validation. The CASE
@@ -957,7 +997,7 @@ test "v8→v9 migration tolerates a slug starting with a slash (degenerate fixtu
 
     // We don't pin the specific (owner, repo) values for degenerate
     // input — only that the migration completes and the marker bumps.
-    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
 }
 
 test "v8→v9 migration falls back to verbatim name on a slug missing the slash" {
@@ -979,6 +1019,87 @@ test "v8→v9 migration falls back to verbatim name on a slug missing the slash"
     try testing.expect(try probe.step());
     try testing.expectEqualStrings("legacy", std.mem.sliceTo(probe.columnText(0) orelse "", 0));
     try testing.expectEqualStrings("legacy", std.mem.sliceTo(probe.columnText(1) orelse "", 0));
+}
+
+// v9→v10 adds kegs.bin_isolated so the install pipeline can record
+// "this dep's bin/sbin are deliberately not symlinked into prefix/bin"
+// per-keg. Default 0 keeps every pre-feature install behaving exactly
+// like today.
+
+test "fresh DB ships with kegs.bin_isolated (v10 shape)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    var stmt = try db.prepare("PRAGMA table_info(kegs);");
+    defer stmt.finalize();
+    var found = false;
+    while (try stmt.step()) {
+        const name = stmt.columnText(1) orelse continue;
+        if (std.mem.eql(u8, std.mem.sliceTo(name, 0), "bin_isolated")) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
+}
+
+test "v9→v10 migration adds bin_isolated and defaults existing rows to 0" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    // Seed kegs on the current shape and rewind the marker so the
+    // migration step runs over rows that pre-date the column.
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason)
+        \\VALUES ('foo', 'foo', '1.0', 'sha-foo', '/c/foo/1.0', 'direct'),
+        \\       ('bar', 'bar', '2.0', 'sha-bar', '/c/bar/2.0', 'dependency');
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 10;");
+
+    try migrate(&db);
+
+    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
+
+    var probe = try db.prepare("SELECT name, bin_isolated FROM kegs ORDER BY name;");
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    try testing.expectEqualStrings(
+        "bar",
+        std.mem.sliceTo(probe.columnText(0) orelse "", 0),
+    );
+    try testing.expectEqual(@as(i64, 0), probe.columnInt(1));
+    try testing.expect(try probe.step());
+    try testing.expectEqualStrings(
+        "foo",
+        std.mem.sliceTo(probe.columnText(0) orelse "", 0),
+    );
+    try testing.expectEqual(@as(i64, 0), probe.columnInt(1));
+}
+
+test "v9→v10 migration is idempotent and preserves bin_isolated=1" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    // Seed a keg whose bin_isolated is already true, rewind the marker,
+    // and re-run migrate twice. The PRAGMA guard must skip the ALTER
+    // and the row must keep its explicit value.
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason, bin_isolated)
+        \\VALUES ('foo', 'foo', '1.0', 'sha-foo', '/c/foo/1.0', 'dependency', 1);
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 10;");
+    try migrate(&db);
+    try db.exec("DELETE FROM schema_version WHERE version >= 10;");
+    try migrate(&db);
+
+    var probe = try db.prepare("SELECT bin_isolated FROM kegs WHERE name='foo';");
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    try testing.expectEqual(@as(i64, 1), probe.columnInt(0));
 }
 
 test "migrate refuses a DB whose schema_version exceeds the known max" {

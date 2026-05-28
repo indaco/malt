@@ -70,7 +70,7 @@ test "link creates symlinks for every file in a keg and records them in the DB" 
     const keg_id: i64 = 1;
 
     var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
-    try linker.link(keg, "foo", keg_id);
+    try linker.link(keg, "foo", keg_id, false);
 
     // Symlink should exist at {prefix}/bin/foo-tool -> {keg}/bin/foo-tool
     var link_path_buf: [512]u8 = undefined;
@@ -201,10 +201,10 @@ test "checkConflicts flags a symlink that points into a different keg" {
     defer db.close();
     try schema.initSchema(&db);
     var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
-    try linker.link(keg_a, "alpha", 1);
+    try linker.link(keg_a, "alpha", 1, false);
 
     // Now the `bin/tool` symlink points into alpha. Check beta's conflicts.
-    const conflicts = try linker.checkConflicts(keg_b);
+    const conflicts = try linker.checkConflicts(keg_b, false);
     defer {
         for (conflicts) |c| {
             testing.allocator.free(c.link_path);
@@ -236,7 +236,7 @@ test "checkConflicts is empty when nothing is linked yet" {
     try schema.initSchema(&db);
     var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
 
-    const conflicts = try linker.checkConflicts(keg);
+    const conflicts = try linker.checkConflicts(keg, false);
     defer testing.allocator.free(conflicts);
     try testing.expectEqual(@as(usize, 0), conflicts.len);
 }

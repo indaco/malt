@@ -222,3 +222,100 @@ test "executeUnlink on a non-installed package returns Aborted" {
         link_mod.executeUnlink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"ghost-pkg"}),
     );
 }
+
+// --- executeLink --isolate ----------------------------------------------
+
+// Seed a keg row and tag it dependency so the --isolate gate accepts.
+fn seedDepKeg(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    name: []const u8,
+    version: []const u8,
+    bin_name: []const u8,
+) !void {
+    try seedKeg(allocator, prefix, name, version, bin_name);
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("UPDATE kegs SET install_reason = 'dependency' WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    _ = try stmt.step();
+}
+
+test "executeLink --isolate on a dep keg removes bin links and sets bin_isolated=1" {
+    var s = try Scratch.init(testing.allocator, "isolate_dep");
+    defer s.deinit(testing.allocator);
+    try seedDepKeg(testing.allocator, s.path, "depbin", "1.0", "depbin");
+
+    quiet();
+    defer unquiet();
+
+    // First, link normally so the bin/ row + symlink exist.
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"depbin"});
+    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/depbin", .{s.path});
+    defer testing.allocator.free(linked);
+    try testing.expect(pathExists(linked));
+
+    // Now isolate: bin symlink and links row must disappear; bin_isolated=1.
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--isolate", "depbin" });
+    try testing.expect(!pathExists(linked));
+
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var probe = try db.prepare("SELECT bin_isolated FROM kegs WHERE name='depbin';");
+    defer probe.finalize();
+    _ = try probe.step();
+    try testing.expectEqual(@as(i64, 1), probe.columnInt(0));
+
+    var cnt = try db.prepare("SELECT COUNT(*) FROM links WHERE link_path LIKE '%/bin/%';");
+    defer cnt.finalize();
+    _ = try cnt.step();
+    try testing.expectEqual(@as(i64, 0), cnt.columnInt(0));
+}
+
+test "executeLink --isolate refuses on a direct keg" {
+    var s = try Scratch.init(testing.allocator, "isolate_direct_refused");
+    defer s.deinit(testing.allocator);
+    try seedKeg(testing.allocator, s.path, "directbin", "1.0", "directbin");
+
+    quiet();
+    defer unquiet();
+
+    try testing.expectError(
+        error.Aborted,
+        link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--isolate", "directbin" }),
+    );
+}
+
+test "executeLink on an isolated dep re-links bins and clears bin_isolated" {
+    var s = try Scratch.init(testing.allocator, "link_un_isolate");
+    defer s.deinit(testing.allocator);
+    try seedDepKeg(testing.allocator, s.path, "depbin", "1.0", "depbin");
+
+    quiet();
+    defer unquiet();
+
+    // Isolate first.
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"depbin"});
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--isolate", "depbin" });
+    const linked = try std.fmt.allocPrint(testing.allocator, "{s}/bin/depbin", .{s.path});
+    defer testing.allocator.free(linked);
+    try testing.expect(!pathExists(linked));
+
+    // Plain link must restore bins AND clear bin_isolated.
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"depbin"});
+    try testing.expect(pathExists(linked));
+
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    var probe = try db.prepare("SELECT bin_isolated FROM kegs WHERE name='depbin';");
+    defer probe.finalize();
+    _ = try probe.step();
+    try testing.expectEqual(@as(i64, 0), probe.columnInt(0));
+}

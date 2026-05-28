@@ -137,13 +137,13 @@ pub const bash_script =
     \\
     \\    local cmd_flags=""
     \\    case "$cmd" in
-    \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-dependencies --quiet -q --json" ;;
-    \\        reinstall)        cmd_flags="--cask --dry-run --quiet -q --json" ;;
+    \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-dependencies --isolate-deps --quiet -q --json" ;;
+    \\        reinstall)        cmd_flags="--cask --dry-run --isolate-deps --quiet -q --json" ;;
     \\        backup)           cmd_flags="--output -o --versions --services --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
     \\        purge)            cmd_flags="--store-orphans --unused-deps --cache --cache= --downloads --stale-casks --old-versions --housekeeping --wipe --backup -b --keep-cache --remove-binary --yes -y --dry-run -n" ;;
     \\        uninstall|remove) cmd_flags="--force --zap --dry-run" ;;
-    \\        upgrade)          cmd_flags="--all --cask --formula --dry-run --pinned --force -f" ;;
+    \\        upgrade)          cmd_flags="--all --cask --formula --dry-run --pinned --force -f --isolate-deps" ;;
     \\        outdated)         cmd_flags="--json --formula --cask --pinned-only --tap --refresh --quiet -q" ;;
     \\        update)           cmd_flags="--check --quiet -q" ;;
     \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --tap --json --quiet -q" ;;
@@ -154,9 +154,9 @@ pub const bash_script =
     \\        which)            cmd_flags="--json" ;;
     \\        migrate)          cmd_flags="--dry-run" ;;
     \\        rollback)         cmd_flags="--dry-run --list --to --json" ;;
-    \\        link)             cmd_flags="--overwrite --force -f" ;;
+    \\        link)             cmd_flags="--overwrite --force -f --isolate --all" ;;
     \\        services)         cmd_flags="--tail --stderr --follow -f --system --json" ;;
-    \\        bundle)           cmd_flags="--dry-run -n --format --from-installed --purge --yes -y" ;;
+    \\        bundle)           cmd_flags="--dry-run -n --format --from-installed --purge --yes -y --isolate-deps" ;;
     \\        run)              cmd_flags="--keep" ;;
     \\        doctor)           cmd_flags="--fix --dry-run" ;;
     \\        tap)              cmd_flags="--refresh --all --pin --repo --force --yes -y --json" ;;
@@ -258,6 +258,7 @@ pub const zsh_script =
     \\                        '--force[Overwrite existing installations]' \
     \\                        '--download-only[Warm the bottle, cask, or tap-archive cache; skip install]' \
     \\                        '--only-dependencies[Install transitive deps, skip the requested package]' \
+    \\                        '--isolate-deps[Keep transitive deps out of <prefix>/bin and <prefix>/sbin]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
     \\                        '--json[Output result as JSON]' \
     \\                        '*::package:'
@@ -266,6 +267,7 @@ pub const zsh_script =
     \\                    _arguments \
     \\                        '--cask[Force cask path (auto-detected from the DB)]' \
     \\                        '--dry-run[Show what would be reinstalled]' \
+    \\                        '--isolate-deps[Apply isolation to any newly fetched dep]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
     \\                        '--json[Output result as JSON]' \
     \\                        '*::package:'
@@ -285,6 +287,7 @@ pub const zsh_script =
     \\                        '--dry-run[Show what would be upgraded]' \
     \\                        '--pinned[Audit pinned formulas + casks (requires --dry-run or --force)]' \
     \\                        '(--force -f)'{--force,-f}'[Bypass pin protection]' \
+    \\                        '--isolate-deps[Apply isolation to deps newly pulled in by this upgrade]' \
     \\                        '*::package:'
     \\                    ;;
     \\                pin|unpin)
@@ -358,6 +361,8 @@ pub const zsh_script =
     \\                    _arguments \
     \\                        '--overwrite[Replace existing symlinks]' \
     \\                        '(--force -f)'{--force,-f}'[Same as --overwrite]' \
+    \\                        '--isolate[Remove bin/sbin links and mark a dep isolated]' \
+    \\                        '--all[With --isolate: every dep keg]' \
     \\                        '*::formula:'
     \\                    ;;
     \\                completions|shellenv)
@@ -539,11 +544,13 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l force   -d 'Overwrite existing'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l download-only -d 'Warm the bottle, cask, or tap-archive cache; skip install'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l only-dependencies -d 'Install transitive deps; skip the requested package'
+    \\    complete -c $__malt_bin -n '__malt_using_command install' -l isolate-deps -d 'Keep transitive deps out of <prefix>/bin and <prefix>/sbin'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l json    -d 'JSON output'
     \\
     \\    # reinstall
     \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l cask    -d 'Force cask path (auto-detected from the DB)'
     \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l dry-run -d 'Preview'
+    \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l isolate-deps -d 'Apply isolation to deps newly fetched by this reinstall'
     \\    complete -c $__malt_bin -n '__malt_using_command reinstall' -l json    -d 'JSON output'
     \\
     \\    # uninstall / remove
@@ -561,6 +568,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l pinned  -d 'Audit pinned formulas + casks (needs --dry-run or --force)'
     \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -s f -l force -d 'Bypass pin protection'
+    \\    complete -c $__malt_bin -n '__malt_using_command upgrade' -l isolate-deps -d 'Apply isolation to deps newly pulled in by this upgrade'
     \\
     \\    # outdated
     \\    complete -c $__malt_bin -n '__malt_using_command outdated' -l json        -d 'JSON output'
@@ -624,6 +632,8 @@ pub const fish_script =
     \\    # link
     \\    complete -c $__malt_bin -n '__malt_using_command link' -l overwrite -d 'Replace existing symlinks'
     \\    complete -c $__malt_bin -n '__malt_using_command link' -s f -l force -d 'Same as --overwrite'
+    \\    complete -c $__malt_bin -n '__malt_using_command link' -l isolate    -d 'Remove bin/sbin links and mark a dep isolated'
+    \\    complete -c $__malt_bin -n '__malt_using_command link' -l all        -d 'With --isolate: every dep keg'
     \\
     \\    # run
     \\    complete -c $__malt_bin -n '__malt_using_command run' -l keep -d 'Cache extracted bottle under {cache}/run/<sha256>/'
@@ -696,6 +706,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l format -r -a 'brewfile json' -d 'Output format'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l from-installed -d 'Populate from installed packages'
     \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l purge          -d 'Also uninstall members on remove'
+    \\    complete -c $__malt_bin -n '__malt_using_command bundle' -l isolate-deps   -d 'Apply isolation to transitive deps of every member'
     \\end
     \\
     \\set -e __malt_bin

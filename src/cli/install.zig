@@ -269,6 +269,65 @@ fn kegPresent(ctx: *const AppCtx, prefix: []const u8, name: []const u8) bool {
     return true;
 }
 
+/// Read-only DB probe used by the fast-path gate. Returns true iff any
+/// named pkg currently has `install_reason='dependency'` AND
+/// `bin_isolated=1` — i.e. the user is asking us to promote a dep keg
+/// the install pipeline must then re-link bin/sbin for. Quiet on
+/// errors: a missing DB is the empty case, not a failure to surface.
+fn anyNamedNeedsPromotion(ctx: *const AppCtx, prefix: []const u8, packages: []const []const u8) bool {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return false;
+    std.Io.Dir.accessAbsolute(ctx.io, db_path, .{}) catch return false;
+    var db = sqlite.Database.open(db_path) catch return false;
+    defer db.close();
+
+    var stmt = db.prepare(
+        "SELECT 1 FROM kegs WHERE name=?1 AND install_reason='dependency' AND bin_isolated=1 LIMIT 1;",
+    ) catch return false;
+    defer stmt.finalize();
+
+    for (packages) |pkg| {
+        stmt.reset() catch return false;
+        stmt.bindText(1, pkg) catch return false;
+        if (stmt.step() catch false) return true;
+    }
+    return false;
+}
+
+/// Promote one named keg if it is currently an isolated dep: clear
+/// `bin_isolated`, set `install_reason='direct'`, and re-link
+/// bin/sbin. Returns true on a successful promotion. Idempotent on
+/// already-direct rows.
+fn promoteIsolatedDepIfAny(
+    db: *sqlite.Database,
+    linker: *linker_mod.Linker,
+    name: []const u8,
+) bool {
+    var sel = db.prepare(
+        "SELECT id, version, cellar_path FROM kegs WHERE name=?1 AND install_reason='dependency' AND bin_isolated=1 LIMIT 1;",
+    ) catch return false;
+    defer sel.finalize();
+    sel.bindText(1, name) catch return false;
+    const ok = sel.step() catch false;
+    if (!ok) return false;
+    const keg_id = sel.columnInt(0);
+    const ver_ptr = sel.columnText(1) orelse return false;
+    const cellar_ptr = sel.columnText(2) orelse return false;
+    const version = std.mem.sliceTo(ver_ptr, 0);
+    const cellar = std.mem.sliceTo(cellar_ptr, 0);
+
+    var upd = db.prepare(
+        "UPDATE kegs SET install_reason='direct', bin_isolated=0 WHERE id=?1;",
+    ) catch return false;
+    defer upd.finalize();
+    upd.bindInt(1, keg_id) catch return false;
+    _ = upd.step() catch return false;
+
+    linker.link(cellar, name, keg_id, false) catch return false;
+    linker.linkOpt(name, version) catch {}; // opt link already present on a promoted dep; best-effort refresh.
+    return true;
+}
+
 pub const InstallAllOpts = struct {
     /// Treat every package as a cask; equivalent to `--cask`.
     cask: bool = false,
@@ -277,6 +336,10 @@ pub const InstallAllOpts = struct {
     /// otherwise EAGAIN-loop against its own hold and 30 s-timeout with
     /// the misleading "another mt process is running" error.
     skip_lock: bool = false,
+    /// Equivalent to `--isolate-deps` on the argv form. Mirrored on the
+    /// opts struct so the bundle runner can opt in without spelling
+    /// the flag out.
+    isolate_deps: bool = false,
 };
 
 /// Non-argv primitive used by `core/bundle/runner.zig` via its injected
@@ -294,6 +357,7 @@ pub fn installAll(
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     if (opts.cask) try argv.append(allocator, "--cask");
+    if (opts.isolate_deps) try argv.append(allocator, "--isolate-deps");
     for (packages) |p| try argv.append(allocator, p);
     return executeWithOpts(ctx, allocator, argv.items, .{ .skip_lock = opts.skip_lock });
 }
@@ -316,6 +380,7 @@ const InstallFlag = enum {
     json,
     only_dependencies,
     download_only,
+    isolate_deps,
 };
 
 const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
@@ -330,6 +395,7 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "--json", .json },
     .{ "--only-dependencies", .only_dependencies },
     .{ "--download-only", .download_only },
+    .{ "--isolate-deps", .isolate_deps },
 });
 
 /// `allocator` must be an arena (see `installAll`).
@@ -369,6 +435,10 @@ fn executeWithOpts(
     // at 0 so warmed entries are invisible to `purge --store-orphans`
     // until a follow-up install picks them up.
     var download_only = false;
+    // Per-pass user intent: every dep keg materialised during this run
+    // gets `bin_isolated=1`. Direct kegs (the names the user asked for)
+    // are unaffected so they still land in PATH.
+    var isolate_deps = false;
 
     // StaticStringMap + exhaustive switch: the compiler checks every flag
     // has a handler, so adding a new variant without wiring it fails to build.
@@ -392,6 +462,7 @@ fn executeWithOpts(
             .json => output.setMode(.json),
             .only_dependencies => only_dependencies = true,
             .download_only => download_only = true,
+            .isolate_deps => isolate_deps = true,
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             packages.append(allocator, arg) catch return error.OutOfMemory;
         }
@@ -485,6 +556,12 @@ fn executeWithOpts(
             if (isTapFormula(pkg) or isLocalFormulaPath(pkg)) break :fast;
             if (!kegPresent(ctx, prefix, pkg)) break :fast;
         }
+        // Promotion target — a named pkg currently recorded as an
+        // isolated dependency — needs `install_reason` cleared and
+        // bin/sbin symlinks materialised. That work fails open the DB
+        // and the lock, so it lives in the slow path; here we just
+        // gate the early return.
+        if (anyNamedNeedsPromotion(ctx, prefix, packages.items)) break :fast;
         for (packages.items) |pkg| {
             output.info("{s} is already installed", .{pkg});
             // Fast-path skips the protocol; positive signal so consumers
@@ -565,6 +642,16 @@ fn executeWithOpts(
     // Set up store + linker
     var store = store_mod.Store.init(ctx.io, allocator, &db, prefix);
     var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
+
+    // Promote any named pkg currently recorded as an isolated dep.
+    // Done before resolution so the subsequent flow sees the post-
+    // promotion state ("direct + present") and `collectFormulaJobs`
+    // correctly short-circuits without re-downloading the keg.
+    for (packages.items) |pkg_name| {
+        if (promoteIsolatedDepIfAny(&db, &linker, pkg_name)) {
+            output.success("{s} promoted to direct: bin/sbin links restored", .{pkg_name});
+        }
+    }
 
     // One parsed-formula cache for the whole run; single free site.
     var formula_cache = deps_mod.FormulaCache.init(allocator);
@@ -978,7 +1065,7 @@ fn executeWithOpts(
             unlinkStaleKegLinks(&db, &linker, job.name, mats[i].kegPath());
         }
 
-        linkAndRecord(ctx.io, allocator, job, mats[i].kegPath(), &db, &linker, prefix, &formula_cache) catch {
+        linkAndRecord(ctx.io, allocator, job, mats[i].kegPath(), &db, &linker, prefix, &formula_cache, isolate_deps) catch {
             // The underlying error was already logged with a tag by
             // linkAndRecord — just record that this job failed so its
             // dependents in the rest of the loop get skipped above.
@@ -1013,6 +1100,11 @@ fn executeWithOpts(
 
 /// Link + record a materialised keg. Must run serially: linker conflict
 /// checks read live symlink state and SQLite is single-writer.
+///
+/// `isolate_deps` is the per-pass user flag. The keg's `bin_isolated`
+/// is computed as `isolate_deps and job.is_dep` so direct kegs always
+/// land in PATH even when the flag is set — the contract is "isolate
+/// transitive deps, never the named package."
 fn linkAndRecord(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1022,8 +1114,10 @@ fn linkAndRecord(
     linker: *linker_mod.Linker,
     prefix: []const u8,
     cache: *deps_mod.FormulaCache,
+    isolate_deps: bool,
 ) !void {
     const reason: []const u8 = if (job.is_dep) "dependency" else "direct";
+    const bin_isolated = isolate_deps and job.is_dep;
 
     // Cache hit on the warm path; miss only happens for jobs whose JSON
     // never reached collectFormulaJobs (none today).
@@ -1035,9 +1129,12 @@ fn linkAndRecord(
         };
     };
 
-    // Check for symlink conflicts before linking
+    // Check for symlink conflicts before linking. The probe must mirror
+    // the link policy — otherwise an isolated dep would trigger a
+    // spurious bin/sbin conflict against a keg whose bins were never
+    // linked in the first place.
     if (!job.keg_only) {
-        const conflicts = linker.checkConflicts(keg_path) catch &.{};
+        const conflicts = linker.checkConflicts(keg_path, bin_isolated) catch &.{};
         if (conflicts.len > 0) {
             output.err("{s}: {d} symlink conflict(s) detected:", .{ job.name, conflicts.len });
             for (conflicts) |conflict| {
@@ -1051,13 +1148,13 @@ fn linkAndRecord(
 
     // Link + record
     if (!job.keg_only) {
-        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason, .{}) catch |err| {
+        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason, bin_isolated, .{}) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
         };
 
-        linker.link(keg_path, job.name, keg_id) catch |err| {
+        linker.link(keg_path, job.name, keg_id, bin_isolated) catch |err| {
             output.err("Failed to link {s}: {s}", .{ job.name, @errorName(err) });
             output.emitNdjsonEvent(.linked, job.name, "failed");
             // Rollback: unlink what was partially created + remove DB record + cellar.
@@ -1075,7 +1172,7 @@ fn linkAndRecord(
         };
         recordDeps(db, keg_id, formula);
     } else {
-        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason, .{}) catch |err| {
+        const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason, bin_isolated, .{}) catch |err| {
             output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
