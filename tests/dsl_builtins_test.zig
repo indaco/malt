@@ -230,24 +230,229 @@ test "Pathname.unlink deletes a file in the sandbox" {
     try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, path, .{}));
 }
 
-test "Pathname.install_symlink creates and replaces a symlink in the sandbox" {
-    const root = try uniqueSandbox("install_symlink");
+test "Pathname.install_symlink (positional) links <dir>/<basename(source)> -> source" {
+    // Homebrew semantics: receiver is the target directory, arg[0] is the
+    // source. The link lands at <dir>/<basename(source)>.
+    const root = try uniqueSandbox("install_symlink_pos");
     defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     const ctx = mkCtx(root);
 
     const src = try std.fmt.allocPrint(testing.allocator, "{s}/source.txt", .{root});
     defer testing.allocator.free(src);
-    const dst = try std.fmt.allocPrint(testing.allocator, "{s}/sub/link", .{root});
-    defer testing.allocator.free(dst);
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/sub", .{root});
+    defer testing.allocator.free(dir);
     (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
 
-    const args = [_]Value{.{ .string = dst }};
-    _ = try pathname.installSymlink(ctx, Value{ .pathname = src }, &args);
+    const args = [_]Value{.{ .string = src }};
+    _ = try pathname.installSymlink(ctx, Value{ .pathname = dir }, &args);
+
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/source.txt", .{dir});
+    defer testing.allocator.free(link);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings(src, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
+}
+
+test "Pathname.install_symlink (hash) links <dir>/<link_name> -> source" {
+    // The `source => link_name` form: ca-certificates uses
+    // `openssl_pkgetc.install_symlink pkgshare/"cacert.pem" => "cert.pem"`.
+    const root = try uniqueSandbox("install_symlink_hash");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+
+    const src = try std.fmt.allocPrint(testing.allocator, "{s}/cacert.pem", .{root});
+    defer testing.allocator.free(src);
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc", .{root});
+    defer testing.allocator.free(dir);
+    (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
+
+    const pairs = [_]Value.HashPair{.{ .key = .{ .pathname = src }, .value = .{ .string = "cert.pem" } }};
+    const args = [_]Value{.{ .hash = &pairs }};
+    _ = try pathname.installSymlink(ctx, Value{ .pathname = dir }, &args);
+
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/cert.pem", .{dir});
+    defer testing.allocator.free(link);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings(src, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
+}
+
+test "Pathname.install_symlink (array) links each source by basename" {
+    const root = try uniqueSandbox("install_symlink_arr");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+
+    const a = try std.fmt.allocPrint(testing.allocator, "{s}/a.conf", .{root});
+    defer testing.allocator.free(a);
+    const b = try std.fmt.allocPrint(testing.allocator, "{s}/b.conf", .{root});
+    defer testing.allocator.free(b);
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc", .{root});
+    defer testing.allocator.free(dir);
+    for ([_][]const u8{ a, b }) |p| (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
+
+    const items = [_]Value{ .{ .pathname = a }, .{ .pathname = b } };
+    const args = [_]Value{.{ .array = &items }};
+    _ = try pathname.installSymlink(ctx, Value{ .pathname = dir }, &args);
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const target = try test_io.readLinkAbsolute(std.Options.debug_io, dst, &buf);
-    try testing.expectEqualStrings(src, target);
+    for ([_][]const u8{ "a.conf", "b.conf" }) |name| {
+        const link = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, name });
+        defer testing.allocator.free(link);
+        _ = try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf);
+    }
+}
+
+test "Pathname.install_symlink replaces an existing link at the target name" {
+    const root = try uniqueSandbox("install_symlink_replace");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+
+    const old_src = try std.fmt.allocPrint(testing.allocator, "{s}/old.pem", .{root});
+    defer testing.allocator.free(old_src);
+    const new_src = try std.fmt.allocPrint(testing.allocator, "{s}/new.pem", .{root});
+    defer testing.allocator.free(new_src);
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc", .{root});
+    defer testing.allocator.free(dir);
+    for ([_][]const u8{ old_src, new_src }) |p| (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
+
+    const args_old = [_]Value{.{ .hash = &[_]Value.HashPair{.{ .key = .{ .pathname = old_src }, .value = .{ .string = "cert.pem" } }} }};
+    _ = try pathname.installSymlink(ctx, Value{ .pathname = dir }, &args_old);
+    const args_new = [_]Value{.{ .hash = &[_]Value.HashPair{.{ .key = .{ .pathname = new_src }, .value = .{ .string = "cert.pem" } }} }};
+    _ = try pathname.installSymlink(ctx, Value{ .pathname = dir }, &args_new);
+
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/cert.pem", .{dir});
+    defer testing.allocator.free(link);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings(new_src, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
+}
+
+test "Pathname.install_symlink rejects a target directory outside the sandbox" {
+    const root = try uniqueSandbox("install_symlink_violate");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+    const args = [_]Value{.{ .string = "/some/source" }};
+    try testing.expectError(
+        error.PathSandboxViolation,
+        pathname.installSymlink(ctx, Value{ .pathname = "/etc/malt_bad_symlink_dir" }, &args),
+    );
+}
+
+test "Pathname.install_symlink with no args is a no-op returning nil" {
+    const root = try uniqueSandbox("install_symlink_noargs");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+    const v = try pathname.installSymlink(ctx, Value{ .pathname = root }, &.{});
+    try testing.expect(v == .nil);
+}
+
+test "Pathname.install_symlink accepts a plain string source (not only pathname)" {
+    const root = try uniqueSandbox("install_symlink_strsrc");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+    const src = try std.fmt.allocPrint(testing.allocator, "{s}/s.txt", .{root});
+    defer testing.allocator.free(src);
+    (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
+
+    const args = [_]Value{.{ .string = src }};
+    _ = try pathname.installSymlink(ctx, Value{ .pathname = root }, &args);
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/s.txt", .{root});
+    defer testing.allocator.free(link);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings(src, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
+}
+
+test "Pathname.install_symlink hash with multiple pairs links each" {
+    const root = try uniqueSandbox("install_symlink_multi");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+    const s1 = try std.fmt.allocPrint(testing.allocator, "{s}/one", .{root});
+    defer testing.allocator.free(s1);
+    const s2 = try std.fmt.allocPrint(testing.allocator, "{s}/two", .{root});
+    defer testing.allocator.free(s2);
+    const dir = try std.fmt.allocPrint(testing.allocator, "{s}/etc", .{root});
+    defer testing.allocator.free(dir);
+    for ([_][]const u8{ s1, s2 }) |p| (try test_io.createFileAbsolute(std.Options.debug_io, p, .{})).close(std.Options.debug_io);
+
+    const pairs = [_]Value.HashPair{
+        .{ .key = .{ .pathname = s1 }, .value = .{ .string = "a.pem" } },
+        .{ .key = .{ .pathname = s2 }, .value = .{ .string = "b.pem" } },
+    };
+    const args = [_]Value{.{ .hash = &pairs }};
+    _ = try pathname.installSymlink(ctx, Value{ .pathname = dir }, &args);
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    for ([_]struct { name: []const u8, src: []const u8 }{
+        .{ .name = "a.pem", .src = s1 },
+        .{ .name = "b.pem", .src = s2 },
+    }) |entry| {
+        const link = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ dir, entry.name });
+        defer testing.allocator.free(link);
+        try testing.expectEqualStrings(entry.src, try test_io.readLinkAbsolute(std.Options.debug_io, link, &buf));
+    }
+}
+
+test "Pathname.install_symlink skips a hash entry with an empty link name" {
+    const root = try uniqueSandbox("install_symlink_emptyname");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+    const src = try std.fmt.allocPrint(testing.allocator, "{s}/src", .{root});
+    defer testing.allocator.free(src);
+    (try test_io.createFileAbsolute(std.Options.debug_io, src, .{})).close(std.Options.debug_io);
+
+    // Empty link name must not create `<root>/` or crash — just skip.
+    const pairs = [_]Value.HashPair{.{ .key = .{ .pathname = src }, .value = .{ .string = "" } }};
+    const args = [_]Value{.{ .hash = &pairs }};
+    const v = try pathname.installSymlink(ctx, Value{ .pathname = root }, &args);
+    try testing.expect(v == .nil);
+}
+
+test "rm_f removes an array of paths and skips out-of-sandbox entries" {
+    const root = try uniqueSandbox("rm_f_array");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+    const rm_f = @import("malt").dsl.builtins.bare_builtins.get("rm_f").?;
+    const good = try std.fmt.allocPrint(testing.allocator, "{s}/g.txt", .{root});
+    defer testing.allocator.free(good);
+    (try test_io.createFileAbsolute(std.Options.debug_io, good, .{})).close(std.Options.debug_io);
+
+    const items = [_]Value{ .{ .string = "/etc/passwd" }, .{ .string = good } };
+    _ = try rm_f(ctx, null, &.{.{ .array = &items }});
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(std.Options.debug_io, good, .{}));
+}
+
+test "rm_f rejects a single path outside the sandbox (force does not bypass the boundary)" {
+    const root = try uniqueSandbox("rm_f_violate");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+    const rm_f = @import("malt").dsl.builtins.bare_builtins.get("rm_f").?;
+    try testing.expectError(error.PathSandboxViolation, rm_f(ctx, null, &.{.{ .string = "/etc/passwd" }}));
+}
+
+test "rm_f is registered as an alias of rm in the bare-builtin table" {
+    const dispatch = @import("malt").dsl.builtins.bare_builtins;
+    try testing.expect(dispatch.get("rm_f") != null);
+    try testing.expect(dispatch.get("rm") != null);
+}
+
+test "rm_f silently no-ops on a missing target inside the sandbox" {
+    const root = try uniqueSandbox("rm_f_missing");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+    const rm_f = @import("malt").dsl.builtins.bare_builtins.get("rm_f").?;
+    const missing = try std.fmt.allocPrint(testing.allocator, "{s}/etc/cert.pem", .{root});
+    defer testing.allocator.free(missing);
+    const v = try rm_f(ctx, null, &.{.{ .string = missing }});
+    try testing.expect(v == .nil);
 }
 
 test "Pathname.glob with receiver returns matching entries" {

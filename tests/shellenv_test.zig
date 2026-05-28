@@ -39,7 +39,7 @@ fn expectContains(haystack: []const u8, needle: []const u8) !void {
 }
 
 test "render bash exports brew-compatible env so third-party scripts keep working" {
-    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt");
+    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt", false);
     defer testing.allocator.free(out);
 
     try expectContains(out, "export HOMEBREW_PREFIX=\"/opt/malt\"");
@@ -55,15 +55,15 @@ test "render bash exports brew-compatible env so third-party scripts keep workin
 }
 
 test "render bash and zsh emit byte-identical output (single shared arm)" {
-    const bash = try shellenv.render(testing.allocator, .bash, "/opt/malt");
+    const bash = try shellenv.render(testing.allocator, .bash, "/opt/malt", false);
     defer testing.allocator.free(bash);
-    const zsh = try shellenv.render(testing.allocator, .zsh, "/opt/malt");
+    const zsh = try shellenv.render(testing.allocator, .zsh, "/opt/malt", false);
     defer testing.allocator.free(zsh);
     try testing.expectEqualStrings(bash, zsh);
 }
 
 test "render bash prepends malt's bin before \\$PATH so its binaries win" {
-    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt");
+    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt", false);
     defer testing.allocator.free(out);
     // Binary order matters: an `append` would let the existing PATH shadow
     // malt-installed tools.
@@ -73,7 +73,7 @@ test "render bash prepends malt's bin before \\$PATH so its binaries win" {
 }
 
 test "render bash terminates every line with `;\\n` so eval sees full statements" {
-    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt");
+    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt", false);
     defer testing.allocator.free(out);
     try testing.expect(out.len > 0);
     try testing.expect(std.mem.endsWith(u8, out, ";\n"));
@@ -85,7 +85,7 @@ test "render bash terminates every line with `;\\n` so eval sees full statements
 }
 
 test "render fish uses set -gx and avoids POSIX export syntax" {
-    const out = try shellenv.render(testing.allocator, .fish, "/opt/malt");
+    const out = try shellenv.render(testing.allocator, .fish, "/opt/malt", false);
     defer testing.allocator.free(out);
 
     try expectContains(out, "set -gx HOMEBREW_PREFIX \"/opt/malt\"");
@@ -99,8 +99,61 @@ test "render fish uses set -gx and avoids POSIX export syntax" {
     try testing.expect(std.mem.indexOf(u8, out, "${") == null);
 }
 
+test "render emits SSL_CERT_FILE only when the CA bundle is present" {
+    // Present: a single export line pointing at the canonical bundle.
+    const with = try shellenv.render(testing.allocator, .bash, "/opt/malt", true);
+    defer testing.allocator.free(with);
+    try expectContains(with, "export SSL_CERT_FILE=\"/opt/malt/etc/openssl@3/cert.pem\";");
+
+    // Absent: nothing — the var must never name a missing file.
+    const without = try shellenv.render(testing.allocator, .bash, "/opt/malt", false);
+    defer testing.allocator.free(without);
+    try testing.expect(std.mem.indexOf(u8, without, "SSL_CERT_FILE") == null);
+}
+
+test "render bash SSL_CERT_FILE line is terminated and follows INFOPATH" {
+    const out = try shellenv.render(testing.allocator, .bash, "/opt/malt", true);
+    defer testing.allocator.free(out);
+    // Must keep the `;\n` line-termination contract eval relies on.
+    try testing.expect(std.mem.endsWith(u8, out, ";\n"));
+    // Ordering: SSL_CERT_FILE comes after the brew-compatible block.
+    const info = std.mem.indexOf(u8, out, "INFOPATH").?;
+    const ssl = std.mem.indexOf(u8, out, "SSL_CERT_FILE").?;
+    try testing.expect(ssl > info);
+}
+
+test "render fish uses set -gx for SSL_CERT_FILE when present" {
+    const out = try shellenv.render(testing.allocator, .fish, "/opt/malt", true);
+    defer testing.allocator.free(out);
+    try expectContains(out, "set -gx SSL_CERT_FILE \"/opt/malt/etc/openssl@3/cert.pem\";");
+    // No POSIX export / brace-expansion sneaks in via the new line.
+    try testing.expect(std.mem.indexOf(u8, out, "export ") == null);
+}
+
+test "render bash and zsh stay byte-identical with SSL_CERT_FILE present" {
+    const bash = try shellenv.render(testing.allocator, .bash, "/opt/malt", true);
+    defer testing.allocator.free(bash);
+    const zsh = try shellenv.render(testing.allocator, .zsh, "/opt/malt", true);
+    defer testing.allocator.free(zsh);
+    try testing.expectEqualStrings(bash, zsh);
+}
+
+test "render with SSL_CERT_FILE present survives a tiny budget without corruption" {
+    // The new write path must also fail cleanly to OutOfMemory.
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        struct {
+            fn run(a: std.mem.Allocator) !void {
+                const out = try shellenv.render(a, .bash, "/opt/malt", true);
+                a.free(out);
+            }
+        }.run,
+        .{},
+    );
+}
+
 test "render honors a non-default prefix" {
-    const out = try shellenv.render(testing.allocator, .bash, "/usr/local");
+    const out = try shellenv.render(testing.allocator, .bash, "/usr/local", false);
     defer testing.allocator.free(out);
 
     try expectContains(out, "export HOMEBREW_PREFIX=\"/usr/local\"");
@@ -111,7 +164,7 @@ test "render honors a non-default prefix" {
 test "render surfaces allocator failure rather than swallowing it" {
     try testing.expectError(
         error.OutOfMemory,
-        shellenv.render(testing.failing_allocator, .bash, "/opt/malt"),
+        shellenv.render(testing.failing_allocator, .bash, "/opt/malt", false),
     );
 }
 
@@ -121,7 +174,7 @@ test "render with a tiny budget eventually returns OutOfMemory, not corruption" 
         testing.allocator,
         struct {
             fn run(a: std.mem.Allocator) !void {
-                const out = try shellenv.render(a, .fish, "/opt/malt");
+                const out = try shellenv.render(a, .fish, "/opt/malt", false);
                 a.free(out);
             }
         }.run,

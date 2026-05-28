@@ -365,7 +365,12 @@ pub const Parser = struct {
             self.skipNewlines();
             if (self.current.kind == .rparen) break;
             switch (try self.parseOneArg()) {
-                .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
+                .arg => |a| {
+                    // A `=>` after the arg starts an implicit trailing hash,
+                    // which is terminal — the rest of the list is its pairs.
+                    if (try self.maybeTrailingHash(args, a)) break;
+                    args.append(self.allocator, a) catch return DslError.OutOfMemory;
+                },
                 .block_pass => |bp| {
                     block_pass_out.* = bp;
                     break;
@@ -388,18 +393,66 @@ pub const Parser = struct {
         block_pass_out: *?*const Node,
     ) DslError!void {
         const first = try self.parseExpression();
+        if (try self.maybeTrailingHash(args, first)) return;
         args.append(self.allocator, first) catch return DslError.OutOfMemory;
         while (self.current.kind == .comma) {
             self.advanceToken();
             self.skipNewlines();
             switch (try self.parseOneArg()) {
-                .arg => |a| args.append(self.allocator, a) catch return DslError.OutOfMemory,
+                .arg => |a| {
+                    if (try self.maybeTrailingHash(args, a)) return;
+                    args.append(self.allocator, a) catch return DslError.OutOfMemory;
+                },
                 .block_pass => |bp| {
                     block_pass_out.* = bp;
                     break;
                 },
             }
         }
+    }
+
+    /// If the current token is `=>`, the just-parsed `key` opens an
+    /// implicit trailing hash: every remaining comma-separated element is
+    /// a `key => value` pair, folded into one hash_literal arg. Ruby
+    /// lowers `f a, k1 => v1, k2 => v2` this way. Returns true when a hash
+    /// was appended (the arg list is then terminal).
+    fn maybeTrailingHash(
+        self: *Parser,
+        args: *std.ArrayList(*const Node),
+        key: *const Node,
+    ) DslError!bool {
+        if (self.current.kind != .fat_arrow) return false;
+        const hash = try self.parseTrailingHash(key);
+        args.append(self.allocator, hash) catch return DslError.OutOfMemory;
+        return true;
+    }
+
+    /// Collect `key => value (`,` key => value)*` into a hash_literal,
+    /// starting from an already-parsed `first_key` sitting on `=>`. Stops
+    /// at the first non-`=>` element so a malformed tail degrades instead
+    /// of crashing — only one hash level is supported at this position.
+    fn parseTrailingHash(self: *Parser, first_key: *const Node) DslError!*const Node {
+        var entries: std.ArrayList(ast.HashEntry) = .empty;
+        var key = first_key;
+        while (true) {
+            self.advanceToken(); // consume '=>'
+            self.skipNewlines();
+            const value = try self.parseExpression();
+            entries.append(self.allocator, .{ .key = key, .value = value }) catch return DslError.OutOfMemory;
+            if (self.current.kind != .comma) break;
+            self.advanceToken(); // consume ','
+            self.skipNewlines();
+            // A trailing comma before the list close ends the hash.
+            if (self.current.kind == .rparen or self.current.kind == .eof or
+                self.current.kind == .newline) break;
+            key = try self.parseExpression();
+            if (self.current.kind != .fat_arrow) break;
+        }
+        const slice = entries.toOwnedSlice(self.allocator) catch return DslError.OutOfMemory;
+        return self.allocNode(.{
+            .loc = first_key.loc,
+            .kind = .{ .hash_literal = slice },
+        });
     }
 
     /// Consume an optional `do |params| … end` or `{ |params| … }` tail
@@ -1208,6 +1261,7 @@ pub const Parser = struct {
             .{ "odie", {} },
             .{ "mkdir_p", {} },
             .{ "rm", {} },
+            .{ "rm_f", {} },
             .{ "rm_r", {} },
             .{ "rm_rf", {} },
             .{ "cp", {} },

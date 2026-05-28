@@ -204,25 +204,54 @@ pub fn unlink(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Val
     return Value{ .nil = {} };
 }
 
-/// install_symlink — create a symlink (sandbox-validated)
+/// install_symlink — link source(s) into the receiver directory.
+///
+/// Homebrew semantics: the receiver is the *target directory*, each arg
+/// names a source. A bare source lands at `<dir>/<basename(source)>`; a
+/// hash entry `source => link_name` overrides the link name; an array
+/// links each element by basename. The link path is sandbox-validated.
 pub fn installSymlink(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Value {
-    const source = try receiverPath(ctx.allocator, receiver);
-    const target = if (args.len > 0) try args[0].asString(ctx.allocator) else return Value{ .nil = {} };
+    const dir = try receiverPath(ctx.allocator, receiver);
+    if (dir.len == 0) return Value{ .nil = {} };
+    for (args) |arg| try installSymlinkArg(ctx, dir, arg);
+    return Value{ .nil = {} };
+}
 
-    // Guard against empty/invalid paths
-    if (source.len == 0 or target.len == 0) return Value{ .nil = {} };
+fn installSymlinkArg(ctx: ExecCtx, dir: []const u8, arg: Value) BuiltinError!void {
+    switch (arg) {
+        // `source => link_name`: key is the source, value the link name.
+        .hash => |pairs| for (pairs) |p| {
+            const source = try p.key.asString(ctx.allocator);
+            const name = try p.value.asString(ctx.allocator);
+            try linkInto(ctx, dir, source, name);
+        },
+        .array => |items| for (items) |item| {
+            const source = try item.asString(ctx.allocator);
+            try linkInto(ctx, dir, source, std.fs.path.basename(source));
+        },
+        else => {
+            const source = try arg.asString(ctx.allocator);
+            try linkInto(ctx, dir, source, std.fs.path.basename(source));
+        },
+    }
+}
 
-    sandbox.validatePath(target, ctx.cellar_path, ctx.malt_prefix) catch
+/// Symlink `<dir>/<name>` → `<source>`, sandbox-validated on the link
+/// path. Same non-raising fs contract as the rest of this module: a
+/// failed mkdir/symlink surfaces downstream, not here.
+fn linkInto(ctx: ExecCtx, dir: []const u8, source: []const u8, name: []const u8) BuiltinError!void {
+    if (source.len == 0 or name.len == 0) return;
+
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    // Overflow means a pathological path — skip rather than truncate.
+    const link = std.fmt.bufPrint(&link_buf, "{s}/{s}", .{ dir, name }) catch return;
+
+    sandbox.validatePath(link, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
 
-    // Ensure parent exists
-    if (std.fs.path.dirname(target)) |parent| {
-        std.Io.Dir.cwd().createDirPath(ctx.io, parent) catch {};
-    }
-
-    std.Io.Dir.cwd().deleteFile(ctx.io, target) catch {};
-    std.Io.Dir.symLinkAbsolute(ctx.io, source, target, .{}) catch {};
-    return Value{ .nil = {} };
+    std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch {};
+    std.Io.Dir.cwd().deleteFile(ctx.io, link) catch {};
+    std.Io.Dir.symLinkAbsolute(ctx.io, source, link, .{}) catch {};
 }
 
 /// glob(pattern) — match files in a directory against a glob pattern
