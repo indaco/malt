@@ -156,7 +156,7 @@ fn cmdInstall(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []
     var explicit_path: ?[]const u8 = null;
     var isolate_deps = false;
     for (rest) |a| {
-        if (std.mem.eql(u8, a, "--isolate-deps")) {
+        if (std.mem.eql(u8, a, "--isolate-deps") or std.mem.eql(u8, a, "--isolate-dependencies")) {
             isolate_deps = true;
         } else if (std.mem.startsWith(u8, a, "-")) {
             output.warn("ignored flag: {s}", .{a});

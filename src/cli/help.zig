@@ -93,6 +93,7 @@ const install_help =
     \\                     based formulas that bare-name-exec their deps
     \\                     (e.g. `python` vs `/full/path/python`) may break;
     \\                     use `mt link <dep>` to undo per-keg.
+    \\                     `--isolate-dependencies` accepted as an alias.
     \\  --quiet, -q        Suppress non-error output
     \\  --json             Output result as JSON
     \\
@@ -154,6 +155,7 @@ const upgrade_help =
     \\  --isolate-deps New deps pulled in by this upgrade keep their bins
     \\                 out of <prefix>/bin and <prefix>/sbin. Existing kegs
     \\                 replay whatever they were already recorded with.
+    \\                 `--isolate-dependencies` accepted as an alias.
     \\
 ;
 

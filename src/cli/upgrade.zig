@@ -42,6 +42,9 @@ const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     .{ "-f", .force },
     .{ "--pinned", .pinned },
     .{ "--isolate-deps", .isolate_deps },
+    // Long-form alias matching the `--only-dependencies` / `--only-deps`
+    // shape so the flag surface stays predictable.
+    .{ "--isolate-dependencies", .isolate_deps },
 });
 
 /// True when this name should be skipped due to a user pin. Pure gate so

@@ -364,6 +364,29 @@ test "isolate_deps is a no-op on direct kegs (named pkg stays linked)" {
     try testing.expectEqual(@as(i64, 0), probe.columnInt(0));
 }
 
+// Long-form spelling is an accepted alias of the canonical flag.
+// Pinning the alias keeps a future flag-map cleanup from silently
+// dropping the form some users will reach for first.
+test "execute accepts --isolate-dependencies as an alias of --isolate-deps" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const result = malt.install.execute(
+        &malt.app_ctx.debug_ctx,
+        arena.allocator(),
+        &.{ "--dry-run", "--isolate-dependencies", "--quiet", "zz_nonexistent_formula_xyz" },
+    );
+    if (result) |_| {} else |e| switch (e) {
+        error.PartialFailure,
+        error.FormulaNotFound,
+        error.NetworkError,
+        error.RateLimited,
+        error.DownloadFailed,
+        => {},
+        else => return e,
+    }
+}
+
 // Flag-acceptance smoke: `mt install --isolate-deps --dry-run <pkg>`
 // must not error on flag parsing. Verifies argv plumbing exists.
 test "execute accepts --isolate-deps without erroring during dry-run" {

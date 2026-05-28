@@ -402,6 +402,9 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "--only-dependencies", .only_deps },
     .{ "--download-only", .download_only },
     .{ "--isolate-deps", .isolate_deps },
+    // Long-form alias — mirrors the `--only-deps` / `--only-dependencies`
+    // pair so the flag surface stays predictable.
+    .{ "--isolate-dependencies", .isolate_deps },
 });
 
 /// `allocator` must be an arena (see `installAll`).
