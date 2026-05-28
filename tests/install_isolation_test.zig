@@ -12,6 +12,11 @@ const install_record = malt.install_record;
 const linker_mod = malt.linker;
 const formula_mod = malt.formula;
 
+const c = struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+};
+
 const fake_formula_json =
     \\{
     \\  "name": "depkeg",
@@ -368,41 +373,43 @@ test "isolate_deps is a no-op on direct kegs (named pkg stays linked)" {
 // Pinning the alias keeps a future flag-map cleanup from silently
 // dropping the form some users will reach for first.
 test "execute accepts --isolate-dependencies as an alias of --isolate-deps" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const result = malt.install.execute(
-        &malt.app_ctx.debug_ctx,
-        arena.allocator(),
-        &.{ "--dry-run", "--isolate-dependencies", "--quiet", "zz_nonexistent_formula_xyz" },
-    );
-    if (result) |_| {} else |e| switch (e) {
-        error.PartialFailure,
-        error.FormulaNotFound,
-        error.NetworkError,
-        error.RateLimited,
-        error.DownloadFailed,
-        => {},
-        else => return e,
-    }
+    try runFlagAcceptanceProbe("iso_alias", "--isolate-dependencies");
 }
 
 // Flag-acceptance smoke: `mt install --isolate-deps --dry-run <pkg>`
 // must not error on flag parsing. Verifies argv plumbing exists.
 test "execute accepts --isolate-deps without erroring during dry-run" {
+    try runFlagAcceptanceProbe("iso_canonical", "--isolate-deps");
+}
+
+// Shared helper: drive `install.execute` against a scratch
+// MALT_PREFIX so `ensureDirs` doesn't trip on `/opt/malt` being
+// unwritable (CI). Any of the downstream "no such formula" errors
+// counts as proof the parser reached past the flag stage; raising
+// any other error means the flag was rejected.
+fn runFlagAcceptanceProbe(suffix: []const u8, flag: []const u8) !void {
+    const prefix = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "/tmp/malt_iso_probe_{d}_{s}",
+        .{ test_io.nanoTimestamp(std.Options.debug_io), suffix },
+        0,
+    );
+    defer testing.allocator.free(prefix);
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    _ = c.setenv("MALT_PREFIX", prefix.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    // --dry-run + a guaranteed-404 name routes through PartialFailure,
-    // but the parser must reach that point — never reject --isolate-deps
-    // as an unknown flag.
     const result = malt.install.execute(
         &malt.app_ctx.debug_ctx,
         arena.allocator(),
-        &.{ "--dry-run", "--isolate-deps", "--quiet", "zz_nonexistent_formula_xyz" },
+        &.{ "--dry-run", flag, "--quiet", "zz_nonexistent_formula_xyz" },
     );
-    // Any of PartialFailure / FormulaNotFound / NetworkError is fine —
-    // they mean parsing got past the flag stage.
     if (result) |_| {} else |e| switch (e) {
         error.PartialFailure,
         error.FormulaNotFound,
