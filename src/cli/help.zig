@@ -267,6 +267,7 @@ const doctor_help =
 
 const tap_help =
     \\Usage: malt tap [<user>/<repo>]
+    \\       malt tap <user>/<repo> --repo <owner>/<exact-repo> [--force]
     \\       malt tap --refresh <user>/<repo>
     \\       malt tap --refresh --all [--yes] [--json]
     \\       malt tap --pin <user>/<repo> <sha>
@@ -288,6 +289,15 @@ const tap_help =
     \\  --pin <slug> <sha>   Explicitly pin <slug> to <sha>. The SHA is
     \\                       validated for reachability through GitHub's
     \\                       commits/<sha> endpoint before the pin lands.
+    \\  --repo <owner>/<exact-repo>
+    \\                       Point the tap at a GitHub repo whose name
+    \\                       does NOT carry the `homebrew-` prefix
+    \\                       (e.g. `mt tap aeroxy/ast-outline --repo
+    \\                       aeroxy/ast-outline`). Without this flag the
+    \\                       tap resolves against `homebrew-<repo>`.
+    \\  --force              Allow rebinding an existing tap to a new
+    \\                       --repo target. Clears the stale commit SHA
+    \\                       and ETag because the new repo has its own HEAD.
     \\  --yes, -y            Confirm the apply step of --refresh --all.
     \\  --json               Emit the --refresh --all diff as
     \\                       `{"taps":[{"tap","old_sha","new_sha","status"}]}`.

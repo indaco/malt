@@ -2,11 +2,14 @@
 //! Tests for cask JSON parsing, artifact type detection, and DB operations.
 
 const std = @import("std");
+const testing = std.testing;
+
 const malt = @import("malt");
-const test_io = @import("test_io");
 const cask = malt.cask;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
+const test_io = @import("test_io");
+const malt_fs = test_io;
 
 fn testIo() std.Io {
     return std.Options.debug_io;
@@ -441,9 +444,6 @@ test "isOutdated surfaces SqliteError when schema is missing" {
 // upstream zip was bit-perfect but malt rejected it. These tests
 // exercise the chunk loop at every boundary and prove the hash
 // output against independently-computed digests.
-
-const testing = std.testing;
-const malt_fs = test_io;
 
 /// 64 KiB — the internal SHA256 read buffer size. Every boundary
 /// case below is expressed relative to this so the tests stay
@@ -1148,12 +1148,13 @@ test "v6→v7 migration leaves cask_versions empty when casks has a broken shape
     _ = try stmt.step();
     try testing.expectEqual(@as(i64, 0), stmt.columnInt(0));
     // Migration still bumps the schema marker so a future run skips this path.
-    try testing.expectEqual(@as(i64, 8), try schema.currentVersion(&db));
+    try testing.expectEqual(@as(i64, 9), try schema.currentVersion(&db));
 }
 
-// v7→v8 ALTER must skip when `taps` is missing entirely (forensic DBs
-// hand-built without the v3-era table); the migration still bumps the
-// schema marker so a future run treats the chain as caught up.
+// v7→v8 / v8→v9 ALTERs must skip when `taps` is missing entirely
+// (forensic DBs hand-built without the v3-era table); the migration
+// still bumps the schema marker so a future run treats the chain as
+// caught up.
 test "v7→v8 migration tolerates a missing taps table" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -1168,7 +1169,7 @@ test "v7→v8 migration tolerates a missing taps table" {
 
     try schema.migrate(&db);
 
-    try testing.expectEqual(@as(i64, 8), try schema.currentVersion(&db));
+    try testing.expectEqual(@as(i64, 9), try schema.currentVersion(&db));
 }
 
 // --- coverage: lookupCaskVersion refuses a malformed row ----------------

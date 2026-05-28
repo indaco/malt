@@ -159,7 +159,7 @@ pub const bash_script =
     \\        bundle)           cmd_flags="--dry-run -n --format --from-installed --purge --yes -y" ;;
     \\        run)              cmd_flags="--keep" ;;
     \\        doctor)           cmd_flags="--fix --dry-run" ;;
-    \\        tap)              cmd_flags="--refresh --all --pin --yes -y --json" ;;
+    \\        tap)              cmd_flags="--refresh --all --pin --repo --force --yes -y --json" ;;
     \\    esac
     \\
     \\    if [[ "$cur" == -* ]]; then
@@ -424,6 +424,8 @@ pub const zsh_script =
     \\                        '--refresh[Advance the pin to current HEAD]' \
     \\                        '--all[With --refresh: walk every registered tap]' \
     \\                        '--pin[Explicitly pin <slug> to <sha>]' \
+    \\                        '--repo[Point the tap at owner/exact-repo (no homebrew- prefix)]:owner/exact-repo:' \
+    \\                        '--force[Rebind an existing tap to a new --repo target]' \
     \\                        '(--yes -y)'{--yes,-y}'[Confirm --refresh --all apply]' \
     \\                        '--json[Emit refresh-all diff as JSON]' \
     \\                        '*::slug:'
@@ -630,6 +632,8 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l refresh -d 'Advance the pin to current HEAD'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l all     -d 'With --refresh: walk every registered tap'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l pin     -d 'Explicitly pin <slug> to <sha>'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l repo    -x -d 'Point the tap at owner/exact-repo (no homebrew- prefix)'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l force   -d 'Rebind an existing tap to a new --repo target'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -s y -l yes -d 'Confirm --refresh --all apply'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l json    -d 'Emit refresh-all diff as JSON'
     \\

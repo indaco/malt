@@ -2,10 +2,11 @@
 
 const std = @import("std");
 const testing = std.testing;
+
 const malt = @import("malt");
-const test_io = @import("test_io");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
+const test_io = @import("test_io");
 
 const TempDb = struct {
     dir: []const u8,
@@ -53,7 +54,7 @@ test "initSchema runs v1 then migrates to the current known version" {
     try testing.expect(try tableExists(&tdb.db, "bundle_members"));
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 8), ver);
+    try testing.expectEqual(@as(i64, 9), ver);
 }
 
 test "migrate is idempotent on re-run" {
@@ -65,7 +66,7 @@ test "migrate is idempotent on re-run" {
     try schema.migrate(&tdb.db);
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 8), ver);
+    try testing.expectEqual(@as(i64, 9), ver);
 }
 
 test "v4 migration adds pinned column to casks" {
@@ -95,7 +96,7 @@ test "v4 migration is idempotent on re-run" {
     try schema.migrate(&tdb.db);
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 8), ver);
+    try testing.expectEqual(@as(i64, 9), ver);
 }
 
 test "v6 migration adds tap column to casks" {

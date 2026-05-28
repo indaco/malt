@@ -2,15 +2,68 @@
 //! Manage taps (tap/untap).
 
 const std = @import("std");
+
 const AppCtx = @import("../app_ctx.zig").AppCtx;
-const sqlite = @import("../db/sqlite.zig");
-const schema = @import("../db/schema.zig");
 const tap_mod = @import("../core/tap.zig");
+const schema = @import("../db/schema.zig");
+const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
 pub const TapNameError = error{InvalidTapName};
+
+pub const RepoOverrideError = error{InvalidRepoOverride} || std.mem.Allocator.Error;
+
+/// Parse `--repo <owner>/<exact-repo>` into an owned `(owner, repo)`
+/// pair. Reuses the slug-validation rules so the override can't sneak
+/// past validateTapName by going through the flag. Caller owns both
+/// slices via `TapPair.deinit`.
+pub fn parseRepoOverride(allocator: std.mem.Allocator, raw: []const u8) RepoOverrideError!tap_mod.TapPair {
+    validateTapName(raw) catch return RepoOverrideError.InvalidRepoOverride;
+    const slash = std.mem.indexOfScalar(u8, raw, '/') orelse unreachable;
+    const owner = raw[0..slash];
+    const repo = raw[slash + 1 ..];
+    const owner_owned = try allocator.dupe(u8, owner);
+    errdefer allocator.free(owner_owned);
+    const repo_owned = try allocator.dupe(u8, repo);
+    return .{ .owner = owner_owned, .repo = repo_owned };
+}
+
+test "parseRepoOverride accepts user/repo and returns the owned pair" {
+    const pair = try parseRepoOverride(std.testing.allocator, "aeroxy/ast-outline");
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("aeroxy", pair.owner);
+    try std.testing.expectEqualStrings("ast-outline", pair.repo);
+}
+
+test "parseRepoOverride rejects a malformed override (no slash, double slash, empty parts)" {
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "noslash"));
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "user//repo"));
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "user/"));
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "/repo"));
+}
+
+test "parseRepoOverride preserves hyphens, digits, dots in both components" {
+    // GitHub allows these in user and repo names; the validator must
+    // not reject them when a user passes them through --repo.
+    const pair = try parseRepoOverride(std.testing.allocator, "user-1/some.repo_v2");
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("user-1", pair.owner);
+    try std.testing.expectEqualStrings("some.repo_v2", pair.repo);
+}
+
+test "parseRepoOverride rejects components longer than 64 chars" {
+    // Pre-existing validateTapName cap. Documented here so a future
+    // relaxation surfaces as a test diff rather than silent acceptance.
+    const long = "a" ** 65 ++ "/" ++ "b" ** 4;
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, long));
+}
+
+test "parseRepoOverride rejects a leading dot (path-traversal-shaped names)" {
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, ".hidden/repo"));
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "user/.hidden"));
+}
 
 /// Reject malformed `user/repo` inputs before they're formatted into a
 /// GitHub URL or stored as a tap name. No security boundary (no shell
@@ -341,11 +394,17 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     // --refresh <name>: update the stored commit pin to current HEAD.
     // --pin <user/repo> <sha>: explicit pin; consumes the next two argv slots.
     // --refresh --all: walk every registered tap and refresh in batch.
+    // --repo <owner>/<exact-repo>: pin the GitHub repo identifier for
+    //   third-party taps whose repo does not carry the `homebrew-` prefix.
+    // --force: rebind an existing row to a new --repo target, clearing
+    //   the stale commit pin in the process.
     var refresh_target: ?[]const u8 = null;
     var refresh_all = false;
     var pin_slug: ?[]const u8 = null;
     var pin_sha: ?[]const u8 = null;
     var yes = false;
+    var force = false;
+    var repo_override: ?[]const u8 = null;
     var positional: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -358,6 +417,25 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             refresh_all = true;
         } else if (std.mem.eql(u8, arg, "--yes") or std.mem.eql(u8, arg, "-y")) {
             yes = true;
+        } else if (std.mem.eql(u8, arg, "--force")) {
+            force = true;
+        } else if (std.mem.eql(u8, arg, "--repo")) {
+            if (action != .add) {
+                output.err("--repo is only valid with `mt tap`", .{});
+                return error.Aborted;
+            }
+            if (i + 1 >= args.len) {
+                output.err("Usage: mt tap <slug> --repo <owner>/<exact-repo>", .{});
+                return error.Aborted;
+            }
+            repo_override = args[i + 1];
+            i += 1;
+        } else if (std.mem.startsWith(u8, arg, "--repo=")) {
+            if (action != .add) {
+                output.err("--repo is only valid with `mt tap`", .{});
+                return error.Aborted;
+            }
+            repo_override = arg["--repo=".len..];
         } else if (std.mem.eql(u8, arg, "--pin")) {
             if (action != .add) {
                 output.err("--pin is only valid with `mt tap`", .{});
@@ -376,6 +454,23 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     }
     if (refresh_target) |rt| {
         if (rt.len == 0) refresh_target = positional;
+    }
+
+    // --repo / --force only make sense on the add path with a positional
+    // slug. Refuse early so silent drops don't masquerade as success.
+    if (repo_override != null) {
+        if (refresh_all or refresh_target != null or pin_slug != null) {
+            output.err("--repo cannot be combined with --refresh or --pin", .{});
+            return error.Aborted;
+        }
+        if (positional == null) {
+            output.err("Usage: mt tap <user>/<repo> --repo <owner>/<exact-repo>", .{});
+            return error.Aborted;
+        }
+    }
+    if (force and repo_override == null) {
+        output.err("--force is only valid alongside --repo", .{});
+        return error.Aborted;
     }
 
     const prefix = atomic.maltPrefixOrAbort();
@@ -472,13 +567,56 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
 
     switch (action) {
         .add => {
-            const urls = try tap_mod.resolveTapBaseUrls(allocator, name);
+            // --repo overrides any stored pair; otherwise the helper
+            // reads the row, falling back to the slug-derived
+            // `(user, "homebrew-" || repo)` default the first time round.
+            const target_pair = pair: {
+                if (repo_override) |rep| break :pair parseRepoOverride(allocator, rep) catch |e| switch (e) {
+                    error.InvalidRepoOverride => {
+                        output.err("Invalid --repo '{s}'. Expected: owner/exact-repo with [A-Za-z0-9._-]", .{rep});
+                        return error.Aborted;
+                    },
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
+                break :pair try tap_mod.effectiveOwnerRepo(allocator, &db, name);
+            };
+            defer target_pair.deinit(allocator);
+
+            // Rebind policy: refuse if a row already pins a different
+            // (owner, repo) unless --force. Matches the pin-stays-sticky
+            // posture of `tap_mod.add`'s COALESCE on commit_sha.
+            const stored_opt = tap_mod.getOwnerRepo(allocator, &db, name) catch null;
+            defer if (stored_opt) |p| p.deinit(allocator);
+            var rebinding = false;
+            if (stored_opt) |stored| {
+                const same = std.mem.eql(u8, stored.owner, target_pair.owner) and
+                    std.mem.eql(u8, stored.repo, target_pair.repo);
+                if (!same) {
+                    if (!force) {
+                        output.err("Tap {s} is already bound to {s}/{s}. Re-run with --force to rebind to {s}/{s}.", .{ name, stored.owner, stored.repo, target_pair.owner, target_pair.repo });
+                        return error.Aborted;
+                    }
+                    rebinding = true;
+                }
+            }
+
+            // Apply the rebind before any HTTP work. Clearing the pin
+            // upfront means a network failure leaves the row in the
+            // "needs refresh" state rather than half-rebound with stale
+            // SHA + new (owner, repo).
+            if (rebinding) {
+                tap_mod.rebind(&db, name, target_pair.owner, target_pair.repo) catch {
+                    output.err("Failed to rebind tap {s}", .{name});
+                    return error.Aborted;
+                };
+            }
+
+            const urls = try tap_mod.buildTapBaseUrls(allocator, target_pair.owner, target_pair.repo);
             defer urls.deinit(allocator);
 
-            // Resolve HEAD so the tap is pinned from day one. Failing
-            // here beats silently registering an unpinned tap. Idempotent
-            // re-adds reuse the cached etag so a second `tap add` against
-            // a stable tap costs zero rate-limit tokens.
+            // Idempotent re-adds reuse the cached etag for stable taps —
+            // a rebind cleared both fields above, so this is null on
+            // that path.
             const cached_sha_opt = tap_mod.getCommitSha(allocator, &db, name) catch null;
             defer if (cached_sha_opt) |s| allocator.free(s);
             const cached_etag_opt = tap_mod.getHeadEtag(allocator, &db, name) catch null;
@@ -486,6 +624,9 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
 
             var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, cached_etag_opt) catch |e| {
                 output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
+                // Rebind already moved (owner, repo) and cleared the pin —
+                // the row is unfetchable until `mt tap --refresh {slug}` lands a fresh SHA.
+                if (rebinding) output.warn("Rebind applied with no pin — run `mt tap --refresh {s}` to recover.", .{name});
                 return error.Aborted;
             };
             defer head_res.deinit();
@@ -499,7 +640,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
                     output.err("Could not resolve {s}'s HEAD commit: empty response", .{name});
                     return error.Aborted;
                 });
-            tap_mod.add(&db, name, urls.repo_url, sha) catch {
+            tap_mod.add(&db, name, target_pair.owner, target_pair.repo, sha) catch {
                 output.err("Failed to add tap {s}", .{name});
                 return error.Aborted;
             };
@@ -543,7 +684,7 @@ fn pinTap(
     // installs will use. A 404 means GitHub has no such commit on this repo.
     // /commits/<sha> is sha-pinned so the ETag has no caching value — pass
     // null and ignore any etag the server happens to return.
-    const commit_url = try tap_mod.resolveCommitUrl(allocator, slug, sha);
+    const commit_url = try tap_mod.resolveCommitUrl(allocator, db, slug, sha);
     defer allocator.free(commit_url);
     var echoed_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, commit_url, null) catch |e| {
         if (e == error.NotFound) {
@@ -566,9 +707,9 @@ fn pinTap(
         return error.Aborted;
     }
 
-    const urls = try tap_mod.resolveTapBaseUrls(allocator, slug);
-    defer urls.deinit(allocator);
-    tap_mod.add(db, slug, urls.repo_url, sha) catch {
+    const pair = try tap_mod.effectiveOwnerRepo(allocator, db, slug);
+    defer pair.deinit(allocator);
+    tap_mod.add(db, slug, pair.owner, pair.repo, sha) catch {
         output.err("Failed to pin {s}", .{slug});
         return error.Aborted;
     };
@@ -617,7 +758,7 @@ fn refreshAll(
     try rows.ensureTotalCapacityPrecise(allocator, taps.len);
 
     for (taps) |t| {
-        const pair = resolveOneHead(ctx, allocator, t.name) catch null;
+        const pair = resolveOneHead(ctx, allocator, db, t.name) catch null;
         const new_sha: ?[]const u8 = if (pair) |p| p.sha else null;
         const new_et: ?[]const u8 = if (pair) |p| p.etag else null;
         new_shas.appendAssumeCapacity(new_sha);
@@ -657,9 +798,10 @@ const RefreshedHead = struct { sha: []const u8, etag: ?[]const u8 };
 fn resolveOneHead(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
+    db: *sqlite.Database,
     slug: []const u8,
 ) !RefreshedHead {
-    const urls = try tap_mod.resolveTapBaseUrls(allocator, slug);
+    const urls = try tap_mod.resolveTapBaseUrls(allocator, db, slug);
     defer urls.deinit(allocator);
     // `tap --refresh` is the explicit "force fresh" verb — never send
     // If-None-Match so a stale-but-unmoved upstream still surfaces a
@@ -693,7 +835,7 @@ fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Data
         output.err("Invalid tap '{s}'. Expected: user/repo with [A-Za-z0-9._-]", .{name});
         return error.Aborted;
     };
-    const urls = try tap_mod.resolveTapBaseUrls(allocator, name);
+    const urls = try tap_mod.resolveTapBaseUrls(allocator, db, name);
     defer urls.deinit(allocator);
     // Force fresh: bypass the cached etag so the operator sees the
     // current body. The new etag is still persisted afterwards so the

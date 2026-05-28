@@ -3,10 +3,13 @@
 //! directory, so the dispatch opens a real SQLite database under the prefix.
 
 const std = @import("std");
-const malt = @import("malt");
-const test_io = @import("test_io");
 const testing = std.testing;
+
+const malt = @import("malt");
 const tap_cli = @import("malt").cli_tap;
+const TapNameError = tap_cli.TapNameError;
+const bad = TapNameError.InvalidTapName;
+const test_io = @import("test_io");
 
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -112,7 +115,8 @@ test "execute with --json output is a parseable JSON array" {
         try malt.tap.add(
             &db,
             "user/repo",
-            "https://github.com/user/homebrew-repo",
+            "user",
+            "homebrew-repo",
             "0123456789abcdef0123456789abcdef01234567",
         );
     }
@@ -158,10 +162,11 @@ test "execute with --json on a populated DB emits one object per tap" {
         try malt.tap.add(
             &db,
             "user/repo",
-            "https://github.com/user/homebrew-repo",
+            "user",
+            "homebrew-repo",
             "0123456789abcdef0123456789abcdef01234567",
         );
-        try malt.tap.add(&db, "x/y", "https://github.com/x/homebrew-y", null);
+        try malt.tap.add(&db, "x/y", "x", "homebrew-y", null);
     }
 
     const prior_json = malt.output.isJson();
@@ -216,9 +221,6 @@ test "execute with --help short-circuits before touching the database" {
 // ---------------------------------------------------------------------------
 // validateTapName
 // ---------------------------------------------------------------------------
-
-const TapNameError = tap_cli.TapNameError;
-const bad = TapNameError.InvalidTapName;
 
 test "validateTapName: accepts canonical user/repo" {
     try tap_cli.validateTapName("homebrew/core");
@@ -444,6 +446,219 @@ test "execute --refresh --all under `mt untap` is rejected" {
     );
 }
 
+test "execute rejects --repo without a positional slug" {
+    // `mt tap --repo X/Y` with no slug is meaningless — refuse early
+    // rather than silently dispatching to the listing branch.
+    const prefix = try setupPrefix("repo_no_positional");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{ "--repo", "aeroxy/ast-outline" }),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Usage:") != null);
+}
+
+test "execute rejects --repo combined with --refresh" {
+    const prefix = try setupPrefix("repo_with_refresh");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{
+            "user/repo", "--repo", "user/repo", "--refresh",
+        }),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--repo cannot be combined") != null);
+}
+
+test "execute rejects --force without --repo (no-op flag, surface the mistake)" {
+    const prefix = try setupPrefix("force_without_repo");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{ "user/repo", "--force" }),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--force is only valid") != null);
+}
+
+test "execute reports a clean error on a malformed --repo value" {
+    const prefix = try setupPrefix("repo_malformed");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{ "user/repo", "--repo", "no-slash" }),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Invalid --repo") != null);
+}
+
+test "execute rejects --repo over an existing row that pins a different pair" {
+    // Rebind policy: refuse without --force. The refusal fires before
+    // any HTTP work so the assertion is deterministic against a row
+    // already bound to a different (owner, repo).
+    const prefix = try setupPrefix("repo_rebind_refuse");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const db_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/db/malt.db",
+        .{prefix},
+        0,
+    );
+    defer testing.allocator.free(db_path);
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try malt.tap.add(
+            &db,
+            "aeroxy/ast-outline",
+            "aeroxy",
+            "homebrew-ast-outline",
+            null,
+        );
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{
+            "aeroxy/ast-outline", "--repo", "aeroxy/ast-outline",
+        }),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "--force") != null);
+}
+
+test "execute --repo --force rebinds the row and clears the stale pin before any HTTP work" {
+    // Force-rebind invalidates the pin upfront so a network failure
+    // can't leave the row pointing at the new repo with the old SHA.
+    // We drive that invariant with a deliberately-404ing target so the
+    // post-rebind HEAD resolve fails — the rebind side effects must
+    // already be visible in the DB by then.
+    const prefix = try setupPrefix("repo_force_rebind");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const db_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/db/malt.db",
+        .{prefix},
+        0,
+    );
+    defer testing.allocator.free(db_path);
+
+    const stale_sha = "0123456789abcdef0123456789abcdef01234567";
+    {
+        var db = try malt.sqlite.Database.open(db_path);
+        defer db.close();
+        try malt.schema.initSchema(&db);
+        try malt.tap.add(&db, "aeroxy/tap", "aeroxy", "homebrew-tap", stale_sha);
+        try malt.tap.updateHead(&db, "aeroxy/tap", stale_sha, "W/\"stale-etag\"");
+    }
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = threaded.io(),
+        .environ = malt.app_ctx.processEnviron(),
+    };
+
+    // `aeroxy/this-repo-does-not-exist-...` is a deterministic 404
+    // against api.github.com — the rebind runs before the resolve, so
+    // the row mutation is observable even though the command aborts.
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{
+            "aeroxy/tap", "--repo", "aeroxy/missing-prefixless-repo", "--force",
+        }),
+    );
+
+    // The "needs refresh" warning fires only when rebind landed before
+    // the resolve failure — pinning the message guards the ordering.
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Rebind applied with no pin") != null);
+
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare(
+        "SELECT github_owner, github_repo, commit_sha, head_etag FROM taps WHERE name = ?1;",
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, "aeroxy/tap");
+    try testing.expect(try stmt.step());
+    try testing.expectEqualStrings(
+        "aeroxy",
+        std.mem.sliceTo(stmt.columnText(0) orelse "", 0),
+    );
+    try testing.expectEqualStrings(
+        "missing-prefixless-repo",
+        std.mem.sliceTo(stmt.columnText(1) orelse "", 0),
+    );
+    try testing.expect(stmt.columnText(2) == null);
+    try testing.expect(stmt.columnText(3) == null);
+}
+
 test "execute --refresh --all with only failed rows does not gate the apply" {
     // Pre-seed a row whose remote 404s. `--all` walks it, surfaces the
     // failure, but the no-moved-rows path still exits cleanly without
@@ -467,7 +682,8 @@ test "execute --refresh --all with only failed rows does not gate the apply" {
         try malt.tap.add(
             &db,
             "user/repo",
-            "https://github.com/user/homebrew-repo",
+            "user",
+            "homebrew-repo",
             "0123456789abcdef0123456789abcdef01234567",
         );
     }
