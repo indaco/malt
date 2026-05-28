@@ -87,8 +87,10 @@ INSTALLER_URL="https://raw.githubusercontent.com/indaco/malt/main/scripts/instal
 # /usr/bin/shasum or /usr/bin/curl with broken homebrew/nanobrew
 # wrappers — install.sh probes command -v and would pick those up. The
 # test isn't about dev-env pollution, so force a minimal PATH plus
-# cosign's directory.
-SAFE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+# cosign's directory. `$INSTALL_DIR` is also prepended so install.sh's
+# trailing `command -v malt` check resolves the binary it just wrote
+# and the smoke output stays free of the "not in PATH" warning.
+SAFE_PATH="$INSTALL_DIR:/usr/bin:/bin:/usr/sbin:/sbin"
 if [ -n "$COSIGN_PATH" ]; then
   SAFE_PATH="$(dirname "$COSIGN_PATH"):$SAFE_PATH"
 fi
