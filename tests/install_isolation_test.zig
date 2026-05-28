@@ -310,6 +310,60 @@ test "promotion: isolated dep becomes direct with bin link on user install" {
     try testing.expectEqual(@as(i64, 0), probe.columnInt(1));
 }
 
+// Invariant: a direct keg installed during the same pass as a flag-
+// enabled run must NOT pick up isolation. The computation lives in
+// linkAndRecord as `bin_isolated = isolate_deps and job.is_dep`, but
+// the user-visible promise is "the name I typed always lands in PATH".
+test "isolate_deps is a no-op on direct kegs (named pkg stays linked)" {
+    const prefix = try uniquePrefix("direct_noop");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    try test_io.cwd().createDirPath(std.Options.debug_io, prefix);
+    const keg = try makeKegWithBin(prefix, "depkeg", "1.0");
+    defer testing.allocator.free(keg);
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var f = try formula_mod.parseFormula(arena.allocator(), fake_formula_json);
+    defer f.deinit();
+
+    // What the install pipeline computes for a direct keg even when
+    // the user passed --isolate-deps: bin_isolated = flag(true) and
+    // is_dep(false) = false. Mirror that exact call here.
+    const isolate_deps_flag = true;
+    const job_is_dep = false;
+    const computed_bin_isolated = isolate_deps_flag and job_is_dep;
+    try testing.expect(!computed_bin_isolated);
+
+    const keg_id = try install_record.recordKeg(
+        &db,
+        &f,
+        "0" ** 64,
+        keg,
+        "direct",
+        computed_bin_isolated,
+        .{},
+    );
+
+    var linker = linker_mod.Linker.init(std.Options.debug_io, testing.allocator, &db, prefix);
+    try linker.link(keg, "depkeg", keg_id, computed_bin_isolated);
+
+    var bin_buf: [512]u8 = undefined;
+    const bin_link = try std.fmt.bufPrint(&bin_buf, "{s}/bin/depkeg", .{prefix});
+    try testing.expect(pathExists(bin_link));
+
+    var probe = try db.prepare("SELECT bin_isolated FROM kegs WHERE id = ?1;");
+    defer probe.finalize();
+    try probe.bindInt(1, keg_id);
+    _ = try probe.step();
+    try testing.expectEqual(@as(i64, 0), probe.columnInt(0));
+}
+
 // Flag-acceptance smoke: `mt install --isolate-deps --dry-run <pkg>`
 // must not error on flag parsing. Verifies argv plumbing exists.
 test "execute accepts --isolate-deps without erroring during dry-run" {

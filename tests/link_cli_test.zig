@@ -291,6 +291,69 @@ test "executeLink --isolate refuses on a direct keg" {
     );
 }
 
+test "executeLink --isolate without a name and without --all is rejected" {
+    var s = try Scratch.init(testing.allocator, "isolate_no_arg");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+    }
+    quiet();
+    defer unquiet();
+    try testing.expectError(
+        error.Aborted,
+        link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{"--isolate"}),
+    );
+}
+
+test "executeLink --isolate with both a name and --all is rejected" {
+    var s = try Scratch.init(testing.allocator, "isolate_ambiguous");
+    defer s.deinit(testing.allocator);
+    try seedDepKeg(testing.allocator, s.path, "depbin", "1.0", "depbin");
+    quiet();
+    defer unquiet();
+    try testing.expectError(
+        error.Aborted,
+        link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--isolate", "depbin", "--all" }),
+    );
+}
+
+test "executeLink --isolate <missing-name> returns Aborted" {
+    var s = try Scratch.init(testing.allocator, "isolate_missing_name");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+    }
+    quiet();
+    defer unquiet();
+    try testing.expectError(
+        error.Aborted,
+        link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--isolate", "ghost-pkg" }),
+    );
+}
+
+test "executeLink --isolate --all on a prefix with no dep kegs is a clean info" {
+    var s = try Scratch.init(testing.allocator, "isolate_all_empty");
+    defer s.deinit(testing.allocator);
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+    }
+    quiet();
+    defer unquiet();
+    try link_mod.executeLink(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--isolate", "--all" });
+}
+
 test "executeLink on an isolated dep re-links bins and clears bin_isolated" {
     var s = try Scratch.init(testing.allocator, "link_un_isolate");
     defer s.deinit(testing.allocator);
