@@ -156,8 +156,6 @@ fn executeLinkIsolate(ctx: *const AppCtx, allocator: std.mem.Allocator, name: ?[
     defer db.close();
     schema.initSchema(&db) catch {};
 
-    var linker = linker_mod.Linker.init(ctx.io, allocator, &db, prefix);
-
     if (all_flag) {
         var sel = db.prepare(
             "SELECT id, name FROM kegs WHERE install_reason='dependency' AND bin_isolated=0 ORDER BY name;",
@@ -189,7 +187,7 @@ fn executeLinkIsolate(ctx: *const AppCtx, allocator: std.mem.Allocator, name: ?[
         }
 
         for (names.items, ids.items) |n, id| {
-            isolateOne(ctx, &db, &linker, n, id) catch {
+            isolateOne(ctx, &db, id) catch {
                 output.warn("could not isolate {s}", .{n});
                 continue;
             };
@@ -216,7 +214,7 @@ fn executeLinkIsolate(ctx: *const AppCtx, allocator: std.mem.Allocator, name: ?[
         return error.Aborted;
     }
 
-    try isolateOne(ctx, &db, &linker, target, keg_id);
+    try isolateOne(ctx, &db, keg_id);
     output.success("{s} isolated: bin/sbin links removed", .{target});
 }
 
@@ -227,13 +225,8 @@ fn executeLinkIsolate(ctx: *const AppCtx, allocator: std.mem.Allocator, name: ?[
 fn isolateOne(
     ctx: *const AppCtx,
     db: *sqlite.Database,
-    linker: *linker_mod.Linker,
-    name: []const u8,
     keg_id: i64,
 ) !void {
-    _ = name;
-    _ = linker;
-
     var sel = try db.prepare(
         "SELECT link_path FROM links WHERE keg_id = ?1 AND (link_path LIKE '%/bin/%' OR link_path LIKE '%/sbin/%');",
     );
@@ -241,6 +234,8 @@ fn isolateOne(
     try sel.bindInt(1, keg_id);
     while (try sel.step()) {
         const p = sel.columnText(0) orelse continue;
+        // Symlink may already be gone from the filesystem; the DB
+        // DELETE below is the source of truth being flushed.
         std.Io.Dir.cwd().deleteFile(ctx.io, std.mem.sliceTo(p, 0)) catch {};
     }
 
