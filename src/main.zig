@@ -504,6 +504,7 @@ fn printUsage(ctx: *const AppCtx) void {
     const usage =
         \\malt — a fast, drop-in Homebrew alternative for macOS.
         \\Warm installs in milliseconds. post_install scripts that actually run.
+        \\Full operational surface beyond install and uninstall.
         \\
         \\Usage: malt <command> [options] [arguments]
         \\       mt <command> [options] [arguments]    (alias)
