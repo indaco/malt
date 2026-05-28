@@ -380,7 +380,7 @@ const InstallFlag = enum {
     use_system_ruby,
     quiet,
     json,
-    only_dependencies,
+    only_deps,
     download_only,
     isolate_deps,
 };
@@ -395,7 +395,11 @@ const install_flag_map = std.StaticStringMap(InstallFlag).initComptime(.{
     .{ "--quiet", .quiet },
     .{ "-q", .quiet },
     .{ "--json", .json },
-    .{ "--only-dependencies", .only_dependencies },
+    .{ "--only-deps", .only_deps },
+    // brew-parity alias — `--only-dependencies` is what `brew install`
+    // accepts, so muscle memory keeps working alongside the canonical
+    // `--only-deps` spelling that mirrors `--isolate-deps`.
+    .{ "--only-dependencies", .only_deps },
     .{ "--download-only", .download_only },
     .{ "--isolate-deps", .isolate_deps },
 });
@@ -432,7 +436,7 @@ fn executeWithOpts(
     var local_only = false;
     // brew parity: resolve the dep graph, bail before the requested package's
     // materialise+link. Deps stay marked `dependency` for `mt purge --unused-deps`.
-    var only_dependencies = false;
+    var only_deps = false;
     // Warm the bottle store; skip materialise/link/record. Refcount stays
     // at 0 so warmed entries are invisible to `purge --store-orphans`
     // until a follow-up install picks them up.
@@ -462,7 +466,7 @@ fn executeWithOpts(
             .use_system_ruby => use_system_ruby_bare = true,
             .quiet => output.setQuiet(true),
             .json => output.setMode(.json),
-            .only_dependencies => only_dependencies = true,
+            .only_deps => only_deps = true,
             .download_only => download_only = true,
             .isolate_deps => isolate_deps = true,
         } else if (!std.mem.startsWith(u8, arg, "-")) {
@@ -492,11 +496,11 @@ fn executeWithOpts(
         }
     }
 
-    // The two flags pull in opposite directions: --only-dependencies skips
-    // the requested package, --download-only skips materialise+link entirely.
+    // The two flags pull in opposite directions: --only-deps skips the
+    // requested package, --download-only skips materialise+link entirely.
     // Document the refusal up front rather than silently picking a winner.
-    if (download_only and only_dependencies) {
-        output.err("--download-only cannot be combined with --only-dependencies", .{});
+    if (download_only and only_deps) {
+        output.err("--download-only cannot be combined with --only-deps", .{});
         return error.Aborted;
     }
 
@@ -548,11 +552,11 @@ fn executeWithOpts(
 
     // Idempotent fast path — skip DB / lock / HTTP setup when every named
     // arg already has a Cellar entry. Flags that change semantics
-    // (--force / --cask / --local / --dry-run / --only-dependencies) and
+    // (--force / --cask / --local / --dry-run / --only-deps) and
     // tap-form / .rb-path args route to the regular flow. All-or-nothing
     // on multi-arg keeps the gate state-free.
     const fastpath_eligible = !force and !force_cask and !local_only and
-        !dry_run and !only_dependencies;
+        !dry_run and !only_deps;
     if (fastpath_eligible) fast: {
         for (packages.items) |pkg| {
             if (isTapFormula(pkg) or isLocalFormulaPath(pkg)) break :fast;
@@ -773,7 +777,7 @@ fn executeWithOpts(
     // top-level skipped; deps still recorded for GC. Surviving jobs keep
     // `is_dep=true`, so `linkAndRecord` writes `install_reason='dependency'`
     // and `mt purge --unused-deps` reclaims them once nothing direct retains them.
-    if (only_dependencies) dropTopLevelJobs(allocator, &all_jobs);
+    if (only_deps) dropTopLevelJobs(allocator, &all_jobs);
 
     if (all_jobs.items.len == 0) {
         // Resolution-only failures never reach the link loop's trailing

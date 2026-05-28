@@ -463,10 +463,12 @@ test "execute --only-dependencies on a leaf formula plans nothing" {
     try testing.expect(std.mem.indexOf(u8, captured.items, "Dry run: would install") == null);
 }
 
-test "execute --only-dependencies --dry-run plans deps but skips the requested formula" {
-    // Brew parity: --only-dependencies installs the transitive deps but
-    // never materialises or links the requested package. Captured stderr
-    // is the cheapest way to assert the plan's contents from the outside.
+test "execute --only-deps --dry-run plans deps but skips the requested formula" {
+    // Brew parity: --only-deps installs the transitive deps but never
+    // materialises or links the requested package. Captured stderr is
+    // the cheapest way to assert the plan's contents from the outside.
+    // The earlier `--only-dependencies` test pins the brew-parity alias;
+    // this one pins the canonical short spelling.
     const prefix_z: [:0]const u8 = "/tmp/mod";
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix_z) catch {};
     try test_io.cwd().createDirPath(std.Options.debug_io, prefix_z);
@@ -527,7 +529,7 @@ test "execute --only-dependencies --dry-run plans deps but skips the requested f
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
-    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--only-dependencies", "alpha" });
+    try install.execute(&ctx, arena.allocator(), &.{ "--dry-run", "--only-deps", "alpha" });
 
     // The dry-run plan header is the load-bearing observation: with the
     // top-level filtered, only the single dep should land in the plan.

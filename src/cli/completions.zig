@@ -137,7 +137,7 @@ pub const bash_script =
     \\
     \\    local cmd_flags=""
     \\    case "$cmd" in
-    \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-dependencies --isolate-deps --quiet -q --json" ;;
+    \\        install)          cmd_flags="--cask --formula --local --dry-run --force --download-only --only-deps --only-dependencies --isolate-deps --quiet -q --json" ;;
     \\        reinstall)        cmd_flags="--cask --dry-run --isolate-deps --quiet -q --json" ;;
     \\        backup)           cmd_flags="--output -o --versions --services --quiet -q" ;;
     \\        restore)          cmd_flags="--dry-run --force --quiet -q" ;;
@@ -257,7 +257,8 @@ pub const zsh_script =
     \\                        '--dry-run[Show what would be installed]' \
     \\                        '--force[Overwrite existing installations]' \
     \\                        '--download-only[Warm the bottle, cask, or tap-archive cache; skip install]' \
-    \\                        '--only-dependencies[Install transitive deps, skip the requested package]' \
+    \\                        '--only-deps[Install transitive deps, skip the requested package]' \
+    \\                        '--only-dependencies[Brew-parity alias of --only-deps]' \
     \\                        '--isolate-deps[Keep transitive deps out of <prefix>/bin and <prefix>/sbin]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
     \\                        '--json[Output result as JSON]' \
@@ -543,7 +544,8 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l dry-run -d 'Preview'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l force   -d 'Overwrite existing'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l download-only -d 'Warm the bottle, cask, or tap-archive cache; skip install'
-    \\    complete -c $__malt_bin -n '__malt_using_command install' -l only-dependencies -d 'Install transitive deps; skip the requested package'
+    \\    complete -c $__malt_bin -n '__malt_using_command install' -l only-deps         -d 'Install transitive deps; skip the requested package'
+    \\    complete -c $__malt_bin -n '__malt_using_command install' -l only-dependencies -d 'Brew-parity alias of --only-deps'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l isolate-deps -d 'Keep transitive deps out of <prefix>/bin and <prefix>/sbin'
     \\    complete -c $__malt_bin -n '__malt_using_command install' -l json    -d 'JSON output'
     \\

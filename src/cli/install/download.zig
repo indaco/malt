@@ -445,7 +445,7 @@ pub fn assignDownloadLineIndices(jobs: []DownloadJob) u16 {
     return idx;
 }
 
-/// Drop top-level (`is_dep == false`) jobs from `jobs` so `--only-dependencies`
+/// Drop top-level (`is_dep == false`) jobs from `jobs` so `--only-deps`
 /// can bail before the requested package is materialised. Frees the same five
 /// strings `dupeJobStrings` allocated; `formula_json` on top-level jobs is
 /// borrowed from `api.fetchFormula`, so freeing it here would double-free.
