@@ -294,10 +294,11 @@ fn anyNamedNeedsPromotion(ctx: *const AppCtx, prefix: []const u8, packages: []co
     return false;
 }
 
-/// Promote one named keg if it is currently an isolated dep: clear
-/// `bin_isolated`, set `install_reason='direct'`, and re-link
-/// bin/sbin. Returns true on a successful promotion. Idempotent on
-/// already-direct rows.
+/// Promote one named keg if it is currently an isolated dep: re-link
+/// bin/sbin, then clear `bin_isolated` and set `install_reason='direct'`.
+/// FS work happens before the DB update so a link failure leaves the
+/// row's prior `bin_isolated=1` intact — coherent with the (still
+/// absent) bin/sbin links and recoverable on retry.
 fn promoteIsolatedDepIfAny(
     db: *sqlite.Database,
     linker: *linker_mod.Linker,
@@ -316,6 +317,9 @@ fn promoteIsolatedDepIfAny(
     const version = std.mem.sliceTo(ver_ptr, 0);
     const cellar = std.mem.sliceTo(cellar_ptr, 0);
 
+    linker.link(cellar, name, keg_id, false) catch return false;
+    linker.linkOpt(name, version) catch {}; // opt link already present on a promoted dep; best-effort refresh.
+
     var upd = db.prepare(
         "UPDATE kegs SET install_reason='direct', bin_isolated=0 WHERE id=?1;",
     ) catch return false;
@@ -323,8 +327,6 @@ fn promoteIsolatedDepIfAny(
     upd.bindInt(1, keg_id) catch return false;
     _ = upd.step() catch return false;
 
-    linker.link(cellar, name, keg_id, false) catch return false;
-    linker.linkOpt(name, version) catch {}; // opt link already present on a promoted dep; best-effort refresh.
     return true;
 }
 

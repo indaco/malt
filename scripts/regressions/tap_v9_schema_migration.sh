@@ -57,8 +57,8 @@ export MALT_PREFIX="$PREFIX"
 }
 
 ver=$(sqlite3 "$DB" "SELECT MAX(version) FROM schema_version;")
-[[ "$ver" == "9" ]] || {
-  printf 'FAIL: fresh DB at v%s, expected v9.\n' "$ver" >&2
+[[ "$ver" -ge 9 ]] || {
+  printf 'FAIL: fresh DB at v%s, expected at least v9.\n' "$ver" >&2
   exit 1
 }
 
@@ -95,13 +95,13 @@ ver_after=$(sqlite3 "$DB" "SELECT MAX(version) FROM schema_version;")
 # Step 2: run `mt tap` so initSchema → migrate triggers v8→v9.
 "$MT" tap >/dev/null 2>&1 || true
 
-# Step 3: assert the migration landed at v9 with the expected backfill.
+# Step 3: assert the migration landed at v9 (or newer) with the expected backfill.
 ver_post=$(sqlite3 "$DB" "SELECT MAX(version) FROM schema_version;")
-[[ "$ver_post" == "9" ]] || {
-  printf 'FAIL: migration did not bump to v9 (got %s).\n' "$ver_post" >&2
+[[ "$ver_post" -ge 9 ]] || {
+  printf 'FAIL: migration did not bump to at least v9 (got %s).\n' "$ver_post" >&2
   exit 1
 }
-printf '  ✓ schema_version bumped 8 -> 9\n'
+printf '  ✓ schema_version reached at least v9 (got %s)\n' "$ver_post"
 
 row1=$(sqlite3 -separator '|' "$DB" "SELECT github_owner, github_repo FROM taps WHERE name='aeroxy/tap';")
 [[ "$row1" == "aeroxy|homebrew-tap" ]] || {

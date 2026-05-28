@@ -115,14 +115,20 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
     }
 
     // A full link materialises bin/sbin, so the row's `bin_isolated`
-    // must agree with the filesystem; clear it unconditionally. The
-    // UPDATE is a no-op for already-direct rows.
-    var clr = db.prepare("UPDATE kegs SET bin_isolated = 0 WHERE id = ?1;") catch return;
-    defer clr.finalize();
-    clr.bindInt(1, keg_id) catch return;
-    _ = clr.step() catch {};
+    // must agree with the filesystem; clear it unconditionally. Best-
+    // effort: the FS work already succeeded, so on a DB write error
+    // we still print success and let `mt doctor` self-heal — bailing
+    // here would swallow the user-visible outcome.
+    clearBinIsolated(&db, keg_id);
 
     output.success("{s} linked", .{target_name});
+}
+
+fn clearBinIsolated(db: *sqlite.Database, keg_id: i64) void {
+    var stmt = db.prepare("UPDATE kegs SET bin_isolated = 0 WHERE id = ?1;") catch return;
+    defer stmt.finalize();
+    stmt.bindInt(1, keg_id) catch return;
+    _ = stmt.step() catch {};
 }
 
 /// `mt link --isolate <name|--all>` — remove bin/sbin links and mark
