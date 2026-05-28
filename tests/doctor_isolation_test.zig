@@ -8,6 +8,7 @@ const test_io = @import("test_io");
 const doctor = malt.doctor;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
+const output = malt.output;
 
 fn uniquePrefix(suffix: []const u8) ![]u8 {
     return std.fmt.allocPrint(
@@ -50,7 +51,12 @@ fn seedFixture(prefix: []const u8) !void {
     );
 }
 
-test "doctor isolation check flags only dep kegs with bin/sbin links and bin_isolated=0" {
+test "doctor isolation check stays informational even when dep kegs link bin/sbin" {
+    // Per the task contract: linked deps are the default state, not a
+    // defect — `mt doctor` must exit clean so first-time users aren't
+    // moralised at every run. The check surfaces the count via its
+    // detail line (verified by the SQL — there *are* offenders in the
+    // fixture) but the tally tag stays `.ok` so doctor exits 0.
     const prefix = try uniquePrefix("leaker");
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -65,9 +71,8 @@ test "doctor isolation check flags only dep kegs with bin/sbin links and bin_iso
         .offline = false,
     };
 
-    // Run the check directly so we don't depend on doctor's stdout-printing.
     const result = checkResult(ctx);
-    try testing.expectEqual(doctor.CheckResult.warn_status, result);
+    try testing.expectEqual(doctor.CheckResult.ok, result);
 }
 
 // Clean prefix: no dep kegs leak. Check returns ok.
@@ -112,12 +117,39 @@ test "doctor isolation check returns ok when no dep keg leaks bin/sbin" {
     try testing.expectEqual(doctor.CheckResult.ok, result);
 }
 
+// Verbose mode must keep the check informational too — the
+// enumeration is just bonus detail, never an exit-code bump.
+test "doctor isolation check is .ok under --verbose with offenders" {
+    const prior_verbose = output.isVerbose();
+    output.setVerbose(true);
+    defer output.setVerbose(prior_verbose);
+    output.setQuiet(true); // silence the writeVerboseList stderr noise during testing
+    defer output.setQuiet(false);
+
+    const prefix = try uniquePrefix("verbose_leaker");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    try seedFixture(prefix);
+
+    const ctx: doctor.CheckCtx = .{
+        .allocator = testing.allocator,
+        .prefix = prefix,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .mirrors = .{},
+        .offline = false,
+    };
+
+    const result = checkResult(ctx);
+    try testing.expectEqual(doctor.CheckResult.ok, result);
+}
+
 // The check table must include the new entry — guards against
 // silently dropping it from the registered walk.
 test "checks table includes the dependency bin/sbin leak check" {
     var found = false;
     for (doctor.checks) |c| {
-        if (std.mem.eql(u8, c.name, "Dependency bin/sbin leaks")) {
+        if (std.mem.eql(u8, c.name, "Dependency bin/sbin link census")) {
             found = true;
             break;
         }
@@ -128,7 +160,7 @@ test "checks table includes the dependency bin/sbin leak check" {
 // Find the registered check function by name and invoke it.
 fn checkResult(ctx: doctor.CheckCtx) doctor.CheckResult {
     for (doctor.checks) |c| {
-        if (std.mem.eql(u8, c.name, "Dependency bin/sbin leaks")) {
+        if (std.mem.eql(u8, c.name, "Dependency bin/sbin link census")) {
             return c.run(ctx, c.name);
         }
     }

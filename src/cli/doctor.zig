@@ -85,7 +85,7 @@ pub const checks = [_]Check{
     .{ .name = "Mach-O placeholders", .run = checkMachOPlaceholders },
     .{ .name = "Disk space", .run = checkDiskSpace },
     .{ .name = "Local formula sources", .run = checkLocalSources },
-    .{ .name = "Dependency bin/sbin leaks", .run = checkIsolationLeaks },
+    .{ .name = "Dependency bin/sbin link census", .run = checkIsolationLeaks },
 };
 
 /// Walks the table and tallies warn/err contributions. Exposed so
@@ -871,11 +871,11 @@ fn checkDiskSpace(ctx: CheckCtx, name: []const u8) CheckResult {
     return .warn_status;
 }
 
-/// Enumerate dep kegs whose bin/sbin are still linked into the prefix —
-/// the leak the isolation feature targets. Reports a count by default;
-/// verbose mode lists each offender with the `mt link --isolate <name>`
-/// remediation. Warning (not error) severity: nothing is broken, the
-/// user simply has more in PATH than they may want.
+/// Surface the dep-keg bin/sbin link census. Linked deps are the
+/// default state, not a defect — the check stays at `.ok` severity so
+/// `mt doctor` exits clean. Detail + enumeration only emit under
+/// `--verbose` so default runs stay silent on this dimension and
+/// downstream "grep for warnings" gates don't false-positive.
 fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
@@ -887,6 +887,11 @@ fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
         return .ok;
     };
     defer db.close();
+
+    if (!output.isVerbose()) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
 
     var stmt = db.prepare(
         \\SELECT k.name
@@ -910,7 +915,7 @@ fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
         const k_name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
         const row = std.fmt.allocPrint(
             ctx.allocator,
-            "{s}   (remediation: mt link --isolate {s})",
+            "{s}   (mt link --isolate {s} to hide from PATH)",
             .{ k_name, k_name },
         ) catch continue;
         offenders.append(ctx.allocator, row) catch {
@@ -927,13 +932,12 @@ fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
     var msg_buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &msg_buf,
-        "{d} dependency keg(s) still link bin/sbin. Run `mt link --isolate <name>` to hide them from PATH.",
+        "{d} dependency keg(s) link bin/sbin (use `mt link --isolate <name>` to hide).",
         .{offenders.items.len},
-    ) catch "Dependency kegs are still linked into bin/sbin.";
-    printCheck(name, .warn_status, msg);
-    armVerboseHint();
+    ) catch "Dependency kegs are linked into bin/sbin.";
+    printCheck(name, .ok, msg);
     writeVerboseList(offenders.items);
-    return .warn_status;
+    return .ok;
 }
 
 fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {
