@@ -2,32 +2,33 @@
 //! Upgrade installed packages and casks.
 
 const std = @import("std");
+
 const AppCtx = @import("../app_ctx.zig").AppCtx;
-const sqlite = @import("../db/sqlite.zig");
-const schema = @import("../db/schema.zig");
-const atomic = @import("../fs/atomic.zig");
-const output = @import("../ui/output.zig");
-const lock_mod = @import("../db/lock.zig");
-const client_mod = @import("../net/client.zig");
-const api_mod = @import("../net/api.zig");
 const cask_mod = @import("../core/cask.zig");
-const formula_mod = @import("../core/formula.zig");
-const store_mod = @import("../core/store.zig");
 const cellar_mod = @import("../core/cellar.zig");
+const deps_mod = @import("../core/deps.zig");
+const formula_mod = @import("../core/formula.zig");
 const linker_mod = @import("../core/linker.zig");
+const store_mod = @import("../core/store.zig");
+const tap_mod = @import("../core/tap.zig");
+const lock_mod = @import("../db/lock.zig");
+const schema = @import("../db/schema.zig");
+const sqlite = @import("../db/sqlite.zig");
+const atomic = @import("../fs/atomic.zig");
+const api_mod = @import("../net/api.zig");
+const client_mod = @import("../net/client.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
+const output = @import("../ui/output.zig");
+const progress_mod = @import("../ui/progress.zig");
 const help = @import("help.zig");
-const pin_mod = @import("pin.zig");
-const install_mod = @import("install.zig");
-const install_local_mod = @import("install/local.zig");
-const install_rb_parse_mod = @import("install/rb_parse.zig");
 const install_args_mod = @import("install/args.zig");
 const install_download_mod = @import("install/download.zig");
+const install_local_mod = @import("install/local.zig");
+const install_rb_parse_mod = @import("install/rb_parse.zig");
 const install_record_mod = @import("install/record.zig");
 const InstallError = install_record_mod.InstallError;
-const progress_mod = @import("../ui/progress.zig");
-const tap_mod = @import("../core/tap.zig");
-const deps_mod = @import("../core/deps.zig");
+const install_mod = @import("install.zig");
+const pin_mod = @import("pin.zig");
 
 const UpgradeFlag = enum { quiet, cask, formula, dry_run, force, pinned };
 
@@ -441,7 +442,7 @@ fn upgradeTapFormula(
         return error.Aborted;
     }
 
-    const urls = try tap_mod.resolveTapBaseUrls(allocator, tap_label);
+    const urls = try tap_mod.resolveTapBaseUrls(allocator, db, tap_label);
     defer urls.deinit(allocator);
 
     // `mt upgrade` asks GitHub "has HEAD moved?". Sending the cached
@@ -488,10 +489,19 @@ fn upgradeTapFormula(
 
     // Persist the new pin BEFORE installTapFormula reads it. Use add()
     // so a missing tap row (legacy install) is created instead of erroring.
-    tap_mod.add(db, tap_label, urls.repo_url, fresh_sha) catch {
-        output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
-        return error.Aborted;
-    };
+    // (owner, repo) routes through `effectiveOwnerRepo` so the synthesis
+    // used at HEAD resolve time matches the row that records the pin.
+    {
+        const pair = tap_mod.effectiveOwnerRepo(allocator, db, tap_label) catch {
+            output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
+            return error.Aborted;
+        };
+        defer pair.deinit(allocator);
+        tap_mod.add(db, tap_label, pair.owner, pair.repo, fresh_sha) catch {
+            output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
+            return error.Aborted;
+        };
+    }
     // Refresh the etag on 200 so the next upgrade short-circuits. On 304
     // the etag we already hold is by definition still current.
     if (!head_res.not_modified) {
@@ -534,7 +544,7 @@ fn upgradeRoutedTapCask(
     const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse return error.Aborted;
     if (slash == 0 or slash == tap_label.len - 1) return error.Aborted;
 
-    const urls = tap_mod.resolveTapBaseUrls(allocator, tap_label) catch return error.Aborted;
+    const urls = tap_mod.resolveTapBaseUrls(allocator, db, tap_label) catch return error.Aborted;
     defer urls.deinit(allocator);
 
     // Send the cached etag so a stable tap 304s for free; on 200 we
@@ -585,10 +595,17 @@ fn upgradeRoutedTapCask(
 
     // Persist the new pin BEFORE installTapFormula reads it via
     // `tap_mod.getCommitSha`. Same pattern as `upgradeTapFormula`.
-    tap_mod.add(db, tap_label, urls.repo_url, fresh_sha) catch {
-        output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
-        return error.Aborted;
-    };
+    {
+        const pair = tap_mod.effectiveOwnerRepo(allocator, db, tap_label) catch {
+            output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
+            return error.Aborted;
+        };
+        defer pair.deinit(allocator);
+        tap_mod.add(db, tap_label, pair.owner, pair.repo, fresh_sha) catch {
+            output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
+            return error.Aborted;
+        };
+    }
     // On 200, refresh the etag so the next round can 304. On 304 the
     // cached etag is by definition still current.
     if (!head_res.not_modified) {

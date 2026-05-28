@@ -1,4 +1,6 @@
 const std = @import("std");
+const testing = std.testing;
+
 const sqlite = @import("sqlite.zig");
 
 /// Initialize the database schema (CREATE TABLE IF NOT EXISTS).
@@ -122,7 +124,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 8;
+pub const known_schema_version: i64 = 9;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -140,6 +142,7 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 6) try migrateV5toV6(db);
     if (ver < 7) try migrateV6toV7(db);
     if (ver < 8) try migrateV7toV8(db);
+    if (ver < 9) try migrateV8toV9(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -463,6 +466,66 @@ fn migrateV7toV8(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
+/// v9 — promote the `homebrew-<repo>` prefix decision from inline format
+/// strings into structured `(github_owner, github_repo)` columns. The
+/// helper at `core/tap.zig` reads from the row; the prefix is no longer
+/// synthesised at fetch time. Existing rows backfill from the slug, so
+/// pre-v9 prefixed taps keep fetching from the same URLs byte-for-byte.
+fn migrateV8toV9(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    // PRAGMA table_info returns zero rows when the table is missing — same
+    // partial-shape fixture defensiveness as v7→v8.
+    var have_table = false;
+    var have_owner = false;
+    var have_repo = false;
+    {
+        var stmt = try db.prepare("PRAGMA table_info(taps);");
+        defer stmt.finalize();
+        while (try stmt.step()) {
+            have_table = true;
+            const name = stmt.columnText(1) orelse continue;
+            const n = std.mem.sliceTo(name, 0);
+            if (std.mem.eql(u8, n, "github_owner")) have_owner = true;
+            if (std.mem.eql(u8, n, "github_repo")) have_repo = true;
+        }
+    }
+    if (have_table and !have_owner) {
+        // DEFAULT '' so ALTER over a non-empty table doesn't violate
+        // NOT NULL; the backfill below replaces every '' with a real value.
+        try db.exec("ALTER TABLE taps ADD COLUMN github_owner TEXT NOT NULL DEFAULT '';");
+    }
+    if (have_table and !have_repo) {
+        try db.exec("ALTER TABLE taps ADD COLUMN github_repo TEXT NOT NULL DEFAULT '';");
+    }
+
+    // Backfill only rows that still carry the ALTER default. A row whose
+    // pair was already populated (re-run, fresh DB, custom `--repo` insert
+    // applied before the migration marker rewound) keeps its value.
+    //
+    // `instr(name, '/')`: SQLite returns 0 when the slash is absent. The
+    // CASE branches keep malformed slugs from corrupting the row — the
+    // verbatim fallback preserves what's there rather than producing a
+    // negative substring length.
+    if (have_table) {
+        try db.exec(
+            \\UPDATE taps SET
+            \\    github_owner = CASE WHEN instr(name, '/') > 0
+            \\                        THEN substr(name, 1, instr(name, '/') - 1)
+            \\                        ELSE name END,
+            \\    github_repo  = CASE WHEN instr(name, '/') > 0
+            \\                        THEN 'homebrew-' || substr(name, instr(name, '/') + 1)
+            \\                        ELSE name END
+            \\WHERE github_owner = '' OR github_repo = '';
+        );
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (9);");
+
+    try db.commit();
+}
+
 /// Return true iff every column in `wanted` is present on the `casks`
 /// table. Mirrors the PRAGMA-guarded probes used by v2→v3 / v3→v4 /
 /// v5→v6; centralised here because the v6→v7 backfill needs five
@@ -492,8 +555,6 @@ pub fn currentVersion(db: *sqlite.Database) sqlite.SqliteError!i64 {
 
     return stmt.columnInt(0);
 }
-
-const testing = std.testing;
 
 fn foreignKeysOn(db: *sqlite.Database) !bool {
     var stmt = try db.prepare("PRAGMA foreign_keys;");
@@ -658,7 +719,7 @@ test "v6→v7 migration backfills cask_versions from existing casks rows" {
     const token1 = stmt.columnText(0) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("flux-markdown", std.mem.sliceTo(token1, 0));
 
-    try testing.expectEqual(@as(i64, 8), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
 }
 
 test "v6→v7 migration is idempotent when cask_versions already carries the rows" {
@@ -707,7 +768,7 @@ test "fresh DB ships with taps.head_etag (v8 shape)" {
         }
     }
     try testing.expect(found);
-    try testing.expectEqual(@as(i64, 8), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
 }
 
 test "v7→v8 migration adds head_etag and preserves existing tap rows" {
@@ -738,7 +799,7 @@ test "v7→v8 migration adds head_etag and preserves existing tap rows" {
     );
     // Pre-v8 rows must carry NULL until a conditional GET populates it.
     try testing.expect(probe.columnText(1) == null);
-    try testing.expectEqual(@as(i64, 8), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
 }
 
 test "v7→v8 migration is idempotent when head_etag is already present" {
@@ -763,6 +824,161 @@ test "v7→v8 migration is idempotent when head_etag is already present" {
     try testing.expect(try probe.step());
     const et = probe.columnText(0) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("W/\"deadbeef\"", std.mem.sliceTo(et, 0));
+}
+
+// v8→v9 promotes the prefix decision into structured (github_owner,
+// github_repo) columns so the helper has no string synthesis left to
+// forget. Fresh DBs ship with the v9 shape; upgraded DBs get
+// `(user, "homebrew-" || repo)` backfilled from the existing slug.
+
+test "fresh DB ships with taps.github_owner and taps.github_repo (v9 shape)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    var stmt = try db.prepare("PRAGMA table_info(taps);");
+    defer stmt.finalize();
+    var owner_seen = false;
+    var repo_seen = false;
+    while (try stmt.step()) {
+        const name = stmt.columnText(1) orelse continue;
+        const n = std.mem.sliceTo(name, 0);
+        if (std.mem.eql(u8, n, "github_owner")) owner_seen = true;
+        if (std.mem.eql(u8, n, "github_repo")) repo_seen = true;
+    }
+    try testing.expect(owner_seen);
+    try testing.expect(repo_seen);
+    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
+}
+
+test "v8→v9 migration backfills (user, \"homebrew-\" || repo) from existing slugs" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    // Seed three v8-shape tap rows, then rewind the schema marker so the
+    // next migrate run re-enters the v8→v9 step.
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha) VALUES
+        \\    ('aeroxy/tap',   'https://github.com/aeroxy/homebrew-tap',   '0123456789abcdef0123456789abcdef01234567'),
+        \\    ('user/repo',    'https://github.com/user/homebrew-repo',    NULL),
+        \\    ('user-1/some.v2','https://github.com/user-1/homebrew-some.v2', NULL);
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 9;");
+
+    try migrate(&db);
+
+    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
+
+    var probe = try db.prepare(
+        "SELECT name, github_owner, github_repo FROM taps ORDER BY name;",
+    );
+    defer probe.finalize();
+
+    try testing.expect(try probe.step());
+    const n0 = std.mem.sliceTo(probe.columnText(0) orelse return error.TestUnexpectedResult, 0);
+    try testing.expectEqualStrings("aeroxy/tap", n0);
+    try testing.expectEqualStrings("aeroxy", std.mem.sliceTo(probe.columnText(1) orelse "", 0));
+    try testing.expectEqualStrings("homebrew-tap", std.mem.sliceTo(probe.columnText(2) orelse "", 0));
+
+    try testing.expect(try probe.step());
+    const n1 = std.mem.sliceTo(probe.columnText(0) orelse return error.TestUnexpectedResult, 0);
+    try testing.expectEqualStrings("user-1/some.v2", n1);
+    try testing.expectEqualStrings("user-1", std.mem.sliceTo(probe.columnText(1) orelse "", 0));
+    try testing.expectEqualStrings("homebrew-some.v2", std.mem.sliceTo(probe.columnText(2) orelse "", 0));
+
+    try testing.expect(try probe.step());
+    const n2 = std.mem.sliceTo(probe.columnText(0) orelse return error.TestUnexpectedResult, 0);
+    try testing.expectEqualStrings("user/repo", n2);
+    try testing.expectEqualStrings("user", std.mem.sliceTo(probe.columnText(1) orelse "", 0));
+    try testing.expectEqualStrings("homebrew-repo", std.mem.sliceTo(probe.columnText(2) orelse "", 0));
+}
+
+test "v8→v9 migration is idempotent when columns are already populated" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    // Stamp a custom (owner, repo) pair, rewind, re-run the migration.
+    // The PRAGMA guard must skip the ALTER and the backfill must not
+    // overwrite a non-default pair.
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo) VALUES
+        \\    ('aeroxy/ast-outline', 'https://github.com/aeroxy/ast-outline', NULL, 'aeroxy', 'ast-outline');
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 9;");
+
+    try migrate(&db);
+
+    var probe = try db.prepare(
+        "SELECT github_owner, github_repo FROM taps WHERE name='aeroxy/ast-outline';",
+    );
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    try testing.expectEqualStrings("aeroxy", std.mem.sliceTo(probe.columnText(0) orelse "", 0));
+    try testing.expectEqualStrings("ast-outline", std.mem.sliceTo(probe.columnText(1) orelse "", 0));
+}
+
+// Empty `taps` table is the most common pre-v9 shape — the ALTER must
+// add the columns, the backfill UPDATE must safely no-op, and the
+// version marker still bumps so a re-run skips this path.
+test "v8→v9 migration bumps the marker even when taps is empty" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec("DELETE FROM schema_version WHERE version >= 9;");
+    try migrate(&db);
+
+    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
+}
+
+// Pre-v3 rows could in theory have escaped slug validation. The CASE
+// branches keep `substr(name, 1, -1)` from corrupting the row — a
+// malformed slug falls back to writing the verbatim name into both
+// columns so the row stays reachable rather than ending up with a
+// negative-length substring.
+test "v8→v9 migration tolerates a slug starting with a slash (degenerate fixture)" {
+    // `instr('/repo', '/') = 1` makes `substr(name, 1, 0) = ''` — the
+    // owner would land empty. The backfill WHERE filters by '' so this
+    // is benign on first pass, but a re-run could loop. The current
+    // schema rejects empty components on read (`getOwnerRepo` returns
+    // null) so this row's URLs fall through to the slug fallback.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha) VALUES
+        \\    ('/repo', 'https://example.invalid/leading-slash', NULL);
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 9;");
+    try migrate(&db);
+
+    // We don't pin the specific (owner, repo) values for degenerate
+    // input — only that the migration completes and the marker bumps.
+    try testing.expectEqual(@as(i64, 9), try currentVersion(&db));
+}
+
+test "v8→v9 migration falls back to verbatim name on a slug missing the slash" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha) VALUES
+        \\    ('legacy', 'https://example.invalid/legacy', NULL);
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 9;");
+    try migrate(&db);
+
+    var probe = try db.prepare(
+        "SELECT github_owner, github_repo FROM taps WHERE name='legacy';",
+    );
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    try testing.expectEqualStrings("legacy", std.mem.sliceTo(probe.columnText(0) orelse "", 0));
+    try testing.expectEqualStrings("legacy", std.mem.sliceTo(probe.columnText(1) orelse "", 0));
 }
 
 test "migrate refuses a DB whose schema_version exceeds the known max" {

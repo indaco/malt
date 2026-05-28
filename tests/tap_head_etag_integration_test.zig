@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+
 const malt = @import("malt");
 const sqlite = malt.sqlite;
 const schema = malt.schema;
@@ -32,7 +33,7 @@ fn openDb() !sqlite.Database {
 test "cold start: getHeadEtag returns null before any resolve" {
     var db = try openDb();
     defer db.close();
-    try tap.add(&db, "aeroxy/tap", "https://github.com/aeroxy/homebrew-tap", null);
+    try tap.add(&db, "aeroxy/tap", "aeroxy", "homebrew-tap", null);
 
     const et = try tap.getHeadEtag(testing.allocator, &db, "aeroxy/tap");
     try testing.expectEqual(@as(?[]const u8, null), et);
@@ -41,7 +42,7 @@ test "cold start: getHeadEtag returns null before any resolve" {
 test "warm start: a 200 response persists (sha, etag); next round can short-circuit" {
     var db = try openDb();
     defer db.close();
-    try tap.add(&db, "aeroxy/tap", "https://github.com/aeroxy/homebrew-tap", null);
+    try tap.add(&db, "aeroxy/tap", "aeroxy", "homebrew-tap", null);
 
     // Simulate the cold-start resolve: HeadResolution{sha, etag} →
     // updateHead atomically pairs them in the row.
@@ -60,7 +61,7 @@ test "warm start: a 200 response persists (sha, etag); next round can short-circ
 test "304 response: caller keeps cached sha, no DB write happens" {
     var db = try openDb();
     defer db.close();
-    try tap.add(&db, "aeroxy/tap", "https://github.com/aeroxy/homebrew-tap", null);
+    try tap.add(&db, "aeroxy/tap", "aeroxy", "homebrew-tap", null);
     try tap.updateHead(&db, "aeroxy/tap", fresh_sha, fresh_etag);
 
     // Mimic resolveFromConditional on a 304: HeadResolution.not_modified=true,
@@ -91,7 +92,7 @@ test "304 response: caller keeps cached sha, no DB write happens" {
 test "cache-bust: a clobbered etag triggers a 200 path that updates both fields" {
     var db = try openDb();
     defer db.close();
-    try tap.add(&db, "aeroxy/tap", "https://github.com/aeroxy/homebrew-tap", null);
+    try tap.add(&db, "aeroxy/tap", "aeroxy", "homebrew-tap", null);
     try tap.updateHead(&db, "aeroxy/tap", fresh_sha, "W/\"stale\"");
 
     // The server returns 200 because the stale etag doesn't match.
@@ -129,7 +130,7 @@ test "server omits ETag on 200: sha persists, etag column is cleared" {
     // GET on the next round rather than carrying a stale etag forward.
     var db = try openDb();
     defer db.close();
-    try tap.add(&db, "aeroxy/tap", "https://github.com/aeroxy/homebrew-tap", null);
+    try tap.add(&db, "aeroxy/tap", "aeroxy", "homebrew-tap", null);
     try tap.updateHead(&db, "aeroxy/tap", fresh_sha, fresh_etag);
 
     var resp: client.ConditionalResponse = .{
@@ -188,7 +189,7 @@ test "sequential writers of the same (sha, etag) last-writer-wins" {
     // 16x in a row must end at the agreed values.
     var db = try openDb();
     defer db.close();
-    try tap.add(&db, "aeroxy/tap", "https://github.com/aeroxy/homebrew-tap", null);
+    try tap.add(&db, "aeroxy/tap", "aeroxy", "homebrew-tap", null);
 
     for (0..16) |_| {
         try tap.updateHead(&db, "aeroxy/tap", fresh_sha, fresh_etag);
@@ -235,7 +236,7 @@ const ConcurrentCtx = struct {
 test "concurrent workers (real threads) leave the row consistent under SQLite SERIALIZED" {
     var db = try openDb();
     defer db.close();
-    try tap.add(&db, "aeroxy/tap", "https://github.com/aeroxy/homebrew-tap", null);
+    try tap.add(&db, "aeroxy/tap", "aeroxy", "homebrew-tap", null);
 
     const thread_count: usize = 8;
     const iterations_per_thread: usize = 64;
@@ -269,7 +270,7 @@ test "updateHead's validator runs before the UPDATE, even with a non-null etag" 
     // invariant is upheld at every callsite.
     var db = try openDb();
     defer db.close();
-    try tap.add(&db, "aeroxy/tap", "https://github.com/aeroxy/homebrew-tap", null);
+    try tap.add(&db, "aeroxy/tap", "aeroxy", "homebrew-tap", null);
     try tap.updateHead(&db, "aeroxy/tap", fresh_sha, fresh_etag);
 
     try testing.expectError(

@@ -466,7 +466,7 @@ const HeadResolverCtx = struct {
     fn resolve(userdata: *anyopaque, a: std.mem.Allocator, tap_label: []const u8) ?[]const u8 {
         // Unpack the userdata pointer the cache hands back per call.
         const self: *HeadResolverCtx = @ptrCast(@alignCast(userdata));
-        const urls = tap_mod.resolveTapBaseUrls(a, tap_label) catch return null;
+        const urls = tap_mod.resolveTapBaseUrls(a, self.db, tap_label) catch return null;
 
         // catch null: a DB hiccup here just degrades to "no cached pin /
         // etag" — the resolve then runs unconditional (same as a cold
@@ -530,7 +530,7 @@ fn tapCaskLatestVersion(
 
     // The .rb fetch is per-cask (different token per row), so it stays
     // out of the cache — only the tap-HEAD resolve dedups.
-    const urls = tap_mod.resolveTapBaseUrls(alloc, tap_label) catch return null;
+    const urls = tap_mod.resolveTapBaseUrls(alloc, db, tap_label) catch return null;
     defer urls.deinit(alloc);
 
     var http = client_mod.HttpClient.init(io, environ, alloc);

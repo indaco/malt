@@ -5,30 +5,28 @@
 //! this path changes.
 
 const std = @import("std");
+
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
-const sqlite = @import("../../db/sqlite.zig");
-const atomic = @import("../../fs/atomic.zig");
 const cask_mod = @import("../../core/cask.zig");
+const hash = @import("../../core/hash.zig");
 const linker_mod = @import("../../core/linker.zig");
 const tap_mod = @import("../../core/tap.zig");
 const tap_cache = @import("../../core/tap_cache.zig");
+const sqlite = @import("../../db/sqlite.zig");
+const atomic = @import("../../fs/atomic.zig");
 const client_mod = @import("../../net/client.zig");
-const hash = @import("../../core/hash.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
-
+const install_mod = @import("../install.zig");
 const args = @import("args.zig");
-const record = @import("record.zig");
 const download = @import("download.zig");
 const rb_parse = @import("rb_parse.zig");
-const install_mod = @import("../install.zig");
-
 const RubyFormulaInfo = rb_parse.RubyFormulaInfo;
 const parseRubyFormula = rb_parse.parseRubyFormula;
 const parseCaskBinary = rb_parse.parseCaskBinary;
 const parseCaskApp = rb_parse.parseCaskApp;
 const tapCaskArtifactKind = rb_parse.tapCaskArtifactKind;
-
+const record = @import("record.zig");
 const InstallError = record.InstallError;
 
 /// Maximum size of a `.rb` formula file that `malt install --local`
@@ -211,7 +209,7 @@ fn installTapRb(
     const tap_slug = std.fmt.bufPrint(&tap_slug_buf, "{s}/{s}", .{ parts.user, parts.repo }) catch
         return InstallError.FormulaNotFound;
 
-    const urls = try tap_mod.resolveTapBaseUrls(allocator, tap_slug);
+    const urls = try tap_mod.resolveTapBaseUrls(allocator, db, tap_slug);
     defer urls.deinit(allocator);
 
     // Cold-start: pass null for cached_etag (no pin → no etag either);
@@ -778,11 +776,13 @@ pub fn materializeRubyFormula(
             // `COALESCE` in tap_mod.add pins the commit on first install
             // and leaves later pins untouched. Tap row is advisory — keg
             // is already recorded; a missing tap row self-heals next sync.
-            tap_mod.add(db, resolved.tap_label, t.url, t.commit_sha) catch {};
-            // Stamp the captured etag so the next resolve can send
-            // If-None-Match. Warm-path installs leave `head_etag` null —
-            // there's no fresh etag to overwrite an older cached one with.
-            if (t.head_etag) |et| tap_mod.updateHead(db, resolved.tap_label, t.commit_sha, et) catch {};
+            // (owner, repo) routes through `effectiveOwnerRepo` so the
+            // synthesis used at fetch time and at persist time can't drift.
+            if (tap_mod.effectiveOwnerRepo(allocator, db, resolved.tap_label)) |pair| {
+                defer pair.deinit(allocator);
+                tap_mod.add(db, resolved.tap_label, pair.owner, pair.repo, t.commit_sha) catch {};
+                if (t.head_etag) |et| tap_mod.updateHead(db, resolved.tap_label, t.commit_sha, et) catch {};
+            } else |_| {}
         }
     }
 
@@ -903,7 +903,7 @@ fn materializeTapCask(
     defer allocator.free(app_path);
 
     // `try` is the invariant: success line never fires without a row.
-    try finalizeTapCaskInstall(db, &cask, app_path, resolved.tap_label, resolved.tap_registration);
+    try finalizeTapCaskInstall(allocator, db, &cask, app_path, resolved.tap_label, resolved.tap_registration);
 
     output.success("{s} {s} installed", .{ cask.token, cask.version });
 }
@@ -981,6 +981,7 @@ fn mapTapResolveError(e: tap_mod.TapError) InstallError {
 /// the caller cannot print "installed" without a committed row. The
 /// err wording is a public contract for `scripts/regressions/*.sh`.
 fn finalizeTapCaskInstall(
+    allocator: std.mem.Allocator,
     db: *sqlite.Database,
     cask: *const cask_mod.Cask,
     app_path: ?[]const u8,
@@ -993,9 +994,14 @@ fn finalizeTapCaskInstall(
     };
     // Tap row + etag are advisory; the cask row is the install
     // source of truth and tap_mod state self-heals on next sync.
+    // (owner, repo) routes through `effectiveOwnerRepo` so the
+    // persisted pair matches the one fetched against.
     if (tap_registration) |t| {
-        tap_mod.add(db, tap_label, t.url, t.commit_sha) catch {};
-        if (t.head_etag) |et| tap_mod.updateHead(db, tap_label, t.commit_sha, et) catch {};
+        if (tap_mod.effectiveOwnerRepo(allocator, db, tap_label)) |pair| {
+            defer pair.deinit(allocator);
+            tap_mod.add(db, tap_label, pair.owner, pair.repo, t.commit_sha) catch {};
+            if (t.head_etag) |et| tap_mod.updateHead(db, tap_label, t.commit_sha, et) catch {};
+        } else |_| {}
     }
 }
 
@@ -1084,7 +1090,7 @@ test "finalizeTapCaskInstall persists the cask row on the happy path" {
     var cask = try cask_mod.parseCask(std.testing.allocator, json_buf.items);
     defer cask.deinit();
 
-    try finalizeTapCaskInstall(&db, &cask, "/tmp/Deck.app", "yuzeguitarist/deck", null);
+    try finalizeTapCaskInstall(std.testing.allocator, &db, &cask, "/tmp/Deck.app", "yuzeguitarist/deck", null);
 
     var stmt = try db.prepare("SELECT version, tap FROM casks WHERE token = ?1;");
     defer stmt.finalize();
@@ -1118,7 +1124,9 @@ test "finalizeTapCaskInstall stamps the owning tap when tap_registration is set"
         \\    name TEXT PRIMARY KEY,
         \\    url TEXT NOT NULL,
         \\    commit_sha TEXT,
-        \\    head_etag TEXT
+        \\    head_etag TEXT,
+        \\    github_owner TEXT NOT NULL DEFAULT '',
+        \\    github_repo TEXT NOT NULL DEFAULT ''
         \\);
     );
 
@@ -1139,7 +1147,7 @@ test "finalizeTapCaskInstall stamps the owning tap when tap_registration is set"
 
     // updateHead validates SHA shape; a short SHA silently skips etag.
     const sha = "0123456789abcdef0123456789abcdef01234567";
-    try finalizeTapCaskInstall(&db, &cask, "/tmp/Deck.app", "yuzeguitarist/deck", .{
+    try finalizeTapCaskInstall(std.testing.allocator, &db, &cask, "/tmp/Deck.app", "yuzeguitarist/deck", .{
         .url = "https://github.com/yuzeguitarist/homebrew-deck",
         .commit_sha = sha,
         .head_etag = "\"etag-abc\"",
@@ -1182,7 +1190,7 @@ test "finalizeTapCaskInstall fails loud when the cask DB row cannot persist" {
 
     // Mirror the materializeTapCask call site shape.
     var finalize_err: ?InstallError = null;
-    finalizeTapCaskInstall(&db, &cask, null, "yuzeguitarist/deck", null) catch |e| {
+    finalizeTapCaskInstall(std.testing.allocator, &db, &cask, null, "yuzeguitarist/deck", null) catch |e| {
         finalize_err = e;
     };
     if (finalize_err == null) {
