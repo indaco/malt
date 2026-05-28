@@ -786,7 +786,7 @@ pub fn materializeRubyFormula(
         }
     }
 
-    linker.link(cellar_path, resolved.name, keg_id) catch {
+    linker.link(cellar_path, resolved.name, keg_id, false) catch {
         output.warn("Some links for {s} could not be created", .{resolved.name});
     };
     linker.linkOpt(resolved.name, resolved.version) catch {

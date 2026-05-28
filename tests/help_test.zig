@@ -102,6 +102,22 @@ test "deps help documents --recursive, --installed, and --json" {
     try testing.expect(std.mem.indexOf(u8, text, "--json") != null);
 }
 
+test "install/upgrade/reinstall help documents --isolate-deps" {
+    // Discoverability guard for the dep-bin isolation feature: a user
+    // can't opt into a flag they can't find in --help. The contract
+    // must be visible on every install-flavoured verb.
+    inline for (&[_][]const u8{ "install", "upgrade", "reinstall" }) |verb| {
+        const text = help.helpFor(verb);
+        try testing.expect(std.mem.indexOf(u8, text, "--isolate-deps") != null);
+    }
+}
+
+test "link help documents --isolate and --all" {
+    const text = help.helpFor("link");
+    try testing.expect(std.mem.indexOf(u8, text, "--isolate") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "--all") != null);
+}
+
 test "helpFor falls back gracefully for unknown commands" {
     try testing.expectEqualStrings("No help available.\n", help.helpFor("not-a-real-command"));
 }

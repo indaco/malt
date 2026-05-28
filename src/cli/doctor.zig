@@ -85,6 +85,7 @@ pub const checks = [_]Check{
     .{ .name = "Mach-O placeholders", .run = checkMachOPlaceholders },
     .{ .name = "Disk space", .run = checkDiskSpace },
     .{ .name = "Local formula sources", .run = checkLocalSources },
+    .{ .name = "Dependency bin/sbin link census", .run = checkIsolationLeaks },
 };
 
 /// Walks the table and tallies warn/err contributions. Exposed so
@@ -868,6 +869,75 @@ fn checkDiskSpace(ctx: CheckCtx, name: []const u8) CheckResult {
     ) catch "Low disk space (< 1 GB free)";
     printCheck(name, .warn_status, msg);
     return .warn_status;
+}
+
+/// Surface the dep-keg bin/sbin link census. Linked deps are the
+/// default state, not a defect — the check stays at `.ok` severity so
+/// `mt doctor` exits clean. Detail + enumeration only emit under
+/// `--verbose` so default runs stay silent on this dimension and
+/// downstream "grep for warnings" gates don't false-positive.
+fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    var db = sqlite.Database.open(db_path) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer db.close();
+
+    if (!output.isVerbose()) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+
+    var stmt = db.prepare(
+        \\SELECT k.name
+        \\FROM kegs k
+        \\JOIN links l ON l.keg_id = k.id
+        \\WHERE k.install_reason = 'dependency'
+        \\  AND k.bin_isolated = 0
+        \\  AND (l.link_path LIKE '%/bin/%' OR l.link_path LIKE '%/sbin/%')
+        \\GROUP BY k.id
+        \\ORDER BY k.name;
+    ) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    defer stmt.finalize();
+
+    var offenders: std.ArrayList([]u8) = .empty;
+    defer freeOwnedStringList(ctx.allocator, &offenders);
+
+    while (stmt.step() catch false) {
+        const k_name = std.mem.sliceTo(stmt.columnText(0) orelse continue, 0);
+        const row = std.fmt.allocPrint(
+            ctx.allocator,
+            "{s}   (mt link --isolate {s} to hide from PATH)",
+            .{ k_name, k_name },
+        ) catch continue;
+        offenders.append(ctx.allocator, row) catch {
+            ctx.allocator.free(row);
+            continue;
+        };
+    }
+
+    if (offenders.items.len == 0) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+
+    var msg_buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "{d} dependency keg(s) link bin/sbin (use `mt link --isolate <name>` to hide).",
+        .{offenders.items.len},
+    ) catch "Dependency kegs are linked into bin/sbin.";
+    printCheck(name, .ok, msg);
+    writeVerboseList(offenders.items);
+    return .ok;
 }
 
 fn checkLocalSources(ctx: CheckCtx, name: []const u8) CheckResult {

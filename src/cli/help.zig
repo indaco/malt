@@ -71,18 +71,29 @@ const install_help =
     \\                     only pass files you trust)
     \\  --dry-run          Show what would be installed
     \\  --force            Overwrite existing installations
-    \\  --only-dependencies  Install transitive deps but skip the requested package
+    \\  --only-deps        Install transitive deps but skip the requested package
     \\                     (deps are recorded as `dependency` so `mt purge --unused-deps`
-    \\                     can later GC them)
+    \\                     can later GC them). `--only-dependencies` accepted for
+    \\                     brew-parity.
     \\  --download-only    Warm the bottle store (formulas), the Cask cache (casks),
     \\                     or the tap archive cache (`<prefix>/cache/Tap/` for
     \\                     `user/repo/<formula>`) and stop before materialise/link/
     \\                     record. The Cellar, /Applications, and DB stay untouched;
     \\                     a follow-up `mt install` consumes the cached bytes.
-    \\                     Refused with --only-dependencies.
+    \\                     Refused with --only-deps.
     \\  --use-system-ruby[=<name>,...]  Run post_install via the system Ruby interpreter
     \\                     (experimental, sandboxed). A bare flag requires a single
     \\                     package; use =<name>,... to scope when installing multiple.
+    \\  --isolate-deps     Keep every transitive dep out of <prefix>/bin and
+    \\                     <prefix>/sbin. The package(s) you named still link
+    \\                     normally; deps land in the Cellar with their `opt/`
+    \\                     anchor (Mach-O dependents stay resolvable) but their
+    \\                     bin/sbin contents are skipped. The choice is recorded
+    \\                     per-keg so a later `mt upgrade` replays it. Shell-
+    \\                     based formulas that bare-name-exec their deps
+    \\                     (e.g. `python` vs `/full/path/python`) may break;
+    \\                     use `mt link <dep>` to undo per-keg.
+    \\                     `--isolate-dependencies` accepted as an alias.
     \\  --quiet, -q        Suppress non-error output
     \\  --json             Output result as JSON
     \\
@@ -104,6 +115,8 @@ const reinstall_help =
     \\  --dry-run            Show what would be reinstalled
     \\  --quiet, -q          Suppress non-error output
     \\  --json               JSON output (mirrors `mt install --json`)
+    \\  --isolate-deps       New deps follow the flag; existing rows keep
+    \\                       whatever isolation policy they were recorded with
     \\  --output-format=ndjson
     \\                       Stream one event per state transition
     \\
@@ -139,6 +152,10 @@ const upgrade_help =
     \\  --dry-run      Show what would be upgraded
     \\  --pinned       Audit pinned formulas + casks (requires --dry-run or --force)
     \\  --force, -f    Bypass pin protection (dangerous; user-initiated)
+    \\  --isolate-deps New deps pulled in by this upgrade keep their bins
+    \\                 out of <prefix>/bin and <prefix>/sbin. Existing kegs
+    \\                 replay whatever they were already recorded with.
+    \\                 `--isolate-dependencies` accepted as an alias.
     \\
 ;
 
@@ -375,12 +392,26 @@ const run_help =
 
 const link_help =
     \\Usage: malt link <formula> [flags]
+    \\       malt link --isolate <name>
+    \\       malt link --isolate --all
     \\
-    \\Create symlinks for an installed keg in the prefix (bin/, lib/, etc.).
+    \\Default form: create symlinks for an installed keg in the prefix
+    \\(bin/, lib/, etc.). Re-linking a previously isolated dep also
+    \\clears the isolation flag so DB and filesystem agree.
+    \\
+    \\`--isolate <name>` removes the keg's bin/sbin symlinks and marks
+    \\the row `bin_isolated=1`. Useful retroactively on a dep that
+    \\predates `--isolate-deps`. Refused on `install_reason='direct'`
+    \\kegs — uninstall first if you want a direct keg hidden from PATH.
+    \\
+    \\`--isolate --all` isolates every dep keg currently linking
+    \\bin/sbin.
     \\
     \\Flags:
     \\  --overwrite    Replace existing symlinks
     \\  --force, -f    Same as --overwrite
+    \\  --isolate      Remove bin/sbin symlinks; mark the keg isolated
+    \\  --all          With --isolate: operate on every dep keg
     \\
 ;
 

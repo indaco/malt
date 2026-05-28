@@ -18,10 +18,14 @@ pub const Linker = struct {
         return .{ .allocator = allocator, .io = io, .db = db, .prefix = prefix };
     }
 
-    /// Check for symlink conflicts before linking.
-    /// Returns a slice of conflicts (files already linked to a different keg).
-    pub fn checkConflicts(self: *Linker, keg_path: []const u8) ![]Conflict {
-        const dirs_to_check = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc" };
+    /// Check for symlink conflicts before linking. When `bin_isolated`
+    /// is true, the probe skips `bin`/`sbin` to mirror the link-side
+    /// policy — otherwise a dep installed under isolation would falsely
+    /// trigger a conflict against a keg whose bins were never linked.
+    pub fn checkConflicts(self: *Linker, keg_path: []const u8, bin_isolated: bool) ![]Conflict {
+        const dirs_full = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc" };
+        const dirs_isolated = [_][]const u8{ "lib", "include", "share", "etc" };
+        const dirs_to_check: []const []const u8 = if (bin_isolated) &dirs_isolated else &dirs_full;
         var conflicts: std.ArrayList(Conflict) = .empty;
 
         for (dirs_to_check) |subdir| {
@@ -82,8 +86,14 @@ pub const Linker = struct {
     }
 
     /// Create symlinks for all files in a keg, recording in DB.
-    pub fn link(self: *Linker, keg_path: []const u8, name: []const u8, keg_id: i64) !void {
-        const dirs_to_link = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc" };
+    /// When `bin_isolated` is true, the keg's `bin`/`sbin` contents are
+    /// deliberately left unlinked — `opt/<name>` and dependents'
+    /// `LC_LOAD_DYLIB` paths continue to resolve via `lib`, so compiled
+    /// formulae are unaffected; only the global PATH entries disappear.
+    pub fn link(self: *Linker, keg_path: []const u8, name: []const u8, keg_id: i64, bin_isolated: bool) !void {
+        const dirs_full = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc" };
+        const dirs_isolated = [_][]const u8{ "lib", "include", "share", "etc" };
+        const dirs_to_link: []const []const u8 = if (bin_isolated) &dirs_isolated else &dirs_full;
 
         for (dirs_to_link) |subdir| {
             self.linkSubdir(keg_path, subdir, name, keg_id) catch continue;

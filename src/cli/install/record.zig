@@ -112,12 +112,17 @@ pub const RecordOpts = struct {
 /// underlying cause through `db.errMsg()` instead of seeing a flat
 /// `RecordFailed` — particularly load-bearing for the upgrade path
 /// where a UNIQUE collision must surface to the user.
+///
+/// `bin_isolated` is the user's per-keg "don't link bin/sbin into
+/// prefix/bin" intent; it round-trips so a later upgrade reads back
+/// the same policy without the user re-passing a flag.
 pub fn recordKeg(
     db: *sqlite.Database,
     formula: *const formula_mod.Formula,
     store_sha256: []const u8,
     cellar_path: []const u8,
     install_reason: []const u8,
+    bin_isolated: bool,
     opts: RecordOpts,
 ) sqlite.SqliteError!i64 {
     if (!opts.in_transaction) {
@@ -130,11 +135,11 @@ pub fn recordKeg(
     // REPLACE handles same-(name, version) re-records (install --force,
     // revision bumps); upgrade (different version) just INSERTs alongside.
     const sql = if (opts.inherit_pin)
-        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, pinned)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));"
+        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, bin_isolated, pinned)" ++
+            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, COALESCE((SELECT MAX(pinned) FROM kegs WHERE name = ?1), 0));"
     else
-        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, pinned)" ++
-            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0);";
+        "INSERT OR REPLACE INTO kegs (name, full_name, version, revision, tap, store_sha256, cellar_path, install_reason, bin_isolated, pinned)" ++
+            " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0);";
 
     var stmt = try db.prepare(sql);
     defer stmt.finalize();
@@ -147,6 +152,7 @@ pub fn recordKeg(
     try stmt.bindText(6, store_sha256);
     try stmt.bindText(7, cellar_path);
     try stmt.bindText(8, install_reason);
+    try stmt.bindInt(9, if (bin_isolated) 1 else 0);
 
     _ = try stmt.step();
 

@@ -30,7 +30,7 @@ const InstallError = install_record_mod.InstallError;
 const install_mod = @import("install.zig");
 const pin_mod = @import("pin.zig");
 
-const UpgradeFlag = enum { quiet, cask, formula, dry_run, force, pinned };
+const UpgradeFlag = enum { quiet, cask, formula, dry_run, force, pinned, isolate_deps };
 
 const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     .{ "-q", .quiet },
@@ -41,6 +41,10 @@ const upgrade_flag_map = std.StaticStringMap(UpgradeFlag).initComptime(.{
     .{ "--force", .force },
     .{ "-f", .force },
     .{ "--pinned", .pinned },
+    .{ "--isolate-deps", .isolate_deps },
+    // Long-form alias matching the `--only-dependencies` / `--only-deps`
+    // shape so the flag surface stays predictable.
+    .{ "--isolate-dependencies", .isolate_deps },
 });
 
 /// True when this name should be skipped due to a user pin. Pure gate so
@@ -61,6 +65,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var dry_run = output.isDryRun();
     var force = false;
     var pinned_only = false;
+    // Applies only to deps newly introduced by this upgrade — existing
+    // kegs replay their stored `bin_isolated` regardless of the flag.
+    var isolate_deps = false;
     var pkg_name: ?[]const u8 = null;
 
     // StaticStringMap + exhaustive switch: every flag routes to a handler.
@@ -72,6 +79,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             .dry_run => dry_run = true,
             .force => force = true,
             .pinned => pinned_only = true,
+            .isolate_deps => isolate_deps = true,
         } else if (arg.len > 0 and arg[0] != '-') {
             if (pkg_name == null) pkg_name = arg;
         }
@@ -134,7 +142,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         // Upgrade a specific package — try formula first, then cask
         if (!cask_only) {
             if (isFormulaInstalled(&db, name)) {
-                upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only) catch {
+                upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps) catch {
                     any_failed = true;
                 };
                 if (any_failed) return error.Aborted;
@@ -148,7 +156,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     } else {
         // Upgrade all
         if (!cask_only) {
-            upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only) catch {
+            upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps) catch {
                 any_failed = true;
             };
         }
@@ -186,6 +194,7 @@ fn upgradeFormula(
     dry_run: bool,
     force: bool,
     audit_mode: bool,
+    isolate_deps: bool,
 ) !void {
     // Honor pins before any network or filesystem work — the whole
     // point is that a pinned keg never gets touched. Audit mode
@@ -198,9 +207,11 @@ fn upgradeFormula(
         return;
     }
 
-    // Step 1: Look up installed version from DB
+    // Step 1: Look up installed version from DB. `bin_isolated` is
+    // read so the upgraded row replays the user's prior isolation
+    // intent without re-passing a flag.
     var find_stmt = db.prepare(
-        "SELECT id, version, revision, store_sha256, cellar_path, tap FROM kegs WHERE name = ?1 LIMIT 1;",
+        "SELECT id, version, revision, store_sha256, cellar_path, tap, bin_isolated FROM kegs WHERE name = ?1 LIMIT 1;",
     ) catch return;
     defer find_stmt.finalize();
     find_stmt.bindText(1, name) catch return;
@@ -217,6 +228,7 @@ fn upgradeFormula(
     const old_sha_ptr = find_stmt.columnText(3);
     const old_cellar_ptr = find_stmt.columnText(4);
     const tap_ptr = find_stmt.columnText(5);
+    const replay_bin_isolated = find_stmt.columnInt(6) != 0;
     const old_version = if (old_ver_ptr) |v| std.mem.sliceTo(v, 0) else "unknown";
     const old_sha256 = if (old_sha_ptr) |s| std.mem.sliceTo(s, 0) else "";
     const old_cellar_path = if (old_cellar_ptr) |c| std.mem.sliceTo(c, 0) else "";
@@ -291,7 +303,10 @@ fn upgradeFormula(
             // BSD flock is per-fd, so without skip_lock the inner acquire
             // would EAGAIN-loop on our own hold and 30 s-timeout as
             // misleading "Another mt process is running" contention.
-            install_mod.installAll(ctx, allocator, missing, .{ .skip_lock = true }) catch {
+            install_mod.installAll(ctx, allocator, missing, .{
+                .skip_lock = true,
+                .isolate_deps = isolate_deps,
+            }) catch {
                 output.err("Could not install new dep(s) for {s}", .{name});
                 return error.Aborted;
             };
@@ -349,7 +364,7 @@ fn upgradeFormula(
         return error.Aborted;
     };
 
-    const new_keg_id = upgradeDbAtomic(db, &linker, old_keg_id, &formula, fetch.sha256, new_keg.path) catch |db_err| {
+    const new_keg_id = upgradeDbAtomic(db, &linker, old_keg_id, &formula, fetch.sha256, new_keg.path, replay_bin_isolated) catch |db_err| {
         output.err(
             "Failed to record new version of {s} in database: {s} ({s})",
             .{ name, @errorName(db_err), db.errMsg() },
@@ -358,7 +373,7 @@ fn upgradeFormula(
         // FS rollback: the txn restored old keg/links rows; we still
         // need to recreate the old symlinks (FS isn't transactional)
         // and drop the freshly-materialized new cellar dir.
-        restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
+        restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id, replay_bin_isolated);
         cellar_mod.remove(ctx.io, prefix, formula.name, formula.pkg_version) catch {};
         return error.Aborted;
     };
@@ -371,7 +386,7 @@ fn upgradeFormula(
         db.rollback();
         // best-effort FS cleanup before falling back to the old version.
         linker.unlink(new_keg_id) catch {};
-        restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id);
+        restoreOldLinks(db, &linker, old_cellar_path, name, old_keg_id, replay_bin_isolated);
         cellar_mod.remove(ctx.io, prefix, formula.name, formula.pkg_version) catch {};
         return error.Aborted;
     };
@@ -729,34 +744,56 @@ pub fn upgradeDbAtomic(
     formula: *const formula_mod.Formula,
     store_sha256: []const u8,
     new_cellar_path: []const u8,
+    bin_isolated: bool,
 ) !i64 {
     try linker.unlink(old_keg_id);
     // `in_transaction = true` so the upgrade wrapper's outer BEGIN/COMMIT
     // owns atomicity for unlink → record → link → delete; the unified
     // recordKeg never nests BEGIN IMMEDIATE here.
+    //
+    // `install_reason` stays whatever the prior row carried — upgrade
+    // never changes the keg's role, only its version. A dep that the
+    // user opted into isolation stays isolated; a direct keg keeps its
+    // bin links.
+    const prior_reason: []const u8 = blk: {
+        var stmt = db.prepare("SELECT install_reason FROM kegs WHERE id = ?1 LIMIT 1;") catch break :blk "direct";
+        defer stmt.finalize();
+        stmt.bindInt(1, old_keg_id) catch break :blk "direct";
+        const ok = stmt.step() catch false;
+        if (!ok) break :blk "direct";
+        if (stmt.columnText(0)) |t| {
+            const s = std.mem.sliceTo(t, 0);
+            if (std.mem.eql(u8, s, "dependency")) break :blk "dependency";
+        }
+        break :blk "direct";
+    };
     const new_keg_id = try install_record_mod.recordKeg(
         db,
         formula,
         store_sha256,
         new_cellar_path,
-        "direct",
+        prior_reason,
+        bin_isolated,
         .{ .in_transaction = true },
     );
-    try linker.link(new_cellar_path, formula.name, new_keg_id);
+    try linker.link(new_cellar_path, formula.name, new_keg_id, bin_isolated);
     install_record_mod.deleteKeg(db, old_keg_id);
     return new_keg_id;
 }
 
-/// Re-link old version during rollback.
+/// Re-link old version during rollback. Replays the old row's
+/// `bin_isolated` so a partially-rolled-back keg matches the user's
+/// prior intent.
 fn restoreOldLinks(
     _: *sqlite.Database,
     linker: *linker_mod.Linker,
     old_cellar_path: []const u8,
     name: []const u8,
     old_keg_id: i64,
+    bin_isolated: bool,
 ) void {
     if (old_cellar_path.len == 0) return;
-    linker.link(old_cellar_path, name, old_keg_id) catch {
+    linker.link(old_cellar_path, name, old_keg_id, bin_isolated) catch {
         output.err("CRITICAL: Failed to restore old symlinks for {s}. Manual intervention may be required.", .{name});
     };
 }
@@ -781,6 +818,7 @@ fn upgradeAllFormulas(
     dry_run: bool,
     force: bool,
     pinned_only: bool,
+    isolate_deps: bool,
 ) !void {
     const sql: [:0]const u8 = if (pinned_only)
         "SELECT name, version FROM kegs WHERE pinned = 1 ORDER BY name;"
@@ -819,7 +857,7 @@ fn upgradeAllFormulas(
     defer failed_names.deinit(allocator);
 
     for (names.items) |name| {
-        upgradeFormula(ctx, allocator, name, db, api, http, prefix, dry_run, force, pinned_only) catch {
+        upgradeFormula(ctx, allocator, name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps) catch {
             failed_count += 1;
             // failed_count is the authoritative counter; list is for UX only.
             failed_names.append(allocator, name) catch {};

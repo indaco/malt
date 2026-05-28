@@ -205,7 +205,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     ) catch return error.Aborted;
 
     // Link the old version
-    linker.link(keg.path, name, keg_id) catch {
+    linker.link(keg.path, name, keg_id, false) catch {
         output.warn("Could not link restored {s} — try: mt link {s}", .{ name, name });
     };
     linker.linkOpt(name, target.pkg_version) catch {
