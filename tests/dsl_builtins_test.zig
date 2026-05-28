@@ -195,7 +195,7 @@ test "Pathname.basename/.dirname/.extname/.toS expose path components" {
     try testing.expectEqualStrings("/x/y", (try pathname.toS(ctx, Value{ .pathname = "/x/y" }, &.{})).string);
 }
 
-test "Pathname.opt_bin/.opt_lib/.opt_include/.pkgetc append the right subdir" {
+test "Pathname.opt_bin/.opt_lib/.opt_include append the right subdir" {
     const ctx = mkCtx("/tmp/malt");
     const v = Value{ .pathname = "/opt/malt/opt/foo" };
 
@@ -210,10 +210,6 @@ test "Pathname.opt_bin/.opt_lib/.opt_include/.pkgetc append the right subdir" {
     const inc = try pathname.optInclude(ctx, v, &.{});
     defer testing.allocator.free(inc.pathname);
     try testing.expectEqualStrings("/opt/malt/opt/foo/include", inc.pathname);
-
-    const etc = try pathname.pkgetc(ctx, v, &.{});
-    defer testing.allocator.free(etc.pathname);
-    try testing.expectEqualStrings("/opt/malt/opt/foo/etc", etc.pathname);
 }
 
 test "Pathname.unlink deletes a file in the sandbox" {

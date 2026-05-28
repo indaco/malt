@@ -1095,6 +1095,11 @@ fn executeWithOpts(
         if (job.post_install_defined) {
             drive(ctx, allocator, job.name, job.version_str, job.formula_json, prefix, use_system_ruby_list, &formula_cache);
         }
+
+        // ca-certificates' macOS post_install can't run natively, so the
+        // shipped Mozilla bundle is linked into etc/<name>/cert.pem here.
+        // No-op for every keg that ships no CA bundle.
+        post_install_mod.provisionShippedCaBundle(ctx.io, prefix, job.name);
     }
 
     if (failed_count > 0) {

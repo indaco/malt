@@ -187,10 +187,14 @@ pub fn optInclude(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError
     return Value{ .pathname = joined };
 }
 
-/// pkgetc — receiver/"etc" (Formula accessor for pkgetc)
+/// pkgetc — `Formula[name].pkgetc` is `<prefix>/etc/<name>`, not
+/// `<opt>/<name>/etc`. The receiver is the opt anchor (`<prefix>/opt/<name>`),
+/// so re-anchor under malt_prefix using its basename as the package name.
+/// The bare current-formula `pkgetc` resolves through path bindings, not here.
 pub fn pkgetc(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
-    const joined = std.fs.path.join(ctx.allocator, &.{ path, "etc" }) catch return BuiltinError.OutOfMemory;
+    const name = std.fs.path.basename(path);
+    const joined = std.fs.path.join(ctx.allocator, &.{ ctx.malt_prefix, "etc", name }) catch return BuiltinError.OutOfMemory;
     return Value{ .pathname = joined };
 }
 
@@ -392,4 +396,39 @@ fn readFileAllAbsolute(io: std.Io, allocator: std.mem.Allocator, abs_path: []con
     @memcpy(shrunk, buf[0..n]);
     allocator.free(buf);
     return shrunk;
+}
+
+// ---------------------------------------------------------------------------
+// Inline tests
+// ---------------------------------------------------------------------------
+
+/// pkgetc only reads `allocator` + `malt_prefix`; the rest is structurally
+/// required by ExecCtx but never touched on this path.
+fn testCtx(allocator: std.mem.Allocator, malt_prefix: []const u8) ExecCtx {
+    return .{
+        .allocator = allocator,
+        .io = undefined,
+        .environ = undefined,
+        .cellar_path = "",
+        .malt_prefix = malt_prefix,
+    };
+}
+
+test "pkgetc re-anchors a Formula[] opt path to <prefix>/etc/<name>" {
+    // Homebrew's `Formula[name].pkgetc` is `<prefix>/etc/<name>`, not
+    // `<opt>/<name>/etc`. The receiver is the opt anchor, so pkgetc rebuilds
+    // under malt_prefix; the bare current-formula pkgetc uses path bindings.
+    const ctx = testCtx(std.testing.allocator, "/opt/malt");
+    const etc = try pkgetc(ctx, Value{ .pathname = "/opt/malt/opt/ca-certificates" }, &.{});
+    defer std.testing.allocator.free(etc.pathname);
+    try std.testing.expectEqualStrings("/opt/malt/etc/ca-certificates", etc.pathname);
+}
+
+test "pkgetc keeps an @-versioned formula name intact" {
+    // openssl@3 et al. carry `@` in the keg name; the basename re-anchor
+    // must preserve it verbatim.
+    const ctx = testCtx(std.testing.allocator, "/opt/malt");
+    const etc = try pkgetc(ctx, Value{ .pathname = "/opt/malt/opt/openssl@3" }, &.{});
+    defer std.testing.allocator.free(etc.pathname);
+    try std.testing.expectEqualStrings("/opt/malt/etc/openssl@3", etc.pathname);
 }
