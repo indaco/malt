@@ -86,6 +86,7 @@ pub const checks = [_]Check{
     .{ .name = "Disk space", .run = checkDiskSpace },
     .{ .name = "Local formula sources", .run = checkLocalSources },
     .{ .name = "Dependency bin/sbin link census", .run = checkIsolationLeaks },
+    .{ .name = "SSL CA bundle", .run = checkSslCaBundle },
 };
 
 /// Walks the table and tallies warn/err contributions. Exposed so
@@ -876,6 +877,45 @@ fn checkDiskSpace(ctx: CheckCtx, name: []const u8) CheckResult {
 /// `mt doctor` exits clean. Detail + enumeration only emit under
 /// `--verbose` so default runs stay silent on this dimension and
 /// downstream "grep for warnings" gates don't false-positive.
+/// Detail line for the "SSL CA bundle" row. `null` when the bundle is
+/// present (clean row); a short flag when it's missing. `pub` so the
+/// render test can pin the text without a filesystem fixture.
+pub fn formatSslCertDetail(present: bool) ?[]const u8 {
+    return if (present)
+        null
+    else
+        "cert.pem missing — HTTPS verification fails until ca-certificates is installed";
+}
+
+/// Informational check: `<prefix>/etc/openssl@3/cert.pem` is what
+/// OpenSSL reaches for at runtime. A missing bundle breaks every HTTPS
+/// client behind OpenSSL, but it's a remediation hint, never a failure —
+/// the row stays `.ok` so doctor exits clean.
+fn checkSslCaBundle(ctx: CheckCtx, name: []const u8) CheckResult {
+    var buf: [512]u8 = undefined;
+    const cert = std.fmt.bufPrint(&buf, "{s}/etc/openssl@3/cert.pem", .{ctx.prefix}) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    const present = blk: {
+        std.Io.Dir.cwd().access(ctx.io, cert, .{}) catch break :blk false;
+        break :blk true;
+    };
+    printCheck(name, .ok, formatSslCertDetail(present));
+    if (!present) {
+        // Verbose-only remediation: install the formula, or relink the
+        // bundle by hand if the keg is already on disk.
+        var manual_buf: [768]u8 = undefined;
+        const manual = std.fmt.bufPrint(
+            &manual_buf,
+            "ln -sf {s}/opt/ca-certificates/share/ca-certificates/cacert.pem {s}/etc/openssl@3/cert.pem",
+            .{ ctx.prefix, ctx.prefix },
+        ) catch "ln -sf <prefix>/opt/ca-certificates/share/ca-certificates/cacert.pem <prefix>/etc/openssl@3/cert.pem";
+        writeVerboseList(&.{ "mt install ca-certificates", manual });
+    }
+    return .ok;
+}
+
 fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
@@ -1081,6 +1121,13 @@ fn captureFixEmit(allocator: std.mem.Allocator, fix_requested: bool) !std.ArrayL
     defer output.endStderrCapture();
     emitFixHintIfNeeded(fix_requested);
     return buf;
+}
+
+test "formatSslCertDetail: null when present, remediation hint when absent" {
+    try testing.expect(formatSslCertDetail(true) == null);
+    const missing = formatSslCertDetail(false) orelse return error.TestUnexpectedResult;
+    // The hint must name the fix so a user can act on it directly.
+    try testing.expect(std.mem.indexOf(u8, missing, "ca-certificates") != null);
 }
 
 test "emitFixHintIfNeeded: silent without arming" {

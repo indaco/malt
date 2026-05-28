@@ -21,6 +21,8 @@ pub const BuiltinFn = *const fn (ExecCtx, ?Value, []const Value) BuiltinError!Va
 pub const bare_builtins = std.StaticStringMap(BuiltinFn).initComptime(.{
     // FileUtils
     .{ "rm", fileutils.rm },
+    // rm_f is rm's force variant; rm already swallows missing-file errors.
+    .{ "rm_f", fileutils.rm },
     .{ "rm_r", fileutils.rmR },
     .{ "rm_rf", fileutils.rmRf },
     .{ "mkdir_p", fileutils.mkdirP },

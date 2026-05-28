@@ -428,6 +428,136 @@ test "parser: hash literal" {
 }
 
 // ---------------------------------------------------------------------------
+// Implicit trailing hash literal at a method-call's argument position
+//
+// Homebrew's `ca-certificates` post_install is
+// `openssl_pkgetc.install_symlink pkgshare/"cacert.pem" => "cert.pem"`.
+// The parser must fold a brace-less `k => v[, k => v]*` tail into a
+// single trailing hash_literal arg so the builtin sees one Value.hash.
+// ---------------------------------------------------------------------------
+
+test "parser: brace-less trailing hash with two pairs in a paren call" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "foo(\"a\" => \"b\", \"c\" => \"d\")");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("foo", mc.method);
+    try testing.expectEqual(@as(usize, 1), mc.args.len);
+
+    const entries = mc.args[0].kind.hash_literal;
+    try testing.expectEqual(@as(usize, 2), entries.len);
+    try testing.expectEqualStrings("a", entries[0].key.kind.string_literal.parts[0].literal);
+    try testing.expectEqualStrings("b", entries[0].value.kind.string_literal.parts[0].literal);
+    try testing.expectEqualStrings("c", entries[1].key.kind.string_literal.parts[0].literal);
+    try testing.expectEqualStrings("d", entries[1].value.kind.string_literal.parts[0].literal);
+}
+
+test "parser: positional arg before a trailing hash" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "bar(1, \"k\" => \"v\")");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("bar", mc.method);
+    try testing.expectEqual(@as(usize, 2), mc.args.len);
+    try testing.expectEqual(@as(i64, 1), mc.args[0].kind.int_literal);
+
+    const entries = mc.args[1].kind.hash_literal;
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    try testing.expectEqualStrings("k", entries[0].key.kind.string_literal.parts[0].literal);
+    try testing.expectEqualStrings("v", entries[0].value.kind.string_literal.parts[0].literal);
+}
+
+test "parser: brace-less trailing hash on a receiver call (install_symlink shape)" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    // Exact bare-arg shape from ca-certificates' post_install.
+    const nodes = try parseSource(&arena, "dir.install_symlink pkgshare/\"cacert.pem\" => \"cert.pem\"");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("install_symlink", mc.method);
+    try testing.expect(mc.receiver != null);
+    try testing.expectEqual(@as(usize, 1), mc.args.len);
+
+    const entries = mc.args[0].kind.hash_literal;
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    // Key is the source path_join, value is the link name string.
+    switch (entries[0].key.kind) {
+        .path_join => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqualStrings("cert.pem", entries[0].value.kind.string_literal.parts[0].literal);
+}
+
+test "parser: trailing hash tolerates a trailing comma before the close" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "foo(\"a\" => \"b\",)");
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqual(@as(usize, 1), mc.args.len);
+    try testing.expectEqual(@as(usize, 1), mc.args[0].kind.hash_literal.len);
+}
+
+test "parser: trailing hash value may be a path_join expression" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "foo(\"k\" => share/\"v\")");
+    const entries = nodes[0].kind.method_call.args[0].kind.hash_literal;
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    switch (entries[0].value.kind) {
+        .path_join => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parser: receiver call with positional arg then trailing hash" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "obj.m 1, \"k\" => \"v\"");
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("m", mc.method);
+    try testing.expectEqual(@as(usize, 2), mc.args.len);
+    try testing.expectEqual(@as(i64, 1), mc.args[0].kind.int_literal);
+    try testing.expectEqual(@as(usize, 1), mc.args[1].kind.hash_literal.len);
+}
+
+test "parser: brace hash arg still parses (regression guard for the explicit form)" {
+    // The implicit-hash change must not regress the explicit `{ ... }`
+    // arg that already worked.
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "foo({ \"a\" => \"b\" })");
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqual(@as(usize, 1), mc.args.len);
+    try testing.expectEqual(@as(usize, 1), mc.args[0].kind.hash_literal.len);
+}
+
+test "parser: rm_f parses as a bare method call with one arg" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const nodes = try parseSource(&arena, "rm_f \"some/path\"");
+    try testing.expectEqual(@as(usize, 1), nodes.len);
+
+    const mc = nodes[0].kind.method_call;
+    try testing.expectEqualStrings("rm_f", mc.method);
+    try testing.expect(mc.receiver == null);
+    try testing.expectEqual(@as(usize, 1), mc.args.len);
+    try testing.expectEqualStrings("some/path", mc.args[0].kind.string_literal.parts[0].literal);
+}
+
+// ---------------------------------------------------------------------------
 // Raise statement
 // ---------------------------------------------------------------------------
 
@@ -1263,6 +1393,11 @@ test "parser: corpus AST snapshot pins every primary form" {
             .want = "(method_call m=all? r=(identifier xs) &(symbol_literal :exist?))",
         },
         .{ .src = "name", .want = "(identifier name)" },
+        .{
+            // Brace-less trailing hash folds into one hash_literal arg.
+            .src = "foo(\"a\" => \"b\")",
+            .want = "(method_call m=foo (hash_literal {(string_literal L\"a\")=>(string_literal L\"b\")}))",
+        },
     };
 
     var buf: [2 * 1024]u8 = undefined;
