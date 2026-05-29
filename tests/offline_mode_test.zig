@@ -67,21 +67,8 @@ test "HttpClient.OfflineRequired is non-transient" {
     try testing.expect(!client_mod.isTransientError(error.OfflineRequired));
 }
 
-// ── HttpClientPool propagation ───────────────────────────────────────
-
-test "HttpClientPool.setOfflineAll mirrors the flag onto every pooled client" {
-    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 3);
-    defer pool.deinit();
-    pool.setOfflineAll(true);
-
-    // Acquire each in turn; release order doesn't matter here — we just
-    // want to read every client's `offline` field once.
-    var seen: [3]*client_mod.HttpClient = undefined;
-    for (0..3) |i| seen[i] = pool.acquire();
-    defer for (seen) |c| pool.release(c);
-
-    for (seen) |c| try testing.expect(c.offline);
-}
+// `HttpClientPool.setOfflineAll` propagation is unit-tested inline in
+// net/client_pool.zig; the offline composition path is covered below.
 
 // ── BrewApi end-to-end: cache hit serves under offline ───────────────
 

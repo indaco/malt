@@ -388,28 +388,12 @@ test "output verbose/dryrun/mode setters and getters round-trip" {
     try testing.expect(!output_mod.isJson());
 }
 
-// --- HttpClientPool coverage ---
+// --- HttpClientPool concurrency coverage ---
 //
-// The pool itself is pure allocator + mutex bookkeeping — no network —
-// so we can exercise init/acquire/release/deinit without HTTP traffic.
-
-test "HttpClientPool acquire and release cycle a single client" {
-    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 2);
-    defer pool.deinit();
-
-    const c1 = pool.acquire();
-    const c2 = pool.acquire();
-    // Both slots are in use — release c1 and re-acquire to flip busy back.
-    pool.release(c1);
-    const c3 = pool.acquire();
-    pool.release(c2);
-    pool.release(c3);
-}
-
-test "HttpClientPool deinit cleans up a zero-use pool" {
-    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
-    pool.deinit();
-}
+// Deterministic pool bookkeeping is unit-tested inline in
+// net/client_pool.zig. The blocking cond.wait branch needs a second
+// thread, so it lives here; it also keeps the client.zig re-export
+// exercised through `client_mod.HttpClientPool`.
 
 test "HttpClientPool blocks acquire when all clients are busy" {
     var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
@@ -464,16 +448,6 @@ test "Response.deinit frees the owned body buffer" {
 // injection branch in HttpClient.get().
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern fn unsetenv(name: [*:0]const u8) c_int;
-
-test "HttpClientPool.init propagates allocator failure on the second allocation" {
-    // The pool allocates two slices — clients and busy. Failing on the
-    // second alloc exercises the errdefer branch that frees the first one.
-    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
-    try testing.expectError(
-        error.OutOfMemory,
-        client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, failing.allocator(), 2),
-    );
-}
 
 test "HttpClient.get retries on a 503 response status" {
     // httpbin.org/status/503 returns a deterministic 503 which is one of
