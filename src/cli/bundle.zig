@@ -1,20 +1,22 @@
 //! malt — bundle command
 
 const std = @import("std");
+
 const AppCtx = @import("../app_ctx.zig").AppCtx;
-const sqlite = @import("../db/sqlite.zig");
-const schema = @import("../db/schema.zig");
-const atomic = @import("../fs/atomic.zig");
-const output = @import("../ui/output.zig");
-const manifest_mod = @import("../core/bundle/manifest.zig");
 const brewfile_mod = @import("../core/bundle/brewfile.zig");
 const brewfile_emit = @import("../core/bundle/brewfile_emit.zig");
-const runner_mod = @import("../core/bundle/runner.zig");
 const cleanup_mod = @import("../core/bundle/cleanup.zig");
+const manifest_mod = @import("../core/bundle/manifest.zig");
+const runner_mod = @import("../core/bundle/runner.zig");
+const schema = @import("../db/schema.zig");
+const sqlite = @import("../db/sqlite.zig");
+const atomic = @import("../fs/atomic.zig");
+const output = @import("../ui/output.zig");
+const install_sink_mod = @import("install/sink.zig");
 const install_cmd = @import("install.zig");
-const uninstall_cmd = @import("uninstall.zig");
-const tap_cmd = @import("tap.zig");
 const services_cmd = @import("services.zig");
+const tap_cmd = @import("tap.zig");
+const uninstall_cmd = @import("uninstall.zig");
 
 // Default in-process dispatcher: the CLI layer supplies this so the
 // runner can stay ignorant of cli/* while still calling into the real
@@ -49,12 +51,14 @@ fn bundleInstallCtxFromOpaque(ctx: ?*anyopaque) *const BundleInstallCtx {
 
 fn cliInstallFormula(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
     const bd = bundleInstallCtxFromOpaque(ctx);
-    install_cmd.installAll(bd.app, allocator, &.{name}, .{ .isolate_deps = bd.isolate_deps }) catch |e| return narrowDispatch(e);
+    // Silent sink: the bundle `Report` is the per-member channel, so the
+    // install pipeline's per-keg lines would only be noise over it.
+    install_cmd.installAll(bd.app, allocator, &.{name}, .{ .isolate_deps = bd.isolate_deps, .sink = install_sink_mod.silent }) catch |e| return narrowDispatch(e);
 }
 
 fn cliInstallCask(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {
     const bd = bundleInstallCtxFromOpaque(ctx);
-    install_cmd.installAll(bd.app, allocator, &.{name}, .{ .cask = true, .isolate_deps = bd.isolate_deps }) catch |e| return narrowDispatch(e);
+    install_cmd.installAll(bd.app, allocator, &.{name}, .{ .cask = true, .isolate_deps = bd.isolate_deps, .sink = install_sink_mod.silent }) catch |e| return narrowDispatch(e);
 }
 
 fn cliTapAdd(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner_mod.DispatchError!void {

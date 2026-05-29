@@ -11,6 +11,9 @@ const sqlite = malt.sqlite;
 const schema = malt.schema;
 const manifest_mod = malt.bundle_manifest;
 const runner = malt.bundle_runner;
+const install = malt.install;
+const install_sink = malt.install_sink;
+const output = malt.output;
 
 const TempDb = struct {
     dir: []const u8,
@@ -434,4 +437,76 @@ test "real-world Brewfile shapes parse without error" {
 
     var report = try runner.run(std.Options.debug_io, testing.allocator, &t.db, m, .{ .dry_run = true, .prefix = t.dir });
     defer report.deinit();
+}
+
+/// Mirrors `cli/bundle.zig`'s real dispatcher: route a member install
+/// through `installAll` with the silent sink, mapping any failure to a
+/// structured `MemberFailed` so the runner's `Report` carries it.
+const SilentInstallCtx = struct {
+    app: *const malt.app_ctx.AppCtx,
+
+    fn installFormulaFn(ctx: ?*anyopaque, allocator: std.mem.Allocator, name: []const u8) runner.DispatchError!void {
+        const self: *SilentInstallCtx = @ptrCast(@alignCast(ctx.?));
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        install.installAll(self.app, arena.allocator(), &.{name}, .{ .sink = install_sink.silent }) catch
+            return runner.DispatchError.MemberFailed;
+    }
+    fn unusedFn(_: ?*anyopaque, _: std.mem.Allocator, _: []const u8) runner.DispatchError!void {
+        unreachable;
+    }
+};
+
+test "silent-sink dispatcher: member failure surfaces via Report with no stderr spam" {
+    var t = try TempDb.init("silent_sink");
+    defer t.deinit();
+
+    // installAll resolves its prefix from MALT_PREFIX; pin it to the temp dir.
+    const prefix_z = try std.fmt.allocPrintSentinel(testing.allocator, "{s}", .{t.dir}, 0);
+    defer testing.allocator.free(prefix_z);
+    _ = c.setenv("MALT_PREFIX", prefix_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Single unresolvable formula isolates the install path: only
+    // installFormula fires, and it fails fast offline.
+    var m = manifest_mod.Manifest.init(testing.allocator);
+    defer m.deinit();
+    const a = m.allocator();
+    m.name = try a.dupe(u8, "solo");
+    m.version = manifest_mod.schema_version;
+    const formulas = try a.alloc(manifest_mod.FormulaEntry, 1);
+    formulas[0] = .{ .name = try a.dupe(u8, "zz_nonexistent_formula_xyz") };
+    m.formulas = formulas;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const app: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    var ictx: SilentInstallCtx = .{ .app = &app };
+    const dispatcher = runner.Dispatcher{
+        .ctx = &ictx,
+        .installFormula = SilentInstallCtx.installFormulaFn,
+        .installCask = SilentInstallCtx.unusedFn,
+        .tapAdd = SilentInstallCtx.unusedFn,
+        .serviceStart = SilentInstallCtx.unusedFn,
+    };
+
+    var out_buf: std.ArrayList(u8) = .empty;
+    defer out_buf.deinit(testing.allocator);
+    output.beginStderrCapture(testing.allocator, &out_buf);
+    defer output.endStderrCapture();
+
+    var report = try runner.run(threaded.io(), testing.allocator, &t.db, m, .{
+        .dry_run = false,
+        .prefix = t.dir,
+        .dispatcher = &dispatcher,
+    });
+    defer report.deinit();
+
+    // Structured per-member outcome survives the silent sink...
+    try testing.expect(report.hasFailure());
+    try testing.expectEqual(@as(usize, 1), report.failures.len);
+    try testing.expectEqual(runner.DispatchError.MemberFailed, report.failures[0].err);
+    try testing.expectEqualStrings("zz_nonexistent_formula_xyz", report.failures[0].name);
+    // ...while the per-keg lines never reach the global stderr channel.
+    try testing.expectEqual(@as(usize, 0), out_buf.items.len);
 }

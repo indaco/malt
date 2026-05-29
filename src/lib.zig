@@ -19,6 +19,7 @@ pub const install_local = @import("cli/install/local.zig");
 pub const install_post_install = @import("cli/install/post_install.zig");
 pub const install_rb_parse = @import("cli/install/rb_parse.zig");
 pub const install_record = @import("cli/install/record.zig");
+pub const install_sink = @import("cli/install/sink.zig");
 pub const cli_link = @import("cli/link.zig");
 pub const cli_list = @import("cli/list.zig");
 pub const cli_migrate = @import("cli/migrate.zig");

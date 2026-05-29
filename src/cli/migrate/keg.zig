@@ -4,22 +4,24 @@
 //! shrinks to flag parsing, scan, and dispatch.
 
 const std = @import("std");
+
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
-const sqlite = @import("../../db/sqlite.zig");
-const formula_mod = @import("../../core/formula.zig");
 const bottle_mod = @import("../../core/bottle.zig");
-const store_mod = @import("../../core/store.zig");
 const cellar_mod = @import("../../core/cellar.zig");
+const formula_mod = @import("../../core/formula.zig");
+const install_receipt_mod = @import("../../core/install_receipt.zig");
 const linker_mod = @import("../../core/linker.zig");
+const store_mod = @import("../../core/store.zig");
+const sqlite = @import("../../db/sqlite.zig");
+const atomic = @import("../../fs/atomic.zig");
+const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
 const ghcr_mod = @import("../../net/ghcr.zig");
-const api_mod = @import("../../net/api.zig");
-const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
 const post_install_mod = @import("../install/post_install.zig");
+const install_sink_mod = @import("../install/sink.zig");
 const post_install_queue_mod = @import("post_install_queue.zig");
-const install_receipt_mod = @import("../../core/install_receipt.zig");
 
 /// Width budget for the "<tap>/<keg_name>" qualifier we record in
 /// `kegs.full_name`. Long org/tap pairs in private taps push past
@@ -226,6 +228,7 @@ pub fn migrateKeg(
                     deps.prefix,
                     deps.use_system_ruby_scope,
                     null,
+                    install_sink_mod.terminal,
                 );
             };
         } else {
@@ -238,6 +241,7 @@ pub fn migrateKeg(
                 deps.prefix,
                 deps.use_system_ruby_scope,
                 null,
+                install_sink_mod.terminal,
             );
         }
     }
@@ -394,6 +398,7 @@ fn runTapPostInstallIfDefined(
                 body,
                 deps.prefix,
                 deps.use_system_ruby_scope,
+                install_sink_mod.terminal,
             );
         };
     } else {
@@ -405,6 +410,7 @@ fn runTapPostInstallIfDefined(
             body,
             deps.prefix,
             deps.use_system_ruby_scope,
+            install_sink_mod.terminal,
         );
     }
 }

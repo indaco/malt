@@ -5,15 +5,18 @@
 //! human + JSON envelopes regardless of which command did the work.
 
 const std = @import("std");
+
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const deps_mod = @import("../../core/deps.zig");
-const formula_mod = @import("../../core/formula.zig");
 const dsl = @import("../../core/dsl/root.zig");
+const formula_mod = @import("../../core/formula.zig");
 const ruby_sub = @import("../../core/ruby_subprocess.zig");
 const sandbox = @import("../../core/sandbox/macos.zig");
 const output = @import("../../ui/output.zig");
-
 const download = @import("download.zig");
+pub const DownloadJob = download.DownloadJob;
+const sink_mod = @import("sink.zig");
+const OutputSink = sink_mod.OutputSink;
 
 /// Extract the post_install body from a tap's `<name>.rb`. Tap kegs
 /// aren't reachable from the bottle DSL pipeline (the locator only
@@ -25,8 +28,6 @@ const download = @import("download.zig");
 pub fn extractRbPostInstallBody(io: std.Io, allocator: std.mem.Allocator, rb_path: []const u8) ?[]const u8 {
     return ruby_sub.extractPostInstallBody(io, allocator, rb_path);
 }
-
-pub const DownloadJob = download.DownloadJob;
 
 /// Whether --use-system-ruby opts the named formula into the Ruby
 /// post_install path. Caller carries the parsed scope from the flag.
@@ -88,6 +89,7 @@ pub fn routePostInstallOutcome(
     prefix: []const u8,
     flog: *const dsl.FallbackLog,
     use_system_ruby_list: []const []const u8,
+    sink: OutputSink,
 ) void {
     routePostInstallOutcomeWithBody(
         ctx,
@@ -98,6 +100,7 @@ pub fn routePostInstallOutcome(
         flog,
         use_system_ruby_list,
         null,
+        sink,
     );
 }
 
@@ -114,10 +117,11 @@ pub fn routePostInstallOutcomeWithBody(
     flog: *const dsl.FallbackLog,
     use_system_ruby_list: []const []const u8,
     pre_resolved_body: ?[]const u8,
+    sink: OutputSink,
 ) void {
     const status: PostInstallStatus = blk: {
         if (flog.hasFatal()) {
-            output.warn("post_install DSL failed for {s} (fatal)", .{name});
+            sink.warn("post_install DSL failed for {s} (fatal)", .{name});
             flog.printFatal(name);
             // `--debug` also surfaces the non-fatal context so a bug
             // report includes every reason the DSL logged, not just the
@@ -126,7 +130,7 @@ pub fn routePostInstallOutcomeWithBody(
             break :blk .fatal;
         }
         if (!flog.hasErrors()) {
-            output.info("post_install completed for {s}", .{name});
+            sink.info("post_install completed for {s}", .{name});
             break :blk .completed;
         }
         // Auto-included Ruby-interpreter kegs (`ruby`, `ruby@N`) skip the
@@ -138,7 +142,7 @@ pub fn routePostInstallOutcomeWithBody(
         const explicit_opt_in = useSystemRubyForFormula(use_system_ruby_list, name);
         const auto_self_hosting = isSelfHostingRubyKeg(name);
         if (explicit_opt_in or (auto_self_hosting and !flog.dslDidWork())) {
-            output.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{name});
+            sink.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{name});
             if (output.isVerbose()) flog.printUnknown(name);
             if (output.isDebug()) flog.printFatal(name);
             const ruby_stdio: sandbox.Stdio = .{ .out = ctx.stdout.handle, .err = ctx.stderr.handle };
@@ -147,15 +151,15 @@ pub fn routePostInstallOutcomeWithBody(
             else
                 ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix, ruby_stdio);
             ruby_result catch |err| {
-                output.warn("post_install subprocess failed for {s}: {s}", .{ name, ruby_sub.describeError(err) });
+                sink.warn("post_install subprocess failed for {s}: {s}", .{ name, ruby_sub.describeError(err) });
                 break :blk .ruby_fallback_failed;
             };
             // Symmetric with the native "completed" info so scripted users
             // see a positive signal when the Ruby escape hatch succeeded.
-            output.info("post_install completed for {s} (via system Ruby)", .{name});
+            sink.info("post_install completed for {s} (via system Ruby)", .{name});
             break :blk .ran_via_ruby;
         }
-        output.warn("{s}: post_install partially skipped (use --use-system-ruby={s} to attempt via Ruby)", .{ name, name });
+        sink.warn("{s}: post_install partially skipped (use --use-system-ruby={s} to attempt via Ruby)", .{ name, name });
         if (output.isVerbose()) flog.printUnknown(name);
         if (output.isDebug()) flog.printFatal(name);
         break :blk .partially_skipped;
@@ -170,7 +174,7 @@ pub fn routePostInstallOutcomeWithBody(
     if (output.isJson()) {
         switch (output.postInstallEmit()) {
             .stream => emitPostInstallStreamLine(allocator, name, status, flog),
-            .embed => bufferPostInstallEvent(allocator, name, status, flog),
+            .embed => bufferPostInstallEvent(allocator, name, status, flog, sink),
         }
     }
 }
@@ -201,6 +205,7 @@ fn bufferPostInstallEvent(
     name: []const u8,
     status: PostInstallStatus,
     flog: *const dsl.FallbackLog,
+    sink: OutputSink,
 ) void {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
@@ -210,7 +215,7 @@ fn bufferPostInstallEvent(
     w.writeAll("}") catch return;
     // Surface push errors loudly so a half-populated summary is obvious.
     output.pushPostInstallEvent(aw.written()) catch |e|
-        output.warn("post_install event buffering failed for {s}: {s}", .{ name, @errorName(e) });
+        sink.warn("post_install event buffering failed for {s}: {s}", .{ name, @errorName(e) });
 }
 
 /// Shared payload writer so the streaming line and buffered embed
@@ -261,6 +266,7 @@ pub fn executeDslPostInstall(
     prefix: []const u8,
     use_system_ruby_list: []const []const u8,
     cache: ?*deps_mod.FormulaCache,
+    sink: OutputSink,
 ) DslPostInstallOutcome {
     var owned: ?formula_mod.Formula = null;
     defer if (owned) |*f| f.deinit();
@@ -268,13 +274,13 @@ pub fn executeDslPostInstall(
     const dsl_version: []const u8, const pkg_version: []const u8 = blk: {
         if (cache) |c| {
             const f = c.getOrParse(name, formula_json) catch {
-                output.warn("post_install: failed to parse formula for {s}", .{name});
+                sink.warn("post_install: failed to parse formula for {s}", .{name});
                 return .parse_failed;
             };
             break :blk .{ f.version, f.pkg_version };
         }
         owned = formula_mod.parseFormula(allocator, formula_json) catch {
-            output.warn("post_install: failed to parse formula for {s}", .{name});
+            sink.warn("post_install: failed to parse formula for {s}", .{name});
             return .parse_failed;
         };
         break :blk .{ owned.?.version, owned.?.pkg_version };
@@ -290,6 +296,7 @@ pub fn executeDslPostInstall(
         post_install_src,
         prefix,
         use_system_ruby_list,
+        sink,
     );
     return .handled;
 }
@@ -310,6 +317,7 @@ pub fn executeDslPostInstallFields(
     post_install_src: []const u8,
     prefix: []const u8,
     use_system_ruby_list: []const []const u8,
+    sink: OutputSink,
 ) void {
     var flog = dsl.FallbackLog.init(allocator);
     defer flog.deinit();
@@ -330,6 +338,7 @@ pub fn executeDslPostInstallFields(
         &flog,
         use_system_ruby_list,
         post_install_src,
+        sink,
     );
 }
 
@@ -367,6 +376,7 @@ pub fn drive(
     prefix: []const u8,
     use_system_ruby_list: []const []const u8,
     cache: ?*deps_mod.FormulaCache,
+    sink: OutputSink,
 ) void {
     if (locateDslSource(ctx, allocator, name)) |src| {
         defer allocator.free(src);
@@ -380,6 +390,7 @@ pub fn drive(
             prefix,
             use_system_ruby_list,
             cache,
+            sink,
         )) {
             .handled => return,
             // parse_failed leaves the DSL path unusable — fall through so
@@ -389,13 +400,13 @@ pub fn drive(
     }
 
     if (useSystemRubyForFormula(use_system_ruby_list, name) or isSelfHostingRubyKeg(name)) {
-        output.warn("Running post_install for {s} via system Ruby...", .{name});
+        sink.warn("Running post_install for {s} via system Ruby...", .{name});
         const ruby_stdio: sandbox.Stdio = .{ .out = ctx.stdout.handle, .err = ctx.stderr.handle };
         ruby_sub.runPostInstall(ctx.io, ctx.environ, allocator, name, version_str, prefix, ruby_stdio) catch |e| {
-            output.warn("post_install failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
+            sink.warn("post_install failed for {s}: {s}", .{ name, ruby_sub.describeError(e) });
         };
     } else {
-        output.warn("{s}: post_install skipped (use --use-system-ruby={s} or brew install {s})", .{ name, name, name });
+        sink.warn("{s}: post_install skipped (use --use-system-ruby={s} or brew install {s})", .{ name, name, name });
     }
 }
 
@@ -418,6 +429,7 @@ pub fn driveTap(
     post_install_src: []const u8,
     prefix: []const u8,
     use_system_ruby_list: []const []const u8,
+    sink: OutputSink,
 ) void {
     executeDslPostInstallFields(
         ctx,
@@ -429,6 +441,7 @@ pub fn driveTap(
         post_install_src,
         prefix,
         use_system_ruby_list,
+        sink,
     );
 }
 

@@ -16,8 +16,10 @@
 //! matter for correctness.
 
 const std = @import("std");
-const post_install_mod = @import("../install/post_install.zig");
+
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
+const post_install_mod = @import("../install/post_install.zig");
+const install_sink_mod = @import("../install/sink.zig");
 
 /// Two queueable shapes share the same FIFO and drain so order across
 /// bottle and tap kegs is preserved (fc-cache races care about
@@ -141,6 +143,7 @@ pub const Queue = struct {
                 prefix,
                 use_system_ruby_scope,
                 null,
+                install_sink_mod.terminal,
             ),
             .tap => |tp| post_install_mod.driveTap(
                 ctx,
@@ -150,6 +153,7 @@ pub const Queue = struct {
                 tp.post_install_src,
                 prefix,
                 use_system_ruby_scope,
+                install_sink_mod.terminal,
             ),
         };
     }
