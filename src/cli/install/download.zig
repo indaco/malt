@@ -15,6 +15,7 @@ const sqlite = @import("../../db/sqlite.zig");
 const atomic = @import("../../fs/atomic.zig");
 const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
+const pool_mod = @import("../../net/client_pool.zig");
 const ghcr_mod = @import("../../net/ghcr.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
@@ -29,7 +30,7 @@ pub const InstallJobDeps = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     api: *api_mod.BrewApi,
-    http_pool: *client_mod.HttpClientPool,
+    http_pool: *pool_mod.HttpClientPool,
     db: *sqlite.Database,
     store: *store_mod.Store,
     /// Shared parsed-formula cache for the whole install run.
@@ -123,7 +124,7 @@ pub fn isDeterministicDownloadError(err: bottle_mod.BottleError) bool {
 const FetchFormulaCtx = struct {
     io: std.Io,
     arena: std.heap.ArenaAllocator,
-    pool: *client_mod.HttpClientPool,
+    pool: *pool_mod.HttpClientPool,
     cache_dir: []const u8,
     /// Snapshot of `api.base_url` so workers inherit the mirror
     /// override without re-reading the env on a worker thread.
@@ -688,7 +689,7 @@ pub const InstallPool = struct {
     jobs: []DownloadJob,
     prefix: []const u8,
     ghcr: *ghcr_mod.GhcrClient,
-    http_pool: *client_mod.HttpClientPool,
+    http_pool: *pool_mod.HttpClientPool,
     store: *store_mod.Store,
     cache: *deps_mod.FormulaCache,
     results: []MaterializeResult,

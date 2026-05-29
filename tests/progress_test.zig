@@ -7,6 +7,7 @@ const test_io = @import("test_io");
 const testing = std.testing;
 const progress_mod = @import("malt").progress;
 const client_mod = @import("malt").client;
+const pool_mod = @import("malt").client_pool;
 const output_mod = @import("malt").output;
 
 // --- ProgressBar unit tests ---
@@ -392,18 +393,17 @@ test "output verbose/dryrun/mode setters and getters round-trip" {
 //
 // Deterministic pool bookkeeping is unit-tested inline in
 // net/client_pool.zig. The blocking cond.wait branch needs a second
-// thread, so it lives here; it also keeps the client.zig re-export
-// exercised through `client_mod.HttpClientPool`.
+// thread, so it lives here.
 
 test "HttpClientPool blocks acquire when all clients are busy" {
-    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
+    var pool = try pool_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
 
     // Hold the only client, then spawn a thread that tries to acquire.
     const held = pool.acquire();
 
     const Ctx = struct {
-        p: *client_mod.HttpClientPool,
+        p: *pool_mod.HttpClientPool,
         got: *client_mod.HttpClient,
         done: *std.atomic.Value(bool),
 

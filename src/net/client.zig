@@ -846,10 +846,6 @@ fn formatUri(allocator: std.mem.Allocator, uri: std.Uri) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}://{s}{s}", .{ scheme, host, path });
 }
 
-/// Pool now lives in `net/client_pool.zig`; re-exported for one release
-/// so existing `client_mod.HttpClientPool` callers keep resolving.
-pub const HttpClientPool = @import("client_pool.zig").HttpClientPool;
-
 test "extractEtagFromHead: finds ETag header by exact name" {
     const bytes = "200 OK\r\nServer: github\r\nETag: \"abc123\"\r\nContent-Length: 0\r\n\r\n";
     const et = extractEtagFromHead(bytes);

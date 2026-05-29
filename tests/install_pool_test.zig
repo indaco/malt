@@ -123,7 +123,7 @@ test "installPoolWorker drains every job against a warm store and stamps each re
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    var http_pool = try malt.client.HttpClientPool.init(ctx.io, ctx.environ, testing.allocator, 1);
+    var http_pool = try malt.client_pool.HttpClientPool.init(ctx.io, ctx.environ, testing.allocator, 1);
     defer http_pool.deinit();
     // ghcr/http are required by the worker signature but the warm-store
     // fast path inside `installKegFromBottle` short-circuits before any
@@ -221,7 +221,7 @@ test "installPoolWorker drains a 3-job pool concurrently across two workers" {
 
     // Two-slot HTTP pool so the two workers can both acquire without
     // either one blocking on the warm-store fast path.
-    var http_pool = try malt.client.HttpClientPool.init(ctx.io, ctx.environ, testing.allocator, 2);
+    var http_pool = try malt.client_pool.HttpClientPool.init(ctx.io, ctx.environ, testing.allocator, 2);
     defer http_pool.deinit();
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, testing.allocator);
     defer http.deinit();
@@ -325,7 +325,7 @@ test "installPoolWorker propagates the specific CellarError variant into result.
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
-    var http_pool = try malt.client.HttpClientPool.init(ctx.io, ctx.environ, testing.allocator, 1);
+    var http_pool = try malt.client_pool.HttpClientPool.init(ctx.io, ctx.environ, testing.allocator, 1);
     defer http_pool.deinit();
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, testing.allocator);
     defer http.deinit();
@@ -393,7 +393,7 @@ test "installPoolWorker bails between jobs when Ctrl-C fires" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
-    var http_pool = try malt.client.HttpClientPool.init(ctx.io, ctx.environ, testing.allocator, 1);
+    var http_pool = try malt.client_pool.HttpClientPool.init(ctx.io, ctx.environ, testing.allocator, 1);
     defer http_pool.deinit();
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, testing.allocator);
     defer http.deinit();
@@ -453,7 +453,7 @@ test "installPoolWorker leaves the result untouched and marks job not-succeeded 
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
 
-    var http_pool = try malt.client.HttpClientPool.init(ctx.io, ctx.environ, testing.allocator, 1);
+    var http_pool = try malt.client_pool.HttpClientPool.init(ctx.io, ctx.environ, testing.allocator, 1);
     defer http_pool.deinit();
     var http = malt.client.HttpClient.init(ctx.io, ctx.environ, testing.allocator);
     defer http.deinit();

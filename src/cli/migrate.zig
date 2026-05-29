@@ -17,6 +17,7 @@ const atomic = @import("../fs/atomic.zig");
 const codesign = @import("../macho/codesign.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
+const pool_mod = @import("../net/client_pool.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
 const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
@@ -314,7 +315,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
         // Borrowed clients keep TLS contexts warm across kegs without
         // paying a fresh handshake per worker.
-        var http_pool = client_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, @intCast(@max(worker_count, 1))) catch {
+        var http_pool = pool_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, @intCast(@max(worker_count, 1))) catch {
             output.err("Failed to initialise HTTP client pool", .{});
             return error.Aborted;
         };

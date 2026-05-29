@@ -93,7 +93,7 @@ test "collectFormulaJobs queues a formula with a post_install hook" {
     test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
 
-    var http = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
+    var http = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
     var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
@@ -334,7 +334,7 @@ test "collectFormulaJobs queues the main formula when nothing is installed" {
     test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
 
-    var http = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
+    var http = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
     // A real single-client HttpClient is safe because it's never touched
     // when deps.len == 0.
@@ -381,7 +381,7 @@ test "collectFormulaJobs no-ops when the formula is already installed" {
 
     const json = bottleJsonWithoutDeps("hello");
 
-    var http: malt.client.HttpClientPool = undefined;
+    var http: malt.client_pool.HttpClientPool = undefined;
     var api: malt.api.BrewApi = undefined;
     var store_inst: malt.store.Store = undefined;
     var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
@@ -463,7 +463,7 @@ test "collectFormulaJobs queues a dep and its parent from a seeded cache" {
     const root_json = formulaJsonWithDep("alpha", "beta");
     try seedCache(cache_dir, "alpha", root_json);
 
-    var http_pool = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
+    var http_pool = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();
     var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
@@ -513,7 +513,7 @@ test "collectFormulaJobs deduplicates deps already queued by a prior call" {
     try seedCache(cache_dir, "alpha", root_a);
     try seedCache(cache_dir, "omega", root_b);
 
-    var http_pool = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
+    var http_pool = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();
     var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
@@ -547,7 +547,7 @@ test "collectFormulaJobs surfaces FormulaNotFound for unparseable JSON" {
     var tdb = try TempDb.init("bad_json");
     defer tdb.deinit();
 
-    var http: malt.client.HttpClientPool = undefined;
+    var http: malt.client_pool.HttpClientPool = undefined;
     var api: malt.api.BrewApi = undefined;
     var store_inst: malt.store.Store = undefined;
     var jobs: std.ArrayList(install_download.DownloadJob) = .empty;
@@ -582,7 +582,7 @@ test "collectFormulaJobs with post_install leaves the DB untouched" {
     test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
 
-    var http = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
+    var http = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
     var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
@@ -646,7 +646,7 @@ test "collectFormulaJobs carries the _<revision> suffix in version_str" {
     test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
 
-    var http = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
+    var http = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
     var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
@@ -686,7 +686,7 @@ test "collectFormulaJobs leaves plain-version formulas unchanged" {
     test_io.makeDirAbsolute(std.Options.debug_io, cache_dir) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, cache_dir) catch {};
 
-    var http = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
+    var http = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 1);
     defer http.deinit();
     var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
@@ -787,7 +787,7 @@ test "collectFormulaJobs leaves no parsed-tree leaks under testing.allocator (>=
     const root_json = formulaJsonWithThreeDeps("root", "dep_a", "dep_b", "dep_c");
     try seedCache(cache_dir, "root", root_json);
 
-    var http_pool = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
+    var http_pool = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();
     var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();

@@ -26,6 +26,7 @@ const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const api_mod = @import("../net/api.zig");
 const client_mod = @import("../net/client.zig");
+const pool_mod = @import("../net/client_pool.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
 const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
@@ -626,7 +627,7 @@ fn executeWithOpts(
 
     // 4-slot worker pool — same budget as the materialize pool; enough to
     // saturate cold installs while reusing TLS contexts.
-    var http_pool = client_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, 4) catch {
+    var http_pool = pool_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, 4) catch {
         output.err("Failed to initialise HTTP client pool", .{});
         return InstallError.DownloadFailed;
     };
