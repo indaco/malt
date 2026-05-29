@@ -57,6 +57,8 @@ const drive = post_install_mod.drive;
 const rb_parse_mod = @import("install/rb_parse.zig");
 const record_mod = @import("install/record.zig");
 const InstallError = record_mod.InstallError;
+const sink_mod = @import("install/sink.zig");
+const OutputSink = sink_mod.OutputSink;
 const recordKeg = record_mod.recordKeg;
 const deleteKeg = record_mod.deleteKeg;
 const recordDeps = record_mod.recordDeps;
@@ -343,6 +345,10 @@ pub const InstallAllOpts = struct {
     /// opts struct so the bundle runner can opt in without spelling
     /// the flag out.
     isolate_deps: bool = false,
+    /// Where per-keg human output goes. Defaults to the terminal sink
+    /// (behaviour identical to `mt install`); the bundle runner passes a
+    /// silent sink so its `Report` is the only channel.
+    sink: OutputSink = sink_mod.terminal,
 };
 
 /// Non-argv primitive used by `core/bundle/runner.zig` via its injected
@@ -362,7 +368,7 @@ pub fn installAll(
     if (opts.cask) try argv.append(allocator, "--cask");
     if (opts.isolate_deps) try argv.append(allocator, "--isolate-deps");
     for (packages) |p| try argv.append(allocator, p);
-    return executeWithOpts(ctx, allocator, argv.items, .{ .skip_lock = opts.skip_lock });
+    return executeWithOpts(ctx, allocator, argv.items, .{ .skip_lock = opts.skip_lock, .sink = opts.sink });
 }
 
 /// Internal options that don't have an argv form. Kept private so the
@@ -370,6 +376,9 @@ pub fn installAll(
 /// contract instead of leaking into the user-visible flag surface.
 const ExecuteOpts = struct {
     skip_lock: bool = false,
+    /// Where per-keg human output goes. Terminal for the argv path; the
+    /// bundle runner threads a silent sink in via `installAll`.
+    sink: OutputSink = sink_mod.terminal,
 };
 
 const InstallFlag = enum {
@@ -420,6 +429,9 @@ fn executeWithOpts(
     exec_opts: ExecuteOpts,
 ) !void {
     if (help.showIfRequested(ctx, args, "install")) return;
+
+    // Single emission seam for this run; default forwards to `ui/output`.
+    const sink = exec_opts.sink;
 
     // Parse flags
     var packages: std.ArrayList([]const u8) = .empty;
@@ -480,22 +492,22 @@ fn executeWithOpts(
 
     if (local_only and packages.items.len == 0) {
         // `error.Aborted` per the main.zig contract — avoids a raw stack trace.
-        output.err("--local requires a path to a .rb file", .{});
+        sink.err("--local requires a path to a .rb file", .{});
         return error.Aborted;
     }
 
     // Refuse ambiguous argv so `--local` cannot silently drop another mode.
     if (local_only) {
         if (force_cask) {
-            output.err("--local cannot be combined with --cask (a .rb file is never a cask)", .{});
+            sink.err("--local cannot be combined with --cask (a .rb file is never a cask)", .{});
             return error.Aborted;
         }
         if (force_formula) {
-            output.err("--local already selects formula mode; drop --formula", .{});
+            sink.err("--local already selects formula mode; drop --formula", .{});
             return error.Aborted;
         }
         if (use_system_ruby_bare or use_system_ruby_scope.items.len > 0) {
-            output.err("--local does not run post_install; --use-system-ruby has no effect and is refused", .{});
+            sink.err("--local does not run post_install; --use-system-ruby has no effect and is refused", .{});
             return error.Aborted;
         }
     }
@@ -504,12 +516,12 @@ fn executeWithOpts(
     // requested package, --download-only skips materialise+link entirely.
     // Document the refusal up front rather than silently picking a winner.
     if (download_only and only_deps) {
-        output.err("--download-only cannot be combined with --only-deps", .{});
+        sink.err("--download-only cannot be combined with --only-deps", .{});
         return error.Aborted;
     }
 
     if (packages.items.len == 0) {
-        output.err("No package names specified", .{});
+        sink.err("No package names specified", .{});
         return InstallError.NoPackages;
     }
 
@@ -519,7 +531,7 @@ fn executeWithOpts(
     // rev/origin tracking.
     for (packages.items) |pkg| {
         if (isSelfInstall(pkg)) {
-            output.err("Refusing to install malt itself ('{s}'). Use 'mt version update' to upgrade.", .{pkg});
+            sink.err("Refusing to install malt itself ('{s}'). Use 'mt version update' to upgrade.", .{pkg});
             return error.Aborted;
         }
     }
@@ -530,7 +542,7 @@ fn executeWithOpts(
         if (packages.items.len == 1) {
             try use_system_ruby_scope.append(allocator, packages.items[0]);
         } else {
-            output.err(
+            sink.err(
                 "--use-system-ruby needs a scope when multiple packages are installed; use --use-system-ruby={s}[,<name>...]",
                 .{packages.items[0]},
             );
@@ -545,11 +557,11 @@ fn executeWithOpts(
     // Absurdly long prefixes overflow install_name_tool's load-command slots.
     checkPrefixSane(prefix) catch |err| switch (err) {
         error.PrefixAbsurd => {
-            output.err(
+            sink.err(
                 "MALT_PREFIX '{s}' is {d} bytes, beyond the {d}-byte sanity cap.",
                 .{ prefix, prefix.len, max_prefix_sane_len },
             );
-            output.err("Set MALT_PREFIX to a reasonable path and retry.", .{});
+            sink.err("Set MALT_PREFIX to a reasonable path and retry.", .{});
             return InstallError.PrefixAbsurd;
         },
     };
@@ -573,7 +585,7 @@ fn executeWithOpts(
         // gate the early return.
         if (anyNamedNeedsPromotion(ctx, prefix, packages.items)) break :fast;
         for (packages.items) |pkg| {
-            output.info("{s} is already installed", .{pkg});
+            sink.info("{s} is already installed", .{pkg});
             // Fast-path skips the protocol; positive signal so consumers
             // can tell idempotent success from "command never ran".
             output.emitNdjsonEvent(.already_installed, pkg, null);
@@ -589,14 +601,14 @@ fn executeWithOpts(
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch
         return InstallError.DatabaseError;
     var db = sqlite.Database.open(db_path) catch {
-        output.err("Failed to open database at {s}", .{db_path});
+        sink.err("Failed to open database at {s}", .{db_path});
         return InstallError.DatabaseError;
     };
     defer db.close();
 
     // Initialize schema
     schema.initSchema(&db) catch {
-        output.err("Failed to initialize database schema", .{});
+        sink.err("Failed to initialize database schema", .{});
         return InstallError.DatabaseError;
     };
 
@@ -610,7 +622,7 @@ fn executeWithOpts(
         const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch
             return InstallError.LockError;
         lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch {
-            output.err("Another mt process is running. Wait or run mt doctor.", .{});
+            sink.err("Another mt process is running. Wait or run mt doctor.", .{});
             return InstallError.LockError;
         };
         output.emitNdjsonEvent(.lock_acquired, "", null);
@@ -628,7 +640,7 @@ fn executeWithOpts(
     // 4-slot worker pool — same budget as the materialize pool; enough to
     // saturate cold installs while reusing TLS contexts.
     var http_pool = pool_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, 4) catch {
-        output.err("Failed to initialise HTTP client pool", .{});
+        sink.err("Failed to initialise HTTP client pool", .{});
         return InstallError.DownloadFailed;
     };
     defer http_pool.deinit();
@@ -659,7 +671,7 @@ fn executeWithOpts(
     // correctly short-circuits without re-downloading the keg.
     for (packages.items) |pkg_name| {
         if (promoteIsolatedDepIfAny(&db, &linker, pkg_name)) {
-            output.success("{s} promoted to direct: bin/sbin links restored", .{pkg_name});
+            sink.success("{s} promoted to direct: bin/sbin links restored", .{pkg_name});
         }
     }
 
@@ -677,14 +689,14 @@ fn executeWithOpts(
 
     // Check for Ctrl-C before resolution phase
     if (signals.isInterrupted()) {
-        output.warn("Interrupted before resolution.", .{});
+        sink.warn("Interrupted before resolution.", .{});
         return;
     }
 
     for (packages.items) |pkg_name| {
         // Check for Ctrl-C between packages during resolution
         if (signals.isInterrupted()) {
-            output.warn("Interrupted during resolution.", .{});
+            sink.warn("Interrupted during resolution.", .{});
             // Surface counted misses so a Ctrl-C after some packages
             // already failed dispatch still exits non-zero.
             if (failed_count > 0) return InstallError.PartialFailure;
@@ -694,11 +706,11 @@ fn executeWithOpts(
         // Path wins over tap-form when `.rb` is present — a typo like
         // `user/repo/foo.rb` hits local-file error, not a GitHub 404.
         if (local_only or isLocalFormulaPath(pkg_name)) {
-            installLocalFormula(ctx, allocator, pkg_name, &db, &linker, prefix, dry_run, force) catch |e| {
+            installLocalFormula(ctx, allocator, pkg_name, &db, &linker, prefix, dry_run, force, sink) catch |e| {
                 // Skip the generic summary when the inner error line already
                 // told the user what went wrong.
                 if (!localErrorIsAnnounced(e)) {
-                    output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+                    sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                 }
                 failed_count += 1;
             };
@@ -707,8 +719,8 @@ fn executeWithOpts(
 
         // Handle tap formulas separately (they don't use GHCR)
         if (isTapFormula(pkg_name)) {
-            installTapFormula(ctx, allocator, pkg_name, &db, &linker, prefix, dry_run, force, download_only) catch |e| {
-                output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+            installTapFormula(ctx, allocator, pkg_name, &db, &linker, prefix, dry_run, force, download_only, sink) catch |e| {
+                sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                 failed_count += 1;
             };
             continue;
@@ -721,25 +733,25 @@ fn executeWithOpts(
                 // didn't have it" line instead of falling through to a
                 // cask probe that would also miss with the same noise.
                 if (fetch_err == api_mod.ApiError.OfflineRequired) {
-                    output.err("offline mode: formula '{s}' not cached", .{pkg_name});
+                    sink.err("offline mode: formula '{s}' not cached", .{pkg_name});
                     failed_count += 1;
                     continue;
                 }
                 if (force_formula) {
                     if (mapApiFetchError(fetch_err) != null) {
-                        output.err("Cannot reach Homebrew API for formula '{s}'", .{pkg_name});
+                        sink.err("Cannot reach Homebrew API for formula '{s}'", .{pkg_name});
                     } else {
-                        output.err("Formula '{s}' not found", .{pkg_name});
+                        sink.err("Formula '{s}' not found", .{pkg_name});
                     }
                     failed_count += 1;
                     continue;
                 }
                 // Try cask
-                installCask(ctx, allocator, pkg_name, &db, &api, dry_run, download_only) catch |e| {
+                installCask(ctx, allocator, pkg_name, &db, &api, dry_run, download_only, sink) catch |e| {
                     if (e == api_mod.ApiError.OfflineRequired) {
-                        output.err("offline mode: '{s}' not cached as formula or cask", .{pkg_name});
+                        sink.err("offline mode: '{s}' not cached as formula or cask", .{pkg_name});
                     } else {
-                        output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+                        sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                     }
                     failed_count += 1;
                 };
@@ -750,7 +762,7 @@ fn executeWithOpts(
             if (!force_formula and api.cachedExists(pkg_name, .cask)) {
                 if (api.fetchCask(pkg_name)) |cask_json| {
                     allocator.free(cask_json);
-                    output.info("{s} exists as both a formula and a cask. Installing formula. Use --cask to install the cask instead.", .{pkg_name});
+                    sink.info("{s} exists as both a formula and a cask. Installing formula. Use --cask to install the cask instead.", .{pkg_name});
                 } else |_| {}
             }
 
@@ -764,15 +776,16 @@ fn executeWithOpts(
                 .store = &store,
                 .cache = &formula_cache,
                 .worker_backing = std.heap.smp_allocator,
+                .sink = sink,
             }, pkg_name, formula_json, force, &all_jobs) catch |e| {
-                output.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
+                sink.err("Failed to resolve {s}: {s}", .{ pkg_name, @errorName(e) });
                 failed_count += 1;
                 continue;
             };
             output.emitNdjsonEvent(.resolved, pkg_name, null);
         } else {
-            installCask(ctx, allocator, pkg_name, &db, &api, dry_run, download_only) catch |e| {
-                output.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+            installCask(ctx, allocator, pkg_name, &db, &api, dry_run, download_only, sink) catch |e| {
+                sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
                 failed_count += 1;
             };
         }
@@ -792,10 +805,10 @@ fn executeWithOpts(
     }
 
     if (dry_run) {
-        output.info("Dry run: would install {d} package(s):", .{all_jobs.items.len});
+        sink.info("Dry run: would install {d} package(s):", .{all_jobs.items.len});
         for (all_jobs.items) |job| {
             const tag: []const u8 = if (job.is_dep) " (dependency)" else "";
-            output.info("  {s} {s}{s}", .{ job.name, job.version_str, tag });
+            sink.info("  {s} {s}{s}", .{ job.name, job.version_str, tag });
             // No transition outcome to report on a plan-only run.
             output.emitNdjsonEvent(.would_install, job.name, null);
         }
@@ -860,9 +873,9 @@ fn executeWithOpts(
     {
         if (to_download > 0) {
             if (to_download == 1) {
-                output.info("Downloading 1 bottle...", .{});
+                sink.info("Downloading 1 bottle...", .{});
             } else {
-                output.info("Downloading {d} bottles...", .{to_download});
+                sink.info("Downloading {d} bottles...", .{to_download});
             }
 
             // Fold every repo into one multi-scope `/token` round-trip; workers
@@ -891,8 +904,10 @@ fn executeWithOpts(
 
         // Multi-progress + bars only exist when at least one job downloads.
         // Warm-only installs skip terminal setup entirely; their pool
-        // workers materialise without a progress callback.
-        var multi: ?progress_mod.MultiProgress = if (to_download > 0)
+        // workers materialise without a progress callback. A non-terminal
+        // sink (bundle) skips bars too — the global progress mode is
+        // set-once and can't be quieted mid-run.
+        var multi: ?progress_mod.MultiProgress = if (sink.show_progress and to_download > 0)
             progress_mod.MultiProgress.init(assignDownloadLineIndices(all_jobs.items))
         else
             null;
@@ -943,6 +958,7 @@ fn executeWithOpts(
             .results = mats,
             .worker_backing = std.heap.smp_allocator,
             .download_only = download_only,
+            .sink = sink,
         };
 
         const pool_threads = allocator.alloc(std.Thread, worker_count) catch
@@ -985,12 +1001,12 @@ fn executeWithOpts(
         for (all_jobs.items) |job| {
             if (!job.succeeded) {
                 output.emitNdjsonEvent(.download_complete, job.name, "failed");
-                output.err("Download failed for {s}", .{job.name});
+                sink.err("Download failed for {s}", .{job.name});
                 failed_count += 1;
                 continue;
             }
             output.emitNdjsonEvent(.download_complete, job.name, "ok");
-            output.success("{s} {s} downloaded to {s}/store/{s}", .{
+            sink.success("{s} {s} downloaded to {s}/store/{s}", .{
                 job.name,
                 job.version_str,
                 prefix,
@@ -1006,7 +1022,7 @@ fn executeWithOpts(
 
     // Check for Ctrl-C between the pool and the serial link phase
     if (signals.isInterrupted()) {
-        output.warn("Interrupted. Cleaning up...", .{});
+        sink.warn("Interrupted. Cleaning up...", .{});
         // Pool already joined; pull its `!job.succeeded` results into
         // failed_count before bailing so the exit code reflects any
         // bottle that failed to download alongside earlier dispatch misses.
@@ -1025,7 +1041,7 @@ fn executeWithOpts(
 
     for (all_jobs.items, 0..) |*job, i| {
         if (signals.isInterrupted()) {
-            output.warn("Interrupted. Stopping install.", .{});
+            sink.warn("Interrupted. Stopping install.", .{});
             break;
         }
 
@@ -1033,7 +1049,7 @@ fn executeWithOpts(
         // findFailedDep check relies on this map, and a silent drop would
         // let dependents install on top of a broken graph.
         if (!job.succeeded) {
-            output.err("Download failed for {s}, skipping", .{job.name});
+            sink.err("Download failed for {s}, skipping", .{job.name});
             try failed_kegs.put(job.name, {});
             failed_count += 1;
             continue;
@@ -1043,7 +1059,7 @@ fn executeWithOpts(
             const err = mats[i].err orelse cellar_mod.CellarError.CloneFailed;
             var msg_buf: [256]u8 = undefined;
             const msg = formatMaterializeFailure(&msg_buf, job.name, err);
-            output.err("{s}", .{msg});
+            sink.err("{s}", .{msg});
             output.emitNdjsonEvent(.materialized, job.name, "failed");
             try failed_kegs.put(job.name, {});
             failed_count += 1;
@@ -1054,7 +1070,7 @@ fn executeWithOpts(
         // Failed-dep → skip: installing on a broken graph yields a dyld-unresolvable
         // keg. Remove the already-materialised keg so orphans don't linger.
         if (findFailedDep(&formula_cache, &failed_kegs, job.name, job.formula_json)) |failed_dep| {
-            output.warn(
+            sink.warn(
                 "Skipping {s}: dependency {s} failed to install",
                 .{ job.name, failed_dep },
             );
@@ -1075,7 +1091,7 @@ fn executeWithOpts(
             unlinkStaleKegLinks(&db, &linker, job.name, mats[i].kegPath());
         }
 
-        linkAndRecord(ctx.io, allocator, job, mats[i].kegPath(), &db, &linker, prefix, &formula_cache, isolate_deps) catch {
+        linkAndRecord(ctx.io, allocator, job, mats[i].kegPath(), &db, &linker, prefix, &formula_cache, isolate_deps, sink) catch {
             // The underlying error was already logged with a tag by
             // linkAndRecord — just record that this job failed so its
             // dependents in the rest of the loop get skipped above.
@@ -1094,7 +1110,7 @@ fn executeWithOpts(
         }
 
         if (job.post_install_defined) {
-            drive(ctx, allocator, job.name, job.version_str, job.formula_json, prefix, use_system_ruby_list, &formula_cache);
+            drive(ctx, allocator, job.name, job.version_str, job.formula_json, prefix, use_system_ruby_list, &formula_cache, sink);
         }
 
         // ca-certificates' macOS post_install can't run natively, so the
@@ -1105,7 +1121,7 @@ fn executeWithOpts(
 
     if (failed_count > 0) {
         const pkg_word: []const u8 = if (failed_count == 1) "package" else "packages";
-        output.err(
+        sink.err(
             "{d} {s} failed to install. See errors above.",
             .{ failed_count, pkg_word },
         );
@@ -1130,6 +1146,7 @@ fn linkAndRecord(
     prefix: []const u8,
     cache: *deps_mod.FormulaCache,
     isolate_deps: bool,
+    sink: OutputSink,
 ) !void {
     const reason: []const u8 = if (job.is_dep) "dependency" else "direct";
     const bin_isolated = isolate_deps and job.is_dep;
@@ -1138,7 +1155,7 @@ fn linkAndRecord(
     // never reached collectFormulaJobs (none today).
     const formula = cache.get(job.name) orelse blk: {
         break :blk cache.getOrParse(job.name, job.formula_json) catch |err| {
-            output.err("Failed to parse formula for {s}: {s}", .{ job.name, @errorName(err) });
+            sink.err("Failed to parse formula for {s}: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.CellarFailed;
         };
@@ -1151,11 +1168,11 @@ fn linkAndRecord(
     if (!job.keg_only) {
         const conflicts = linker.checkConflicts(keg_path, bin_isolated) catch &.{};
         if (conflicts.len > 0) {
-            output.err("{s}: {d} symlink conflict(s) detected:", .{ job.name, conflicts.len });
+            sink.err("{s}: {d} symlink conflict(s) detected:", .{ job.name, conflicts.len });
             for (conflicts) |conflict| {
-                output.err("  {s} already linked by {s}", .{ conflict.link_path, conflict.existing_keg });
+                sink.err("  {s} already linked by {s}", .{ conflict.link_path, conflict.existing_keg });
             }
-            output.err("Use --force to overwrite, or uninstall the conflicting package first.", .{});
+            sink.err("Use --force to overwrite, or uninstall the conflicting package first.", .{});
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.LinkFailed;
         }
@@ -1164,13 +1181,13 @@ fn linkAndRecord(
     // Link + record
     if (!job.keg_only) {
         const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason, bin_isolated, .{}) catch |err| {
-            output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
+            sink.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
         };
 
         linker.link(keg_path, job.name, keg_id, bin_isolated) catch |err| {
-            output.err("Failed to link {s}: {s}", .{ job.name, @errorName(err) });
+            sink.err("Failed to link {s}: {s}", .{ job.name, @errorName(err) });
             output.emitNdjsonEvent(.linked, job.name, "failed");
             // Rollback: unlink what was partially created + remove DB record + cellar.
             linker.unlink(keg_id) catch {};
@@ -1183,27 +1200,27 @@ fn linkAndRecord(
         output.emitNdjsonEvent(.linked, job.name, "ok");
         output.emitNdjsonEvent(.recorded, job.name, "ok");
         linker.linkOpt(job.name, job.version_str) catch |e| {
-            output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ job.name, @errorName(e) });
+            sink.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ job.name, @errorName(e) });
         };
         recordDeps(db, keg_id, formula);
     } else {
         const keg_id = recordKeg(db, formula, job.store_sha256, keg_path, reason, bin_isolated, .{}) catch |err| {
-            output.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
+            sink.err("Failed to record {s} in database: {s}", .{ job.name, @errorName(err) });
             cellar_mod.remove(io, prefix, job.name, job.version_str) catch {};
             return InstallError.RecordFailed;
         };
         // keg-only has no public link phase to roll back.
         output.emitNdjsonEvent(.recorded, job.name, "ok");
         linker.linkOpt(job.name, job.version_str) catch |e| {
-            output.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ job.name, @errorName(e) });
+            sink.warn("opt link for {s} failed: {s} — dependents may fail to load at runtime", .{ job.name, @errorName(e) });
         };
         recordDeps(db, keg_id, formula);
     }
-    maybeRegisterService(io, allocator, db, formula, prefix);
+    maybeRegisterService(io, allocator, db, formula, prefix, sink);
     // Annotate keg-only packages inline so the single line reads as success,
     // not as a "not linking" warning paired with a separate ✓.
     const keg_only_suffix: []const u8 = if (job.keg_only) " (keg-only — dependency only)" else "";
-    output.success("{s} {s} installed{s}", .{ job.name, job.version_str, keg_only_suffix });
+    sink.success("{s} {s} installed{s}", .{ job.name, job.version_str, keg_only_suffix });
 }
 
 /// Register a launchd service when the formula carries a `service:` block.
@@ -1214,6 +1231,7 @@ fn maybeRegisterService(
     db: *sqlite.Database,
     formula: *const formula_mod.Formula,
     prefix: []const u8,
+    sink: OutputSink,
 ) void {
     const def = formula.service orelse return;
     if (def.run.len == 0) return;
@@ -1253,7 +1271,7 @@ fn maybeRegisterService(
     };
 
     supervisor_mod.register(.{ .allocator = allocator, .io = io, .db = db }, spec, formula.name, false, cellar_path, prefix) catch |err| {
-        output.warn("could not register service for {s}: {s}", .{ formula.name, @errorName(err) });
+        sink.warn("could not register service for {s}: {s}", .{ formula.name, @errorName(err) });
     };
 }
 
@@ -1299,22 +1317,23 @@ fn installCask(
     api: *api_mod.BrewApi,
     dry_run: bool,
     download_only: bool,
+    sink: OutputSink,
 ) !void {
     const cask_json = api.fetchCask(token) catch |e| {
         // Propagate the typed OfflineRequired so the outer dispatch
         // surfaces the snapshot-miss message instead of "not found".
         if (e == api_mod.ApiError.OfflineRequired) return e;
         if (mapApiFetchError(e)) |mapped| {
-            output.err("Cannot reach Homebrew API for cask '{s}'", .{token});
+            sink.err("Cannot reach Homebrew API for cask '{s}'", .{token});
             return mapped;
         }
-        output.err("Cask '{s}' not found", .{token});
+        sink.err("Cask '{s}' not found", .{token});
         return InstallError.CaskNotFound;
     };
     defer allocator.free(cask_json);
 
     var cask = cask_mod.parseCask(allocator, cask_json) catch {
-        output.err("Failed to parse cask JSON for '{s}'", .{token});
+        sink.err("Failed to parse cask JSON for '{s}'", .{token});
         return InstallError.CaskNotFound;
     };
     defer cask.deinit();
@@ -1324,7 +1343,7 @@ fn installCask(
     // older revision is on disk. The real install path keeps the
     // "already installed" short-circuit.
     if (!download_only and cask_mod.isInstalled(db, cask.token)) {
-        output.info("{s} is already installed", .{cask.token});
+        sink.info("{s} is already installed", .{cask.token});
         return;
     }
 
@@ -1337,7 +1356,7 @@ fn installCask(
     }
 
     if (dry_run) {
-        output.info("Dry run: would install cask {s} {s} ({s})", .{
+        sink.info("Dry run: would install cask {s} {s} ({s})", .{
             cask.token,
             cask.version,
             @tagName(artifact_type),
@@ -1346,14 +1365,14 @@ fn installCask(
     }
 
     if (artifact_type == .unknown) {
-        output.err("Unsupported cask format for '{s}' — URL: {s}", .{ cask.token, cask.url });
-        output.err("malt supports .dmg, .zip, and .pkg casks. Use: brew install --cask {s}", .{cask.token});
+        sink.err("Unsupported cask format for '{s}' — URL: {s}", .{ cask.token, cask.url });
+        sink.err("malt supports .dmg, .zip, and .pkg casks. Use: brew install --cask {s}", .{cask.token});
         return InstallError.CaskNotFound;
     }
 
     // Warn for PKG casks (require sudo)
     if (artifact_type == .pkg) {
-        output.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
+        sink.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
     }
 
     const prefix = atomic.maltPrefixOrAbort();
@@ -1362,46 +1381,50 @@ fn installCask(
     installer.artifact_type_override = artifact_type;
     installer.offline = ctx.offline;
 
-    // Progress bar for cask download
+    // Progress bar for cask download. A non-terminal sink (bundle) skips
+    // it — the global progress mode is set-once and can't be quieted
+    // mid-run. `init` is pure; only update/finish touch the terminal.
     var bar = progress_mod.ProgressBar.init(cask.token, 0);
-    installer.progress = .{
-        .context = @ptrCast(&bar),
-        .func = &progressBridge,
-    };
+    if (sink.show_progress) {
+        installer.progress = .{
+            .context = @ptrCast(&bar),
+            .func = &progressBridge,
+        };
+    }
 
     if (download_only) {
         output.emitNdjsonEvent(.download_started, cask.token, null);
         const cache_path = installer.downloadOnly(&cask) catch |e| {
-            bar.finish();
+            if (sink.show_progress) bar.finish();
             output.emitNdjsonEvent(.download_complete, cask.token, "failed");
-            output.err("Failed to download cask {s}: {s}", .{ cask.token, @errorName(e) });
+            sink.err("Failed to download cask {s}: {s}", .{ cask.token, @errorName(e) });
             return InstallError.CaskNotFound;
         };
-        bar.finish();
+        if (sink.show_progress) bar.finish();
         defer allocator.free(cache_path);
         output.emitNdjsonEvent(.download_complete, cask.token, "ok");
-        output.success("{s} {s} downloaded to {s}", .{ cask.token, cask.version, cache_path });
+        sink.success("{s} {s} downloaded to {s}", .{ cask.token, cask.version, cache_path });
         return;
     }
 
-    output.info("Installing cask {s} {s}...", .{ cask.token, cask.version });
+    sink.info("Installing cask {s} {s}...", .{ cask.token, cask.version });
 
     const app_path = installer.install(&cask) catch |e| {
-        bar.finish();
+        if (sink.show_progress) bar.finish();
         // Surface the specific cause (Sha256Mismatch, DownloadFailed, …) —
         // users can't act on a bare "failed to install".
-        output.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
+        sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
         return InstallError.CaskNotFound;
     };
-    bar.finish();
+    if (sink.show_progress) bar.finish();
 
     // Core API casks have no third-party tap origin to record.
     cask_mod.recordInstall(db, &cask, app_path, null) catch {
-        output.warn("Failed to record cask {s} in database", .{cask.token});
+        sink.warn("Failed to record cask {s} in database", .{cask.token});
     };
     allocator.free(app_path);
 
-    output.success("{s} {s} installed", .{ cask.token, cask.version });
+    sink.success("{s} {s} installed", .{ cask.token, cask.version });
 }
 
 // Format the user-facing materialize-failure line. Trivial cellar tags

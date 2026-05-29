@@ -27,6 +27,7 @@ const install_local_mod = @import("install/local.zig");
 const install_rb_parse_mod = @import("install/rb_parse.zig");
 const install_record_mod = @import("install/record.zig");
 const InstallError = install_record_mod.InstallError;
+const install_sink_mod = @import("install/sink.zig");
 const install_mod = @import("install.zig");
 const pin_mod = @import("pin.zig");
 
@@ -527,7 +528,7 @@ fn upgradeTapFormula(
     defer allocator.free(full_name);
 
     var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
-    install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false) catch {
+    install_local_mod.installTapFormula(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, false, install_sink_mod.terminal) catch {
         output.err("Failed to upgrade tap formula {s}", .{full_name});
         return error.Aborted;
     };
@@ -658,7 +659,7 @@ fn upgradeRoutedTapCask(
     // never enters the Formula/ probe that would open a nested DB
     // transaction inside our outer one.
     var linker = linker_mod.Linker.init(ctx.io, allocator, db, prefix);
-    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true) catch |in_err| {
+    install_local_mod.installTapCask(ctx, allocator, full_name, db, &linker, prefix, dry_run, true, install_sink_mod.terminal) catch |in_err| {
         output.err("Failed to upgrade tap cask {s}: {s}", .{ full_name, @errorName(in_err) });
         db.rollback();
         return error.Aborted;

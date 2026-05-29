@@ -9,6 +9,7 @@ const install_args = @import("malt").install_args;
 const install_download = @import("malt").install_download;
 const install_ghcr_url = @import("malt").install_ghcr_url;
 const install_post_install = @import("malt").install_post_install;
+const install_sink = @import("malt").install_sink;
 const install_rb_parse = @import("malt").install_rb_parse;
 const install_record = @import("malt").install_record;
 
@@ -1124,7 +1125,7 @@ fn runRoute(
     const dn = try devnullCtx();
     defer closeDevnullCtx(dn.fd);
 
-    install_post_install.routePostInstallOutcome(&dn.ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
+    install_post_install.routePostInstallOutcome(&dn.ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope, install_sink.terminal);
 
     return buf.toOwnedSlice(testing.allocator);
 }
@@ -1437,7 +1438,7 @@ fn runRouteCaptureStdout(
     const dn = try devnullCtx();
     defer closeDevnullCtx(dn.fd);
 
-    install_post_install.routePostInstallOutcome(&dn.ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope);
+    install_post_install.routePostInstallOutcome(&dn.ctx, testing.allocator, name, "1.0", "/tmp/irrelevant", flog, scope, install_sink.terminal);
     return stdout_buf.toOwnedSlice(testing.allocator);
 }
 
@@ -1507,6 +1508,7 @@ test "executeDslPostInstall returns .parse_failed when formula JSON is unparseab
         "/tmp/irrelevant",
         &.{},
         null,
+        install_sink.terminal,
     );
     try testing.expectEqual(install_post_install.DslPostInstallOutcome.parse_failed, outcome);
 }
@@ -1533,6 +1535,7 @@ test "executeDslPostInstall returns .handled when DSL executes against a valid f
         "/tmp/irrelevant",
         &.{},
         null,
+        install_sink.terminal,
     );
     try testing.expectEqual(install_post_install.DslPostInstallOutcome.handled, outcome);
 }
@@ -1563,6 +1566,7 @@ test "executeDslPostInstall routes through the shared FormulaCache once per name
         "/tmp/irrelevant",
         &.{},
         &cache,
+        install_sink.terminal,
     );
     try testing.expectEqual(install_post_install.DslPostInstallOutcome.handled, first);
     try testing.expectEqual(@as(usize, 1), cache.parse_count);
@@ -1577,6 +1581,7 @@ test "executeDslPostInstall routes through the shared FormulaCache once per name
         "/tmp/irrelevant",
         &.{},
         &cache,
+        install_sink.terminal,
     );
     try testing.expectEqual(install_post_install.DslPostInstallOutcome.handled, second);
     try testing.expectEqual(@as(usize, 1), cache.parse_count);
@@ -1609,6 +1614,7 @@ test "executeDslPostInstall reuses an entry the install pipeline already parsed"
         "/tmp/irrelevant",
         &.{},
         &cache,
+        install_sink.terminal,
     );
     try testing.expectEqual(install_post_install.DslPostInstallOutcome.handled, outcome);
     try testing.expectEqual(@as(usize, 1), cache.parse_count);
@@ -1645,6 +1651,7 @@ test "drive: no DSL source and no scope match emits the unified skip hint" {
         "/tmp/irrelevant",
         &.{},
         null,
+        install_sink.terminal,
     );
 
     // The skip hint is the byte-for-byte string both install and migrate

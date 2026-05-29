@@ -514,6 +514,7 @@ test "--download-only on tap formula with warm tap cache prints path + skips Cel
         false, // dry_run
         false, // force
         true, // download_only
+        malt.install_sink.terminal,
     );
 
     const want = try std.fmt.allocPrint(
@@ -600,6 +601,7 @@ test "--download-only --force on tap formula with warm cache is a no-op refresh"
         false, // dry_run
         true, // force
         true, // download_only
+        malt.install_sink.terminal,
     );
 
     // Cache file untouched.
@@ -690,6 +692,7 @@ test "--download-only --ndjson on tap formula emits download_started + complete 
         false, // dry_run
         false, // force
         true, // download_only
+        malt.install_sink.terminal,
     );
 
     try testing.expectEqual(

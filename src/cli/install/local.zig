@@ -28,6 +28,8 @@ const parseCaskApp = rb_parse.parseCaskApp;
 const tapCaskArtifactKind = rb_parse.tapCaskArtifactKind;
 const record = @import("record.zig");
 const InstallError = record.InstallError;
+const sink_mod = @import("sink.zig");
+const OutputSink = sink_mod.OutputSink;
 
 /// Maximum size of a `.rb` formula file that `malt install --local`
 /// will read. Real Homebrew formulas top out well below this (the
@@ -159,8 +161,9 @@ pub fn installTapFormula(
     dry_run: bool,
     force: bool,
     download_only: bool,
+    sink: OutputSink,
 ) !void {
-    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, download_only, .formula_or_cask);
+    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, download_only, .formula_or_cask, sink);
 }
 
 /// Install a tap cask whose owning tap is already known. Skips the
@@ -178,8 +181,9 @@ pub fn installTapCask(
     prefix: []const u8,
     dry_run: bool,
     force: bool,
+    sink: OutputSink,
 ) !void {
-    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, false, .cask_only);
+    return installTapRb(ctx, allocator, pkg_name, db, linker, prefix, dry_run, force, false, .cask_only, sink);
 }
 
 fn installTapRb(
@@ -193,13 +197,14 @@ fn installTapRb(
     force: bool,
     download_only: bool,
     kind: TapResolveKind,
+    sink: OutputSink,
 ) !void {
     const parts = args.parseTapName(pkg_name) orelse {
-        output.err("Invalid tap formula format: {s}", .{pkg_name});
+        sink.err("Invalid tap formula format: {s}", .{pkg_name});
         return InstallError.FormulaNotFound;
     };
 
-    output.info("Resolving tap {s}/{s}/{s}...", .{ parts.user, parts.repo, parts.formula });
+    sink.info("Resolving tap {s}/{s}/{s}...", .{ parts.user, parts.repo, parts.formula });
 
     // Determine the commit SHA to fetch against. Prefer the pin
     // already in the DB (set at tap-add or last --refresh); if no pin
@@ -223,12 +228,12 @@ fn installTapRb(
             break :blk cached;
         }
         var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, null) catch |e| {
-            output.err("Could not resolve {s}'s HEAD commit: {s}", .{ tap_slug, tap_mod.describeResolveError(e) });
+            sink.err("Could not resolve {s}'s HEAD commit: {s}", .{ tap_slug, tap_mod.describeResolveError(e) });
             return mapTapResolveError(e);
         };
         defer head_res.deinit();
         const sha = head_res.sha orelse {
-            output.err("Could not resolve {s}'s HEAD commit: empty response", .{tap_slug});
+            sink.err("Could not resolve {s}'s HEAD commit: empty response", .{tap_slug});
             return InstallError.FormulaNotFound;
         };
         const sha_owned = try allocator.dupe(u8, sha);
@@ -256,7 +261,7 @@ fn installTapRb(
     }) catch return InstallError.FormulaNotFound;
 
     var rb_resp = http.get(rb_url) catch {
-        output.err("Cannot fetch tap from GitHub", .{});
+        sink.err("Cannot fetch tap from GitHub", .{});
         return InstallError.FormulaNotFound;
     };
     defer rb_resp.deinit();
@@ -281,20 +286,20 @@ fn installTapRb(
         }) catch return InstallError.FormulaNotFound;
 
         cask_resp = http.get(cask_url) catch {
-            output.err("Cannot fetch tap from GitHub", .{});
+            sink.err("Cannot fetch tap from GitHub", .{});
             return InstallError.FormulaNotFound;
         };
         break :blk &cask_resp.?;
     };
 
     if (resp.status != 200) {
-        output.err("Tap formula/cask not found: {s}", .{pkg_name});
+        sink.err("Tap formula/cask not found: {s}", .{pkg_name});
         return InstallError.FormulaNotFound;
     }
 
     // Parse the Ruby formula to extract name, version, URL, SHA256 for current arch
     const rb = parseRubyFormula(resp.body) orelse {
-        output.err("Cannot parse tap formula (unsupported Ruby DSL shape). Use: brew install {s}", .{pkg_name});
+        sink.err("Cannot parse tap formula (unsupported Ruby DSL shape). Use: brew install {s}", .{pkg_name});
         return InstallError.FormulaNotFound;
     };
 
@@ -318,7 +323,7 @@ fn installTapRb(
             .head_etag = fresh_head_etag,
         },
     };
-    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, download_only);
+    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, download_only, sink);
 }
 
 /// Install a formula from a local `.rb` file on disk. Gated by the
@@ -339,12 +344,13 @@ pub fn installLocalFormula(
     prefix: []const u8,
     dry_run: bool,
     force: bool,
+    sink: OutputSink,
 ) InstallError!void {
     // Expand a leading `~/` to `$HOME` so the common "drop it in
     // your dotfiles" path works without requiring shell expansion.
     var home_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const expanded = args.expandTildePath(ctx, &home_buf, pkg_arg) orelse {
-        output.err("Cannot resolve home directory for '{s}'", .{pkg_arg});
+        sink.err("Cannot resolve home directory for '{s}'", .{pkg_arg});
         return InstallError.LocalFormulaNotReadable;
     };
 
@@ -355,12 +361,12 @@ pub fn installLocalFormula(
     var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const real_n = if (std.fs.path.isAbsolute(expanded))
         std.Io.Dir.realPathFileAbsolute(ctx.io, expanded, &real_buf) catch {
-            output.err("Cannot open local formula: {s}", .{pkg_arg});
+            sink.err("Cannot open local formula: {s}", .{pkg_arg});
             return InstallError.LocalFormulaNotReadable;
         }
     else
         std.Io.Dir.cwd().realPathFile(ctx.io, expanded, &real_buf) catch {
-            output.err("Cannot open local formula: {s}", .{pkg_arg});
+            sink.err("Cannot open local formula: {s}", .{pkg_arg});
             return InstallError.LocalFormulaNotReadable;
         };
     const realpath = real_buf[0..real_n];
@@ -369,25 +375,25 @@ pub fn installLocalFormula(
     // vector (parse is pure, but post_install + the archive URL trust
     // this file). Printing the realpath surfaces hidden /tmp or
     // world-writable locations to an attentive reader.
-    output.warn("Installing from local file '{s}'. Only install .rb files you trust.", .{realpath});
+    sink.warn("Installing from local file '{s}'. Only install .rb files you trust.", .{realpath});
 
     // Reject non-regular files outright (directory, socket, device)
     // before allocating a read buffer.
     const f = std.Io.Dir.openFileAbsolute(ctx.io, realpath, .{ .mode = .read_only }) catch {
-        output.err("Cannot open local formula: {s}", .{realpath});
+        sink.err("Cannot open local formula: {s}", .{realpath});
         return InstallError.LocalFormulaNotReadable;
     };
     defer f.close(ctx.io);
     const st = f.stat(ctx.io) catch {
-        output.err("Cannot stat local formula: {s}", .{realpath});
+        sink.err("Cannot stat local formula: {s}", .{realpath});
         return InstallError.LocalFormulaNotReadable;
     };
     if (st.kind != .file) {
-        output.err("Local formula is not a regular file: {s}", .{realpath});
+        sink.err("Local formula is not a regular file: {s}", .{realpath});
         return InstallError.LocalFormulaNotReadable;
     }
     if (st.size > max_local_formula_bytes) {
-        output.err("Local formula exceeds {d}-byte read cap: {s}", .{ max_local_formula_bytes, realpath });
+        sink.err("Local formula exceeds {d}-byte read cap: {s}", .{ max_local_formula_bytes, realpath });
         return InstallError.LocalFormulaNotReadable;
     }
 
@@ -396,30 +402,30 @@ pub fn installLocalFormula(
     // block — but we make the risk visible on the same line style as
     // the primary security warning.
     if (fstatRisk(f)) |risk| switch (risk) {
-        .world_writable => output.warn("Local formula is world-writable — any local user could rewrite it between reads.", .{}),
-        .other_owner => output.warn("Local formula is not owned by you — another account wrote this file.", .{}),
+        .world_writable => sink.warn("Local formula is world-writable — any local user could rewrite it between reads.", .{}),
+        .other_owner => sink.warn("Local formula is not owned by you — another account wrote this file.", .{}),
     };
 
     const size: usize = @intCast(@min(@as(u64, max_local_formula_bytes), st.size));
     const body_buf = allocator.alloc(u8, size) catch {
-        output.err("Cannot read local formula: {s}", .{realpath});
+        sink.err("Cannot read local formula: {s}", .{realpath});
         return InstallError.LocalFormulaNotReadable;
     };
     const n = f.readPositionalAll(ctx.io, body_buf, 0) catch {
         allocator.free(body_buf);
-        output.err("Cannot read local formula: {s}", .{realpath});
+        sink.err("Cannot read local formula: {s}", .{realpath});
         return InstallError.LocalFormulaNotReadable;
     };
     const body = if (n == body_buf.len) body_buf else allocator.realloc(body_buf, n) catch {
         allocator.free(body_buf);
-        output.err("Cannot read local formula: {s}", .{realpath});
+        sink.err("Cannot read local formula: {s}", .{realpath});
         return InstallError.LocalFormulaNotReadable;
     };
     defer allocator.free(body);
 
     // Parse the Ruby formula to extract name, version, URL, SHA256 for current arch
     const rb = parseRubyFormula(body) orelse {
-        output.err("Cannot parse local formula (missing version/url/sha256 or unsupported DSL shape): {s}", .{realpath});
+        sink.err("Cannot parse local formula (missing version/url/sha256 or unsupported DSL shape): {s}", .{realpath});
         return InstallError.FormulaNotFound;
     };
 
@@ -428,7 +434,7 @@ pub fn installLocalFormula(
     // the canonical surface for the cellar path, bin name, and DB row.
     const base = std.fs.path.basename(realpath);
     if (!std.mem.endsWith(u8, base, ".rb") or base.len <= 3) {
-        output.err("Local formula must end in .rb: {s}", .{realpath});
+        sink.err("Local formula must end in .rb: {s}", .{realpath});
         return InstallError.LocalFormulaNotReadable;
     }
     const name = base[0 .. base.len - 3];
@@ -452,7 +458,7 @@ pub fn installLocalFormula(
     // `--local` is out of scope for `--download-only`: the user already
     // holds the archive on disk so warming a tap-cache entry adds no
     // value. Hard-wire false here rather than threading the flag.
-    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, false);
+    try materializeRubyFormula(ctx, allocator, resolved, &http, db, linker, prefix, dry_run, force, false, sink);
 }
 
 /// Ordered set of advisory risk labels that may fire on a `.rb` file
@@ -514,15 +520,16 @@ pub fn materializeRubyFormula(
     dry_run: bool,
     force: bool,
     download_only: bool,
+    sink: OutputSink,
 ) InstallError!void {
-    output.info("Found {s} {s}", .{ resolved.name, resolved.version });
+    sink.info("Found {s} {s}", .{ resolved.name, resolved.version });
 
     // Refuse any scheme other than `https://`. A `.rb` that smuggled
     // `http://` (downgrade), `file:///etc/passwd`, `ftp://`, or a data
     // URI would otherwise be trusted by the HTTP client. Enforced for
     // every caller of this helper — tap and local share the check.
     if (!args.isAllowedArchiveUrl(resolved.url)) {
-        output.err("Refusing to fetch non-HTTPS archive URL for {s}: {s}", .{ resolved.name, resolved.url });
+        sink.err("Refusing to fetch non-HTTPS archive URL for {s}: {s}", .{ resolved.name, resolved.url });
         return InstallError.InsecureArchiveUrl;
     }
 
@@ -530,18 +537,18 @@ pub fn materializeRubyFormula(
     // mounting, ditto, and `installer` live there. Tar.gz/tar.xz/zip
     // formula archives keep the simple-extract path below.
     if (tapCaskArtifactKind(resolved.url, resolved.app_name != null)) |kind| {
-        return materializeTapCask(ctx, allocator, resolved, db, kind, dry_run, force, download_only);
+        return materializeTapCask(ctx, allocator, resolved, db, kind, dry_run, force, download_only, sink);
     }
 
     if (dry_run) {
-        output.info("Dry run: would install {s} {s} from {s}", .{ resolved.name, resolved.version, resolved.url });
+        sink.info("Dry run: would install {s} {s} from {s}", .{ resolved.name, resolved.version, resolved.url });
         return;
     }
 
     // `--download-only` deliberately skips `isInstalled`: a warm
     // request must refresh the cache regardless of install state.
     if (!download_only and !force and record.isInstalled(db, resolved.name)) {
-        output.info("{s} is already installed", .{resolved.name});
+        sink.info("{s} is already installed", .{resolved.name});
         return;
     }
 
@@ -550,8 +557,8 @@ pub fn materializeRubyFormula(
     // work. Unknown formats fail fast — no point fetching bytes we
     // can't extract.
     const archive_kind = TapArchiveKind.fromUrl(resolved.url) orelse {
-        output.err("Unsupported archive format for {s}: {s}", .{ resolved.name, resolved.url });
-        output.err("Supported formats: .tar.gz, .tar.xz, .zip.", .{});
+        sink.err("Unsupported archive format for {s}: {s}", .{ resolved.name, resolved.url });
+        sink.err("Supported formats: .tar.gz, .tar.xz, .zip.", .{});
         return InstallError.DownloadFailed;
     };
     const archive_ext = archive_kind.extension();
@@ -585,20 +592,23 @@ pub fn materializeRubyFormula(
         // permanent cache path. A crash mid-write leaves only the
         // staging file (which `mt doctor --fix` and the tap-tmp
         // cleanup regression already reclaim).
+        // A non-terminal sink (bundle) skips the bar — the global progress
+        // mode is set-once and can't be quieted mid-run.
         var bar = progress_mod.ProgressBar.init(resolved.name, 0);
-        var download_resp = http.getWithHeaders(resolved.url, &.{}, .{
-            .context = @ptrCast(&bar),
-            .func = &download.progressBridge,
-        }) catch {
-            bar.finish();
-            output.err("Failed to download {s}", .{resolved.name});
+        const bar_cb: ?client_mod.ProgressCallback = if (sink.show_progress)
+            .{ .context = @ptrCast(&bar), .func = &download.progressBridge }
+        else
+            null;
+        var download_resp = http.getWithHeaders(resolved.url, &.{}, bar_cb) catch {
+            if (sink.show_progress) bar.finish();
+            sink.err("Failed to download {s}", .{resolved.name});
             return InstallError.DownloadFailed;
         };
         defer download_resp.deinit();
-        bar.finish();
+        if (sink.show_progress) bar.finish();
 
         if (download_resp.status != 200) {
-            output.err("Download failed with status {d}", .{download_resp.status});
+            sink.err("Download failed with status {d}", .{download_resp.status});
             return InstallError.DownloadFailed;
         }
 
@@ -616,7 +626,7 @@ pub fn materializeRubyFormula(
         // leaks per-byte progress via timing, giving an adaptive
         // attacker a byte-by-byte oracle against the expected hash.
         if (!hash.constantTimeEql(u8, computed, resolved.sha256)) {
-            output.err("SHA256 mismatch for {s}", .{resolved.name});
+            sink.err("SHA256 mismatch for {s}", .{resolved.name});
             return InstallError.DownloadFailed;
         }
 
@@ -651,7 +661,7 @@ pub fn materializeRubyFormula(
     if (download_only) {
         output.emitNdjsonEvent(.download_complete, resolved.name, "ok");
         dl_complete_emitted = true;
-        output.success("{s} {s} downloaded to {s}", .{ resolved.name, resolved.version, cache_path });
+        sink.success("{s} {s} downloaded to {s}", .{ resolved.name, resolved.version, cache_path });
         return;
     }
 
@@ -691,15 +701,15 @@ pub fn materializeRubyFormula(
     const archive_mod = @import("../../fs/archive.zig");
     switch (archive_kind) {
         .tar_gz => archive_mod.extractTarGz(ctx.io, cache_path, cellar_path) catch {
-            output.err("Failed to extract archive for {s}", .{resolved.name});
+            sink.err("Failed to extract archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
         .tar_xz => archive_mod.extractTarXzFile(ctx.io, cache_path, cellar_path) catch {
-            output.err("Failed to extract .tar.xz archive for {s}", .{resolved.name});
+            sink.err("Failed to extract .tar.xz archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
         .zip => archive_mod.extractZip(ctx.io, cache_path, cellar_path) catch {
-            output.err("Failed to extract .zip archive for {s}", .{resolved.name});
+            sink.err("Failed to extract .zip archive for {s}", .{resolved.name});
             return InstallError.CellarFailed;
         },
     }
@@ -736,7 +746,7 @@ pub fn materializeRubyFormula(
         }
     }
 
-    output.info("Linking {s}...", .{resolved.name});
+    sink.info("Linking {s}...", .{resolved.name});
 
     // Single DB transaction: keg row → optional tap registration →
     // linker work → commit. `errdefer rollback` unwinds cleanly if any
@@ -787,10 +797,10 @@ pub fn materializeRubyFormula(
     }
 
     linker.link(cellar_path, resolved.name, keg_id, false) catch {
-        output.warn("Some links for {s} could not be created", .{resolved.name});
+        sink.warn("Some links for {s} could not be created", .{resolved.name});
     };
     linker.linkOpt(resolved.name, resolved.version) catch {
-        output.warn("Could not create opt link for {s}", .{resolved.name});
+        sink.warn("Could not create opt link for {s}", .{resolved.name});
     };
 
     // `--force` post-link: the new row is recorded and the pin (if
@@ -804,7 +814,7 @@ pub fn materializeRubyFormula(
 
     db.commit() catch return InstallError.RecordFailed;
 
-    output.success("{s} {s} installed", .{ resolved.name, resolved.version });
+    sink.success("{s} {s} installed", .{ resolved.name, resolved.version });
 }
 
 /// Hand a tap cask off to the shared `core/cask.zig` installer by
@@ -823,18 +833,19 @@ fn materializeTapCask(
     dry_run: bool,
     force: bool,
     download_only: bool,
+    sink: OutputSink,
 ) InstallError!void {
     // `--download-only` deliberately ignores `isInstalled` so a user
     // can refresh the cached artefact ahead of an `mt upgrade` even
     // when an older revision is on disk. The regular install path
     // keeps the "already installed" short-circuit.
     if (!download_only and !force and cask_mod.isInstalled(db, resolved.name)) {
-        output.info("{s} is already installed", .{resolved.name});
+        sink.info("{s} is already installed", .{resolved.name});
         return;
     }
 
     if (dry_run) {
-        output.info("Dry run: would install cask {s} {s} from {s}", .{ resolved.name, resolved.version, resolved.url });
+        sink.info("Dry run: would install cask {s} {s} from {s}", .{ resolved.name, resolved.version, resolved.url });
         return;
     }
 
@@ -848,7 +859,7 @@ fn materializeTapCask(
     buildSyntheticCaskJson(allocator, &json_buf, resolved) catch return InstallError.RecordFailed;
 
     var cask = cask_mod.parseCask(allocator, json_buf.items) catch {
-        output.err("Failed to materialise cask {s} from tap DSL", .{resolved.name});
+        sink.err("Failed to materialise cask {s} from tap DSL", .{resolved.name});
         return InstallError.CaskNotFound;
     };
     defer cask.deinit();
@@ -857,14 +868,18 @@ fn materializeTapCask(
     installer.artifact_type_override = kind;
     installer.offline = ctx.offline;
 
+    // A non-terminal sink (bundle) skips the bar — the global progress
+    // mode is set-once and can't be quieted mid-run.
     var bar = progress_mod.ProgressBar.init(cask.token, 0);
-    installer.progress = .{
-        .context = @ptrCast(&bar),
-        .func = &download.progressBridge,
-    };
+    if (sink.show_progress) {
+        installer.progress = .{
+            .context = @ptrCast(&bar),
+            .func = &download.progressBridge,
+        };
+    }
 
     if (kind == .pkg) {
-        output.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
+        sink.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
     }
 
     // `--download-only` for a cask-shaped tap entry reuses the cask
@@ -874,38 +889,38 @@ fn materializeTapCask(
     if (download_only) {
         output.emitNdjsonEvent(.download_started, cask.token, null);
         const cache_path = installer.downloadOnly(&cask) catch |e| {
-            bar.finish();
+            if (sink.show_progress) bar.finish();
             output.emitNdjsonEvent(.download_complete, cask.token, "failed");
-            output.err("Failed to download cask {s}: {s}", .{ cask.token, @errorName(e) });
+            sink.err("Failed to download cask {s}: {s}", .{ cask.token, @errorName(e) });
             return switch (e) {
                 error.DownloadFailed, error.Sha256Mismatch => InstallError.DownloadFailed,
                 error.OutOfMemory => InstallError.RecordFailed,
                 else => InstallError.CaskNotFound,
             };
         };
-        bar.finish();
+        if (sink.show_progress) bar.finish();
         defer allocator.free(cache_path);
         output.emitNdjsonEvent(.download_complete, cask.token, "ok");
-        output.success("{s} {s} downloaded to {s}", .{ cask.token, cask.version, cache_path });
+        sink.success("{s} {s} downloaded to {s}", .{ cask.token, cask.version, cache_path });
         return;
     }
 
     const app_path = installer.install(&cask) catch |e| {
-        bar.finish();
-        output.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
+        if (sink.show_progress) bar.finish();
+        sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
         return switch (e) {
             error.DownloadFailed, error.Sha256Mismatch => InstallError.DownloadFailed,
             error.OutOfMemory => InstallError.RecordFailed,
             else => InstallError.CaskNotFound,
         };
     };
-    bar.finish();
+    if (sink.show_progress) bar.finish();
     defer allocator.free(app_path);
 
     // `try` is the invariant: success line never fires without a row.
-    try finalizeTapCaskInstall(allocator, db, &cask, app_path, resolved.tap_label, resolved.tap_registration);
+    try finalizeTapCaskInstall(allocator, db, &cask, app_path, resolved.tap_label, resolved.tap_registration, sink);
 
-    output.success("{s} {s} installed", .{ cask.token, cask.version });
+    sink.success("{s} {s} installed", .{ cask.token, cask.version });
 }
 
 /// Serialize a Homebrew-cask-API-shaped JSON document so the existing
@@ -987,9 +1002,10 @@ fn finalizeTapCaskInstall(
     app_path: ?[]const u8,
     tap_label: []const u8,
     tap_registration: ?TapRegistration,
+    sink: OutputSink,
 ) InstallError!void {
     cask_mod.recordInstall(db, cask, app_path, tap_label) catch {
-        output.err("failed to record installed cask {s}", .{cask.token});
+        sink.err("failed to record installed cask {s}", .{cask.token});
         return InstallError.RecordFailed;
     };
     // Tap row + etag are advisory; the cask row is the install
@@ -1090,7 +1106,7 @@ test "finalizeTapCaskInstall persists the cask row on the happy path" {
     var cask = try cask_mod.parseCask(std.testing.allocator, json_buf.items);
     defer cask.deinit();
 
-    try finalizeTapCaskInstall(std.testing.allocator, &db, &cask, "/tmp/Deck.app", "yuzeguitarist/deck", null);
+    try finalizeTapCaskInstall(std.testing.allocator, &db, &cask, "/tmp/Deck.app", "yuzeguitarist/deck", null, sink_mod.terminal);
 
     var stmt = try db.prepare("SELECT version, tap FROM casks WHERE token = ?1;");
     defer stmt.finalize();
@@ -1151,7 +1167,7 @@ test "finalizeTapCaskInstall stamps the owning tap when tap_registration is set"
         .url = "https://github.com/yuzeguitarist/homebrew-deck",
         .commit_sha = sha,
         .head_etag = "\"etag-abc\"",
-    });
+    }, sink_mod.terminal);
 
     var stmt = try db.prepare("SELECT commit_sha, head_etag FROM taps WHERE name = ?1;");
     defer stmt.finalize();
@@ -1188,9 +1204,11 @@ test "finalizeTapCaskInstall fails loud when the cask DB row cannot persist" {
     output.beginStderrCapture(std.testing.allocator, &captured);
     defer output.endStderrCapture();
 
-    // Mirror the materializeTapCask call site shape.
+    // Mirror the materializeTapCask call site shape. The terminal sink
+    // forwards to `ui/output`, so the captured stderr below still sees
+    // finalize's error line — proving the diagnostic survives the sink.
     var finalize_err: ?InstallError = null;
-    finalizeTapCaskInstall(std.testing.allocator, &db, &cask, null, "yuzeguitarist/deck", null) catch |e| {
+    finalizeTapCaskInstall(std.testing.allocator, &db, &cask, null, "yuzeguitarist/deck", null, sink_mod.terminal) catch |e| {
         finalize_err = e;
     };
     if (finalize_err == null) {

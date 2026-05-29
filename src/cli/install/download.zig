@@ -17,11 +17,12 @@ const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
 const pool_mod = @import("../../net/client_pool.zig");
 const ghcr_mod = @import("../../net/ghcr.zig");
-const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
 const ghcr_url = @import("ghcr_url.zig");
 const record = @import("record.zig");
 const InstallError = record.InstallError;
+const sink_mod = @import("sink.zig");
+const OutputSink = sink_mod.OutputSink;
 
 /// Named-field bundle for `collectFormulaJobs` so callers stop threading
 /// six pointers through every call. Opens a DI seam for tests to swap in
@@ -39,6 +40,9 @@ pub const InstallJobDeps = struct {
     /// so tests run workers under `testing.allocator` for leak coverage;
     /// production keeps a thread-safe heap (typically `smp_allocator`).
     worker_backing: std.mem.Allocator,
+    /// Where resolution-phase human lines go; terminal by default so the
+    /// upgrade re-entry and `mt install` are unchanged.
+    sink: OutputSink = sink_mod.terminal,
 };
 
 /// A bottle download job for parallel processing.
@@ -242,13 +246,13 @@ pub fn collectFormulaJobs(
 
     // Single seam for every parse — cached entries outlive this function.
     const formula = cache.getOrParse(pkg_name, formula_json) catch |e| {
-        output.err("Failed to parse formula JSON for '{s}': {s}", .{ pkg_name, @errorName(e) });
+        ctx.sink.err("Failed to parse formula JSON for '{s}': {s}", .{ pkg_name, @errorName(e) });
         return InstallError.FormulaNotFound;
     };
 
     // Check if already installed
     if (!force and record.isInstalled(db, formula.name)) {
-        output.info("{s} is already installed", .{formula.name});
+        ctx.sink.info("{s} is already installed", .{formula.name});
         return;
     }
 
@@ -401,7 +405,7 @@ pub fn collectFormulaJobs(
 
     // Add main formula
     const bottle = formula_mod.resolveBottle(formula) catch {
-        output.err("No bottle available for {s} on this platform", .{formula.name});
+        ctx.sink.err("No bottle available for {s} on this platform", .{formula.name});
         return InstallError.NoBottle;
     };
 
@@ -429,7 +433,7 @@ pub fn collectFormulaJobs(
     }) catch return InstallError.DownloadFailed;
 
     const pkg_word: []const u8 = if (jobs.items.len == 1) "package" else "packages";
-    output.info("Resolved {s} {s} ({d} {s})", .{ formula.name, formula.version, jobs.items.len, pkg_word });
+    ctx.sink.info("Resolved {s} {s} ({d} {s})", .{ formula.name, formula.version, jobs.items.len, pkg_word });
 }
 
 /// Stamp a contiguous `line_index` on every job that still needs to download,
@@ -523,6 +527,9 @@ pub const InstallKegDeps = struct {
     /// historical "Failed to materialize X: <variant>" diagnostic
     /// without rerouting through a wider error set.
     cellar_diag: ?*?cellar_mod.CellarError = null,
+    /// Where per-keg download-failure lines go; terminal by default so
+    /// the shared upgrade per-keg loop is unchanged.
+    sink: OutputSink = sink_mod.terminal,
 };
 
 /// Result of `installKegFromBottle`. `sha256` borrows from the formula's
@@ -631,13 +638,13 @@ pub fn downloadBottleToStore(
             last_err = dl_err;
             atomic.cleanupTempDir(ctx.io, tmp_dir);
             if (dl_err == bottle_mod.BottleError.DownloadPermanent) {
-                output.err("  {s}: permanent HTTP error (404/410), not retrying", .{formula.name});
+                deps.sink.err("  {s}: permanent HTTP error (404/410), not retrying", .{formula.name});
                 break;
             }
             if (dl_err == bottle_mod.BottleError.Sha256Mismatch) {
                 last_mismatch = mismatch;
             } else if (isDeterministicDownloadError(dl_err)) {
-                output.err("  {s}: {s}", .{ formula.name, @errorName(dl_err) });
+                deps.sink.err("  {s}: {s}", .{ formula.name, @errorName(dl_err) });
                 break;
             }
             if (dl_attempt + 1 < max_attempts) {
@@ -648,19 +655,19 @@ pub fn downloadBottleToStore(
 
     if (!dl_ok and last_err == bottle_mod.BottleError.Sha256Mismatch) {
         if (last_mismatch) |m| {
-            output.err(
+            deps.sink.err(
                 "  {s}: Sha256Mismatch (expected={s} got={s} bytes={d})",
                 .{ formula.name, m.expected[0..@min(64, m.expected.len)], m.computed[0..], m.body_len },
             );
         } else {
-            output.err("  {s}: Sha256Mismatch", .{formula.name});
+            deps.sink.err("  {s}: Sha256Mismatch", .{formula.name});
         }
     }
 
     if (!dl_ok) {
         if (deps.bar) |bar| bar.finish();
         if (dl_attempt >= max_attempts) {
-            output.err("  {s}: {s} (after {d} attempts)", .{ formula.name, @errorName(last_err), max_attempts });
+            deps.sink.err("  {s}: {s} (after {d} attempts)", .{ formula.name, @errorName(last_err), max_attempts });
         }
         allocator.free(tmp_dir);
         return InstallError.DownloadFailed;
@@ -701,6 +708,8 @@ pub const InstallPool = struct {
     /// caller's serial link loop bails on this flag; refcount stays at 0
     /// so warmed bytes are invisible to `purge --store-orphans`.
     download_only: bool = false,
+    /// Where per-keg worker output goes; terminal by default.
+    sink: OutputSink = sink_mod.terminal,
 };
 
 /// Thread entry-point for the install pool. Drains `pool.jobs` via the
@@ -752,7 +761,7 @@ fn installOneJob(pool: *InstallPool, job: *DownloadJob, result: *MaterializeResu
         _ = downloadBottleToStore(
             pool.ctx,
             arena.allocator(),
-            .{ .ghcr = pool.ghcr, .http = http, .store = pool.store, .bar = job.bar },
+            .{ .ghcr = pool.ghcr, .http = http, .store = pool.store, .bar = job.bar, .sink = pool.sink },
             formula,
             bottle,
         ) catch {
@@ -783,6 +792,7 @@ fn installOneJob(pool: *InstallPool, job: *DownloadJob, result: *MaterializeResu
             .store = pool.store,
             .bar = job.bar,
             .cellar_diag = &cellar_diag,
+            .sink = pool.sink,
         },
         formula,
         pool.prefix,
