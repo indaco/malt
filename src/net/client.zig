@@ -267,11 +267,26 @@ pub const HttpClient = struct {
     const blob_timeout_ns: u64 = 600 * std.time.ns_per_s; // 10 minutes
 
     pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator) HttpClient {
+        var c: std.http.Client = .{ .allocator = allocator, .io = io };
+        return initWith(&c, io, environ, allocator);
+    }
+
+    /// Injection seam for offline tests: takes an externally-built
+    /// `std.http.Client` (e.g. pointed at a localhost `std.http.Server`)
+    /// so HTTP-using commands run without a process-level network mock.
+    /// The client is copied in and owned thereafter — `deinit` frees it,
+    /// so callers must not deinit the passed-in client separately.
+    pub fn initWith(
+        client: *std.http.Client,
+        io: std.Io,
+        environ: std.process.Environ,
+        allocator: std.mem.Allocator,
+    ) HttpClient {
         return .{
             .io = io,
             .environ = environ,
             .allocator = allocator,
-            .client = .{ .allocator = allocator, .io = io },
+            .client = client.*,
         };
     }
 
@@ -897,6 +912,43 @@ test "ConditionalResponse.deinit: 304 path with empty body frees correctly" {
         .allocator = std.testing.allocator,
     };
     cr.deinit();
+}
+
+test "HttpClient.initWith: injected client is copied in, distinct from the struct allocator" {
+    // Build the client with one allocator and pass a *different* one as the
+    // struct allocator. The seam must keep the injected client's allocator
+    // (proving it copied the client, not rebuilt it from the param) while the
+    // struct's own allocator tracks the param.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const struct_alloc = arena.allocator();
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = std.Options.debug_io };
+    var http = HttpClient.initWith(&inner, std.Options.debug_io, std.process.Environ.empty, struct_alloc);
+    defer http.deinit();
+    try std.testing.expectEqual(std.testing.allocator.ptr, http.client.allocator.ptr);
+    try std.testing.expectEqual(struct_alloc.ptr, http.allocator.ptr);
+    try std.testing.expect(http.client.allocator.ptr != http.allocator.ptr);
+}
+
+test "HttpClient.initWith: preserves field defaults" {
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = std.Options.debug_io };
+    var http = HttpClient.initWith(&inner, std.Options.debug_io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    try std.testing.expect(!http.offline);
+    try std.testing.expectEqual(HttpClient.default_timeout_ns, http.timeout_ns);
+    try std.testing.expectEqual(@as(?*const fn () bool, null), http.cancel);
+    try std.testing.expectEqual(@as(?[]u8, null), http.zstd_window);
+    try std.testing.expectEqual(@as(?[]u8, null), http.flate_window);
+}
+
+test "HttpClient.init: delegates to initWith without losing defaults" {
+    // Pins the refactor: init now builds its own client and forwards to
+    // initWith — the defaults the production path relies on must survive.
+    var http = HttpClient.init(std.Options.debug_io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+    try std.testing.expect(!http.offline);
+    try std.testing.expectEqual(HttpClient.default_timeout_ns, http.timeout_ns);
+    try std.testing.expectEqual(std.testing.allocator.ptr, http.client.allocator.ptr);
 }
 
 test "HttpClient.offline defaults to false" {
