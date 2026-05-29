@@ -4,6 +4,7 @@
 const std = @import("std");
 const values = @import("../values.zig");
 const pathname = @import("pathname.zig");
+const sandbox = @import("../sandbox.zig");
 const output = @import("../../../ui/output.zig");
 
 const Value = values.Value;
@@ -23,6 +24,11 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     const argv_slice = argv.toOwnedSlice(ctx.allocator) catch return BuiltinError.OutOfMemory;
 
     if (argv_slice.len == 0) return Value{ .nil = {} };
+
+    // Same sandbox seam as pathname/inreplace/fileutils — gate the spawn
+    // so a fake sandbox can isolate all four DSL builtins, not three.
+    sandbox.validateArgv(argv_slice, ctx.cellar_path, ctx.malt_prefix) catch
+        return BuiltinError.PathSandboxViolation;
 
     // Subprocess stdout shares the FD with malt's `--json` / `--ndjson`
     // document, so verbose tools like fc-cache would corrupt it. Stderr
@@ -225,4 +231,22 @@ fn readPipeAll(file: std.Io.File, allocator: std.mem.Allocator, max_bytes: usize
     var buf: [4096]u8 = undefined;
     var r = file.readerStreaming(threaded.io(), &buf);
     return r.interface.allocRemaining(allocator, std.Io.Limit.limited(max_bytes));
+}
+
+test "system rejects an argv0 outside the sandbox roots before spawning" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lio: std.Io.Threaded = .init(arena.allocator(), .{});
+    defer lio.deinit();
+    const ctx = ExecCtx{
+        .allocator = arena.allocator(),
+        .io = lio.io(),
+        .environ = undefined,
+        .cellar_path = "/opt/malt/Cellar/foo/1.0",
+        .malt_prefix = "/opt/malt",
+    };
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        system(ctx, null, &.{.{ .string = "/Users/me/evil" }}),
+    );
 }

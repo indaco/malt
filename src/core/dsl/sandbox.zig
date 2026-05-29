@@ -2,6 +2,7 @@
 //! Validates that filesystem-mutating operations stay within allowed boundaries.
 
 const std = @import("std");
+const macos = @import("../sandbox/macos.zig");
 
 pub const SandboxError = error{PathSandboxViolation};
 
@@ -35,6 +36,44 @@ pub fn validatePath(
     return SandboxError.PathSandboxViolation;
 }
 
+/// Gate `system()`'s argv0 the way `validatePath` gates FS writes, so a
+/// fake sandbox can isolate all four DSL builtins instead of three. Bare
+/// command names defer to the scrubbed PATH; absolute paths must live
+/// under the formula's keg/prefix or the same system dirs the macOS
+/// fence exposes.
+pub fn validateArgv(
+    argv: []const []const u8,
+    cellar_path: []const u8,
+    malt_prefix: []const u8,
+) SandboxError!void {
+    if (argv.len == 0) return;
+    const argv0 = argv[0];
+
+    if (containsDotDot(argv0)) return SandboxError.PathSandboxViolation;
+
+    // Bare command name (no separator) resolves through the scrubbed PATH.
+    if (std.mem.indexOfScalar(u8, argv0, '/') == null) return;
+
+    // Anything with a separator must be an absolute path under an allowed root.
+    if (argv0[0] != '/') return SandboxError.PathSandboxViolation;
+    if (pathHasPrefix(argv0, cellar_path)) return;
+    if (pathHasPrefix(argv0, malt_prefix)) return;
+    if (underSandboxPathDir(argv0)) return;
+
+    return SandboxError.PathSandboxViolation;
+}
+
+/// True iff `argv0` lives under one of the system dirs in the macOS
+/// fence's scrubbed PATH; keeps the DSL allowlist a function of that
+/// list rather than a second copy.
+fn underSandboxPathDir(argv0: []const u8) bool {
+    var it = std.mem.tokenizeScalar(u8, macos.sandbox_path, ':');
+    while (it.next()) |dir| {
+        if (pathHasPrefix(argv0, dir)) return true;
+    }
+    return false;
+}
+
 /// Resolve a path to its canonical form (resolving symlinks)
 /// and then validate it.
 pub fn validateResolved(
@@ -61,6 +100,38 @@ pub fn validateResolved(
     {
         return SandboxError.PathSandboxViolation;
     }
+}
+
+test "validateArgv accepts bare command names" {
+    try validateArgv(&.{"make"}, "/opt/malt/Cellar/foo/1.0", "/opt/malt");
+    try validateArgv(&.{ "fc-cache", "-f" }, "/opt/malt/Cellar/foo/1.0", "/opt/malt");
+}
+
+test "validateArgv accepts absolute paths under system dirs and the prefix" {
+    const cellar = "/opt/malt/Cellar/foo/1.0";
+    try validateArgv(&.{"/usr/bin/true"}, cellar, "/opt/malt");
+    try validateArgv(&.{"/bin/ls"}, cellar, "/opt/malt");
+    try validateArgv(&.{"/opt/malt/opt/foo/bin/tool"}, cellar, "/opt/malt");
+    try validateArgv(&.{cellar ++ "/bin/tool"}, cellar, "/opt/malt");
+}
+
+test "validateArgv rejects absolute paths outside allowed roots" {
+    try std.testing.expectError(
+        SandboxError.PathSandboxViolation,
+        validateArgv(&.{"/Users/me/evil"}, "/opt/malt/Cellar/foo/1.0", "/opt/malt"),
+    );
+}
+
+test "validateArgv rejects traversal and relative paths with separators" {
+    const cellar = "/opt/malt/Cellar/foo/1.0";
+    try std.testing.expectError(
+        SandboxError.PathSandboxViolation,
+        validateArgv(&.{"../../bin/evil"}, cellar, "/opt/malt"),
+    );
+    try std.testing.expectError(
+        SandboxError.PathSandboxViolation,
+        validateArgv(&.{"./evil"}, cellar, "/opt/malt"),
+    );
 }
 
 fn containsDotDot(path: []const u8) bool {
