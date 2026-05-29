@@ -831,75 +831,9 @@ fn formatUri(allocator: std.mem.Allocator, uri: std.Uri) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}://{s}{s}", .{ scheme, host, path });
 }
 
-/// Thread-safe borrow/return pool of `HttpClient`s. `std.http.Client` is
-/// not thread-safe, but per-request construction pays the full TLS
-/// handshake every time; pooling preserves no-sharing while reusing
-/// connections across the hot phase of an install.
-pub const HttpClientPool = struct {
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    clients: []HttpClient,
-    busy: []bool,
-    mutex: std.Io.Mutex,
-    cond: std.Io.Condition,
-
-    pub fn init(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, size: usize) !HttpClientPool {
-        const clients = try allocator.alloc(HttpClient, size);
-        errdefer allocator.free(clients);
-        const busy = try allocator.alloc(bool, size);
-        errdefer allocator.free(busy);
-        @memset(busy, false);
-        for (clients) |*c| c.* = HttpClient.init(io, environ, allocator);
-        return .{
-            .io = io,
-            .allocator = allocator,
-            .clients = clients,
-            .busy = busy,
-            .mutex = .init,
-            .cond = .init,
-        };
-    }
-
-    pub fn deinit(self: *HttpClientPool) void {
-        for (self.clients) |*c| c.deinit();
-        self.allocator.free(self.clients);
-        self.allocator.free(self.busy);
-    }
-
-    /// Block until idle, mark busy, return exclusive pointer until `release`.
-    pub fn acquire(self: *HttpClientPool) *HttpClient {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        while (true) {
-            for (self.busy, 0..) |b, i| {
-                if (!b) {
-                    self.busy[i] = true;
-                    return &self.clients[i];
-                }
-            }
-            self.cond.waitUncancelable(self.io, &self.mutex);
-        }
-    }
-
-    /// Mirror `offline` onto every pooled client. Cli/ call sites use
-    /// this right after `init` so workers borrowed under offline mode
-    /// short-circuit with `OfflineRequired` rather than dialing out.
-    pub fn setOfflineAll(self: *HttpClientPool, offline: bool) void {
-        for (self.clients) |*c| c.offline = offline;
-    }
-
-    /// Return an acquired client; foreign pointers are a programmer error.
-    pub fn release(self: *HttpClientPool, client: *HttpClient) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        const base = @intFromPtr(self.clients.ptr);
-        const addr = @intFromPtr(client);
-        const idx = (addr - base) / @sizeOf(HttpClient);
-        std.debug.assert(idx < self.clients.len);
-        self.busy[idx] = false;
-        self.cond.signal(self.io);
-    }
-};
+/// Pool now lives in `net/client_pool.zig`; re-exported for one release
+/// so existing `client_mod.HttpClientPool` callers keep resolving.
+pub const HttpClientPool = @import("client_pool.zig").HttpClientPool;
 
 test "extractEtagFromHead: finds ETag header by exact name" {
     const bytes = "200 OK\r\nServer: github\r\nETag: \"abc123\"\r\nContent-Length: 0\r\n\r\n";

@@ -81,6 +81,7 @@ pub const parser = @import("macho/parser.zig");
 pub const patcher = @import("macho/patcher.zig");
 pub const api = @import("net/api.zig");
 pub const client = @import("net/client.zig");
+pub const client_pool = @import("net/client_pool.zig");
 pub const ghcr = @import("net/ghcr.zig");
 pub const mirror = @import("net/mirror.zig");
 pub const offline = @import("net/offline.zig");
