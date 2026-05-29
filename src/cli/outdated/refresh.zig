@@ -14,6 +14,7 @@ const tap_mod = @import("../../core/tap.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
+const pool_mod = @import("../../net/client_pool.zig");
 const output = @import("../../ui/output.zig");
 const install_args_mod = @import("../install/args.zig");
 const install_rb_parse_mod = @import("../install/rb_parse.zig");
@@ -617,7 +618,7 @@ const WorkerCtx = struct {
     /// workers serialise on the per-statement mutex.
     db: *sqlite.Database,
     arena: std.heap.ArenaAllocator,
-    pool: *client_mod.HttpClientPool,
+    pool: *pool_mod.HttpClientPool,
     cache_dir: []const u8,
     /// Snapshot of `ctx.mirrors.api_base` so workers inherit the
     /// mirror override without re-walking the env on a worker thread.
@@ -682,7 +683,7 @@ fn runPool(
     const worker_count = outdatedWorkerCount(kegs.len, workers_override);
     std.debug.assert(worker_count > 0);
 
-    var http_pool = try client_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, worker_count);
+    var http_pool = try pool_mod.HttpClientPool.init(ctx.io, ctx.environ, allocator, worker_count);
     defer http_pool.deinit();
     http_pool.setOfflineAll(ctx.offline);
 

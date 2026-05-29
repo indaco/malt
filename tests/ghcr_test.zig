@@ -4,6 +4,7 @@
 const std = @import("std");
 const testing = std.testing;
 const client_mod = @import("malt").client;
+const pool_mod = @import("malt").client_pool;
 const ghcr = @import("malt").ghcr;
 const io_mod = @import("malt").output;
 
@@ -29,7 +30,7 @@ test "extractTokenField returns InvalidResponse when token field is not a string
 }
 
 test "GhcrClient.init/deinit does not leak and starts without cached token" {
-    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
+    var pool = try pool_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
 
     const http = pool.acquire();
@@ -47,7 +48,7 @@ test "GhcrClient honours a base_url override across token and blob URLs" {
     // Pins the override on the struct, then exercises the pure URL
     // builders against the same value to prove the registry endpoints
     // malt would hit match the mirror.
-    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
+    var pool = try pool_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
     const http = pool.acquire();
     defer pool.release(http);
@@ -120,7 +121,7 @@ test "hasTokenFor is false before any fetch and true after a direct cache seed" 
     // Black-box probe: without hitting the network we can still verify
     // the scope-set cache behaves the way fetchToken / prefetchTokens
     // promise. Seed the cache by hand, then probe.
-    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
+    var pool = try pool_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
     const http = pool.acquire();
     defer pool.release(http);
@@ -163,7 +164,7 @@ test "classifyGhcrStatus: 503 maps to DownloadHttpServerError" {
 }
 
 test "hasTokenFor treats expired tokens as cache-miss" {
-    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
+    var pool = try pool_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
     const http = pool.acquire();
     defer pool.release(http);
@@ -185,7 +186,7 @@ test "fetchToken on cache hit returns an owned dupe the caller must free" {
     // allocation, distinct from `cached_token`. If fetchToken ever
     // reverts to a borrow, this test double-frees the cached buffer
     // and the testing allocator aborts the run.
-    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
+    var pool = try pool_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
     const http = pool.acquire();
     defer pool.release(http);
@@ -216,7 +217,7 @@ test "fetchToken is safe against concurrent cache churn" {
     const fetchers: usize = 4;
     const iterations: usize = 2000;
 
-    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
+    var pool = try pool_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
     const http = pool.acquire();
     defer pool.release(http);

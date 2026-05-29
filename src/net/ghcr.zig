@@ -4,6 +4,7 @@
 const std = @import("std");
 
 const client_mod = @import("client.zig");
+const pool_mod = @import("client_pool.zig");
 const mirror_mod = @import("mirror.zig");
 
 pub const GhcrError = error{
@@ -290,7 +291,7 @@ pub fn extractTokenField(allocator: std.mem.Allocator, json_bytes: []const u8) !
 const testing = std.testing;
 
 test "GhcrClient.init defaults base_url to the upstream GHCR host" {
-    var pool = try client_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
+    var pool = try pool_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
     defer pool.deinit();
     const http = pool.acquire();
     defer pool.release(http);

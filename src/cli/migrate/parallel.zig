@@ -10,7 +10,7 @@ const signals = @import("../../core/signals.zig");
 const store_mod = @import("../../core/store.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const api_mod = @import("../../net/api.zig");
-const client_mod = @import("../../net/client.zig");
+const pool_mod = @import("../../net/client_pool.zig");
 const ghcr_mod = @import("../../net/ghcr.zig");
 const output = @import("../../ui/output.zig");
 const progress_mod = @import("../../ui/progress.zig");
@@ -85,7 +85,7 @@ pub const Pool = struct {
     homebrew_prefix: []const u8,
     use_system_ruby_scope: []const []const u8,
 
-    http_pool: *client_mod.HttpClientPool,
+    http_pool: *pool_mod.HttpClientPool,
     store: *store_mod.Store,
     linker: *linker_mod.Linker,
     db: *sqlite.Database,

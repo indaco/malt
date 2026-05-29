@@ -118,7 +118,7 @@ test "collectFormulaJobs parses each formula exactly once via shared cache" {
     try seedCache(cache_dir, "d_d", bottleJsonUniqueSha("d_d", "dd"));
     try seedCache(cache_dir, "d_e", bottleJsonUniqueSha("d_e", "ee"));
 
-    var http_pool = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
+    var http_pool = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();
     var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
@@ -195,7 +195,7 @@ test "FormulaCache holds at most one entry per unique dep across the run" {
     try seedCache(cache_dir, "d_d", bottleJsonUniqueSha("d_d", "dd"));
     try seedCache(cache_dir, "d_e", bottleJsonUniqueSha("d_e", "ee"));
 
-    var http_pool = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
+    var http_pool = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();
     var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();
@@ -371,7 +371,7 @@ test "shared deps across multi-package install collapse to one parse" {
     try seedCache(cache_dir, "omega", omega_json);
     try seedCache(cache_dir, "shared_lib", bottleJsonUniqueSha("shared_lib", "ss"));
 
-    var http_pool = try malt.client.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
+    var http_pool = try malt.client_pool.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, alloc, 2);
     defer http_pool.deinit();
     var real_http = malt.client.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, alloc);
     defer real_http.deinit();

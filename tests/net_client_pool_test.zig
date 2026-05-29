@@ -16,3 +16,10 @@ test "client_pool exposes a usable pool + borrowed HttpClient via its own module
     try testing.expect(!c.offline); // borrowed client is the real type, default online
     pool.release(c);
 }
+
+test "HttpClientPool lives only in client_pool, not re-exported from client" {
+    // The transition re-export from net/client.zig is gone — callers import
+    // the pool from its own module, keeping the client↔pool import cycle broken.
+    try testing.expect(@hasDecl(@import("malt").client_pool, "HttpClientPool"));
+    try testing.expect(!@hasDecl(@import("malt").client, "HttpClientPool"));
+}
