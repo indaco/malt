@@ -1403,9 +1403,64 @@ test "routePostInstallOutcome: fatal + --debug also prints non-fatal context" {
     defer testing.allocator.free(out);
 
     try testing.expect(std.mem.indexOf(u8, out, "DSL failed for z (fatal)") != null);
-    // Sandbox violation surfaces via printFatal; tangential helper via printUnknown.
+    // Sandbox violation surfaces via renderFatal; tangential helper via renderUnknown.
     try testing.expect(std.mem.indexOf(u8, out, "[sandbox_violation] /etc/passwd") != null);
     try testing.expect(std.mem.indexOf(u8, out, "[unknown_method] tangential_helper") != null);
+}
+
+test "routePostInstallOutcome: renders recorded diagnostic notes at the completion seam" {
+    // raise / inreplace record notes in the pure log during execution; the
+    // router renders them so the user still sees the message.
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.note("  x boom\n");
+
+    const out = try runRoute(&flog, "demo", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "x boom") != null);
+}
+
+test "routePostInstallOutcome: surfaces the dropped_oom notice" {
+    // A log that dropped an entry under memory pressure is the user's only
+    // signal that "partially skipped" was itself incomplete.
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.dropped_oom = true;
+
+    const out = try runRoute(&flog, "demo", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "dropped an entry due to OOM") != null);
+}
+
+// Byte-identical-envelope guard: diagnostics (notes / dropped_oom) live in
+// a channel routing ignores. A body that recorded a note but logged no
+// entry must still report `completed`, exactly as before the split —
+// otherwise the refactor would silently re-route a clean install.
+test "routePostInstallOutcome: a notes-only log still reports completed and renders the note" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.note("  x boom\n"); // e.g. a rescued raise
+
+    const out = try runRoute(&flog, "demo", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "post_install completed for demo") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "x boom") != null); // still surfaced
+}
+
+test "routePostInstallOutcome: dropped_oom alone does not downgrade the routing decision" {
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+    flog.dropped_oom = true; // no entries logged
+
+    const out = try runRoute(&flog, "demo", &.{});
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "post_install completed for demo") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "partially skipped") == null);
 }
 
 // ---------------------------------------------------------------------------
@@ -1681,8 +1736,8 @@ test "invariant: two FallbackLogs stay isolated (per-formula scope)" {
     a.log(.{ .formula = "a", .reason = .unknown_method, .detail = "a_helper", .loc = null });
     try testing.expect(a.hasErrors());
     try testing.expect(!b.hasErrors());
-    try testing.expectEqual(@as(usize, 1), a.entries.items.len);
-    try testing.expectEqual(@as(usize, 0), b.entries.items.len);
+    try testing.expectEqual(@as(usize, 1), a.entries().len);
+    try testing.expectEqual(@as(usize, 0), b.entries().len);
 }
 
 test "invariant: router emits exactly one partially-skipped warn regardless of entry count" {

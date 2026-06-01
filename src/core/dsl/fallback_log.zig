@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
-const output = @import("../../ui/output.zig");
 
 pub const FallbackReason = enum {
     unknown_method,
@@ -23,8 +22,16 @@ pub const FallbackEntry = struct {
 };
 
 pub const FallbackLog = struct {
-    entries: std.ArrayList(FallbackEntry),
+    _entries: std.ArrayList(FallbackEntry),
+    /// Free-form diagnostics (raise messages, inreplace fallback warnings)
+    /// the caller renders verbatim. Kept separate from `_entries` so a note
+    /// never participates in routing (`hasErrors`/`hasFatal`/`toJson`).
+    _notes: std.ArrayList([]const u8),
     allocator: std.mem.Allocator,
+    /// Set when an append fails under memory pressure. A pure log can't
+    /// render, so the caller reads this at the rendering seam and warns
+    /// that "post_install was partially skipped" was itself dropped.
+    dropped_oom: bool = false,
     /// Top-level statements the interpreter attempted to evaluate. Bumped
     /// per-node by `Interpreter.execute`; tests construct synthetic logs by
     /// setting this directly.
@@ -38,26 +45,51 @@ pub const FallbackLog = struct {
 
     pub fn init(allocator: std.mem.Allocator) FallbackLog {
         return .{
-            .entries = .empty,
+            ._entries = .empty,
+            ._notes = .empty,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *FallbackLog) void {
-        self.entries.deinit(self.allocator);
+        for (self._notes.items) |n| self.allocator.free(n);
+        self._notes.deinit(self.allocator);
+        self._entries.deinit(self.allocator);
     }
 
     pub fn log(self: *FallbackLog, entry: FallbackEntry) void {
-        self.entries.append(self.allocator, entry) catch {
-            // OOM still drops the entry, but stay loud about it: this log
-            // is the only signal the user has for "post_install was
-            // partially skipped" during a large `mt migrate`.
-            output.writeStderrAll("malt: fallback log dropped an entry due to OOM\n");
+        self._entries.append(self.allocator, entry) catch {
+            // Record the drop as a flag the caller renders — the pure log
+            // never writes stderr itself.
+            self.dropped_oom = true;
         };
     }
 
+    /// Record a free-form diagnostic line, owning a copy. Append-only and
+    /// OOM-tolerant: a failed dupe flags `dropped_oom` rather than raising.
+    pub fn note(self: *FallbackLog, line: []const u8) void {
+        const owned = self.allocator.dupe(u8, line) catch {
+            self.dropped_oom = true;
+            return;
+        };
+        self._notes.append(self.allocator, owned) catch {
+            self.allocator.free(owned);
+            self.dropped_oom = true;
+        };
+    }
+
+    /// Read-only view of the routing entries — callers render at their seam.
+    pub fn entries(self: *const FallbackLog) []const FallbackEntry {
+        return self._entries.items;
+    }
+
+    /// Read-only view of the diagnostic notes.
+    pub fn notes(self: *const FallbackLog) []const []const u8 {
+        return self._notes.items;
+    }
+
     pub fn hasErrors(self: *const FallbackLog) bool {
-        return self.entries.items.len > 0;
+        return self._entries.items.len > 0;
     }
 
     /// True when at least one top-level statement evaluated without a new
@@ -70,62 +102,13 @@ pub const FallbackLog = struct {
     }
 
     pub fn hasFatal(self: *const FallbackLog) bool {
-        for (self.entries.items) |entry| {
+        for (self._entries.items) |entry| {
             switch (entry.reason) {
                 .sandbox_violation, .system_command_failed => return true,
                 else => {},
             }
         }
         return false;
-    }
-
-    /// Print every fatal-or-diagnostic entry in `tag:line:col: message` form.
-    /// `parse_error` is included so users see the exact file:line:col when the
-    /// DSL falls back to `--use-system-ruby`; it is not treated as fatal by
-    /// `hasFatal`, keeping the salvage path open.
-    pub fn printFatal(self: *const FallbackLog, tag: []const u8) void {
-        for (self.entries.items) |entry| {
-            const printable = switch (entry.reason) {
-                .sandbox_violation, .system_command_failed, .parse_error => true,
-                else => false,
-            };
-            if (!printable) continue;
-            var buf: [1024]u8 = undefined;
-            const formatted = if (entry.loc) |loc|
-                std.fmt.bufPrint(&buf, "  {s}:{d}:{d}: [{s}] {s}\n", .{
-                    tag, loc.line, loc.col, @tagName(entry.reason), entry.detail,
-                }) catch continue
-            else
-                std.fmt.bufPrint(&buf, "  {s}: [{s}] {s}\n", .{
-                    tag, @tagName(entry.reason), entry.detail,
-                }) catch continue;
-            output.writeStderrAll(formatted);
-        }
-    }
-
-    /// Print unknown_method / unsupported_node entries to stderr — the
-    /// log-only reasons that `printFatal` intentionally skips. Called by
-    /// the install CLI under `--verbose` so users can see which helpers
-    /// the DSL silently downgraded instead of only the "partially skipped"
-    /// hint.
-    pub fn printUnknown(self: *const FallbackLog, tag: []const u8) void {
-        for (self.entries.items) |entry| {
-            const unknown = switch (entry.reason) {
-                .unknown_method, .unsupported_node => true,
-                else => false,
-            };
-            if (!unknown) continue;
-            var buf: [1024]u8 = undefined;
-            const formatted = if (entry.loc) |loc|
-                std.fmt.bufPrint(&buf, "  {s}:{d}:{d}: [{s}] {s}\n", .{
-                    tag, loc.line, loc.col, @tagName(entry.reason), entry.detail,
-                }) catch continue
-            else
-                std.fmt.bufPrint(&buf, "  {s}: [{s}] {s}\n", .{
-                    tag, @tagName(entry.reason), entry.detail,
-                }) catch continue;
-            output.writeStderrAll(formatted);
-        }
     }
 
     /// Serialize to JSON for telemetry reporting.
@@ -135,7 +118,7 @@ pub const FallbackLog = struct {
         const writer = &aw.writer;
 
         try writer.writeAll("[");
-        for (self.entries.items, 0..) |entry, i| {
+        for (self._entries.items, 0..) |entry, i| {
             if (i > 0) try writer.writeAll(",");
             try writer.writeAll("{\"formula\":\"");
             try writer.writeAll(entry.formula);
@@ -182,22 +165,81 @@ test "dslDidWork: at least one handled statement flips the signal" {
     try std.testing.expect(flog.dslDidWork());
 }
 
-// Under memory pressure the diagnostic log itself can fail to grow.
-// A silent drop hides the only signal the user has for "post_install
-// was partially skipped"; surface a one-line warning instead.
-test "log surfaces a warning when the entry append OOMs" {
+// Under memory pressure the diagnostic log itself can fail to grow. A
+// pure log can't render, so it records the drop as a flag the caller
+// reads at the rendering seam — no stderr write, no test capture.
+test "log flags dropped_oom when the entry append OOMs and records nothing" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var flog = FallbackLog.init(failing.allocator());
     defer flog.deinit();
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    output.beginStderrCapture(std.testing.allocator, &buf);
-    defer output.endStderrCapture();
-
     flog.log(.{ .formula = "demo", .reason = .unknown_method, .detail = "boom", .loc = null });
 
-    try std.testing.expectEqual(@as(usize, 0), flog.entries.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "fallback log dropped") != null);
-    try std.testing.expect(std.mem.endsWith(u8, buf.items, "\n"));
+    try std.testing.expectEqual(@as(usize, 0), flog.entries().len);
+    try std.testing.expect(flog.dropped_oom);
+}
+
+test "entries() exposes the logged entries without stderr capture" {
+    var flog = FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+    flog.log(.{ .formula = "wget", .reason = .sandbox_violation, .detail = "/etc/passwd", .loc = null });
+
+    const items = flog.entries();
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqual(FallbackReason.sandbox_violation, items[0].reason);
+    try std.testing.expectEqualStrings("/etc/passwd", items[0].detail);
+}
+
+// The notes channel records free-form diagnostics (raise, inreplace
+// fallback) the caller renders verbatim. It must stay independent of
+// routing: a note alone is not an error and does not flip hasErrors.
+test "note() records a diagnostic the caller can read, without affecting routing" {
+    var flog = FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+
+    flog.note("  x boom\n");
+
+    try std.testing.expectEqual(@as(usize, 1), flog.notes().len);
+    try std.testing.expectEqualStrings("  x boom\n", flog.notes()[0]);
+    try std.testing.expect(!flog.hasErrors());
+    try std.testing.expect(!flog.hasFatal());
+    try std.testing.expectEqual(@as(usize, 0), flog.entries().len);
+}
+
+test "note() owns its copy: the source buffer may be reused after the call" {
+    var flog = FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+
+    var buf: [16]u8 = undefined;
+    @memcpy(buf[0..5], "hello");
+    flog.note(buf[0..5]);
+    @memcpy(buf[0..5], "world"); // clobber the source
+
+    try std.testing.expectEqualStrings("hello", flog.notes()[0]);
+}
+
+test "note() preserves insertion order across multiple records" {
+    var flog = FallbackLog.init(std.testing.allocator);
+    defer flog.deinit();
+
+    flog.note("first");
+    flog.note("second");
+
+    try std.testing.expectEqual(@as(usize, 2), flog.notes().len);
+    try std.testing.expectEqualStrings("first", flog.notes()[0]);
+    try std.testing.expectEqualStrings("second", flog.notes()[1]);
+}
+
+// Edge: the diagnostics channel is OOM-tolerant too. A failed dupe must
+// flag the drop rather than record a dangling slice — same contract as
+// `log`, so the caller's "dropped due to OOM" notice still fires.
+test "note() flags dropped_oom and records nothing when the dupe OOMs" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var flog = FallbackLog.init(failing.allocator());
+    defer flog.deinit();
+
+    flog.note("would-be diagnostic");
+
+    try std.testing.expectEqual(@as(usize, 0), flog.notes().len);
+    try std.testing.expect(flog.dropped_oom);
 }

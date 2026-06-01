@@ -52,18 +52,23 @@ test "hasFatal does NOT trip on parse_error (fallback path stays open)" {
     try testing.expect(!log.hasFatal());
 }
 
-test "printFatal does not crash on empty / fatal / non-fatal mixes" {
-    // Exercises the formatting branches (with-loc / no-loc / non-fatal-skipped).
-    // Writes route through `output.writeStderrAll` which silently drops when
-    // no capture buffer is set.
+test "entries() preserves reason, detail, and loc in log order for the renderer" {
+    // The log is pure: it hands the caller an ordered view and the caller
+    // owns the `tag:line:col: [reason] detail` formatting. Pin the data the
+    // renderer reads rather than the rendered bytes.
     var log = FallbackLog.init(testing.allocator);
     defer log.deinit();
-    log.printFatal("empty"); // empty list, no-op
+    try testing.expectEqual(@as(usize, 0), log.entries().len);
 
     log.log(.{ .formula = "wget", .reason = .unknown_method, .detail = "skip me", .loc = null });
     log.log(.{ .formula = "wget", .reason = .parse_error, .detail = "unexpected token", .loc = .{ .line = 12, .col = 4 } });
     log.log(.{ .formula = "wget", .reason = .sandbox_violation, .detail = "/etc/passwd", .loc = null });
-    log.printFatal("wget");
+
+    const items = log.entries();
+    try testing.expectEqual(@as(usize, 3), items.len);
+    try testing.expectEqual(FallbackReason.parse_error, items[1].reason);
+    try testing.expectEqual(@as(u32, 12), items[1].loc.?.line);
+    try testing.expectEqualStrings("/etc/passwd", items[2].detail);
 }
 
 test "toJson emits an empty array for no entries" {

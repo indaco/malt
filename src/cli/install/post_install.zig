@@ -119,14 +119,17 @@ pub fn routePostInstallOutcomeWithBody(
     pre_resolved_body: ?[]const u8,
     sink: OutputSink,
 ) void {
+    // Diagnostics the DSL recorded during execution render first, matching
+    // the pre-refactor order where they printed inline before routing.
+    renderNotes(flog);
     const status: PostInstallStatus = blk: {
         if (flog.hasFatal()) {
             sink.warn("post_install DSL failed for {s} (fatal)", .{name});
-            flog.printFatal(name);
+            renderFatal(flog, name);
             // `--debug` also surfaces the non-fatal context so a bug
             // report includes every reason the DSL logged, not just the
             // one that aborted execution.
-            if (output.isDebug()) flog.printUnknown(name);
+            if (output.isDebug()) renderUnknown(flog, name);
             break :blk .fatal;
         }
         if (!flog.hasErrors()) {
@@ -143,8 +146,8 @@ pub fn routePostInstallOutcomeWithBody(
         const auto_self_hosting = isSelfHostingRubyKeg(name);
         if (explicit_opt_in or (auto_self_hosting and !flog.dslDidWork())) {
             sink.warn("post_install DSL incomplete for {s}, falling back to system Ruby...", .{name});
-            if (output.isVerbose()) flog.printUnknown(name);
-            if (output.isDebug()) flog.printFatal(name);
+            if (output.isVerbose()) renderUnknown(flog, name);
+            if (output.isDebug()) renderFatal(flog, name);
             const ruby_stdio: sandbox.Stdio = .{ .out = ctx.stdout.handle, .err = ctx.stderr.handle };
             const ruby_result: ruby_sub.RubyError!void = if (pre_resolved_body) |body|
                 ruby_sub.runPostInstallWithBody(ctx.io, ctx.environ, allocator, name, version_str, prefix, body, ruby_stdio)
@@ -160,8 +163,8 @@ pub fn routePostInstallOutcomeWithBody(
             break :blk .ran_via_ruby;
         }
         sink.warn("{s}: post_install partially skipped (use --use-system-ruby={s} to attempt via Ruby)", .{ name, name });
-        if (output.isVerbose()) flog.printUnknown(name);
-        if (output.isDebug()) flog.printFatal(name);
+        if (output.isVerbose()) renderUnknown(flog, name);
+        if (output.isDebug()) renderFatal(flog, name);
         break :blk .partially_skipped;
     };
 
@@ -177,6 +180,45 @@ pub fn routePostInstallOutcomeWithBody(
             .embed => bufferPostInstallEvent(allocator, name, status, flog, sink),
         }
     }
+}
+
+/// Render the log entries whose reason is in `reasons` as
+/// `tag:line:col: [reason] detail` lines. Rendering lives here, not in
+/// core/dsl: the fallback log is pure recording, the CLI owns the UI.
+fn renderEntries(flog: *const dsl.FallbackLog, tag: []const u8, comptime reasons: []const dsl.FallbackReason) void {
+    for (flog.entries()) |entry| {
+        if (std.mem.indexOfScalar(dsl.FallbackReason, reasons, entry.reason) == null) continue;
+        var buf: [1024]u8 = undefined;
+        const formatted = if (entry.loc) |loc|
+            std.fmt.bufPrint(&buf, "  {s}:{d}:{d}: [{s}] {s}\n", .{
+                tag, loc.line, loc.col, @tagName(entry.reason), entry.detail,
+            }) catch continue
+        else
+            std.fmt.bufPrint(&buf, "  {s}: [{s}] {s}\n", .{
+                tag, @tagName(entry.reason), entry.detail,
+            }) catch continue;
+        output.writeStderrAll(formatted);
+    }
+}
+
+/// Fatal-or-diagnostic entries (`parse_error` included so users get the
+/// file:line:col before a `--use-system-ruby` salvage).
+fn renderFatal(flog: *const dsl.FallbackLog, tag: []const u8) void {
+    renderEntries(flog, tag, &.{ .sandbox_violation, .system_command_failed, .parse_error });
+}
+
+/// The log-only reasons `renderFatal` skips; shown under `--verbose`.
+fn renderUnknown(flog: *const dsl.FallbackLog, tag: []const u8) void {
+    renderEntries(flog, tag, &.{ .unknown_method, .unsupported_node });
+}
+
+/// Emit the pure log's free-form diagnostics (raise messages, inreplace
+/// fallback warnings) plus any OOM-drop notice. The DSL records these
+/// during execution; rendering is the CLI's job so core/dsl stays UI-free.
+fn renderNotes(flog: *const dsl.FallbackLog) void {
+    for (flog.notes()) |line| output.writeStderrAll(line);
+    if (flog.dropped_oom)
+        output.writeStderrAll("malt: fallback log dropped an entry due to OOM\n");
 }
 
 /// Write one JSON line per post_install routing decision to stdout. One
@@ -323,12 +365,16 @@ pub fn executeDslPostInstallFields(
     defer flog.deinit();
 
     // DSL errors reflect in `flog`; the router reads the log as the source
-    // of truth so silent skips downgrade the same as hard failures.
-    dsl.executePostInstall(ctx.io, ctx.environ, allocator, .{
+    // of truth so silent skips downgrade the same as hard failures. The
+    // stdio mode is read here (CLI owns --json/--ndjson) and threaded in so
+    // a spawned child's stdout can't corrupt the document.
+    dsl.executePostInstallWithOpts(ctx.io, ctx.environ, allocator, .{
         .name = name,
         .version = dsl_version,
         .pkg_version = pkg_version,
-    }, post_install_src, prefix, &flog) catch {};
+    }, post_install_src, prefix, &flog, .{
+        .suppress_child_stdout = output.isJson() or output.isNdjson(),
+    }) catch {};
     routePostInstallOutcomeWithBody(
         ctx,
         allocator,
