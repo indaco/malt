@@ -72,6 +72,34 @@ fn runSnippet(
     return null;
 }
 
+/// Like `runSnippet`, but records into the caller-owned `flog` so the test
+/// can inspect `flog.notes()` / `flog.entries()` afterward — the pure log
+/// replaces the old stderr-capture seam.
+fn runSnippetInto(
+    arena: *std.heap.ArenaAllocator,
+    ruby_src: []const u8,
+    malt_prefix: []const u8,
+    flog: *dsl.FallbackLog,
+) !void {
+    const alloc = arena.allocator();
+
+    const json = try minimalJson(alloc, "testpkg", "1.0");
+    var f = try formula_mod.parseFormula(alloc, json);
+    defer f.deinit();
+
+    const environ = malt.app_ctx.processEnviron();
+    var threaded: std.Io.Threaded = .init(alloc, .{ .environ = environ });
+    defer threaded.deinit();
+
+    dsl.executePostInstall(threaded.io(), environ, alloc, .{
+        .name = f.name,
+        .version = f.version,
+        .pkg_version = f.pkg_version,
+        // DSL errors are reflected in `flog`; the test asserts on the log,
+        // so the propagated error is intentionally discarded here.
+    }, ruby_src, malt_prefix, flog) catch {};
+}
+
 /// Create the cellar directory tree that ExecContext expects.
 fn setupCellar(prefix_dir: []const u8) !void {
     // Create Cellar/testpkg/1.0
@@ -286,25 +314,26 @@ test "interpreter: raise causes PostInstallFailed" {
     try testing.expectEqual(dsl.DslError.PostInstallFailed, err.?);
 }
 
-test "interpreter: raise message is captured by the output module seam" {
-    // Pins the routing fix: `raise` emits via output.writeStderrAll so
-    // beginStderrCapture intercepts the line and `zig build test` stays
-    // quiet. A regression to direct fd-2 writes would let the message
-    // leak past the capture and the assertion below would fail.
+test "interpreter: raise message is recorded as a note, not written to stderr" {
+    // `raise` records its message in the pure log; the post_install caller
+    // renders notes. Asserting on `flog.notes()` removes the stderr-capture
+    // dependency and proves the message no longer leaks to fd 2.
     var arena = testArena();
     defer arena.deinit();
 
     const prefix = try makeTempPrefix();
     defer testing.allocator.free(prefix);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    malt.output.beginStderrCapture(testing.allocator, &buf);
-    defer malt.output.endStderrCapture();
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
 
-    const err = try runSnippet(&arena, "raise \"boom\"", prefix);
-    try testing.expect(err != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "boom") != null);
+    try runSnippetInto(&arena, "raise \"boom\"", prefix, &flog);
+
+    var found = false;
+    for (flog.notes()) |n| {
+        if (std.mem.indexOf(u8, n, "boom") != null) found = true;
+    }
+    try testing.expect(found);
 }
 
 test "interpreter: begin rescue handles error" {
@@ -325,6 +354,38 @@ test "interpreter: begin rescue handles error" {
     const err = try runSnippet(&arena, src, prefix);
     // rescue catches PostInstallFailed — execution completes successfully
     try testing.expect(err == null);
+}
+
+// Edge: a rescued raise still records its message (the diagnostic is
+// useful even when recovered) but, because the rescue swallowed the
+// failure, it stays a note — never a routing entry. Guards that the
+// note/control-flow interaction can't flip the post_install envelope.
+test "interpreter: a rescued raise records a note without a routing entry" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
+
+    const src =
+        \\begin
+        \\  raise "kaboom"
+        \\rescue
+        \\  x = 1
+        \\end
+    ;
+    try runSnippetInto(&arena, src, prefix, &flog);
+
+    var found = false;
+    for (flog.notes()) |n| {
+        if (std.mem.indexOf(u8, n, "kaboom") != null) found = true;
+    }
+    try testing.expect(found);
+    try testing.expectEqual(@as(usize, 0), flog.entries().len);
+    try testing.expect(!flog.hasErrors());
 }
 
 test "interpreter: multiple statements execute in order" {
@@ -642,10 +703,10 @@ test "interpreter: inreplace replaces content in file" {
     try testing.expectEqualStrings("setting=NEW_VALUE\n", buf[0..n]);
 }
 
-// Regression: the atomic-write fallback warning previously bypassed the
-// output module by writing to STDERR_FILENO directly, which let the line
-// leak past `beginStderrCapture` and interleave with `zig test` output.
-test "interpreter: inreplace fallback warning is captured by output stderr seam" {
+// The atomic-write fallback warning is recorded as a pure-log note now,
+// not written to stderr — the caller renders notes at the post_install
+// seam. Asserting on `flog.notes()` removes the stderr-capture dependency.
+test "interpreter: inreplace fallback warning is recorded as a note" {
     var arena = testArena();
     defer arena.deinit();
 
@@ -679,16 +740,23 @@ test "interpreter: inreplace fallback warning is captured by output stderr seam"
     if (c.chmod(target_dir_z, 0o555) != 0) return error.TestUnexpectedResult;
     defer _ = c.chmod(target_dir_z, 0o755);
 
-    var stderr_buf: std.ArrayList(u8) = .empty;
-    defer stderr_buf.deinit(testing.allocator);
-    malt.output.beginStderrCapture(testing.allocator, &stderr_buf);
-    defer malt.output.endStderrCapture();
+    var flog = dsl.FallbackLog.init(testing.allocator);
+    defer flog.deinit();
 
     const src = "inreplace prefix/\"config.txt\", \"OLD_VALUE\", \"NEW_VALUE\"";
-    _ = try runSnippet(&arena, src, prefix);
+    try runSnippetInto(&arena, src, prefix, &flog);
 
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "inreplace atomic write failed") != null);
-    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "TempCreateFailed") != null);
+    var found = false;
+    for (flog.notes()) |n| {
+        if (std.mem.indexOf(u8, n, "inreplace atomic write failed") != null and
+            std.mem.indexOf(u8, n, "TempCreateFailed") != null) found = true;
+    }
+    try testing.expect(found);
+    // Regression guard for the byte-identical envelope: the fallback is a
+    // note, never a routing entry, so a body that only hit it still routes
+    // to `completed` (hasErrors stays false).
+    try testing.expectEqual(@as(usize, 0), flog.entries().len);
+    try testing.expect(!flog.hasErrors());
 }
 
 // ---------------------------------------------------------------------------
@@ -1641,7 +1709,7 @@ test "parse_error: malformed source populates fallback log with location" {
     try testing.expect(!flog.hasFatal());
 
     var saw_parse_error = false;
-    for (flog.entries.items) |entry| {
+    for (flog.entries()) |entry| {
         if (entry.reason == .parse_error) {
             saw_parse_error = true;
             try testing.expect(entry.loc != null);

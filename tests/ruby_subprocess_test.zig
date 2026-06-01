@@ -449,7 +449,7 @@ test "ca-certificates-shape: dispatcher with unparseable siblings leaves flog cl
     }, body, "/tmp/malt_cacerts_test", &flog);
 
     try testing.expect(!flog.hasFatal());
-    try testing.expectEqual(@as(usize, 0), flog.entries.items.len);
+    try testing.expectEqual(@as(usize, 0), flog.entries().len);
 }
 
 // Defense-in-depth — runPostInstall must reject hostile name / version

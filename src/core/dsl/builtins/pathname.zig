@@ -9,6 +9,7 @@ const std = @import("std");
 const values = @import("../values.zig");
 const sandbox = @import("../sandbox.zig");
 const ast = @import("../ast.zig");
+const fallback_log = @import("../fallback_log.zig");
 
 const Value = values.Value;
 
@@ -28,6 +29,12 @@ pub const ExecCtx = struct {
     environ: std.process.Environ,
     cellar_path: []const u8,
     malt_prefix: []const u8,
+    /// Suppress a spawned child's stdout (set under --json/--ndjson so it
+    /// can't corrupt the document). Threaded in by the interpreter.
+    suppress_child_stdout: bool = false,
+    /// Record-only diagnostics sink for builtins (e.g. inreplace's
+    /// atomic-write fallback). Optional so test contexts can omit it.
+    fallback_log: ?*fallback_log.FallbackLog = null,
 };
 
 /// mkpath — recursive directory creation

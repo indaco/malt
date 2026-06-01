@@ -13,6 +13,8 @@ pub const builtins = @import("builtins/root.zig");
 
 // Public API re-exports
 pub const executePostInstall = interpreter.executePostInstall;
+pub const executePostInstallWithOpts = interpreter.executePostInstallWithOpts;
+pub const PostInstallOpts = interpreter.PostInstallOpts;
 pub const DslError = context.DslError;
 pub const ExecContext = context.ExecContext;
 pub const FormulaRef = context.FormulaRef;

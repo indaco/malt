@@ -10,10 +10,6 @@ const sandbox = @import("sandbox.zig");
 const fallback_log = @import("fallback_log.zig");
 const builtins_root = @import("builtins/root.zig");
 const context = @import("context.zig");
-// Same UI seam used by `odie` and the fallback log; routing through
-// the output module keeps test stderr capture working instead of
-// punching directly to fd 2.
-const output = @import("../../ui/output.zig");
 
 const Node = ast.Node;
 const SourceLoc = ast.SourceLoc;
@@ -64,7 +60,7 @@ pub const Interpreter = struct {
             // A statement counts as "handled" only if its eval threw nothing
             // and logged nothing — the router uses that signal to gate the
             // system-Ruby fallback away from already-applied bodies.
-            const before_entries = self.ctx.fallback_log_writer.entries.items.len;
+            const before_entries = self.ctx.fallback_log_writer.entries().len;
             // Exhaustive: new DslError tags must be classified, not dropped.
             _ = self.eval(node) catch |e| switch (e) {
                 DslError.PostInstallFailed => return e,
@@ -82,7 +78,7 @@ pub const Interpreter = struct {
                 // value is discarded because there's no caller.
                 DslError.ReturnSignal => {
                     self.ctx.return_value = Value{ .nil = {} };
-                    if (self.ctx.fallback_log_writer.entries.items.len == before_entries) {
+                    if (self.ctx.fallback_log_writer.entries().len == before_entries) {
                         self.ctx.fallback_log_writer.handled_top_level += 1;
                     }
                     return;
@@ -95,7 +91,7 @@ pub const Interpreter = struct {
                 DslError.OutOfMemory,
                 => continue,
             };
-            if (self.ctx.fallback_log_writer.entries.items.len == before_entries) {
+            if (self.ctx.fallback_log_writer.entries().len == before_entries) {
                 self.ctx.fallback_log_writer.handled_top_level += 1;
             }
         }
@@ -258,6 +254,8 @@ pub const Interpreter = struct {
             .environ = self.ctx.environ,
             .cellar_path = self.ctx.cellar_path,
             .malt_prefix = self.ctx.malt_prefix,
+            .suppress_child_stdout = self.ctx.suppress_child_stdout,
+            .fallback_log = self.ctx.fallback_log_writer,
         };
 
         if (mc.receiver) |receiver_node| {
@@ -578,7 +576,9 @@ pub const Interpreter = struct {
             // assembly OOM and the stream failure are tolerated.
             if (std.fmt.allocPrint(self.allocator, "  x {s}\n", .{msg_str})) |line| {
                 defer self.allocator.free(line);
-                output.writeStderrAll(line);
+                // Record-only: the post_install caller renders notes. Keeps
+                // the interpreter free of ui/output.
+                self.ctx.fallback_log_writer.note(line);
             } else |_| {}
         }
         return DslError.PostInstallFailed;
@@ -746,6 +746,8 @@ pub const Interpreter = struct {
             .environ = self.ctx.environ,
             .cellar_path = self.ctx.cellar_path,
             .malt_prefix = self.ctx.malt_prefix,
+            .suppress_child_stdout = self.ctx.suppress_child_stdout,
+            .fallback_log = self.ctx.fallback_log_writer,
         };
         if (builtins_root.receiver_builtins.get(sym)) |func| {
             return func(builtin_ctx, item, &.{}) catch |e| mapBuiltinError(e);
@@ -911,6 +913,13 @@ fn compare(left: Value, op: []const u8, right: Value) bool {
     return false;
 }
 
+/// Options the caller sets once at DSL entry. Carries the output-mode
+/// decision so builtins never reach into ui/output for global state.
+pub const PostInstallOpts = struct {
+    /// Suppress spawned children's stdout (set under --json/--ndjson).
+    suppress_child_stdout: bool = false,
+};
+
 /// Execute a formula's post_install block.
 pub fn executePostInstall(
     io: std.Io,
@@ -920,6 +929,22 @@ pub fn executePostInstall(
     ruby_source: []const u8,
     malt_prefix: []const u8,
     flog: *FallbackLog,
+) DslError!void {
+    return executePostInstallWithOpts(io, environ, allocator, ref, ruby_source, malt_prefix, flog, .{});
+}
+
+/// Variant carrying the caller's output-mode opts. The bare
+/// `executePostInstall` delegates here with defaults so test callers stay
+/// untouched; the CLI passes the live `--json`/`--ndjson` state.
+pub fn executePostInstallWithOpts(
+    io: std.Io,
+    environ: std.process.Environ,
+    allocator: std.mem.Allocator,
+    ref: FormulaRef,
+    ruby_source: []const u8,
+    malt_prefix: []const u8,
+    flog: *FallbackLog,
+    opts: PostInstallOpts,
 ) DslError!void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -944,6 +969,7 @@ pub fn executePostInstall(
 
     var ctx = try ExecContext.init(a, io, environ, ref, malt_prefix, flog);
     defer ctx.deinit();
+    ctx.suppress_child_stdout = opts.suppress_child_stdout;
     var interp = Interpreter.init(&ctx);
     try interp.execute(nodes);
 }

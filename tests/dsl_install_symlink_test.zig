@@ -88,7 +88,7 @@ test "install_symlink: ca-certificates-shaped post_install lands the cert symlin
 
     // rm_f on a missing target is a silent no-op — neither it nor
     // install_symlink may be logged as unknown_method.
-    for (flog.entries.items) |entry| {
+    for (flog.entries()) |entry| {
         if (entry.reason == .unknown_method) {
             std.debug.print("unexpected unknown_method: {s}\n", .{entry.detail});
             return error.UnexpectedUnknownMethod;

@@ -115,6 +115,11 @@ pub const ExecContext = struct {
     // Fallback log writer
     fallback_log_writer: *FallbackLog,
 
+    /// Suppress a spawned child's stdout under --json/--ndjson. Set once at
+    /// DSL entry by the caller (which owns the output mode) so builtins
+    /// never reach into ui/output for the global flag.
+    suppress_child_stdout: bool = false,
+
     // Formula name for fallback log entries
     formula_name: []const u8,
 

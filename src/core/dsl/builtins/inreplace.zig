@@ -6,7 +6,6 @@ const std = @import("std");
 const values = @import("../values.zig");
 const sandbox = @import("../sandbox.zig");
 const pathname = @import("pathname.zig");
-const output = @import("../../../ui/output.zig");
 const text_replace = @import("../../../text_replace.zig");
 
 const Value = values.Value;
@@ -57,9 +56,9 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
         var buf: [512]u8 = undefined;
         const underlying = underlying_name orelse @errorName(e);
         const msg = formatAtomicWriteFailureMessage(&buf, e, underlying) catch return Value{ .nil = {} };
-        // Route through the capture-aware seam so tests see the warning
-        // and CI logs do not interleave with raw-fd writes.
-        output.writeStderrAll(msg);
+        // Record the warning; the post_install caller renders notes. Keeps
+        // this builtin free of ui/output.
+        if (ctx.fallback_log) |flog| flog.note(msg);
         writeDirectly(ctx.io, path, new_content);
     };
 

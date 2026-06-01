@@ -5,11 +5,18 @@ const std = @import("std");
 const values = @import("../values.zig");
 const pathname = @import("pathname.zig");
 const sandbox = @import("../sandbox.zig");
-const output = @import("../../../ui/output.zig");
 
 const Value = values.Value;
 const BuiltinError = pathname.BuiltinError;
 const ExecCtx = pathname.ExecCtx;
+
+/// Subprocess stdout shares the FD with malt's `--json` / `--ndjson`
+/// document, so verbose tools like fc-cache would corrupt it. The caller
+/// decides via `ExecCtx.suppress_child_stdout`; stderr stays inherited so
+/// warnings still surface for the user.
+fn childStdoutMode(suppress: bool) std.process.SpawnOptions.StdIo {
+    return if (suppress) .ignore else .inherit;
+}
 
 /// system — execute a command
 pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
@@ -30,11 +37,7 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     sandbox.validateArgv(argv_slice, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
 
-    // Subprocess stdout shares the FD with malt's `--json` / `--ndjson`
-    // document, so verbose tools like fc-cache would corrupt it. Stderr
-    // stays inherited so warnings still surface for the user.
-    const child_stdout: std.process.SpawnOptions.StdIo =
-        if (output.isJson() or output.isNdjson()) .ignore else .inherit;
+    const child_stdout = childStdoutMode(ctx.suppress_child_stdout);
     var child = std.process.spawn(ctx.io, .{
         .argv = argv_slice,
         .stdout = child_stdout,
@@ -231,6 +234,13 @@ fn readPipeAll(file: std.Io.File, allocator: std.mem.Allocator, max_bytes: usize
     var buf: [4096]u8 = undefined;
     var r = file.readerStreaming(threaded.io(), &buf);
     return r.interface.allocRemaining(allocator, std.Io.Limit.limited(max_bytes));
+}
+
+test "childStdoutMode ignores subprocess stdout only when suppression is requested" {
+    // Under --json/--ndjson the caller suppresses the child's stdout so it
+    // can't corrupt the document; otherwise it inherits malt's fd.
+    try std.testing.expect(std.meta.activeTag(childStdoutMode(true)) == .ignore);
+    try std.testing.expect(std.meta.activeTag(childStdoutMode(false)) == .inherit);
 }
 
 test "system rejects an argv0 outside the sandbox roots before spawning" {
