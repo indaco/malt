@@ -37,9 +37,17 @@ pub fn system(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     sandbox.validateArgv(argv_slice, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
 
+    // The lint above waves bare/system-dir argv0 through; the real write
+    // containment is the sandbox-exec fence wrapping the spawn (parity with
+    // the --use-system-ruby path).
+    const spawn_argv = sandbox.fenceArgv(ctx.allocator, argv_slice, ctx.cellar_path, ctx.malt_prefix) catch |e| switch (e) {
+        error.OutOfMemory => return BuiltinError.OutOfMemory,
+        error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
+    };
+
     const child_stdout = childStdoutMode(ctx.suppress_child_stdout);
     var child = std.process.spawn(ctx.io, .{
-        .argv = argv_slice,
+        .argv = spawn_argv,
         .stdout = child_stdout,
     }) catch return BuiltinError.SystemCommandFailed;
     const term = child.wait(ctx.io) catch return BuiltinError.SystemCommandFailed;
