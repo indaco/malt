@@ -323,11 +323,14 @@ fn upgradeFormula(
 
     var store = store_mod.Store.init(ctx.io, allocator, db, prefix);
 
-    var bar = progress_mod.ProgressBar.init(name, 0);
+    // One-line group so the upgrade bar disables autowrap and restores on
+    // exit, instead of the old setup-free bar that stacked when over-width.
+    var sp = progress_mod.SingleBar.init(name, 0);
+    defer sp.finish();
     const fetch = install_download_mod.installKegFromBottle(
         ctx,
         allocator,
-        .{ .ghcr = &ghcr, .http = http, .store = &store, .bar = &bar },
+        .{ .ghcr = &ghcr, .http = http, .store = &store, .bar = sp.bind() },
         &formula,
         prefix,
     ) catch |e| {

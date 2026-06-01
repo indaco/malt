@@ -1381,13 +1381,15 @@ fn installCask(
     installer.artifact_type_override = artifact_type;
     installer.offline = ctx.offline;
 
-    // Progress bar for cask download. A non-terminal sink (bundle) skips
-    // it — the global progress mode is set-once and can't be quieted
-    // mid-run. `init` is pure; only update/finish touch the terminal.
-    var bar = progress_mod.ProgressBar.init(cask.token, 0);
-    if (sink.show_progress) {
+    // Progress bar for cask download, rendered as a one-line group so it
+    // disables autowrap and restores on exit. A non-terminal sink (bundle)
+    // skips setup entirely — the global progress mode is set-once and
+    // can't be quieted mid-run.
+    var sp: ?progress_mod.SingleBar = if (sink.show_progress) progress_mod.SingleBar.init(cask.token, 0) else null;
+    defer if (sp) |*s| s.finish();
+    if (sp) |*s| {
         installer.progress = .{
-            .context = @ptrCast(&bar),
+            .context = @ptrCast(s.bind()),
             .func = &progressBridge,
         };
     }
@@ -1395,12 +1397,12 @@ fn installCask(
     if (download_only) {
         output.emitNdjsonEvent(.download_started, cask.token, null);
         const cache_path = installer.downloadOnly(&cask) catch |e| {
-            if (sink.show_progress) bar.finish();
+            if (sp) |*s| s.bar.finish();
             output.emitNdjsonEvent(.download_complete, cask.token, "failed");
             sink.err("Failed to download cask {s}: {s}", .{ cask.token, @errorName(e) });
             return InstallError.CaskNotFound;
         };
-        if (sink.show_progress) bar.finish();
+        if (sp) |*s| s.bar.finish();
         defer allocator.free(cache_path);
         output.emitNdjsonEvent(.download_complete, cask.token, "ok");
         sink.success("{s} {s} downloaded to {s}", .{ cask.token, cask.version, cache_path });
@@ -1410,13 +1412,13 @@ fn installCask(
     sink.info("Installing cask {s} {s}...", .{ cask.token, cask.version });
 
     const app_path = installer.install(&cask) catch |e| {
-        if (sink.show_progress) bar.finish();
+        if (sp) |*s| s.bar.finish();
         // Surface the specific cause (Sha256Mismatch, DownloadFailed, …) —
         // users can't act on a bare "failed to install".
         sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
         return InstallError.CaskNotFound;
     };
-    if (sink.show_progress) bar.finish();
+    if (sp) |*s| s.bar.finish();
 
     // Core API casks have no third-party tap origin to record.
     cask_mod.recordInstall(db, &cask, app_path, null) catch {

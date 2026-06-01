@@ -439,10 +439,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 continue;
             }
 
-            // Standalone bar (no MultiProgress) — same shape as install.zig's
-            // cask path. Initial frame so the row isn't blank before the
-            // first progress callback fires.
-            var bar = progress_mod.ProgressBar.init(keg_name, 0);
+            // One-line group so the bar inherits autowrap-off + restore.
+            // Initial frame so the row isn't blank before the first
+            // progress callback fires.
+            var sp = progress_mod.SingleBar.init(keg_name, 0);
+            defer sp.finish();
+            const bar = sp.bind();
             bar.label_width = max_name_len;
             bar.update(0);
 
@@ -457,7 +459,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
                 .homebrew_prefix = brew_prefix,
                 .use_system_ruby_scope = use_system_ruby_scope.items,
                 .post_install_queue = &post_install_queue,
-                .bar = &bar,
+                .bar = bar,
             });
             bar.finish();
 
