@@ -4,6 +4,7 @@
 //! interpreter-level tests don't already touch.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const malt = @import("malt");
 const test_io = @import("test_io");
 const testing = std.testing;
@@ -793,6 +794,120 @@ test "quietSystem always returns nil regardless of exit code" {
     defer lio.deinit();
     const v = try process.quietSystem(arenaCtxLive(&arena, &lio, "/tmp/malt"), null, &.{.{ .string = "/usr/bin/false" }});
     try testing.expect(v == .nil);
+}
+
+// ---------------------------------------------------------------------------
+// Native post_install containment. `system` spawns must run under the same
+// real sandbox-exec fence the --use-system-ruby path gets: the DSL argv lint
+// (validateArgv) accepts any bare/system-dir argv0, so only the OS fence can
+// stop a destructive write the formula's *arguments* aim outside the keg.
+// ---------------------------------------------------------------------------
+
+/// Realpath of a fresh temp dir, skipping the test when it lands under a
+/// profile-writable root (/tmp, /private/tmp, /private/var/folders) — there
+/// the fence's write rules would pass the write through and the assertion
+/// would prove nothing. A CI tmp relocation surfaces as a skip, not a false
+/// pass.
+fn fenceTmpBase(tmp: *std.testing.TmpDir, buf: []u8) ![]const u8 {
+    const n = try std.Io.Dir.realPath(tmp.dir, std.Options.debug_io, buf);
+    const base = buf[0..n];
+    if (std.mem.startsWith(u8, base, "/tmp/") or
+        std.mem.startsWith(u8, base, "/private/tmp/") or
+        std.mem.startsWith(u8, base, "/private/var/folders/"))
+        return error.SkipZigTest;
+    return base;
+}
+
+test "system: a write outside the keg/prefix is blocked by the fence, not the argv lint" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try test_io.skipIfNoSubprocess();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try fenceTmpBase(&tmp, &base_buf);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prefix = try std.fmt.allocPrint(a, "{s}/opt/malt", .{base});
+    const cellar = try std.fmt.allocPrint(a, "{s}/Cellar/foo/1.0", .{prefix});
+    // Sibling of the prefix: outside both the keg and every blessed subtree.
+    const outside = try std.fmt.allocPrint(a, "{s}/pwned", .{base});
+
+    var lio = LiveIo.init();
+    defer lio.deinit();
+    const ctx = ExecCtx{
+        .allocator = a,
+        .io = lio.io(),
+        .environ = malt.app_ctx.processEnviron(),
+        .cellar_path = cellar,
+        .malt_prefix = prefix,
+    };
+
+    // argv0 (/usr/bin/touch) is a system-dir path the lint accepts; only the OS
+    // fence can stop the out-of-root write the argument targets. The denied
+    // write makes touch print "Operation not permitted" to the inherited
+    // stderr; mute fd 2 around the spawn (the argv-only invariant rules out a
+    // shell redirect) so it can't leak into the build runner's error capture
+    // and read as a spurious failure. Restored before the assertions.
+    const v = blk: {
+        const devnull = try std.Io.Dir.cwd().openFile(std.Options.debug_io, "/dev/null", .{ .mode = .write_only });
+        defer devnull.close(std.Options.debug_io);
+        const saved_err = std.c.dup(std.posix.STDERR_FILENO);
+        defer {
+            _ = std.c.dup2(saved_err, std.posix.STDERR_FILENO);
+            _ = std.c.close(saved_err);
+        }
+        _ = std.c.dup2(devnull.handle, std.posix.STDERR_FILENO);
+        break :blk try process.system(ctx, null, &.{
+            .{ .string = "/usr/bin/touch" },
+            .{ .string = outside },
+        });
+    };
+
+    try testing.expect(!v.bool); // denied write → touch exits nonzero
+    if (std.Io.Dir.cwd().access(std.Options.debug_io, outside, .{})) |_|
+        return error.SandboxFenceLeaked
+    else |_| {}
+}
+
+test "system: a write into the keg still succeeds under the fence (no over-confinement)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try test_io.skipIfNoSubprocess();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try fenceTmpBase(&tmp, &base_buf);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prefix = try std.fmt.allocPrint(a, "{s}/opt/malt", .{base});
+    const cellar = try std.fmt.allocPrint(a, "{s}/Cellar/foo/1.0", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, cellar);
+    const inside = try std.fmt.allocPrint(a, "{s}/marker", .{cellar});
+
+    var lio = LiveIo.init();
+    defer lio.deinit();
+    const ctx = ExecCtx{
+        .allocator = a,
+        .io = lio.io(),
+        .environ = malt.app_ctx.processEnviron(),
+        .cellar_path = cellar,
+        .malt_prefix = prefix,
+    };
+
+    // A keg-local write is exactly what a real post_install does; the fence
+    // must allow it or it would reject the whole regression corpus.
+    const v = try process.system(ctx, null, &.{
+        .{ .string = "/usr/bin/touch" },
+        .{ .string = inside },
+    });
+
+    try testing.expect(v.bool); // allowed write → touch exits 0
+    try std.Io.Dir.cwd().access(std.Options.debug_io, inside, .{});
 }
 
 test "fileExist checks a real path" {
