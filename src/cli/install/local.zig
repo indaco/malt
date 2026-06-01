@@ -593,19 +593,21 @@ pub fn materializeRubyFormula(
         // staging file (which `mt doctor --fix` and the tap-tmp
         // cleanup regression already reclaim).
         // A non-terminal sink (bundle) skips the bar — the global progress
-        // mode is set-once and can't be quieted mid-run.
-        var bar = progress_mod.ProgressBar.init(resolved.name, 0);
-        const bar_cb: ?client_mod.ProgressCallback = if (sink.show_progress)
-            .{ .context = @ptrCast(&bar), .func = &download.progressBridge }
+        // mode is set-once and can't be quieted mid-run. Rendered as a
+        // one-line group so it disables autowrap and restores on exit.
+        var sp: ?progress_mod.SingleBar = if (sink.show_progress) progress_mod.SingleBar.init(resolved.name, 0) else null;
+        defer if (sp) |*s| s.finish();
+        const bar_cb: ?client_mod.ProgressCallback = if (sp) |*s|
+            .{ .context = @ptrCast(s.bind()), .func = &download.progressBridge }
         else
             null;
         var download_resp = http.getWithHeaders(resolved.url, &.{}, bar_cb) catch {
-            if (sink.show_progress) bar.finish();
+            if (sp) |*s| s.bar.finish();
             sink.err("Failed to download {s}", .{resolved.name});
             return InstallError.DownloadFailed;
         };
         defer download_resp.deinit();
-        if (sink.show_progress) bar.finish();
+        if (sp) |*s| s.bar.finish();
 
         if (download_resp.status != 200) {
             sink.err("Download failed with status {d}", .{download_resp.status});
@@ -869,11 +871,13 @@ fn materializeTapCask(
     installer.offline = ctx.offline;
 
     // A non-terminal sink (bundle) skips the bar — the global progress
-    // mode is set-once and can't be quieted mid-run.
-    var bar = progress_mod.ProgressBar.init(cask.token, 0);
-    if (sink.show_progress) {
+    // mode is set-once and can't be quieted mid-run. Rendered as a
+    // one-line group so it disables autowrap and restores on exit.
+    var sp: ?progress_mod.SingleBar = if (sink.show_progress) progress_mod.SingleBar.init(cask.token, 0) else null;
+    defer if (sp) |*s| s.finish();
+    if (sp) |*s| {
         installer.progress = .{
-            .context = @ptrCast(&bar),
+            .context = @ptrCast(s.bind()),
             .func = &download.progressBridge,
         };
     }
@@ -889,7 +893,7 @@ fn materializeTapCask(
     if (download_only) {
         output.emitNdjsonEvent(.download_started, cask.token, null);
         const cache_path = installer.downloadOnly(&cask) catch |e| {
-            if (sink.show_progress) bar.finish();
+            if (sp) |*s| s.bar.finish();
             output.emitNdjsonEvent(.download_complete, cask.token, "failed");
             sink.err("Failed to download cask {s}: {s}", .{ cask.token, @errorName(e) });
             return switch (e) {
@@ -898,7 +902,7 @@ fn materializeTapCask(
                 else => InstallError.CaskNotFound,
             };
         };
-        if (sink.show_progress) bar.finish();
+        if (sp) |*s| s.bar.finish();
         defer allocator.free(cache_path);
         output.emitNdjsonEvent(.download_complete, cask.token, "ok");
         sink.success("{s} {s} downloaded to {s}", .{ cask.token, cask.version, cache_path });
@@ -906,7 +910,7 @@ fn materializeTapCask(
     }
 
     const app_path = installer.install(&cask) catch |e| {
-        if (sink.show_progress) bar.finish();
+        if (sp) |*s| s.bar.finish();
         sink.err("Failed to install cask {s}: {s}", .{ cask.token, @errorName(e) });
         return switch (e) {
             error.DownloadFailed, error.Sha256Mismatch => InstallError.DownloadFailed,
@@ -914,7 +918,7 @@ fn materializeTapCask(
             else => InstallError.CaskNotFound,
         };
     };
-    if (sink.show_progress) bar.finish();
+    if (sp) |*s| s.bar.finish();
     defer allocator.free(app_path);
 
     // `try` is the invariant: success line never fires without a row.

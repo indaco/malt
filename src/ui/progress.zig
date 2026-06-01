@@ -8,15 +8,15 @@
 //! mid-chain output.
 
 const std = @import("std");
+/// Process-wide io and stderr sink seeded once from `main` via
+/// `setRuntime`. `pkg_stderr` defaults to fd `-1` so unconfigured tests
+/// silently drop progress writes; `pkg_io` defaults to `debug_io`.
+var pkg_io: std.Io = std.Options.debug_io;
 const builtin = @import("builtin");
 
 const color = @import("color.zig");
 const output = @import("output.zig");
 
-/// Process-wide io and stderr sink seeded once from `main` via
-/// `setRuntime`. `pkg_stderr` defaults to fd `-1` so unconfigured tests
-/// silently drop progress writes; `pkg_io` defaults to `debug_io`.
-var pkg_io: std.Io = std.Options.debug_io;
 var pkg_stderr: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
 
 /// Selects how long-running mutators report progress. Resolved once at
@@ -272,12 +272,10 @@ pub const ProgressBar = struct {
                 if (self.total > 0) {
                     self.current = self.total;
                 }
+                // Every bar belongs to a group that reserves its row up
+                // front (`SingleBar` for the one-bar case), so the final
+                // frame is an in-place redraw — no trailing newline.
                 self.render();
-                // Standalone bars own their trailing newline; multi-progress
-                // groups reserve the row up front.
-                if (self.multi == null) {
-                    writeStderrAll("\n");
-                }
             },
         }
     }
@@ -600,6 +598,43 @@ pub const ProgressBar = struct {
         }
 
         writeStderrAll(buf[0..pos]);
+    }
+};
+
+/// A single download bar rendered as a group of one. Standalone callers
+/// (single-package install, cask, single-keg migrate, upgrade) used to
+/// hand-roll a setup-free `ProgressBar`, which never disabled autowrap —
+/// so an over-width bar line wrapped and every redraw stacked a fresh row.
+/// Routing them through `MultiProgress.init(1)` reuses the same
+/// autowrap-off + cursor-hide + line-reservation + restore guarantees the
+/// multi-package path already had, killing the divergence and the bug.
+///
+/// Self-referential: `bar.multi` points back into this struct, so it must
+/// be pinned at its final address before use — `init` then `bind`.
+pub const SingleBar = struct {
+    multi: MultiProgress,
+    bar: ProgressBar,
+
+    pub fn init(label: []const u8, total: u64) SingleBar {
+        return .{
+            .multi = MultiProgress.init(1),
+            .bar = ProgressBar.init(label, total),
+        };
+    }
+
+    /// Attach the bar to its one-line group and hand back a stable pointer.
+    /// Call once, after the struct is at its final stack address.
+    pub fn bind(self: *SingleBar) *ProgressBar {
+        self.bar.multi = &self.multi;
+        self.bar.line_index = 0;
+        return &self.bar;
+    }
+
+    /// Restore terminal state (autowrap, cursor). The bar's final frame is
+    /// rendered by the caller's `bar.finish()`; this only tears down the
+    /// group, mirroring `defer multi.finish()` on the multi-package path.
+    pub fn finish(self: *SingleBar) void {
+        self.multi.finish();
     }
 };
 
@@ -1069,6 +1104,103 @@ test "MultiProgress in tty mode on a TTY emits the cursor-hide prelude" {
     // Prelude + 2 reserved newlines + restore-on-finish (autowrap on,
     // cursor on, carriage return).
     try std.testing.expectEqualStrings("\x1b[?25l\x1b[?7l\n\n\x1b[?7h\x1b[?25h\r", buf.items);
+}
+
+// The single-bar entry point must inherit the same terminal setup as the
+// multi-package path — a "group of one". Pinning the autowrap-disable
+// prelude here is the regression guard: a future change that drops back to
+// a setup-free standalone bar (the divergence that let over-width upgrade
+// bars wrap and stack) fails this test.
+test "SingleBar in tty mode emits the autowrap-disable prelude" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var sp = SingleBar.init("tree", 0);
+    sp.finish();
+
+    // Prelude + 1 reserved newline + restore-on-finish.
+    try std.testing.expectEqualStrings("\x1b[?25l\x1b[?7l\n\x1b[?7h\x1b[?25h\r", buf.items);
+}
+
+// The unified single-bar path redraws in place via cursor moves; the only
+// newline in its output is the one reserved row from MultiProgress(1).
+// A per-tick or trailing `\n` would re-introduce the standalone bar's
+// "stack a fresh row per redraw" symptom.
+test "SingleBar renders one logical line with no stray newline" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var sp = SingleBar.init("tree", 100);
+    const bar = sp.bind();
+    bar.update(50);
+    bar.finish();
+    sp.finish();
+
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, buf.items, "\n"));
+}
+
+// Regression guard for AC3: routing the single-bar case through a group
+// must not leak DECSET/cursor-hide setup into CI logs. In plain mode the
+// bar still emits its one starting / one done line and nothing else.
+test "SingleBar in plain mode emits plain lines and no ANSI setup" {
+    const prior_mode = mode();
+    setMode(.plain);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var sp = SingleBar.init("tree", 1000);
+    const bar = sp.bind();
+    bar.update(0);
+    bar.update(500); // intermediate updates do not spam new lines
+    bar.finish();
+    sp.finish();
+
+    try std.testing.expectEqualStrings("tree: starting\ntree: done\n", buf.items);
+}
+
+// Regression guard for AC3: none mode through the single-bar primitive
+// writes zero bytes, even with the TTY render branch forced.
+test "SingleBar in none mode writes no bytes" {
+    const prior_mode = mode();
+    setMode(.none);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var sp = SingleBar.init("tree", 1000);
+    const bar = sp.bind();
+    bar.update(500);
+    bar.finish();
+    sp.finish();
+
+    try std.testing.expectEqualStrings("", buf.items);
 }
 
 // A standalone bar that's `finish`-ed without any prior `update` still
