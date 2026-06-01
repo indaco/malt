@@ -2,16 +2,26 @@
 //! Delegates post_install script execution to the system Ruby interpreter.
 //! This is an experimental stopgap until malt can natively evaluate the
 //! Homebrew DSL.
+//!
+//! Spawn, result glue, and sandbox wiring live here; detection and source
+//! extraction are split into `ruby/detect.zig` and `ruby/source.zig` so
+//! DSL-only and net-only tests stop cross-linking through this driver.
 
 const std = @import("std");
-const pins = @import("pins.zig");
-const hash_mod = @import("hash.zig");
-const http_client = @import("../net/client.zig");
-const api_mod = @import("../net/api.zig");
 const sandbox = @import("sandbox/macos.zig");
-const dsl_lexer = @import("dsl/lexer.zig");
-const dsl_parser = @import("dsl/parser.zig");
 const fs_atomic = @import("../fs/atomic.zig");
+const detect = @import("ruby/detect.zig");
+const source = @import("ruby/source.zig");
+
+// Public surface preserved through the top-level file: the only consumers
+// (`cli/install/post_install.zig`, `cli/doctor/post_install.zig`) and the
+// existing test suite reach detection/extraction via `ruby_subprocess.X`.
+pub const detectRuby = detect.detectRuby;
+pub const findHomebrewCoreTap = detect.findHomebrewCoreTap;
+pub const resolveFormulaRbPath = detect.resolveFormulaRbPath;
+pub const extractPostInstallBody = source.extractPostInstallBody;
+pub const extractPostInstallFromSource = source.extractPostInstallFromSource;
+pub const fetchPostInstallFromGitHub = source.fetchPostInstallFromGitHub;
 
 pub const RubyError = error{
     RubyNotFound,
@@ -41,206 +51,6 @@ pub fn describeError(err: RubyError) []const u8 {
     };
 }
 
-/// Upper bound on a fetched formula .rb blob. The Homebrew-wide 99th
-/// percentile is ~40 KiB; 1 MiB is orders of magnitude of headroom
-/// without giving a hostile response room to grow.
-const max_formula_rb_bytes: usize = 1024 * 1024;
-
-/// Detect a usable Ruby interpreter. Returns a caller-owned absolute path
-/// or null. Caller must free the returned slice with `allocator.free`.
-///
-/// Previously this function returned static slices for the hardcoded
-/// candidates and `allocator.dupe`d slices for the rbenv/asdf/PATH
-/// branches — the only call site never freed, so the heap branches
-/// leaked. Unifying the contract on "always heap-owned" lets the caller
-/// pair every successful return with one `defer allocator.free(...)`.
-///
-/// Public for testability; not part of the stable surface.
-pub fn detectRuby(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator) ?[]const u8 {
-    const candidates = [_][]const u8{
-        "/opt/homebrew/opt/ruby/bin/ruby",
-        "/usr/local/opt/ruby/bin/ruby",
-        "/usr/bin/ruby",
-    };
-    for (candidates) |path| {
-        std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
-        return allocator.dupe(u8, path) catch return null;
-    }
-
-    // Reusable scratch for path joining — avoids per-iteration heap churn.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-
-    // User-local version managers: rbenv, asdf
-    if (std.process.Environ.getPosix(environ, "HOME")) |home| {
-        const shim_suffixes = [_][]const u8{ "/.rbenv/shims/ruby", "/.asdf/shims/ruby" };
-        for (shim_suffixes) |suffix| {
-            const path = std.fmt.bufPrint(&buf, "{s}{s}", .{ home, suffix }) catch continue;
-            std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
-            return allocator.dupe(u8, path) catch return null;
-        }
-    }
-
-    // PATH search
-    if (std.process.Environ.getPosix(environ, "PATH")) |path_env| {
-        var it = std.mem.splitScalar(u8, path_env, ':');
-        while (it.next()) |dir| {
-            if (dir.len == 0) continue;
-            const candidate = std.fmt.bufPrint(&buf, "{s}/ruby", .{dir}) catch continue;
-            std.Io.Dir.accessAbsolute(io, candidate, .{}) catch continue;
-            return allocator.dupe(u8, candidate) catch return null;
-        }
-    }
-
-    return null;
-}
-
-/// Locate the homebrew-core tap clone on disk. Returns the tap path or null.
-pub fn findHomebrewCoreTap(io: std.Io) ?[]const u8 {
-    const tap_paths = [_][]const u8{
-        "/opt/homebrew/Library/Taps/homebrew/homebrew-core",
-        "/usr/local/Homebrew/Library/Taps/homebrew/homebrew-core",
-    };
-    for (tap_paths) |path| {
-        std.Io.Dir.accessAbsolute(io, path, .{}) catch continue;
-        return path;
-    }
-    return null;
-}
-
-/// Resolve the .rb source file path for a formula within the tap.
-/// Tries new sharded layout first (Formula/f/foo.rb), falls back to flat
-/// (Formula/foo.rb).
-pub fn resolveFormulaRbPath(io: std.Io, buf: *[1024]u8, tap_path: []const u8, name: []const u8) ?[]const u8 {
-    if (name.len == 0) return null;
-
-    // New layout: Formula/FIRST_LETTER/NAME.rb
-    const new_path = std.fmt.bufPrint(buf, "{s}/Formula/{c}/{s}.rb", .{
-        tap_path, name[0], name,
-    }) catch return null;
-    std.Io.Dir.accessAbsolute(io, new_path, .{}) catch {
-        // Fall through to old layout
-        const old_path = std.fmt.bufPrint(buf, "{s}/Formula/{s}.rb", .{
-            tap_path, name,
-        }) catch return null;
-        std.Io.Dir.accessAbsolute(io, old_path, .{}) catch return null;
-        return old_path;
-    };
-    return new_path;
-}
-
-/// Outcome of the GitHub fallback fetch. Distinguishing `body_not_found`
-/// (we got source, no parseable post_install) from `fetch_failed`
-/// (network, HTTP, hash, or manifest miss) is what lets the resolver
-/// surface an actionable tag instead of collapsing onto TapNotFound.
-const FetchOutcome = union(enum) {
-    body: []const u8,
-    body_not_found,
-    fetch_failed,
-};
-
-/// Tagged variant of `fetchPostInstallFromGitHub` that preserves the
-/// distinction between a fetch arm that failed and one that succeeded
-/// but yielded no extractable body. Internal: the public optional-slice
-/// wrapper is what CLI call sites consume.
-fn fetchPostInstallFromGitHubTagged(
-    io: std.Io,
-    environ: std.process.Environ,
-    allocator: std.mem.Allocator,
-    name: []const u8,
-) FetchOutcome {
-    // Reject anything that wouldn't pass the API name allowlist
-    // ([a-z0-9@._+-]) — the URL path substitutes the name directly.
-    api_mod.validateName(name) catch return .fetch_failed;
-
-    // Fail-closed: no manifest entry, no fetch. The caller decides whether
-    // to warn — core stays headless.
-    const expected_hash = pins.expectedSha256(name) orelse return .fetch_failed;
-
-    var url_buf: [512]u8 = undefined;
-    const url = std.fmt.bufPrint(
-        &url_buf,
-        "https://raw.githubusercontent.com/Homebrew/homebrew-core/{s}/Formula/{c}/{s}.rb",
-        .{ &pins.homebrew_core_commit_sha, name[0], name },
-    ) catch return .fetch_failed;
-
-    var http = http_client.HttpClient.init(io, environ, allocator);
-    defer http.deinit();
-
-    var resp = http.get(url) catch return .fetch_failed;
-    defer resp.deinit();
-    if (resp.status != 200) return .fetch_failed;
-    if (resp.body.len == 0 or resp.body.len > max_formula_rb_bytes) return .fetch_failed;
-
-    var actual_hex: [pins.sha256_hex_len]u8 = undefined;
-    pins.sha256Hex(resp.body, &actual_hex);
-    // Constant-time compare matches every other SHA check in the install
-    // / bottle / verify path; no timing oracle today, but the consistency
-    // makes the spawn-audit guard's job easier.
-    if (!hash_mod.constantTimeEql(u8, actual_hex[0..], expected_hash)) return .fetch_failed;
-
-    if (extractPostInstallFromSource(allocator, resp.body)) |body| {
-        return .{ .body = body };
-    }
-    return .body_not_found;
-}
-
-/// Fetch a formula's .rb source from the pinned homebrew-core commit,
-/// verify its SHA256 against the embedded manifest, and extract the
-/// post_install body.
-///
-/// This path is the fallback when the homebrew-core tap is not cloned
-/// locally. It refuses anything whose hash isn't pre-authorized in
-/// `pins_manifest.txt` — a floating-HEAD fetch would give an attacker
-/// who controls the raw.githubusercontent.com response (MITM with a
-/// valid cert, compromised CDN edge, branch rewrite) a direct path to
-/// code execution via `--use-system-ruby`.
-///
-/// Returns the post_install body or null on any fetch / verify / parse
-/// failure. All failures are silent-to-caller; the caller decides
-/// whether to warn.
-pub fn fetchPostInstallFromGitHub(io: std.Io, environ: std.process.Environ, allocator: std.mem.Allocator, name: []const u8) ?[]const u8 {
-    return switch (fetchPostInstallFromGitHubTagged(io, environ, allocator, name)) {
-        .body => |b| b,
-        .body_not_found, .fetch_failed => null,
-    };
-}
-
-/// Extract post_install body + any sibling `def` blocks at the same indent,
-/// concatenated so the DSL sees helpers registered before the body runs.
-/// Without this, formulas like ca-certificates/llvm@21 whose post_install
-/// calls into private helpers would fall back to `--use-system-ruby`.
-pub fn extractPostInstallFromSource(allocator: std.mem.Allocator, source: []const u8) ?[]const u8 {
-    const post_install_span = findDefBlock(source, "post_install") orelse return null;
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    // Siblings first — registered as user methods before the post_install
-    // body runs. On parse fail we emit an empty stub under the sibling's
-    // name so a dispatcher post_install (ca-certificates, …) resolves to a
-    // no-op instead of logging `unknown_method` and tripping hasErrors().
-    var pos: usize = 0;
-    while (findAnyDefBlockAtIndent(source, pos, post_install_span.indent)) |span| {
-        const is_self = std.mem.eql(u8, span.name, "post_install");
-        if (!is_self) {
-            if (canParseBlock(allocator, source[span.block_start..span.block_end])) {
-                out.appendSlice(allocator, source[span.block_start..span.block_end]) catch return null;
-                out.append(allocator, '\n') catch return null;
-            } else {
-                out.appendSlice(allocator, "def ") catch return null;
-                out.appendSlice(allocator, span.name) catch return null;
-                out.appendSlice(allocator, "\nend\n") catch return null;
-            }
-        }
-        pos = span.block_end;
-    }
-
-    // Then the post_install body itself (no `def`/`end` wrapper).
-    out.appendSlice(allocator, source[post_install_span.body_start..post_install_span.body_end]) catch return null;
-
-    return out.toOwnedSlice(allocator) catch return null;
-}
-
 /// Which arm of the local-tap path was the last one to fail. Carried
 /// from `resolvePostInstallBody` into the failure classifier so the
 /// returned RubyError reflects the deepest-known reason rather than a
@@ -258,7 +68,7 @@ const LocalArmFailure = enum {
 /// arm's failure mode and the fetch arm's outcome. Operators triage by
 /// the variant, so we surface the deepest-known reason — e.g. a hash
 /// mismatch becomes `FetchFailed`, not `TapNotFound`.
-fn classifyResolveFailure(local: LocalArmFailure, fetch_failure: FetchOutcome) RubyError {
+fn classifyResolveFailure(local: LocalArmFailure, fetch_failure: source.FetchOutcome) RubyError {
     return switch (fetch_failure) {
         .body => unreachable, // success isn't a failure to classify
         .body_not_found => RubyError.PostInstallBodyNotFound,
@@ -295,156 +105,11 @@ pub fn resolvePostInstallBody(
         }
     }
 
-    const fetch = fetchPostInstallFromGitHubTagged(io, environ, allocator, name);
+    const fetch = source.fetchPostInstallFromGitHubTagged(io, environ, allocator, name);
     return switch (fetch) {
         .body => |b| b,
         else => classifyResolveFailure(local, fetch),
     };
-}
-
-/// Run the DSL parser over an isolated sibling-def block and report whether
-/// it produced zero diagnostics. Used to gate sibling inclusion so a formula
-/// whose `def install` or `def macos_post_install` contains Ruby we don't
-/// speak yet (keyword args, `Tempfile`, `.scan` regex blocks, …) doesn't
-/// wreck the whole post_install extraction.
-fn canParseBlock(allocator: std.mem.Allocator, src: []const u8) bool {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    var lex = dsl_lexer.Lexer.init(src);
-    var p = dsl_parser.Parser.init(arena.allocator(), &lex);
-    _ = p.parseBlock() catch return false;
-    return p.diagnostics().len == 0;
-}
-
-/// Span describing a single `def NAME ... end` block at a known indent.
-const DefSpan = struct {
-    name: []const u8,
-    indent: usize,
-    block_start: usize, // column 0 of the `def` line
-    block_end: usize, // index AFTER the matching `end` line's newline
-    body_start: usize, // index just after the `def` line's newline
-    body_end: usize, // `line_start` of the matching `end`
-};
-
-/// Find the named def (`def <name>`) at class-body indent and return its span.
-fn findDefBlock(source: []const u8, name: []const u8) ?DefSpan {
-    var buf: [64]u8 = undefined;
-    const marker = std.fmt.bufPrint(&buf, "def {s}", .{name}) catch return null;
-    var pos: usize = 0;
-    while (std.mem.indexOfPos(u8, source, pos, marker)) |idx| {
-        const span = defSpanAt(source, idx) orelse {
-            pos = idx + marker.len;
-            continue;
-        };
-        if (std.mem.eql(u8, span.name, name)) return span;
-        pos = span.block_end;
-    }
-    return null;
-}
-
-/// Return the next `def ... end` block at `indent` starting at or after
-/// `pos`. Returns null when no more defs at that indent exist.
-fn findAnyDefBlockAtIndent(source: []const u8, start: usize, indent: usize) ?DefSpan {
-    var pos = start;
-    while (std.mem.indexOfPos(u8, source, pos, "def ")) |idx| {
-        const span = defSpanAt(source, idx) orelse {
-            pos = idx + 4;
-            continue;
-        };
-        if (span.indent == indent) return span;
-        pos = span.block_end;
-    }
-    return null;
-}
-
-/// If `idx` points at the `d` of a `def` that starts a line, build its
-/// DefSpan. Returns null if the context isn't a real top-of-line def.
-fn defSpanAt(source: []const u8, idx: usize) ?DefSpan {
-    // Must be at line start (optionally preceded by spaces).
-    const line_start = if (idx == 0)
-        0
-    else if (std.mem.findScalarLast(u8, source[0..idx], '\n')) |nl|
-        nl + 1
-    else
-        0;
-
-    // Verify the gap between line_start and idx is only spaces.
-    for (source[line_start..idx]) |c| if (c != ' ') return null;
-    const indent = idx - line_start;
-
-    // Skip `def ` + optional leading whitespace to the name.
-    var name_start = idx + 4; // after "def "
-    while (name_start < source.len and source[name_start] == ' ') name_start += 1;
-
-    // Ruby method names: letters, digits, `_`, optional trailing `?`/`!`/`=`.
-    var ne = name_start;
-    while (ne < source.len) : (ne += 1) {
-        const c = source[ne];
-        if (std.ascii.isAlphanumeric(c) or c == '_') continue;
-        break;
-    }
-    if (ne < source.len and (source[ne] == '?' or source[ne] == '!' or source[ne] == '=')) {
-        ne += 1;
-    }
-    if (ne == name_start) return null;
-
-    const body_start = std.mem.findScalarPos(u8, source, idx, '\n') orelse return null;
-    const matching_end = findMatchingEnd(source, body_start + 1, indent) orelse return null;
-
-    return .{
-        .name = source[name_start..ne],
-        .indent = indent,
-        .block_start = line_start,
-        .block_end = matching_end.block_end,
-        .body_start = body_start + 1,
-        .body_end = matching_end.end_line_start,
-    };
-}
-
-/// Locate the matching `end` line at exactly `indent` columns. Returns both
-/// the index AFTER the end line's newline and the index of the end line's
-/// first character so callers can slice both the block and its body.
-fn findMatchingEnd(source: []const u8, start: usize, indent: usize) ?struct {
-    end_line_start: usize,
-    block_end: usize,
-} {
-    var pos = start;
-    while (pos < source.len) {
-        const line_start = pos;
-        const line_end = std.mem.findScalarPos(u8, source, pos, '\n') orelse source.len;
-
-        var line_indent: usize = 0;
-        var scan = line_start;
-        while (scan < line_end and source[scan] == ' ') : (scan += 1) line_indent += 1;
-
-        if (line_indent == indent and
-            line_end - scan >= 3 and
-            std.mem.eql(u8, source[scan..@min(scan + 3, line_end)], "end") and
-            (scan + 3 >= line_end or source[scan + 3] == ' ' or source[scan + 3] == '\n'))
-        {
-            const block_end = if (line_end < source.len) line_end + 1 else source.len;
-            return .{ .end_line_start = line_start, .block_end = block_end };
-        }
-
-        pos = if (line_end < source.len) line_end + 1 else source.len;
-    }
-    return null;
-}
-
-/// Extract the post_install method body + sibling helpers from a formula
-/// .rb source file. Thin file-IO wrapper around `extractPostInstallFromSource`
-/// so the parsing contract lives in one place.
-pub fn extractPostInstallBody(io: std.Io, allocator: std.mem.Allocator, rb_path: []const u8) ?[]const u8 {
-    const file = std.Io.Dir.openFileAbsolute(io, rb_path, .{}) catch return null;
-    defer file.close(io);
-
-    const st = file.stat(io) catch return null;
-    const size: usize = @intCast(@min(@as(u64, 1024 * 1024), st.size));
-    const source = allocator.alloc(u8, size) catch return null;
-    defer allocator.free(source);
-    const n = file.readPositionalAll(io, source, 0) catch return null;
-
-    return extractPostInstallFromSource(allocator, source[0..n]);
 }
 
 /// Generate the Ruby wrapper script that provides a FormulaStub sandbox
@@ -453,9 +118,9 @@ pub fn extractPostInstallBody(io: std.Io, allocator: std.mem.Allocator, rb_path:
 /// `prefix`, `name`, `version` are interpolated into single-quoted Ruby
 /// literals. They MUST contain only bytes from the centralised charset in
 /// `fs/atomic.zig` — anything else (`'`, `\`, `\n`, control bytes, …)
-/// would break the literal or open an injection (BUG-007). We validate
-/// at the boundary rather than escape so the contract is one-line
-/// reviewable: pass → safe to interpolate, fail → InvalidInput.
+/// would break the literal or open an injection. We validate at the
+/// boundary rather than escape so the contract is one-line reviewable:
+/// pass → safe to interpolate, fail → InvalidInput.
 pub fn generateWrapper(
     allocator: std.mem.Allocator,
     name: []const u8,
