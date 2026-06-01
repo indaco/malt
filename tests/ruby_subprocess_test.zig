@@ -1,10 +1,11 @@
-//! malt — ruby_subprocess pure-helper tests
-//! Covers tap discovery, formula .rb path resolution (new sharded and flat
-//! layouts), and post_install body extraction from a .rb file on disk.
+//! malt — ruby_subprocess integration tests.
+//! Wrapper-script generation, the spawn-path input guard, error-text
+//! mapping, body resolution, and the ca-certificates end-to-end shape.
+//! Pure detection + source-extraction units live inline in
+//! `src/core/ruby/{detect,source}.zig`.
 
 const std = @import("std");
 const malt = @import("malt");
-const test_io = @import("test_io");
 const testing = std.testing;
 const ruby = @import("malt").ruby_subprocess;
 
@@ -14,122 +15,6 @@ fn testIo() std.Io {
 
 fn testEnviron() std.process.Environ {
     return malt.app_ctx.processEnviron();
-}
-
-fn uniqueDir(suffix: []const u8) ![]u8 {
-    const p = try std.fmt.allocPrint(
-        testing.allocator,
-        "/tmp/malt_ruby_sub_{d}_{s}",
-        .{ test_io.nanoTimestamp(
-            std.Options.debug_io,
-        ), suffix },
-    );
-    try test_io.cwd().createDirPath(std.Options.debug_io, p);
-    return p;
-}
-
-test "findHomebrewCoreTap returns null when the canonical paths are absent" {
-    // On most CI boxes the tap is absent. We can't assert true/null
-    // deterministically, so we at least exercise the lookup loop.
-    _ = ruby.findHomebrewCoreTap(testIo());
-}
-
-test "resolveFormulaRbPath returns null for an empty name" {
-    var buf: [1024]u8 = undefined;
-    try testing.expect(ruby.resolveFormulaRbPath(testIo(), &buf, "/any/tap", "") == null);
-}
-
-test "resolveFormulaRbPath returns null when neither layout exists" {
-    const tap = try uniqueDir("no_formula");
-    defer testing.allocator.free(tap);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
-    var buf: [1024]u8 = undefined;
-    try testing.expect(ruby.resolveFormulaRbPath(testIo(), &buf, tap, "wget") == null);
-}
-
-test "resolveFormulaRbPath prefers the sharded Formula/{first}/{name}.rb layout" {
-    const tap = try uniqueDir("sharded");
-    defer testing.allocator.free(tap);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
-    const shard_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Formula/w", .{tap});
-    defer testing.allocator.free(shard_dir);
-    try test_io.cwd().createDirPath(std.Options.debug_io, shard_dir);
-    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{shard_dir});
-    defer testing.allocator.free(rb);
-    (try test_io.createFileAbsolute(std.Options.debug_io, rb, .{})).close(std.Options.debug_io);
-
-    var buf: [1024]u8 = undefined;
-    const got = ruby.resolveFormulaRbPath(testIo(), &buf, tap, "wget");
-    try testing.expect(got != null);
-    try testing.expect(std.mem.endsWith(u8, got.?, "/Formula/w/wget.rb"));
-}
-
-test "resolveFormulaRbPath falls back to the flat Formula/{name}.rb layout" {
-    const tap = try uniqueDir("flat");
-    defer testing.allocator.free(tap);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
-    const flat_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Formula", .{tap});
-    defer testing.allocator.free(flat_dir);
-    try test_io.cwd().createDirPath(std.Options.debug_io, flat_dir);
-    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/wget.rb", .{flat_dir});
-    defer testing.allocator.free(rb);
-    (try test_io.createFileAbsolute(std.Options.debug_io, rb, .{})).close(std.Options.debug_io);
-
-    var buf: [1024]u8 = undefined;
-    const got = ruby.resolveFormulaRbPath(testIo(), &buf, tap, "wget");
-    try testing.expect(got != null);
-    try testing.expect(std.mem.endsWith(u8, got.?, "/Formula/wget.rb"));
-}
-
-test "extractPostInstallBody returns null when the file has no post_install" {
-    const tap = try uniqueDir("no_postinstall");
-    defer testing.allocator.free(tap);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
-    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/hello.rb", .{tap});
-    defer testing.allocator.free(rb);
-    {
-        const f = try test_io.createFileAbsolute(std.Options.debug_io, rb, .{});
-        try f.writeStreamingAll(std.Options.debug_io, "class Hello < Formula\n  url \"x\"\nend\n");
-        f.close(std.Options.debug_io);
-    }
-    try testing.expect(ruby.extractPostInstallBody(testIo(), testing.allocator, rb) == null);
-}
-
-test "extractPostInstallBody returns null for a missing file" {
-    try testing.expect(ruby.extractPostInstallBody(testIo(), testing.allocator, "/tmp/malt_ruby_missing_xyz.rb") == null);
-}
-
-test "extractPostInstallFromSource handles an in-memory Ruby body" {
-    const src =
-        \\class Hello < Formula
-        \\  def post_install
-        \\    mkdir_p "etc"
-        \\  end
-        \\end
-        \\
-    ;
-    const body = ruby.extractPostInstallFromSource(testing.allocator, src);
-    try testing.expect(body != null);
-    defer testing.allocator.free(body.?);
-    try testing.expect(std.mem.indexOf(u8, body.?, "mkdir_p \"etc\"") != null);
-}
-
-test "extractPostInstallFromSource returns null when no post_install exists" {
-    const src = "class X < Formula\n  url \"x\"\nend\n";
-    try testing.expect(ruby.extractPostInstallFromSource(testing.allocator, src) == null);
-}
-
-test "extractPostInstallFromSource handles post_install at the top level (no indent)" {
-    const src =
-        \\def post_install
-        \\touch "foo"
-        \\end
-        \\
-    ;
-    const body = ruby.extractPostInstallFromSource(testing.allocator, src);
-    try testing.expect(body != null);
-    defer testing.allocator.free(body.?);
-    try testing.expect(std.mem.indexOf(u8, body.?, "touch \"foo\"") != null);
 }
 
 test "generateWrapper emits a Ruby script containing the post_install body and prefix" {
@@ -267,120 +152,6 @@ test "generateWrapper rejects empty prefix" {
         error.InvalidInput,
         ruby.generateWrapper(testing.allocator, "pkg", "1.0", "", "ohai 'hi'\n"),
     );
-}
-
-test "fetchPostInstallFromGitHub returns null for an empty name" {
-    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
-    defer threaded.deinit();
-    try testing.expect(ruby.fetchPostInstallFromGitHub(threaded.io(), testEnviron(), testing.allocator, "") == null);
-}
-
-test "extractPostInstallBody captures the body between def post_install and matching end" {
-    const tap = try uniqueDir("with_postinstall");
-    defer testing.allocator.free(tap);
-    defer test_io.deleteTreeAbsolute(std.Options.debug_io, tap) catch {};
-    const rb = try std.fmt.allocPrint(testing.allocator, "{s}/hello.rb", .{tap});
-    defer testing.allocator.free(rb);
-    {
-        const f = try test_io.createFileAbsolute(std.Options.debug_io, rb, .{});
-        try f.writeStreamingAll(std.Options.debug_io,
-            \\class Hello < Formula
-            \\  def post_install
-            \\    mkdir_p "etc/hello"
-            \\    touch "etc/hello/config"
-            \\  end
-            \\end
-            \\
-        );
-        f.close(std.Options.debug_io);
-    }
-    const body = ruby.extractPostInstallBody(testIo(), testing.allocator, rb);
-    try testing.expect(body != null);
-    defer testing.allocator.free(body.?);
-    try testing.expect(std.mem.indexOf(u8, body.?, "mkdir_p \"etc/hello\"") != null);
-    try testing.expect(std.mem.indexOf(u8, body.?, "touch \"etc/hello/config\"") != null);
-    // Trailing `end` must NOT be inside the body.
-    try testing.expect(std.mem.indexOf(u8, body.?, "end\n") == null or
-        std.mem.findLast(u8, body.?, "end") == null);
-}
-
-// ---------------------------------------------------------------------------
-// Sibling-def extraction — real formulas (llvm@21, ca-certificates) define
-// helpers at class indent and call them from post_install. The extractor
-// must surface those helpers so the DSL can register them.
-// ---------------------------------------------------------------------------
-
-test "extractPostInstallFromSource prepends sibling defs so helpers resolve" {
-    const src =
-        \\class Foo < Formula
-        \\  def helper
-        \\    ohai "helped"
-        \\  end
-        \\
-        \\  def post_install
-        \\    helper
-        \\  end
-        \\end
-        \\
-    ;
-    const body = ruby.extractPostInstallFromSource(testing.allocator, src);
-    try testing.expect(body != null);
-    defer testing.allocator.free(body.?);
-
-    // Sibling def appears before post_install body content.
-    const idx_sibling = std.mem.indexOf(u8, body.?, "def helper") orelse return error.TestUnexpectedResult;
-    const idx_call = std.mem.indexOf(u8, body.?, "  helper\n") orelse return error.TestUnexpectedResult;
-    try testing.expect(idx_sibling < idx_call);
-    // `def post_install` itself is NOT repeated in the body — only its body.
-    try testing.expect(std.mem.indexOf(u8, body.?, "def post_install") == null);
-}
-
-test "extractPostInstallFromSource collects multiple sibling defs in file order" {
-    // Same shape as ca-certificates.rb — two mac/linux helpers plus the
-    // dispatcher post_install. All three must register before the body runs.
-    const src =
-        \\class Certs < Formula
-        \\  def macos_post_install
-        \\    ohai "mac"
-        \\  end
-        \\
-        \\  def linux_post_install
-        \\    ohai "linux"
-        \\  end
-        \\
-        \\  def post_install
-        \\    if OS.mac?
-        \\      macos_post_install
-        \\    else
-        \\      linux_post_install
-        \\    end
-        \\  end
-        \\end
-    ;
-    const body = ruby.extractPostInstallFromSource(testing.allocator, src);
-    try testing.expect(body != null);
-    defer testing.allocator.free(body.?);
-    try testing.expect(std.mem.indexOf(u8, body.?, "def macos_post_install") != null);
-    try testing.expect(std.mem.indexOf(u8, body.?, "def linux_post_install") != null);
-    try testing.expect(std.mem.indexOf(u8, body.?, "if OS.mac?") != null);
-}
-
-test "extractPostInstallFromSource skips nested defs inside post_install body" {
-    // A `def` nested inside the post_install body stays in the body; it is
-    // NOT promoted to a sibling (the indent match ensures this). No double
-    // occurrences.
-    const src =
-        \\class X < Formula
-        \\  def post_install
-        \\    ohai "hi"
-        \\  end
-        \\end
-    ;
-    const body = ruby.extractPostInstallFromSource(testing.allocator, src);
-    try testing.expect(body != null);
-    defer testing.allocator.free(body.?);
-    try testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, body.?, "def post_install"));
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, body.?, "ohai \"hi\""));
 }
 
 // ca-certificates-shaped regression: the real formula's `macos_post_install`
@@ -537,33 +308,5 @@ test "resolvePostInstallBody surfaces a distinguishing tag instead of collapsing
         else
             ruby.RubyError.FetchFailed;
         try testing.expectEqual(expected, err);
-    }
-}
-
-test "fetchPostInstallFromGitHub keeps its ?[]const u8 contract for CLI callers" {
-    // doctor + install rely on the optional-slice signature; the tagged
-    // variant is internal. An unknown name short-circuits before any
-    // network I/O via the manifest miss.
-    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
-    defer threaded.deinit();
-    try testing.expect(ruby.fetchPostInstallFromGitHub(
-        threaded.io(),
-        testEnviron(),
-        testing.allocator,
-        "__malt_d10_unknown_formula__",
-    ) == null);
-}
-
-test "detectRuby returns a heap-owned slice that the caller can free" {
-    // On any machine that has Ruby available, the contract requires the
-    // returned slice to be allocator-owned so the call site can pair it
-    // with `defer allocator.free`. We can't assert the path itself
-    // (machine-dependent), but we *can* verify that freeing the result
-    // does not double-free or fault — which only holds if every branch
-    // returns heap memory rather than a mix of static and heap slices.
-    if (ruby.detectRuby(testIo(), testEnviron(), testing.allocator)) |path| {
-        defer testing.allocator.free(path);
-        try testing.expect(path.len > 0);
-        try testing.expect(std.mem.startsWith(u8, path, "/"));
     }
 }
