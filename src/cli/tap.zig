@@ -28,7 +28,11 @@ pub fn parseRepoOverride(allocator: std.mem.Allocator, raw: []const u8) RepoOver
     const owner_owned = try allocator.dupe(u8, owner);
     errdefer allocator.free(owner_owned);
     const repo_owned = try allocator.dupe(u8, repo);
-    return .{ .owner = owner_owned, .repo = repo_owned };
+    errdefer allocator.free(repo_owned);
+    // `--repo` is a GitHub-only override today; a chosen host will be
+    // threaded through here later. Default keeps the pair self-consistent.
+    const host_owned = try allocator.dupe(u8, "github.com");
+    return .{ .owner = owner_owned, .repo = repo_owned, .host = host_owned };
 }
 
 test "parseRepoOverride accepts user/repo and returns the owned pair" {

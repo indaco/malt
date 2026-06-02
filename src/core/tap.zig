@@ -215,22 +215,25 @@ pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
         taps.deinit(allocator);
     }
 
-    // Project `url` from (github_owner, github_repo) so the listing
+    // Project `url` from (github_owner, github_repo, host) so the listing
     // can't disagree with the actual fetch target.
-    var stmt = try db.prepare("SELECT name, github_owner, github_repo, commit_sha FROM taps;");
+    var stmt = try db.prepare("SELECT name, github_owner, github_repo, commit_sha, host FROM taps;");
     defer stmt.finalize();
 
     while (try stmt.step()) {
         const n = stmt.columnText(0) orelse continue;
         const o = stmt.columnText(1) orelse continue;
         const r = stmt.columnText(2) orelse continue;
+        // host is NOT NULL DEFAULT 'github.com'; the orelse only guards
+        // the impossible NULL so the row still projects.
+        const host = std.mem.sliceTo(stmt.columnText(4) orelse "github.com", 0);
 
         const name_owned = try allocator.dupe(u8, std.mem.sliceTo(n, 0));
         errdefer allocator.free(name_owned);
         const url_owned = try forge.allocRepoBrowseUrl(
             allocator,
-            .github,
-            "github.com",
+            forge.fromHost(host),
+            host,
             std.mem.sliceTo(o, 0),
             std.mem.sliceTo(r, 0),
         );
@@ -268,14 +271,18 @@ pub fn resolveFormula(allocator: std.mem.Allocator, user: []const u8, repo: []co
 /// row/SQLite logic that decides the `(owner, repo)` fed into it.
 pub const TapBaseUrls = forge.TapBaseUrls;
 
-/// Owner+repo pair read off a tap row. Caller owns both slices.
+/// Owner+repo+host read off a tap row. `host` feeds `forge.fromHost`
+/// so resolution targets the forge the row was registered on. Caller
+/// owns all three slices.
 pub const TapPair = struct {
     owner: []const u8,
     repo: []const u8,
+    host: []const u8,
 
     pub fn deinit(self: TapPair, allocator: std.mem.Allocator) void {
         allocator.free(self.owner);
         allocator.free(self.repo);
+        allocator.free(self.host);
     }
 };
 
@@ -287,13 +294,16 @@ pub fn getOwnerRepo(
     slug: []const u8,
 ) !?TapPair {
     var stmt = try db.prepare(
-        "SELECT github_owner, github_repo FROM taps WHERE name = ?1;",
+        "SELECT github_owner, github_repo, host FROM taps WHERE name = ?1;",
     );
     defer stmt.finalize();
     try stmt.bindText(1, slug);
     if (!(try stmt.step())) return null;
     const owner_raw = stmt.columnText(0) orelse return null;
     const repo_raw = stmt.columnText(1) orelse return null;
+    // host is NOT NULL DEFAULT 'github.com'; the orelse only guards the
+    // impossible NULL so a forge is never lost on read.
+    const host_trim = std.mem.sliceTo(stmt.columnText(2) orelse "github.com", 0);
     const owner_trim = std.mem.sliceTo(owner_raw, 0);
     const repo_trim = std.mem.sliceTo(repo_raw, 0);
     if (owner_trim.len == 0 or repo_trim.len == 0) return null;
@@ -301,7 +311,9 @@ pub fn getOwnerRepo(
     const owner_owned = try allocator.dupe(u8, owner_trim);
     errdefer allocator.free(owner_owned);
     const repo_owned = try allocator.dupe(u8, repo_trim);
-    return .{ .owner = owner_owned, .repo = repo_owned };
+    errdefer allocator.free(repo_owned);
+    const host_owned = try allocator.dupe(u8, host_trim);
+    return .{ .owner = owner_owned, .repo = repo_owned, .host = host_owned };
 }
 
 /// Single point where the slug-derived default `(user, "homebrew-" || repo)`
@@ -321,7 +333,11 @@ pub fn effectiveOwnerRepo(
     const owner_owned = try allocator.dupe(u8, user);
     errdefer allocator.free(owner_owned);
     const repo_owned = try std.fmt.allocPrint(allocator, "homebrew-{s}", .{repo_part});
-    return .{ .owner = owner_owned, .repo = repo_owned };
+    errdefer allocator.free(repo_owned);
+    // Cold path predates any stored row; the homebrew-<repo> synthesis is
+    // GitHub-only, so the synthesised pair is github.com by construction.
+    const host_owned = try allocator.dupe(u8, "github.com");
+    return .{ .owner = owner_owned, .repo = repo_owned, .host = host_owned };
 }
 
 /// Build every URL needed to talk to a tap repo. Reads the row's
@@ -336,7 +352,9 @@ pub fn resolveTapBaseUrls(
 ) !TapBaseUrls {
     const pair = try effectiveOwnerRepo(allocator, db, slug);
     defer pair.deinit(allocator);
-    return forge.buildBaseUrls(allocator, .github, "github.com", pair.owner, pair.repo);
+    // The row's host selects the forge; github.com rows resolve exactly
+    // as before since `fromHost` maps everything to `.github` today.
+    return forge.buildBaseUrls(allocator, forge.fromHost(pair.host), pair.host, pair.owner, pair.repo);
 }
 
 // ── resolveFromConditional: response → HeadResolution conversion ────
@@ -647,6 +665,74 @@ test "resolveTapBaseUrls reads the stored prefixed pair byte-for-byte" {
         "https://api.github.com/repos/user-1/homebrew-some.v2/commits/HEAD",
         urls.api_head_url,
     );
+}
+
+test "getOwnerRepo reads the row's host, defaulting to github.com" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try add(&db, "user/repo", "user", "homebrew-repo", null);
+
+    const pair = (try getOwnerRepo(std.testing.allocator, &db, "user/repo")).?;
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("github.com", pair.host);
+}
+
+test "getOwnerRepo reads a non-default host written to the row" {
+    // Until the host-registration UX lands, a non-github host can only
+    // reach the row via a direct write — exercise the read path now so
+    // the persisted host is provably surfaced ahead of the forge arms.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo, host)
+        \\VALUES ('grp/tap', 'https://gitlab.com/grp/tap', NULL, 'grp', 'tap', 'gitlab.com');
+    );
+
+    const pair = (try getOwnerRepo(std.testing.allocator, &db, "grp/tap")).?;
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("gitlab.com", pair.host);
+    try std.testing.expectEqualStrings("grp", pair.owner);
+    try std.testing.expectEqualStrings("tap", pair.repo);
+}
+
+test "effectiveOwnerRepo cold path defaults host to github.com" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+
+    const pair = try effectiveOwnerRepo(std.testing.allocator, &db, "aeroxy/tap");
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("github.com", pair.host);
+    try std.testing.expectEqualStrings("aeroxy", pair.owner);
+    try std.testing.expectEqualStrings("homebrew-tap", pair.repo);
+}
+
+test "resolveTapBaseUrls routes the row's host through the forge seam" {
+    // The host is read and handed to `forge.fromHost`. Until the GitLab
+    // arm lands, `fromHost` maps every host to `.github`, so the URLs
+    // stay github-shaped — proving the host is *read*, not that the
+    // output changed. The owner/repo come through verbatim (no synthesis).
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo, host)
+        \\VALUES ('grp/tap', 'https://gitlab.com/grp/tap', NULL, 'grp', 'tap', 'gitlab.com');
+    );
+
+    const urls = try resolveTapBaseUrls(std.testing.allocator, &db, "grp/tap");
+    defer urls.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(
+        "https://api.github.com/repos/grp/tap/commits/HEAD",
+        urls.api_head_url,
+    );
+    try std.testing.expectEqualStrings("https://github.com/grp/tap", urls.repo_url);
 }
 
 /// Build the `commits/<sha>` URL sibling of `api_head_url`. Routes

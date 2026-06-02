@@ -126,7 +126,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 10;
+pub const known_schema_version: i64 = 11;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -146,6 +146,7 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 8) try migrateV7toV8(db);
     if (ver < 9) try migrateV8toV9(db);
     if (ver < 10) try migrateV9toV10(db);
+    if (ver < 11) try migrateV10toV11(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
@@ -566,6 +567,44 @@ fn migrateV9toV10(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
+/// v11 — record which forge hosts each tap so resolution can pick the
+/// right provider per row instead of always synthesising GitHub URLs.
+/// DEFAULT 'github.com' (the full host, usable directly as the `host`
+/// argument to `forge.buildBaseUrls`) keeps every pre-feature row
+/// resolving against GitHub byte-for-byte. Same PRAGMA-guarded shape as
+/// v7→v8 / v8→v9 / v9→v10 so re-runs against partial fixtures stay
+/// idempotent.
+fn migrateV10toV11(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    // PRAGMA table_info returns zero rows when the table is missing —
+    // same partial-shape fixture defensiveness as v7→v8 onward.
+    var have_table = false;
+    var have_column = false;
+    {
+        var stmt = try db.prepare("PRAGMA table_info(taps);");
+        defer stmt.finalize();
+        while (try stmt.step()) {
+            have_table = true;
+            const name = stmt.columnText(1) orelse continue;
+            if (std.mem.eql(u8, std.mem.sliceTo(name, 0), "host")) {
+                have_column = true;
+                break;
+            }
+        }
+    }
+    if (have_table and !have_column) {
+        try db.exec(
+            "ALTER TABLE taps ADD COLUMN host TEXT NOT NULL DEFAULT 'github.com';",
+        );
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (11);");
+
+    try db.commit();
+}
+
 /// Return true iff every column in `wanted` is present on the `casks`
 /// table. Mirrors the PRAGMA-guarded probes used by v2→v3 / v3→v4 /
 /// v5→v6; centralised here because the v6→v7 backfill needs five
@@ -759,7 +798,7 @@ test "v6→v7 migration backfills cask_versions from existing casks rows" {
     const token1 = stmt.columnText(0) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("flux-markdown", std.mem.sliceTo(token1, 0));
 
-    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 11), try currentVersion(&db));
 }
 
 test "v6→v7 migration is idempotent when cask_versions already carries the rows" {
@@ -808,7 +847,7 @@ test "fresh DB ships with taps.head_etag (v8 shape)" {
         }
     }
     try testing.expect(found);
-    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 11), try currentVersion(&db));
 }
 
 test "v7→v8 migration adds head_etag and preserves existing tap rows" {
@@ -839,7 +878,7 @@ test "v7→v8 migration adds head_etag and preserves existing tap rows" {
     );
     // Pre-v8 rows must carry NULL until a conditional GET populates it.
     try testing.expect(probe.columnText(1) == null);
-    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 11), try currentVersion(&db));
 }
 
 test "v7→v8 migration is idempotent when head_etag is already present" {
@@ -888,7 +927,7 @@ test "fresh DB ships with taps.github_owner and taps.github_repo (v9 shape)" {
     }
     try testing.expect(owner_seen);
     try testing.expect(repo_seen);
-    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 11), try currentVersion(&db));
 }
 
 test "v8→v9 migration backfills (user, \"homebrew-\" || repo) from existing slugs" {
@@ -908,7 +947,7 @@ test "v8→v9 migration backfills (user, \"homebrew-\" || repo) from existing sl
 
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 11), try currentVersion(&db));
 
     var probe = try db.prepare(
         "SELECT name, github_owner, github_repo FROM taps ORDER BY name;",
@@ -970,7 +1009,7 @@ test "v8→v9 migration bumps the marker even when taps is empty" {
     try db.exec("DELETE FROM schema_version WHERE version >= 9;");
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 11), try currentVersion(&db));
 }
 
 // Pre-v3 rows could in theory have escaped slug validation. The CASE
@@ -997,7 +1036,7 @@ test "v8→v9 migration tolerates a slug starting with a slash (degenerate fixtu
 
     // We don't pin the specific (owner, repo) values for degenerate
     // input — only that the migration completes and the marker bumps.
-    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 11), try currentVersion(&db));
 }
 
 test "v8→v9 migration falls back to verbatim name on a slug missing the slash" {
@@ -1042,7 +1081,7 @@ test "fresh DB ships with kegs.bin_isolated (v10 shape)" {
         }
     }
     try testing.expect(found);
-    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 11), try currentVersion(&db));
 }
 
 test "v9→v10 migration adds bin_isolated and defaults existing rows to 0" {
@@ -1061,7 +1100,7 @@ test "v9→v10 migration adds bin_isolated and defaults existing rows to 0" {
 
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 10), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 11), try currentVersion(&db));
 
     var probe = try db.prepare("SELECT name, bin_isolated FROM kegs ORDER BY name;");
     defer probe.finalize();
@@ -1100,6 +1139,101 @@ test "v9→v10 migration is idempotent and preserves bin_isolated=1" {
     defer probe.finalize();
     try testing.expect(try probe.step());
     try testing.expectEqual(@as(i64, 1), probe.columnInt(0));
+}
+
+// v10→v11 adds taps.host so a tap row remembers which forge hosts it
+// (github.com today; GitLab/Codeberg arrive as forge arms later). The
+// DEFAULT keeps every pre-feature row resolving against GitHub exactly
+// as before. Fresh and upgraded DBs must converge on the same shape.
+
+test "fresh DB ships with taps.host defaulting to github.com (v11 shape)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    var stmt = try db.prepare("PRAGMA table_info(taps);");
+    defer stmt.finalize();
+    var found = false;
+    while (try stmt.step()) {
+        const name = stmt.columnText(1) orelse continue;
+        if (std.mem.eql(u8, std.mem.sliceTo(name, 0), "host")) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+
+    // A row inserted without naming `host` takes the column DEFAULT —
+    // this is the path `tap.add` relies on to stamp github.com.
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo)
+        \\VALUES ('user/repo', 'https://github.com/user/homebrew-repo', NULL, 'user', 'homebrew-repo');
+    );
+    var probe = try db.prepare("SELECT host FROM taps WHERE name='user/repo';");
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    try testing.expectEqualStrings("github.com", std.mem.sliceTo(probe.columnText(0) orelse "", 0));
+
+    try testing.expectEqual(@as(i64, 11), try currentVersion(&db));
+}
+
+test "v10→v11 migration backfills host=github.com on existing tap rows" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    // Seed a tap on the current shape, then rewind the marker so migrate
+    // re-enters the v10→v11 step against a row that pre-dates the column.
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo)
+        \\VALUES ('aeroxy/tap', 'https://github.com/aeroxy/homebrew-tap', NULL, 'aeroxy', 'homebrew-tap');
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 11;");
+
+    try migrate(&db);
+
+    try testing.expectEqual(@as(i64, 11), try currentVersion(&db));
+
+    var probe = try db.prepare("SELECT host FROM taps WHERE name='aeroxy/tap';");
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    try testing.expectEqualStrings("github.com", std.mem.sliceTo(probe.columnText(0) orelse "", 0));
+}
+
+// A row already carrying a non-default host must survive a re-run — the
+// PRAGMA guard skips the ALTER so the explicit value is never clobbered
+// back to github.com.
+test "v10→v11 migration is idempotent and preserves a non-default host" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo, host)
+        \\VALUES ('grp/tap', 'https://gitlab.com/grp/tap', NULL, 'grp', 'tap', 'gitlab.com');
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 11;");
+    try migrate(&db);
+    try db.exec("DELETE FROM schema_version WHERE version >= 11;");
+    try migrate(&db);
+
+    var probe = try db.prepare("SELECT host FROM taps WHERE name='grp/tap';");
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    try testing.expectEqualStrings("gitlab.com", std.mem.sliceTo(probe.columnText(0) orelse "", 0));
+}
+
+// The empty-taps case is the most common upgrade shape: the ALTER must
+// add the column and the marker must still bump so a re-run skips it.
+test "v10→v11 migration bumps the marker even when taps is empty" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec("DELETE FROM schema_version WHERE version >= 11;");
+    try migrate(&db);
+
+    try testing.expectEqual(@as(i64, 11), try currentVersion(&db));
 }
 
 test "migrate refuses a DB whose schema_version exceeds the known max" {
