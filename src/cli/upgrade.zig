@@ -11,6 +11,7 @@ const formula_mod = @import("../core/formula.zig");
 const linker_mod = @import("../core/linker.zig");
 const store_mod = @import("../core/store.zig");
 const tap_mod = @import("../core/tap.zig");
+const forge = @import("../core/forge.zig");
 const lock_mod = @import("../db/lock.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
@@ -589,7 +590,7 @@ fn upgradeRoutedTapCask(
     http.offline = ctx.offline;
 
     var rb_url_buf: [512]u8 = undefined;
-    const rb_url = std.fmt.bufPrint(&rb_url_buf, "{s}/{s}/Casks/{s}.rb", .{ urls.raw_base, fresh_sha, token }) catch return error.Aborted;
+    const rb_url = forge.rawFileUrl(&rb_url_buf, .github, urls.raw_base, fresh_sha, .cask, token) catch return error.Aborted;
 
     var rb_resp = http.get(rb_url) catch |e| {
         output.err("Could not fetch {s} from tap {s}: {s}", .{ token, tap_label, @errorName(e) });

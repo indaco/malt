@@ -461,81 +461,9 @@ test "resolveFormula joins user/repo/formula with slashes" {
     try testing.expectEqualStrings("u/r/f", s);
 }
 
-// ────────────────────────────────────────────────────────────────────
-// parseCommitShaFromJson — security-sensitive: picking up the wrong
-// "sha" field would pin malt to an attacker-influenced commit instead
-// of the real HEAD. Exhaustive coverage of shapes a real GitHub
-// `commits/HEAD` response can take.
-// ────────────────────────────────────────────────────────────────────
-
-test "parseCommitShaFromJson: canonical GitHub response" {
-    const body =
-        \\{"sha":"0123456789abcdef0123456789abcdef01234567","node_id":"X","commit":{"author":{"name":"x"}}}
-    ;
-    const got = tap.parseCommitShaFromJson(body) orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings(valid_sha, got);
-}
-
-test "parseCommitShaFromJson: tolerates whitespace around ':' and value" {
-    const body =
-        \\{  "sha"  :  "0123456789abcdef0123456789abcdef01234567" , "other": 1 }
-    ;
-    const got = tap.parseCommitShaFromJson(body) orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings(valid_sha, got);
-}
-
-test "parseCommitShaFromJson: returns first top-level sha even when nested sha exists" {
-    // Real responses have `commit.tree.sha` as a separate field —
-    // the parser's first-match behaviour is the whole point: the
-    // top-level commit SHA appears first.
-    const body =
-        \\{"sha":"0123456789abcdef0123456789abcdef01234567","commit":{"tree":{"sha":"ffffffffffffffffffffffffffffffffffffffff"}}}
-    ;
-    const got = tap.parseCommitShaFromJson(body) orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings(valid_sha, got);
-}
-
-test "parseCommitShaFromJson: missing sha field yields null" {
-    const body =
-        \\{"node_id":"X","commit":{"author":{"name":"x"}}}
-    ;
-    try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(body));
-}
-
-test "parseCommitShaFromJson: non-string value yields null" {
-    // Defense: if upstream ever returned a number or null for sha we'd
-    // rather refuse than misparse.
-    const body =
-        \\{"sha": 42}
-    ;
-    try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(body));
-}
-
-test "parseCommitShaFromJson: truncated value yields null" {
-    const body =
-        \\{"sha":"deadbeef
-    ;
-    try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(body));
-}
-
-test "parseCommitShaFromJson: malformed SHA value yields null" {
-    // Right structural shape, wrong content — validator rejects.
-    const body =
-        \\{"sha":"not-a-valid-sha"}
-    ;
-    try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(body));
-}
-
-test "parseCommitShaFromJson: empty body yields null" {
-    try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(""));
-}
-
-test "parseCommitShaFromJson: uppercase hex in value is rejected" {
-    const body =
-        \\{"sha":"0123456789ABCDEF0123456789ABCDEF01234567"}
-    ;
-    try testing.expectEqual(@as(?[]const u8, null), tap.parseCommitShaFromJson(body));
-}
+// parseHeadSha and githubAuthHeader moved to the forge seam in the
+// extraction; their exhaustive coverage now lives as inline tests in
+// `src/core/forge.zig` (`parseHeadSha github: …`, `authHeader github: …`).
 
 // ────────────────────────────────────────────────────────────────────
 // classifyResolveStatus — callers rely on distinct tags to map each
@@ -560,40 +488,6 @@ test "classifyResolveStatus: unexpected 5xx falls back to ResolveFailed" {
 
 test "classifyResolveStatus: 401 (bad auth) is distinct from rate limit" {
     try testing.expectEqual(tap.TapError.ResolveFailed, tap.classifyResolveStatus(401));
-}
-
-// ────────────────────────────────────────────────────────────────────
-// githubAuthHeader — only the `/commits/HEAD` call picks up
-// MALT_GITHUB_TOKEN; everything else keeps the existing HOMEBREW token
-// plumbing. Bearer header format must match GitHub's contract.
-// ────────────────────────────────────────────────────────────────────
-
-const c_env = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
-
-test "githubAuthHeader: returns null when MALT_GITHUB_TOKEN unset" {
-    _ = c_env.unsetenv("MALT_GITHUB_TOKEN");
-    var buf: [256]u8 = undefined;
-    try testing.expect(tap.githubAuthHeader(malt.app_ctx.processEnviron(), &buf) == null);
-}
-
-test "githubAuthHeader: returns Bearer header when MALT_GITHUB_TOKEN set" {
-    _ = c_env.setenv("MALT_GITHUB_TOKEN", "ghp_testtoken", 1);
-    defer _ = c_env.unsetenv("MALT_GITHUB_TOKEN");
-
-    var buf: [256]u8 = undefined;
-    const h = tap.githubAuthHeader(malt.app_ctx.processEnviron(), &buf) orelse return error.TestUnexpectedNull;
-    try testing.expectEqualStrings("Authorization", h.name);
-    try testing.expectEqualStrings("Bearer ghp_testtoken", h.value);
-}
-
-test "githubAuthHeader: empty-string token behaves as unset" {
-    _ = c_env.setenv("MALT_GITHUB_TOKEN", "", 1);
-    defer _ = c_env.unsetenv("MALT_GITHUB_TOKEN");
-    var buf: [256]u8 = undefined;
-    try testing.expect(tap.githubAuthHeader(malt.app_ctx.processEnviron(), &buf) == null);
 }
 
 // ────────────────────────────────────────────────────────────────────

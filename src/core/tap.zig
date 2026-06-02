@@ -2,6 +2,7 @@ const std = @import("std");
 
 const sqlite = @import("../db/sqlite.zig");
 const client_mod = @import("../net/client.zig");
+const forge = @import("forge.zig");
 
 pub const TapInfo = struct {
     name: []const u8,
@@ -39,17 +40,6 @@ pub fn classifyResolveStatus(status: u16) TapError {
     };
 }
 
-/// Build a `Authorization: Bearer <token>` header into `buf` from
-/// `MALT_GITHUB_TOKEN`, or return null when the env var is unset or
-/// empty. Exclusive to `resolveHeadCommit` — no other codepath picks up
-/// this env var, so users who set it only affect tap-resolution calls.
-pub fn githubAuthHeader(environ: std.process.Environ, buf: []u8) ?std.http.Header {
-    const raw = std.process.Environ.getPosix(environ, "MALT_GITHUB_TOKEN") orelse return null;
-    if (raw.len == 0) return null;
-    const value = std.fmt.bufPrint(buf, "Bearer {s}", .{raw}) catch return null;
-    return .{ .name = "Authorization", .value = value };
-}
-
 /// Short remediation hint for each `TapError` variant. Keeping the
 /// strings here (not at the call site) means `cli/install/local.zig`
 /// and `cli/tap.zig` cannot drift out of sync, and unit tests can pin
@@ -66,15 +56,11 @@ pub fn describeResolveError(err: TapError) []const u8 {
     };
 }
 
-/// Format string for the `taps.url` projection. Centralised so the
-/// INSERT/rebind writer and the read-time projection in `list()` can't
-/// drift — a future host swap (GitLab, Gitea) flips this one literal.
-const repo_url_fmt = "https://github.com/{s}/{s}";
-
-/// Materialise `taps.url` from `(owner, repo)` into a caller buffer.
+/// Materialise `taps.url` from `(owner, repo)` into a caller buffer
+/// through the forge seam, so the browse-URL shape lives in one place.
 /// `buf` must hold ≥160 bytes (19 prefix + 2·64 component cap + 1 slash).
 fn writeRepoUrl(buf: []u8, owner: []const u8, repo: []const u8) sqlite.SqliteError![]const u8 {
-    return std.fmt.bufPrint(buf, repo_url_fmt, .{ owner, repo }) catch
+    return forge.repoBrowseUrl(buf, .github, "github.com", owner, repo) catch
         sqlite.SqliteError.ExecFailed;
 }
 
@@ -241,10 +227,12 @@ pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
 
         const name_owned = try allocator.dupe(u8, std.mem.sliceTo(n, 0));
         errdefer allocator.free(name_owned);
-        const url_owned = try std.fmt.allocPrint(
+        const url_owned = try forge.allocRepoBrowseUrl(
             allocator,
-            repo_url_fmt,
-            .{ std.mem.sliceTo(o, 0), std.mem.sliceTo(r, 0) },
+            .github,
+            "github.com",
+            std.mem.sliceTo(o, 0),
+            std.mem.sliceTo(r, 0),
         );
         errdefer allocator.free(url_owned);
         const sha_owned: ?[]const u8 = if (stmt.columnText(3)) |s| blk: {
@@ -275,65 +263,10 @@ pub fn resolveFormula(allocator: std.mem.Allocator, user: []const u8, repo: []co
     return std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ user, repo, formula });
 }
 
-/// URLs every tap fetch site needs, derived from a `(github_owner,
-/// github_repo)` pair so the prefix decision lives in the row (or in
-/// the `effectiveOwnerRepo` cold-path fallback), never in the URL
-/// template. For raw fetches callers append `/<sha>/Formula/<name>.rb`
-/// (or `Casks/`) to `raw_base`.
-pub const TapBaseUrls = struct {
-    /// `https://api.github.com/repos/<owner>/<repo>/commits/HEAD`
-    api_head_url: []const u8,
-    /// `https://github.com/<owner>/<repo>` — the URL that actually
-    /// resolves; mirrored into `taps.url` at INSERT/rebind time.
-    repo_url: []const u8,
-    /// `https://raw.githubusercontent.com/<owner>/<repo>` — caller
-    /// appends `/<sha>/Formula/<name>.rb` or `/<sha>/Casks/<name>.rb`.
-    raw_base: []const u8,
-
-    pub fn deinit(self: TapBaseUrls, allocator: std.mem.Allocator) void {
-        allocator.free(self.api_head_url);
-        allocator.free(self.repo_url);
-        allocator.free(self.raw_base);
-    }
-};
-
-/// Build the URL triple from an explicit `(owner, repo)` pair. Single
-/// site where the GitHub URL shape lives; both the row-read path and
-/// the cold registration path (`mt tap --repo X/Y`, default derivation
-/// before the row exists) route through here. Adding a non-GitHub host
-/// later is a switch on the host column at this seam.
-pub fn buildTapBaseUrls(
-    allocator: std.mem.Allocator,
-    owner: []const u8,
-    repo: []const u8,
-) std.mem.Allocator.Error!TapBaseUrls {
-    const api_head_url = try std.fmt.allocPrint(
-        allocator,
-        "https://api.github.com/repos/{s}/{s}/commits/HEAD",
-        .{ owner, repo },
-    );
-    errdefer allocator.free(api_head_url);
-
-    const repo_url = try std.fmt.allocPrint(
-        allocator,
-        "https://github.com/{s}/{s}",
-        .{ owner, repo },
-    );
-    errdefer allocator.free(repo_url);
-
-    const raw_base = try std.fmt.allocPrint(
-        allocator,
-        "https://raw.githubusercontent.com/{s}/{s}",
-        .{ owner, repo },
-    );
-    errdefer allocator.free(raw_base);
-
-    return .{
-        .api_head_url = api_head_url,
-        .repo_url = repo_url,
-        .raw_base = raw_base,
-    };
-}
+/// The URL triple every tap fetch site needs. Re-exported from the
+/// forge seam, which owns the host-shaped layout; `tap` keeps the
+/// row/SQLite logic that decides the `(owner, repo)` fed into it.
+pub const TapBaseUrls = forge.TapBaseUrls;
 
 /// Owner+repo pair read off a tap row. Caller owns both slices.
 pub const TapPair = struct {
@@ -403,7 +336,7 @@ pub fn resolveTapBaseUrls(
 ) !TapBaseUrls {
     const pair = try effectiveOwnerRepo(allocator, db, slug);
     defer pair.deinit(allocator);
-    return buildTapBaseUrls(allocator, pair.owner, pair.repo);
+    return forge.buildBaseUrls(allocator, .github, "github.com", pair.owner, pair.repo);
 }
 
 // ── resolveFromConditional: response → HeadResolution conversion ────
@@ -809,27 +742,6 @@ pub fn validateCommitSha(sha: []const u8) TapError!void {
     };
 }
 
-/// Pull the first top-level `"sha"` field out of a GitHub commits/HEAD
-/// response. Exposed for unit tests; production code reaches it via
-/// `resolveHeadCommit`.
-///
-/// Takes only the first match because GitHub's response always has
-/// the commit SHA before the nested tree/parent objects. The result
-/// is validated as a 40-char lowercase hex string — malformed or
-/// unexpected shapes return null rather than misleading SHAs.
-pub fn parseCommitShaFromJson(body: []const u8) ?[]const u8 {
-    const marker = "\"sha\"";
-    const idx = std.mem.indexOf(u8, body, marker) orelse return null;
-    var cur = idx + marker.len;
-    while (cur < body.len and (body[cur] == ' ' or body[cur] == ':' or body[cur] == '\t')) : (cur += 1) {}
-    if (cur >= body.len or body[cur] != '"') return null;
-    cur += 1;
-    const end = std.mem.indexOfScalarPos(u8, body, cur, '"') orelse return null;
-    const sha = body[cur..end];
-    validateCommitSha(sha) catch return null;
-    return sha;
-}
-
 /// HEAD-resolve outcome. `sha` is set on a fresh body (200) and null
 /// on 304 — the caller's cached sha is still authoritative in that
 /// case. `etag`, when set, is GitHub's current ETag for `/commits/HEAD`;
@@ -873,7 +785,7 @@ pub fn resolveFromConditional(
 
     if (resp.status != 200) return classifyResolveStatus(resp.status);
 
-    const sha = parseCommitShaFromJson(resp.body) orelse return TapError.MalformedJson;
+    const sha = forge.parseHeadSha(.github, resp.body) orelse return TapError.MalformedJson;
     const sha_owned = allocator.dupe(u8, sha) catch return TapError.OutOfMemory;
     errdefer allocator.free(sha_owned);
 
@@ -914,7 +826,7 @@ pub fn resolveHeadCommit(
     // — both authenticate against the same 5000/hr quota that 304s don't
     // touch.
     var auth_buf: [256]u8 = undefined;
-    var resp = if (githubAuthHeader(environ, &auth_buf)) |header| blk: {
+    var resp = if (forge.authHeader(.github, environ, &auth_buf)) |header| blk: {
         const headers = [_]std.http.Header{header};
         break :blk http.getConditional(api_head_url, cached_etag, &headers) catch return TapError.NetworkError;
     } else http.getConditional(api_head_url, cached_etag, &.{}) catch return TapError.NetworkError;

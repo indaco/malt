@@ -11,6 +11,7 @@ const std = @import("std");
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const cask_mod = @import("../../core/cask.zig");
 const tap_mod = @import("../../core/tap.zig");
+const forge = @import("../../core/forge.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const api_mod = @import("../../net/api.zig");
 const client_mod = @import("../../net/client.zig");
@@ -539,7 +540,7 @@ fn tapCaskLatestVersion(
     http.offline = offline;
 
     var rb_url_buf: [512]u8 = undefined;
-    const rb_url = std.fmt.bufPrint(&rb_url_buf, "{s}/{s}/Casks/{s}.rb", .{ urls.raw_base, fresh_sha, token }) catch return null;
+    const rb_url = forge.rawFileUrl(&rb_url_buf, .github, urls.raw_base, fresh_sha, .cask, token) catch return null;
 
     var rb_resp = http.get(rb_url) catch {
         warnTapCaskFetchFailed(tap_label, token, "Network failure while reading the .rb");
