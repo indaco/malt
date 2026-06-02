@@ -116,7 +116,7 @@ jobs:
           cache: false
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.1
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
@@ -170,7 +170,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.1
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Download draft release artifacts
         env:
@@ -370,7 +370,7 @@ jobs:
           persist-credentials: false
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.1
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Run release-install smoke
         env:
