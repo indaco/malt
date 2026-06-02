@@ -132,6 +132,43 @@ test "add persists the (github_owner, github_repo) pair passed at INSERT" {
     );
 }
 
+test "add stamps the default host github.com, read back via getOwnerRepo" {
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try tap.add(&db, "user/repo", "user", "homebrew-repo", null);
+
+    const pair = (try tap.getOwnerRepo(testing.allocator, &db, "user/repo")).?;
+    defer pair.deinit(testing.allocator);
+    try testing.expectEqualStrings("github.com", pair.host);
+}
+
+test "a non-github host round-trips through getOwnerRepo and list" {
+    // Persistence half of multi-forge support: the host is stored and
+    // read back. Resolution still produces github-shaped URLs because the
+    // non-github forge arms aren't here yet — assert the host is *read*,
+    // not that the URL changed.
+    var db = try openDb();
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo, host)
+        \\VALUES ('grp/tap', 'https://gitlab.com/grp/tap', NULL, 'grp', 'tap', 'gitlab.com');
+    );
+
+    const pair = (try tap.getOwnerRepo(testing.allocator, &db, "grp/tap")).?;
+    defer pair.deinit(testing.allocator);
+    try testing.expectEqualStrings("gitlab.com", pair.host);
+
+    const taps = try tap.list(testing.allocator, &db);
+    defer freeTaps(taps);
+    try testing.expectEqual(@as(usize, 1), taps.len);
+    try testing.expectEqualStrings("grp/tap", taps[0].name);
+    try testing.expectEqualStrings("https://github.com/grp/tap", taps[0].url);
+}
+
 test "rebind moves (owner, repo) and clears commit_sha and head_etag" {
     // Rebinding to a new repo invalidates the old pin — the new repo has
     // its own HEAD, and keeping the stale SHA would freeze the row at a

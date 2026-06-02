@@ -1152,7 +1152,8 @@ test "finalizeTapCaskInstall stamps the owning tap when tap_registration is set"
         \\    commit_sha TEXT,
         \\    head_etag TEXT,
         \\    github_owner TEXT NOT NULL DEFAULT '',
-        \\    github_repo TEXT NOT NULL DEFAULT ''
+        \\    github_repo TEXT NOT NULL DEFAULT '',
+        \\    host TEXT NOT NULL DEFAULT 'github.com'
         \\);
     );
 
