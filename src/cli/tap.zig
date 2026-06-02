@@ -5,6 +5,7 @@ const std = @import("std");
 
 const AppCtx = @import("../app_ctx.zig").AppCtx;
 const tap_mod = @import("../core/tap.zig");
+const forge = @import("../core/forge.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -611,7 +612,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
                 };
             }
 
-            const urls = try tap_mod.buildTapBaseUrls(allocator, target_pair.owner, target_pair.repo);
+            const urls = try forge.buildBaseUrls(allocator, .github, "github.com", target_pair.owner, target_pair.repo);
             defer urls.deinit(allocator);
 
             // Idempotent re-adds reuse the cached etag for stable taps —

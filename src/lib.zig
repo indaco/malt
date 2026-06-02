@@ -56,6 +56,7 @@ pub const child = @import("core/child.zig");
 pub const deps = @import("core/deps.zig");
 pub const dsl = @import("core/dsl/root.zig");
 pub const formula = @import("core/formula.zig");
+pub const forge = @import("core/forge.zig");
 pub const hash = @import("core/hash.zig");
 pub const install_receipt = @import("core/install_receipt.zig");
 pub const linker = @import("core/linker.zig");

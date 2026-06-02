@@ -11,6 +11,7 @@ const cask_mod = @import("../../core/cask.zig");
 const hash = @import("../../core/hash.zig");
 const linker_mod = @import("../../core/linker.zig");
 const tap_mod = @import("../../core/tap.zig");
+const forge = @import("../../core/forge.zig");
 const tap_cache = @import("../../core/tap_cache.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const atomic = @import("../../fs/atomic.zig");
@@ -248,17 +249,19 @@ fn installTapRb(
 
     // First probe: Formula/ for the default mode, Casks/ when the
     // caller has pinned the resolve to cask-only.
-    const initial_subdir: []const u8 = switch (kind) {
-        .formula_or_cask => "Formula",
-        .cask_only => "Casks",
+    const initial_kind: forge.RawKind = switch (kind) {
+        .formula_or_cask => .formula,
+        .cask_only => .cask,
     };
     var url_buf: [512]u8 = undefined;
-    const rb_url = std.fmt.bufPrint(&url_buf, "{s}/{s}/{s}/{s}.rb", .{
+    const rb_url = forge.rawFileUrl(
+        &url_buf,
+        .github,
         urls.raw_base,
         commit_sha,
-        initial_subdir,
+        initial_kind,
         parts.formula,
-    }) catch return InstallError.FormulaNotFound;
+    ) catch return InstallError.FormulaNotFound;
 
     var rb_resp = http.get(rb_url) catch {
         sink.err("Cannot fetch tap from GitHub", .{});
@@ -279,11 +282,14 @@ fn installTapRb(
         // the not-found error.
         if (kind == .cask_only) break :blk &rb_resp;
 
-        const cask_url = std.fmt.bufPrint(&url_buf, "{s}/{s}/Casks/{s}.rb", .{
+        const cask_url = forge.rawFileUrl(
+            &url_buf,
+            .github,
             urls.raw_base,
             commit_sha,
+            .cask,
             parts.formula,
-        }) catch return InstallError.FormulaNotFound;
+        ) catch return InstallError.FormulaNotFound;
 
         cask_resp = http.get(cask_url) catch {
             sink.err("Cannot fetch tap from GitHub", .{});
