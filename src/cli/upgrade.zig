@@ -512,7 +512,7 @@ fn upgradeTapFormula(
     // (owner, repo) routes through `effectiveOwnerRepo` so the synthesis
     // used at HEAD resolve time matches the row that records the pin.
     {
-        const pair = tap_mod.effectiveOwnerRepo(allocator, db, tap_label) catch {
+        const pair = tap_mod.effectiveOwnerRepo(allocator, db, tap_label, "github.com") catch {
             output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
             return error.Aborted;
         };
@@ -616,7 +616,7 @@ fn upgradeRoutedTapCask(
     // Persist the new pin BEFORE installTapFormula reads it via
     // `tap_mod.getCommitSha`. Same pattern as `upgradeTapFormula`.
     {
-        const pair = tap_mod.effectiveOwnerRepo(allocator, db, tap_label) catch {
+        const pair = tap_mod.effectiveOwnerRepo(allocator, db, tap_label, "github.com") catch {
             output.err("Could not pin {s} to {s}", .{ tap_label, fresh_sha });
             return error.Aborted;
         };
@@ -711,6 +711,7 @@ fn upgradeTapCaskFallback(
         for (taps) |t| {
             allocator.free(t.name);
             allocator.free(t.url);
+            allocator.free(t.host);
             if (t.commit_sha) |s| allocator.free(s);
         }
         allocator.free(taps);

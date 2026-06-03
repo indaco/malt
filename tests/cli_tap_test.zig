@@ -314,6 +314,119 @@ test "execute with a bare name (no slash) surfaces error.Aborted" {
 }
 
 // ---------------------------------------------------------------------------
+// --host / --url forge registration
+// ---------------------------------------------------------------------------
+
+fn readTapRow(db_path: [:0]const u8, name: []const u8) !struct { host: []u8, owner: []u8, repo: []u8, pinned: bool } {
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT host, github_owner, github_repo, commit_sha FROM taps WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    try testing.expect(try stmt.step());
+    const host = try testing.allocator.dupe(u8, std.mem.sliceTo(stmt.columnText(0) orelse "", 0));
+    const owner = try testing.allocator.dupe(u8, std.mem.sliceTo(stmt.columnText(1) orelse "", 0));
+    const repo = try testing.allocator.dupe(u8, std.mem.sliceTo(stmt.columnText(2) orelse "", 0));
+    const pinned = stmt.columnText(3) != null;
+    return .{ .host = host, .owner = owner, .repo = repo, .pinned = pinned };
+}
+
+test "execute --host with --repo registers a non-github tap unpinned, no network" {
+    const prefix = try setupPrefix("host_repo_register");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    // Empty environ → if the code routed to GitHub HTTP this would fail;
+    // the non-github path must persist without touching the network.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try tap_cli.execute(&ctx, testing.allocator, &.{ "grp/tap", "--host", "gitlab.com", "--repo", "grp/tap" });
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    const row = try readTapRow(db_path, "grp/tap");
+    defer testing.allocator.free(row.host);
+    defer testing.allocator.free(row.owner);
+    defer testing.allocator.free(row.repo);
+    try testing.expectEqualStrings("gitlab.com", row.host);
+    try testing.expectEqualStrings("grp", row.owner);
+    try testing.expectEqualStrings("tap", row.repo);
+    try testing.expect(!row.pinned); // unpinned: resolution lands in a later release
+}
+
+test "execute --url derives and persists (host, owner, repo) unpinned" {
+    const prefix = try setupPrefix("url_register");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try tap_cli.execute(&ctx, testing.allocator, &.{ "mygrp/mytap", "--url", "https://codeberg.org/o/r" });
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    const row = try readTapRow(db_path, "mygrp/mytap");
+    defer testing.allocator.free(row.host);
+    defer testing.allocator.free(row.owner);
+    defer testing.allocator.free(row.repo);
+    try testing.expectEqualStrings("codeberg.org", row.host);
+    try testing.expectEqualStrings("o", row.owner);
+    try testing.expectEqualStrings("r", row.repo);
+    try testing.expect(!row.pinned);
+}
+
+test "execute --host without an explicit repo fails with a hint, not a homebrew- guess" {
+    const prefix = try setupPrefix("host_no_repo");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{ "grp/tap", "--host", "gitlab.com" }),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "needs an explicit repo") != null);
+}
+
+test "execute rejects a --host that carries a scheme or path" {
+    const prefix = try setupPrefix("host_bad");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var captured: std.ArrayList(u8) = .empty;
+    defer captured.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &captured);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(
+        error.Aborted,
+        tap_cli.execute(&ctx, testing.allocator, &.{ "grp/tap", "--host", "https://gitlab.com", "--repo", "grp/tap" }),
+    );
+    try testing.expect(std.mem.indexOf(u8, captured.items, "Invalid --host") != null);
+}
+
+// ---------------------------------------------------------------------------
 // --pin <user/repo> <sha>
 // ---------------------------------------------------------------------------
 

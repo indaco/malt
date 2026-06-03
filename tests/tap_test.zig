@@ -22,6 +22,7 @@ fn freeTaps(taps: []tap.TapInfo) void {
         testing.allocator.free(t.name);
         testing.allocator.free(t.url);
         if (t.commit_sha) |sha| testing.allocator.free(sha);
+        testing.allocator.free(t.host);
     }
     testing.allocator.free(taps);
 }
@@ -223,7 +224,7 @@ test "effectiveOwnerRepo reads from the row when present" {
     try schema.initSchema(&db);
     try tap.add(&db, "aeroxy/ast-outline", "aeroxy", "ast-outline", null);
 
-    const pair = try tap.effectiveOwnerRepo(testing.allocator, &db, "aeroxy/ast-outline");
+    const pair = try tap.effectiveOwnerRepo(testing.allocator, &db, "aeroxy/ast-outline", "github.com");
     defer pair.deinit(testing.allocator);
     try testing.expectEqualStrings("aeroxy", pair.owner);
     try testing.expectEqualStrings("ast-outline", pair.repo);
@@ -234,7 +235,7 @@ test "effectiveOwnerRepo falls back to slug-derived (user, \"homebrew-\" || repo
     defer db.close();
     try schema.initSchema(&db);
 
-    const pair = try tap.effectiveOwnerRepo(testing.allocator, &db, "aeroxy/tap");
+    const pair = try tap.effectiveOwnerRepo(testing.allocator, &db, "aeroxy/tap", "github.com");
     defer pair.deinit(testing.allocator);
     try testing.expectEqualStrings("aeroxy", pair.owner);
     try testing.expectEqualStrings("homebrew-tap", pair.repo);
@@ -289,7 +290,7 @@ test "effectiveOwnerRepo treats half-empty rows as missing (forgiving against co
         \\VALUES ('user/repo', 'https://x', '', 'something');
     );
 
-    const pair = try tap.effectiveOwnerRepo(testing.allocator, &db, "user/repo");
+    const pair = try tap.effectiveOwnerRepo(testing.allocator, &db, "user/repo", "github.com");
     defer pair.deinit(testing.allocator);
     try testing.expectEqualStrings("user", pair.owner);
     try testing.expectEqualStrings("homebrew-repo", pair.repo);
@@ -474,6 +475,7 @@ fn listAndFree(alloc: std.mem.Allocator, db: *sqlite.Database) !void {
         alloc.free(t.name);
         alloc.free(t.url);
         if (t.commit_sha) |sha| alloc.free(sha);
+        alloc.free(t.host);
     }
     alloc.free(taps);
 }

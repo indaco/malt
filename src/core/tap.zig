@@ -11,6 +11,9 @@ pub const TapInfo = struct {
     /// for rows carried over from pre-pin schema or for additions that
     /// couldn't resolve a remote commit at tap time.
     commit_sha: ?[]const u8 = null,
+    /// Forge host the tap resolves against. Defaults to github.com so
+    /// pre-host rows and synthetic test fixtures stay valid.
+    host: []const u8 = "github.com",
 };
 
 pub const TapError = error{
@@ -56,14 +59,17 @@ pub fn describeResolveError(err: TapError) []const u8 {
     };
 }
 
-/// Materialise `taps.url` from `(owner, repo)` into a caller buffer
+/// Materialise `taps.url` from `(host, owner, repo)` into a caller buffer
 /// through the forge seam, so the browse-URL shape lives in one place.
 /// `buf` must hold ≥160 bytes (19 prefix + 2·64 component cap + 1 slash).
-fn writeRepoUrl(buf: []u8, owner: []const u8, repo: []const u8) sqlite.SqliteError![]const u8 {
-    return forge.repoBrowseUrl(buf, .github, "github.com", owner, repo) catch
+fn writeRepoUrl(buf: []u8, host: []const u8, owner: []const u8, repo: []const u8) sqlite.SqliteError![]const u8 {
+    return forge.repoBrowseUrl(buf, forge.fromHost(host), host, owner, repo) catch
         sqlite.SqliteError.ExecFailed;
 }
 
+/// GitHub-default `add` — the overwhelming majority of taps. Delegates to
+/// `addWithHost` so the 5-arg call sites stay untouched; host is sticky
+/// on conflict, so a re-add never clobbers a non-github row's forge.
 pub fn add(
     db: *sqlite.Database,
     name: []const u8,
@@ -71,14 +77,28 @@ pub fn add(
     repo: []const u8,
     commit_sha: ?[]const u8,
 ) sqlite.SqliteError!void {
-    // Owner/repo are sticky on conflict — the rebind verb is the only
+    return addWithHost(db, name, owner, repo, "github.com", commit_sha);
+}
+
+/// Register a tap row carrying its forge `host`. The `mt tap --host` /
+/// `--url` registration path is the only caller that names a non-github
+/// host; everything else routes through `add`.
+pub fn addWithHost(
+    db: *sqlite.Database,
+    name: []const u8,
+    owner: []const u8,
+    repo: []const u8,
+    host: []const u8,
+    commit_sha: ?[]const u8,
+) sqlite.SqliteError!void {
+    // Owner/repo/host are sticky on conflict — the rebind verb is the only
     // sanctioned mutator. commit_sha is sticky unless a fresh one is
     // passed (refresh goes through `updateCommit`/`updateHead`).
     var url_buf: [256]u8 = undefined;
-    const derived_url = try writeRepoUrl(&url_buf, owner, repo);
+    const derived_url = try writeRepoUrl(&url_buf, host, owner, repo);
 
     var stmt = try db.prepare(
-        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo) VALUES (?1, ?2, ?3, ?4, ?5)
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo, host) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
         \\ON CONFLICT(name) DO UPDATE SET
         \\    commit_sha = COALESCE(excluded.commit_sha, taps.commit_sha);
     );
@@ -92,6 +112,7 @@ pub fn add(
     }
     try stmt.bindText(4, owner);
     try stmt.bindText(5, repo);
+    try stmt.bindText(6, host);
     _ = try stmt.step();
 }
 
@@ -107,7 +128,10 @@ pub fn rebind(
     repo: []const u8,
 ) sqlite.SqliteError!void {
     var url_buf: [256]u8 = undefined;
-    const derived_url = try writeRepoUrl(&url_buf, owner, repo);
+    // Rebind is a GitHub-only verb today (`mt tap --repo`); the row's host
+    // is left untouched by the UPDATE below, so deriving the browse URL
+    // against github.com matches the row that stays.
+    const derived_url = try writeRepoUrl(&url_buf, "github.com", owner, repo);
 
     var stmt = try db.prepare(
         \\UPDATE taps SET
@@ -230,6 +254,8 @@ pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
 
         const name_owned = try allocator.dupe(u8, std.mem.sliceTo(n, 0));
         errdefer allocator.free(name_owned);
+        const host_owned = try allocator.dupe(u8, host);
+        errdefer allocator.free(host_owned);
         const url_owned = try forge.allocRepoBrowseUrl(
             allocator,
             forge.fromHost(host),
@@ -249,6 +275,7 @@ pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
             .name = name_owned,
             .url = url_owned,
             .commit_sha = sha_owned,
+            .host = host_owned,
         });
     }
 
@@ -259,6 +286,7 @@ fn freeTapInfoFields(allocator: std.mem.Allocator, info: TapInfo) void {
     allocator.free(info.name);
     allocator.free(info.url);
     if (info.commit_sha) |sha| allocator.free(sha);
+    allocator.free(info.host);
 }
 
 /// Resolve a tap formula — builds the full tap formula name.
@@ -325,8 +353,13 @@ pub fn effectiveOwnerRepo(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     slug: []const u8,
+    host: []const u8,
 ) !TapPair {
     if (try getOwnerRepo(allocator, db, slug)) |pair| return pair;
+    // Cold path predates any stored row. The `homebrew-<repo>` synthesis is
+    // a GitHub-community convention — it does not hold on other forges, so
+    // a non-github registration must name its repo explicitly.
+    if (!std.mem.eql(u8, host, "github.com")) return error.ExplicitRepoRequired;
     const slash = std.mem.indexOfScalar(u8, slug, '/') orelse unreachable;
     const user = slug[0..slash];
     const repo_part = slug[slash + 1 ..];
@@ -334,8 +367,6 @@ pub fn effectiveOwnerRepo(
     errdefer allocator.free(owner_owned);
     const repo_owned = try std.fmt.allocPrint(allocator, "homebrew-{s}", .{repo_part});
     errdefer allocator.free(repo_owned);
-    // Cold path predates any stored row; the homebrew-<repo> synthesis is
-    // GitHub-only, so the synthesised pair is github.com by construction.
     const host_owned = try allocator.dupe(u8, "github.com");
     return .{ .owner = owner_owned, .repo = repo_owned, .host = host_owned };
 }
@@ -350,7 +381,10 @@ pub fn resolveTapBaseUrls(
     db: *sqlite.Database,
     slug: []const u8,
 ) !TapBaseUrls {
-    const pair = try effectiveOwnerRepo(allocator, db, slug);
+    // The cold-path hint is github.com: this helper is only reached on the
+    // resolve/refresh path, which non-github taps skip until their forge
+    // arm lands. When a row exists its persisted host wins anyway.
+    const pair = try effectiveOwnerRepo(allocator, db, slug, "github.com");
     defer pair.deinit(allocator);
     // The row's host selects the forge; github.com rows resolve exactly
     // as before since `fromHost` maps everything to `.github` today.
@@ -667,6 +701,55 @@ test "resolveTapBaseUrls reads the stored prefixed pair byte-for-byte" {
     );
 }
 
+test "addWithHost persists the row's forge host" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try addWithHost(&db, "grp/tap", "grp", "tap", "gitlab.com", null);
+
+    const pair = (try getOwnerRepo(std.testing.allocator, &db, "grp/tap")).?;
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("gitlab.com", pair.host);
+    try std.testing.expectEqualStrings("grp", pair.owner);
+    try std.testing.expectEqualStrings("tap", pair.repo);
+}
+
+test "add defaults the host to github.com (delegates to addWithHost)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try add(&db, "user/repo", "user", "homebrew-repo", null);
+
+    const pair = (try getOwnerRepo(std.testing.allocator, &db, "user/repo")).?;
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("github.com", pair.host);
+}
+
+test "list surfaces each row's forge host" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try add(&db, "user/repo", "user", "homebrew-repo", null);
+    try addWithHost(&db, "grp/tap", "grp", "tap", "gitlab.com", null);
+
+    const taps = try list(std.testing.allocator, &db);
+    defer {
+        for (taps) |t| freeTapInfoFields(std.testing.allocator, t);
+        std.testing.allocator.free(taps);
+    }
+    try std.testing.expectEqual(@as(usize, 2), taps.len);
+    for (taps) |t| {
+        if (std.mem.eql(u8, t.name, "grp/tap")) {
+            try std.testing.expectEqualStrings("gitlab.com", t.host);
+        } else {
+            try std.testing.expectEqualStrings("github.com", t.host);
+        }
+    }
+}
+
 test "getOwnerRepo reads the row's host, defaulting to github.com" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
@@ -699,17 +782,48 @@ test "getOwnerRepo reads a non-default host written to the row" {
     try std.testing.expectEqualStrings("tap", pair.repo);
 }
 
-test "effectiveOwnerRepo cold path defaults host to github.com" {
+test "effectiveOwnerRepo cold path synthesizes homebrew- for github.com" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     const schema = @import("../db/schema.zig");
     try schema.initSchema(&db);
 
-    const pair = try effectiveOwnerRepo(std.testing.allocator, &db, "aeroxy/tap");
+    const pair = try effectiveOwnerRepo(std.testing.allocator, &db, "aeroxy/tap", "github.com");
     defer pair.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("github.com", pair.host);
     try std.testing.expectEqualStrings("aeroxy", pair.owner);
     try std.testing.expectEqualStrings("homebrew-tap", pair.repo);
+}
+
+test "effectiveOwnerRepo refuses to synthesize a repo for non-github hosts" {
+    // The `homebrew-<repo>` convention is GitHub-community-specific; on
+    // other forges there is no safe default repo to guess, so the cold
+    // path must demand an explicit repo rather than mis-resolve.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+
+    try std.testing.expectError(
+        error.ExplicitRepoRequired,
+        effectiveOwnerRepo(std.testing.allocator, &db, "grp/tap", "gitlab.com"),
+    );
+}
+
+test "effectiveOwnerRepo reads the stored row regardless of the host hint" {
+    // Once a row exists its persisted host wins; the hint only governs
+    // the cold-path synthesis decision.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try addWithHost(&db, "grp/tap", "grp", "tap", "gitlab.com", null);
+
+    const pair = try effectiveOwnerRepo(std.testing.allocator, &db, "grp/tap", "github.com");
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("gitlab.com", pair.host);
+    try std.testing.expectEqualStrings("grp", pair.owner);
+    try std.testing.expectEqualStrings("tap", pair.repo);
 }
 
 test "resolveTapBaseUrls routes the row's host through the forge seam" {
@@ -745,7 +859,8 @@ pub fn resolveCommitUrl(
     slug: []const u8,
     sha: []const u8,
 ) ![]const u8 {
-    const pair = try effectiveOwnerRepo(allocator, db, slug);
+    // `commits/<sha>` is a GitHub-only verb today (`mt tap --pin`).
+    const pair = try effectiveOwnerRepo(allocator, db, slug, "github.com");
     defer pair.deinit(allocator);
     return std.fmt.allocPrint(
         allocator,

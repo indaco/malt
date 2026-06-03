@@ -796,7 +796,7 @@ pub fn materializeRubyFormula(
             // is already recorded; a missing tap row self-heals next sync.
             // (owner, repo) routes through `effectiveOwnerRepo` so the
             // synthesis used at fetch time and at persist time can't drift.
-            if (tap_mod.effectiveOwnerRepo(allocator, db, resolved.tap_label)) |pair| {
+            if (tap_mod.effectiveOwnerRepo(allocator, db, resolved.tap_label, "github.com")) |pair| {
                 defer pair.deinit(allocator);
                 tap_mod.add(db, resolved.tap_label, pair.owner, pair.repo, t.commit_sha) catch {};
                 if (t.head_etag) |et| tap_mod.updateHead(db, resolved.tap_label, t.commit_sha, et) catch {};
@@ -1023,7 +1023,7 @@ fn finalizeTapCaskInstall(
     // (owner, repo) routes through `effectiveOwnerRepo` so the
     // persisted pair matches the one fetched against.
     if (tap_registration) |t| {
-        if (tap_mod.effectiveOwnerRepo(allocator, db, tap_label)) |pair| {
+        if (tap_mod.effectiveOwnerRepo(allocator, db, tap_label, "github.com")) |pair| {
             defer pair.deinit(allocator);
             tap_mod.add(db, tap_label, pair.owner, pair.repo, t.commit_sha) catch {};
             if (t.head_etag) |et| tap_mod.updateHead(db, tap_label, t.commit_sha, et) catch {};

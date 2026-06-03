@@ -159,7 +159,7 @@ pub const bash_script =
     \\        bundle)           cmd_flags="--dry-run -n --format --from-installed --purge --yes -y --isolate-deps --isolate-dependencies" ;;
     \\        run)              cmd_flags="--keep" ;;
     \\        doctor)           cmd_flags="--fix --dry-run" ;;
-    \\        tap)              cmd_flags="--refresh --all --pin --repo --force --yes -y --json" ;;
+    \\        tap)              cmd_flags="--refresh --all --pin --repo --host --url --force --yes -y --json" ;;
     \\    esac
     \\
     \\    if [[ "$cur" == -* ]]; then
@@ -434,6 +434,8 @@ pub const zsh_script =
     \\                        '--all[With --refresh: walk every registered tap]' \
     \\                        '--pin[Explicitly pin <slug> to <sha>]' \
     \\                        '--repo[Point the tap at owner/exact-repo (no homebrew- prefix)]:owner/exact-repo:' \
+    \\                        '--host[Register the tap on a non-GitHub forge (e.g. gitlab.com)]:forge-host:' \
+    \\                        '--url[Derive (host, owner, repo) from a full repo URL]:repo-url:' \
     \\                        '--force[Rebind an existing tap to a new --repo target]' \
     \\                        '(--yes -y)'{--yes,-y}'[Confirm --refresh --all apply]' \
     \\                        '--json[Emit refresh-all diff as JSON]' \
@@ -651,6 +653,8 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l all     -d 'With --refresh: walk every registered tap'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l pin     -d 'Explicitly pin <slug> to <sha>'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l repo    -x -d 'Point the tap at owner/exact-repo (no homebrew- prefix)'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l host    -x -d 'Register the tap on a non-GitHub forge (e.g. gitlab.com)'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l url     -x -d 'Derive (host, owner, repo) from a full repo URL'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l force   -d 'Rebind an existing tap to a new --repo target'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -s y -l yes -d 'Confirm --refresh --all apply'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l json    -d 'Emit refresh-all diff as JSON'
