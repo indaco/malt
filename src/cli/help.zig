@@ -306,8 +306,8 @@ const tap_help =
     \\                       and refuse to apply without --yes when any
     \\                       tap moved.
     \\  --pin <slug> <sha>   Explicitly pin <slug> to <sha>. The SHA is
-    \\                       validated for reachability through GitHub's
-    \\                       commits/<sha> endpoint before the pin lands.
+    \\                       validated for reachability through the tap's own
+    \\                       forge's commits/<sha> endpoint before it lands.
     \\  --repo <owner>/<exact-repo>
     \\                       Point the tap at a GitHub repo whose name
     \\                       does NOT carry the `homebrew-` prefix

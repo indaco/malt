@@ -983,21 +983,17 @@ test "getOwnerRepo carries the row's effective forge" {
 /// Build the `commits/<sha>` URL sibling of `api_head_url`. Routes
 /// through the same `effectiveOwnerRepo` seam the HEAD path uses — a
 /// 200 here proves the SHA is reachable against the exact repo
-/// subsequent installs will fetch from.
+/// subsequent installs will fetch from. The row's effective forge picks
+/// the endpoint, so a non-github tap pins against its own forge.
 pub fn resolveCommitUrl(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
     slug: []const u8,
     sha: []const u8,
 ) ![]const u8 {
-    // `commits/<sha>` is a GitHub-only verb today (`mt tap --pin`).
     const pair = try effectiveOwnerRepo(allocator, db, slug, "github.com");
     defer pair.deinit(allocator);
-    return std.fmt.allocPrint(
-        allocator,
-        "https://api.github.com/repos/{s}/{s}/commits/{s}",
-        .{ pair.owner, pair.repo, sha },
-    );
+    return forge.commitUrl(allocator, pair.forge, pair.host, pair.owner, pair.repo, sha);
 }
 
 test "resolveCommitUrl falls back to slug-derived default when no row exists" {
@@ -1034,6 +1030,79 @@ test "resolveCommitUrl reads (owner, repo) from the row when present" {
         "https://api.github.com/repos/aeroxy/ast-outline/commits/" ++ sha,
         url,
     );
+}
+
+test "resolveCommitUrl builds the gitlab v4 commits/<sha> URL for a gitlab row" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try addWithForge(&db, "grp/tap", "grp", "tap", "gitlab.com", .gitlab, null);
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+
+    const url = try resolveCommitUrl(std.testing.allocator, &db, "grp/tap", sha);
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://gitlab.com/api/v4/projects/grp%2Ftap/repository/commits/" ++ sha,
+        url,
+    );
+}
+
+test "resolveCommitUrl builds the codeberg v1 commits/<sha> URL for a codeberg row" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try addWithForge(&db, "grp/tap", "grp", "tap", "codeberg.org", .codeberg, null);
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+
+    const url = try resolveCommitUrl(std.testing.allocator, &db, "grp/tap", sha);
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://codeberg.org/api/v1/repos/grp/tap/git/commits/" ++ sha,
+        url,
+    );
+}
+
+test "resolveCommitUrl honours a self-hosted gitlab row's host and forge hint" {
+    // The host (code.acme.com) can't reveal the provider; only the stored
+    // `--forge gitlab` hint routes the pin to the v4 endpoint, on that host.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try addWithForge(&db, "acme/tap", "acme", "tap", "code.acme.com", .gitlab, null);
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+
+    const url = try resolveCommitUrl(std.testing.allocator, &db, "acme/tap", sha);
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://code.acme.com/api/v4/projects/acme%2Ftap/repository/commits/" ++ sha,
+        url,
+    );
+}
+
+test "pinning a non-github tap lands the sha without resetting its host or forge" {
+    // Pinning now reaches a successful `add` for non-github taps (it used to
+    // 404 at GitHub). The add must keep host/forge sticky — only commit_sha
+    // advances — or the row would silently resolve against github next time.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try addWithForge(&db, "grp/tap", "grp", "tap", "gitlab.com", .gitlab, null);
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+
+    try add(&db, "grp/tap", "grp", "tap", sha);
+
+    const stored = (try getCommitSha(std.testing.allocator, &db, "grp/tap")).?;
+    defer std.testing.allocator.free(stored);
+    try std.testing.expectEqualStrings(sha, stored);
+
+    const pair = (try getOwnerRepo(std.testing.allocator, &db, "grp/tap")).?;
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("gitlab.com", pair.host);
+    try std.testing.expectEqual(forge.Forge.gitlab, pair.forge);
 }
 
 test "resolveTapBaseUrls preserves repo names containing hyphens and digits via the row" {

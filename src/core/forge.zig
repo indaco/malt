@@ -235,6 +235,50 @@ pub fn buildBaseUrls(
     }
 }
 
+/// Build the `commits/<sha>` URL for a tap repo — the pin-verb sibling of
+/// `buildBaseUrls`'s `api_head_url`. `mt tap --pin` hits it to prove a SHA
+/// is reachable on the tap's **own** forge, so a non-github tap never
+/// routes its check at api.github.com. `host` drives the non-github arms;
+/// the github arm's host is fixed. Caller owns the result.
+pub fn commitUrl(
+    allocator: std.mem.Allocator,
+    forge_kind: Forge,
+    host: []const u8,
+    owner: []const u8,
+    repo: []const u8,
+    sha: []const u8,
+) std.mem.Allocator.Error![]const u8 {
+    switch (forge_kind) {
+        .github => return std.fmt.allocPrint(
+            allocator,
+            "https://api.github.com/repos/{s}/{s}/commits/{s}",
+            .{ owner, repo, sha },
+        ),
+        .gitlab => {
+            // v4 keys by the URL-encoded project path, like buildBaseUrls;
+            // worst case every byte (the "/" separator too) escapes to 3.
+            const enc_cap = (owner.len + 1 + repo.len) * 3;
+            const enc = try allocator.alloc(u8, enc_cap);
+            defer allocator.free(enc);
+            // enc is sized for the worst case, so encoding cannot overflow it.
+            const path = encodeProjectPath(enc, owner, repo) catch unreachable;
+            return std.fmt.allocPrint(
+                allocator,
+                "https://{s}/api/v4/projects/{s}/repository/commits/{s}",
+                .{ host, path, sha },
+            );
+        },
+        // Gitea/Forgejo serve a single commit at `git/commits/<sha>` (the
+        // git-data route); the bare `commits/<sha>` verb 404s. Keyed by
+        // plain owner/repo (no encoding) on the instance host.
+        .codeberg => return std.fmt.allocPrint(
+            allocator,
+            "https://{s}/api/v1/repos/{s}/{s}/git/commits/{s}",
+            .{ host, owner, repo, sha },
+        ),
+    }
+}
+
 /// Auth header for the forge's **API** request (the `commits/HEAD`
 /// call), built into `buf` from the forge's token env var, or null when
 /// unset/empty. The token contract is one env var per forge, keyed by
@@ -925,4 +969,91 @@ test "rawAuthHeader codeberg: token attached — raw lives on the instance host"
 test "rawAuthHeader codeberg: null when MALT_CODEBERG_TOKEN unset" {
     var buf: [256]u8 = undefined;
     try std.testing.expect(rawAuthHeader(.codeberg, .empty, &buf) == null);
+}
+
+// ── commitUrl ──────────────────────────────────────────────────────
+// The `commits/<sha>` sibling of `api_head_url` that `mt tap --pin` hits
+// to prove a SHA is reachable on the tap's own forge. Byte shapes are the
+// contract: a non-github tap must pin against its own endpoint, never
+// api.github.com. github stays byte-identical to the pre-seam literal.
+
+const commit_sha_fixture = "0123456789abcdef0123456789abcdef01234567";
+
+test "commitUrl github: byte-identical to the pre-seam api.github.com literal" {
+    const url = try commitUrl(std.testing.allocator, .github, "github.com", "aeroxy", "ast-outline", commit_sha_fixture);
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://api.github.com/repos/aeroxy/ast-outline/commits/" ++ commit_sha_fixture,
+        url,
+    );
+}
+
+test "commitUrl gitlab: encoded v4 project path on the instance host" {
+    const url = try commitUrl(std.testing.allocator, .gitlab, "gitlab.com", "grp", "tap", commit_sha_fixture);
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://gitlab.com/api/v4/projects/grp%2Ftap/repository/commits/" ++ commit_sha_fixture,
+        url,
+    );
+}
+
+test "commitUrl gitlab: a self-hosted instance host drives the URL" {
+    const url = try commitUrl(std.testing.allocator, .gitlab, "gitlab.gnome.org", "GNOME", "glib", commit_sha_fixture);
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://gitlab.gnome.org/api/v4/projects/GNOME%2Fglib/repository/commits/" ++ commit_sha_fixture,
+        url,
+    );
+}
+
+test "commitUrl codeberg: plain owner/repo on the v1 git/commits endpoint" {
+    // Gitea/Forgejo serve a single commit at `git/commits/<sha>`; the bare
+    // `commits/<sha>` (gitlab/github's verb) 404s here.
+    const url = try commitUrl(std.testing.allocator, .codeberg, "codeberg.org", "grp", "tap", commit_sha_fixture);
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://codeberg.org/api/v1/repos/grp/tap/git/commits/" ++ commit_sha_fixture,
+        url,
+    );
+}
+
+test "commitUrl codeberg: a self-hosted Forgejo host drives the URL" {
+    const url = try commitUrl(std.testing.allocator, .codeberg, "git.example.org", "team", "tap", commit_sha_fixture);
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://git.example.org/api/v1/repos/team/tap/git/commits/" ++ commit_sha_fixture,
+        url,
+    );
+}
+
+fn commitUrlAndFree(allocator: std.mem.Allocator) !void {
+    // gitlab is the allocating-twice arm (encode buffer + allocPrint).
+    const url = try commitUrl(allocator, .gitlab, "gitlab.com", "grp", "tap", commit_sha_fixture);
+    allocator.free(url);
+}
+
+test "commitUrl gitlab: no leak on any allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, commitUrlAndFree, .{});
+}
+
+// Codeberg's `commits/<sha>` returns a single object (`{"sha":…}`), not
+// the `?limit=1` array its HEAD path uses. The shared scan finds the
+// first top-level `"sha"` either way, so the pin path reuses the parser.
+
+test "parseHeadSha codeberg: single commit object (commits/<sha>) yields the sha" {
+    const body =
+        \\{"sha":"0123456789abcdef0123456789abcdef01234567","commit":{"message":"x"}}
+    ;
+    const got = parseHeadSha(.codeberg, body) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(valid_sha_fixture, got);
+}
+
+test "parseHeadSha codeberg: commit object picks the top-level sha, not a nested tree sha" {
+    // The pin response nests a `commit.tree.sha`; the scan must lock onto
+    // the object's own top-level sha, exactly as the HEAD array path does.
+    const body =
+        \\{"sha":"0123456789abcdef0123456789abcdef01234567","commit":{"tree":{"sha":"ffffffffffffffffffffffffffffffffffffffff"}}}
+    ;
+    const got = parseHeadSha(.codeberg, body) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(valid_sha_fixture, got);
 }
