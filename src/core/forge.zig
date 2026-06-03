@@ -7,12 +7,15 @@
 
 const std = @import("std");
 
-/// Source forge hosting a tap repo. GitHub is the only variant today;
-/// GitLab/Codeberg arrive as new arms, each forcing an exhaustive-switch
-/// compile error until every concern below handles it.
-pub const Forge = enum { github };
+/// Source forge hosting a tap repo. Each variant forces an
+/// exhaustive-switch compile error until every concern below handles it,
+/// so a new forge (Codeberg next) can never be half-wired.
+pub const Forge = enum { github, gitlab };
 
 const github_browse_fmt = "https://github.com/{s}/{s}";
+// GitLab's browse, repo, and `/-/raw` URLs all share the instance host,
+// so the host (not a literal) prefixes each.
+const gitlab_browse_fmt = "https://{s}/{s}/{s}";
 
 /// Browse URL for `taps.url`, written into a caller buffer. `host` is
 /// plumbed for non-github arms; the github arm's host is fixed.
@@ -23,9 +26,9 @@ pub fn repoBrowseUrl(
     owner: []const u8,
     repo: []const u8,
 ) std.fmt.BufPrintError![]const u8 {
-    _ = host;
     return switch (forge) {
         .github => std.fmt.bufPrint(buf, github_browse_fmt, .{ owner, repo }),
+        .gitlab => std.fmt.bufPrint(buf, gitlab_browse_fmt, .{ host, owner, repo }),
     };
 }
 
@@ -38,9 +41,9 @@ pub fn allocRepoBrowseUrl(
     owner: []const u8,
     repo: []const u8,
 ) std.mem.Allocator.Error![]const u8 {
-    _ = host;
     return switch (forge) {
         .github => std.fmt.allocPrint(allocator, github_browse_fmt, .{ owner, repo }),
+        .gitlab => std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ host, owner, repo }),
     };
 }
 
@@ -71,7 +74,9 @@ pub fn rawFileUrl(
     name: []const u8,
 ) std.fmt.BufPrintError![]const u8 {
     return switch (forge) {
-        .github => std.fmt.bufPrint(buf, "{s}/{s}/{s}/{s}.rb", .{
+        // Same tail for both: the forge-specific infix already lives in
+        // `raw_base` (github: bare; gitlab: `/-/raw`).
+        .github, .gitlab => std.fmt.bufPrint(buf, "{s}/{s}/{s}/{s}.rb", .{
             raw_base, sha, kind.subdir(), name,
         }),
     };
@@ -81,7 +86,9 @@ pub fn rawFileUrl(
 /// today; the `host` argument is plumbed now so AP-002 only feeds it,
 /// never re-threads signatures.
 pub fn fromHost(host: []const u8) Forge {
-    _ = host;
+    // Narrow `gitlab.` prefix (covers gitlab.com and self-hosted
+    // gitlab.<org>); a look-alike like notgitlab.com must not match.
+    if (std.mem.startsWith(u8, host, "gitlab.")) return .gitlab;
     return .github;
 }
 
@@ -107,6 +114,40 @@ pub const TapBaseUrls = struct {
     }
 };
 
+const upper_hex = "0123456789ABCDEF";
+
+/// RFC 3986 unreserved set — the bytes `encodeProjectPath` leaves intact.
+fn isUnreserved(c: u8) bool {
+    return switch (c) {
+        'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~' => true,
+        else => false,
+    };
+}
+
+/// Percent-encode `owner/repo` into `buf` as GitLab's v4 `:id` segment
+/// (`owner%2Frepo`). Every byte outside the unreserved set is escaped —
+/// the `/` separator included — so a subgroup path or an odd repo name
+/// can't break out of the URL segment. Caller sizes `buf`.
+fn encodeProjectPath(buf: []u8, owner: []const u8, repo: []const u8) error{NoSpaceLeft}![]const u8 {
+    var n: usize = 0;
+    for ([_][]const u8{ owner, "/", repo }) |part| {
+        for (part) |c| {
+            if (isUnreserved(c)) {
+                if (n >= buf.len) return error.NoSpaceLeft;
+                buf[n] = c;
+                n += 1;
+            } else {
+                if (n + 3 > buf.len) return error.NoSpaceLeft;
+                buf[n] = '%';
+                buf[n + 1] = upper_hex[c >> 4];
+                buf[n + 2] = upper_hex[c & 0x0f];
+                n += 3;
+            }
+        }
+    }
+    return buf[0..n];
+}
+
 /// Build the URL triple for a tap repo. `host` is plumbed for the
 /// non-GitHub arms (AP-002 feeds it from the row); the github arm's
 /// hosts are fixed, so it ignores `host` today.
@@ -119,7 +160,7 @@ pub fn buildBaseUrls(
 ) std.mem.Allocator.Error!TapBaseUrls {
     switch (forge) {
         .github => {
-            _ = host; // github hosts are fixed; host drives only non-github arms
+            // github hosts are fixed; only the gitlab arm consults `host`.
             const api_head_url = try std.fmt.allocPrint(
                 allocator,
                 "https://api.github.com/repos/{s}/{s}/commits/HEAD",
@@ -139,6 +180,29 @@ pub fn buildBaseUrls(
                 "https://raw.githubusercontent.com/{s}/{s}",
                 .{ owner, repo },
             );
+            errdefer allocator.free(raw_base);
+
+            return .{ .forge = forge, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
+        },
+        .gitlab => {
+            // Worst case every byte escapes to 3 chars; the "/" separator too.
+            const enc_cap = (owner.len + 1 + repo.len) * 3;
+            const enc = try allocator.alloc(u8, enc_cap);
+            defer allocator.free(enc);
+            // enc is sized for the worst case, so encoding cannot overflow it.
+            const path = encodeProjectPath(enc, owner, repo) catch unreachable;
+
+            const api_head_url = try std.fmt.allocPrint(
+                allocator,
+                "https://{s}/api/v4/projects/{s}/repository/commits/HEAD",
+                .{ host, path },
+            );
+            errdefer allocator.free(api_head_url);
+
+            const repo_url = try std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ host, owner, repo });
+            errdefer allocator.free(repo_url);
+
+            const raw_base = try std.fmt.allocPrint(allocator, "https://{s}/{s}/{s}/-/raw", .{ host, owner, repo });
             errdefer allocator.free(raw_base);
 
             return .{ .forge = forge, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
@@ -164,7 +228,19 @@ pub fn authHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std.ht
             const value = std.fmt.bufPrint(buf, "Bearer {s}", .{raw}) catch return null;
             return .{ .name = "Authorization", .value = value };
         },
+        .gitlab => return gitlabPrivateToken(environ, buf),
     }
+}
+
+/// GitLab's `PRIVATE-TOKEN` header from `MALT_GITLAB_TOKEN`, or null when
+/// unset/empty. Shared by the API and the instance-host raw fetch — both
+/// authenticate the same way, against the same host.
+fn gitlabPrivateToken(environ: std.process.Environ, buf: []u8) ?std.http.Header {
+    const raw = std.process.Environ.getPosix(environ, "MALT_GITLAB_TOKEN") orelse return null;
+    if (raw.len == 0) return null;
+    // Bare PAT — no scheme prefix, unlike github's Bearer.
+    const value = std.fmt.bufPrint(buf, "{s}", .{raw}) catch return null;
+    return .{ .name = "PRIVATE-TOKEN", .value = value };
 }
 
 /// Auth header for a **raw `.rb`** fetch, or null when the forge's raw
@@ -174,10 +250,9 @@ pub fn authHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std.ht
 /// raw fetch stays unauthenticated, exactly as before. Forges whose raw
 /// path lives on the authenticated instance host attach their token here.
 pub fn rawAuthHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std.http.Header {
-    _ = environ;
-    _ = buf;
     return switch (forge) {
         .github => null,
+        .gitlab => gitlabPrivateToken(environ, buf),
     };
 }
 
@@ -193,36 +268,53 @@ fn isCommitSha(sha: []const u8) bool {
     return true;
 }
 
-/// Pull the HEAD commit sha out of a forge's `commits/HEAD` response.
-/// GitHub: the first top-level `"sha"` string, validated as 40-char
-/// lowercase hex. Untrusted input — malformed or unexpected shapes
-/// return null rather than a misleading sha. The result borrows from
-/// `body`; the caller dupes it.
+/// First top-level `<marker>` string value, validated as a 40-char hex
+/// sha. `marker` carries its own quotes (`"sha"`, `"id"`) so it can't
+/// match a longer key (`"short_id"` won't match `"id"`). Untrusted input —
+/// malformed/unexpected shapes return null. Result borrows from `body`.
+fn firstShaField(body: []const u8, marker: []const u8) ?[]const u8 {
+    const idx = std.mem.indexOf(u8, body, marker) orelse return null;
+    var cur = idx + marker.len;
+    while (cur < body.len and (body[cur] == ' ' or body[cur] == ':' or body[cur] == '\t')) : (cur += 1) {}
+    if (cur >= body.len or body[cur] != '"') return null;
+    cur += 1;
+    const end = std.mem.indexOfScalarPos(u8, body, cur, '"') orelse return null;
+    const sha = body[cur..end];
+    if (!isCommitSha(sha)) return null;
+    return sha;
+}
+
+/// Pull the HEAD commit sha out of a forge's `commits/HEAD` response, as
+/// the caller dupes it. The shape differs only in the leading key:
+/// GitHub emits `"sha"` first; GitLab emits `"id"` (not `sha`) first.
 pub fn parseHeadSha(forge: Forge, body: []const u8) ?[]const u8 {
-    switch (forge) {
-        .github => {
-            // First top-level `"sha"` takes the value — GitHub always emits
-            // the commit SHA before the nested tree/parent objects.
-            const marker = "\"sha\"";
-            const idx = std.mem.indexOf(u8, body, marker) orelse return null;
-            var cur = idx + marker.len;
-            while (cur < body.len and (body[cur] == ' ' or body[cur] == ':' or body[cur] == '\t')) : (cur += 1) {}
-            if (cur >= body.len or body[cur] != '"') return null;
-            cur += 1;
-            const end = std.mem.indexOfScalarPos(u8, body, cur, '"') orelse return null;
-            const sha = body[cur..end];
-            if (!isCommitSha(sha)) return null;
-            return sha;
-        },
-    }
+    return switch (forge) {
+        .github => firstShaField(body, "\"sha\""),
+        .gitlab => firstShaField(body, "\"id\""),
+    };
 }
 
 test "fromHost classifies github.com as .github" {
     try std.testing.expectEqual(Forge.github, fromHost("github.com"));
 }
 
-test "fromHost defaults unknown hosts to .github (only variant today)" {
+test "fromHost defaults non-gitlab hosts to .github" {
     try std.testing.expectEqual(Forge.github, fromHost("example.com"));
+}
+
+test "fromHost classifies gitlab.com as .gitlab" {
+    try std.testing.expectEqual(Forge.gitlab, fromHost("gitlab.com"));
+}
+
+test "fromHost classifies a self-hosted gitlab.* instance as .gitlab" {
+    try std.testing.expectEqual(Forge.gitlab, fromHost("gitlab.gnome.org"));
+}
+
+test "fromHost leaves a gitlab look-alike host as .github" {
+    // The match is a narrow `gitlab.` prefix, not a substring: a name like
+    // `notgitlab.com` must not auto-classify. Self-hosted instances that
+    // aren't named gitlab.* use explicit registration, not host sniffing.
+    try std.testing.expectEqual(Forge.github, fromHost("notgitlab.com"));
 }
 
 // ── parseHeadSha (github) ──────────────────────────────────────────
@@ -295,6 +387,54 @@ test "parseHeadSha github: uppercase hex in value is rejected" {
     try std.testing.expectEqual(@as(?[]const u8, null), parseHeadSha(.github, body));
 }
 
+// ── parseHeadSha (gitlab) ──────────────────────────────────────────
+// GitLab's commit object leads with `"id":"<sha>"` (note: id, not sha).
+// Same untrusted-input discipline as github: malformed shapes return
+// null so resolve reports MalformedJson rather than pinning a bad sha.
+
+test "parseHeadSha gitlab: canonical GitLab commit response" {
+    const body =
+        \\{"id":"0123456789abcdef0123456789abcdef01234567","short_id":"01234567","title":"x"}
+    ;
+    const got = parseHeadSha(.gitlab, body) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(valid_sha_fixture, got);
+}
+
+test "parseHeadSha gitlab: short_id does not shadow the full id" {
+    // The `"id"` marker must not match inside `"short_id"` — a false
+    // match there would yield the 8-char short id, not the 40-hex sha.
+    const body =
+        \\{"id":"0123456789abcdef0123456789abcdef01234567","short_id":"01234567"}
+    ;
+    const got = parseHeadSha(.gitlab, body) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(valid_sha_fixture, got);
+}
+
+test "parseHeadSha gitlab: missing id field yields null" {
+    const body =
+        \\{"short_id":"01234567","title":"x"}
+    ;
+    try std.testing.expectEqual(@as(?[]const u8, null), parseHeadSha(.gitlab, body));
+}
+
+test "parseHeadSha gitlab: short (malformed) id yields null" {
+    const body =
+        \\{"id":"0123456","short_id":"0123456"}
+    ;
+    try std.testing.expectEqual(@as(?[]const u8, null), parseHeadSha(.gitlab, body));
+}
+
+test "parseHeadSha gitlab: non-string id value yields null" {
+    const body =
+        \\{"id": 42}
+    ;
+    try std.testing.expectEqual(@as(?[]const u8, null), parseHeadSha(.gitlab, body));
+}
+
+test "parseHeadSha gitlab: empty body yields null" {
+    try std.testing.expectEqual(@as(?[]const u8, null), parseHeadSha(.gitlab, ""));
+}
+
 // ── authHeader (github) ────────────────────────────────────────────
 // Only the `/commits/HEAD` call picks up MALT_GITHUB_TOKEN. The Bearer
 // format must match GitHub's contract. Environs are constructed inline
@@ -331,6 +471,46 @@ test "rawAuthHeader github: null even when MALT_GITHUB_TOKEN is set" {
     var buf: [256]u8 = undefined;
     try std.testing.expect(rawAuthHeader(.github, envWith(entries), &buf) == null);
     try std.testing.expect(rawAuthHeader(.github, .empty, &buf) == null);
+}
+
+// ── authHeader (gitlab) ────────────────────────────────────────────
+// GitLab authenticates with a bare PAT under the PRIVATE-TOKEN header —
+// no `Bearer` prefix. MALT_GITLAB_TOKEN keys it (one var per forge), so
+// a self-hosted instance reuses its forge's var.
+
+test "authHeader gitlab: null when MALT_GITLAB_TOKEN unset" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(authHeader(.gitlab, .empty, &buf) == null);
+}
+
+test "authHeader gitlab: PRIVATE-TOKEN header when MALT_GITLAB_TOKEN set" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=glpat-xyz"};
+    var buf: [256]u8 = undefined;
+    const h = authHeader(.gitlab, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("PRIVATE-TOKEN", h.name);
+    try std.testing.expectEqualStrings("glpat-xyz", h.value);
+}
+
+test "authHeader gitlab: empty-string token behaves as unset" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN="};
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(authHeader(.gitlab, envWith(entries), &buf) == null);
+}
+
+test "rawAuthHeader gitlab: PRIVATE-TOKEN attached — raw lives on the instance host" {
+    // Unlike github's separate public raw CDN, gitlab serves `/-/raw` from
+    // the authenticated instance host, so a private tap's raw fetch carries
+    // the token. Same var, same header as the API call.
+    const entries = [_:null]?[*:0]const u8{"MALT_GITLAB_TOKEN=glpat-xyz"};
+    var buf: [256]u8 = undefined;
+    const h = rawAuthHeader(.gitlab, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("PRIVATE-TOKEN", h.name);
+    try std.testing.expectEqualStrings("glpat-xyz", h.value);
+}
+
+test "rawAuthHeader gitlab: null when MALT_GITLAB_TOKEN unset" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(rawAuthHeader(.gitlab, .empty, &buf) == null);
 }
 
 // ── buildBaseUrls (github) ─────────────────────────────────────────
@@ -433,4 +613,102 @@ fn browseAndFree(allocator: std.mem.Allocator) !void {
 
 test "allocRepoBrowseUrl github: no leak on allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, browseAndFree, .{});
+}
+
+// ── browse URL (gitlab) ────────────────────────────────────────────
+// Unlike github, the host is not fixed: a self-hosted instance domain
+// must drive the URL, so the row's `host` is the source of truth.
+
+test "repoBrowseUrl gitlab: the instance host drives the browse URL" {
+    var buf: [256]u8 = undefined;
+    const url = try repoBrowseUrl(&buf, .gitlab, "gitlab.gnome.org", "GNOME", "glib");
+    try std.testing.expectEqualStrings("https://gitlab.gnome.org/GNOME/glib", url);
+}
+
+test "allocRepoBrowseUrl gitlab: allocates the instance-host browse URL" {
+    const url = try allocRepoBrowseUrl(std.testing.allocator, .gitlab, "gitlab.com", "grp", "tap");
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://gitlab.com/grp/tap", url);
+}
+
+// ── buildBaseUrls (gitlab) ─────────────────────────────────────────
+// GitLab keys the v4 API by the URL-encoded project path (owner%2Frepo),
+// serves raw files under `/-/raw`, and browses at the instance host —
+// all three driven by the row's `host`, never a literal, so self-hosted
+// instances resolve against their own domain.
+
+test "buildBaseUrls gitlab: builds the encoded v4 / raw / browse triple" {
+    const urls = try buildBaseUrls(std.testing.allocator, .gitlab, "gitlab.com", "o", "r");
+    defer urls.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Forge.gitlab, urls.forge);
+    try std.testing.expectEqualStrings(
+        "https://gitlab.com/api/v4/projects/o%2Fr/repository/commits/HEAD",
+        urls.api_head_url,
+    );
+    try std.testing.expectEqualStrings("https://gitlab.com/o/r", urls.repo_url);
+    try std.testing.expectEqualStrings("https://gitlab.com/o/r/-/raw", urls.raw_base);
+}
+
+test "buildBaseUrls gitlab: a self-hosted instance host drives every URL" {
+    const urls = try buildBaseUrls(std.testing.allocator, .gitlab, "gitlab.gnome.org", "GNOME", "glib");
+    defer urls.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(
+        "https://gitlab.gnome.org/api/v4/projects/GNOME%2Fglib/repository/commits/HEAD",
+        urls.api_head_url,
+    );
+    try std.testing.expectEqualStrings("https://gitlab.gnome.org/GNOME/glib", urls.repo_url);
+    try std.testing.expectEqualStrings("https://gitlab.gnome.org/GNOME/glib/-/raw", urls.raw_base);
+}
+
+test "buildBaseUrls gitlab: percent-encodes reserved bytes in the project path" {
+    // Reserved bytes (the `/` separator, a space) must escape so the path
+    // stays inside the v4 `:id` segment; unreserved `.` is left intact.
+    const urls = try buildBaseUrls(std.testing.allocator, .gitlab, "gitlab.com", "a b", "c.d");
+    defer urls.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(
+        "https://gitlab.com/api/v4/projects/a%20b%2Fc.d/repository/commits/HEAD",
+        urls.api_head_url,
+    );
+}
+
+fn buildGitlabAndFree(allocator: std.mem.Allocator) !void {
+    const urls = try buildBaseUrls(allocator, .gitlab, "gitlab.com", "grp", "tap");
+    urls.deinit(allocator);
+}
+
+test "buildBaseUrls gitlab: no leak on any allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, buildGitlabAndFree, .{});
+}
+
+test "encodeProjectPath: surfaces NoSpaceLeft for an unreserved byte and an escape" {
+    // buildBaseUrls always sizes the buffer for the worst case, so these
+    // branches are otherwise unreachable — cover them directly.
+    var tiny: [0]u8 = undefined;
+    try std.testing.expectError(error.NoSpaceLeft, encodeProjectPath(&tiny, "a", "b"));
+    var one: [1]u8 = undefined; // fits 'a' but not the "/" escape (needs 3)
+    try std.testing.expectError(error.NoSpaceLeft, encodeProjectPath(&one, "a", "b"));
+}
+
+// ── rawFileUrl (gitlab) ────────────────────────────────────────────
+// The tail is identical to github; gitlab differs only in raw_base
+// (the `/-/raw` infix `buildBaseUrls` already baked in).
+
+const gitlab_raw_base = "https://gitlab.com/grp/tap/-/raw";
+
+test "rawFileUrl gitlab: formula kind builds the /-/raw Formula tail" {
+    var buf: [512]u8 = undefined;
+    const url = try rawFileUrl(&buf, .gitlab, gitlab_raw_base, raw_sha_fixture, .formula, "glow");
+    try std.testing.expectEqualStrings(
+        gitlab_raw_base ++ "/" ++ raw_sha_fixture ++ "/Formula/glow.rb",
+        url,
+    );
+}
+
+test "rawFileUrl gitlab: cask kind builds the /-/raw Casks tail" {
+    var buf: [512]u8 = undefined;
+    const url = try rawFileUrl(&buf, .gitlab, gitlab_raw_base, raw_sha_fixture, .cask, "glow");
+    try std.testing.expectEqualStrings(
+        gitlab_raw_base ++ "/" ++ raw_sha_fixture ++ "/Casks/glow.rb",
+        url,
+    );
 }

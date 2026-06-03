@@ -146,10 +146,9 @@ test "add stamps the default host github.com, read back via getOwnerRepo" {
 }
 
 test "a non-github host round-trips through getOwnerRepo and list" {
-    // Persistence half of multi-forge support: the host is stored and
-    // read back. Resolution still produces github-shaped URLs because the
-    // non-github forge arms aren't here yet — assert the host is *read*,
-    // not that the URL changed.
+    // The host is stored, read back, and now drives the projected URL:
+    // a gitlab row lists with its instance-host browse URL, not a
+    // github-shaped one.
     var db = try openDb();
     defer db.close();
     try schema.initSchema(&db);
@@ -167,7 +166,7 @@ test "a non-github host round-trips through getOwnerRepo and list" {
     defer freeTaps(taps);
     try testing.expectEqual(@as(usize, 1), taps.len);
     try testing.expectEqualStrings("grp/tap", taps[0].name);
-    try testing.expectEqualStrings("https://github.com/grp/tap", taps[0].url);
+    try testing.expectEqualStrings("https://gitlab.com/grp/tap", taps[0].url);
 }
 
 test "rebind moves (owner, repo) and clears commit_sha and head_etag" {

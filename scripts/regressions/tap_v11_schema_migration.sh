@@ -8,8 +8,8 @@
 #      github_owner/github_repo but *without* host) upgrades to v11 on
 #      first `mt` open. Existing rows backfill to host='github.com'.
 #   2. A row carrying a non-github host survives unchanged, and the
-#      `taps.url` projection in `mt --json tap` stays github-shaped (the
-#      host is read, but the forge arms that change the URL land later).
+#      `taps.url` projection in `mt --json tap` is driven by that host —
+#      a gitlab.com row resolves to its own instance, not a github URL.
 #
 # Methodology: build a v11 DB against the current binary's initSchema,
 # rewind the taps table to the v10 shape and the schema_version marker to
@@ -112,8 +112,8 @@ host2=$(sqlite3 "$DB" "SELECT host FROM taps WHERE name='user/repo';")
 }
 printf '  ✓ existing rows backfilled to host=github.com\n'
 
-# Step 4: a non-github host persists and is read, but the URL projection
-# stays github-shaped until the forge arms land.
+# Step 4: a non-github host persists, is read, and now drives the URL
+# projection — the gitlab arm resolves a gitlab.com row to its own host.
 sqlite3 "$DB" "INSERT INTO taps (name, url, commit_sha, github_owner, github_repo, host) VALUES ('grp/tap', 'https://gitlab.com/grp/tap', NULL, 'grp', 'tap', 'gitlab.com');"
 
 host3=$(sqlite3 "$DB" "SELECT host FROM taps WHERE name='grp/tap';")
@@ -124,11 +124,11 @@ host3=$(sqlite3 "$DB" "SELECT host FROM taps WHERE name='grp/tap';")
 
 json=$("$MT" --json tap 2>/dev/null)
 projected=$(printf '%s' "$json" | jq -r '.[] | select(.name=="grp/tap") | .url')
-[[ "$projected" == "https://github.com/grp/tap" ]] || {
-  printf 'FAIL: grp/tap URL projection = %s, expected github-shaped URL.\n' "$projected" >&2
+[[ "$projected" == "https://gitlab.com/grp/tap" ]] || {
+  printf 'FAIL: grp/tap URL projection = %s, expected https://gitlab.com/grp/tap.\n' "$projected" >&2
   exit 1
 }
-printf '  ✓ non-github host stored and read; URL projection still github-shaped\n'
+printf '  ✓ non-github host stored, read, and projected through the gitlab arm\n'
 
 # Step 5: rerun migration on the now-v11 DB — must be a no-op.
 "$MT" tap >/dev/null 2>&1 || true

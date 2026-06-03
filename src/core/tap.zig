@@ -62,8 +62,8 @@ pub fn describeResolveError(err: TapError) []const u8 {
 /// Materialise `taps.url` from `(host, owner, repo)` into a caller buffer
 /// through the forge seam, so the browse-URL shape lives in one place.
 /// `buf` must hold ≥160 bytes (19 prefix + 2·64 component cap + 1 slash).
-fn writeRepoUrl(buf: []u8, host: []const u8, owner: []const u8, repo: []const u8) sqlite.SqliteError![]const u8 {
-    return forge.repoBrowseUrl(buf, forge.fromHost(host), host, owner, repo) catch
+fn writeRepoUrl(buf: []u8, forge_kind: forge.Forge, host: []const u8, owner: []const u8, repo: []const u8) sqlite.SqliteError![]const u8 {
+    return forge.repoBrowseUrl(buf, forge_kind, host, owner, repo) catch
         sqlite.SqliteError.ExecFailed;
 }
 
@@ -80,9 +80,9 @@ pub fn add(
     return addWithHost(db, name, owner, repo, "github.com", commit_sha);
 }
 
-/// Register a tap row carrying its forge `host`. The `mt tap --host` /
-/// `--url` registration path is the only caller that names a non-github
-/// host; everything else routes through `add`.
+/// Register a tap row carrying its forge `host`, letting host
+/// classification pick the provider. The `mt tap --host` / `--url`
+/// path uses this when the host alone resolves the forge.
 pub fn addWithHost(
     db: *sqlite.Database,
     name: []const u8,
@@ -91,14 +91,32 @@ pub fn addWithHost(
     host: []const u8,
     commit_sha: ?[]const u8,
 ) sqlite.SqliteError!void {
-    // Owner/repo/host are sticky on conflict — the rebind verb is the only
-    // sanctioned mutator. commit_sha is sticky unless a fresh one is
+    return addWithForge(db, name, owner, repo, host, null, commit_sha);
+}
+
+/// Register a tap row, optionally pinning its forge explicitly. A
+/// non-null `forge_hint` is the only way to resolve a custom-domain
+/// instance whose host can't reveal its provider; null defers to host
+/// classification (the common case). The hint is persisted so resolution
+/// is stable across runs.
+pub fn addWithForge(
+    db: *sqlite.Database,
+    name: []const u8,
+    owner: []const u8,
+    repo: []const u8,
+    host: []const u8,
+    forge_hint: ?forge.Forge,
+    commit_sha: ?[]const u8,
+) sqlite.SqliteError!void {
+    // Owner/repo/host/forge are sticky on conflict — the rebind verb is the
+    // only sanctioned mutator. commit_sha is sticky unless a fresh one is
     // passed (refresh goes through `updateCommit`/`updateHead`).
+    const forge_kind = forge_hint orelse forge.fromHost(host);
     var url_buf: [256]u8 = undefined;
-    const derived_url = try writeRepoUrl(&url_buf, host, owner, repo);
+    const derived_url = try writeRepoUrl(&url_buf, forge_kind, host, owner, repo);
 
     var stmt = try db.prepare(
-        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo, host) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        \\INSERT INTO taps (name, url, commit_sha, github_owner, github_repo, host, forge) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         \\ON CONFLICT(name) DO UPDATE SET
         \\    commit_sha = COALESCE(excluded.commit_sha, taps.commit_sha);
     );
@@ -113,6 +131,12 @@ pub fn addWithHost(
     try stmt.bindText(4, owner);
     try stmt.bindText(5, repo);
     try stmt.bindText(6, host);
+    // NULL forge means "classify by host" — only an explicit hint persists.
+    if (forge_hint) |f| {
+        try stmt.bindText(7, @tagName(f));
+    } else {
+        try stmt.bindNull(7);
+    }
     _ = try stmt.step();
 }
 
@@ -131,7 +155,7 @@ pub fn rebind(
     // Rebind is a GitHub-only verb today (`mt tap --repo`); the row's host
     // is left untouched by the UPDATE below, so deriving the browse URL
     // against github.com matches the row that stays.
-    const derived_url = try writeRepoUrl(&url_buf, "github.com", owner, repo);
+    const derived_url = try writeRepoUrl(&url_buf, .github, "github.com", owner, repo);
 
     var stmt = try db.prepare(
         \\UPDATE taps SET
@@ -241,7 +265,7 @@ pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
 
     // Project `url` from (github_owner, github_repo, host) so the listing
     // can't disagree with the actual fetch target.
-    var stmt = try db.prepare("SELECT name, github_owner, github_repo, commit_sha, host FROM taps;");
+    var stmt = try db.prepare("SELECT name, github_owner, github_repo, commit_sha, host, forge FROM taps;");
     defer stmt.finalize();
 
     while (try stmt.step()) {
@@ -251,6 +275,8 @@ pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
         // host is NOT NULL DEFAULT 'github.com'; the orelse only guards
         // the impossible NULL so the row still projects.
         const host = std.mem.sliceTo(stmt.columnText(4) orelse "github.com", 0);
+        // forge is nullable — NULL means classify by host.
+        const forge_stored: ?[]const u8 = if (stmt.columnText(5)) |f| std.mem.sliceTo(f, 0) else null;
 
         const name_owned = try allocator.dupe(u8, std.mem.sliceTo(n, 0));
         errdefer allocator.free(name_owned);
@@ -258,7 +284,7 @@ pub fn list(allocator: std.mem.Allocator, db: *sqlite.Database) ![]TapInfo {
         errdefer allocator.free(host_owned);
         const url_owned = try forge.allocRepoBrowseUrl(
             allocator,
-            forge.fromHost(host),
+            effectiveForge(forge_stored, host),
             host,
             std.mem.sliceTo(o, 0),
             std.mem.sliceTo(r, 0),
@@ -306,6 +332,10 @@ pub const TapPair = struct {
     owner: []const u8,
     repo: []const u8,
     host: []const u8,
+    /// The forge a row resolves against. Defaults to `.github` for the
+    /// registration-input pairs the CLI builds (they feed the forge in
+    /// separately); the row-read paths set the effective forge.
+    forge: forge.Forge = .github,
 
     pub fn deinit(self: TapPair, allocator: std.mem.Allocator) void {
         allocator.free(self.owner);
@@ -313,6 +343,18 @@ pub const TapPair = struct {
         allocator.free(self.host);
     }
 };
+
+/// Resolve the forge a tap row should use. An explicit `--forge` hint
+/// (the `forge` column) wins — it's the only way to classify a custom
+/// domain whose host can't reveal its provider (a corporate GitLab at
+/// e.g. code.acme.com). A NULL/empty/unknown value defers to host
+/// classification, so every pre-hint row resolves byte-for-byte as before.
+pub fn effectiveForge(stored: ?[]const u8, host: []const u8) forge.Forge {
+    if (stored) |s| {
+        if (std.meta.stringToEnum(forge.Forge, std.mem.sliceTo(s, 0))) |f| return f;
+    }
+    return forge.fromHost(host);
+}
 
 /// Read `(github_owner, github_repo)` for `slug`, or null when the row
 /// doesn't exist yet (cold path during `mt tap` registration).
@@ -322,7 +364,7 @@ pub fn getOwnerRepo(
     slug: []const u8,
 ) !?TapPair {
     var stmt = try db.prepare(
-        "SELECT github_owner, github_repo, host FROM taps WHERE name = ?1;",
+        "SELECT github_owner, github_repo, host, forge FROM taps WHERE name = ?1;",
     );
     defer stmt.finalize();
     try stmt.bindText(1, slug);
@@ -332,6 +374,8 @@ pub fn getOwnerRepo(
     // host is NOT NULL DEFAULT 'github.com'; the orelse only guards the
     // impossible NULL so a forge is never lost on read.
     const host_trim = std.mem.sliceTo(stmt.columnText(2) orelse "github.com", 0);
+    // forge is nullable — NULL means classify by host.
+    const forge_stored: ?[]const u8 = if (stmt.columnText(3)) |f| std.mem.sliceTo(f, 0) else null;
     const owner_trim = std.mem.sliceTo(owner_raw, 0);
     const repo_trim = std.mem.sliceTo(repo_raw, 0);
     if (owner_trim.len == 0 or repo_trim.len == 0) return null;
@@ -341,7 +385,12 @@ pub fn getOwnerRepo(
     const repo_owned = try allocator.dupe(u8, repo_trim);
     errdefer allocator.free(repo_owned);
     const host_owned = try allocator.dupe(u8, host_trim);
-    return .{ .owner = owner_owned, .repo = repo_owned, .host = host_owned };
+    return .{
+        .owner = owner_owned,
+        .repo = repo_owned,
+        .host = host_owned,
+        .forge = effectiveForge(forge_stored, host_trim),
+    };
 }
 
 /// Single point where the slug-derived default `(user, "homebrew-" || repo)`
@@ -386,9 +435,9 @@ pub fn resolveTapBaseUrls(
     // arm lands. When a row exists its persisted host wins anyway.
     const pair = try effectiveOwnerRepo(allocator, db, slug, "github.com");
     defer pair.deinit(allocator);
-    // The row's host selects the forge; github.com rows resolve exactly
-    // as before since `fromHost` maps everything to `.github` today.
-    return forge.buildBaseUrls(allocator, forge.fromHost(pair.host), pair.host, pair.owner, pair.repo);
+    // The row's effective forge (an explicit `--forge` hint, else host
+    // classification) selects the provider; github.com rows are unchanged.
+    return forge.buildBaseUrls(allocator, pair.forge, pair.host, pair.owner, pair.repo);
 }
 
 // ── resolveFromConditional: response → HeadResolution conversion ────
@@ -845,10 +894,10 @@ test "effectiveOwnerRepo reads the stored row regardless of the host hint" {
 }
 
 test "resolveTapBaseUrls routes the row's host through the forge seam" {
-    // The host is read and handed to `forge.fromHost`. Until the GitLab
-    // arm lands, `fromHost` maps every host to `.github`, so the URLs
-    // stay github-shaped — proving the host is *read*, not that the
-    // output changed. The owner/repo come through verbatim (no synthesis).
+    // The host is read and handed to `forge.fromHost`: a gitlab.com row
+    // resolves to GitLab's v4 commits URL (URL-encoded project path) and
+    // the instance-host browse URL. Owner/repo come through verbatim
+    // (no `homebrew-` synthesis).
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     const schema = @import("../db/schema.zig");
@@ -861,10 +910,74 @@ test "resolveTapBaseUrls routes the row's host through the forge seam" {
     const urls = try resolveTapBaseUrls(std.testing.allocator, &db, "grp/tap");
     defer urls.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings(
-        "https://api.github.com/repos/grp/tap/commits/HEAD",
+        "https://gitlab.com/api/v4/projects/grp%2Ftap/repository/commits/HEAD",
         urls.api_head_url,
     );
-    try std.testing.expectEqualStrings("https://github.com/grp/tap", urls.repo_url);
+    try std.testing.expectEqualStrings("https://gitlab.com/grp/tap", urls.repo_url);
+}
+
+test "effectiveForge: an explicit forge hint overrides host classification" {
+    // A corporate GitLab on a custom domain can't be sniffed from its
+    // host, so the stored hint is the only signal and must win.
+    try std.testing.expectEqual(forge.Forge.gitlab, effectiveForge("gitlab", "code.acme.com"));
+}
+
+test "effectiveForge: a null hint falls back to host classification" {
+    try std.testing.expectEqual(forge.Forge.gitlab, effectiveForge(null, "gitlab.com"));
+    try std.testing.expectEqual(forge.Forge.github, effectiveForge(null, "github.com"));
+}
+
+test "effectiveForge: an unrecognised stored value falls back to the host" {
+    try std.testing.expectEqual(forge.Forge.github, effectiveForge("bogus", "github.com"));
+}
+
+test "addWithForge resolves a custom-domain instance through the hinted forge" {
+    // The whole point of `--forge`: code.acme.com isn't named gitlab.*,
+    // so only the persisted hint makes it resolve as GitLab.
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+
+    try addWithForge(&db, "acme/tap", "acme", "tap", "code.acme.com", .gitlab, null);
+
+    const urls = try resolveTapBaseUrls(std.testing.allocator, &db, "acme/tap");
+    defer urls.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(
+        "https://code.acme.com/api/v4/projects/acme%2Ftap/repository/commits/HEAD",
+        urls.api_head_url,
+    );
+    try std.testing.expectEqualStrings("https://code.acme.com/acme/tap", urls.repo_url);
+    try std.testing.expectEqualStrings("https://code.acme.com/acme/tap/-/raw", urls.raw_base);
+}
+
+test "addWithForge stamps the browse URL through the hinted forge" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+
+    try addWithForge(&db, "acme/tap", "acme", "tap", "code.acme.com", .gitlab, null);
+
+    const taps = try list(std.testing.allocator, &db);
+    defer {
+        for (taps) |t| freeTapInfoFields(std.testing.allocator, t);
+        std.testing.allocator.free(taps);
+    }
+    try std.testing.expectEqual(@as(usize, 1), taps.len);
+    try std.testing.expectEqualStrings("https://code.acme.com/acme/tap", taps[0].url);
+}
+
+test "getOwnerRepo carries the row's effective forge" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    try addWithForge(&db, "acme/tap", "acme", "tap", "code.acme.com", .gitlab, null);
+
+    const pair = (try getOwnerRepo(std.testing.allocator, &db, "acme/tap")).?;
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqual(forge.Forge.gitlab, pair.forge);
 }
 
 /// Build the `commits/<sha>` URL sibling of `api_head_url`. Routes

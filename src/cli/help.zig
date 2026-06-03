@@ -285,7 +285,7 @@ const doctor_help =
 const tap_help =
     \\Usage: malt tap [<user>/<repo>]
     \\       malt tap <user>/<repo> --repo <owner>/<exact-repo> [--force]
-    \\       malt tap <slug> --host <forge-host> --repo <owner>/<repo>
+    \\       malt tap <slug> --host <forge-host> [--forge <provider>] --repo <owner>/<repo>
     \\       malt tap <slug> --url https://<host>/<owner>/<repo>
     \\       malt tap --refresh <user>/<repo>
     \\       malt tap --refresh --all [--yes] [--json]
@@ -315,10 +315,14 @@ const tap_help =
     \\                       aeroxy/ast-outline`). Without this flag the
     \\                       tap resolves against `homebrew-<repo>`.
     \\  --host <forge-host>  Register the tap against a non-GitHub forge
-    \\                       (e.g. gitlab.com, codeberg.org). Requires an
+    \\                       (e.g. gitlab.com, gitlab.gnome.org). Requires an
     \\                       explicit --repo — the `homebrew-<repo>` default
-    \\                       only applies to github.com. Resolution for
-    \\                       non-GitHub forges arrives in a later release.
+    \\                       only applies to github.com. The tap registers
+    \\                       unpinned; `mt tap --refresh <slug>` pins its HEAD.
+    \\  --forge <provider>   Pin the forge explicitly (github or gitlab) when
+    \\                       the host can't reveal it — a custom-domain GitLab
+    \\                       like code.acme.com. gitlab.* hosts auto-classify,
+    \\                       so this is only needed for non-obvious domains.
     \\  --url <repo-url>     Derive (host, owner, repo) from a full
     \\                       `https://<host>/<owner>/<repo>` URL instead of
     \\                       naming --host and --repo separately.
