@@ -16,11 +16,59 @@ pub const TapNameError = error{InvalidTapName};
 
 pub const RepoOverrideError = error{InvalidRepoOverride} || std.mem.Allocator.Error;
 
+pub const ForgeHostError = error{InvalidForgeHost};
+
+pub const RepoUrlError = error{InvalidRepoUrl} || std.mem.Allocator.Error;
+
+/// Parse a full `https://<host>/<owner>/<repo>` registration URL into an
+/// owned `(host, owner, repo)` triple, deriving the forge host so the
+/// user need not name `--host` separately. Host and path components are
+/// validated by the same rules `--host` and `--repo` enforce. A single
+/// trailing slash is tolerated; deeper paths and non-https URLs are
+/// rejected. Caller owns the triple via `TapPair.deinit`.
+pub fn parseRepoUrl(allocator: std.mem.Allocator, raw: []const u8) RepoUrlError!tap_mod.TapPair {
+    const scheme = "https://";
+    if (!std.mem.startsWith(u8, raw, scheme)) return error.InvalidRepoUrl;
+    const rest = std.mem.trimEnd(u8, raw[scheme.len..], "/");
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.InvalidRepoUrl;
+    const host = rest[0..slash];
+    const path = rest[slash + 1 ..];
+    validateForgeHost(host) catch return error.InvalidRepoUrl;
+    validateTapName(path) catch return error.InvalidRepoUrl;
+    const path_slash = std.mem.indexOfScalar(u8, path, '/').?;
+    const owner = path[0..path_slash];
+    const repo = path[path_slash + 1 ..];
+
+    const host_owned = try allocator.dupe(u8, host);
+    errdefer allocator.free(host_owned);
+    const owner_owned = try allocator.dupe(u8, owner);
+    errdefer allocator.free(owner_owned);
+    const repo_owned = try allocator.dupe(u8, repo);
+    return .{ .owner = owner_owned, .repo = repo_owned, .host = host_owned };
+}
+
+/// Validate a `--host` value as a bare forge host: an HTTPS host with no
+/// scheme and no path. Rejecting `:` and `/` rules out `https://…`, a
+/// trailing path, and `host:port` in one sweep; the dot requirement stops
+/// a stray path fragment from masquerading as a host.
+pub fn validateForgeHost(host: []const u8) ForgeHostError!void {
+    if (host.len == 0 or host.len > 253) return error.InvalidForgeHost;
+    if (host[0] == '.' or host[0] == '-') return error.InvalidForgeHost;
+    if (host[host.len - 1] == '.' or host[host.len - 1] == '-') return error.InvalidForgeHost;
+    var has_dot = false;
+    for (host) |ch| switch (ch) {
+        'a'...'z', 'A'...'Z', '0'...'9', '-' => {},
+        '.' => has_dot = true,
+        else => return error.InvalidForgeHost,
+    };
+    if (!has_dot) return error.InvalidForgeHost;
+}
+
 /// Parse `--repo <owner>/<exact-repo>` into an owned `(owner, repo)`
 /// pair. Reuses the slug-validation rules so the override can't sneak
 /// past validateTapName by going through the flag. Caller owns both
 /// slices via `TapPair.deinit`.
-pub fn parseRepoOverride(allocator: std.mem.Allocator, raw: []const u8) RepoOverrideError!tap_mod.TapPair {
+pub fn parseRepoOverride(allocator: std.mem.Allocator, raw: []const u8, host: []const u8) RepoOverrideError!tap_mod.TapPair {
     validateTapName(raw) catch return RepoOverrideError.InvalidRepoOverride;
     const slash = std.mem.indexOfScalar(u8, raw, '/') orelse unreachable;
     const owner = raw[0..slash];
@@ -29,30 +77,39 @@ pub fn parseRepoOverride(allocator: std.mem.Allocator, raw: []const u8) RepoOver
     errdefer allocator.free(owner_owned);
     const repo_owned = try allocator.dupe(u8, repo);
     errdefer allocator.free(repo_owned);
-    // `--repo` is a GitHub-only override today; a chosen host will be
-    // threaded through here later. Default keeps the pair self-consistent.
-    const host_owned = try allocator.dupe(u8, "github.com");
+    // `host` is the forge chosen via `--host` (or github.com by default);
+    // pairing it here keeps the row's `(owner, repo, host)` self-consistent.
+    const host_owned = try allocator.dupe(u8, host);
     return .{ .owner = owner_owned, .repo = repo_owned, .host = host_owned };
 }
 
 test "parseRepoOverride accepts user/repo and returns the owned pair" {
-    const pair = try parseRepoOverride(std.testing.allocator, "aeroxy/ast-outline");
+    const pair = try parseRepoOverride(std.testing.allocator, "aeroxy/ast-outline", "github.com");
     defer pair.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("aeroxy", pair.owner);
     try std.testing.expectEqualStrings("ast-outline", pair.repo);
+    try std.testing.expectEqualStrings("github.com", pair.host);
+}
+
+test "parseRepoOverride threads the chosen forge host onto the pair" {
+    const pair = try parseRepoOverride(std.testing.allocator, "mygroup/mytap", "gitlab.com");
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("mygroup", pair.owner);
+    try std.testing.expectEqualStrings("mytap", pair.repo);
+    try std.testing.expectEqualStrings("gitlab.com", pair.host);
 }
 
 test "parseRepoOverride rejects a malformed override (no slash, double slash, empty parts)" {
-    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "noslash"));
-    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "user//repo"));
-    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "user/"));
-    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "/repo"));
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "noslash", "github.com"));
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "user//repo", "github.com"));
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "user/", "github.com"));
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "/repo", "github.com"));
 }
 
 test "parseRepoOverride preserves hyphens, digits, dots in both components" {
     // GitHub allows these in user and repo names; the validator must
     // not reject them when a user passes them through --repo.
-    const pair = try parseRepoOverride(std.testing.allocator, "user-1/some.repo_v2");
+    const pair = try parseRepoOverride(std.testing.allocator, "user-1/some.repo_v2", "github.com");
     defer pair.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("user-1", pair.owner);
     try std.testing.expectEqualStrings("some.repo_v2", pair.repo);
@@ -62,12 +119,12 @@ test "parseRepoOverride rejects components longer than 64 chars" {
     // Pre-existing validateTapName cap. Documented here so a future
     // relaxation surfaces as a test diff rather than silent acceptance.
     const long = "a" ** 65 ++ "/" ++ "b" ** 4;
-    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, long));
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, long, "github.com"));
 }
 
 test "parseRepoOverride rejects a leading dot (path-traversal-shaped names)" {
-    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, ".hidden/repo"));
-    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "user/.hidden"));
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, ".hidden/repo", "github.com"));
+    try std.testing.expectError(RepoOverrideError.InvalidRepoOverride, parseRepoOverride(std.testing.allocator, "user/.hidden", "github.com"));
 }
 
 /// Reject malformed `user/repo` inputs before they're formatted into a
@@ -83,6 +140,48 @@ pub fn validateTapName(name: []const u8) TapNameError!void {
     if (std.mem.findScalarPos(u8, name, slash + 1, '/') != null) return TapNameError.InvalidTapName;
     try validateComponent(name[0..slash]);
     try validateComponent(name[slash + 1 ..]);
+}
+
+test "parseRepoUrl derives (host, owner, repo) from a full HTTPS repo URL" {
+    const pair = try parseRepoUrl(std.testing.allocator, "https://gitlab.com/mygroup/mytap");
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("gitlab.com", pair.host);
+    try std.testing.expectEqualStrings("mygroup", pair.owner);
+    try std.testing.expectEqualStrings("mytap", pair.repo);
+}
+
+test "parseRepoUrl tolerates a single trailing slash" {
+    const pair = try parseRepoUrl(std.testing.allocator, "https://codeberg.org/o/r/");
+    defer pair.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("codeberg.org", pair.host);
+    try std.testing.expectEqualStrings("o", pair.owner);
+    try std.testing.expectEqualStrings("r", pair.repo);
+}
+
+test "parseRepoUrl rejects non-https, missing-repo, deep-path, and bad-host URLs" {
+    try std.testing.expectError(RepoUrlError.InvalidRepoUrl, parseRepoUrl(std.testing.allocator, "http://gitlab.com/o/r"));
+    try std.testing.expectError(RepoUrlError.InvalidRepoUrl, parseRepoUrl(std.testing.allocator, "https://gitlab.com/o"));
+    try std.testing.expectError(RepoUrlError.InvalidRepoUrl, parseRepoUrl(std.testing.allocator, "https://gitlab.com/o/r/sub"));
+    try std.testing.expectError(RepoUrlError.InvalidRepoUrl, parseRepoUrl(std.testing.allocator, "https://gitlab .com/o/r"));
+    try std.testing.expectError(RepoUrlError.InvalidRepoUrl, parseRepoUrl(std.testing.allocator, "https://gitlab.com//r"));
+}
+
+test "validateForgeHost accepts bare HTTPS hosts" {
+    try validateForgeHost("gitlab.com");
+    try validateForgeHost("codeberg.org");
+    try validateForgeHost("git.example.com");
+    try validateForgeHost("github.com");
+}
+
+test "validateForgeHost rejects schemes, paths, ports, and dotless hosts" {
+    try std.testing.expectError(ForgeHostError.InvalidForgeHost, validateForgeHost("https://gitlab.com"));
+    try std.testing.expectError(ForgeHostError.InvalidForgeHost, validateForgeHost("gitlab.com/group/tap"));
+    try std.testing.expectError(ForgeHostError.InvalidForgeHost, validateForgeHost("gitlab.com:8443"));
+    try std.testing.expectError(ForgeHostError.InvalidForgeHost, validateForgeHost("localhost"));
+    try std.testing.expectError(ForgeHostError.InvalidForgeHost, validateForgeHost(""));
+    try std.testing.expectError(ForgeHostError.InvalidForgeHost, validateForgeHost("gitlab .com"));
+    try std.testing.expectError(ForgeHostError.InvalidForgeHost, validateForgeHost(".gitlab.com"));
+    try std.testing.expectError(ForgeHostError.InvalidForgeHost, validateForgeHost("gitlab.com."));
 }
 
 fn validateComponent(part: []const u8) TapNameError!void {
@@ -140,9 +239,10 @@ fn writeRefreshRowText(w: *std.Io.Writer, row: RefreshRow) !void {
     }
 }
 
-/// Emit `[{ "name", "url", "commit_sha" }, ...]\n` for `mt tap --json`.
-/// `commit_sha` is `null` when the tap is unpinned. Kept `pub` so tests can
-/// pin the exact bytes without staging a DB or running the dispatcher.
+/// Emit `[{ "name", "url", "commit_sha", "host" }, ...]\n` for `mt tap
+/// --json`. `commit_sha` is `null` when the tap is unpinned; `host` names
+/// the forge the tap resolves against. Kept `pub` so tests can pin the
+/// exact bytes without staging a DB or running the dispatcher.
 pub fn writeTapListJson(w: *std.Io.Writer, taps: []const tap_mod.TapInfo) !void {
     try w.writeAll("[");
     for (taps, 0..) |t, i| {
@@ -153,6 +253,8 @@ pub fn writeTapListJson(w: *std.Io.Writer, taps: []const tap_mod.TapInfo) !void 
         try output.jsonStr(w, t.url);
         try w.writeAll(",\"commit_sha\":");
         if (t.commit_sha) |sha| try output.jsonStr(w, sha) else try w.writeAll("null");
+        try w.writeAll(",\"host\":");
+        try output.jsonStr(w, t.host);
         try w.writeAll("}");
     }
     try w.writeAll("]\n");
@@ -180,14 +282,21 @@ fn writeRefreshRowsJson(w: *std.Io.Writer, rows: []const RefreshRow) !void {
 /// the returned slice. Kept in one place so the refresh hint stays in
 /// sync with `mt tap --refresh` and the exact byte layout is testable.
 fn formatTapLine(allocator: std.mem.Allocator, t: tap_mod.TapInfo) ![]u8 {
+    // GitHub is the implicit default; tag only off-github taps so the
+    // common listing stays uncluttered. A hostname fits in 256 bytes.
+    var host_buf: [288]u8 = undefined;
+    const host_tag: []const u8 = if (std.mem.eql(u8, t.host, "github.com"))
+        ""
+    else
+        std.fmt.bufPrint(&host_buf, " [{s}]", .{t.host}) catch "";
     if (t.commit_sha) |sha| {
         const short_len = @min(sha.len, 7);
-        return std.fmt.allocPrint(allocator, "{s} @ {s}\n", .{ t.name, sha[0..short_len] });
+        return std.fmt.allocPrint(allocator, "{s} @ {s}{s}\n", .{ t.name, sha[0..short_len], host_tag });
     }
     return std.fmt.allocPrint(
         allocator,
-        "{s} (unpinned — run `mt tap --refresh {s}`)\n",
-        .{ t.name, t.name },
+        "{s} (unpinned — run `mt tap --refresh {s}`){s}\n",
+        .{ t.name, t.name, host_tag },
     );
 }
 
@@ -211,6 +320,31 @@ test "formatTapLine renders refresh hint for an unpinned tap" {
     try std.testing.expectEqualStrings(
         "user/repo (unpinned — run `mt tap --refresh user/repo`)\n",
         line,
+    );
+}
+
+test "formatTapLine annotates a non-github tap with its forge host" {
+    // GitHub is the implicit default — only off-github taps carry the
+    // host tag so the common listing stays uncluttered.
+    const pinned = try formatTapLine(std.testing.allocator, .{
+        .name = "grp/tap",
+        .url = "https://gitlab.com/grp/tap",
+        .commit_sha = "0123456789abcdef0123456789abcdef01234567",
+        .host = "gitlab.com",
+    });
+    defer std.testing.allocator.free(pinned);
+    try std.testing.expectEqualStrings("grp/tap @ 0123456 [gitlab.com]\n", pinned);
+
+    const unpinned = try formatTapLine(std.testing.allocator, .{
+        .name = "grp/tap",
+        .url = "https://gitlab.com/grp/tap",
+        .commit_sha = null,
+        .host = "gitlab.com",
+    });
+    defer std.testing.allocator.free(unpinned);
+    try std.testing.expectEqualStrings(
+        "grp/tap (unpinned — run `mt tap --refresh grp/tap`) [gitlab.com]\n",
+        unpinned,
     );
 }
 
@@ -347,23 +481,23 @@ test "writeTapListJson: escapes embedded quotes/backslashes in url so output is 
     defer aw.deinit();
     try writeTapListJson(&aw.writer, &rows);
     try std.testing.expectEqualStrings(
-        "[{\"name\":\"user/repo\",\"url\":\"https://x/\\\"weird\\\\path\\\"\",\"commit_sha\":null}]\n",
+        "[{\"name\":\"user/repo\",\"url\":\"https://x/\\\"weird\\\\path\\\"\",\"commit_sha\":null,\"host\":\"github.com\"}]\n",
         aw.written(),
     );
 }
 
-test "writeTapListJson: emits `name`, `url`, `commit_sha` per tap; null when unpinned" {
+test "writeTapListJson: emits `name`, `url`, `commit_sha`, `host` per tap; null when unpinned" {
     const rows = [_]tap_mod.TapInfo{
         .{ .name = "user/repo", .url = "https://github.com/user/homebrew-repo", .commit_sha = sha_old },
-        .{ .name = "x/y", .url = "https://github.com/x/homebrew-y", .commit_sha = null },
+        .{ .name = "grp/tap", .url = "https://gitlab.com/grp/tap", .commit_sha = null, .host = "gitlab.com" },
     };
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     try writeTapListJson(&aw.writer, &rows);
     try std.testing.expectEqualStrings(
         "[" ++
-            "{\"name\":\"user/repo\",\"url\":\"https://github.com/user/homebrew-repo\",\"commit_sha\":\"" ++ sha_old ++ "\"}," ++
-            "{\"name\":\"x/y\",\"url\":\"https://github.com/x/homebrew-y\",\"commit_sha\":null}" ++
+            "{\"name\":\"user/repo\",\"url\":\"https://github.com/user/homebrew-repo\",\"commit_sha\":\"" ++ sha_old ++ "\",\"host\":\"github.com\"}," ++
+            "{\"name\":\"grp/tap\",\"url\":\"https://gitlab.com/grp/tap\",\"commit_sha\":null,\"host\":\"gitlab.com\"}" ++
             "]\n",
         aw.written(),
     );
@@ -410,6 +544,10 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     var yes = false;
     var force = false;
     var repo_override: ?[]const u8 = null;
+    // --host <forge-host>: register the tap against a non-GitHub forge.
+    // --url <repo-url>: derive (host, owner, repo) from a full repo URL.
+    var host_flag: ?[]const u8 = null;
+    var url_flag: ?[]const u8 = null;
     var positional: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -441,6 +579,40 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
                 return error.Aborted;
             }
             repo_override = arg["--repo=".len..];
+        } else if (std.mem.eql(u8, arg, "--host")) {
+            if (action != .add) {
+                output.err("--host is only valid with `mt tap`", .{});
+                return error.Aborted;
+            }
+            if (i + 1 >= args.len) {
+                output.err("Usage: mt tap <slug> --host <forge-host>", .{});
+                return error.Aborted;
+            }
+            host_flag = args[i + 1];
+            i += 1;
+        } else if (std.mem.startsWith(u8, arg, "--host=")) {
+            if (action != .add) {
+                output.err("--host is only valid with `mt tap`", .{});
+                return error.Aborted;
+            }
+            host_flag = arg["--host=".len..];
+        } else if (std.mem.eql(u8, arg, "--url")) {
+            if (action != .add) {
+                output.err("--url is only valid with `mt tap`", .{});
+                return error.Aborted;
+            }
+            if (i + 1 >= args.len) {
+                output.err("Usage: mt tap <slug> --url https://<host>/<owner>/<repo>", .{});
+                return error.Aborted;
+            }
+            url_flag = args[i + 1];
+            i += 1;
+        } else if (std.mem.startsWith(u8, arg, "--url=")) {
+            if (action != .add) {
+                output.err("--url is only valid with `mt tap`", .{});
+                return error.Aborted;
+            }
+            url_flag = arg["--url=".len..];
         } else if (std.mem.eql(u8, arg, "--pin")) {
             if (action != .add) {
                 output.err("--pin is only valid with `mt tap`", .{});
@@ -477,6 +649,30 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
         output.err("--force is only valid alongside --repo", .{});
         return error.Aborted;
     }
+
+    // --url already carries host + owner/repo, so pairing it with --host
+    // or --repo is contradictory. Refuse rather than silently pick one.
+    if (url_flag != null and (host_flag != null or repo_override != null)) {
+        output.err("--url cannot be combined with --host or --repo", .{});
+        return error.Aborted;
+    }
+    // --host / --url need a positional slug to name the tap locally.
+    if ((host_flag != null or url_flag != null) and positional == null) {
+        output.err("Usage: mt tap <slug> --host <host> --repo <owner>/<repo>  (or --url <repo-url>)", .{});
+        return error.Aborted;
+    }
+    if ((host_flag != null or url_flag != null) and
+        (refresh_all or refresh_target != null or pin_slug != null))
+    {
+        output.err("--host/--url cannot be combined with --refresh or --pin", .{});
+        return error.Aborted;
+    }
+    // Validate the forge host up front so an invalid `--host` reports the
+    // real problem rather than a downstream "needs --repo" hint.
+    if (host_flag) |h| validateForgeHost(h) catch {
+        output.err("Invalid --host '{s}'. Expected a bare HTTPS host like gitlab.com (no scheme, no path).", .{h});
+        return error.Aborted;
+    };
 
     const prefix = atomic.maltPrefixOrAbort();
 
@@ -533,6 +729,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             for (taps) |t| {
                 allocator.free(t.name);
                 allocator.free(t.url);
+                allocator.free(t.host);
                 if (t.commit_sha) |sha| allocator.free(sha);
             }
             allocator.free(taps);
@@ -572,37 +769,71 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
 
     switch (action) {
         .add => {
-            // --repo overrides any stored pair; otherwise the helper
-            // reads the row, falling back to the slug-derived
-            // `(user, "homebrew-" || repo)` default the first time round.
+            // --url carries (host, owner, repo); --repo overrides the pair
+            // on the chosen host; otherwise the helper reads the row,
+            // falling back to the slug-derived `(user, "homebrew-" || repo)`
+            // default — github.com only.
+            const chosen_host: []const u8 = host_flag orelse "github.com";
             const target_pair = pair: {
-                if (repo_override) |rep| break :pair parseRepoOverride(allocator, rep) catch |e| switch (e) {
+                if (url_flag) |u| break :pair parseRepoUrl(allocator, u) catch |e| switch (e) {
+                    error.InvalidRepoUrl => {
+                        output.err("Invalid --url '{s}'. Expected https://<host>/<owner>/<repo>.", .{u});
+                        return error.Aborted;
+                    },
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
+                if (repo_override) |rep| break :pair parseRepoOverride(allocator, rep, chosen_host) catch |e| switch (e) {
                     error.InvalidRepoOverride => {
                         output.err("Invalid --repo '{s}'. Expected: owner/exact-repo with [A-Za-z0-9._-]", .{rep});
                         return error.Aborted;
                     },
                     error.OutOfMemory => return error.OutOfMemory,
                 };
-                break :pair try tap_mod.effectiveOwnerRepo(allocator, &db, name);
+                break :pair tap_mod.effectiveOwnerRepo(allocator, &db, name, chosen_host) catch |e| switch (e) {
+                    error.ExplicitRepoRequired => {
+                        output.err("Registering a {s} tap needs an explicit repo — add --repo <owner>/<repo> or use --url <repo-url>. The homebrew-<repo> default only applies to github.com.", .{chosen_host});
+                        return error.Aborted;
+                    },
+                    else => return e,
+                };
             };
             defer target_pair.deinit(allocator);
 
             // Rebind policy: refuse if a row already pins a different
-            // (owner, repo) unless --force. Matches the pin-stays-sticky
+            // (owner, repo, host) unless --force. Matches the pin-stays-sticky
             // posture of `tap_mod.add`'s COALESCE on commit_sha.
             const stored_opt = tap_mod.getOwnerRepo(allocator, &db, name) catch null;
             defer if (stored_opt) |p| p.deinit(allocator);
             var rebinding = false;
             if (stored_opt) |stored| {
                 const same = std.mem.eql(u8, stored.owner, target_pair.owner) and
-                    std.mem.eql(u8, stored.repo, target_pair.repo);
+                    std.mem.eql(u8, stored.repo, target_pair.repo) and
+                    std.mem.eql(u8, stored.host, target_pair.host);
                 if (!same) {
                     if (!force) {
-                        output.err("Tap {s} is already bound to {s}/{s}. Re-run with --force to rebind to {s}/{s}.", .{ name, stored.owner, stored.repo, target_pair.owner, target_pair.repo });
+                        output.err("Tap {s} is already bound to {s}/{s} on {s}. Re-run with --force to rebind to {s}/{s} on {s}.", .{ name, stored.owner, stored.repo, stored.host, target_pair.owner, target_pair.repo, target_pair.host });
                         return error.Aborted;
                     }
                     rebinding = true;
                 }
+            }
+
+            // Off-GitHub forges have no resolver yet — persist the row so
+            // the tap is recorded, but skip the GitHub-shaped HEAD resolve
+            // (it would mis-resolve against api.github.com). Rebinding onto
+            // another forge needs the host-aware rebind the provider arms
+            // bring, so refuse it for now rather than half-apply it.
+            if (!std.mem.eql(u8, target_pair.host, "github.com")) {
+                if (rebinding) {
+                    output.err("Rebinding {s} onto {s} isn't supported yet — run `mt untap {s}` then re-register.", .{ name, target_pair.host, name });
+                    return error.Aborted;
+                }
+                tap_mod.addWithHost(&db, name, target_pair.owner, target_pair.repo, target_pair.host, null) catch {
+                    output.err("Failed to register tap {s}", .{name});
+                    return error.Aborted;
+                };
+                output.warn("Registered {s} → {s}/{s} on {s}. Resolution for non-GitHub forges arrives in a later release; the tap is stored but not yet fetchable.", .{ name, target_pair.owner, target_pair.repo, target_pair.host });
+                return;
             }
 
             // Apply the rebind before any HTTP work. Clearing the pin
@@ -712,7 +943,7 @@ fn pinTap(
         return error.Aborted;
     }
 
-    const pair = try tap_mod.effectiveOwnerRepo(allocator, db, slug);
+    const pair = try tap_mod.effectiveOwnerRepo(allocator, db, slug, "github.com");
     defer pair.deinit(allocator);
     tap_mod.add(db, slug, pair.owner, pair.repo, sha) catch {
         output.err("Failed to pin {s}", .{slug});
@@ -738,6 +969,7 @@ fn refreshAll(
         for (taps) |t| {
             allocator.free(t.name);
             allocator.free(t.url);
+            allocator.free(t.host);
             if (t.commit_sha) |sha| allocator.free(sha);
         }
         allocator.free(taps);

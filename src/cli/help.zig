@@ -285,6 +285,8 @@ const doctor_help =
 const tap_help =
     \\Usage: malt tap [<user>/<repo>]
     \\       malt tap <user>/<repo> --repo <owner>/<exact-repo> [--force]
+    \\       malt tap <slug> --host <forge-host> --repo <owner>/<repo>
+    \\       malt tap <slug> --url https://<host>/<owner>/<repo>
     \\       malt tap --refresh <user>/<repo>
     \\       malt tap --refresh --all [--yes] [--json]
     \\       malt tap --pin <user>/<repo> <sha>
@@ -312,6 +314,14 @@ const tap_help =
     \\                       (e.g. `mt tap aeroxy/ast-outline --repo
     \\                       aeroxy/ast-outline`). Without this flag the
     \\                       tap resolves against `homebrew-<repo>`.
+    \\  --host <forge-host>  Register the tap against a non-GitHub forge
+    \\                       (e.g. gitlab.com, codeberg.org). Requires an
+    \\                       explicit --repo — the `homebrew-<repo>` default
+    \\                       only applies to github.com. Resolution for
+    \\                       non-GitHub forges arrives in a later release.
+    \\  --url <repo-url>     Derive (host, owner, repo) from a full
+    \\                       `https://<host>/<owner>/<repo>` URL instead of
+    \\                       naming --host and --repo separately.
     \\  --force              Allow rebinding an existing tap to a new
     \\                       --repo target. Clears the stale commit SHA
     \\                       and ETag because the new repo has its own HEAD.
