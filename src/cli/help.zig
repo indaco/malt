@@ -319,10 +319,12 @@ const tap_help =
     \\                       explicit --repo — the `homebrew-<repo>` default
     \\                       only applies to github.com. The tap registers
     \\                       unpinned; `mt tap --refresh <slug>` pins its HEAD.
-    \\  --forge <provider>   Pin the forge explicitly (github or gitlab) when
-    \\                       the host can't reveal it — a custom-domain GitLab
-    \\                       like code.acme.com. gitlab.* hosts auto-classify,
-    \\                       so this is only needed for non-obvious domains.
+    \\  --forge <provider>   Pin the forge explicitly (github, gitlab, or
+    \\                       codeberg) when the host can't reveal it — a
+    \\                       custom-domain GitLab like code.acme.com or a
+    \\                       self-hosted Forgejo/Gitea. gitlab.* and
+    \\                       codeberg.org auto-classify, so this is only
+    \\                       needed for non-obvious domains.
     \\  --url <repo-url>     Derive (host, owner, repo) from a full
     \\                       `https://<host>/<owner>/<repo>` URL instead of
     \\                       naming --host and --repo separately.

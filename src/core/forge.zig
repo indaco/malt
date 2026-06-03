@@ -9,8 +9,8 @@ const std = @import("std");
 
 /// Source forge hosting a tap repo. Each variant forces an
 /// exhaustive-switch compile error until every concern below handles it,
-/// so a new forge (Codeberg next) can never be half-wired.
-pub const Forge = enum { github, gitlab };
+/// so a new forge can never be half-wired.
+pub const Forge = enum { github, gitlab, codeberg };
 
 const github_browse_fmt = "https://github.com/{s}/{s}";
 // GitLab's browse, repo, and `/-/raw` URLs all share the instance host,
@@ -28,7 +28,8 @@ pub fn repoBrowseUrl(
 ) std.fmt.BufPrintError![]const u8 {
     return switch (forge) {
         .github => std.fmt.bufPrint(buf, github_browse_fmt, .{ owner, repo }),
-        .gitlab => std.fmt.bufPrint(buf, gitlab_browse_fmt, .{ host, owner, repo }),
+        // gitlab and codeberg both browse at the instance host.
+        .gitlab, .codeberg => std.fmt.bufPrint(buf, gitlab_browse_fmt, .{ host, owner, repo }),
     };
 }
 
@@ -43,7 +44,7 @@ pub fn allocRepoBrowseUrl(
 ) std.mem.Allocator.Error![]const u8 {
     return switch (forge) {
         .github => std.fmt.allocPrint(allocator, github_browse_fmt, .{ owner, repo }),
-        .gitlab => std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ host, owner, repo }),
+        .gitlab, .codeberg => std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ host, owner, repo }),
     };
 }
 
@@ -74,9 +75,9 @@ pub fn rawFileUrl(
     name: []const u8,
 ) std.fmt.BufPrintError![]const u8 {
     return switch (forge) {
-        // Same tail for both: the forge-specific infix already lives in
-        // `raw_base` (github: bare; gitlab: `/-/raw`).
-        .github, .gitlab => std.fmt.bufPrint(buf, "{s}/{s}/{s}/{s}.rb", .{
+        // Same tail for all: the forge-specific infix already lives in
+        // `raw_base` (github: bare; gitlab: `/-/raw`; codeberg: `/raw`).
+        .github, .gitlab, .codeberg => std.fmt.bufPrint(buf, "{s}/{s}/{s}/{s}.rb", .{
             raw_base, sha, kind.subdir(), name,
         }),
     };
@@ -89,6 +90,10 @@ pub fn fromHost(host: []const u8) Forge {
     // Narrow `gitlab.` prefix (covers gitlab.com and self-hosted
     // gitlab.<org>); a look-alike like notgitlab.com must not match.
     if (std.mem.startsWith(u8, host, "gitlab.")) return .gitlab;
+    // codeberg.org is the only name-detectable Gitea host; an exact match
+    // keeps a look-alike like notcodeberg.org from auto-classifying.
+    // Self-hosted Forgejo uses explicit `--forge codeberg` registration.
+    if (std.mem.eql(u8, host, "codeberg.org")) return .codeberg;
     return .github;
 }
 
@@ -207,6 +212,26 @@ pub fn buildBaseUrls(
 
             return .{ .forge = forge, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
         },
+        .codeberg => {
+            // Gitea's v1 API keys by plain owner/repo (no URL-encoding,
+            // unlike gitlab); `commits?limit=1` returns a one-element array
+            // so HEAD costs one round-trip. Raw has no `/-/` infix. All
+            // three URLs ride the row's `host` for self-hosted Forgejo.
+            const api_head_url = try std.fmt.allocPrint(
+                allocator,
+                "https://{s}/api/v1/repos/{s}/{s}/commits?limit=1&stat=false",
+                .{ host, owner, repo },
+            );
+            errdefer allocator.free(api_head_url);
+
+            const repo_url = try std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ host, owner, repo });
+            errdefer allocator.free(repo_url);
+
+            const raw_base = try std.fmt.allocPrint(allocator, "https://{s}/{s}/{s}/raw", .{ host, owner, repo });
+            errdefer allocator.free(raw_base);
+
+            return .{ .forge = forge, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
+        },
     }
 }
 
@@ -229,6 +254,7 @@ pub fn authHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std.ht
             return .{ .name = "Authorization", .value = value };
         },
         .gitlab => return gitlabPrivateToken(environ, buf),
+        .codeberg => return codebergToken(environ, buf),
     }
 }
 
@@ -243,6 +269,17 @@ fn gitlabPrivateToken(environ: std.process.Environ, buf: []u8) ?std.http.Header 
     return .{ .name = "PRIVATE-TOKEN", .value = value };
 }
 
+/// Gitea/Forgejo's `Authorization: token <PAT>` header from
+/// `MALT_CODEBERG_TOKEN`, or null when unset/empty. Shared by the API and
+/// the instance-host raw fetch — both authenticate the same way, against
+/// the same host. The `token` scheme is Gitea's, not github's `Bearer`.
+fn codebergToken(environ: std.process.Environ, buf: []u8) ?std.http.Header {
+    const raw = std.process.Environ.getPosix(environ, "MALT_CODEBERG_TOKEN") orelse return null;
+    if (raw.len == 0) return null;
+    const value = std.fmt.bufPrint(buf, "token {s}", .{raw}) catch return null;
+    return .{ .name = "Authorization", .value = value };
+}
+
 /// Auth header for a **raw `.rb`** fetch, or null when the forge's raw
 /// host needs none. GitHub serves raw content from a separate public CDN
 /// (`raw.githubusercontent.com`) the API token does not belong to —
@@ -253,6 +290,8 @@ pub fn rawAuthHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std
     return switch (forge) {
         .github => null,
         .gitlab => gitlabPrivateToken(environ, buf),
+        // Gitea serves `/raw` from the authenticated instance host, like gitlab.
+        .codeberg => codebergToken(environ, buf),
     };
 }
 
@@ -287,9 +326,12 @@ fn firstShaField(body: []const u8, marker: []const u8) ?[]const u8 {
 /// Pull the HEAD commit sha out of a forge's `commits/HEAD` response, as
 /// the caller dupes it. The shape differs only in the leading key:
 /// GitHub emits `"sha"` first; GitLab emits `"id"` (not `sha`) first.
+/// Codeberg/Gitea wraps the same GitHub-shaped `"sha"` in a one-element
+/// array, so the first-field scan finds it without parsing the array — an
+/// empty `[]` simply has no `"sha"` and falls through to null.
 pub fn parseHeadSha(forge: Forge, body: []const u8) ?[]const u8 {
     return switch (forge) {
-        .github => firstShaField(body, "\"sha\""),
+        .github, .codeberg => firstShaField(body, "\"sha\""),
         .gitlab => firstShaField(body, "\"id\""),
     };
 }
@@ -711,4 +753,176 @@ test "rawFileUrl gitlab: cask kind builds the /-/raw Casks tail" {
         gitlab_raw_base ++ "/" ++ raw_sha_fixture ++ "/Casks/glow.rb",
         url,
     );
+}
+
+// ── fromHost (codeberg) ────────────────────────────────────────────
+// codeberg.org is the only name-detectable Gitea host. Self-hosted
+// Forgejo/Gitea instances aren't, so they reach `.codeberg` only via
+// explicit `--forge codeberg` registration, never host sniffing.
+
+test "fromHost classifies codeberg.org as .codeberg" {
+    try std.testing.expectEqual(Forge.codeberg, fromHost("codeberg.org"));
+}
+
+test "fromHost leaves an unnamed Forgejo host as .github" {
+    // A self-hosted Gitea like git.example.org isn't name-detectable; it
+    // must be registered with `--forge codeberg`, not auto-classified.
+    try std.testing.expectEqual(Forge.github, fromHost("git.example.org"));
+}
+
+test "fromHost leaves a codeberg look-alike host as .github" {
+    // Exact host match, not a substring: `notcodeberg.org` must not match.
+    try std.testing.expectEqual(Forge.github, fromHost("notcodeberg.org"));
+}
+
+// ── parseHeadSha (codeberg) ────────────────────────────────────────
+// Gitea's `commits?limit=1` returns a JSON *array*; the head sha is the
+// first element's top-level `"sha"` (GitHub-shaped, unlike gitlab's id).
+// Same untrusted-input discipline: empty array / malformed entry → null
+// so resolve reports MalformedJson rather than pinning a bad sha.
+
+test "parseHeadSha codeberg: single-element commits array yields the sha" {
+    const body =
+        \\[{"sha":"0123456789abcdef0123456789abcdef01234567","commit":{"message":"x"}}]
+    ;
+    const got = parseHeadSha(.codeberg, body) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(valid_sha_fixture, got);
+}
+
+test "parseHeadSha codeberg: picks the element's top-level sha, not a nested tree sha" {
+    const body =
+        \\[{"sha":"0123456789abcdef0123456789abcdef01234567","commit":{"tree":{"sha":"ffffffffffffffffffffffffffffffffffffffff"}}}]
+    ;
+    const got = parseHeadSha(.codeberg, body) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(valid_sha_fixture, got);
+}
+
+test "parseHeadSha codeberg: empty array yields null" {
+    try std.testing.expectEqual(@as(?[]const u8, null), parseHeadSha(.codeberg, "[]"));
+}
+
+test "parseHeadSha codeberg: malformed sha entry yields null" {
+    const body =
+        \\[{"sha":"not-a-valid-sha"}]
+    ;
+    try std.testing.expectEqual(@as(?[]const u8, null), parseHeadSha(.codeberg, body));
+}
+
+test "parseHeadSha codeberg: empty body yields null" {
+    try std.testing.expectEqual(@as(?[]const u8, null), parseHeadSha(.codeberg, ""));
+}
+
+// ── buildBaseUrls (codeberg) ───────────────────────────────────────
+// Gitea keys its v1 API by plain `{owner}/{repo}` (no URL-encoding,
+// unlike gitlab), serves raw under `/raw` (no `/-/` infix), and browses
+// at the instance host — all driven by the row's `host`, so self-hosted
+// Forgejo resolves against its own domain.
+
+test "buildBaseUrls codeberg: builds the v1 commits / raw / browse triple" {
+    const urls = try buildBaseUrls(std.testing.allocator, .codeberg, "codeberg.org", "o", "r");
+    defer urls.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Forge.codeberg, urls.forge);
+    try std.testing.expectEqualStrings(
+        "https://codeberg.org/api/v1/repos/o/r/commits?limit=1&stat=false",
+        urls.api_head_url,
+    );
+    try std.testing.expectEqualStrings("https://codeberg.org/o/r", urls.repo_url);
+    try std.testing.expectEqualStrings("https://codeberg.org/o/r/raw", urls.raw_base);
+}
+
+test "buildBaseUrls codeberg: a self-hosted Forgejo host drives every URL" {
+    const urls = try buildBaseUrls(std.testing.allocator, .codeberg, "git.example.org", "team", "tap");
+    defer urls.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(
+        "https://git.example.org/api/v1/repos/team/tap/commits?limit=1&stat=false",
+        urls.api_head_url,
+    );
+    try std.testing.expectEqualStrings("https://git.example.org/team/tap", urls.repo_url);
+    try std.testing.expectEqualStrings("https://git.example.org/team/tap/raw", urls.raw_base);
+}
+
+fn buildCodebergAndFree(allocator: std.mem.Allocator) !void {
+    const urls = try buildBaseUrls(allocator, .codeberg, "codeberg.org", "grp", "tap");
+    urls.deinit(allocator);
+}
+
+test "buildBaseUrls codeberg: no leak on any allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, buildCodebergAndFree, .{});
+}
+
+// ── browse URL (codeberg) ──────────────────────────────────────────
+// Like gitlab, the instance host (not a literal) drives the browse URL.
+
+test "repoBrowseUrl codeberg: the instance host drives the browse URL" {
+    var buf: [256]u8 = undefined;
+    const url = try repoBrowseUrl(&buf, .codeberg, "codeberg.org", "grp", "tap");
+    try std.testing.expectEqualStrings("https://codeberg.org/grp/tap", url);
+}
+
+test "allocRepoBrowseUrl codeberg: allocates the instance-host browse URL" {
+    const url = try allocRepoBrowseUrl(std.testing.allocator, .codeberg, "git.example.org", "team", "tap");
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://git.example.org/team/tap", url);
+}
+
+// ── rawFileUrl (codeberg) ──────────────────────────────────────────
+// Gitea's raw route has no `/-/` infix; raw_base already ends in `/raw`,
+// so the shared tail appends `<sha>/Formula/<name>.rb`.
+
+const codeberg_raw_base = "https://codeberg.org/grp/tap/raw";
+
+test "rawFileUrl codeberg: formula kind builds the /raw Formula tail" {
+    var buf: [512]u8 = undefined;
+    const url = try rawFileUrl(&buf, .codeberg, codeberg_raw_base, raw_sha_fixture, .formula, "glow");
+    try std.testing.expectEqualStrings(
+        codeberg_raw_base ++ "/" ++ raw_sha_fixture ++ "/Formula/glow.rb",
+        url,
+    );
+}
+
+test "rawFileUrl codeberg: cask kind builds the /raw Casks tail" {
+    var buf: [512]u8 = undefined;
+    const url = try rawFileUrl(&buf, .codeberg, codeberg_raw_base, raw_sha_fixture, .cask, "glow");
+    try std.testing.expectEqualStrings(
+        codeberg_raw_base ++ "/" ++ raw_sha_fixture ++ "/Casks/glow.rb",
+        url,
+    );
+}
+
+// ── authHeader (codeberg) ──────────────────────────────────────────
+// Gitea/Forgejo authenticate with `Authorization: token <PAT>` — the
+// `token` scheme, not github's `Bearer`. MALT_CODEBERG_TOKEN keys it.
+
+test "authHeader codeberg: null when MALT_CODEBERG_TOKEN unset" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(authHeader(.codeberg, .empty, &buf) == null);
+}
+
+test "authHeader codeberg: token header when MALT_CODEBERG_TOKEN set" {
+    const entries = [_:null]?[*:0]const u8{"MALT_CODEBERG_TOKEN=cb_testtoken"};
+    var buf: [256]u8 = undefined;
+    const h = authHeader(.codeberg, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("Authorization", h.name);
+    try std.testing.expectEqualStrings("token cb_testtoken", h.value);
+}
+
+test "authHeader codeberg: empty-string token behaves as unset" {
+    const entries = [_:null]?[*:0]const u8{"MALT_CODEBERG_TOKEN="};
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(authHeader(.codeberg, envWith(entries), &buf) == null);
+}
+
+test "rawAuthHeader codeberg: token attached — raw lives on the instance host" {
+    // Gitea serves `/raw` from the authenticated instance host (like gitlab,
+    // unlike github's public CDN), so a private tap's raw fetch carries it.
+    const entries = [_:null]?[*:0]const u8{"MALT_CODEBERG_TOKEN=cb_testtoken"};
+    var buf: [256]u8 = undefined;
+    const h = rawAuthHeader(.codeberg, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("Authorization", h.name);
+    try std.testing.expectEqualStrings("token cb_testtoken", h.value);
+}
+
+test "rawAuthHeader codeberg: null when MALT_CODEBERG_TOKEN unset" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(rawAuthHeader(.codeberg, .empty, &buf) == null);
 }

@@ -401,6 +401,27 @@ test "execute --host with --forge persists the explicit provider for a custom do
     try testing.expectEqualStrings("gitlab", stored_forge orelse "");
 }
 
+test "execute --host with --forge codeberg persists the provider for a self-hosted Forgejo" {
+    // A self-hosted Forgejo/Gitea on a custom domain isn't name-detectable,
+    // so --forge codeberg is the only signal; it must persist so resolution
+    // targets the Gitea API, not the github default.
+    const prefix = try setupPrefix("forge_codeberg_register");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try tap_cli.execute(&ctx, testing.allocator, &.{ "team/tap", "--host", "git.example.org", "--forge", "codeberg", "--repo", "team/tap" });
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    const stored_forge = try readTapForge(db_path, "team/tap");
+    defer if (stored_forge) |f| testing.allocator.free(f);
+    try testing.expectEqualStrings("codeberg", stored_forge orelse "");
+}
+
 test "execute --forge rejects an unknown provider" {
     const prefix = try setupPrefix("forge_unknown");
     defer testing.allocator.free(prefix);
