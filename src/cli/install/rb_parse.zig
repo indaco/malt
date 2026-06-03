@@ -170,21 +170,35 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     return null;
 }
 
-/// Pull a version token out of a Homebrew-style URL when the formula
-/// omits `version "..."`. Covers the three shapes Homebrew itself
-/// derives from:
-///   * `…/releases/download/<X>/…`              — release asset
-///   * `…/archive/refs/tags/<X>.<archive-ext>`  — git tag tarball
-///   * `…/archive/<X>.<archive-ext>`            — short-form tag tarball
+/// Pull a version token out of a forge URL when the formula omits
+/// `version "..."`. Covers the shapes GitHub, GitLab, and Gitea/Forgejo
+/// encode the tag in:
+///   * `…/releases/download/<X>/…`              — GitHub release asset
+///   * `…/-/archive/<X>/<file>`                 — GitLab archive
+///   * `…/-/releases/<X>/downloads/…`           — GitLab release asset
+///   * `…/archive/refs/tags/<X>.<archive-ext>`  — GitHub git tag tarball
+///   * `…/archive/<X>.<archive-ext>`            — short-form tag tarball (Gitea)
 /// Returns null when no pattern matches or the captured token does not
 /// look like a version (must start with a digit, optionally after a
 /// single `v`/`V`). The strict check stops malt from inventing a
 /// version like `latest` or `nightly` for a floating-tag URL.
 fn deriveVersionFromUrl(url: []const u8) ?[]const u8 {
     if (std.mem.indexOf(u8, url, "/releases/download/")) |pos| {
-        const after = url[pos + "/releases/download/".len ..];
-        const slash = std.mem.indexOfScalar(u8, after, '/') orelse return null;
-        return validateVersionToken(after[0..slash]);
+        return firstPathSegmentVersion(url[pos + "/releases/download/".len ..]);
+    }
+
+    // GitLab archive: `/-/archive/<ref>/<name>-<ref>.<ext>`. The ref is
+    // the first path segment; the filename repeats it, so read up to the
+    // next slash rather than suffix-stripping the filename. Must precede
+    // the generic `/archive/` branch, whose nested-slash guard would
+    // otherwise reject this shape (it contains `/archive/` as a substring).
+    if (std.mem.indexOf(u8, url, "/-/archive/")) |pos| {
+        return firstPathSegmentVersion(url[pos + "/-/archive/".len ..]);
+    }
+
+    // GitLab release asset: `/-/releases/<tag>/downloads/<asset>`.
+    if (std.mem.indexOf(u8, url, "/-/releases/")) |pos| {
+        return firstPathSegmentVersion(url[pos + "/-/releases/".len ..]);
     }
 
     if (std.mem.indexOf(u8, url, "/archive/refs/tags/")) |pos| {
@@ -202,6 +216,16 @@ fn deriveVersionFromUrl(url: []const u8) ?[]const u8 {
     }
 
     return null;
+}
+
+/// Validate the path segment up to the next `/` as a version token.
+/// Shared by the URL shapes that carry the tag as a bare segment
+/// (`/releases/download/<X>/`, `/-/archive/<X>/`, `/-/releases/<X>/`)
+/// rather than as a suffixed filename. Returns null when the segment
+/// is the whole tail (no trailing slash) or fails the version gate.
+fn firstPathSegmentVersion(after: []const u8) ?[]const u8 {
+    const slash = std.mem.indexOfScalar(u8, after, '/') orelse return null;
+    return validateVersionToken(after[0..slash]);
 }
 
 /// Strip any accepted tap-archive suffix from `tail` and run the
@@ -354,6 +378,50 @@ test "parseRubyFormula: derives version from /releases/download/ URL" {
     ;
     const got = parseRubyFormula(src) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("2.4.0", got.version);
+}
+
+test "parseRubyFormula: derives version from a GitLab /-/archive/ URL" {
+    const src =
+        \\class Foo < Formula
+        \\  url "https://gitlab.com/foo/bar/-/archive/v1.2.3/bar-v1.2.3.tar.gz"
+        \\  sha256 "deadbeef"
+        \\end
+    ;
+    const got = parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("1.2.3", got.version);
+}
+
+test "deriveVersionFromUrl: GitLab archive uses the ref segment, not the filename" {
+    const got = deriveVersionFromUrl(
+        "https://gitlab.com/foo/bar/-/archive/v1.2.3/bar-v1.2.3.tar.gz",
+    ) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("1.2.3", got);
+}
+
+test "deriveVersionFromUrl: GitLab release downloads path yields the tag" {
+    const got = deriveVersionFromUrl(
+        "https://gitlab.com/foo/bar/-/releases/v1.2.3/downloads/bar.tar.gz",
+    ) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("1.2.3", got);
+}
+
+test "deriveVersionFromUrl: Gitea short-form /archive/<ref>.tar.gz" {
+    const got = deriveVersionFromUrl(
+        "https://gitea.example.com/foo/bar/archive/v1.2.3.tar.gz",
+    ) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("1.2.3", got);
+}
+
+test "deriveVersionFromUrl: GitLab floating ref is rejected" {
+    try std.testing.expect(deriveVersionFromUrl(
+        "https://gitlab.com/foo/bar/-/archive/main/bar-main.tar.gz",
+    ) == null);
+}
+
+test "deriveVersionFromUrl: GitLab floating release tag is rejected" {
+    try std.testing.expect(deriveVersionFromUrl(
+        "https://gitlab.com/foo/bar/-/releases/latest/downloads/bar.tar.gz",
+    ) == null);
 }
 
 test "extractQuoted: extracts between prefix and the next quote" {
