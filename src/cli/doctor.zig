@@ -13,6 +13,7 @@ const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
 const tap_cache_mod = @import("../core/tap_cache.zig");
+const tap_mod = @import("../core/tap.zig");
 const clonefile = @import("../fs/clonefile.zig");
 const parser = @import("../macho/parser.zig");
 const client_mod = @import("../net/client.zig");
@@ -158,6 +159,71 @@ pub fn emitTapCacheReport(allocator: std.mem.Allocator, io: std.Io, prefix: []co
     output.writeStderrAll(aw.written());
 }
 
+/// Emit the registered-tap forge/host block doctor shows after the
+/// check rows. Every tap carries its host (github.com included) so a
+/// user can confirm which forge a tap resolves against — the off-GitHub
+/// hosts are where a wrong registration silently resolves elsewhere.
+/// Empty list writes nothing, keeping the no-tap case quiet. Pure for
+/// byte-pinning tests.
+pub fn writeTapForgeHuman(w: *std.Io.Writer, taps: []const tap_mod.TapInfo) !void {
+    if (taps.len == 0) return;
+    try w.writeAll("  > Registered taps:\n");
+    for (taps) |t| {
+        try w.print("        {s} [{s}]\n", .{ t.name, t.host });
+    }
+}
+
+/// `mt doctor --json` payload for the registered taps. The `taps` array
+/// stays present (empty, not omitted) so scripted consumers can always
+/// read it. Strings route through `output.jsonStr` for escaping. Pure
+/// for byte-pinning tests.
+pub fn writeTapForgeJson(w: *std.Io.Writer, taps: []const tap_mod.TapInfo) !void {
+    try w.writeAll("{\"taps\":[");
+    for (taps, 0..) |t, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try output.jsonStr(w, t.name);
+        try w.writeAll(",\"host\":");
+        try output.jsonStr(w, t.host);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}\n");
+}
+
+/// Walk the registered taps and emit their forge/host alongside doctor's
+/// other reports. Routes to stdout (JSON, stable empty array) or stderr
+/// (human, silent when no taps). Pure read; safe from `execute`'s
+/// post-check phase. Best-effort: a DB or list failure drops the report
+/// rather than failing the whole doctor run.
+pub fn emitTapForgeReport(allocator: std.mem.Allocator, prefix: []const u8) void {
+    var db_path_buf: [512]u8 = undefined;
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
+    var db = sqlite.Database.open(db_path) catch return;
+    defer db.close();
+    schema.initSchema(&db) catch {};
+
+    const taps = tap_mod.list(allocator, &db) catch return;
+    defer {
+        for (taps) |t| {
+            allocator.free(t.name);
+            allocator.free(t.url);
+            allocator.free(t.host);
+            if (t.commit_sha) |sha| allocator.free(sha);
+        }
+        allocator.free(taps);
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    if (output.isJson()) {
+        writeTapForgeJson(&aw.writer, taps) catch return;
+        output.writeStdoutAll(aw.written());
+        return;
+    }
+    writeTapForgeHuman(&aw.writer, taps) catch return;
+    output.writeStderrAll(aw.written());
+}
+
 /// Local mirror of `cli/purge/util.zig::formatBytes` / the cask-history
 /// formatter — doctor can't reach across the sibling-CLI boundary into
 /// `cli/purge`, and the byte format must match what `purge --cache`
@@ -201,6 +267,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     emitCaskHistoryReport(allocator, ctx.io, prefix);
     emitTapCacheReport(allocator, ctx.io, prefix);
+    emitTapForgeReport(allocator, prefix);
 
     if (fix_requested) {
         output.plain("", .{});

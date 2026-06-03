@@ -71,6 +71,25 @@ The CI pipeline runs the full slate (including `local-bench.sh` and the smoke su
 - **`docs/`** - design notes, security audits, and the post_install DSL coverage doc live here. Skim the file most relevant to your change.
 - **`docs/plan/` and `docs/design/`** - ADRs and longer design write-ups. If you're proposing something architectural, check whether there's already an ADR on the topic.
 
+## Tap forges
+
+Taps resolve against three forges — GitHub, GitLab (incl. self-hosted), and
+Codeberg/Forgejo/Gitea. The user-facing matrix, the `mt tap --host` / `--url`
+registration forms, and the per-forge token env vars (`MALT_GITHUB_TOKEN`,
+`MALT_GITLAB_TOKEN`, `MALT_CODEBERG_TOKEN`) are documented in the README's
+[Custom sources](README.md#custom-sources) section — read it before touching tap
+resolution.
+
+For contributors: each forge is one arm of the enum-`switch` in
+`src/core/forge.zig`, which stays a pure leaf (no `cli/*` or `ui/*` imports, no
+user-facing strings). Adding a forge is a new enum arm, so the compiler flags
+every `switch` that hasn't handled it.
+
+When authoring a tap formula, prefer **release-asset** URLs over GitLab
+`/-/archive/` or Gitea `/archive/` tarballs for any pinned `sha256`: generated
+archives are regenerated server-side and their digest can shift across a forge
+upgrade, which surfaces as a `Sha256Mismatch` that isn't actually corruption.
+
 ## Security invariants
 
 ### Argv-only spawn

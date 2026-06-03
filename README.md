@@ -400,6 +400,53 @@ mt untap user/repo                                # remove a tap
 
 Taps are auto-resolved during install (`mt install user/repo/formula`), so this is optional unless you want the explicit Homebrew-style workflow.
 
+#### Supported forges
+
+A tap can live on any of three forges. GitHub is the default; the others
+register with an explicit `--host` (which always needs an explicit `--repo`,
+since the `homebrew-<repo>` convention is GitHub-only).
+
+| Forge                      | Hosts                                     | Register with                                                                               | Token env var         |
+| -------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------- | --------------------- |
+| GitHub                     | `github.com`                              | `mt tap user/repo` (resolves `homebrew-repo`), or `--repo owner/repo` for a prefixless repo | `MALT_GITHUB_TOKEN`   |
+| GitLab (incl. self-hosted) | `gitlab.com`, `gitlab.gnome.org`, custom  | `mt tap <slug> --host <host> --repo <owner>/<repo>`                                         | `MALT_GITLAB_TOKEN`   |
+| Codeberg / Forgejo / Gitea | `codeberg.org`, self-hosted Forgejo/Gitea | `mt tap <slug> --host <host> --repo <owner>/<repo>`                                         | `MALT_CODEBERG_TOKEN` |
+
+`gitlab.*` and `codeberg.org` auto-classify from the host. A custom domain that
+doesn't reveal its provider (a self-hosted GitLab like `code.acme.com`, or a
+Forgejo/Gitea instance) needs `--forge gitlab` or `--forge codeberg` so malt
+knows which API to speak. See the [environment variables](#environment-variables)
+table for what each token is sent as.
+
+```bash
+# GitLab — --host requires an explicit --repo
+mt tap grp/tap --host gitlab.com --repo grp/homebrew-tap
+mt tap grp/tap --url https://gitlab.com/grp/homebrew-tap   # same, from a full URL
+
+# Self-hosted GitLab on a domain the host can't classify
+mt tap acme/tap --host code.acme.com --forge gitlab --repo acme/tap
+
+# Codeberg, and self-hosted Forgejo/Gitea
+mt tap org/tap --host codeberg.org --repo org/homebrew-tap
+mt tap org/tap --host git.acme.com --forge codeberg --repo org/tap
+```
+
+A non-GitHub tap registers unpinned; `mt tap --refresh <slug>` pins its current
+HEAD. `mt doctor` lists every registered tap with the forge host it resolves
+against, so you can confirm a `--host` registration landed where you intended.
+
+#### Pinning caveat: prefer release assets over generated archives
+
+GitLab `/-/archive/` and Gitea `/archive/` tarballs are **regenerated
+server-side** — their gzip framing can change across a forge upgrade even when
+the file contents don't. A tap formula that pins the `sha256` of such an archive
+can therefore break on a forge upgrade. Prefer a **release-asset** URL (an
+uploaded tarball, whose bytes are immutable) over a `/-/archive/` or `/archive/`
+URL when you pin a `sha256`. If a pinned archive's digest later mismatches, malt
+reports the usual `Sha256Mismatch`; on a generated-archive URL that often means
+the forge re-generated the tarball rather than that the download is corrupt —
+re-pin against a stable release asset.
+
 ### Manage malt
 
 ```bash
