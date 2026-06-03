@@ -455,6 +455,8 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 | `MALT_THEME`                    | Force the output palette: `light`, `dark`, or `auto` (detects via OSC 11)                                                                                | `auto`                         |
 | `HOMEBREW_GITHUB_API_TOKEN`     | GitHub token for higher API rate limits                                                                                                                  | unset                          |
 | `MALT_GITHUB_TOKEN`             | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only                                                                           | unset                          |
+| `MALT_GITLAB_TOKEN`             | GitLab token (PAT) sent as `PRIVATE-TOKEN` on tap commit + raw `.rb` calls for GitLab-hosted taps                                                        | unset                          |
+| `MALT_CODEBERG_TOKEN`           | Codeberg/Forgejo (Gitea) token sent as `Authorization: token` on tap commit + raw `.rb` calls; covers Codeberg and self-hosted Forgejo/Gitea             | unset                          |
 | `MALT_HTTP_IDLE_TIMEOUT_SECS`   | HTTP idle (no-progress) read timeout in seconds (clamped to `[5, 600]`)                                                                                  | `30`                           |
 | `MALT_API_DOMAIN`               | Override metadata API base URL; HTTPS only; falls back to `HOMEBREW_API_DOMAIN`                                                                          | `https://formulae.brew.sh/api` |
 | `MALT_BOTTLE_DOMAIN`            | Override bottle registry base URL; HTTPS only; falls back to `HOMEBREW_BOTTLE_DOMAIN`                                                                    | `https://ghcr.io`              |
@@ -619,33 +621,39 @@ For installing malt from a local checkout (the end-user path), see [From source]
 Install times on macOS 14 (Apple Silicon).
 
 <!-- BENCH:COLD:START -->
+
 ### Cold Install (median ±σ)
 
-| Package | malt | nanobrew | zerobrew | Homebrew |
-| ------- | ---- | -------- | -------- | -------- |
-| **tree** (0 deps) | 0.664±0.109s | 0.719±0.038s | 1.673±0.084s | 3.991±0.176s |
-| **wget** (6 deps) | 3.337±0.131s | 4.090±0.557s | 7.858±0.357s | 4.781±0.401s |
+| Package              | malt         | nanobrew     | zerobrew      | Homebrew      |
+| -------------------- | ------------ | ------------ | ------------- | ------------- |
+| **tree** (0 deps)    | 0.664±0.109s | 0.719±0.038s | 1.673±0.084s  | 3.991±0.176s  |
+| **wget** (6 deps)    | 3.337±0.131s | 4.090±0.557s | 7.858±0.357s  | 4.781±0.401s  |
 | **ffmpeg** (11 deps) | 4.181±0.496s | 4.784±0.528s | 11.930±1.818s | 30.164±1.690s |
+
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
+
 ### Warm Install
 
-| Package | malt | nanobrew | zerobrew |
-| ------- | ---- | -------- | -------- |
-| **tree** (0 deps) | 0.008s | 0.012s | 0.273s |
-| **wget** (6 deps) | 0.012s | 0.016s | 0.846s |
-| **ffmpeg** (11 deps) | 0.060s | 0.031s | 5.490s |
+| Package              | malt   | nanobrew | zerobrew |
+| -------------------- | ------ | -------- | -------- |
+| **tree** (0 deps)    | 0.008s | 0.012s   | 0.273s   |
+| **wget** (6 deps)    | 0.012s | 0.016s   | 0.846s   |
+| **ffmpeg** (11 deps) | 0.060s | 0.031s   | 5.490s   |
+
 <!-- BENCH:WARM:END -->
 
 <!-- BENCH:SIZE:START -->
+
 ### Binary Size
 
-| Tool | Size |
-| ---- | ---- |
+| Tool     | Size   |
+| -------- | ------ |
 | **malt** | 3.6 MB |
 | nanobrew | 2.6 MB |
 | zerobrew | 8.7 MB |
+
 <!-- BENCH:SIZE:END -->
 
 Apple Silicon (GitHub Actions macos-14), 2026-06-01. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
