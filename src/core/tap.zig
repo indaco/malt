@@ -412,6 +412,24 @@ fn makeConditional(
     };
 }
 
+test "resolveFromConditional: routes the body through the row's forge parser" {
+    // The forge selects the HEAD parser; a github row reads GitHub's `"sha"`.
+    // A future non-github arm reuses this seam — same wiring, different parse.
+    var resp = try makeConditional(
+        200,
+        false,
+        "{\"sha\":\"0123456789abcdef0123456789abcdef01234567\"}",
+        null,
+    );
+    defer resp.deinit();
+    var res = try resolveFromConditional(std.testing.allocator, .github, resp);
+    defer res.deinit();
+    try std.testing.expectEqualStrings(
+        "0123456789abcdef0123456789abcdef01234567",
+        res.sha.?,
+    );
+}
+
 test "resolveFromConditional: 200 with body+etag yields sha and persists etag" {
     var resp = try makeConditional(
         200,
@@ -421,7 +439,7 @@ test "resolveFromConditional: 200 with body+etag yields sha and persists etag" {
     );
     defer resp.deinit();
 
-    var res = try resolveFromConditional(std.testing.allocator, resp);
+    var res = try resolveFromConditional(std.testing.allocator, .github, resp);
     defer res.deinit();
     try std.testing.expect(!res.not_modified);
     try std.testing.expectEqualStrings(
@@ -440,7 +458,7 @@ test "resolveFromConditional: 200 without etag still yields sha (etag stays null
     );
     defer resp.deinit();
 
-    var res = try resolveFromConditional(std.testing.allocator, resp);
+    var res = try resolveFromConditional(std.testing.allocator, .github, resp);
     defer res.deinit();
     try std.testing.expect(!res.not_modified);
     try std.testing.expect(res.sha != null);
@@ -451,7 +469,7 @@ test "resolveFromConditional: 304 yields not_modified=true, sha=null, etag prese
     var resp = try makeConditional(304, true, "", "W/\"deadbeef\"");
     defer resp.deinit();
 
-    var res = try resolveFromConditional(std.testing.allocator, resp);
+    var res = try resolveFromConditional(std.testing.allocator, .github, resp);
     defer res.deinit();
     try std.testing.expect(res.not_modified);
     try std.testing.expectEqual(@as(?[]const u8, null), res.sha);
@@ -464,7 +482,7 @@ test "resolveFromConditional: 304 without ETag header — caller falls back to c
     var resp = try makeConditional(304, true, "", null);
     defer resp.deinit();
 
-    var res = try resolveFromConditional(std.testing.allocator, resp);
+    var res = try resolveFromConditional(std.testing.allocator, .github, resp);
     defer res.deinit();
     try std.testing.expect(res.not_modified);
     try std.testing.expectEqual(@as(?[]const u8, null), res.etag);
@@ -475,7 +493,7 @@ test "resolveFromConditional: 404 classifies as NotFound" {
     defer resp.deinit();
     try std.testing.expectError(
         TapError.NotFound,
-        resolveFromConditional(std.testing.allocator, resp),
+        resolveFromConditional(std.testing.allocator, .github, resp),
     );
 }
 
@@ -484,7 +502,7 @@ test "resolveFromConditional: 403 classifies as RateLimited" {
     defer resp.deinit();
     try std.testing.expectError(
         TapError.RateLimited,
-        resolveFromConditional(std.testing.allocator, resp),
+        resolveFromConditional(std.testing.allocator, .github, resp),
     );
 }
 
@@ -493,7 +511,7 @@ test "resolveFromConditional: 5xx classifies as ResolveFailed" {
     defer resp.deinit();
     try std.testing.expectError(
         TapError.ResolveFailed,
-        resolveFromConditional(std.testing.allocator, resp),
+        resolveFromConditional(std.testing.allocator, .github, resp),
     );
 }
 
@@ -502,7 +520,7 @@ test "resolveFromConditional: 200 with malformed JSON classifies as MalformedJso
     defer resp.deinit();
     try std.testing.expectError(
         TapError.MalformedJson,
-        resolveFromConditional(std.testing.allocator, resp),
+        resolveFromConditional(std.testing.allocator, .github, resp),
     );
 }
 
@@ -962,12 +980,14 @@ pub const HeadResolution = struct {
     }
 };
 
-/// Convert a `ConditionalResponse` from GitHub's `/commits/HEAD` into a
-/// `HeadResolution`. Pure: takes ownership of `resp.etag` only when the
+/// Convert a forge's `/commits/HEAD` `ConditionalResponse` into a
+/// `HeadResolution`; `forge_kind` selects the body parser. Pure: takes
+/// ownership of `resp.etag` only when the
 /// status is convertible; otherwise reports the classified `TapError`
 /// (`resp.deinit` still frees both body and etag in the error path).
 pub fn resolveFromConditional(
     allocator: std.mem.Allocator,
+    forge_kind: forge.Forge,
     resp: client_mod.ConditionalResponse,
 ) TapError!HeadResolution {
     if (resp.not_modified) {
@@ -986,7 +1006,7 @@ pub fn resolveFromConditional(
 
     if (resp.status != 200) return classifyResolveStatus(resp.status);
 
-    const sha = forge.parseHeadSha(.github, resp.body) orelse return TapError.MalformedJson;
+    const sha = forge.parseHeadSha(forge_kind, resp.body) orelse return TapError.MalformedJson;
     const sha_owned = allocator.dupe(u8, sha) catch return TapError.OutOfMemory;
     errdefer allocator.free(sha_owned);
 
@@ -1003,10 +1023,11 @@ pub fn resolveFromConditional(
     };
 }
 
-/// Ask GitHub for the current HEAD commit of a tap's repo, sending
+/// Ask the forge for the current HEAD commit of a tap's repo, sending
 /// `If-None-Match` when `cached_etag` is set so a stable tap costs
-/// zero rate-limit tokens. Returns a `HeadResolution` so callers can
-/// distinguish "fresh sha" from "304: cached sha is still good".
+/// zero rate-limit tokens. `forge_kind` selects the auth header and HEAD
+/// parser. Returns a `HeadResolution` so callers can distinguish
+/// "fresh sha" from "304: cached sha is still good".
 ///
 /// `api_head_url` must come from `resolveTapBaseUrls` — that single seam
 /// owns the `homebrew-<repo>` synthesis. A bare-args overload that
@@ -1016,22 +1037,43 @@ pub fn resolveHeadCommit(
     io: std.Io,
     environ: std.process.Environ,
     allocator: std.mem.Allocator,
+    forge_kind: forge.Forge,
     api_head_url: []const u8,
     cached_etag: ?[]const u8,
 ) TapError!HeadResolution {
     var http = client_mod.HttpClient.init(io, environ, allocator);
     defer http.deinit();
 
-    // MALT_GITHUB_TOKEN takes precedence; falling through to `extra=&.{}`
-    // lets net/client's HOMEBREW_GITHUB_API_TOKEN auto-inject still apply
-    // — both authenticate against the same 5000/hr quota that 304s don't
-    // touch.
+    // The forge's own token (e.g. MALT_GITHUB_TOKEN) is attached per
+    // request; falling through to `extra=&.{}` lets net/client's
+    // HOMEBREW_GITHUB_API_TOKEN auto-inject still apply for github hosts.
+    // 304s don't spend the rate-limit quota either way.
     var auth_buf: [256]u8 = undefined;
-    var resp = if (forge.authHeader(.github, environ, &auth_buf)) |header| blk: {
+    var resp = if (forge.authHeader(forge_kind, environ, &auth_buf)) |header| blk: {
         const headers = [_]std.http.Header{header};
         break :blk http.getConditional(api_head_url, cached_etag, &headers) catch return TapError.NetworkError;
     } else http.getConditional(api_head_url, cached_etag, &.{}) catch return TapError.NetworkError;
     defer resp.deinit();
 
-    return resolveFromConditional(allocator, resp);
+    return resolveFromConditional(allocator, forge_kind, resp);
+}
+
+/// Fetch a tap's raw `.rb`, attaching the forge's raw-auth header when it
+/// needs one. Auth rides this explicit per-request path so a private
+/// forge whose raw lives on the instance host (e.g. GitLab `PRIVATE-TOKEN`)
+/// is reached without leaning on `net/client`'s host-substring auto-inject.
+/// GitHub's raw CDN needs none, so its fetch is byte-identical to a plain
+/// GET. Caller owns the returned `Response`.
+pub fn getRawFile(
+    http: *client_mod.HttpClient,
+    environ: std.process.Environ,
+    forge_kind: forge.Forge,
+    rb_url: []const u8,
+) !client_mod.Response {
+    var auth_buf: [256]u8 = undefined;
+    if (forge.rawAuthHeader(forge_kind, environ, &auth_buf)) |header| {
+        const headers = [_]std.http.Header{header};
+        return http.getWithHeaders(rb_url, &headers, null);
+    }
+    return http.get(rb_url);
 }

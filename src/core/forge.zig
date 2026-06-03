@@ -88,6 +88,9 @@ pub fn fromHost(host: []const u8) Forge {
 /// URLs every tap fetch site needs. For raw fetches callers append the
 /// `<sha>/Formula/<name>.rb` (or `Casks/`) tail via `rawFileUrl`.
 pub const TapBaseUrls = struct {
+    /// The forge these URLs were built for. Carried so resolve sites pick
+    /// the right HEAD parse and auth header without re-deriving it.
+    forge: Forge,
     /// `https://api.github.com/repos/<owner>/<repo>/commits/HEAD`
     api_head_url: []const u8,
     /// `https://github.com/<owner>/<repo>` — the URL that actually
@@ -138,16 +141,21 @@ pub fn buildBaseUrls(
             );
             errdefer allocator.free(raw_base);
 
-            return .{ .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
+            return .{ .forge = forge, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
         },
     }
 }
 
-/// Build the per-forge auth header into `buf` from the forge's token
-/// env var, or null when unset/empty. GitHub: `Authorization: Bearer
-/// <MALT_GITHUB_TOKEN>`. The reach is deliberately narrow — only the
-/// tap-resolution caller passes this header — so the token never leaks
-/// onto unrelated requests.
+/// Auth header for the forge's **API** request (the `commits/HEAD`
+/// call), built into `buf` from the forge's token env var, or null when
+/// unset/empty. The token contract is one env var per forge, keyed by
+/// forge rather than by host, so a self-hosted instance reuses its
+/// forge's var:
+///   - github:   `MALT_GITHUB_TOKEN`   → `Authorization: Bearer <t>`
+///   - gitlab:   `MALT_GITLAB_TOKEN`   → `PRIVATE-TOKEN: <t>`
+///   - codeberg: `MALT_CODEBERG_TOKEN` → `Authorization: token <t>`
+/// The reach is deliberately narrow — only the tap-resolution callers
+/// pass this header — so the token never leaks onto unrelated requests.
 pub fn authHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std.http.Header {
     switch (forge) {
         .github => {
@@ -157,6 +165,20 @@ pub fn authHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std.ht
             return .{ .name = "Authorization", .value = value };
         },
     }
+}
+
+/// Auth header for a **raw `.rb`** fetch, or null when the forge's raw
+/// host needs none. GitHub serves raw content from a separate public CDN
+/// (`raw.githubusercontent.com`) the API token does not belong to —
+/// attaching it there would only widen the token's reach, so the github
+/// raw fetch stays unauthenticated, exactly as before. Forges whose raw
+/// path lives on the authenticated instance host attach their token here.
+pub fn rawAuthHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std.http.Header {
+    _ = environ;
+    _ = buf;
+    return switch (forge) {
+        .github => null,
+    };
 }
 
 /// A 40-char lowercase hex commit SHA — git's printable form. Kept
@@ -302,10 +324,27 @@ test "authHeader github: empty-string token behaves as unset" {
     try std.testing.expect(authHeader(.github, envWith(entries), &buf) == null);
 }
 
+test "rawAuthHeader github: null even when MALT_GITHUB_TOKEN is set" {
+    // The API token belongs to api.github.com, not the raw CDN — the raw
+    // fetch stays unauthenticated so the token's reach never widens.
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=ghp_testtoken"};
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(rawAuthHeader(.github, envWith(entries), &buf) == null);
+    try std.testing.expect(rawAuthHeader(.github, .empty, &buf) == null);
+}
+
 // ── buildBaseUrls (github) ─────────────────────────────────────────
 // The URL triple every tap fetch site needs. Byte shapes are the
 // contract — `core/tap.zig`'s resolve path and every install/upgrade
 // caller depend on them being identical to today.
+
+test "buildBaseUrls github: records the originating forge on the result" {
+    // The row's forge must ride along with the URL triple so resolve sites
+    // (auth + body parse) consult it without re-deriving it from the host.
+    const urls = try buildBaseUrls(std.testing.allocator, .github, "github.com", "o", "r");
+    defer urls.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Forge.github, urls.forge);
+}
 
 test "buildBaseUrls github: builds the api-head / repo / raw triple" {
     const urls = try buildBaseUrls(std.testing.allocator, .github, "github.com", "aeroxy", "ast-outline");

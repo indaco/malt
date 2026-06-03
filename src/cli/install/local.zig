@@ -228,7 +228,7 @@ fn installTapRb(
         if ((tap_mod.getCommitSha(allocator, db, tap_slug) catch null)) |cached| {
             break :blk cached;
         }
-        var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, null) catch |e| {
+        var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, null) catch |e| {
             sink.err("Could not resolve {s}'s HEAD commit: {s}", .{ tap_slug, tap_mod.describeResolveError(e) });
             return mapTapResolveError(e);
         };
@@ -256,20 +256,20 @@ fn installTapRb(
     var url_buf: [512]u8 = undefined;
     const rb_url = forge.rawFileUrl(
         &url_buf,
-        .github,
+        urls.forge,
         urls.raw_base,
         commit_sha,
         initial_kind,
         parts.formula,
     ) catch return InstallError.FormulaNotFound;
 
-    var rb_resp = http.get(rb_url) catch {
+    var rb_resp = tap_mod.getRawFile(&http, ctx.environ, urls.forge, rb_url) catch {
         sink.err("Cannot fetch tap from GitHub", .{});
         return InstallError.FormulaNotFound;
     };
     defer rb_resp.deinit();
 
-    // Distinct handle for the Casks/ retry: each http.get() pairs with
+    // Distinct handle for the Casks/ retry: each fetch pairs with
     // its own defer, so a future reorder cannot turn the previous
     // single-`resp` reuse into a double-free or use-after-free.
     var cask_resp: ?client_mod.Response = null;
@@ -284,14 +284,14 @@ fn installTapRb(
 
         const cask_url = forge.rawFileUrl(
             &url_buf,
-            .github,
+            urls.forge,
             urls.raw_base,
             commit_sha,
             .cask,
             parts.formula,
         ) catch return InstallError.FormulaNotFound;
 
-        cask_resp = http.get(cask_url) catch {
+        cask_resp = tap_mod.getRawFile(&http, ctx.environ, urls.forge, cask_url) catch {
             sink.err("Cannot fetch tap from GitHub", .{});
             return InstallError.FormulaNotFound;
         };

@@ -75,7 +75,7 @@ test "304 response: caller keeps cached sha, no DB write happens" {
         .allocator = testing.allocator,
     };
     defer resp.deinit();
-    var res = try tap.resolveFromConditional(testing.allocator, resp);
+    var res = try tap.resolveFromConditional(testing.allocator, .github, resp);
     defer res.deinit();
     try testing.expect(res.not_modified);
     try testing.expectEqual(@as(?[]const u8, null), res.sha);
@@ -107,7 +107,7 @@ test "cache-bust: a clobbered etag triggers a 200 path that updates both fields"
         .allocator = testing.allocator,
     };
     defer resp.deinit();
-    var res = try tap.resolveFromConditional(testing.allocator, resp);
+    var res = try tap.resolveFromConditional(testing.allocator, .github, resp);
     defer res.deinit();
     try testing.expect(!res.not_modified);
     try testing.expectEqualStrings(moved_sha, res.sha.?);
@@ -144,7 +144,7 @@ test "server omits ETag on 200: sha persists, etag column is cleared" {
         .allocator = testing.allocator,
     };
     defer resp.deinit();
-    var res = try tap.resolveFromConditional(testing.allocator, resp);
+    var res = try tap.resolveFromConditional(testing.allocator, .github, resp);
     defer res.deinit();
     try tap.updateHead(&db, "aeroxy/tap", res.sha.?, res.etag);
 

@@ -476,7 +476,7 @@ const HeadResolverCtx = struct {
         const cached_sha = tap_mod.getCommitSha(a, self.db, tap_label) catch null;
         const cached_etag = tap_mod.getHeadEtag(a, self.db, tap_label) catch null;
 
-        var res = tap_mod.resolveHeadCommit(self.io, self.environ, a, urls.api_head_url, cached_etag) catch |err| {
+        var res = tap_mod.resolveHeadCommit(self.io, self.environ, a, urls.forge, urls.api_head_url, cached_etag) catch |err| {
             warnTapHeadResolveFailed(tap_label, err);
             return null;
         };
@@ -540,9 +540,9 @@ fn tapCaskLatestVersion(
     http.offline = offline;
 
     var rb_url_buf: [512]u8 = undefined;
-    const rb_url = forge.rawFileUrl(&rb_url_buf, .github, urls.raw_base, fresh_sha, .cask, token) catch return null;
+    const rb_url = forge.rawFileUrl(&rb_url_buf, urls.forge, urls.raw_base, fresh_sha, .cask, token) catch return null;
 
-    var rb_resp = http.get(rb_url) catch {
+    var rb_resp = tap_mod.getRawFile(&http, environ, urls.forge, rb_url) catch {
         warnTapCaskFetchFailed(tap_label, token, "Network failure while reading the .rb");
         return null;
     };
