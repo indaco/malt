@@ -546,8 +546,11 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
     var repo_override: ?[]const u8 = null;
     // --host <forge-host>: register the tap against a non-GitHub forge.
     // --url <repo-url>: derive (host, owner, repo) from a full repo URL.
+    // --forge <name>: pin the provider explicitly when the host can't
+    //   reveal it (a custom-domain GitLab like code.acme.com).
     var host_flag: ?[]const u8 = null;
     var url_flag: ?[]const u8 = null;
+    var forge_flag: ?[]const u8 = null;
     var positional: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -613,6 +616,23 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
                 return error.Aborted;
             }
             url_flag = arg["--url=".len..];
+        } else if (std.mem.eql(u8, arg, "--forge")) {
+            if (action != .add) {
+                output.err("--forge is only valid with `mt tap`", .{});
+                return error.Aborted;
+            }
+            if (i + 1 >= args.len) {
+                output.err("Usage: mt tap <slug> --host <host> --forge <provider> --repo <owner>/<repo>", .{});
+                return error.Aborted;
+            }
+            forge_flag = args[i + 1];
+            i += 1;
+        } else if (std.mem.startsWith(u8, arg, "--forge=")) {
+            if (action != .add) {
+                output.err("--forge is only valid with `mt tap`", .{});
+                return error.Aborted;
+            }
+            forge_flag = arg["--forge=".len..];
         } else if (std.mem.eql(u8, arg, "--pin")) {
             if (action != .add) {
                 output.err("--pin is only valid with `mt tap`", .{});
@@ -673,6 +693,27 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
         output.err("Invalid --host '{s}'. Expected a bare HTTPS host like gitlab.com (no scheme, no path).", .{h});
         return error.Aborted;
     };
+
+    // --forge only resolves a custom-domain instance, so it needs a host
+    // to pin. Map it to a known provider up front; an unknown name is a
+    // typo, not a silent github fallback.
+    var forge_hint: ?forge.Forge = null;
+    if (forge_flag) |f| {
+        // Checked before the host requirement so a `--forge --refresh` slip
+        // gets the precise reason, not a misleading "needs --host".
+        if (refresh_all or refresh_target != null or pin_slug != null) {
+            output.err("--forge cannot be combined with --refresh or --pin", .{});
+            return error.Aborted;
+        }
+        if (host_flag == null and url_flag == null) {
+            output.err("--forge requires --host or --url (it pins the provider for a custom-domain instance).", .{});
+            return error.Aborted;
+        }
+        forge_hint = std.meta.stringToEnum(forge.Forge, f) orelse {
+            output.err("Unknown --forge '{s}'. Supported: github, gitlab.", .{f});
+            return error.Aborted;
+        };
+    }
 
     const prefix = atomic.maltPrefixOrAbort();
 
@@ -818,21 +859,21 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
                 }
             }
 
-            // Off-GitHub forges have no resolver yet — persist the row so
-            // the tap is recorded, but skip the GitHub-shaped HEAD resolve
-            // (it would mis-resolve against api.github.com). Rebinding onto
-            // another forge needs the host-aware rebind the provider arms
-            // bring, so refuse it for now rather than half-apply it.
+            // Off-GitHub forges register unpinned (no network at add time);
+            // the row carries the host and, when the host can't reveal the
+            // provider, an explicit `--forge` hint so resolution targets the
+            // right forge. Rebinding onto another forge needs the host-aware
+            // rebind a later task brings, so refuse it rather than half-apply.
             if (!std.mem.eql(u8, target_pair.host, "github.com")) {
                 if (rebinding) {
                     output.err("Rebinding {s} onto {s} isn't supported yet — run `mt untap {s}` then re-register.", .{ name, target_pair.host, name });
                     return error.Aborted;
                 }
-                tap_mod.addWithHost(&db, name, target_pair.owner, target_pair.repo, target_pair.host, null) catch {
+                tap_mod.addWithForge(&db, name, target_pair.owner, target_pair.repo, target_pair.host, forge_hint, null) catch {
                     output.err("Failed to register tap {s}", .{name});
                     return error.Aborted;
                 };
-                output.warn("Registered {s} → {s}/{s} on {s}. Resolution for non-GitHub forges arrives in a later release; the tap is stored but not yet fetchable.", .{ name, target_pair.owner, target_pair.repo, target_pair.host });
+                output.info("Registered {s} → {s}/{s} on {s} (unpinned). Run `mt tap --refresh {s}` to pin its HEAD commit.", .{ name, target_pair.owner, target_pair.repo, target_pair.host, name });
                 return;
             }
 

@@ -331,6 +331,19 @@ fn readTapRow(db_path: [:0]const u8, name: []const u8) !struct { host: []u8, own
     return .{ .host = host, .owner = owner, .repo = repo, .pinned = pinned };
 }
 
+// Read the nullable `forge` column on its own — the explicit `--forge`
+// hint a custom-domain row persists, NULL when classification is by host.
+fn readTapForge(db_path: [:0]const u8, name: []const u8) !?[]u8 {
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    var stmt = try db.prepare("SELECT forge FROM taps WHERE name = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    try testing.expect(try stmt.step());
+    const raw = stmt.columnText(0) orelse return null;
+    return try testing.allocator.dupe(u8, std.mem.sliceTo(raw, 0));
+}
+
 test "execute --host with --repo registers a non-github tap unpinned, no network" {
     const prefix = try setupPrefix("host_repo_register");
     defer testing.allocator.free(prefix);
@@ -359,6 +372,81 @@ test "execute --host with --repo registers a non-github tap unpinned, no network
     try testing.expectEqualStrings("grp", row.owner);
     try testing.expectEqualStrings("tap", row.repo);
     try testing.expect(!row.pinned); // unpinned: resolution lands in a later release
+}
+
+test "execute --host with --forge persists the explicit provider for a custom domain" {
+    // A corporate GitLab on a custom domain (code.acme.com) can't be
+    // classified from its host, so --forge is the only signal; it must
+    // persist so resolution targets GitLab, not the github default.
+    const prefix = try setupPrefix("forge_hint_register");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try tap_cli.execute(&ctx, testing.allocator, &.{ "acme/tap", "--host", "code.acme.com", "--forge", "gitlab", "--repo", "acme/tap" });
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    const row = try readTapRow(db_path, "acme/tap");
+    defer testing.allocator.free(row.host);
+    defer testing.allocator.free(row.owner);
+    defer testing.allocator.free(row.repo);
+    try testing.expectEqualStrings("code.acme.com", row.host);
+
+    const stored_forge = try readTapForge(db_path, "acme/tap");
+    defer if (stored_forge) |f| testing.allocator.free(f);
+    try testing.expectEqualStrings("gitlab", stored_forge orelse "");
+}
+
+test "execute --forge rejects an unknown provider" {
+    const prefix = try setupPrefix("forge_unknown");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "acme/tap", "--host", "code.acme.com", "--forge", "bogus", "--repo", "acme/tap" }));
+}
+
+test "execute --forge without a host is rejected" {
+    const prefix = try setupPrefix("forge_no_host");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "acme/tap", "--forge", "gitlab", "--repo", "acme/tap" }));
+}
+
+test "execute --forge combined with --refresh is rejected" {
+    const prefix = try setupPrefix("forge_refresh");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "--refresh", "acme/tap", "--forge", "gitlab" }));
+}
+
+test "execute --forge=<value> inline form is parsed (rejects an unknown provider)" {
+    const prefix = try setupPrefix("forge_inline");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try testing.expectError(error.Aborted, tap_cli.execute(&ctx, testing.allocator, &.{ "acme/tap", "--host", "code.acme.com", "--forge=bogus", "--repo", "acme/tap" }));
 }
 
 test "execute --url derives and persists (host, owner, repo) unpinned" {
