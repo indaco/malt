@@ -228,8 +228,9 @@ fn installTapRb(
         if ((tap_mod.getCommitSha(allocator, db, tap_slug) catch null)) |cached| {
             break :blk cached;
         }
+        var rerr_buf: [512]u8 = undefined;
         var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, null) catch |e| {
-            sink.err("Could not resolve {s}'s HEAD commit: {s}", .{ tap_slug, tap_mod.describeResolveError(e) });
+            sink.err("Could not resolve {s}'s HEAD commit: {s}", .{ tap_slug, tap_mod.describeResolveError(&rerr_buf, e, urls.forge, urls.host) });
             return mapTapResolveError(e);
         };
         defer head_res.deinit();

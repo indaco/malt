@@ -899,8 +899,9 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             const cached_etag_opt = tap_mod.getHeadEtag(allocator, &db, name) catch null;
             defer if (cached_etag_opt) |e| allocator.free(e);
 
+            var rerr_buf: [512]u8 = undefined;
             var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, cached_etag_opt) catch |e| {
-                output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
+                output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(&rerr_buf, e, urls.forge, urls.host) });
                 // Rebind already moved (owner, repo) and cleared the pin —
                 // the row is unfetchable until `mt tap --refresh {slug}` lands a fresh SHA.
                 if (rebinding) output.warn("Rebind applied with no pin — run `mt tap --refresh {s}` to recover.", .{name});
@@ -969,11 +970,12 @@ fn pinTap(
     // caching value — pass null and ignore any etag the server returns.
     const commit_url = try tap_mod.resolveCommitUrl(allocator, db, slug, sha);
     defer allocator.free(commit_url);
+    var perr_buf: [512]u8 = undefined;
     var echoed_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, pair.forge, commit_url, null) catch |e| {
         if (e == error.NotFound) {
             output.err("Cannot pin {s} @ {s}: {s} has no such commit on this tap.", .{ slug, sha[0..@min(sha.len, 7)], pair.host });
         } else {
-            output.err("Could not verify {s} @ {s}: {s}", .{ slug, sha[0..@min(sha.len, 7)], tap_mod.describeResolveError(e) });
+            output.err("Could not verify {s} @ {s}: {s}", .{ slug, sha[0..@min(sha.len, 7)], tap_mod.describeResolveError(&perr_buf, e, pair.forge, pair.host) });
         }
         return error.Aborted;
     };
@@ -1122,8 +1124,9 @@ fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Data
     // Force fresh: bypass the cached etag so the operator sees the
     // current body. The new etag is still persisted afterwards so the
     // *next* non-refresh resolve can short-circuit.
+    var rerr_buf: [512]u8 = undefined;
     var res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, null) catch |e| {
-        output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
+        output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(&rerr_buf, e, urls.forge, urls.host) });
         return error.Aborted;
     };
     defer res.deinit();

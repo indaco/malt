@@ -235,6 +235,7 @@ pub fn build(b: *std.Build) void {
         "tests/tap_gitlab_resolution_test.zig",
         "tests/tap_codeberg_resolution_test.zig",
         "tests/tap_pin_forge_test.zig",
+        "tests/tap_resolve_error_test.zig",
         "tests/linker_isolation_test.zig",
         "tests/install_isolation_test.zig",
         "tests/doctor_isolation_test.zig",
@@ -330,7 +331,7 @@ pub fn build(b: *std.Build) void {
     });
     test_io_mod.addImport("malt", malt_lib);
 
-    @setEvalBranchQuota(20000);
+    @setEvalBranchQuota(30000);
     inline for (test_modules) |test_file| {
         // e.g. "tests/formula_test.zig" → "formula_test" (so each test binary
         // has a unique install name, which `test-bin` / kcov need).
