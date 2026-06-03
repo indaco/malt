@@ -207,6 +207,115 @@ test "formatOfflineDetail reports active when offline is true" {
     );
 }
 
+// ── registered-taps forge/host report ───────────────────────────────
+//
+// `mt doctor` lists each registered tap with the forge host it resolves
+// against, so a user can see at a glance which forge a tap targets — the
+// off-GitHub hosts are exactly where a wrong registration silently
+// resolves elsewhere. Pure formatters so the bytes pin without a DB.
+
+const tap_mod = @import("malt").tap;
+
+test "writeTapForgeHuman lists every tap with its host, github included" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const taps = [_]tap_mod.TapInfo{
+        .{ .name = "user/repo", .url = "https://github.com/user/homebrew-repo", .host = "github.com" },
+        .{ .name = "grp/tap", .url = "https://gitlab.com/grp/tap", .host = "gitlab.com" },
+    };
+    try doctor.writeTapForgeHuman(&aw.writer, &taps);
+    try testing.expectEqualStrings(
+        "  > Registered taps:\n" ++
+            "        user/repo [github.com]\n" ++
+            "        grp/tap [gitlab.com]\n",
+        aw.written(),
+    );
+}
+
+test "writeTapForgeHuman writes nothing when no taps are registered" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try doctor.writeTapForgeHuman(&aw.writer, &.{});
+    try testing.expectEqual(@as(usize, 0), aw.written().len);
+}
+
+test "writeTapForgeJson emits one {name,host} object per tap" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const taps = [_]tap_mod.TapInfo{
+        .{ .name = "user/repo", .url = "https://github.com/user/homebrew-repo", .host = "github.com" },
+        .{ .name = "grp/tap", .url = "https://gitlab.com/grp/tap", .host = "gitlab.com" },
+    };
+    try doctor.writeTapForgeJson(&aw.writer, &taps);
+    try testing.expectEqualStrings(
+        "{\"taps\":[{\"name\":\"user/repo\",\"host\":\"github.com\"}," ++
+            "{\"name\":\"grp/tap\",\"host\":\"gitlab.com\"}]}\n",
+        aw.written(),
+    );
+}
+
+test "writeTapForgeJson keeps an empty array (stable schema) when no taps" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try doctor.writeTapForgeJson(&aw.writer, &.{});
+    try testing.expectEqualStrings("{\"taps\":[]}\n", aw.written());
+}
+
+// Edge: the forge report is host-focused — a pinned tap shows its host,
+// never the commit SHA. The pin belongs to `mt tap`'s listing, so a
+// future change that leaked the SHA into doctor would be a regression.
+test "writeTapForgeHuman shows the host of a pinned tap, not its SHA" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const taps = [_]tap_mod.TapInfo{
+        .{
+            .name = "grp/tap",
+            .url = "https://gitlab.com/grp/tap",
+            .commit_sha = "0123456789abcdef0123456789abcdef01234567",
+            .host = "gitlab.com",
+        },
+    };
+    try doctor.writeTapForgeHuman(&aw.writer, &taps);
+    try testing.expectEqualStrings(
+        "  > Registered taps:\n        grp/tap [gitlab.com]\n",
+        aw.written(),
+    );
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "0123456") == null);
+}
+
+test "writeTapForgeJson omits the commit SHA for a pinned tap" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const taps = [_]tap_mod.TapInfo{
+        .{
+            .name = "grp/tap",
+            .url = "https://gitlab.com/grp/tap",
+            .commit_sha = "0123456789abcdef0123456789abcdef01234567",
+            .host = "gitlab.com",
+        },
+    };
+    try doctor.writeTapForgeJson(&aw.writer, &taps);
+    try testing.expectEqualStrings(
+        "{\"taps\":[{\"name\":\"grp/tap\",\"host\":\"gitlab.com\"}]}\n",
+        aw.written(),
+    );
+}
+
+// Edge: a self-hosted host on a custom domain renders verbatim — the
+// report shows whatever host was registered, no github.com fallback.
+test "writeTapForgeHuman renders a self-hosted custom host verbatim" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const taps = [_]tap_mod.TapInfo{
+        .{ .name = "acme/tap", .url = "https://code.acme.com/acme/tap", .host = "code.acme.com" },
+    };
+    try doctor.writeTapForgeHuman(&aw.writer, &taps);
+    try testing.expectEqualStrings(
+        "  > Registered taps:\n        acme/tap [code.acme.com]\n",
+        aw.written(),
+    );
+}
+
 // ── countMissingLocalSources ────────────────────────────────────────
 //
 // The local-source check walks `kegs WHERE tap='local'` and reports
