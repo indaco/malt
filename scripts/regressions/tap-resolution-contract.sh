@@ -57,4 +57,19 @@ if [[ -n "$filtered" ]]; then
   exit 1
 fi
 
-echo "OK: tap-resolution contract holds — all fetches and auth go through the forge seam"
+# The `mt tap --pin` reachability verb (`commits/<sha>`) must build through
+# forge.commitUrl, so a non-github tap pins against its own forge instead
+# of 404ing at api.github.com. The `commits/{s}` URL literal therefore
+# lives only in the seam — re-inlining it at a call site (the bug this
+# guards) would route every pin back at GitHub.
+pin_literal=$(grep -rn --include='*.zig' -F 'commits/{s}' src |
+  grep -v '^src/core/forge\.zig:' || true)
+if [[ -n "$pin_literal" ]]; then
+  printf 'FAIL: commits/<sha> pin URL built outside forge.commitUrl:\n\n' >&2
+  printf '%s\n\n' "$pin_literal" >&2
+  printf 'Route the pin verb through forge.commitUrl so non-github taps\n' >&2
+  printf 'pin against their own forge.\n' >&2
+  exit 1
+fi
+
+echo "OK: tap-resolution contract holds — all fetches, auth, and the pin verb go through the forge seam"

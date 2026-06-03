@@ -956,18 +956,22 @@ fn pinTap(
         return error.Aborted;
     };
 
+    // The row's forge selects both the `commits/<sha>` endpoint and the
+    // parse/auth, so the pin is validated against the tap's own forge —
+    // a non-github tap never 404s at api.github.com. The host names the
+    // forge in failures (not a hard-coded "GitHub").
+    const pair = try tap_mod.effectiveOwnerRepo(allocator, db, slug, "github.com");
+    defer pair.deinit(allocator);
+
     // Route reachability through the same HTTP path as HEAD resolution so a
     // 200 here proves the SHA is fetchable from the exact repo subsequent
-    // installs will use. A 404 means GitHub has no such commit on this repo.
-    // /commits/<sha> is sha-pinned so the ETag has no caching value — pass
-    // null and ignore any etag the server happens to return.
+    // installs will use. /commits/<sha> is sha-pinned so the ETag has no
+    // caching value — pass null and ignore any etag the server returns.
     const commit_url = try tap_mod.resolveCommitUrl(allocator, db, slug, sha);
     defer allocator.free(commit_url);
-    // Pinning (`commits/<sha>`) is a GitHub-only verb today, matching
-    // `resolveCommitUrl`'s github-only URL shape.
-    var echoed_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, .github, commit_url, null) catch |e| {
+    var echoed_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, pair.forge, commit_url, null) catch |e| {
         if (e == error.NotFound) {
-            output.err("Cannot pin {s} @ {s}: GitHub has no such commit on this tap.", .{ slug, sha[0..@min(sha.len, 7)] });
+            output.err("Cannot pin {s} @ {s}: {s} has no such commit on this tap.", .{ slug, sha[0..@min(sha.len, 7)], pair.host });
         } else {
             output.err("Could not verify {s} @ {s}: {s}", .{ slug, sha[0..@min(sha.len, 7)], tap_mod.describeResolveError(e) });
         }
@@ -975,19 +979,17 @@ fn pinTap(
     };
     defer echoed_res.deinit();
     const echoed = echoed_res.sha orelse {
-        output.err("Cannot pin {s} @ {s}: GitHub returned an empty response.", .{ slug, sha[0..@min(sha.len, 7)] });
+        output.err("Cannot pin {s} @ {s}: {s} returned an empty response.", .{ slug, sha[0..@min(sha.len, 7)], pair.host });
         return error.Aborted;
     };
 
-    // Defensive: GitHub's `commits/<sha>` echoes the resolved full SHA. If
-    // it differs, treat as unreachable rather than store a mismatched pin.
+    // Defensive: the forge's `commits/<sha>` echoes the resolved full SHA.
+    // If it differs, treat as unreachable rather than store a mismatched pin.
     if (!std.mem.eql(u8, echoed, sha)) {
-        output.err("Cannot pin {s} @ {s}: GitHub returned a different SHA.", .{ slug, sha[0..@min(sha.len, 7)] });
+        output.err("Cannot pin {s} @ {s}: {s} returned a different SHA.", .{ slug, sha[0..@min(sha.len, 7)], pair.host });
         return error.Aborted;
     }
 
-    const pair = try tap_mod.effectiveOwnerRepo(allocator, db, slug, "github.com");
-    defer pair.deinit(allocator);
     tap_mod.add(db, slug, pair.owner, pair.repo, sha) catch {
         output.err("Failed to pin {s}", .{slug});
         return error.Aborted;
