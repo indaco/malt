@@ -858,7 +858,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             const cached_etag_opt = tap_mod.getHeadEtag(allocator, &db, name) catch null;
             defer if (cached_etag_opt) |e| allocator.free(e);
 
-            var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, cached_etag_opt) catch |e| {
+            var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, cached_etag_opt) catch |e| {
                 output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
                 // Rebind already moved (owner, repo) and cleared the pin —
                 // the row is unfetchable until `mt tap --refresh {slug}` lands a fresh SHA.
@@ -922,7 +922,9 @@ fn pinTap(
     // null and ignore any etag the server happens to return.
     const commit_url = try tap_mod.resolveCommitUrl(allocator, db, slug, sha);
     defer allocator.free(commit_url);
-    var echoed_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, commit_url, null) catch |e| {
+    // Pinning (`commits/<sha>`) is a GitHub-only verb today, matching
+    // `resolveCommitUrl`'s github-only URL shape.
+    var echoed_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, .github, commit_url, null) catch |e| {
         if (e == error.NotFound) {
             output.err("Cannot pin {s} @ {s}: GitHub has no such commit on this tap.", .{ slug, sha[0..@min(sha.len, 7)] });
         } else {
@@ -1044,7 +1046,7 @@ fn resolveOneHead(
     // If-None-Match so a stale-but-unmoved upstream still surfaces a
     // fresh body and the operator can confirm the tap really hasn't
     // budged. Per task implementation notes.
-    var res = try tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, null);
+    var res = try tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, null);
     defer res.deinit();
     const sha = res.sha orelse return error.MalformedJson;
     const sha_owned = try allocator.dupe(u8, sha);
@@ -1077,7 +1079,7 @@ fn refreshTap(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Data
     // Force fresh: bypass the cached etag so the operator sees the
     // current body. The new etag is still persisted afterwards so the
     // *next* non-refresh resolve can short-circuit.
-    var res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, null) catch |e| {
+    var res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, null) catch |e| {
         output.err("Could not resolve {s}'s HEAD commit: {s}", .{ name, tap_mod.describeResolveError(e) });
         return error.Aborted;
     };

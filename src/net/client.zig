@@ -310,16 +310,51 @@ pub const HttpClient = struct {
         return w;
     }
 
+    /// Host component of an http(s) URL — no scheme, userinfo, port, or
+    /// path. Null for non-http(s) inputs (never auth-eligible). Strips
+    /// userinfo so `github.com@evil.tld` resolves to its real host
+    /// `evil.tld`, closing the substring-match token leak.
+    fn urlHost(url: []const u8) ?[]const u8 {
+        const after_scheme = if (std.mem.startsWith(u8, url, "https://"))
+            url["https://".len..]
+        else if (std.mem.startsWith(u8, url, "http://"))
+            url["http://".len..]
+        else
+            return null;
+
+        var authority = after_scheme;
+        if (std.mem.indexOfAny(u8, authority, "/?#")) |i| authority = authority[0..i];
+        if (std.mem.lastIndexOfScalar(u8, authority, '@')) |i| authority = authority[i + 1 ..];
+        if (std.mem.lastIndexOfScalar(u8, authority, ':')) |i| authority = authority[0..i];
+        // A trailing dot is the FQDN root form of the same host (`github.com.`).
+        if (authority.len > 0 and authority[authority.len - 1] == '.')
+            authority = authority[0 .. authority.len - 1];
+        return authority;
+    }
+
+    /// True when `url`'s host component is one of the GitHub/Homebrew hosts
+    /// the metadata token is meant for. Matches the *host*, not a substring,
+    /// so a look-alike like `https://github.com.evil.tld/` or a path like
+    /// `https://evil.tld/github.com` never receives the token. Hosts are
+    /// compared case-insensitively (DNS is case-insensitive), so a legit
+    /// host never loses the token to capitalisation.
+    fn githubTokenApplies(url: []const u8) bool {
+        const host = urlHost(url) orelse return false;
+        if (std.ascii.eqlIgnoreCase(host, "github.com")) return true;
+        if (std.ascii.endsWithIgnoreCase(host, ".github.com")) return true;
+        if (std.ascii.eqlIgnoreCase(host, "formulae.brew.sh")) return true;
+        if (std.ascii.eqlIgnoreCase(host, "ghcr.io")) return true;
+        return false;
+    }
+
     /// GET request; auto-injects HOMEBREW_GITHUB_API_TOKEN as Authorization
     /// for GitHub/Homebrew hosts. Caller owns the returned `Response`.
     pub fn get(self: *HttpClient, url: []const u8) !Response {
         if (self.offline) return error.OfflineRequired;
         if (std.process.Environ.getPosix(self.environ, "HOMEBREW_GITHUB_API_TOKEN")) |token| {
-            // Apply token to GitHub and Homebrew API requests
-            if (std.mem.indexOf(u8, url, "github.com") != null or
-                std.mem.indexOf(u8, url, "formulae.brew.sh") != null or
-                std.mem.indexOf(u8, url, "ghcr.io") != null)
-            {
+            // Host-component match, not substring: a look-alike host or a
+            // path containing "github.com" must never receive the token.
+            if (githubTokenApplies(url)) {
                 var auth_buf: [256]u8 = undefined;
                 const auth_value = std.fmt.bufPrint(&auth_buf, "token {s}", .{std.mem.sliceTo(token, 0)}) catch
                     return self.doGet(url, &.{});
@@ -951,6 +986,69 @@ test "HttpClient.offline defaults to false" {
     var http = HttpClient.init(std.Options.debug_io, std.process.Environ.empty, std.testing.allocator);
     defer http.deinit();
     try std.testing.expect(!http.offline);
+}
+
+// ── githubTokenApplies: host-component match ───────────────────────
+// Security-sensitive: a substring match leaked the metadata token to
+// any URL *containing* "github.com" — a look-alike host or even a path
+// segment. The token must ride only on the real GitHub/Homebrew hosts.
+
+test "githubTokenApplies: matches github.com and its api subdomain" {
+    try std.testing.expect(HttpClient.githubTokenApplies("https://github.com/Homebrew/homebrew-core"));
+    try std.testing.expect(HttpClient.githubTokenApplies("https://api.github.com/repos/x/y/commits/HEAD"));
+}
+
+test "githubTokenApplies: matches formulae.brew.sh and ghcr.io" {
+    try std.testing.expect(HttpClient.githubTokenApplies("https://formulae.brew.sh/api/formula/glow.json"));
+    try std.testing.expect(HttpClient.githubTokenApplies("https://ghcr.io/v2/homebrew/core/glow/manifests/1.0"));
+}
+
+test "githubTokenApplies: rejects a look-alike host suffix" {
+    // The core leak: `github.com.evil.tld`'s host is not github.com.
+    try std.testing.expect(!HttpClient.githubTokenApplies("https://github.com.evil.tld/Homebrew/x"));
+    try std.testing.expect(!HttpClient.githubTokenApplies("https://api.github.com.evil.tld/x"));
+}
+
+test "githubTokenApplies: rejects the host in userinfo or path" {
+    // userinfo before '@' is not the host; a path segment is not the host.
+    try std.testing.expect(!HttpClient.githubTokenApplies("https://github.com@evil.tld/x"));
+    try std.testing.expect(!HttpClient.githubTokenApplies("https://evil.tld/github.com"));
+}
+
+test "githubTokenApplies: rejects non-forge and raw hosts" {
+    // raw.githubusercontent.com is a different host and was never matched.
+    try std.testing.expect(!HttpClient.githubTokenApplies("https://raw.githubusercontent.com/x/y/HEAD/F.rb"));
+    try std.testing.expect(!HttpClient.githubTokenApplies("https://gitlab.com/o/r"));
+    try std.testing.expect(!HttpClient.githubTokenApplies("https://example.com/x"));
+}
+
+test "githubTokenApplies: tolerates a port and matches the host" {
+    try std.testing.expect(HttpClient.githubTokenApplies("https://github.com:443/x"));
+    try std.testing.expect(!HttpClient.githubTokenApplies("https://github.com.evil.tld:8443/x"));
+}
+
+test "githubTokenApplies: matches a host-only URL with no path" {
+    try std.testing.expect(HttpClient.githubTokenApplies("https://github.com"));
+}
+
+test "githubTokenApplies: rejects non-http(s) schemes and empty input" {
+    // urlHost only resolves http(s); anything else is never auth-eligible.
+    try std.testing.expect(!HttpClient.githubTokenApplies("git://github.com/x"));
+    try std.testing.expect(!HttpClient.githubTokenApplies("ssh://git@github.com/x"));
+    try std.testing.expect(!HttpClient.githubTokenApplies(""));
+}
+
+test "githubTokenApplies: host comparison is case-insensitive (no token lost to caps)" {
+    try std.testing.expect(HttpClient.githubTokenApplies("https://GitHub.com/Homebrew/x"));
+    try std.testing.expect(HttpClient.githubTokenApplies("https://API.GITHUB.COM/repos/x"));
+    // ...but a capitalised look-alike is still rejected.
+    try std.testing.expect(!HttpClient.githubTokenApplies("https://GitHub.com.evil.tld/x"));
+}
+
+test "githubTokenApplies: tolerates the FQDN trailing-dot root form" {
+    try std.testing.expect(HttpClient.githubTokenApplies("https://github.com./x"));
+    try std.testing.expect(HttpClient.githubTokenApplies("https://api.github.com./x"));
+    try std.testing.expect(!HttpClient.githubTokenApplies("https://github.com.evil.tld./x"));
 }
 
 test "HttpClient.get returns OfflineRequired when offline is set" {

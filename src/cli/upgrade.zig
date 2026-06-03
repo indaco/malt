@@ -474,7 +474,7 @@ fn upgradeTapFormula(
     const cached_etag_opt = tap_mod.getHeadEtag(allocator, db, tap_label) catch null;
     defer if (cached_etag_opt) |e| allocator.free(e);
 
-    var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, cached_etag_opt) catch |e| {
+    var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, cached_etag_opt) catch |e| {
         output.err("Could not resolve {s} HEAD: {s}", .{ tap_label, tap_mod.describeResolveError(e) });
         return error.Aborted;
     };
@@ -575,7 +575,7 @@ fn upgradeRoutedTapCask(
     const cached_etag_opt = tap_mod.getHeadEtag(allocator, db, tap_label) catch null;
     defer if (cached_etag_opt) |e| allocator.free(e);
 
-    var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.api_head_url, cached_etag_opt) catch |e| {
+    var head_res = tap_mod.resolveHeadCommit(ctx.io, ctx.environ, allocator, urls.forge, urls.api_head_url, cached_etag_opt) catch |e| {
         output.err("Could not resolve {s} HEAD: {s}", .{ tap_label, tap_mod.describeResolveError(e) });
         return error.Aborted;
     };
@@ -590,9 +590,9 @@ fn upgradeRoutedTapCask(
     http.offline = ctx.offline;
 
     var rb_url_buf: [512]u8 = undefined;
-    const rb_url = forge.rawFileUrl(&rb_url_buf, .github, urls.raw_base, fresh_sha, .cask, token) catch return error.Aborted;
+    const rb_url = forge.rawFileUrl(&rb_url_buf, urls.forge, urls.raw_base, fresh_sha, .cask, token) catch return error.Aborted;
 
-    var rb_resp = http.get(rb_url) catch |e| {
+    var rb_resp = tap_mod.getRawFile(&http, ctx.environ, urls.forge, rb_url) catch |e| {
         output.err("Could not fetch {s} from tap {s}: {s}", .{ token, tap_label, @errorName(e) });
         return error.Aborted;
     };
