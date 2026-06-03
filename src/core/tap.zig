@@ -43,11 +43,23 @@ pub fn classifyResolveStatus(status: u16) TapError {
     };
 }
 
-/// Short remediation hint for each `TapError` variant. Keeping the
-/// strings here (not at the call site) means `cli/install/local.zig`
-/// and `cli/tap.zig` cannot drift out of sync, and unit tests can pin
-/// every tag without touching the network or the UI layer.
-pub fn describeResolveError(err: TapError) []const u8 {
+/// Short remediation hint for each `TapError` variant, naming the tap's
+/// own forge and host so a GitLab/Codeberg failure never reports GitHub
+/// hosts or the wrong token env var. Keeping the strings here (not at the
+/// call site) means every resolve site stays in sync, and unit tests can
+/// pin every tag without touching the network or the UI layer. `buf` holds
+/// the formatted non-github message; it must be ≥ 512 B (a DNS host is
+/// ≤ 253 B, every template < 256 B), so `bufPrint` cannot overflow.
+pub fn describeResolveError(buf: []u8, err: TapError, forge_kind: forge.Forge, host: []const u8) []const u8 {
+    return switch (forge_kind) {
+        .github => githubResolveError(err),
+        .gitlab => forgeResolveError(buf, err, "GitLab", "MALT_GITLAB_TOKEN", host),
+        .codeberg => forgeResolveError(buf, err, "Codeberg", "MALT_CODEBERG_TOKEN", host),
+    };
+}
+
+/// GitHub's resolve hints — fixed hosts, so no `host`/`buf` threading.
+fn githubResolveError(err: TapError) []const u8 {
     return switch (err) {
         error.RateLimited => "GitHub API rate limit reached. Set MALT_GITHUB_TOKEN to an authorized GitHub token to lift the 60/hr anonymous cap.",
         error.NotFound => "GitHub returned 404 for the tap repo. If the repo lives at github.com/<user>/<exact-name> instead of github.com/<user>/homebrew-<repo>, rerun with --repo <user>/<exact-name>.",
@@ -57,6 +69,114 @@ pub fn describeResolveError(err: TapError) []const u8 {
         error.ResolveFailed => "GitHub returned an unexpected status while resolving HEAD — retry, or set MALT_GITHUB_TOKEN if this persists.",
         error.OutOfMemory => "Out of memory while resolving HEAD commit.",
     };
+}
+
+/// Resolve hints for a non-github forge, naming its instance `host` and
+/// per-forge `token_var`. `bufPrint` writes into the caller's `buf`
+/// (≥ 512 B); host is registration-validated to ≤ 253 B and every template
+/// is < 256 B, so the format cannot overflow — same sizing contract as
+/// `forge.encodeProjectPath`'s `catch unreachable`. `NetworkError` keeps the
+/// literal "Network failure" the regression skip-guards key on.
+fn forgeResolveError(
+    buf: []u8,
+    err: TapError,
+    name: []const u8,
+    token_var: []const u8,
+    host: []const u8,
+) []const u8 {
+    return switch (err) {
+        error.RateLimited => std.fmt.bufPrint(buf, "{s} API rate limit reached at {s}. Set {s} to an authorized token to lift the anonymous cap.", .{ name, host, token_var }) catch unreachable,
+        // No homebrew-/--repo hint: that synthesis is github-only.
+        error.NotFound => std.fmt.bufPrint(buf, "{s} returned 404 for the tap repo at {s}. Verify the owner/repo, or set {s} if the repo is private.", .{ name, host, token_var }) catch unreachable,
+        error.NetworkError => std.fmt.bufPrint(buf, "Network failure while reaching {s} — check connectivity and retry.", .{host}) catch unreachable,
+        error.MalformedJson => std.fmt.bufPrint(buf, "Unexpected response shape from {s} ({s}) — rerun with --debug and attach the log when filing an issue.", .{ name, host }) catch unreachable,
+        error.InvalidSha => std.fmt.bufPrint(buf, "{s} ({s}) returned a commit SHA that failed validation (not 40-char lowercase hex).", .{ name, host }) catch unreachable,
+        error.ResolveFailed => std.fmt.bufPrint(buf, "{s} ({s}) returned an unexpected status while resolving HEAD — retry, or set {s} if this persists.", .{ name, host, token_var }) catch unreachable,
+        error.OutOfMemory => "Out of memory while resolving HEAD commit.",
+    };
+}
+
+// ── describeResolveError (forge-aware) ──────────────────────────────
+// A GitLab/Codeberg tap must report its own host and token env var, not
+// GitHub's. github stays byte-identical; the regression skip-guards key
+// on "Network failure", so every forge's NetworkError keeps that phrase.
+
+test "describeResolveError github: NetworkError stays byte-identical (host ignored)" {
+    var buf: [512]u8 = undefined;
+    // github hosts are fixed, so a different `host` arg must not leak in.
+    const msg = describeResolveError(&buf, error.NetworkError, .github, "github.com");
+    try std.testing.expectEqualStrings(
+        "Network failure while reaching api.github.com — check connectivity and retry.",
+        msg,
+    );
+}
+
+test "describeResolveError gitlab: RateLimited names the host and MALT_GITLAB_TOKEN" {
+    var buf: [512]u8 = undefined;
+    const msg = describeResolveError(&buf, error.RateLimited, .gitlab, "gitlab.com");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "gitlab.com") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITLAB_TOKEN") != null);
+    // No GitHub host or token leaking onto a GitLab tap.
+    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") == null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "github.com") == null);
+}
+
+test "describeResolveError gitlab: NetworkError names the instance host, not api.github.com" {
+    var buf: [512]u8 = undefined;
+    const msg = describeResolveError(&buf, error.NetworkError, .gitlab, "gitlab.gnome.org");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "gitlab.gnome.org") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "api.github.com") == null);
+    // The skip-guard regex in scripts/regressions/*.sh keys on this phrase.
+    try std.testing.expect(std.mem.indexOf(u8, msg, "Network failure") != null);
+}
+
+test "describeResolveError gitlab: NotFound drops the github-only homebrew-/--repo hint" {
+    var buf: [512]u8 = undefined;
+    const msg = describeResolveError(&buf, error.NotFound, .gitlab, "gitlab.com");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "gitlab.com") != null);
+    // The homebrew-<repo> synthesis is github-only; it must not appear here.
+    try std.testing.expect(std.mem.indexOf(u8, msg, "homebrew-") == null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "--repo") == null);
+}
+
+test "describeResolveError codeberg: RateLimited names the host and MALT_CODEBERG_TOKEN" {
+    var buf: [512]u8 = undefined;
+    const msg = describeResolveError(&buf, error.RateLimited, .codeberg, "codeberg.org");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "codeberg.org") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_CODEBERG_TOKEN") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") == null);
+}
+
+test "describeResolveError codeberg: a self-hosted Forgejo host is named" {
+    var buf: [512]u8 = undefined;
+    const msg = describeResolveError(&buf, error.MalformedJson, .codeberg, "git.example.org");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "git.example.org") != null);
+}
+
+test "describeResolveError gitlab: ResolveFailed (the 5xx catch-all) names host and token" {
+    var buf: [512]u8 = undefined;
+    const msg = describeResolveError(&buf, error.ResolveFailed, .gitlab, "gitlab.gnome.org");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "gitlab.gnome.org") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITLAB_TOKEN") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") == null);
+}
+
+test "describeResolveError gitlab: InvalidSha names the instance host" {
+    var buf: [512]u8 = undefined;
+    const msg = describeResolveError(&buf, error.InvalidSha, .gitlab, "gitlab.com");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "gitlab.com") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "GitLab") != null);
+}
+
+test "describeResolveError github: ignores a non-canonical host (fixed-host literals win)" {
+    // The github arm's hosts are fixed; a stray host arg must never leak into
+    // the message — it keeps the api.github.com literal verbatim.
+    var buf: [512]u8 = undefined;
+    const msg = describeResolveError(&buf, error.NetworkError, .github, "evil.example.com");
+    try std.testing.expectEqualStrings(
+        "Network failure while reaching api.github.com — check connectivity and retry.",
+        msg,
+    );
 }
 
 /// Materialise `taps.url` from `(host, owner, repo)` into a caller buffer

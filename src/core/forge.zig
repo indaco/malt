@@ -103,6 +103,9 @@ pub const TapBaseUrls = struct {
     /// The forge these URLs were built for. Carried so resolve sites pick
     /// the right HEAD parse and auth header without re-deriving it.
     forge: Forge,
+    /// The row's host. Carried alongside `forge` so a resolve failure can
+    /// name the tap's own instance without re-reading the row.
+    host: []const u8,
     /// `https://api.github.com/repos/<owner>/<repo>/commits/HEAD`
     api_head_url: []const u8,
     /// `https://github.com/<owner>/<repo>` — the URL that actually
@@ -113,6 +116,7 @@ pub const TapBaseUrls = struct {
     raw_base: []const u8,
 
     pub fn deinit(self: TapBaseUrls, allocator: std.mem.Allocator) void {
+        allocator.free(self.host);
         allocator.free(self.api_head_url);
         allocator.free(self.repo_url);
         allocator.free(self.raw_base);
@@ -163,6 +167,9 @@ pub fn buildBaseUrls(
     owner: []const u8,
     repo: []const u8,
 ) std.mem.Allocator.Error!TapBaseUrls {
+    // Owned so the result survives the caller's borrowed `host`; freed in deinit.
+    const host_owned = try allocator.dupe(u8, host);
+    errdefer allocator.free(host_owned);
     switch (forge) {
         .github => {
             // github hosts are fixed; only the gitlab arm consults `host`.
@@ -187,7 +194,7 @@ pub fn buildBaseUrls(
             );
             errdefer allocator.free(raw_base);
 
-            return .{ .forge = forge, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
+            return .{ .forge = forge, .host = host_owned, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
         },
         .gitlab => {
             // Worst case every byte escapes to 3 chars; the "/" separator too.
@@ -210,7 +217,7 @@ pub fn buildBaseUrls(
             const raw_base = try std.fmt.allocPrint(allocator, "https://{s}/{s}/{s}/-/raw", .{ host, owner, repo });
             errdefer allocator.free(raw_base);
 
-            return .{ .forge = forge, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
+            return .{ .forge = forge, .host = host_owned, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
         },
         .codeberg => {
             // Gitea's v1 API keys by plain owner/repo (no URL-encoding,
@@ -230,7 +237,7 @@ pub fn buildBaseUrls(
             const raw_base = try std.fmt.allocPrint(allocator, "https://{s}/{s}/{s}/raw", .{ host, owner, repo });
             errdefer allocator.free(raw_base);
 
-            return .{ .forge = forge, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
+            return .{ .forge = forge, .host = host_owned, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
         },
     }
 }
@@ -610,6 +617,7 @@ test "buildBaseUrls github: records the originating forge on the result" {
     const urls = try buildBaseUrls(std.testing.allocator, .github, "github.com", "o", "r");
     defer urls.deinit(std.testing.allocator);
     try std.testing.expectEqual(Forge.github, urls.forge);
+    try std.testing.expectEqualStrings("github.com", urls.host);
 }
 
 test "buildBaseUrls github: builds the api-head / repo / raw triple" {
@@ -738,6 +746,8 @@ test "buildBaseUrls gitlab: builds the encoded v4 / raw / browse triple" {
 test "buildBaseUrls gitlab: a self-hosted instance host drives every URL" {
     const urls = try buildBaseUrls(std.testing.allocator, .gitlab, "gitlab.gnome.org", "GNOME", "glib");
     defer urls.deinit(std.testing.allocator);
+    // The instance host rides along so a resolve failure can name it.
+    try std.testing.expectEqualStrings("gitlab.gnome.org", urls.host);
     try std.testing.expectEqualStrings(
         "https://gitlab.gnome.org/api/v4/projects/GNOME%2Fglib/repository/commits/HEAD",
         urls.api_head_url,
@@ -877,6 +887,8 @@ test "buildBaseUrls codeberg: builds the v1 commits / raw / browse triple" {
 test "buildBaseUrls codeberg: a self-hosted Forgejo host drives every URL" {
     const urls = try buildBaseUrls(std.testing.allocator, .codeberg, "git.example.org", "team", "tap");
     defer urls.deinit(std.testing.allocator);
+    // The instance host rides along so a resolve failure can name it.
+    try std.testing.expectEqualStrings("git.example.org", urls.host);
     try std.testing.expectEqualStrings(
         "https://git.example.org/api/v1/repos/team/tap/commits?limit=1&stat=false",
         urls.api_head_url,

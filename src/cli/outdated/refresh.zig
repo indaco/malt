@@ -440,10 +440,11 @@ test "TapHeadResolve: concurrent same-label calls resolve exactly once" {
 /// the only thing wrong was a transient rate limit. The wording mirrors
 /// `describeResolveError` so the install/upgrade/outdated paths share
 /// one user-actionable line.
-fn warnTapHeadResolveFailed(tap_label: []const u8, err: tap_mod.TapError) void {
+fn warnTapHeadResolveFailed(tap_label: []const u8, err: tap_mod.TapError, forge_kind: forge.Forge, host: []const u8) void {
+    var rerr_buf: [512]u8 = undefined;
     output.warn(
         "Could not resolve {s}'s HEAD: {s}",
-        .{ tap_label, tap_mod.describeResolveError(err) },
+        .{ tap_label, tap_mod.describeResolveError(&rerr_buf, err, forge_kind, host) },
     );
 }
 
@@ -477,19 +478,19 @@ const HeadResolverCtx = struct {
         const cached_etag = tap_mod.getHeadEtag(a, self.db, tap_label) catch null;
 
         var res = tap_mod.resolveHeadCommit(self.io, self.environ, a, urls.forge, urls.api_head_url, cached_etag) catch |err| {
-            warnTapHeadResolveFailed(tap_label, err);
+            warnTapHeadResolveFailed(tap_label, err, urls.forge, urls.host);
             return null;
         };
         defer res.deinit();
 
         const final_sha = if (res.not_modified)
             (cached_sha orelse {
-                warnTapHeadResolveFailed(tap_label, tap_mod.TapError.ResolveFailed);
+                warnTapHeadResolveFailed(tap_label, tap_mod.TapError.ResolveFailed, urls.forge, urls.host);
                 return null;
             })
         else
             (res.sha orelse {
-                warnTapHeadResolveFailed(tap_label, tap_mod.TapError.MalformedJson);
+                warnTapHeadResolveFailed(tap_label, tap_mod.TapError.MalformedJson, urls.forge, urls.host);
                 return null;
             });
 
@@ -812,7 +813,7 @@ test "warnTapHeadResolveFailed surfaces rate-limit reason with the tap label" {
     output.beginStderrCapture(std.testing.allocator, &buf);
     defer output.endStderrCapture();
 
-    warnTapHeadResolveFailed("yuzeguitarist/deck", tap_mod.TapError.RateLimited);
+    warnTapHeadResolveFailed("yuzeguitarist/deck", tap_mod.TapError.RateLimited, .github, "github.com");
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "yuzeguitarist/deck") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "Could not resolve") != null);
@@ -825,7 +826,7 @@ test "warnTapHeadResolveFailed surfaces network failure for the regression skip-
     output.beginStderrCapture(std.testing.allocator, &buf);
     defer output.endStderrCapture();
 
-    warnTapHeadResolveFailed("user/repo", tap_mod.TapError.NetworkError);
+    warnTapHeadResolveFailed("user/repo", tap_mod.TapError.NetworkError, .github, "github.com");
 
     // Wording must hit both the user-facing "Could not resolve" header
     // and the existing skip-guard regex (`Network failure`) so the
@@ -833,6 +834,40 @@ test "warnTapHeadResolveFailed surfaces network failure for the regression skip-
     // assertion miss.
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "Could not resolve") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "Network failure") != null);
+}
+
+test "warnTapHeadResolveFailed renders the gitlab host + token on the CLI output path" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    warnTapHeadResolveFailed("grp/tap", tap_mod.TapError.RateLimited, .gitlab, "gitlab.com");
+
+    // The whole point: a non-github tap's resolve failure reaches stderr
+    // naming its own host + token var, never GitHub's.
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "grp/tap") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "gitlab.com") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "MALT_GITLAB_TOKEN") != null);
+    // No github host or token leaked — a single "github" substring would
+    // catch either (and avoids hard-coding the token literal the
+    // tap-resolution-contract guard forbids outside the forge seam).
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "github") == null);
+}
+
+test "warnTapHeadResolveFailed keeps the Network-failure skip-guard phrase for codeberg" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer output.endStderrCapture();
+
+    warnTapHeadResolveFailed("team/tap", tap_mod.TapError.NetworkError, .codeberg, "git.example.org");
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "git.example.org") != null);
+    // The regressions/*.sh skip-guards grep "Network failure" — it must hold
+    // for every forge, not just github.
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Network failure") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Could not resolve") != null);
 }
 
 test "warnTapCaskFetchFailed names both the tap and the token" {
