@@ -21,6 +21,9 @@ pub const KegRow = struct {
     name: []const u8,
     version: []const u8,
     tap: ?[]const u8 = null,
+    /// True for `mt pin`-held rows. Surfaced so `mt outdated --json` can
+    /// keep a pinned-but-outdated package visible with `pinned:true`.
+    pinned: bool = false,
 };
 
 /// Scope filter for `loadFormulaRows` / `loadCaskRows`. Variants:
@@ -44,10 +47,10 @@ pub fn loadFormulaRows(
     filter: KegFilter,
 ) ![]KegRow {
     const sql: [:0]const u8 = switch (filter) {
-        .all => "SELECT name, version FROM kegs ORDER BY name;",
-        .pinned_only => "SELECT name, version FROM kegs WHERE pinned = 1 ORDER BY name;",
+        .all => "SELECT name, version, tap, pinned FROM kegs ORDER BY name;",
+        .pinned_only => "SELECT name, version, tap, pinned FROM kegs WHERE pinned = 1 ORDER BY name;",
         // NOCASE so `--tap User/Repo` resolves a row stored lowercase.
-        .by_tap => "SELECT name, version FROM kegs WHERE tap = ?1 COLLATE NOCASE ORDER BY name;",
+        .by_tap => "SELECT name, version, tap, pinned FROM kegs WHERE tap = ?1 COLLATE NOCASE ORDER BY name;",
     };
     const bind: ?[]const u8 = switch (filter) {
         .by_tap => |label| label,
@@ -66,10 +69,10 @@ pub fn loadCaskRows(
     filter: KegFilter,
 ) ![]KegRow {
     const sql: [:0]const u8 = switch (filter) {
-        .all => "SELECT token, version, tap FROM casks ORDER BY token;",
-        .pinned_only => "SELECT token, version, tap FROM casks WHERE pinned = 1 ORDER BY token;",
+        .all => "SELECT token, version, tap, pinned FROM casks ORDER BY token;",
+        .pinned_only => "SELECT token, version, tap, pinned FROM casks WHERE pinned = 1 ORDER BY token;",
         // NOCASE so `--tap User/Repo` resolves a row stored lowercase.
-        .by_tap => "SELECT token, version, tap FROM casks WHERE tap = ?1 COLLATE NOCASE ORDER BY token;",
+        .by_tap => "SELECT token, version, tap, pinned FROM casks WHERE tap = ?1 COLLATE NOCASE ORDER BY token;",
     };
     const bind: ?[]const u8 = switch (filter) {
         .by_tap => |label| label,
@@ -113,10 +116,9 @@ pub fn freeKegRows(allocator: std.mem.Allocator, rows: []KegRow) void {
     allocator.free(rows);
 }
 
-/// Reads `name, version` (and optionally `tap` as column 2) into
-/// caller-owned `KegRow`s. Tap is left null when the column isn't
-/// part of the SELECT (formula loader) or when the row's value is
-/// SQL NULL (core-API cask, or a v5-era row not yet backfilled).
+/// Reads `name, version, tap, pinned` into caller-owned `KegRow`s.
+/// Tap is left null when the row's value is SQL NULL (core-API cask,
+/// or a v5-era row not yet backfilled).
 fn loadKegRows(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
@@ -145,15 +147,20 @@ fn loadKegRows(
         errdefer allocator.free(name_dup);
         const ver_dup = try allocator.dupe(u8, ver_slice);
         errdefer allocator.free(ver_dup);
-        // Column 2 is the `tap` field for cask loaders; formula
-        // loaders don't SELECT it, so `columnText` returns null and
-        // the row gets a null tap.
+        // Column 2 is `tap`: null for core-API rows and v5-era casks
+        // not yet backfilled. Column 3 is the `pinned` flag.
         var tap_dup: ?[]u8 = null;
         if (stmt.columnText(2)) |tap_ptr| {
             const tap_slice = std.mem.sliceTo(tap_ptr, 0);
             tap_dup = try allocator.dupe(u8, tap_slice);
         }
-        try rows.append(allocator, .{ .name = name_dup, .version = ver_dup, .tap = tap_dup });
+        errdefer if (tap_dup) |t| allocator.free(t);
+        try rows.append(allocator, .{
+            .name = name_dup,
+            .version = ver_dup,
+            .tap = tap_dup,
+            .pinned = stmt.columnBool(3),
+        });
     }
     return rows.toOwnedSlice(allocator);
 }
