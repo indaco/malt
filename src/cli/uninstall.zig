@@ -14,6 +14,7 @@ const cask_mod = @import("../core/cask.zig");
 const formula_mod = @import("../core/formula.zig");
 const supervisor_mod = @import("../core/services/supervisor.zig");
 const help = @import("help.zig");
+const lock_report = @import("lock_report.zig");
 
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "uninstall")) return;
@@ -44,9 +45,18 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Acquire lock
     var lock_path_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
-    var lock = lock_mod.LockFile.acquire(ctx.io, lock_path, 5000) catch {
-        output.err("Could not acquire lock. Another malt process may be running.", .{});
-        return error.Aborted;
+    var lock = lock_mod.LockFile.acquire(ctx.io, lock_path, 5000) catch |e| switch (e) {
+        // Fresh prefix with no `db/` dir → nothing is installed, so the
+        // requested package certainly isn't. Say so plainly instead of
+        // reporting phantom lock contention.
+        error.DirMissing => {
+            output.err("{s} is not installed", .{name});
+            return error.Aborted;
+        },
+        else => {
+            lock_report.reportAcquireFailure(e, prefix);
+            return error.Aborted;
+        },
     };
     defer lock.release(ctx.io);
 

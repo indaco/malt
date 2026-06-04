@@ -22,6 +22,7 @@ const ghcr_mod = @import("../net/ghcr.zig");
 const output = @import("../ui/output.zig");
 const progress_mod = @import("../ui/progress.zig");
 const help = @import("help.zig");
+const lock_report = @import("lock_report.zig");
 const install_args_mod = @import("install/args.zig");
 const install_download_mod = @import("install/download.zig");
 const install_local_mod = @import("install/local.zig");
@@ -101,13 +102,18 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     var lock_path_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
-    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 5000) catch {
+    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 5000) catch |e| switch (e) {
         // Fresh prefix: no `db/` yet = nothing installed, nothing to
         // upgrade. Exit 0 silently rather than treating the missing
         // lock directory as contention with another process.
-        if (dry_run) return;
-        output.err("Could not acquire lock. Another malt process may be running.", .{});
-        return error.Aborted;
+        error.DirMissing => return,
+        // dry_run audits stay quiet on any other failure; otherwise tell
+        // the user exactly what went wrong.
+        else => {
+            if (dry_run) return;
+            lock_report.reportAcquireFailure(e, prefix);
+            return error.Aborted;
+        },
     };
     defer lk.release(ctx.io);
     // LIFO: install_complete fires before lk.release. Inline gate keeps

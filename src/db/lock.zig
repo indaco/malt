@@ -1,8 +1,20 @@
 const std = @import("std");
 
 pub const LockError = error{
+    /// Genuine contention: another live process still holds the lock when
+    /// the timeout elapses.
     Timeout,
+    /// The lock's parent directory does not exist — a fresh prefix that has
+    /// never had anything installed. Kept distinct from contention so callers
+    /// can treat it as "nothing installed" instead of a phantom "process
+    /// running".
+    DirMissing,
+    /// The lock's directory exists but is not writable — e.g. a root-owned
+    /// /opt/malt created by `sudo mkdir` without a follow-up `chown`.
+    AccessDenied,
+    /// Any other failure opening the lock file.
     OpenFailed,
+    /// The lock was taken but its pid could not be recorded.
     WriteFailed,
 };
 
@@ -22,7 +34,12 @@ pub const LockFile = struct {
         const file = std.Io.Dir.createFileAbsolute(io, path, .{
             .read = true,
             .truncate = false,
-        }) catch return error.OpenFailed;
+        }) catch |e| switch (e) {
+            // ENOENT on the parent dir = fresh prefix, not contention.
+            error.FileNotFound => return error.DirMissing,
+            error.AccessDenied, error.PermissionDenied => return error.AccessDenied,
+            else => return error.OpenFailed,
+        };
         errdefer file.close(io);
 
         try acquireLockWithin(io, file, timeout_ms);
@@ -91,6 +108,61 @@ fn writePidAndSync(io: std.Io, file: std.Io.File) LockError!void {
     // Durability of the live pid for `mt doctor` after a SIGKILL —
     // without this the pid lives only in the page cache.
     file.sync(io) catch return error.WriteFailed;
+}
+
+test "acquire reports DirMissing when the lock's parent directory is absent" {
+    // A fresh prefix that never had anything installed has no `db/` dir, so
+    // the lock create hits ENOENT. The historical bug surfaced that to the
+    // user as "another malt process may be running". Pin the distinct error
+    // so callers can treat it as "nothing installed", not contention.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var rnd: [9]u8 = undefined;
+    io.random(&rnd);
+    var suffix: [std.base64.url_safe.Encoder.calcSize(9)]u8 = undefined;
+    _ = std.base64.url_safe.Encoder.encode(&suffix, &rnd);
+
+    // The `<base>/db` parent is deliberately never created.
+    const path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "/tmp/malt-lock-missing-{s}/db/malt.lock",
+        .{suffix},
+    );
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expectError(error.DirMissing, LockFile.acquire(io, path, 100));
+}
+
+test "acquire records a pid while held and release vacates it" {
+    // The success path is the other half of the DirMissing contract: when
+    // the dir exists the lock must take, expose its holder pid, then clear
+    // it on release so `mt doctor` never reports a phantom holder.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var rnd: [9]u8 = undefined;
+    io.random(&rnd);
+    var suffix: [std.base64.url_safe.Encoder.calcSize(9)]u8 = undefined;
+    _ = std.base64.url_safe.Encoder.encode(&suffix, &rnd);
+
+    const dir = try std.fmt.allocPrint(std.testing.allocator, "/tmp/malt-lock-ok-{s}", .{suffix});
+    defer std.testing.allocator.free(dir);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/malt.lock", .{dir});
+    defer std.testing.allocator.free(path);
+
+    try std.Io.Dir.createDirAbsolute(io, dir, .default_dir);
+    defer {
+        std.Io.Dir.deleteFileAbsolute(io, path) catch {};
+        std.Io.Dir.deleteDirAbsolute(io, dir) catch {};
+    }
+
+    var lk = try LockFile.acquire(io, path, 1000);
+    try std.testing.expect(LockFile.holderPid(io, path) != null);
+    lk.release(io);
+    try std.testing.expect(LockFile.holderPid(io, path) == null);
 }
 
 test "acquire has a single close path (regression guard for double-close)" {
