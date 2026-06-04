@@ -1,4 +1,7 @@
 const std = @import("std");
+const testing = std.testing;
+
+const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 
 pub const LinkError = error{ ConflictFound, LinkFailed, UnlinkFailed, OutOfMemory };
@@ -203,3 +206,37 @@ pub const Linker = struct {
         _ = try del_stmt.step();
     }
 };
+
+/// Read-only link status for a keg: true iff any symlink is recorded for
+/// it in `links`. Counterpart to `link`/`unlink`; `mt list --json
+/// --linked` uses it to report whether a keg is active in the prefix.
+/// Any DB error reads as "not linked" rather than failing the row.
+pub fn isKegLinked(db: *sqlite.Database, keg_id: i64) bool {
+    var stmt = db.prepare("SELECT EXISTS(SELECT 1 FROM links WHERE keg_id = ?1);") catch return false;
+    defer stmt.finalize();
+    stmt.bindInt(1, keg_id) catch return false;
+    if (stmt.step() catch false) return stmt.columnInt(0) != 0;
+    return false;
+}
+
+test "isKegLinked reflects whether the keg has link rows" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path)
+        \\VALUES (1, 'linked-keg', 'linked-keg', '1.0', 'aa', '/c/linked-keg/1.0'),
+        \\       (2, 'bare-keg',   'bare-keg',   '2.0', 'bb', '/c/bare-keg/2.0');
+    );
+    // Only keg 1 has a recorded symlink.
+    try db.exec(
+        \\INSERT INTO links (keg_id, link_path, target)
+        \\VALUES (1, '/opt/malt/bin/linked-keg', '/c/linked-keg/1.0/bin/linked-keg');
+    );
+
+    try testing.expect(isKegLinked(&db, 1));
+    try testing.expect(!isKegLinked(&db, 2));
+    // A keg id that doesn't exist is simply "not linked".
+    try testing.expect(!isKegLinked(&db, 999));
+}

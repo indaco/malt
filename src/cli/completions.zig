@@ -146,7 +146,7 @@ pub const bash_script =
     \\        upgrade)          cmd_flags="--all --cask --formula --dry-run --pinned --force -f --isolate-deps --isolate-dependencies" ;;
     \\        outdated)         cmd_flags="--json --formula --cask --pinned-only --tap --refresh --quiet -q" ;;
     \\        update)           cmd_flags="--check --quiet -q" ;;
-    \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --tap --json --quiet -q" ;;
+    \\        list|ls)          cmd_flags="--versions --formula --cask --pinned --tap --json --size --linked --quiet -q" ;;
     \\        info)             cmd_flags="--formula --cask --json" ;;
     \\        search)           cmd_flags="--formula --cask --json --installed --api --all --offline" ;;
     \\        uses)             cmd_flags="--recursive -r --json --quiet -q" ;;
@@ -330,6 +330,8 @@ pub const zsh_script =
     \\                        '--pinned[Pinned packages only]' \
     \\                        '--tap[Only packages from <label> (e.g. user/repo)]:tap label:' \
     \\                        '--json[Output as JSON]' \
+    \\                        '--size[With --json: add on-disk size_bytes per row]' \
+    \\                        '--linked[With --json: add link status per row]' \
     \\                        '(--quiet -q)'{--quiet,-q}'[Names only]'
     \\                    ;;
     \\                info)
@@ -599,6 +601,8 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l pinned   -d 'Pinned only'
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l tap      -x -d 'Only packages from <label>'
     \\    complete -c $__malt_bin -n '__malt_using_command list' -l json     -d 'JSON output'
+    \\    complete -c $__malt_bin -n '__malt_using_command list' -l size     -d 'With --json: add on-disk size_bytes'
+    \\    complete -c $__malt_bin -n '__malt_using_command list' -l linked   -d 'With --json: add link status'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l versions -d 'Show version numbers'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l formula  -d 'Formulas only'
     \\    complete -c $__malt_bin -n '__malt_using_command ls'   -l cask     -d 'Casks only'

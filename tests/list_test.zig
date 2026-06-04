@@ -91,13 +91,52 @@ fn runBuildTap(
     show_pinned: bool,
     tap_filter: ?[]const u8,
 ) ![]u8 {
+    return runBuildFull(allocator, db, show_formula, show_cask, show_pinned, false, false, tap_filter, "");
+}
+
+/// Full encoder entry point: lets size/linked tests opt into the new
+/// `--size`/`--linked` enrichment and supply the prefix used to resolve
+/// cask `Caskroom/<token>` paths.
+fn runBuildFull(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    show_formula: bool,
+    show_cask: bool,
+    show_pinned: bool,
+    show_size: bool,
+    show_linked: bool,
+    tap_filter: ?[]const u8,
+    prefix: []const u8,
+) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
     // Use a fixed start_ts so the ",\"time_ms\":N" suffix is predictable.
-    try cli_list.buildListJson(db, &aw.writer, show_formula, show_cask, show_pinned, tap_filter, test_io.milliTimestamp(
+    try cli_list.buildListJson(
+        db,
+        &aw.writer,
         std.Options.debug_io,
-    ));
+        prefix,
+        show_formula,
+        show_cask,
+        show_pinned,
+        show_size,
+        show_linked,
+        tap_filter,
+        test_io.milliTimestamp(std.Options.debug_io),
+    );
     return aw.toOwnedSlice();
+}
+
+/// Write `body` to `parent/rel`, creating intermediate dirs. Mirrors the
+/// keg-dir fixtures other suites build for on-disk walks.
+fn writeTreeFile(parent: []const u8, rel: []const u8, body: []const u8) !void {
+    const io = std.Options.debug_io;
+    var buf: [512]u8 = undefined;
+    const abs = try std.fmt.bufPrint(&buf, "{s}/{s}", .{ parent, rel });
+    if (std.fs.path.dirname(abs)) |d| std.Io.Dir.cwd().createDirPath(io, d) catch {};
+    const f = try std.Io.Dir.createFileAbsolute(io, abs, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, body);
 }
 
 // Strip the non-deterministic ",\"time_ms\":N}\n" suffix so assertions can
@@ -230,9 +269,37 @@ test "buildListJson: cask-only, one cask" {
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
         "{\"installed\":[" ++
-            "{\"name\":\"firefox\",\"version\":\"120.0\",\"type\":\"cask\"}" ++
+            "{\"name\":\"firefox\",\"version\":\"120.0\",\"type\":\"cask\",\"pinned\":false}" ++
             "],\"casks\":[" ++
             "{\"token\":\"firefox\",\"version\":\"120.0\"}" ++
+            "]",
+        body,
+    );
+}
+
+test "buildListJson: cask .installed row carries pinned, matching formulae" {
+    // Symmetry with formula rows: a pinned cask must surface `pinned:true`
+    // in the installed array so the dashboard can show held casks too.
+    var t = try TempDb.init("cask_pinned");
+    defer t.deinit();
+
+    try insertCask(&t.db, "loose", "1.0"); // unpinned
+    try t.db.exec(
+        \\INSERT INTO casks (token, name, version, url, pinned)
+        \\VALUES ('held', 'held', '2.0', 'https://example.invalid', 1);
+    );
+
+    const out = try runBuild(testing.allocator, &t.db, false, true, false);
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[" ++
+            "{\"name\":\"held\",\"version\":\"2.0\",\"type\":\"cask\",\"pinned\":true}," ++
+            "{\"name\":\"loose\",\"version\":\"1.0\",\"type\":\"cask\",\"pinned\":false}" ++
+            "],\"casks\":[" ++
+            "{\"token\":\"held\",\"version\":\"2.0\"}," ++
+            "{\"token\":\"loose\",\"version\":\"1.0\"}" ++
             "]",
         body,
     );
@@ -252,7 +319,7 @@ test "buildListJson: mixed kegs and casks, comma between types in installed" {
     try testing.expectEqualStrings(
         "{\"installed\":[" ++
             "{\"name\":\"zsh\",\"version\":\"5.9\",\"type\":\"formula\",\"pinned\":false}," ++
-            "{\"name\":\"slack\",\"version\":\"4.0\",\"type\":\"cask\"}" ++
+            "{\"name\":\"slack\",\"version\":\"4.0\",\"type\":\"cask\",\"pinned\":false}" ++
             "],\"formulae\":[" ++
             "{\"name\":\"zsh\",\"version\":\"5.9\",\"pinned\":false}" ++
             "],\"casks\":[" ++
@@ -508,7 +575,7 @@ test "buildListJson --tap filters both installed and legacy arrays" {
     try testing.expectEqualStrings(
         "{\"installed\":[" ++
             "{\"name\":\"tap-formula\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":false}," ++
-            "{\"name\":\"tap-cask\",\"version\":\"3.0\",\"type\":\"cask\"}" ++
+            "{\"name\":\"tap-cask\",\"version\":\"3.0\",\"type\":\"cask\",\"pinned\":false}" ++
             "],\"formulae\":[" ++
             "{\"name\":\"tap-formula\",\"version\":\"1.0\",\"pinned\":false}" ++
             "],\"casks\":[" ++
@@ -577,4 +644,356 @@ test "buildListJson: output parses as valid JSON" {
     try testing.expect(root.get("formulae") != null);
     try testing.expect(root.get("casks") != null);
     try testing.expect(root.get("time_ms") != null);
+}
+
+test "buildListJson --size --linked output parses as valid JSON with both fields" {
+    var t = try TempDb.init("valid_json_extras");
+    defer t.deinit();
+    try insertKeg(&t.db, "tree", "2.1", false);
+    try insertCask(&t.db, "obs", "30.0");
+
+    const out = try runBuildFull(testing.allocator, &t.db, true, true, false, true, true, null, t.dir);
+    defer testing.allocator.free(out);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+
+    const installed = parsed.value.object.get("installed").?.array;
+    try testing.expectEqual(@as(usize, 2), installed.items.len);
+    for (installed.items) |row| {
+        try testing.expect(row.object.get("size_bytes").? == .integer);
+        try testing.expect(row.object.get("linked").? == .bool);
+    }
+    // Legacy arrays must stay lean — no enrichment leaked into them.
+    const legacy_formulae = parsed.value.object.get("formulae").?.array;
+    try testing.expect(legacy_formulae.items[0].object.get("size_bytes") == null);
+    try testing.expect(legacy_formulae.items[0].object.get("linked") == null);
+}
+
+// --- --size ------------------------------------------------------------
+
+test "buildListJson --size sums size_bytes from the keg cellar dir" {
+    var t = try TempDb.init("size_formula");
+    defer t.deinit();
+
+    var cb: [256]u8 = undefined;
+    const cellar = try std.fmt.bufPrint(&cb, "{s}/Cellar/treesize/1.0", .{t.dir});
+    try writeTreeFile(cellar, "bin/a", "12345"); // 5 bytes
+    try writeTreeFile(cellar, "lib/b", "678"); // 3 bytes
+
+    var sb: [600]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &sb,
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('treesize','treesize','1.0','deadbeef','{s}');",
+        .{cellar},
+    );
+    try t.db.exec(sql);
+
+    const out = try runBuildFull(testing.allocator, &t.db, true, false, false, true, false, null, t.dir);
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[" ++
+            "{\"name\":\"treesize\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":false,\"size_bytes\":8}" ++
+            "],\"formulae\":[" ++
+            "{\"name\":\"treesize\",\"version\":\"1.0\",\"pinned\":false}" ++
+            "]",
+        body,
+    );
+}
+
+test "buildListJson --size emits size_bytes:0 when the keg cellar dir is missing" {
+    // A partial/absent keg dir must not crash the writer — it reads as 0.
+    var t = try TempDb.init("size_missing");
+    defer t.deinit();
+    try insertKeg(&t.db, "ghost", "1.0", false); // cellar_path points nowhere real
+
+    const out = try runBuildFull(testing.allocator, &t.db, true, false, false, true, false, null, t.dir);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "\"size_bytes\":0") != null);
+}
+
+test "buildListJson --size emits size_bytes:0 for an empty cellar dir" {
+    var t = try TempDb.init("size_empty");
+    defer t.deinit();
+
+    var cb: [256]u8 = undefined;
+    const cellar = try std.fmt.bufPrint(&cb, "{s}/Cellar/empty/1.0", .{t.dir});
+    try std.Io.Dir.cwd().createDirPath(std.Options.debug_io, cellar);
+
+    var sb: [600]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &sb,
+        "INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path) VALUES ('empty','empty','1.0','deadbeef','{s}');",
+        .{cellar},
+    );
+    try t.db.exec(sql);
+
+    const out = try runBuildFull(testing.allocator, &t.db, true, false, false, true, false, null, t.dir);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "\"size_bytes\":0") != null);
+}
+
+test "buildListJson --size sums a cask's Caskroom dir and app_path bundle" {
+    var t = try TempDb.init("size_cask");
+    defer t.deinit();
+
+    var crb: [256]u8 = undefined;
+    const caskroom = try std.fmt.bufPrint(&crb, "{s}/Caskroom/widget", .{t.dir});
+    try writeTreeFile(caskroom, "1.0/data", "abcd"); // 4 bytes in-prefix bookkeeping
+
+    var ab: [256]u8 = undefined;
+    const app = try std.fmt.bufPrint(&ab, "{s}/Applications/Widget.app", .{t.dir});
+    try writeTreeFile(app, "Contents/MacOS/widget", "binary"); // 6 bytes app payload
+
+    var sb: [700]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &sb,
+        "INSERT INTO casks (token, name, version, url, app_path) VALUES ('widget','Widget','1.0','https://example.invalid','{s}');",
+        .{app},
+    );
+    try t.db.exec(sql);
+
+    const out = try runBuildFull(testing.allocator, &t.db, false, true, false, true, false, null, t.dir);
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[" ++
+            "{\"name\":\"widget\",\"version\":\"1.0\",\"type\":\"cask\",\"pinned\":false,\"size_bytes\":10}" ++
+            "],\"casks\":[" ++
+            "{\"token\":\"widget\",\"version\":\"1.0\"}" ++
+            "]",
+        body,
+    );
+}
+
+test "buildListJson --size on a cask with no app_path counts only the Caskroom dir" {
+    // A cask row may carry a NULL app_path; size must fall back to the
+    // in-prefix Caskroom dir without crashing the writer.
+    var t = try TempDb.init("size_cask_no_app");
+    defer t.deinit();
+
+    var crb: [256]u8 = undefined;
+    const caskroom = try std.fmt.bufPrint(&crb, "{s}/Caskroom/barecask", .{t.dir});
+    try writeTreeFile(caskroom, "1.0/payload", "abcdef"); // 6 bytes
+    try insertCask(&t.db, "barecask", "1.0"); // app_path stays NULL
+
+    const out = try runBuildFull(testing.allocator, &t.db, false, true, false, true, false, null, t.dir);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "\"size_bytes\":6") != null);
+}
+
+test "buildListJson --size does not double-count a cask app_path symlinked into Caskroom" {
+    // Binary casks symlink their installed name back into the payload that
+    // already lives under Caskroom. The symlink-safe walk must count the
+    // 7-byte payload once (via Caskroom) and ignore the app_path symlink.
+    var t = try TempDb.init("size_cask_symlink");
+    defer t.deinit();
+    const io = std.Options.debug_io;
+
+    var crb: [256]u8 = undefined;
+    const caskroom = try std.fmt.bufPrint(&crb, "{s}/Caskroom/tool", .{t.dir});
+    try writeTreeFile(caskroom, "2.0/tool", "1234567"); // 7 bytes
+
+    var binb: [256]u8 = undefined;
+    const bindir = try std.fmt.bufPrint(&binb, "{s}/bin", .{t.dir});
+    std.Io.Dir.cwd().createDirPath(io, bindir) catch {};
+    var tgtb: [320]u8 = undefined;
+    const target = try std.fmt.bufPrint(&tgtb, "{s}/2.0/tool", .{caskroom});
+    var bd = try std.Io.Dir.openDirAbsolute(io, bindir, .{});
+    defer bd.close(io);
+    bd.symLink(io, target, "tool", .{}) catch {};
+
+    var appb: [256]u8 = undefined;
+    const app = try std.fmt.bufPrint(&appb, "{s}/tool", .{bindir});
+    var sb: [700]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &sb,
+        "INSERT INTO casks (token, name, version, url, app_path) VALUES ('tool','tool','2.0','https://example.invalid','{s}');",
+        .{app},
+    );
+    try t.db.exec(sql);
+
+    const out = try runBuildFull(testing.allocator, &t.db, false, true, false, true, false, null, t.dir);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "\"size_bytes\":7") != null);
+}
+
+// --- --linked ----------------------------------------------------------
+
+test "buildListJson --linked reports keg link status from the links table" {
+    var t = try TempDb.init("linked_formula");
+    defer t.deinit();
+
+    try t.db.exec(
+        \\INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path)
+        \\VALUES (1,'active','active','1.0','aa','/c/active/1.0'),
+        \\       (2,'dormant','dormant','2.0','bb','/c/dormant/2.0');
+    );
+    // Only the first keg has a recorded symlink.
+    try t.db.exec(
+        \\INSERT INTO links (keg_id, link_path, target)
+        \\VALUES (1,'/opt/malt/bin/active','/c/active/1.0/bin/active');
+    );
+
+    const out = try runBuildFull(testing.allocator, &t.db, true, false, false, false, true, null, t.dir);
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[" ++
+            "{\"name\":\"active\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":false,\"linked\":true}," ++
+            "{\"name\":\"dormant\",\"version\":\"2.0\",\"type\":\"formula\",\"pinned\":false,\"linked\":false}" ++
+            "],\"formulae\":[" ++
+            "{\"name\":\"active\",\"version\":\"1.0\",\"pinned\":false}," ++
+            "{\"name\":\"dormant\",\"version\":\"2.0\",\"pinned\":false}" ++
+            "]",
+        body,
+    );
+}
+
+test "buildListJson --linked reports casks as always linked" {
+    // Casks have no prefix-link concept; an installed cask is active.
+    var t = try TempDb.init("linked_cask");
+    defer t.deinit();
+    try insertCask(&t.db, "firefox", "120.0");
+
+    const out = try runBuildFull(testing.allocator, &t.db, false, true, false, false, true, null, t.dir);
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[" ++
+            "{\"name\":\"firefox\",\"version\":\"120.0\",\"type\":\"cask\",\"pinned\":false,\"linked\":true}" ++
+            "],\"casks\":[" ++
+            "{\"token\":\"firefox\",\"version\":\"120.0\"}" ++
+            "]",
+        body,
+    );
+}
+
+test "buildListJson --size --linked emits size_bytes before linked" {
+    // Pins the field order so consumers and the schema doc agree.
+    var t = try TempDb.init("size_linked_order");
+    defer t.deinit();
+
+    var cb: [256]u8 = undefined;
+    const cellar = try std.fmt.bufPrint(&cb, "{s}/Cellar/combo/1.0", .{t.dir});
+    try writeTreeFile(cellar, "bin/x", "ab"); // 2 bytes
+
+    var sb: [600]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &sb,
+        "INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path) VALUES (1,'combo','combo','1.0','aa','{s}');",
+        .{cellar},
+    );
+    try t.db.exec(sql);
+    try t.db.exec(
+        \\INSERT INTO links (keg_id, link_path, target) VALUES (1,'/opt/malt/bin/combo','/x');
+    );
+
+    const out = try runBuildFull(testing.allocator, &t.db, true, false, false, true, true, null, t.dir);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(
+        u8,
+        out,
+        "\"pinned\":false,\"size_bytes\":2,\"linked\":true}",
+    ) != null);
+}
+
+test "buildListJson --tap --size --linked keeps column alignment in the tap SQL" {
+    // The tap SELECT variant carries the same trailing id/cellar_path/
+    // app_path columns; this guards their index alignment under a filter.
+    var t = try TempDb.init("tap_extras");
+    defer t.deinit();
+
+    var cb: [256]u8 = undefined;
+    const cellar = try std.fmt.bufPrint(&cb, "{s}/Cellar/tapped/1.0", .{t.dir});
+    try writeTreeFile(cellar, "bin/y", "abc"); // 3 bytes
+
+    var sb: [600]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &sb,
+        "INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path, tap) VALUES (1,'tapped','tapped','1.0','aa','{s}','user/repo');",
+        .{cellar},
+    );
+    try t.db.exec(sql);
+    try t.db.exec(
+        \\INSERT INTO links (keg_id, link_path, target) VALUES (1,'/opt/malt/bin/tapped','/x');
+    );
+    // A second keg in a different tap must be excluded by the filter.
+    try insertKegTap(&t.db, "other", "9.0", "other/repo");
+
+    const out = try runBuildFull(testing.allocator, &t.db, true, false, false, true, true, "user/repo", t.dir);
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[" ++
+            "{\"name\":\"tapped\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":false,\"size_bytes\":3,\"linked\":true}" ++
+            "],\"formulae\":[" ++
+            "{\"name\":\"tapped\",\"version\":\"1.0\",\"pinned\":false}" ++
+            "]",
+        body,
+    );
+}
+
+// --- --pinned parity ---------------------------------------------------
+
+test "buildListJson --pinned --size --linked enriches the pinned installed rows" {
+    var t = try TempDb.init("pinned_extras");
+    defer t.deinit();
+
+    var cb: [256]u8 = undefined;
+    const cellar = try std.fmt.bufPrint(&cb, "{s}/Cellar/held/1.0", .{t.dir});
+    try writeTreeFile(cellar, "bin/h", "abcd"); // 4 bytes
+
+    var sb: [600]u8 = undefined;
+    const sql = try std.fmt.bufPrintZ(
+        &sb,
+        "INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path, pinned) VALUES (1,'held','held','1.0','aa','{s}',1);",
+        .{cellar},
+    );
+    try t.db.exec(sql);
+    try t.db.exec(
+        \\INSERT INTO links (keg_id, link_path, target) VALUES (1,'/opt/malt/bin/held','/x');
+    );
+
+    const out = try runBuildFull(testing.allocator, &t.db, true, false, true, true, true, null, t.dir);
+    defer testing.allocator.free(out);
+
+    const body = trimTimeSuffix(out);
+    try testing.expectEqualStrings(
+        "{\"installed\":[" ++
+            "{\"name\":\"held\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":true,\"size_bytes\":4,\"linked\":true}" ++
+            "],\"formulae\":[" ++
+            "{\"name\":\"held\",\"version\":\"1.0\",\"pinned\":true}" ++
+            "]",
+        body,
+    );
+}
+
+test "buildListJson --pinned --linked marks pinned casks linked" {
+    var t = try TempDb.init("pinned_cask_linked");
+    defer t.deinit();
+    try t.db.exec(
+        \\INSERT INTO casks (token, name, version, url, pinned)
+        \\VALUES ('held','held','2.0','https://example.invalid',1);
+    );
+
+    const out = try runBuildFull(testing.allocator, &t.db, false, true, true, false, true, null, t.dir);
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(
+        u8,
+        out,
+        "\"type\":\"cask\",\"pinned\":true,\"linked\":true",
+    ) != null);
 }
