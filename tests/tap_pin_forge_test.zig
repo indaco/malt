@@ -100,18 +100,18 @@ test "gitlab pin: a recorded commits/<sha> body resolves to the pinned sha" {
     try testing.expectEqualStrings(fixture_sha, res.sha.?);
 }
 
-test "codeberg pin: a single commit object (not the HEAD array) resolves to the pinned sha" {
-    const body = try readFixture(testing.allocator, "codeberg_commit.json");
+test "gitea pin: a single commit object (not the HEAD array) resolves to the pinned sha" {
+    const body = try readFixture(testing.allocator, "gitea_commit.json");
     defer testing.allocator.free(body);
 
-    var res = try resolveServed(.codeberg, body, .ok);
+    var res = try resolveServed(.gitea, body, .ok);
     defer res.deinit();
     try testing.expect(!res.not_modified);
     try testing.expectEqualStrings(fixture_sha, res.sha.?);
 }
 
-test "codeberg pin: a 200 with no sha is rejected as MalformedJson — a bad pin never lands" {
-    var res = resolveServed(.codeberg, "{}", .ok) catch |e| {
+test "gitea pin: a 200 with no sha is rejected as MalformedJson — a bad pin never lands" {
+    var res = resolveServed(.gitea, "{}", .ok) catch |e| {
         try testing.expectEqual(tap.TapError.MalformedJson, e);
         return;
     };
@@ -119,8 +119,8 @@ test "codeberg pin: a 200 with no sha is rejected as MalformedJson — a bad pin
     return error.TestUnexpectedResult;
 }
 
-test "codeberg pin: a 404 for an unknown sha fails loud with NotFound" {
-    var res = resolveServed(.codeberg, "", .not_found) catch |e| {
+test "gitea pin: a 404 for an unknown sha fails loud with NotFound" {
+    var res = resolveServed(.gitea, "", .not_found) catch |e| {
         try testing.expectEqual(tap.TapError.NotFound, e);
         return;
     };

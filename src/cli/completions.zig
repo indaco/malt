@@ -435,7 +435,7 @@ pub const zsh_script =
     \\                        '--pin[Explicitly pin <slug> to <sha>]' \
     \\                        '--repo[Point the tap at owner/exact-repo (no homebrew- prefix)]:owner/exact-repo:' \
     \\                        '--host[Register the tap on a non-GitHub forge (e.g. gitlab.com)]:forge-host:' \
-    \\                        '--forge[Pin the provider for a custom-domain host]:provider:(github gitlab codeberg)' \
+    \\                        '--forge[Pin the provider for a custom-domain host]:provider:(github gitlab gitea)' \
     \\                        '--url[Derive (host, owner, repo) from a full repo URL]:repo-url:' \
     \\                        '--force[Rebind an existing tap to a new --repo target]' \
     \\                        '(--yes -y)'{--yes,-y}'[Confirm --refresh --all apply]' \
@@ -655,7 +655,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l pin     -d 'Explicitly pin <slug> to <sha>'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l repo    -x -d 'Point the tap at owner/exact-repo (no homebrew- prefix)'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l host    -x -d 'Register the tap on a non-GitHub forge (e.g. gitlab.com)'
-    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l forge   -x -a 'github gitlab codeberg' -d 'Pin the provider for a custom-domain host'
+    \\    complete -c $__malt_bin -n '__malt_using_command tap' -l forge   -x -a 'github gitlab gitea' -d 'Pin the provider for a custom-domain host'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l url     -x -d 'Derive (host, owner, repo) from a full repo URL'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -l force   -d 'Rebind an existing tap to a new --repo target'
     \\    complete -c $__malt_bin -n '__malt_using_command tap' -s y -l yes -d 'Confirm --refresh --all apply'

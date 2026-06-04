@@ -54,7 +54,7 @@ pub fn describeResolveError(buf: []u8, err: TapError, forge_kind: forge.Forge, h
     return switch (forge_kind) {
         .github => githubResolveError(err),
         .gitlab => forgeResolveError(buf, err, "GitLab", "MALT_GITLAB_TOKEN", host),
-        .codeberg => forgeResolveError(buf, err, "Codeberg", "MALT_CODEBERG_TOKEN", host),
+        .gitea => forgeResolveError(buf, err, "Gitea", "MALT_GITEA_TOKEN", host),
     };
 }
 
@@ -139,17 +139,17 @@ test "describeResolveError gitlab: NotFound drops the github-only homebrew-/--re
     try std.testing.expect(std.mem.indexOf(u8, msg, "--repo") == null);
 }
 
-test "describeResolveError codeberg: RateLimited names the host and MALT_CODEBERG_TOKEN" {
+test "describeResolveError gitea: RateLimited names the host and MALT_GITEA_TOKEN" {
     var buf: [512]u8 = undefined;
-    const msg = describeResolveError(&buf, error.RateLimited, .codeberg, "codeberg.org");
+    const msg = describeResolveError(&buf, error.RateLimited, .gitea, "codeberg.org");
     try std.testing.expect(std.mem.indexOf(u8, msg, "codeberg.org") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_CODEBERG_TOKEN") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITEA_TOKEN") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITHUB_TOKEN") == null);
 }
 
-test "describeResolveError codeberg: a self-hosted Forgejo host is named" {
+test "describeResolveError gitea: a self-hosted Forgejo host is named" {
     var buf: [512]u8 = undefined;
-    const msg = describeResolveError(&buf, error.MalformedJson, .codeberg, "git.example.org");
+    const msg = describeResolveError(&buf, error.MalformedJson, .gitea, "git.example.org");
     try std.testing.expect(std.mem.indexOf(u8, msg, "git.example.org") != null);
 }
 
@@ -1168,12 +1168,12 @@ test "resolveCommitUrl builds the gitlab v4 commits/<sha> URL for a gitlab row" 
     );
 }
 
-test "resolveCommitUrl builds the codeberg v1 commits/<sha> URL for a codeberg row" {
+test "resolveCommitUrl builds the gitea v1 commits/<sha> URL for a gitea row" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();
     const schema = @import("../db/schema.zig");
     try schema.initSchema(&db);
-    try addWithForge(&db, "grp/tap", "grp", "tap", "codeberg.org", .codeberg, null);
+    try addWithForge(&db, "grp/tap", "grp", "tap", "codeberg.org", .gitea, null);
     const sha = "0123456789abcdef0123456789abcdef01234567";
 
     const url = try resolveCommitUrl(std.testing.allocator, &db, "grp/tap", sha);

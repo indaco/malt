@@ -320,7 +320,7 @@ const tap_help =
     \\                       only applies to github.com. The tap registers
     \\                       unpinned; `mt tap --refresh <slug>` pins its HEAD.
     \\  --forge <provider>   Pin the forge explicitly (github, gitlab, or
-    \\                       codeberg) when the host can't reveal it — a
+    \\                       gitea) when the host can't reveal it — a
     \\                       custom-domain GitLab like code.acme.com or a
     \\                       self-hosted Forgejo/Gitea. gitlab.* and
     \\                       codeberg.org auto-classify, so this is only

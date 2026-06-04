@@ -855,13 +855,13 @@ test "warnTapHeadResolveFailed renders the gitlab host + token on the CLI output
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "github") == null);
 }
 
-test "warnTapHeadResolveFailed keeps the Network-failure skip-guard phrase for codeberg" {
+test "warnTapHeadResolveFailed keeps the Network-failure skip-guard phrase for gitea" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
     output.beginStderrCapture(std.testing.allocator, &buf);
     defer output.endStderrCapture();
 
-    warnTapHeadResolveFailed("team/tap", tap_mod.TapError.NetworkError, .codeberg, "git.example.org");
+    warnTapHeadResolveFailed("team/tap", tap_mod.TapError.NetworkError, .gitea, "git.example.org");
 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "git.example.org") != null);
     // The regressions/*.sh skip-guards grep "Network failure" — it must hold

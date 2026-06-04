@@ -1,27 +1,27 @@
-//! malt — offline integration for Codeberg/Forgejo (Gitea) tap resolution.
+//! malt — offline integration for Gitea (Codeberg/Forgejo) tap resolution.
 //!
 //! Inline tests in `src/core/forge.zig` cover the URL/parse/auth shapes
 //! in isolation; this file pins the assembled HTTP path against a
 //! **recorded** Gitea `commits?limit=1` response (`scripts/fixtures/`),
-//! never live network. It proves three things end-to-end for `.codeberg`:
+//! never live network. It proves three things end-to-end for `.gitea`:
 //!   1. a recorded `[{"sha":"<sha>"}]` array body resolves to the right
 //!      sha, and that sha builds the right `/raw/.../Formula/<n>.rb` URL;
 //!   2. the API request carries `Authorization: token` when
-//!      MALT_CODEBERG_TOKEN is set;
+//!      MALT_GITEA_TOKEN is set;
 //!   3. the raw fetch also carries it — Gitea serves `/raw` from the
 //!      authenticated instance host, unlike github's public raw CDN.
 
 const std = @import("std");
 const testing = std.testing;
-const test_io = @import("test_io");
+const net = std.Io.net;
 
 const malt = @import("malt");
 const client = malt.client;
 const tap = malt.tap;
 const forge = malt.forge;
-const net = std.Io.net;
+const test_io = @import("test_io");
 
-// The sha recorded in scripts/fixtures/codeberg_commits_head.json.
+// The sha recorded in scripts/fixtures/gitea_commits_head.json.
 const fixture_sha = "0123456789abcdef0123456789abcdef01234567";
 const raw_body = "class Glow < Formula\nend\n";
 
@@ -29,7 +29,7 @@ fn readFixture(allocator: std.mem.Allocator) ![]u8 {
     const io = std.Options.debug_io;
     var dir = try test_io.cwd().openDir(io, "scripts/fixtures", .{});
     defer dir.close(io);
-    const file = try dir.openFile(io, "codeberg_commits_head.json", .{});
+    const file = try dir.openFile(io, "gitea_commits_head.json", .{});
     defer file.close(io);
     const stat = try file.stat(io);
     const buf = try allocator.alloc(u8, @intCast(stat.size));
@@ -69,8 +69,8 @@ fn serveOnce(fx: *Fixture) void {
     req.respond(fx.body, .{}) catch return;
 }
 
-fn envWithCodebergToken() std.process.Environ {
-    const entries = [_:null]?[*:0]const u8{"MALT_CODEBERG_TOKEN=cb-itest"};
+fn envWithGiteaToken() std.process.Environ {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITEA_TOKEN=cb-itest"};
     return .{ .block = .{ .slice = entries[0..1 :null] } };
 }
 
@@ -79,7 +79,7 @@ fn listenLocal(io: std.Io) !net.Server {
     return addr.listen(io, .{ .reuse_address = true });
 }
 
-test "codeberg resolve: a recorded commits array body yields the sha and its raw .rb URL" {
+test "gitea resolve: a recorded commits array body yields the sha and its raw .rb URL" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -98,7 +98,7 @@ test "codeberg resolve: a recorded commits array body yields the sha and its raw
     var url_buf: [96]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/grp/tap/commits?limit=1&stat=false", .{port});
 
-    var res = try tap.resolveHeadCommit(io, .empty, testing.allocator, .codeberg, url, null);
+    var res = try tap.resolveHeadCommit(io, .empty, testing.allocator, .gitea, url, null);
     defer res.deinit();
     try testing.expect(!res.not_modified);
     try testing.expectEqualStrings(fixture_sha, res.sha.?);
@@ -108,7 +108,7 @@ test "codeberg resolve: a recorded commits array body yields the sha and its raw
     var raw_buf: [256]u8 = undefined;
     const raw_url = try forge.rawFileUrl(
         &raw_buf,
-        .codeberg,
+        .gitea,
         "https://codeberg.org/grp/tap/raw",
         res.sha.?,
         .formula,
@@ -120,7 +120,7 @@ test "codeberg resolve: a recorded commits array body yields the sha and its raw
     );
 }
 
-test "codeberg resolve: the API request carries Authorization token when MALT_CODEBERG_TOKEN is set" {
+test "gitea resolve: the API request carries Authorization token when MALT_GITEA_TOKEN is set" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -139,12 +139,12 @@ test "codeberg resolve: the API request carries Authorization token when MALT_CO
     var url_buf: [96]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/grp/tap/commits?limit=1&stat=false", .{port});
 
-    var res = try tap.resolveHeadCommit(io, envWithCodebergToken(), testing.allocator, .codeberg, url, null);
+    var res = try tap.resolveHeadCommit(io, envWithGiteaToken(), testing.allocator, .gitea, url, null);
     defer res.deinit();
     try testing.expectEqualStrings("token cb-itest", fx.authorization[0..fx.authorization_len]);
 }
 
-test "codeberg raw fetch: getRawFile carries Authorization token — raw lives on the instance host" {
+test "gitea raw fetch: getRawFile carries Authorization token — raw lives on the instance host" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -161,10 +161,10 @@ test "codeberg raw fetch: getRawFile carries Authorization token — raw lives o
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/grp/tap/raw/{s}/Formula/glow.rb", .{ port, fixture_sha });
 
     var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
-    var http = client.HttpClient.initWith(&inner, io, envWithCodebergToken(), testing.allocator);
+    var http = client.HttpClient.initWith(&inner, io, envWithGiteaToken(), testing.allocator);
     defer http.deinit();
 
-    var resp = try tap.getRawFile(&http, envWithCodebergToken(), .codeberg, url);
+    var resp = try tap.getRawFile(&http, envWithGiteaToken(), .gitea, url);
     defer resp.deinit();
     try testing.expectEqual(@as(u16, 200), resp.status);
     try testing.expectEqualStrings(raw_body, resp.body);
