@@ -207,6 +207,11 @@ const list_help =
     \\                 recorded tap won't match — run `mt upgrade <token>`
     \\                 to trigger attribution, or omit the filter.
     \\  --json         Output as JSON
+    \\  --size         With --json: add size_bytes (on-disk size) per row.
+    \\                 Opt-in — it walks each keg/cask dir, so the default
+    \\                 --json stays metadata-only and pays no walk cost.
+    \\  --linked       With --json: add linked (is the keg active in the
+    \\                 prefix). Casks are always linked once installed.
     \\  --quiet, -q    Names only, one per line
     \\
 ;

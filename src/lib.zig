@@ -78,6 +78,7 @@ pub const sqlite = @import("db/sqlite.zig");
 pub const archive = @import("fs/archive.zig");
 pub const atomic = @import("fs/atomic.zig");
 pub const clonefile = @import("fs/clonefile.zig");
+pub const dirsize = @import("fs/dirsize.zig");
 pub const codesign = @import("macho/codesign.zig");
 pub const parser = @import("macho/parser.zig");
 pub const patcher = @import("macho/patcher.zig");
