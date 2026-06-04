@@ -710,7 +710,7 @@ fn run(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u
             return error.Aborted;
         }
         forge_hint = std.meta.stringToEnum(forge.Forge, f) orelse {
-            output.err("Unknown --forge '{s}'. Supported: github, gitlab, codeberg.", .{f});
+            output.err("Unknown --forge '{s}'. Supported: github, gitlab, gitea.", .{f});
             return error.Aborted;
         };
     }

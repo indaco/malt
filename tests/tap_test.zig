@@ -564,7 +564,7 @@ test "describeResolveError: github MalformedJson is distinct from ResolveFailed"
 }
 
 test "describeResolveError: every forge × TapError variant gets a non-empty hint" {
-    inline for (.{ .github, .gitlab, .codeberg }) |f| {
+    inline for (.{ .github, .gitlab, .gitea }) |f| {
         inline for (@typeInfo(tap.TapError).error_set.?) |e| {
             var buf: [512]u8 = undefined;
             const err = @field(tap.TapError, e.name);

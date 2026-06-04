@@ -67,7 +67,7 @@ test "gitlab refresh over a 403 reports a forge-correct rate-limit message" {
     try testing.expect(std.mem.indexOf(u8, msg, "api.github.com") == null);
 }
 
-test "codeberg refresh over a 404 names the instance host and drops the github-only hint" {
+test "gitea refresh over a 404 names the instance host and drops the github-only hint" {
     // 404 is non-retryable; a 5xx would trip the client's retry-with-backoff,
     // which a single-serve localhost server can't satisfy (the 5xx→ResolveFailed
     // classification is covered by the resolveFromConditional unit test instead).
@@ -86,10 +86,10 @@ test "codeberg refresh over a 404 names the instance host and drops the github-o
     var url_buf: [96]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/repos/grp/tap/commits?limit=1&stat=false", .{port});
 
-    try testing.expectError(error.NotFound, tap.resolveHeadCommit(io, .empty, testing.allocator, .codeberg, url, null));
+    try testing.expectError(error.NotFound, tap.resolveHeadCommit(io, .empty, testing.allocator, .gitea, url, null));
 
     var msg_buf: [512]u8 = undefined;
-    const msg = tap.describeResolveError(&msg_buf, error.NotFound, .codeberg, "git.example.org");
+    const msg = tap.describeResolveError(&msg_buf, error.NotFound, .gitea, "git.example.org");
     try testing.expect(std.mem.indexOf(u8, msg, "git.example.org") != null);
     // The homebrew-<repo>/--repo remediation is github-only; it must not leak here.
     try testing.expect(std.mem.indexOf(u8, msg, "homebrew-") == null);

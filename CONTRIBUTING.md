@@ -73,11 +73,11 @@ The CI pipeline runs the full slate (including `local-bench.sh` and the smoke su
 
 ## Tap forges
 
-Taps resolve against three forges — GitHub, GitLab (incl. self-hosted), and
+Taps resolve against three forges - GitHub, GitLab (incl. self-hosted), and
 Codeberg/Forgejo/Gitea. The user-facing matrix, the `mt tap --host` / `--url`
 registration forms, and the per-forge token env vars (`MALT_GITHUB_TOKEN`,
-`MALT_GITLAB_TOKEN`, `MALT_CODEBERG_TOKEN`) are documented in the README's
-[Custom sources](README.md#custom-sources) section — read it before touching tap
+`MALT_GITLAB_TOKEN`, `MALT_GITEA_TOKEN`) are documented in the README's
+[Custom sources](README.md#custom-sources) section - read it before touching tap
 resolution.
 
 For contributors: each forge is one arm of the enum-`switch` in

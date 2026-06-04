@@ -54,7 +54,7 @@ printf '%s' "$json" | grep -q 'homebrew-' && fail 'unexpected homebrew- synthesi
 "$MALT_BIN" tap mygrp/mytap --url https://codeberg.org/o/r >/dev/null 2>&1 ||
   fail 'mt tap --url https://codeberg.org/o/r exited non-zero'
 json=$("$MALT_BIN" tap --json)
-printf '%s' "$json" | grep -q '"host":"codeberg.org"' || fail 'codeberg tap host not surfaced in --json'
+printf '%s' "$json" | grep -q '"host":"codeberg.org"' || fail 'gitea tap host not surfaced in --json'
 
 # 4. non-github host without a repo fails with a hint.
 if "$MALT_BIN" tap other/tap --host gitlab.com >/dev/null 2>"$PREFIX/err.log"; then
