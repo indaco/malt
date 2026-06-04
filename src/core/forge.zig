@@ -10,7 +10,7 @@ const std = @import("std");
 /// Source forge hosting a tap repo. Each variant forces an
 /// exhaustive-switch compile error until every concern below handles it,
 /// so a new forge can never be half-wired.
-pub const Forge = enum { github, gitlab, gitea };
+pub const Forge = enum { github, gitlab, gitea, gogs };
 
 const github_browse_fmt = "https://github.com/{s}/{s}";
 // GitLab's browse, repo, and `/-/raw` URLs all share the instance host,
@@ -28,8 +28,8 @@ pub fn repoBrowseUrl(
 ) std.fmt.BufPrintError![]const u8 {
     return switch (forge) {
         .github => std.fmt.bufPrint(buf, github_browse_fmt, .{ owner, repo }),
-        // gitlab and gitea both browse at the instance host.
-        .gitlab, .gitea => std.fmt.bufPrint(buf, gitlab_browse_fmt, .{ host, owner, repo }),
+        // gitlab, gitea, and gogs all browse at the instance host.
+        .gitlab, .gitea, .gogs => std.fmt.bufPrint(buf, gitlab_browse_fmt, .{ host, owner, repo }),
     };
 }
 
@@ -44,7 +44,7 @@ pub fn allocRepoBrowseUrl(
 ) std.mem.Allocator.Error![]const u8 {
     return switch (forge) {
         .github => std.fmt.allocPrint(allocator, github_browse_fmt, .{ owner, repo }),
-        .gitlab, .gitea => std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ host, owner, repo }),
+        .gitlab, .gitea, .gogs => std.fmt.allocPrint(allocator, gitlab_browse_fmt, .{ host, owner, repo }),
     };
 }
 
@@ -76,8 +76,8 @@ pub fn rawFileUrl(
 ) std.fmt.BufPrintError![]const u8 {
     return switch (forge) {
         // Same tail for all: the forge-specific infix already lives in
-        // `raw_base` (github: bare; gitlab: `/-/raw`; gitea: `/raw`).
-        .github, .gitlab, .gitea => std.fmt.bufPrint(buf, "{s}/{s}/{s}/{s}.rb", .{
+        // `raw_base` (github: bare; gitlab: `/-/raw`; gitea/gogs: `/raw`).
+        .github, .gitlab, .gitea, .gogs => std.fmt.bufPrint(buf, "{s}/{s}/{s}/{s}.rb", .{
             raw_base, sha, kind.subdir(), name,
         }),
     };
@@ -219,11 +219,13 @@ pub fn buildBaseUrls(
 
             return .{ .forge = forge, .host = host_owned, .api_head_url = api_head_url, .repo_url = repo_url, .raw_base = raw_base };
         },
-        .gitea => {
+        // Gogs shares Gitea's v1 layout here — it is the project Gitea forked
+        // from; only the pin endpoint (`commitUrl`) diverges.
+        .gitea, .gogs => {
             // Gitea's v1 API keys by plain owner/repo (no URL-encoding,
             // unlike gitlab); `commits?limit=1` returns a one-element array
             // so HEAD costs one round-trip. Raw has no `/-/` infix. All
-            // three URLs ride the row's `host` for self-hosted Forgejo.
+            // three URLs ride the row's `host` for self-hosted Forgejo/Gogs.
             const api_head_url = try std.fmt.allocPrint(
                 allocator,
                 "https://{s}/api/v1/repos/{s}/{s}/commits?limit=1&stat=false",
@@ -283,6 +285,14 @@ pub fn commitUrl(
             "https://{s}/api/v1/repos/{s}/{s}/git/commits/{s}",
             .{ host, owner, repo, sha },
         ),
+        // Gogs predates Gitea's git-data API: it has no `git/commits/<sha>`
+        // route and serves the single commit at the bare `commits/<sha>`
+        // (the inverse of Gitea, where that bare verb 404s).
+        .gogs => return std.fmt.allocPrint(
+            allocator,
+            "https://{s}/api/v1/repos/{s}/{s}/commits/{s}",
+            .{ host, owner, repo, sha },
+        ),
     }
 }
 
@@ -305,7 +315,8 @@ pub fn authHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std.ht
             return .{ .name = "Authorization", .value = value };
         },
         .gitlab => return gitlabPrivateToken(environ, buf),
-        .gitea => return giteaToken(environ, buf),
+        // Gogs is the Gitea family — same `token` scheme, same MALT_GITEA_TOKEN.
+        .gitea, .gogs => return giteaToken(environ, buf),
     }
 }
 
@@ -343,8 +354,8 @@ pub fn rawAuthHeader(forge: Forge, environ: std.process.Environ, buf: []u8) ?std
     return switch (forge) {
         .github => null,
         .gitlab => gitlabPrivateToken(environ, buf),
-        // Gitea serves `/raw` from the authenticated instance host, like gitlab.
-        .gitea => giteaToken(environ, buf),
+        // Gitea/Gogs serve `/raw` from the authenticated instance host, like gitlab.
+        .gitea, .gogs => giteaToken(environ, buf),
     };
 }
 
@@ -384,7 +395,7 @@ fn firstShaField(body: []const u8, marker: []const u8) ?[]const u8 {
 /// empty `[]` simply has no `"sha"` and falls through to null.
 pub fn parseHeadSha(forge: Forge, body: []const u8) ?[]const u8 {
     return switch (forge) {
-        .github, .gitea => firstShaField(body, "\"sha\""),
+        .github, .gitea, .gogs => firstShaField(body, "\"sha\""),
         .gitlab => firstShaField(body, "\"id\""),
     };
 }
@@ -1042,6 +1053,17 @@ test "commitUrl gitea: a self-hosted Forgejo host drives the URL" {
     );
 }
 
+test "commitUrl gogs: bare v1 commits/<sha> endpoint — Gogs has no git/ infix" {
+    // Gogs serves a single commit at the bare `commits/<sha>`; the `git/commits`
+    // route Gitea uses 404s here. This is the one place .gogs diverges from .gitea.
+    const url = try commitUrl(std.testing.allocator, .gogs, "git.example.org", "team", "tap", commit_sha_fixture);
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://git.example.org/api/v1/repos/team/tap/commits/" ++ commit_sha_fixture,
+        url,
+    );
+}
+
 fn commitUrlAndFree(allocator: std.mem.Allocator) !void {
     // gitlab is the allocating-twice arm (encode buffer + allocPrint).
     const url = try commitUrl(allocator, .gitlab, "gitlab.com", "grp", "tap", commit_sha_fixture);
@@ -1072,4 +1094,94 @@ test "parseHeadSha gitea: commit object picks the top-level sha, not a nested tr
     ;
     const got = parseHeadSha(.gitea, body) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(valid_sha_fixture, got);
+}
+
+// ── gogs (a thin arm over the Gitea family) ────────────────────────
+// Gogs is the project Gitea forked from: it shares Gitea's v1 HEAD/raw/
+// browse layout, the GitHub-shaped `"sha"`, and the `token` auth scheme.
+// These pins lock that sharing so a future change can't silently diverge
+// the shared concerns. The one genuine divergence — the bare pin endpoint
+// (no `git/` infix) — is covered by the `commitUrl gogs` test above.
+
+test "buildBaseUrls gogs: byte-identical to the gitea v1 commits / raw / browse triple" {
+    const gogs = try buildBaseUrls(std.testing.allocator, .gogs, "git.example.org", "team", "tap");
+    defer gogs.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Forge.gogs, gogs.forge);
+    try std.testing.expectEqualStrings(
+        "https://git.example.org/api/v1/repos/team/tap/commits?limit=1&stat=false",
+        gogs.api_head_url,
+    );
+    try std.testing.expectEqualStrings("https://git.example.org/team/tap", gogs.repo_url);
+    try std.testing.expectEqualStrings("https://git.example.org/team/tap/raw", gogs.raw_base);
+}
+
+fn buildGogsAndFree(allocator: std.mem.Allocator) !void {
+    const urls = try buildBaseUrls(allocator, .gogs, "git.example.org", "team", "tap");
+    urls.deinit(allocator);
+}
+
+test "buildBaseUrls gogs: no leak on any allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, buildGogsAndFree, .{});
+}
+
+test "rawFileUrl gogs: shares the /raw Formula tail" {
+    var buf: [512]u8 = undefined;
+    const url = try rawFileUrl(&buf, .gogs, "https://git.example.org/team/tap/raw", raw_sha_fixture, .formula, "glow");
+    try std.testing.expectEqualStrings(
+        "https://git.example.org/team/tap/raw/" ++ raw_sha_fixture ++ "/Formula/glow.rb",
+        url,
+    );
+}
+
+test "repoBrowseUrl gogs: the instance host drives the browse URL" {
+    var buf: [256]u8 = undefined;
+    const url = try repoBrowseUrl(&buf, .gogs, "git.example.org", "team", "tap");
+    try std.testing.expectEqualStrings("https://git.example.org/team/tap", url);
+}
+
+test "authHeader gogs: token header from MALT_GITEA_TOKEN (shared family token)" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITEA_TOKEN=gitea_tok"};
+    var buf: [256]u8 = undefined;
+    const h = authHeader(.gogs, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("Authorization", h.name);
+    try std.testing.expectEqualStrings("token gitea_tok", h.value);
+}
+
+test "authHeader gogs: null when MALT_GITEA_TOKEN unset" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(authHeader(.gogs, .empty, &buf) == null);
+}
+
+test "rawAuthHeader gogs: token attached — raw lives on the instance host" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITEA_TOKEN=gitea_tok"};
+    var buf: [256]u8 = undefined;
+    const h = rawAuthHeader(.gogs, envWith(entries), &buf) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("token gitea_tok", h.value);
+}
+
+test "parseHeadSha gogs: single-element commits array (HEAD) yields the sha" {
+    const body =
+        \\[{"sha":"0123456789abcdef0123456789abcdef01234567","commit":{"message":"x"}}]
+    ;
+    const got = parseHeadSha(.gogs, body) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(valid_sha_fixture, got);
+}
+
+test "parseHeadSha gogs: single commit object (pin) yields the sha" {
+    const body =
+        \\{"sha":"0123456789abcdef0123456789abcdef01234567","commit":{"message":"x"}}
+    ;
+    const got = parseHeadSha(.gogs, body) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(valid_sha_fixture, got);
+}
+
+test "parseHeadSha gogs: empty array yields null" {
+    try std.testing.expectEqual(@as(?[]const u8, null), parseHeadSha(.gogs, "[]"));
+}
+
+test "parseHeadSha gogs: malformed sha entry yields null" {
+    const body =
+        \\[{"sha":"not-a-valid-sha"}]
+    ;
+    try std.testing.expectEqual(@as(?[]const u8, null), parseHeadSha(.gogs, body));
 }

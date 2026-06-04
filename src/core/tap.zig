@@ -55,6 +55,7 @@ pub fn describeResolveError(buf: []u8, err: TapError, forge_kind: forge.Forge, h
         .github => githubResolveError(err),
         .gitlab => forgeResolveError(buf, err, "GitLab", "MALT_GITLAB_TOKEN", host),
         .gitea => forgeResolveError(buf, err, "Gitea", "MALT_GITEA_TOKEN", host),
+        .gogs => forgeResolveError(buf, err, "Gogs", "MALT_GITEA_TOKEN", host),
     };
 }
 
@@ -151,6 +152,15 @@ test "describeResolveError gitea: a self-hosted Forgejo host is named" {
     var buf: [512]u8 = undefined;
     const msg = describeResolveError(&buf, error.MalformedJson, .gitea, "git.example.org");
     try std.testing.expect(std.mem.indexOf(u8, msg, "git.example.org") != null);
+}
+
+test "describeResolveError gogs: names the instance host and the shared MALT_GITEA_TOKEN" {
+    var buf: [512]u8 = undefined;
+    const msg = describeResolveError(&buf, error.RateLimited, .gogs, "git.example.org");
+    try std.testing.expect(std.mem.indexOf(u8, msg, "git.example.org") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GITEA_TOKEN") != null);
+    // Gogs reuses the Gitea family token; no separate var leaks in.
+    try std.testing.expect(std.mem.indexOf(u8, msg, "MALT_GOGS_TOKEN") == null);
 }
 
 test "describeResolveError gitlab: ResolveFailed (the 5xx catch-all) names host and token" {
@@ -1180,6 +1190,24 @@ test "resolveCommitUrl builds the gitea v1 commits/<sha> URL for a gitea row" {
     defer std.testing.allocator.free(url);
     try std.testing.expectEqualStrings(
         "https://codeberg.org/api/v1/repos/grp/tap/git/commits/" ++ sha,
+        url,
+    );
+}
+
+test "resolveCommitUrl builds the bare gogs commits/<sha> URL for a gogs row" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    const schema = @import("../db/schema.zig");
+    try schema.initSchema(&db);
+    // Gogs is not name-detectable, so the row carries an explicit --forge hint.
+    try addWithForge(&db, "team/tap", "team", "tap", "git.example.org", .gogs, null);
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+
+    const url = try resolveCommitUrl(std.testing.allocator, &db, "team/tap", sha);
+    defer std.testing.allocator.free(url);
+    // Bare commits/<sha> — no git/ infix, unlike the gitea row above.
+    try std.testing.expectEqualStrings(
+        "https://git.example.org/api/v1/repos/team/tap/commits/" ++ sha,
         url,
     );
 }

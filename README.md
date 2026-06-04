@@ -51,6 +51,7 @@ The implementation is a study in human-directed AI: design, architecture, and ev
 The full surface area at a glance.
 
 - **Drop-in for Homebrew workflows.** Installs formulas, casks, tap formulas, and `user/tap/formula` shortcuts; reads existing `Brewfile`s with no conversion; `mt shellenv` is a drop-in for `eval "$(brew shellenv)"`; `mt services` is a drop-in for `brew services`. Installs to `/opt/malt`, never touches Homebrew's files.
+- **Taps on any major forge.** Third-party taps resolve through the forge API (without cloning the whole repo) on GitHub, GitLab (incl. self-hosted), Codeberg/Forgejo/Gitea, and Gogs - with per-forge token auth for private taps. See [Supported forges](#supported-forges).
 - **Native `post_install`.** A built-in Zig interpreter runs Homebrew `post_install` scripts natively - `node`, `openssl`, `fontconfig`, `docbook` are fully configured by the time the install returns. Unsupported constructs are reported; `--use-system-ruby` delegates to a sandboxed Ruby subprocess. See [Architecture](#architecture) for the fallback flow.
 - **Content-addressable store.** Bottles indexed by SHA256; the same bottle is never downloaded or extracted twice. Kegs in `Cellar/` are APFS `clonefile()` copies. Reinstalls and rollbacks cost no bytes and no network.
 - **Atomic install protocol.** New versions verified before old versions are touched; `mt rollback --to <version>` reverts from the store with no re-download. Streaming SHA256 + parallel downloads + a 30 s advisory file lock against concurrent mutations.
@@ -402,50 +403,54 @@ Taps are auto-resolved during install (`mt install user/repo/formula`), so this 
 
 #### Supported forges
 
-A tap can live on any of three forges. GitHub is the default; the others
-register with an explicit `--host` (which always needs an explicit `--repo`,
-since the `homebrew-<repo>` convention is GitHub-only).
+A tap can live on any of four forges. GitHub is the default; the others register with an explicit `--host` (which always needs an explicit `--repo`, since the `homebrew-<repo>` convention is GitHub-only).
+
+A single `--url https://<host>/<owner>/<repo>` is a self-contained alternative to the `--host` + `--repo` pair: it carries the host and the exact repo together and works for every forge, GitHub included. Because `--url` already names both, it cannot be combined with `--host` or `--repo` - but a host that doesn't auto-classify (a self-hosted GitLab/Gitea, or any Gogs host) still pairs it with `--forge`.
 
 | Forge                      | Hosts                                     | Register with                                                                               | Token env var       |
 | -------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------- |
 | GitHub                     | `github.com`                              | `mt tap user/repo` (resolves `homebrew-repo`), or `--repo owner/repo` for a prefixless repo | `MALT_GITHUB_TOKEN` |
 | GitLab (incl. self-hosted) | `gitlab.com`, `gitlab.gnome.org`, custom  | `mt tap <slug> --host <host> --repo <owner>/<repo>`                                         | `MALT_GITLAB_TOKEN` |
 | Codeberg / Forgejo / Gitea | `codeberg.org`, self-hosted Forgejo/Gitea | `mt tap <slug> --host <host> --repo <owner>/<repo>`                                         | `MALT_GITEA_TOKEN`  |
+| Gogs                       | self-hosted Gogs                          | `mt tap <slug> --host <host> --forge gogs --repo <owner>/<repo>`                            | `MALT_GITEA_TOKEN`  |
 
-`gitlab.*` and `codeberg.org` auto-classify from the host. A custom domain that
-doesn't reveal its provider (a self-hosted GitLab like `code.acme.com`, or a
-Forgejo/Gitea instance) needs `--forge gitlab` or `--forge gitea` so malt
-knows which API to speak. See the [environment variables](#environment-variables)
-table for what each token is sent as.
+Only `gitlab.*` and `codeberg.org` auto-classify from the host. Any other instance - a self-hosted GitLab like `code.acme.com`, a Forgejo/Gitea host, or a Gogs host - needs `--forge gitlab`, `--forge gitea`, or `--forge gogs` so malt knows which API to speak. Gogs shares the Gitea API (and `MALT_GITEA_TOKEN`); it differs only in the pin endpoint, so it always needs the explicit `--forge gogs`.
+
+See the [environment variables](#environment-variables) table for what each token is sent as.
 
 ```bash
-# GitLab - --host requires an explicit --repo
+# Each forge takes the --host + --repo pair or the equivalent --url.
+
+# GitHub (default)
+mt tap user/repo --repo owner/exact-repo
+mt tap user/repo --url https://github.com/owner/exact-repo
+
+# GitLab (gitlab.* auto-classifies from the host)
 mt tap grp/tap --host gitlab.com --repo grp/homebrew-tap
-mt tap grp/tap --url https://gitlab.com/grp/homebrew-tap   # same, from a full URL
+mt tap grp/tap --url https://gitlab.com/grp/homebrew-tap
 
-# Self-hosted GitLab on a domain the host can't classify
+# Self-hosted GitLab (host can't classify - name the forge)
 mt tap acme/tap --host code.acme.com --forge gitlab --repo acme/tap
+mt tap acme/tap --url https://code.acme.com/acme/tap --forge gitlab
 
-# Codeberg, and self-hosted Forgejo/Gitea
+# Codeberg / Forgejo / Gitea (codeberg.org auto-classifies)
 mt tap org/tap --host codeberg.org --repo org/homebrew-tap
+mt tap org/tap --url https://codeberg.org/org/homebrew-tap
+
+# Self-hosted Forgejo/Gitea (host can't classify - name the forge)
 mt tap org/tap --host git.acme.com --forge gitea --repo org/tap
+mt tap org/tap --url https://git.acme.com/org/tap --forge gitea
+
+# Gogs (never auto-classifies - always name the forge)
+mt tap org/tap --host git.acme.com --forge gogs --repo org/tap
+mt tap org/tap --url https://git.acme.com/org/tap --forge gogs
 ```
 
-A non-GitHub tap registers unpinned; `mt tap --refresh <slug>` pins its current
-HEAD. `mt doctor` lists every registered tap with the forge host it resolves
-against, so you can confirm a `--host` registration landed where you intended.
+A non-GitHub tap registers unpinned; `mt tap --refresh <slug>` pins its current HEAD. `mt doctor` lists every registered tap with the forge host it resolves against, so you can confirm a `--host` registration landed where you intended.
 
 #### Pinning caveat: prefer release assets over generated archives
 
-GitLab `/-/archive/` and Gitea `/archive/` tarballs are **regenerated
-server-side** - their gzip framing can change across a forge upgrade even when
-the file contents don't. A tap formula that pins the `sha256` of such an archive
-can therefore break on a forge upgrade. Prefer a **release-asset** URL (an
-uploaded tarball, whose bytes are immutable) over a `/-/archive/` or `/archive/`
-URL when you pin a `sha256`. If a pinned archive's digest later mismatches, malt
-reports the usual `Sha256Mismatch`; on a generated-archive URL that often means
-the forge re-generated the tarball rather than that the download is corrupt -
-re-pin against a stable release asset.
+GitLab `/-/archive/` and Gitea/Gogs `/archive/` tarballs are regenerated server-side - their gzip framing can shift across a forge upgrade even when the file contents don't, so a `sha256` pinned against one can later mismatch. When you pin, prefer a **release-asset** URL (an uploaded tarball, whose bytes are immutable) over a `/-/archive/` or `/archive/` URL. The mismatch surfaces as the usual `Sha256Mismatch`; on a generated-archive URL that usually means the forge re-rolled the tarball, not a corrupt download - re-pin against a release asset.
 
 ### Manage malt
 

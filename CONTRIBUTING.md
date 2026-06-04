@@ -73,22 +73,11 @@ The CI pipeline runs the full slate (including `local-bench.sh` and the smoke su
 
 ## Tap forges
 
-Taps resolve against three forges - GitHub, GitLab (incl. self-hosted), and
-Codeberg/Forgejo/Gitea. The user-facing matrix, the `mt tap --host` / `--url`
-registration forms, and the per-forge token env vars (`MALT_GITHUB_TOKEN`,
-`MALT_GITLAB_TOKEN`, `MALT_GITEA_TOKEN`) are documented in the README's
-[Custom sources](README.md#custom-sources) section - read it before touching tap
-resolution.
+Taps resolve against four forges - GitHub, GitLab (incl. self-hosted), Codeberg/Forgejo/Gitea, and Gogs (the project Gitea forked from; it shares the Gitea API and `MALT_GITEA_TOKEN`, diverging only at the pin endpoint). The user-facing matrix, the `mt tap --host` / `--url` registration forms, and the per-forge token env vars (`MALT_GITHUB_TOKEN`, `MALT_GITLAB_TOKEN`, `MALT_GITEA_TOKEN`) are documented in the README's [Custom sources](README.md#custom-sources) section - read it before touching tap resolution.
 
-For contributors: each forge is one arm of the enum-`switch` in
-`src/core/forge.zig`, which stays a pure leaf (no `cli/*` or `ui/*` imports, no
-user-facing strings). Adding a forge is a new enum arm, so the compiler flags
-every `switch` that hasn't handled it.
+For contributors: each forge is one arm of the enum-`switch` in `src/core/forge.zig`, which stays a pure leaf (no `cli/*` or `ui/*` imports, no user-facing strings). Adding a forge is a new enum arm, so the compiler flags every `switch` that hasn't handled it.
 
-When authoring a tap formula, prefer **release-asset** URLs over GitLab
-`/-/archive/` or Gitea `/archive/` tarballs for any pinned `sha256`: generated
-archives are regenerated server-side and their digest can shift across a forge
-upgrade, which surfaces as a `Sha256Mismatch` that isn't actually corruption.
+When authoring a tap formula, prefer **release-asset** URLs over GitLab `/-/archive/` or Gitea/Gogs `/archive/` tarballs for any pinned `sha256`: generated archives are re-rolled server-side, so their digest can shift across a forge upgrade even though the contents are unchanged - surfacing as a `Sha256Mismatch` that isn't actually corruption.
 
 ## Security invariants
 

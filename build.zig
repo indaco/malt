@@ -235,6 +235,7 @@ pub fn build(b: *std.Build) void {
         "tests/tap_raw_rb_auth_test.zig",
         "tests/tap_gitlab_resolution_test.zig",
         "tests/tap_gitea_resolution_test.zig",
+        "tests/tap_gogs_resolution_test.zig",
         "tests/tap_pin_forge_test.zig",
         "tests/tap_resolve_error_test.zig",
         "tests/linker_isolation_test.zig",
