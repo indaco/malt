@@ -110,6 +110,40 @@ fn dupEntry(allocator: std.mem.Allocator, e: OutdatedEntry) std.mem.Allocator.Er
     return .{ .name = name, .installed = installed, .latest = latest };
 }
 
+/// Stitch the live keg `pinned` + `tap` onto each outdated entry,
+/// appending unified render rows to `out`. Pinned/tap are DB attributes
+/// (not snapshot state), so we match each entry to its keg row by name;
+/// `tap` collapses a SQL NULL to `""` so the JSON field is always present
+/// (matching `mt info`). An entry with no matching keg degrades to
+/// unpinned/empty tap rather than failing the whole emit.
+fn appendRenderRows(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(render_mod.Row),
+    entries: []const OutdatedEntry,
+    kegs: []const KegRow,
+    kind: render_mod.Kind,
+) std.mem.Allocator.Error!void {
+    if (entries.len == 0) return;
+
+    var by_name: std.StringHashMap(KegRow) = .init(allocator);
+    defer by_name.deinit();
+    try by_name.ensureTotalCapacity(@intCast(kegs.len));
+    for (kegs) |row| by_name.putAssumeCapacity(row.name, row);
+
+    try out.ensureUnusedCapacity(allocator, entries.len);
+    for (entries) |e| {
+        const row = by_name.get(e.name);
+        out.appendAssumeCapacity(.{
+            .name = e.name,
+            .installed = e.installed,
+            .latest = e.latest,
+            .kind = kind,
+            .pinned = if (row) |r| r.pinned else false,
+            .tap = if (row) |r| (r.tap orelse "") else "",
+        });
+    }
+}
+
 /// What `mt outdated` should do for the current invocation. Picked once,
 /// up front, so the dispatch is testable and the rest of `execute`
 /// stays linear.
@@ -161,6 +195,80 @@ fn summaryMessage(formula_count: usize, cask_count: usize, formula_only: bool, c
     if (formula_only) return "All formulas are up to date.";
     if (cask_only) return "All casks are up to date.";
     return "All packages are up to date.";
+}
+
+test "appendRenderRows stitches pinned and tap onto entries by name" {
+    const entries = [_]OutdatedEntry{
+        .{ .name = @constCast("held"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+        .{ .name = @constCast("scoped"), .installed = @constCast("3.0"), .latest = @constCast("4.0") },
+    };
+    const kegs = [_]KegRow{
+        .{ .name = "held", .version = "1.0", .tap = null, .pinned = true },
+        .{ .name = "scoped", .version = "3.0", .tap = "user/repo", .pinned = false },
+    };
+
+    var out: std.ArrayList(render_mod.Row) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try appendRenderRows(std.testing.allocator, &out, &entries, &kegs, .cask);
+
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqualStrings("held", out.items[0].name);
+    try std.testing.expectEqual(render_mod.Kind.cask, out.items[0].kind);
+    try std.testing.expect(out.items[0].pinned);
+    try std.testing.expectEqualStrings("", out.items[0].tap);
+
+    try std.testing.expectEqualStrings("scoped", out.items[1].name);
+    try std.testing.expect(!out.items[1].pinned);
+    try std.testing.expectEqualStrings("user/repo", out.items[1].tap);
+}
+
+test "appendRenderRows appends nothing for empty entries" {
+    const kegs = [_]KegRow{.{ .name = "held", .version = "1.0", .pinned = true }};
+    var out: std.ArrayList(render_mod.Row) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try appendRenderRows(std.testing.allocator, &out, &.{}, &kegs, .formula);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "appendRenderRows composes formula-then-cask order across two calls" {
+    // Mirrors the orchestrator: formulae are appended before casks, so
+    // the unified array preserves that grouping.
+    const f_entries = [_]OutdatedEntry{
+        .{ .name = @constCast("wget"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+    };
+    const c_entries = [_]OutdatedEntry{
+        .{ .name = @constCast("flux"), .installed = @constCast("0.1"), .latest = @constCast("0.2") },
+    };
+    const f_rows = [_]KegRow{.{ .name = "wget", .version = "1.0" }};
+    const c_rows = [_]KegRow{.{ .name = "flux", .version = "0.1", .tap = "user/repo" }};
+
+    var out: std.ArrayList(render_mod.Row) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try appendRenderRows(std.testing.allocator, &out, &f_entries, &f_rows, .formula);
+    try appendRenderRows(std.testing.allocator, &out, &c_entries, &c_rows, .cask);
+
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqual(render_mod.Kind.formula, out.items[0].kind);
+    try std.testing.expectEqualStrings("wget", out.items[0].name);
+    try std.testing.expectEqual(render_mod.Kind.cask, out.items[1].kind);
+    try std.testing.expectEqualStrings("user/repo", out.items[1].tap);
+}
+
+test "appendRenderRows defaults to unpinned + empty tap when no keg matches" {
+    const entries = [_]OutdatedEntry{
+        .{ .name = @constCast("orphan"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+    };
+    const kegs = [_]KegRow{};
+
+    var out: std.ArrayList(render_mod.Row) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try appendRenderRows(std.testing.allocator, &out, &entries, &kegs, .formula);
+
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    try std.testing.expectEqual(render_mod.Kind.formula, out.items[0].kind);
+    try std.testing.expect(!out.items[0].pinned);
+    try std.testing.expectEqualStrings("", out.items[0].tap);
+    try std.testing.expectEqualStrings("2.0", out.items[0].latest);
 }
 
 test "intersectWithDb drops snapshot entries whose keg is no longer installed" {
@@ -428,7 +536,9 @@ fn filterPick(scope: ScopeFlags) FilterPick {
 }
 
 /// Emit the snapshot through the live DB so an uninstalled or
-/// upgraded keg never appears in the output.
+/// upgraded keg never appears in the output. The keg rows are kept
+/// alive alongside the filtered entries so the JSON path can read each
+/// row's live `pinned`/`tap` when stitching the unified array.
 fn emitFromSnapshot(
     allocator: std.mem.Allocator,
     db: *sqlite.Database,
@@ -437,30 +547,66 @@ fn emitFromSnapshot(
     json_mode: bool,
     scope: ScopeFlags,
 ) !void {
-    var formula_count: usize = 0;
-    var cask_count: usize = 0;
-
+    var f_rows: ?[]KegRow = null;
+    defer if (f_rows) |r| freeKegRows(allocator, r);
+    var f_entries: ?[]OutdatedEntry = null;
+    defer if (f_entries) |e| freeEntrySlice(allocator, e);
     if (!scope.cask_only) {
         const rows = try loadFormulaRows(allocator, db, .all);
-        defer freeKegRows(allocator, rows);
-        const filtered = try intersectWithDb(allocator, rows, snap.formulas);
-        defer freeEntrySlice(allocator, filtered);
-        try render_mod.writeFormulaEntries(allocator, stdout, filtered, json_mode);
-        formula_count = filtered.len;
-    }
-    if (!scope.formula_only) {
-        const rows = try loadCaskRows(allocator, db, .all);
-        defer freeKegRows(allocator, rows);
-        const filtered = try intersectWithDb(allocator, rows, snap.casks);
-        defer freeEntrySlice(allocator, filtered);
-        try render_mod.writeCaskEntries(stdout, filtered, json_mode);
-        cask_count = filtered.len;
+        f_rows = rows;
+        f_entries = try intersectWithDb(allocator, rows, snap.formulas);
     }
 
-    if (!json_mode) {
-        if (summaryMessage(formula_count, cask_count, scope.formula_only, scope.cask_only)) |msg| {
-            output.info("{s}", .{msg});
-        }
+    var c_rows: ?[]KegRow = null;
+    defer if (c_rows) |r| freeKegRows(allocator, r);
+    var c_entries: ?[]OutdatedEntry = null;
+    defer if (c_entries) |e| freeEntrySlice(allocator, e);
+    if (!scope.formula_only) {
+        const rows = try loadCaskRows(allocator, db, .all);
+        c_rows = rows;
+        c_entries = try intersectWithDb(allocator, rows, snap.casks);
+    }
+
+    try emitEntries(allocator, stdout, json_mode, scope, .{
+        .formula_entries = f_entries orelse &.{},
+        .formula_rows = f_rows orelse &.{},
+        .cask_entries = c_entries orelse &.{},
+        .cask_rows = c_rows orelse &.{},
+    });
+}
+
+/// The four slices `emitEntries` needs: outdated entries plus the live
+/// keg rows they came from (so JSON can read `pinned`/`tap`).
+const EmitSlices = struct {
+    formula_entries: []const OutdatedEntry,
+    formula_rows: []const KegRow,
+    cask_entries: []const OutdatedEntry,
+    cask_rows: []const KegRow,
+};
+
+/// Single emit point shared by the snapshot and recompute paths. JSON
+/// frames one array spanning formulae + casks; human mode keeps the
+/// two-section bullet output byte-identical to before.
+fn emitEntries(
+    allocator: std.mem.Allocator,
+    stdout: *std.Io.Writer,
+    json_mode: bool,
+    scope: ScopeFlags,
+    s: EmitSlices,
+) !void {
+    if (json_mode) {
+        var rows: std.ArrayList(render_mod.Row) = .empty;
+        defer rows.deinit(allocator);
+        try appendRenderRows(allocator, &rows, s.formula_entries, s.formula_rows, .formula);
+        try appendRenderRows(allocator, &rows, s.cask_entries, s.cask_rows, .cask);
+        try render_mod.writeJsonArray(allocator, stdout, rows.items);
+        return;
+    }
+
+    render_mod.writeFormulaEntries(stdout, s.formula_entries);
+    render_mod.writeCaskEntries(stdout, s.cask_entries);
+    if (summaryMessage(s.formula_entries.len, s.cask_entries.len, scope.formula_only, scope.cask_only)) |msg| {
+        output.info("{s}", .{msg});
     }
 }
 
@@ -491,14 +637,38 @@ fn recomputeAndEmit(
         .tap => .{ .by_tap = scope.tap.? },
     };
 
-    var formula_count: usize = 0;
-    var cask_count: usize = 0;
+    // Load keg rows + collect outdated entries for both kinds before
+    // emitting, so the JSON path can frame one array spanning formulae
+    // and casks and read each row's live `pinned`/`tap`. Rows outlive
+    // the emit; `&.{}` sentinels keep `free` a no-op when scope skips a
+    // kind.
+    var f_rows: ?[]KegRow = null;
+    defer if (f_rows) |r| freeKegRows(allocator, r);
+    var f_entries: ?[]OutdatedEntry = null;
+    defer if (f_entries) |e| freeEntrySlice(allocator, e);
     if (!scope.cask_only) {
-        formula_count = try emitOutdatedFormulas(ctx, allocator, db, &api, cache_dir, workers_override, stdout, json_mode, filter);
+        const rows = try loadFormulaRows(allocator, db, filter);
+        f_rows = rows;
+        f_entries = try collectOutdatedFormulas(ctx, allocator, db, &api, cache_dir, rows, workers_override);
     }
+
+    var c_rows: ?[]KegRow = null;
+    defer if (c_rows) |r| freeKegRows(allocator, r);
+    var c_entries: ?[]OutdatedEntry = null;
+    defer if (c_entries) |e| freeEntrySlice(allocator, e);
     if (!scope.formula_only) {
-        cask_count = try emitOutdatedCasks(ctx, allocator, db, &api, cache_dir, workers_override, stdout, json_mode, filter);
+        const rows = try loadCaskRows(allocator, db, filter);
+        c_rows = rows;
+        c_entries = try collectOutdatedCasks(ctx, allocator, db, &api, cache_dir, rows, workers_override);
     }
+
+    try emitEntries(allocator, stdout, json_mode, scope, .{
+        .formula_entries = f_entries orelse &.{},
+        .formula_rows = f_rows orelse &.{},
+        .cask_entries = c_entries orelse &.{},
+        .cask_rows = c_rows orelse &.{},
+    });
+
     // Refresh the snapshot only when we walked the full keg set; any
     // narrowed recompute (pinned, tap, formula-only, cask-only) would
     // mislead the next reader. Best-effort: a write failure shouldn't
@@ -510,52 +680,4 @@ fn recomputeAndEmit(
     if (refresh_ok) {
         refreshSnapshot(ctx, allocator, db, &api, cache_dir, workers_override) catch {};
     }
-
-    if (!json_mode) {
-        if (summaryMessage(formula_count, cask_count, scope.formula_only, scope.cask_only)) |msg| {
-            output.info("{s}", .{msg});
-        }
-    }
-}
-
-fn emitOutdatedFormulas(
-    ctx: *const AppCtx,
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
-    api: *api_mod.BrewApi,
-    cache_dir: []const u8,
-    workers_override: ?usize,
-    stdout: *std.Io.Writer,
-    json_mode: bool,
-    filter: KegFilter,
-) !usize {
-    const rows = try loadFormulaRows(allocator, db, filter);
-    defer freeKegRows(allocator, rows);
-
-    const entries = try collectOutdatedFormulas(ctx, allocator, db, api, cache_dir, rows, workers_override);
-    defer freeEntrySlice(allocator, entries);
-
-    try render_mod.writeFormulaEntries(allocator, stdout, entries, json_mode);
-    return entries.len;
-}
-
-fn emitOutdatedCasks(
-    ctx: *const AppCtx,
-    allocator: std.mem.Allocator,
-    db: *sqlite.Database,
-    api: *api_mod.BrewApi,
-    cache_dir: []const u8,
-    workers_override: ?usize,
-    stdout: *std.Io.Writer,
-    json_mode: bool,
-    filter: KegFilter,
-) !usize {
-    const rows = try loadCaskRows(allocator, db, filter);
-    defer freeKegRows(allocator, rows);
-
-    const entries = try collectOutdatedCasks(ctx, allocator, db, api, cache_dir, rows, workers_override);
-    defer freeEntrySlice(allocator, entries);
-
-    try render_mod.writeCaskEntries(stdout, entries, json_mode);
-    return entries.len;
 }

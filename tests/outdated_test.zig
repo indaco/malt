@@ -398,6 +398,56 @@ test "loadCaskRows surfaces the owning tap when set" {
     try testing.expect(rows[1].tap == null);
 }
 
+test "loadFormulaRows .all surfaces the pinned flag and tap attribution" {
+    // `mt outdated --json` reads pinned + tap off the keg row so a held
+    // package stays visible with `pinned:true` and rows can name their tap.
+    const path = try setupPinnedPrefix("formula_pinned_tap");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertKeg(&db, "held", true);
+    try insertKegWithTap(&db, "scoped", "user/repo");
+
+    const rows = try outdated_mod.loadFormulaRows(testing.allocator, &db, .all);
+    defer outdated_mod.freeKegRows(testing.allocator, rows);
+
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    // ORDER BY name: 'held' < 'scoped'.
+    try testing.expectEqualStrings("held", rows[0].name);
+    try testing.expect(rows[0].pinned);
+    try testing.expect(rows[0].tap == null);
+
+    try testing.expectEqualStrings("scoped", rows[1].name);
+    try testing.expect(!rows[1].pinned);
+    try testing.expect(rows[1].tap != null);
+    try testing.expectEqualStrings("user/repo", rows[1].tap.?);
+}
+
+test "loadCaskRows .all surfaces the pinned flag" {
+    const path = try setupPinnedPrefix("cask_pinned_flag");
+    defer testing.allocator.free(path);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    var db = try openSeededDb(path);
+    defer db.close();
+    try insertCask(&db, "free-cask", false);
+    try insertCask(&db, "held-cask", true);
+
+    const rows = try outdated_mod.loadCaskRows(testing.allocator, &db, .all);
+    defer outdated_mod.freeKegRows(testing.allocator, rows);
+
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    // ORDER BY token: 'free-cask' < 'held-cask'.
+    try testing.expectEqualStrings("free-cask", rows[0].name);
+    try testing.expect(!rows[0].pinned);
+    try testing.expectEqualStrings("held-cask", rows[1].name);
+    try testing.expect(rows[1].pinned);
+}
+
 test "outdated execute --pinned-only walks pinned casks alongside formulas" {
     const path = try setupPinnedPrefix("exec_pinned_mixed");
     defer testing.allocator.free(path);

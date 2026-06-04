@@ -12,59 +12,68 @@ const output = @import("../../ui/output.zig");
 const snap_mod = @import("snapshot.zig");
 const OutdatedEntry = snap_mod.OutdatedEntry;
 
-/// Render formula rows as a single JSON array (one document, matches
-/// the documented `mt outdated --json` shape) or as styled bullets.
-pub fn writeFormulaEntries(
-    allocator: std.mem.Allocator,
-    stdout: *std.Io.Writer,
-    entries: []const OutdatedEntry,
-    json_mode: bool,
-) !void {
-    if (json_mode) {
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        const w = &aw.writer;
-        try w.writeAll("[");
-        for (entries, 0..) |e, i| {
-            if (i != 0) try w.writeAll(",");
-            try w.writeAll("{\"name\":");
-            try output.jsonStr(w, e.name);
-            try w.writeAll(",\"installed\":");
-            try output.jsonStr(w, e.installed);
-            try w.writeAll(",\"latest\":");
-            try output.jsonStr(w, e.latest);
-            try w.writeAll(",\"type\":\"formula\"}");
-        }
-        try w.writeAll("]\n");
-        stdout.writeAll(aw.written()) catch return;
-        return;
-    }
+/// Which package family a unified-array row describes. Exhaustive
+/// `switch` (no `else`) so a new kind is a compile error at the encoder.
+pub const Kind = enum { formula, cask };
 
+/// One row of the unified `mt outdated --json` array. `pinned` and `tap`
+/// are live DB attributes (not snapshot state), so the orchestrator
+/// stitches them onto the snapshot/recompute entries at emit time.
+/// `tap` is `""` when unattributed — present always, matching how
+/// `mt info` exposes tap.
+pub const Row = struct {
+    name: []const u8,
+    installed: []const u8,
+    latest: []const u8,
+    kind: Kind,
+    pinned: bool,
+    tap: []const u8,
+};
+
+/// Render formula rows as styled bullets. JSON now flows through the
+/// unified `writeJsonArray`; this path is human-only.
+pub fn writeFormulaEntries(stdout: *std.Io.Writer, entries: []const OutdatedEntry) void {
     for (entries) |e| writeEntry(stdout, e, null);
 }
 
-/// Render cask rows. JSON mode streams one document per line (NDJSON)
-/// to match the legacy `mt outdated --json --cask` shape; the human
-/// mode shares the bullet row with formulas plus a `[cask]` kind tag.
-pub fn writeCaskEntries(
-    stdout: *std.Io.Writer,
-    entries: []const OutdatedEntry,
-    json_mode: bool,
-) !void {
-    if (json_mode) {
-        for (entries) |e| {
-            stdout.writeAll("{\"name\":") catch continue;
-            output.jsonStr(stdout, e.name) catch continue;
-            stdout.writeAll(",\"installed\":") catch continue;
-            output.jsonStr(stdout, e.installed) catch continue;
-            stdout.writeAll(",\"latest\":") catch continue;
-            output.jsonStr(stdout, e.latest) catch continue;
-            stdout.writeAll(",\"type\":\"cask\"}\n") catch continue;
-        }
-        return;
-    }
-
+/// Cask sibling of `writeFormulaEntries`: the bullet row plus a `[cask]`
+/// kind tag. Human-only — casks join formulae in the unified JSON array.
+pub fn writeCaskEntries(stdout: *std.Io.Writer, entries: []const OutdatedEntry) void {
     for (entries) |e| writeEntry(stdout, e, "cask");
+}
+
+/// Render a mixed slice of formula + cask rows as one top-level JSON
+/// array — the unified `mt outdated --json` shape. Casks live inside
+/// the array alongside formulae (a deliberate break from the old
+/// per-line cask NDJSON), and every row carries `pinned` + `tap`.
+pub fn writeJsonArray(
+    allocator: std.mem.Allocator,
+    stdout: *std.Io.Writer,
+    rows: []const Row,
+) !void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+    try w.writeAll("[");
+    for (rows, 0..) |r, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try output.jsonStr(w, r.name);
+        try w.writeAll(",\"installed\":");
+        try output.jsonStr(w, r.installed);
+        try w.writeAll(",\"latest\":");
+        try output.jsonStr(w, r.latest);
+        try w.writeAll(switch (r.kind) {
+            .formula => ",\"type\":\"formula\",\"pinned\":",
+            .cask => ",\"type\":\"cask\",\"pinned\":",
+        });
+        try w.writeAll(if (r.pinned) "true" else "false");
+        try w.writeAll(",\"tap\":");
+        try output.jsonStr(w, r.tap);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]\n");
+    stdout.writeAll(aw.written()) catch return;
 }
 
 /// Match the `mt list` / `mt search` row shape: cyan bullet, plain
@@ -111,74 +120,95 @@ fn writeStyledSpan(
     if (use_color) stdout.writeAll(color.Style.reset.code()) catch return;
 }
 
-test "writeFormulaEntries --json emits a single canonical JSON array" {
+test "writeJsonArray emits one array with formulae and casks and all six fields" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
-    const entries = [_]OutdatedEntry{
-        .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
-        .{ .name = @constCast("bravo"), .installed = @constCast("3.0"), .latest = @constCast("4.0") },
+    const rows = [_]Row{
+        .{ .name = "alpha", .installed = "1.0", .latest = "2.0", .kind = .formula, .pinned = false, .tap = "" },
+        .{ .name = "beta-cask", .installed = "3.0", .latest = "4.0", .kind = .cask, .pinned = true, .tap = "user/repo" },
     };
-    try writeFormulaEntries(std.testing.allocator, &aw.writer, &entries, true);
+    try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
 
     const want =
-        \\[{"name":"alpha","installed":"1.0","latest":"2.0","type":"formula"},{"name":"bravo","installed":"3.0","latest":"4.0","type":"formula"}]
+        \\[{"name":"alpha","installed":"1.0","latest":"2.0","type":"formula","pinned":false,"tap":""},{"name":"beta-cask","installed":"3.0","latest":"4.0","type":"cask","pinned":true,"tap":"user/repo"}]
     ++ "\n";
     try std.testing.expectEqualStrings(want, aw.written());
 }
 
-test "writeFormulaEntries --json emits an empty array for no entries" {
-    // Shell-prompt integrations parse the output unconditionally; an
-    // empty array is the documented "nothing outdated" shape.
+test "writeJsonArray keeps casks inside the array, not as per-line NDJSON" {
+    // Regression against the old cask shape: a cask row must be a member
+    // of the single array (no `}\n{` document boundary, no trailing line).
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
-    try writeFormulaEntries(std.testing.allocator, &aw.writer, &.{}, true);
+
+    const rows = [_]Row{
+        .{ .name = "only-cask", .installed = "1.0", .latest = "2.0", .kind = .cask, .pinned = false, .tap = "" },
+    };
+    try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
+
+    const out = aw.written();
+    try std.testing.expect(out[0] == '[');
+    try std.testing.expectEqualStrings("]\n", out[out.len - 2 ..]);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"type\":\"cask\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "}\n{") == null);
+}
+
+test "writeJsonArray comma-separates a formula-only array with no trailing comma" {
+    // Formula-only scope still yields one array (not the old per-kind path).
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    const rows = [_]Row{
+        .{ .name = "alpha", .installed = "1.0", .latest = "2.0", .kind = .formula, .pinned = false, .tap = "" },
+        .{ .name = "bravo", .installed = "3.0", .latest = "4.0", .kind = .formula, .pinned = false, .tap = "" },
+    };
+    try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
+
+    const want =
+        \\[{"name":"alpha","installed":"1.0","latest":"2.0","type":"formula","pinned":false,"tap":""},{"name":"bravo","installed":"3.0","latest":"4.0","type":"formula","pinned":false,"tap":""}]
+    ++ "\n";
+    try std.testing.expectEqualStrings(want, aw.written());
+}
+
+test "writeJsonArray emits an empty array for no rows" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeJsonArray(std.testing.allocator, &aw.writer, &.{});
     try std.testing.expectEqualStrings("[]\n", aw.written());
 }
 
-test "writeFormulaEntries escapes embedded quotes in --json mode" {
-    // Names from third-party taps can contain shell-hostile characters;
-    // the JSON layer has to escape them, not pass them through raw.
+test "writeJsonArray keeps a pinned-but-outdated row with pinned:true" {
+    // Acceptance: pinned packages stay visible rather than being dropped.
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
-    const entries = [_]OutdatedEntry{
-        .{ .name = @constCast("a\"b"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
+    const rows = [_]Row{
+        .{ .name = "held", .installed = "1.0", .latest = "2.0", .kind = .formula, .pinned = true, .tap = "" },
     };
-    try writeFormulaEntries(std.testing.allocator, &aw.writer, &entries, true);
+    try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
 
     const want =
-        \\[{"name":"a\"b","installed":"1.0","latest":"2.0","type":"formula"}]
+        \\[{"name":"held","installed":"1.0","latest":"2.0","type":"formula","pinned":true,"tap":""}]
     ++ "\n";
     try std.testing.expectEqualStrings(want, aw.written());
 }
 
-test "writeCaskEntries --json emits one NDJSON document per entry" {
-    // `mt outdated --json` for casks predates the formula array shape;
-    // changing it would break downstream parsers, so the NDJSON path
-    // is pinned.
+test "writeJsonArray escapes embedded quotes in name and tap" {
+    // Names/labels from third-party taps can carry shell-hostile bytes;
+    // the JSON layer escapes rather than passing them through raw.
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
-    const entries = [_]OutdatedEntry{
-        .{ .name = @constCast("alpha-cask"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
-        .{ .name = @constCast("beta-cask"), .installed = @constCast("3.0"), .latest = @constCast("4.0") },
+    const rows = [_]Row{
+        .{ .name = "a\"b", .installed = "1.0", .latest = "2.0", .kind = .cask, .pinned = false, .tap = "x\"y" },
     };
-    try writeCaskEntries(&aw.writer, &entries, true);
+    try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
 
     const want =
-        \\{"name":"alpha-cask","installed":"1.0","latest":"2.0","type":"cask"}
-        \\{"name":"beta-cask","installed":"3.0","latest":"4.0","type":"cask"}
-        \\
-    ;
+        \\[{"name":"a\"b","installed":"1.0","latest":"2.0","type":"cask","pinned":false,"tap":"x\"y"}]
+    ++ "\n";
     try std.testing.expectEqualStrings(want, aw.written());
-}
-
-test "writeCaskEntries --json writes nothing when entries is empty" {
-    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer aw.deinit();
-    try writeCaskEntries(&aw.writer, &.{}, true);
-    try std.testing.expectEqualStrings("", aw.written());
 }
 
 test "writeFormulaEntries quiet mode prints only the name, no styling" {
@@ -194,7 +224,7 @@ test "writeFormulaEntries quiet mode prints only the name, no styling" {
         .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
         .{ .name = @constCast("bravo"), .installed = @constCast("3.0"), .latest = @constCast("4.0") },
     };
-    try writeFormulaEntries(std.testing.allocator, &aw.writer, &entries, false);
+    writeFormulaEntries(&aw.writer, &entries);
 
     try std.testing.expectEqualStrings("alpha\nbravo\n", aw.written());
 }
@@ -213,7 +243,7 @@ test "writeCaskEntries human mode no-color path adds the [cask] kind tag" {
     const entries = [_]OutdatedEntry{
         .{ .name = @constCast("alpha-cask"), .installed = @constCast("1.0"), .latest = @constCast("2.0") },
     };
-    try writeCaskEntries(&aw.writer, &entries, false);
+    writeCaskEntries(&aw.writer, &entries);
 
     try std.testing.expect(std.mem.indexOf(u8, aw.written(), "alpha-cask") != null);
     try std.testing.expect(std.mem.indexOf(u8, aw.written(), " (1.0)") != null);
