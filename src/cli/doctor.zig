@@ -77,6 +77,7 @@ pub const checks = [_]Check{
     .{ .name = patch.external_tool_name, .run = checkExternalTool },
     .{ .name = "APFS volume", .run = checkApfs },
     .{ .name = "Prefix permissions", .run = checkPrefixPermissions },
+    .{ .name = "Prefix on PATH", .run = checkPrefixPath },
     .{ .name = "Mirror overrides", .run = checkMirrorOverrides },
     .{ .name = "Offline mode", .run = checkOfflineMode },
     .{ .name = "API reachable", .run = checkApiReachable },
@@ -592,6 +593,30 @@ fn checkPrefixPermissions(ctx: CheckCtx, name: []const u8) CheckResult {
         const line = std.fmt.bufPrint(&line_buf, "{s} ({s})", .{ f.path, reason }) catch continue;
         writeStyledDetail(line);
     }
+    return .warn_status;
+}
+
+/// Warn when the prefix's `bin` directory isn't on PATH — the common
+/// cask-install symptom where `malt install`ed commands are "not found"
+/// because nothing ever added `<prefix>/bin` to the user's shell.
+fn checkPrefixPath(ctx: CheckCtx, name: []const u8) CheckResult {
+    var bin_buf: [512]u8 = undefined;
+    const bin = std.fmt.bufPrint(&bin_buf, "{s}/bin", .{ctx.prefix}) catch {
+        printCheck(name, .ok, null);
+        return .ok;
+    };
+    const path_env = std.process.Environ.getPosix(ctx.environ, "PATH") orelse "";
+    if (pathContainsDir(path_env, bin)) {
+        printCheck(name, .ok, null);
+        return .ok;
+    }
+    var msg_buf: [640]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "{s} is not on PATH — installed commands won't be found. Add: export PATH=\"{s}:$PATH\"",
+        .{ bin, bin },
+    ) catch "Prefix bin directory is not on PATH";
+    printCheck(name, .warn_status, msg);
     return .warn_status;
 }
 
@@ -1111,6 +1136,21 @@ fn hasUnpatchedPlaceholder(
     return false;
 }
 
+/// True if `dir` appears as a complete, colon-separated entry in `path_env`.
+/// Whole-entry match (not substring) so `/opt/malt/binary` never satisfies a
+/// query for `/opt/malt/bin`; trailing slashes on either side are ignored.
+/// `pub` so the membership logic is unit-tested without a fabricated environ.
+pub fn pathContainsDir(path_env: []const u8, dir: []const u8) bool {
+    const want = std.mem.trimEnd(u8, dir, "/");
+    if (want.len == 0) return false;
+    var it = std.mem.splitScalar(u8, path_env, ':');
+    while (it.next()) |entry| {
+        if (entry.len == 0) continue;
+        if (std.mem.eql(u8, std.mem.trimEnd(u8, entry, "/"), want)) return true;
+    }
+    return false;
+}
+
 /// Fast existence check for a platform relocation tool on PATH.
 /// Tries `/usr/bin/<tool>` first (where Xcode Command Line Tools land
 /// install_name_tool) and then walks `PATH` entry-by-entry. `pub` so
@@ -1309,6 +1349,41 @@ test "checks table includes the mirror-overrides row" {
     var found = false;
     for (checks) |c| {
         if (std.mem.eql(u8, c.name, "Mirror overrides")) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "pathContainsDir: matches a complete entry, ignores trailing slashes" {
+    // The "Prefix on PATH" check is only correct if it matches whole PATH
+    // entries — a substring match would falsely pass for `/opt/malt/binary`
+    // when only `/opt/malt/bin` is wanted, hiding a broken PATH from the user.
+    try testing.expect(pathContainsDir("/opt/malt/bin:/usr/bin", "/opt/malt/bin"));
+    try testing.expect(pathContainsDir("/usr/bin:/opt/malt/bin", "/opt/malt/bin"));
+    try testing.expect(pathContainsDir("/a:/opt/malt/bin:/b", "/opt/malt/bin"));
+    // Trailing slash on either side must not defeat the match.
+    try testing.expect(pathContainsDir("/opt/malt/bin/:/usr/bin", "/opt/malt/bin"));
+    try testing.expect(pathContainsDir("/opt/malt/bin", "/opt/malt/bin/"));
+}
+
+test "pathContainsDir: rejects substrings, missing entries, and empties" {
+    try testing.expect(!pathContainsDir("/opt/malt/binary:/usr/bin", "/opt/malt/bin"));
+    try testing.expect(!pathContainsDir("/usr/bin:/usr/local/bin", "/opt/malt/bin"));
+    try testing.expect(!pathContainsDir("", "/opt/malt/bin"));
+    try testing.expect(!pathContainsDir("::", "/opt/malt/bin"));
+    // A degenerate prefix must never match an empty PATH entry.
+    try testing.expect(!pathContainsDir("/usr/bin::/bin", "/"));
+}
+
+test "checks table includes the prefix-on-PATH row" {
+    // Pins the onboarding signal: without this row a cask user whose
+    // /opt/malt/bin isn't exported gets no hint why installed commands
+    // are "not found".
+    var found = false;
+    for (checks) |c| {
+        if (std.mem.eql(u8, c.name, "Prefix on PATH")) {
             found = true;
             break;
         }
