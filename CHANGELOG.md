@@ -4,6 +4,71 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.16.0 - 2026-06-04
+
+### Highlights
+
+v0.16.0 frees your taps from GitHub - they can now live on any major forge - and smooths the first run after a Homebrew install.
+
+- **Taps on any major forge.** Third-party taps resolve through the forge API - no full clone - on GitHub, GitLab (incl. self-hosted), Codeberg/Forgejo/Gitea, and Gogs, each with its own token for private taps. See [Supported forges](https://github.com/indaco/malt#supported-forges).
+- **A cleaner setup after `brew install`.** The cask now lands in a usable prefix and points you at a PATH that works, and the first failed install reports its real cause instead of phantom lock contention.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🚀 Enhancements
+
+- **core/forge:** resolve taps hosted on Gogs ([7988a38](https://github.com/indaco/malt/commit/7988a38)) ([#432](https://github.com/indaco/malt/pull/432))
+- **core/tap:** validate a tap pin against its own forge ([a04e23e](https://github.com/indaco/malt/commit/a04e23e)) ([#428](https://github.com/indaco/malt/pull/428))
+- **cli/install:** derive tap version from GitLab/Gitea archive URLs ([662c2e1](https://github.com/indaco/malt/commit/662c2e1)) ([#427](https://github.com/indaco/malt/pull/427))
+- **core/forge:** resolve taps hosted on Codeberg/Forgejo ([5ed8f5e](https://github.com/indaco/malt/commit/5ed8f5e)) ([#425](https://github.com/indaco/malt/pull/425))
+- **core/forge:** resolve taps hosted on GitLab, including self-hosted ([16d5fa2](https://github.com/indaco/malt/commit/16d5fa2)) ([#424](https://github.com/indaco/malt/pull/424))
+- **cli/tap:** register taps on GitLab/Codeberg via --host ([694b59d](https://github.com/indaco/malt/commit/694b59d)) ([#421](https://github.com/indaco/malt/pull/421))
+- **db,core/tap:** persist the forge host for each tap ([4881ba2](https://github.com/indaco/malt/commit/4881ba2)) ([#420](https://github.com/indaco/malt/pull/420))
+
+### 🩹 Fixes
+
+- guide cask users to a usable prefix and a working PATH ([3249f29](https://github.com/indaco/malt/commit/3249f29)) ([#435](https://github.com/indaco/malt/pull/435))
+- **cli:** replace phantom lock-contention errors with the real cause ([3cf273c](https://github.com/indaco/malt/commit/3cf273c)) ([#434](https://github.com/indaco/malt/pull/434))
+
+### 💅 Refactors
+
+- **core/forge:** rename the Gitea-family forge to gitea ([cdbe65f](https://github.com/indaco/malt/commit/cdbe65f)) ([#431](https://github.com/indaco/malt/pull/431))
+- **core/tap:** name the tap's own forge in resolve errors ([e54b9e3](https://github.com/indaco/malt/commit/e54b9e3)) ([#429](https://github.com/indaco/malt/pull/429))
+- **net,core/forge:** attach forge auth explicitly, harden host-match ([919a67e](https://github.com/indaco/malt/commit/919a67e)) ([#423](https://github.com/indaco/malt/pull/423))
+- **core:** extract a forge seam for tap URL/HEAD/auth resolution ([beff3fa](https://github.com/indaco/malt/commit/beff3fa)) ([#418](https://github.com/indaco/malt/pull/418))
+
+### 📖 Documentation
+
+- document supported tap forges and the archive-pin caveat ([80a0bb6](https://github.com/indaco/malt/commit/80a0bb6)) ([#430](https://github.com/indaco/malt/pull/430))
+- **readme:** document GitLab and Codeberg forge token env vars ([d13409a](https://github.com/indaco/malt/commit/d13409a)) ([#426](https://github.com/indaco/malt/pull/426))
+
+### 🏡 Chores
+
+- **pins:** sync the homebrew-core manifest with the pinned commit ([75fd910](https://github.com/indaco/malt/commit/75fd910)) ([#433](https://github.com/indaco/malt/pull/433))
+- **pins:** drop node@20/22/24 from the post-install allowlist ([4129a5f](https://github.com/indaco/malt/commit/4129a5f)) ([#422](https://github.com/indaco/malt/pull/422))
+
+### 🤖 CI
+
+- bump sigstore/cosign-installer from 4.1.1 to 4.1.2 ([2a67c80](https://github.com/indaco/malt/commit/2a67c80)) ([#419](https://github.com/indaco/malt/pull/419))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@dependabot[bot]](https://github.com/dependabot[bot])
+
 ## v0.15.0 - 2026-06-02
 
 ### Highlights
