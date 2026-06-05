@@ -109,6 +109,16 @@ test "all outdated completions expose --refresh" {
     try expectContains(completions.fish_script, "-l refresh");
 }
 
+test "all doctor completions offer the --fix class ids" {
+    // The `--fix <id>` selector is only discoverable if each shell
+    // offers the safe-fix class ids as completion candidates. All three
+    // embed the same space-joined id list, so one needle pins them all.
+    const ids = "stale_lock orphaned_store broken_symlinks";
+    try expectContains(completions.bash_script, ids);
+    try expectContains(completions.zsh_script, ids);
+    try expectContains(completions.fish_script, ids);
+}
+
 test "all outdated completions expose --tap" {
     // bash carries `--tap` in the outdated cmd_flags list; zsh's
     // per-command _arguments block names it with a `:tap label:` slot;
