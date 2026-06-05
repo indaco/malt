@@ -126,6 +126,10 @@ export MALT_PREFIX="$PREFIX"
 export MALT_CACHE="$CACHE"
 export MALT_NO_EMOJI=1
 export NO_COLOR=1
+# Put the install prefix's bin on PATH — the realistic post-install state, and
+# what `mt doctor`'s "Prefix on PATH" check expects. Without it doctor emits a
+# warning and exits non-zero, failing the smoke for an environmental reason.
+export PATH="$PREFIX/bin:$PATH"
 
 # ── 1. Install ────────────────────────────────────────────────────────────
 log "installing ${PACKAGES[*]} into $PREFIX …"
