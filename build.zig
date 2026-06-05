@@ -216,6 +216,7 @@ pub fn build(b: *std.Build) void {
         "tests/doctor_dispatch_test.zig",
         "tests/doctor_cask_history_test.zig",
         "tests/doctor_tap_forge_test.zig",
+        "tests/doctor_json_test.zig",
         "tests/info_cli_test.zig",
         "tests/backup_cli_test.zig",
         "tests/run_cli_test.zig",
