@@ -4,7 +4,7 @@
 # Pinned behaviour:
 #   1. With taps registered, `mt doctor` lists each one as `<name> [<host>]`
 #      under a "Registered taps" block — github and off-github alike.
-#   2. `mt doctor --json` carries a `{"taps":[{"name","host"},...]}` payload.
+#   2. `mt doctor --json` carries a `"taps":[{"name","host"},...]` member.
 #   3. On a prefix with no taps, the block is silent (no "Registered taps").
 #
 # Registration and doctor render never touch the network, so this runs offline.
@@ -48,7 +48,7 @@ printf '%s' "$human" | grep -q 'grp/tap \[gitlab.com\]' ||
   fail 'doctor did not list the gitlab tap with its host'
 
 json=$("$MALT_BIN" doctor --json 2>/dev/null || true)
-printf '%s' "$json" | grep -q '{"taps":\[' ||
+printf '%s' "$json" | grep -q '"taps":\[' ||
   fail 'doctor --json missing the taps payload'
 printf '%s' "$json" | grep -q '"name":"grp/tap","host":"gitlab.com"' ||
   fail 'doctor --json did not carry the gitlab tap name+host'

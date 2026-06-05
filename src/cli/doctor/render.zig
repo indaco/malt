@@ -80,12 +80,12 @@ pub const fix_ids_csv = blk: {
     break :blk s;
 };
 
-/// Serialize findings as a `{"checks":[...]}` object. Pure writer so
-/// tests pin the bytes; every string routes through the shared JSON
-/// escaper. `detail` is always present (empty string when the row had
-/// no detail) so consumers never special-case a missing field.
-pub fn writeChecksJson(w: *std.Io.Writer, findings: []const Finding) !void {
-    try w.writeAll("{\"checks\":[");
+/// Write the `"checks":[...]` field (no surrounding braces, no newline)
+/// so the doctor `--json` merger can embed it as one member of the single
+/// versioned root. `detail` is always present (empty string when the row
+/// had no detail) so consumers never special-case a missing field.
+pub fn writeChecksField(w: *std.Io.Writer, findings: []const Finding) !void {
+    try w.writeAll("\"checks\":[");
     for (findings, 0..) |f, i| {
         if (i != 0) try w.writeAll(",");
         try w.writeAll("{\"id\":");
@@ -100,7 +100,15 @@ pub fn writeChecksJson(w: *std.Io.Writer, findings: []const Finding) !void {
         try output.jsonStr(w, fixClassTag(f.fix_class));
         try w.writeAll("}");
     }
-    try w.writeAll("]}\n");
+    try w.writeAll("]");
+}
+
+/// Serialize findings as a standalone `{"checks":[...]}` object. Pure
+/// writer so tests pin the bytes; wraps `writeChecksField`.
+pub fn writeChecksJson(w: *std.Io.Writer, findings: []const Finding) !void {
+    try w.writeAll("{");
+    try writeChecksField(w, findings);
+    try w.writeAll("}\n");
 }
 
 pub const CheckStyle = struct {

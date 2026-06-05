@@ -532,6 +532,19 @@ pub fn jsonStringArray(w: *std.Io.Writer, items: []const []const u8) !void {
     try w.writeAll("]");
 }
 
+/// Version stamped on every read command's `--json` root (`list`, `info`,
+/// `outdated`, `services`, `doctor`). Bump when a documented field shape
+/// changes so consumers can refuse a shape they don't understand —
+/// documented in `docs/json-schema.md`.
+pub const json_schema_version: u32 = 1;
+
+/// Write the opening `{"schema_version":N,` of a versioned `--json` root.
+/// The caller appends its own fields and the closing `}`. Centralises the
+/// version so a bump touches one constant, not every read command.
+pub fn writeSchemaVersionPrefix(w: *std.Io.Writer) !void {
+    try w.print("{{\"schema_version\":{d},", .{json_schema_version});
+}
+
 /// Write the `,"time_ms":N` suffix used by `--json` commands; `start_ts` is a `milliTimestamp()`.
 pub fn jsonTimeSuffix(w: *std.Io.Writer, start_ts: i64) !void {
     const elapsed = std.Io.Clock.real.now(pkg_io).toMilliseconds() - start_ts;
@@ -693,6 +706,13 @@ test "notice is suppressed by --quiet" {
 
     notice("hidden", .{});
     try std.testing.expectEqualStrings("", buf.items);
+}
+
+test "writeSchemaVersionPrefix opens a versioned object root" {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeSchemaVersionPrefix(&aw.writer);
+    try std.testing.expectEqualStrings("{\"schema_version\":1,", aw.written());
 }
 
 test "isNdjson defaults to false and setNdjson toggles it" {

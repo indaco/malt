@@ -1,9 +1,9 @@
 //! malt — outdated render helpers
 //!
-//! Presentation layer for `mt outdated` rows: JSON (one document for
-//! formulas, NDJSON for casks — matches the legacy CLI shape) and the
-//! human row format shared with `mt list` / `mt search`. Pulled into
-//! its own module so the orchestrator stays focused on dispatch.
+//! Presentation layer for `mt outdated` rows: one versioned JSON root
+//! (`{"schema_version":1,"outdated":[...]}`) carrying formulae and casks,
+//! and the human row format shared with `mt list` / `mt search`. Pulled
+//! into its own module so the orchestrator stays focused on dispatch.
 
 const std = @import("std");
 
@@ -42,10 +42,11 @@ pub fn writeCaskEntries(stdout: *std.Io.Writer, entries: []const OutdatedEntry) 
     for (entries) |e| writeEntry(stdout, e, "cask");
 }
 
-/// Render a mixed slice of formula + cask rows as one top-level JSON
-/// array — the unified `mt outdated --json` shape. Casks live inside
-/// the array alongside formulae (a deliberate break from the old
-/// per-line cask NDJSON), and every row carries `pinned` + `tap`.
+/// Render a mixed slice of formula + cask rows under one versioned JSON
+/// root — `{"schema_version":1,"outdated":[...]}`. Casks live inside the
+/// array alongside formulae (a deliberate break from the old per-line
+/// cask NDJSON), and every row carries `pinned` + `tap`. The object wrap
+/// gives the array a root that can carry `schema_version`.
 pub fn writeJsonArray(
     allocator: std.mem.Allocator,
     stdout: *std.Io.Writer,
@@ -54,7 +55,8 @@ pub fn writeJsonArray(
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     const w = &aw.writer;
-    try w.writeAll("[");
+    try output.writeSchemaVersionPrefix(w);
+    try w.writeAll("\"outdated\":[");
     for (rows, 0..) |r, i| {
         if (i != 0) try w.writeAll(",");
         try w.writeAll("{\"name\":");
@@ -72,7 +74,7 @@ pub fn writeJsonArray(
         try output.jsonStr(w, r.tap);
         try w.writeAll("}");
     }
-    try w.writeAll("]\n");
+    try w.writeAll("]}\n");
     stdout.writeAll(aw.written()) catch return;
 }
 
@@ -120,7 +122,7 @@ fn writeStyledSpan(
     if (use_color) stdout.writeAll(color.Style.reset.code()) catch return;
 }
 
-test "writeJsonArray emits one array with formulae and casks and all six fields" {
+test "writeJsonArray wraps formulae and casks in a versioned root with all six fields" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
@@ -131,7 +133,7 @@ test "writeJsonArray emits one array with formulae and casks and all six fields"
     try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
 
     const want =
-        \\[{"name":"alpha","installed":"1.0","latest":"2.0","type":"formula","pinned":false,"tap":""},{"name":"beta-cask","installed":"3.0","latest":"4.0","type":"cask","pinned":true,"tap":"user/repo"}]
+        \\{"schema_version":1,"outdated":[{"name":"alpha","installed":"1.0","latest":"2.0","type":"formula","pinned":false,"tap":""},{"name":"beta-cask","installed":"3.0","latest":"4.0","type":"cask","pinned":true,"tap":"user/repo"}]}
     ++ "\n";
     try std.testing.expectEqualStrings(want, aw.written());
 }
@@ -148,8 +150,8 @@ test "writeJsonArray keeps casks inside the array, not as per-line NDJSON" {
     try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
 
     const out = aw.written();
-    try std.testing.expect(out[0] == '[');
-    try std.testing.expectEqualStrings("]\n", out[out.len - 2 ..]);
+    try std.testing.expect(std.mem.startsWith(u8, out, "{\"schema_version\":1,\"outdated\":["));
+    try std.testing.expectEqualStrings("]}\n", out[out.len - 3 ..]);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"type\":\"cask\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "}\n{") == null);
 }
@@ -166,16 +168,16 @@ test "writeJsonArray comma-separates a formula-only array with no trailing comma
     try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
 
     const want =
-        \\[{"name":"alpha","installed":"1.0","latest":"2.0","type":"formula","pinned":false,"tap":""},{"name":"bravo","installed":"3.0","latest":"4.0","type":"formula","pinned":false,"tap":""}]
+        \\{"schema_version":1,"outdated":[{"name":"alpha","installed":"1.0","latest":"2.0","type":"formula","pinned":false,"tap":""},{"name":"bravo","installed":"3.0","latest":"4.0","type":"formula","pinned":false,"tap":""}]}
     ++ "\n";
     try std.testing.expectEqualStrings(want, aw.written());
 }
 
-test "writeJsonArray emits an empty array for no rows" {
+test "writeJsonArray emits an empty array under the versioned root for no rows" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     try writeJsonArray(std.testing.allocator, &aw.writer, &.{});
-    try std.testing.expectEqualStrings("[]\n", aw.written());
+    try std.testing.expectEqualStrings("{\"schema_version\":1,\"outdated\":[]}\n", aw.written());
 }
 
 test "writeJsonArray keeps a pinned-but-outdated row with pinned:true" {
@@ -189,7 +191,7 @@ test "writeJsonArray keeps a pinned-but-outdated row with pinned:true" {
     try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
 
     const want =
-        \\[{"name":"held","installed":"1.0","latest":"2.0","type":"formula","pinned":true,"tap":""}]
+        \\{"schema_version":1,"outdated":[{"name":"held","installed":"1.0","latest":"2.0","type":"formula","pinned":true,"tap":""}]}
     ++ "\n";
     try std.testing.expectEqualStrings(want, aw.written());
 }
@@ -206,7 +208,7 @@ test "writeJsonArray escapes embedded quotes in name and tap" {
     try writeJsonArray(std.testing.allocator, &aw.writer, &rows);
 
     const want =
-        \\[{"name":"a\"b","installed":"1.0","latest":"2.0","type":"cask","pinned":false,"tap":"x\"y"}]
+        \\{"schema_version":1,"outdated":[{"name":"a\"b","installed":"1.0","latest":"2.0","type":"cask","pinned":false,"tap":"x\"y"}]}
     ++ "\n";
     try std.testing.expectEqualStrings(want, aw.written());
 }

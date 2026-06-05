@@ -337,7 +337,7 @@ fn writeJsonOutput(
     try buildListJson(db, stdout, ctx.io, prefix, show_formula, show_cask, show_pinned, show_size, show_linked, tap_filter, start_ts);
 }
 
-/// Build the `{ "installed": [...], "formulae": [...], "casks": [...], "time_ms": N }`
+/// Build the `{ "schema_version": 1, "installed": [...], "formulae": [...], "casks": [...], "time_ms": N }`
 /// payload into `w`. Kept `pub` so tests can assert on the exact bytes without
 /// going through a real file. On per-section SQLite failures we emit an empty
 /// array for that section rather than truncating the whole document.
@@ -358,7 +358,8 @@ pub fn buildListJson(
     // formulae/casks arrays stay byte-stable for existing consumers.
     const extras: Extras = .{ .io = io, .prefix = prefix, .size = show_size, .linked = show_linked };
 
-    try w.writeAll("{\"installed\":[");
+    try output.writeSchemaVersionPrefix(w);
+    try w.writeAll("\"installed\":[");
     var first = true;
     if (show_pinned) {
         try writePinnedInstalled(db, w, show_formula, show_cask, tap_filter, extras, &first);

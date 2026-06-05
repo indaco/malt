@@ -173,15 +173,23 @@ pub fn writeHumanEntries(w: *std.Io.Writer, census: Census) !void {
     }
 }
 
-/// Emit doctor's `--json` payload as a single line. The schema stays
-/// stable across the empty case (zero values, not omission) so
-/// scripted consumers can always read `cask_history.retained_versions`
-/// and `cask_history.bytes`. Pure for byte-pinning tests.
-pub fn writeJson(w: *std.Io.Writer, census: Census) !void {
+/// Write the `"cask_history":{...}` field (no braces/newline) for the
+/// doctor `--json` merger. The schema stays stable across the empty case
+/// (zero values, not omission) so scripted consumers can always read
+/// `cask_history.retained_versions` and `cask_history.bytes`.
+pub fn writeField(w: *std.Io.Writer, census: Census) !void {
     try w.print(
-        "{{\"cask_history\":{{\"retained_versions\":{d},\"bytes\":{d}}}}}\n",
+        "\"cask_history\":{{\"retained_versions\":{d},\"bytes\":{d}}}",
         .{ census.entries.len, census.total_bytes },
     );
+}
+
+/// Standalone single-line `{"cask_history":{...}}` document. Pure for
+/// byte-pinning tests; wraps `writeField`.
+pub fn writeJson(w: *std.Io.Writer, census: Census) !void {
+    try w.writeAll("{");
+    try writeField(w, census);
+    try w.writeAll("}\n");
 }
 
 /// Format a byte count as `{d:.1} {unit}` (B/KB/MB/GB/TB). Local mirror

@@ -104,7 +104,7 @@ test "emitTapForgeReport: human mode stays silent when no taps are registered" {
     try testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
 }
 
-test "emitTapForgeReport: --json emits the taps payload on stdout" {
+test "emitDoctorJson: the merged --json carries the taps payload on stdout" {
     const allocator = testing.allocator;
     var s = try Scratch.init(allocator, "json");
     defer s.deinit(allocator);
@@ -119,16 +119,19 @@ test "emitTapForgeReport: --json emits the taps payload on stdout" {
     output.beginStdoutCapture(allocator, &stdout_buf);
     defer output.endStdoutCapture();
 
-    doctor.emitTapForgeReport(allocator, s.path);
+    // The taps data is now one member of the single merged document.
+    doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, &.{});
 
-    try testing.expectEqualStrings(
-        "{\"taps\":[{\"name\":\"user/repo\",\"host\":\"github.com\"}," ++
-            "{\"name\":\"grp/tap\",\"host\":\"gitlab.com\"}]}\n",
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"schema_version\":1") != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
         stdout_buf.items,
-    );
+        "\"taps\":[{\"name\":\"user/repo\",\"host\":\"github.com\"}," ++
+            "{\"name\":\"grp/tap\",\"host\":\"gitlab.com\"}]",
+    ) != null);
 }
 
-test "emitTapForgeReport: --json emits an empty array when no taps exist" {
+test "emitDoctorJson: the merged --json keeps an empty taps array when no taps exist" {
     const allocator = testing.allocator;
     var s = try Scratch.init(allocator, "json_empty");
     defer s.deinit(allocator);
@@ -142,7 +145,7 @@ test "emitTapForgeReport: --json emits an empty array when no taps exist" {
     output.beginStdoutCapture(allocator, &stdout_buf);
     defer output.endStdoutCapture();
 
-    doctor.emitTapForgeReport(allocator, s.path);
+    doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, &.{});
 
-    try testing.expectEqualStrings("{\"taps\":[]}\n", stdout_buf.items);
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"taps\":[]") != null);
 }
