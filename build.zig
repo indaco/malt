@@ -242,6 +242,8 @@ pub fn build(b: *std.Build) void {
         "tests/linker_isolation_test.zig",
         "tests/install_isolation_test.zig",
         "tests/doctor_isolation_test.zig",
+        "tests/tui_term_test.zig",
+        "tests/tui_purity_test.zig",
     };
 
     const test_step = b.step("test", "Run all unit tests");
