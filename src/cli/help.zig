@@ -48,6 +48,7 @@ pub fn helpFor(command: []const u8) []const u8 {
         .{ "which", which_help },
         .{ "pin", pin_help },
         .{ "unpin", unpin_help },
+        .{ "tui", tui_help },
     });
     return map.get(command) orelse "No help available.\n";
 }
@@ -645,6 +646,21 @@ const deps_help =
     \\  malt deps --recursive ffmpeg
     \\  malt deps --installed -r node@20
     \\  malt --json deps wget
+    \\
+;
+
+const tui_help =
+    \\Usage: malt tui
+    \\
+    \\Launch the interactive dashboard: a tab bar (Installed, Outdated,
+    \\Services, Doctor), a `/`-activated filter, and a list that reflows
+    \\live as you resize the terminal. Switch tabs with `tab`, the left/right
+    \\arrows, or `1`-`4`; quit with `q` or Ctrl-C.
+    \\
+    \\Reads come from `mt … --json`; actions delegate to the real `mt`
+    \\subcommands. Requires an interactive terminal — on a pipe, in CI, or
+    \\with NO_COLOR set it refuses to launch (exit 2) rather than emit a
+    \\corrupted frame.
     \\
 ;
 
