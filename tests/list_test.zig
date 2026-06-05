@@ -226,7 +226,7 @@ test "buildListJson: empty DB, both flags" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[],\"formulae\":[],\"casks\":[]",
+        "{\"schema_version\":1,\"installed\":[],\"formulae\":[],\"casks\":[]",
         body,
     );
     // Suffix structure intact.
@@ -246,7 +246,7 @@ test "buildListJson: formula-only, two kegs, pinned flag preserved" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"alpha\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":false}," ++
             "{\"name\":\"bravo\",\"version\":\"2.1\",\"type\":\"formula\",\"pinned\":true}" ++
             "],\"formulae\":[" ++
@@ -268,7 +268,7 @@ test "buildListJson: cask-only, one cask" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"firefox\",\"version\":\"120.0\",\"type\":\"cask\",\"pinned\":false}" ++
             "],\"casks\":[" ++
             "{\"token\":\"firefox\",\"version\":\"120.0\"}" ++
@@ -294,7 +294,7 @@ test "buildListJson: cask .installed row carries pinned, matching formulae" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"held\",\"version\":\"2.0\",\"type\":\"cask\",\"pinned\":true}," ++
             "{\"name\":\"loose\",\"version\":\"1.0\",\"type\":\"cask\",\"pinned\":false}" ++
             "],\"casks\":[" ++
@@ -317,7 +317,7 @@ test "buildListJson: mixed kegs and casks, comma between types in installed" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"zsh\",\"version\":\"5.9\",\"type\":\"formula\",\"pinned\":false}," ++
             "{\"name\":\"slack\",\"version\":\"4.0\",\"type\":\"cask\",\"pinned\":false}" ++
             "],\"formulae\":[" ++
@@ -341,7 +341,7 @@ test "buildListJson: --pinned filters formulae to pinned only" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"two\",\"version\":\"2.0\",\"type\":\"formula\",\"pinned\":true}" ++
             "],\"formulae\":[" ++
             "{\"name\":\"two\",\"version\":\"2.0\",\"pinned\":true}" ++
@@ -369,7 +369,7 @@ test "buildListJson: --pinned UNIONs pinned formulas and casks sorted by name" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"firefox\",\"version\":\"120.0\",\"type\":\"cask\",\"pinned\":true}," ++
             "{\"name\":\"zsh\",\"version\":\"5.9\",\"type\":\"formula\",\"pinned\":true}" ++
             "],\"formulae\":[" ++
@@ -400,7 +400,7 @@ test "buildListJson: --pinned installed array interleaves formulas and casks by 
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"alpha\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":true}," ++
             "{\"name\":\"bravo\",\"version\":\"2.0\",\"type\":\"cask\",\"pinned\":true}," ++
             "{\"name\":\"charlie\",\"version\":\"3.0\",\"type\":\"formula\",\"pinned\":true}," ++
@@ -431,7 +431,7 @@ test "buildListJson: --pinned legacy casks array excludes unpinned casks" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"held-cask\",\"version\":\"2.0\",\"type\":\"cask\",\"pinned\":true}" ++
             "],\"casks\":[" ++
             "{\"token\":\"held-cask\",\"version\":\"2.0\"}" ++
@@ -573,7 +573,7 @@ test "buildListJson --tap filters both installed and legacy arrays" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"tap-formula\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":false}," ++
             "{\"name\":\"tap-cask\",\"version\":\"3.0\",\"type\":\"cask\",\"pinned\":false}" ++
             "],\"formulae\":[" ++
@@ -596,7 +596,7 @@ test "buildListJson --tap with no matches produces empty arrays" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[],\"formulae\":[],\"casks\":[]",
+        "{\"schema_version\":1,\"installed\":[],\"formulae\":[],\"casks\":[]",
         body,
     );
 }
@@ -616,7 +616,7 @@ test "buildListJson --tap with --pinned cross-filters" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"held\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":true}" ++
             "],\"formulae\":[" ++
             "{\"name\":\"held\",\"version\":\"1.0\",\"pinned\":true}" ++
@@ -694,7 +694,7 @@ test "buildListJson --size sums size_bytes from the keg cellar dir" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"treesize\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":false,\"size_bytes\":8}" ++
             "],\"formulae\":[" ++
             "{\"name\":\"treesize\",\"version\":\"1.0\",\"pinned\":false}" ++
@@ -762,7 +762,7 @@ test "buildListJson --size sums a cask's Caskroom dir and app_path bundle" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"widget\",\"version\":\"1.0\",\"type\":\"cask\",\"pinned\":false,\"size_bytes\":10}" ++
             "],\"casks\":[" ++
             "{\"token\":\"widget\",\"version\":\"1.0\"}" ++
@@ -847,7 +847,7 @@ test "buildListJson --linked reports keg link status from the links table" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"active\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":false,\"linked\":true}," ++
             "{\"name\":\"dormant\",\"version\":\"2.0\",\"type\":\"formula\",\"pinned\":false,\"linked\":false}" ++
             "],\"formulae\":[" ++
@@ -869,7 +869,7 @@ test "buildListJson --linked reports casks as always linked" {
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"firefox\",\"version\":\"120.0\",\"type\":\"cask\",\"pinned\":false,\"linked\":true}" ++
             "],\"casks\":[" ++
             "{\"token\":\"firefox\",\"version\":\"120.0\"}" ++
@@ -936,7 +936,7 @@ test "buildListJson --tap --size --linked keeps column alignment in the tap SQL"
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"tapped\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":false,\"size_bytes\":3,\"linked\":true}" ++
             "],\"formulae\":[" ++
             "{\"name\":\"tapped\",\"version\":\"1.0\",\"pinned\":false}" ++
@@ -971,7 +971,7 @@ test "buildListJson --pinned --size --linked enriches the pinned installed rows"
 
     const body = trimTimeSuffix(out);
     try testing.expectEqualStrings(
-        "{\"installed\":[" ++
+        "{\"schema_version\":1,\"installed\":[" ++
             "{\"name\":\"held\",\"version\":\"1.0\",\"type\":\"formula\",\"pinned\":true,\"size_bytes\":4,\"linked\":true}" ++
             "],\"formulae\":[" ++
             "{\"name\":\"held\",\"version\":\"1.0\",\"pinned\":true}" ++

@@ -25,10 +25,12 @@ pub const JsonRow = struct {
     keg_name: []const u8,
 };
 
-/// Emit `[{name,state,auto_start,keg_name},...]\n` for
-/// `mt services list --json` and `mt services status <name> --json`.
+/// Emit `{"schema_version":1,"services":[{name,state,auto_start,keg_name},...]}\n`
+/// for `mt services list --json` and `mt services status <name> --json`. The
+/// object wrap gives the row array a root that can carry `schema_version`.
 pub fn writeServicesJson(w: *std.Io.Writer, rows: []const JsonRow) !void {
-    try w.writeAll("[");
+    try output.writeSchemaVersionPrefix(w);
+    try w.writeAll("\"services\":[");
     for (rows, 0..) |row, i| {
         if (i != 0) try w.writeAll(",");
         try w.writeAll("{\"name\":");
@@ -41,7 +43,7 @@ pub fn writeServicesJson(w: *std.Io.Writer, rows: []const JsonRow) !void {
         try output.jsonStr(w, row.keg_name);
         try w.writeAll("}");
     }
-    try w.writeAll("]\n");
+    try w.writeAll("]}\n");
 }
 
 pub fn describeError(err: ServicesError) []const u8 {
@@ -224,14 +226,14 @@ fn openDb(ctx: *const AppCtx) !sqlite.Database {
     return sqlite.Database.open(path);
 }
 
-test "writeServicesJson: empty input emits `[]\\n`" {
+test "writeServicesJson: empty input still emits the versioned root with an empty array" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     try writeServicesJson(&aw.writer, &.{});
-    try std.testing.expectEqualStrings("[]\n", aw.written());
+    try std.testing.expectEqualStrings("{\"schema_version\":1,\"services\":[]}\n", aw.written());
 }
 
-test "writeServicesJson: emits name, state, auto_start, keg_name per row" {
+test "writeServicesJson: emits name, state, auto_start, keg_name per row under the versioned root" {
     const rows = [_]JsonRow{
         .{ .name = "redis", .state = "running", .auto_start = true, .keg_name = "redis" },
         .{ .name = "postgres", .state = "not-loaded", .auto_start = false, .keg_name = "postgresql@16" },
@@ -240,10 +242,10 @@ test "writeServicesJson: emits name, state, auto_start, keg_name per row" {
     defer aw.deinit();
     try writeServicesJson(&aw.writer, &rows);
     try std.testing.expectEqualStrings(
-        "[" ++
+        "{\"schema_version\":1,\"services\":[" ++
             "{\"name\":\"redis\",\"state\":\"running\",\"auto_start\":true,\"keg_name\":\"redis\"}," ++
             "{\"name\":\"postgres\",\"state\":\"not-loaded\",\"auto_start\":false,\"keg_name\":\"postgresql@16\"}" ++
-            "]\n",
+            "]}\n",
         aw.written(),
     );
 }

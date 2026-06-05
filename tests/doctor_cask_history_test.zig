@@ -145,7 +145,7 @@ test "emitCaskHistoryReport: --verbose lists every retained (token version) unde
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "        alpha 1.5") != null);
 }
 
-test "emitCaskHistoryReport: --json emits the cask_history payload on stdout" {
+test "emitDoctorJson: the merged --json carries the cask_history payload on stdout" {
     const allocator = testing.allocator;
     var s = try Scratch.init(allocator, "json");
     defer s.deinit(allocator);
@@ -165,39 +165,15 @@ test "emitCaskHistoryReport: --json emits the cask_history payload on stdout" {
     output.beginStderrCapture(allocator, &stderr_buf);
     defer output.endStderrCapture();
 
-    doctor.emitCaskHistoryReport(allocator, std.Options.debug_io, s.path);
+    // The cask_history data is now one member of the single merged document.
+    doctor.emitDoctorJson(allocator, std.Options.debug_io, s.path, &.{});
 
-    // Stable JSON shape — same byte sequence the inline `writeJson`
-    // test pins, so a refactor that changes either path catches both.
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"schema_version\":1") != null);
     try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"cask_history\":") != null);
     try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"retained_versions\":2") != null);
     try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"bytes\":") != null);
-    // JSON mode routes the report away from stderr — no human summary
-    // line should appear there.
+    // JSON routes the report away from stderr — no human summary line.
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "Retained cask versions") == null);
-}
-
-test "emitCaskHistoryReport: --json stays stable when nothing is retained" {
-    const allocator = testing.allocator;
-    var s = try Scratch.init(allocator, "json_empty");
-    defer s.deinit(allocator);
-
-    resetOutputFlags();
-    defer resetOutputFlags();
-    output.setMode(.json);
-
-    var stdout_buf: std.ArrayList(u8) = .empty;
-    defer stdout_buf.deinit(allocator);
-    output.beginStdoutCapture(allocator, &stdout_buf);
-    defer output.endStdoutCapture();
-
-    doctor.emitCaskHistoryReport(allocator, std.Options.debug_io, s.path);
-
-    // Schema contract: the section is always present, even when empty.
-    try testing.expectEqualStrings(
-        "{\"cask_history\":{\"retained_versions\":0,\"bytes\":0}}\n",
-        stdout_buf.items,
-    );
 }
 
 test "emitCaskHistoryReport: read-only — cask_versions rows survive the walk" {

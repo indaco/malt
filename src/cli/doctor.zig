@@ -199,33 +199,14 @@ pub fn collectFindings(
     return .{ .sink = sink, .tally = tally };
 }
 
-/// Serialize the collected findings as `mt doctor --json`'s `checks[]`
-/// payload to stdout, alongside the existing cask_history/tap_cache/taps
-/// fragments. Best-effort: a writer failure drops the payload rather
-/// than aborting the run.
-fn emitChecksJson(allocator: std.mem.Allocator, findings: []const render.Finding) void {
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    render.writeChecksJson(&aw.writer, findings) catch return;
-    output.writeStdoutAll(aw.written());
-}
-
-/// Walk retained cask versions and emit the report doctor surfaces
-/// after the check rows. Pure read-only: routes to stdout (JSON) or
-/// stderr (human + optional verbose entry list) by reading
-/// `output.isJson()` and `output.isVerbose()`. Held public so the
+/// Walk retained cask versions and emit the human report doctor surfaces
+/// after the check rows (optionally a verbose entry list). The `--json`
+/// view of this data is emitted as one member of the merged document in
+/// `emitDoctorJson`, so this path is human-only. Held public so the
 /// integration test can drive the same path `execute` uses.
 pub fn emitCaskHistoryReport(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) void {
     var census = cask_history.collectCensus(allocator, io, prefix);
     defer census.deinit(allocator);
-
-    if (output.isJson()) {
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        cask_history.writeJson(&aw.writer, census) catch return;
-        output.writeStdoutAll(aw.written());
-        return;
-    }
 
     if (census.entries.len == 0) return;
 
@@ -240,21 +221,12 @@ pub fn emitCaskHistoryReport(allocator: std.mem.Allocator, io: std.Io, prefix: [
     output.writeStderrAll(aw.written());
 }
 
-/// Walk `<prefix>/cache/Tap` and emit the warmed tap-archive size
-/// alongside doctor's other reports. Routes to stdout (JSON) with a
-/// stable schema (zero values, not omission) or to stderr (human),
-/// which stays silent when the cache is empty so the clean case adds
-/// no noise. Pure read; safe to invoke from `execute` post-checks.
+/// Walk `<prefix>/cache/Tap` and emit the warmed tap-archive size as a
+/// human line, silent when the cache is empty so the clean case adds no
+/// noise. The `--json` view is a member of the merged document built in
+/// `emitDoctorJson`. Pure read; safe to invoke from `execute` post-checks.
 pub fn emitTapCacheReport(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8) void {
     const bytes = tap_cache_mod.bytesUnder(io, allocator, prefix);
-
-    if (output.isJson()) {
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        aw.writer.print("{{\"tap_cache\":{{\"bytes\":{d}}}}}\n", .{bytes}) catch return;
-        output.writeStdoutAll(aw.written());
-        return;
-    }
 
     if (bytes == 0) return;
     var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -283,8 +255,8 @@ pub fn writeTapForgeHuman(w: *std.Io.Writer, taps: []const tap_mod.TapInfo) !voi
 /// stays present (empty, not omitted) so scripted consumers can always
 /// read it. Strings route through `output.jsonStr` for escaping. Pure
 /// for byte-pinning tests.
-pub fn writeTapForgeJson(w: *std.Io.Writer, taps: []const tap_mod.TapInfo) !void {
-    try w.writeAll("{\"taps\":[");
+pub fn writeTapForgeField(w: *std.Io.Writer, taps: []const tap_mod.TapInfo) !void {
+    try w.writeAll("\"taps\":[");
     for (taps, 0..) |t, i| {
         if (i != 0) try w.writeAll(",");
         try w.writeAll("{\"name\":");
@@ -293,41 +265,92 @@ pub fn writeTapForgeJson(w: *std.Io.Writer, taps: []const tap_mod.TapInfo) !void
         try output.jsonStr(w, t.host);
         try w.writeAll("}");
     }
-    try w.writeAll("]}\n");
+    try w.writeAll("]");
 }
 
-/// Walk the registered taps and emit their forge/host alongside doctor's
-/// other reports. Routes to stdout (JSON, stable empty array) or stderr
-/// (human, silent when no taps). Pure read; safe from `execute`'s
-/// post-check phase. Best-effort: a DB or list failure drops the report
-/// rather than failing the whole doctor run.
-pub fn emitTapForgeReport(allocator: std.mem.Allocator, prefix: []const u8) void {
+/// Standalone `{"taps":[...]}` document. Pure for byte-pinning tests;
+/// wraps `writeTapForgeField`.
+pub fn writeTapForgeJson(w: *std.Io.Writer, taps: []const tap_mod.TapInfo) !void {
+    try w.writeAll("{");
+    try writeTapForgeField(w, taps);
+    try w.writeAll("}\n");
+}
+
+/// Read the registered taps from the prefix DB. Returns `null` on any
+/// DB/list failure so a caller drops the taps report rather than failing
+/// the whole doctor run. Free with `freeTaps`.
+fn collectTaps(allocator: std.mem.Allocator, prefix: []const u8) ?[]tap_mod.TapInfo {
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return;
-    var db = sqlite.Database.open(db_path) catch return;
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return null;
+    var db = sqlite.Database.open(db_path) catch return null;
     defer db.close();
     schema.initSchema(&db) catch {};
+    return tap_mod.list(allocator, &db) catch null;
+}
 
-    const taps = tap_mod.list(allocator, &db) catch return;
-    defer {
-        for (taps) |t| {
-            allocator.free(t.name);
-            allocator.free(t.url);
-            allocator.free(t.host);
-            if (t.commit_sha) |sha| allocator.free(sha);
-        }
-        allocator.free(taps);
+fn freeTaps(allocator: std.mem.Allocator, taps: []tap_mod.TapInfo) void {
+    for (taps) |t| {
+        allocator.free(t.name);
+        allocator.free(t.url);
+        allocator.free(t.host);
+        if (t.commit_sha) |sha| allocator.free(sha);
     }
+    allocator.free(taps);
+}
+
+/// Emit the registered-tap forge/host block as human lines (silent when
+/// no taps). The `--json` view is a member of the merged document built
+/// in `emitDoctorJson`. Pure read; safe from `execute`'s post-check phase.
+pub fn emitTapForgeReport(allocator: std.mem.Allocator, prefix: []const u8) void {
+    const taps = collectTaps(allocator, prefix) orelse return;
+    defer freeTaps(allocator, taps);
 
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    if (output.isJson()) {
-        writeTapForgeJson(&aw.writer, taps) catch return;
-        output.writeStdoutAll(aw.written());
-        return;
-    }
     writeTapForgeHuman(&aw.writer, taps) catch return;
     output.writeStderrAll(aw.written());
+}
+
+/// Compose the single versioned `mt doctor --json` document. Pure writer
+/// (no IO/collection) so tests pin the exact bytes and confirm it parses
+/// as one JSON object. The four data members are always present — empty
+/// `checks`/`taps` arrays and zeroed `cask_history`/`tap_cache` rather
+/// than omission — so consumers never special-case a missing key.
+pub fn writeDoctorJson(
+    w: *std.Io.Writer,
+    findings: []const render.Finding,
+    census: cask_history.Census,
+    tap_cache_bytes: u64,
+    taps: []const tap_mod.TapInfo,
+) !void {
+    try output.writeSchemaVersionPrefix(w);
+    try render.writeChecksField(w, findings);
+    try w.writeAll(",");
+    try cask_history.writeField(w, census);
+    try w.print(",\"tap_cache\":{{\"bytes\":{d}}}", .{tap_cache_bytes});
+    try w.writeAll(",");
+    try writeTapForgeField(w, taps);
+    try w.writeAll("}\n");
+}
+
+/// Collect the three post-check data sources and emit them with the
+/// checks as one merged `--json` document. Best-effort: a writer failure
+/// drops the payload rather than aborting the run. Held public so the
+/// integration tests can drive the same path `execute` uses under `--json`.
+pub fn emitDoctorJson(allocator: std.mem.Allocator, io: std.Io, prefix: []const u8, findings: []const render.Finding) void {
+    var census = cask_history.collectCensus(allocator, io, prefix);
+    defer census.deinit(allocator);
+    const tap_cache_bytes = tap_cache_mod.bytesUnder(io, allocator, prefix);
+    // Free the collected slice even when empty-but-allocated; only the
+    // collection-failed (`null`) case substitutes a static empty slice.
+    const taps_opt = collectTaps(allocator, prefix);
+    defer if (taps_opt) |t| freeTaps(allocator, t);
+    const taps: []const tap_mod.TapInfo = taps_opt orelse &.{};
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    writeDoctorJson(&aw.writer, findings, census, tap_cache_bytes, taps) catch return;
+    output.writeStdoutAll(aw.written());
 }
 
 /// Local mirror of `cli/purge/util.zig::formatBytes` / the cask-history
@@ -385,11 +408,15 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     defer walk.deinit();
     const tally = walk.tally;
 
-    if (want_checks_json) emitChecksJson(allocator, walk.findings());
-
-    emitCaskHistoryReport(allocator, ctx.io, prefix);
-    emitTapCacheReport(allocator, ctx.io, prefix);
-    emitTapForgeReport(allocator, prefix);
+    // `--json` is one merged, versioned document; the human view keeps the
+    // three reports split so each renders in its own place after the rows.
+    if (want_checks_json) {
+        emitDoctorJson(allocator, ctx.io, prefix, walk.findings());
+    } else {
+        emitCaskHistoryReport(allocator, ctx.io, prefix);
+        emitTapCacheReport(allocator, ctx.io, prefix);
+        emitTapForgeReport(allocator, prefix);
+    }
 
     if (fix_requested) {
         output.plain("", .{});
@@ -1446,27 +1473,6 @@ test "emitTapCacheReport: silent on stderr when cache is empty" {
     try testing.expectEqualStrings("", buf.items);
 }
 
-test "emitTapCacheReport: emits stable JSON schema even when cache is empty" {
-    // Doctor's JSON consumers must always be able to read
-    // `tap_cache.bytes` — omitting the field on the empty case
-    // forces every consumer to special-case a null/missing path.
-    const allocator = testing.allocator;
-    const ts = std.Io.Clock.real.now(std.Options.debug_io).toNanoseconds();
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_doctor_tap_json_empty_{d}", .{ts});
-
-    output.setMode(.json);
-    defer output.setMode(.human);
-
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    output.beginStdoutCapture(allocator, &buf);
-    defer output.endStdoutCapture();
-    emitTapCacheReport(allocator, std.Options.debug_io, prefix);
-
-    try testing.expectEqualStrings("{\"tap_cache\":{\"bytes\":0}}\n", buf.items);
-}
-
 test "emitTapCacheReport: human one-liner when cache holds bytes" {
     const allocator = testing.allocator;
     const ts = std.Io.Clock.real.now(std.Options.debug_io).toNanoseconds();
@@ -1545,4 +1551,44 @@ test "checks table includes the prefix-on-PATH row" {
         }
     }
     try testing.expect(found);
+}
+
+test "writeDoctorJson merges all four members under one versioned root" {
+    const findings = [_]render.Finding{
+        .{ .id = "stale_lock", .severity = .warn_status, .title = "Stale lock", .detail = "d", .fixable = true, .fix_class = .stale_lock },
+    };
+    const census: cask_history.Census = .{ .entries = &.{}, .total_bytes = 42 };
+    const taps = [_]tap_mod.TapInfo{
+        .{ .name = "u/r", .url = "", .host = "gitlab.com", .commit_sha = null },
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeDoctorJson(&aw.writer, &findings, census, 7, &taps);
+
+    try testing.expectEqualStrings(
+        "{\"schema_version\":1," ++
+            "\"checks\":[{\"id\":\"stale_lock\",\"severity\":\"warn\",\"title\":\"Stale lock\",\"detail\":\"d\",\"fixable\":true,\"fix_class\":\"stale_lock\"}]," ++
+            "\"cask_history\":{\"retained_versions\":0,\"bytes\":42}," ++
+            "\"tap_cache\":{\"bytes\":7}," ++
+            "\"taps\":[{\"name\":\"u/r\",\"host\":\"gitlab.com\"}]}\n",
+        aw.written(),
+    );
+}
+
+test "writeDoctorJson stays one valid JSON object with schema_version on the empty case" {
+    // The merged doc must parse as a single object (the old multi-document
+    // concatenation did not) and carry the version even with nothing found.
+    const census: cask_history.Census = .{ .entries = &.{}, .total_bytes = 0 };
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeDoctorJson(&aw.writer, &.{}, census, 0, &.{});
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 1), parsed.value.object.get("schema_version").?.integer);
+    try testing.expectEqual(@as(usize, 0), parsed.value.object.get("checks").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), parsed.value.object.get("taps").?.array.items.len);
+    try testing.expectEqual(@as(i64, 0), parsed.value.object.get("tap_cache").?.object.get("bytes").?.integer);
 }

@@ -401,7 +401,8 @@ fn encodeHeader(
 }
 
 pub fn encodeApiFormulaJson(w: *std.Io.Writer, f: *const formula_mod.Formula) !void {
-    try w.writeAll("{\"name\":");
+    try output.writeSchemaVersionPrefix(w);
+    try w.writeAll("\"name\":");
     try output.jsonStr(w, f.name);
     try w.writeAll(",\"type\":\"formula\",\"installed\":false,\"version\":");
     try output.jsonStr(w, f.version);
@@ -420,7 +421,8 @@ pub fn encodeApiFormulaJson(w: *std.Io.Writer, f: *const formula_mod.Formula) !v
 }
 
 pub fn encodeApiCaskJson(w: *std.Io.Writer, c: *const cask_mod.Cask) !void {
-    try w.writeAll("{\"name\":");
+    try output.writeSchemaVersionPrefix(w);
+    try w.writeAll("\"name\":");
     try output.jsonStr(w, c.token);
     try w.writeAll(",\"type\":\"cask\",\"installed\":false,\"version\":");
     try output.jsonStr(w, c.version);
@@ -492,7 +494,8 @@ fn writeJsonNotInstalled(
     name: []const u8,
     stdout: *std.Io.Writer,
 ) !void {
-    try stdout.writeAll("{\"name\":");
+    try output.writeSchemaVersionPrefix(stdout);
+    try stdout.writeAll("\"name\":");
     try output.jsonStr(stdout, name);
     try stdout.writeAll(",\"type\":\"formula\",\"installed\":false}\n");
 }
@@ -598,7 +601,8 @@ pub fn encodeInstalledFormulaJson(
     history: []const rollback.Entry,
     dependencies: []const []const u8,
 ) !void {
-    try w.writeAll("{\"name\":");
+    try output.writeSchemaVersionPrefix(w);
+    try w.writeAll("\"name\":");
     try output.jsonStr(w, name);
     try w.writeAll(",\"type\":\"formula\",\"installed\":true,\"version\":");
     try output.jsonStr(w, version);
@@ -689,7 +693,8 @@ pub fn encodeInstalledCaskJson(
     row: *const InstalledCaskRow,
     history: []const rollback.Entry,
 ) !void {
-    try w.writeAll("{\"name\":");
+    try output.writeSchemaVersionPrefix(w);
+    try w.writeAll("\"name\":");
     try output.jsonStr(w, row.token);
     try w.writeAll(",\"type\":\"cask\",\"installed\":true,\"version\":");
     try output.jsonStr(w, row.version orelse "");
@@ -856,7 +861,7 @@ test "encodeApiFormulaJson produces the documented shape" {
     try encodeApiFormulaJson(&aw.writer, &f);
 
     try testing.expectEqualStrings(
-        "{\"name\":\"wget\",\"type\":\"formula\",\"installed\":false,\"version\":\"1.24.5\",\"desc\":\"Internet file retriever\",\"homepage\":\"https://www.gnu.org/software/wget/\",\"tap\":\"homebrew/core\",\"dependencies\":[\"libidn2\",\"openssl@3\"]}\n",
+        "{\"schema_version\":1,\"name\":\"wget\",\"type\":\"formula\",\"installed\":false,\"version\":\"1.24.5\",\"desc\":\"Internet file retriever\",\"homepage\":\"https://www.gnu.org/software/wget/\",\"tap\":\"homebrew/core\",\"dependencies\":[\"libidn2\",\"openssl@3\"]}\n",
         aw.written(),
     );
 }
@@ -896,7 +901,19 @@ test "encodeApiCaskJson produces the documented shape" {
     try encodeApiCaskJson(&aw.writer, &c);
 
     try testing.expectEqualStrings(
-        "{\"name\":\"firefox\",\"type\":\"cask\",\"installed\":false,\"version\":\"149.0.2\",\"full_name\":\"Mozilla Firefox\",\"desc\":\"Web browser\",\"homepage\":\"https://www.mozilla.org/firefox/\",\"url\":\"https://example.com/firefox.dmg\"}\n",
+        "{\"schema_version\":1,\"name\":\"firefox\",\"type\":\"cask\",\"installed\":false,\"version\":\"149.0.2\",\"full_name\":\"Mozilla Firefox\",\"desc\":\"Web browser\",\"homepage\":\"https://www.mozilla.org/firefox/\",\"url\":\"https://example.com/firefox.dmg\"}\n",
+        aw.written(),
+    );
+}
+
+test "writeJsonNotInstalled carries schema_version on the minimal not-found root" {
+    // The unknown-package fallback is the smallest --json root; it must
+    // still version itself so a consumer parses one shape for every case.
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeJsonNotInstalled("ghost", &aw.writer);
+    try testing.expectEqualStrings(
+        "{\"schema_version\":1,\"name\":\"ghost\",\"type\":\"formula\",\"installed\":false}\n",
         aw.written(),
     );
 }
@@ -966,7 +983,7 @@ test "encodeInstalledCaskJson produces the documented shape" {
     try encodeInstalledCaskJson(&aw.writer, &row, no_history);
 
     try testing.expectEqualStrings(
-        "{\"name\":\"firefox\",\"type\":\"cask\",\"installed\":true,\"version\":\"120.0\",\"full_name\":\"Firefox\",\"url\":\"https://example.com/firefox.dmg\",\"app_path\":\"/Applications/Firefox.app\",\"auto_updates\":false,\"installed_at\":\"2026-05-13 10:40:56\",\"tap\":\"\",\"available_rollback_versions\":[]}\n",
+        "{\"schema_version\":1,\"name\":\"firefox\",\"type\":\"cask\",\"installed\":true,\"version\":\"120.0\",\"full_name\":\"Firefox\",\"url\":\"https://example.com/firefox.dmg\",\"app_path\":\"/Applications/Firefox.app\",\"auto_updates\":false,\"installed_at\":\"2026-05-13 10:40:56\",\"tap\":\"\",\"available_rollback_versions\":[]}\n",
         aw.written(),
     );
 }
@@ -983,7 +1000,7 @@ test "encodeInstalledCaskJson emits empty strings for null fields" {
     try encodeInstalledCaskJson(&aw.writer, &row, no_history);
 
     try testing.expectEqualStrings(
-        "{\"name\":\"ghost\",\"type\":\"cask\",\"installed\":true,\"version\":\"\",\"full_name\":\"ghost\",\"url\":\"\",\"app_path\":\"\",\"auto_updates\":true,\"installed_at\":\"\",\"tap\":\"\",\"available_rollback_versions\":[]}\n",
+        "{\"schema_version\":1,\"name\":\"ghost\",\"type\":\"cask\",\"installed\":true,\"version\":\"\",\"full_name\":\"ghost\",\"url\":\"\",\"app_path\":\"\",\"auto_updates\":true,\"installed_at\":\"\",\"tap\":\"\",\"available_rollback_versions\":[]}\n",
         aw.written(),
     );
 }
@@ -1117,7 +1134,7 @@ test "encodeInstalledFormulaJson emits available_rollback_versions:[] for an emp
         &.{},
     );
     try testing.expectEqualStrings(
-        "{\"name\":\"wget\",\"type\":\"formula\",\"installed\":true,\"version\":\"1.24.5\"," ++
+        "{\"schema_version\":1,\"name\":\"wget\",\"type\":\"formula\",\"installed\":true,\"version\":\"1.24.5\"," ++
             "\"tap\":\"homebrew/core\",\"dependencies\":[],\"pinned\":false,\"installed_at\":\"2026-05-13 10:40:56\"," ++
             "\"available_rollback_versions\":[]}\n",
         aw.written(),
@@ -1141,7 +1158,7 @@ test "encodeInstalledFormulaJson splices the same entries[] shape mt rollback --
     // downstream consumers already parse `mt rollback --list --json`'s
     // `entries[]`, and the info payload must hand them the same shape.
     try testing.expectEqualStrings(
-        "{\"name\":\"wget\",\"type\":\"formula\",\"installed\":true,\"version\":\"1.24.5\"," ++
+        "{\"schema_version\":1,\"name\":\"wget\",\"type\":\"formula\",\"installed\":true,\"version\":\"1.24.5\"," ++
             "\"tap\":\"homebrew/core\",\"dependencies\":[],\"pinned\":true,\"installed_at\":\"2026-05-13 10:40:56\"," ++
             "\"available_rollback_versions\":[" ++
             "{\"sha256\":\"aaa111\",\"version\":\"1.24\",\"mtime\":1700000000}," ++
@@ -1192,7 +1209,7 @@ test "encodeInstalledFormulaJson emits a dependencies array mirroring the not-in
         &.{ "libidn2", "openssl@3" },
     );
     try testing.expectEqualStrings(
-        "{\"name\":\"wget\",\"type\":\"formula\",\"installed\":true,\"version\":\"1.24.5\"," ++
+        "{\"schema_version\":1,\"name\":\"wget\",\"type\":\"formula\",\"installed\":true,\"version\":\"1.24.5\"," ++
             "\"tap\":\"homebrew/core\",\"dependencies\":[\"libidn2\",\"openssl@3\"]," ++
             "\"pinned\":false,\"installed_at\":\"2026-05-13 10:40:56\"," ++
             "\"available_rollback_versions\":[]}\n",

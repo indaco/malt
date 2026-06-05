@@ -139,7 +139,7 @@ test "execute list --json on a prefix with no db/ directory emits `[]`" {
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try services_cli.execute(&ctx, testing.allocator, &.{"list"});
-    try testing.expectEqualStrings("[]\n", stdout_buf.items);
+    try testing.expectEqualStrings("{\"schema_version\":1,\"services\":[]}\n", stdout_buf.items);
 }
 
 test "execute list --json on an empty DB emits `[]`" {
@@ -161,13 +161,13 @@ test "execute list --json on an empty DB emits `[]`" {
     defer threaded.deinit();
     const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
     try services_cli.execute(&ctx, testing.allocator, &.{"list"});
-    try testing.expectEqualStrings("[]\n", stdout_buf.items);
+    try testing.expectEqualStrings("{\"schema_version\":1,\"services\":[]}\n", stdout_buf.items);
 
     // `status` with no name routes through cmdList; under --json it must
     // emit the same empty array so consumers can rely on a single shape.
     stdout_buf.clearRetainingCapacity();
     try services_cli.execute(&ctx, testing.allocator, &.{"status"});
-    try testing.expectEqualStrings("[]\n", stdout_buf.items);
+    try testing.expectEqualStrings("{\"schema_version\":1,\"services\":[]}\n", stdout_buf.items);
 }
 
 fn seedService(prefix: []const u8, name: []const u8, keg: []const u8, auto_start: bool) !void {
@@ -219,11 +219,11 @@ test "execute list --json on a populated DB emits one object per row" {
     // Runtime probe is best-effort on non-macOS / when launchctl misses;
     // it still must surface a textual state, never a numeric code.
     try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"state\":\"") != null);
-    try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "["));
-    try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "]\n"));
+    try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "{\"schema_version\":1,\"services\":["));
+    try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "]}\n"));
 }
 
-test "execute list --json output is a parseable JSON array" {
+test "execute list --json output is a parseable versioned JSON object" {
     const prefix = try setupPrefix("list_json_parse");
     defer testing.allocator.free(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
@@ -247,8 +247,10 @@ test "execute list --json output is a parseable JSON array" {
     const trimmed = std.mem.trim(u8, stdout_buf.items, " \t\r\n");
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, trimmed, .{});
     defer parsed.deinit();
-    try testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
-    const row = parsed.value.array.items[0].object;
+    try testing.expectEqual(@as(i64, 1), parsed.value.object.get("schema_version").?.integer);
+    const services = parsed.value.object.get("services").?.array;
+    try testing.expectEqual(@as(usize, 1), services.items.len);
+    const row = services.items[0].object;
     try testing.expectEqualStrings("redis", row.get("name").?.string);
     try testing.expectEqualStrings("redis", row.get("keg_name").?.string);
     try testing.expectEqual(true, row.get("auto_start").?.bool);
@@ -281,8 +283,8 @@ test "execute status <name> --json emits a single-element array" {
     // Only one row in the array — pin the bracketing so `postgres` (not
     // seeded here) can't sneak in via a typo in the filter SQL.
     try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "postgres") == null);
-    try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "[{"));
-    try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "}]\n"));
+    try testing.expect(std.mem.startsWith(u8, stdout_buf.items, "{\"schema_version\":1,\"services\":[{"));
+    try testing.expect(std.mem.endsWith(u8, stdout_buf.items, "}]}\n"));
 }
 
 test "execute status <missing> --json still surfaces SupervisorError" {
