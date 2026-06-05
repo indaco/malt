@@ -357,7 +357,17 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         }
     }
 
-    const fix_requested = fix_mod.wantsFix(args);
+    // Resolve the `--fix` selector up front so an unknown id fails fast
+    // — before any check runs — and never reaches the mutating executor.
+    const fix_req = fix_mod.parseFix(args);
+    const fix_only: ?FixKind = switch (fix_req) {
+        .none, .all => null,
+        .one => |id| render.fixKindFromId(id) catch {
+            output.err("unknown --fix id '{s}' (valid: {s})", .{ id, render.fix_ids_csv });
+            std.process.exit(2);
+        },
+    };
+    const fix_requested = fix_req.isRequested();
 
     resetVerboseHint();
     resetFixHint();
@@ -390,7 +400,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             output.info("Applying safe-class fixes:", .{});
         }
 
-        const outcome = fix_mod.executeFix(.{ .prefix = prefix, .io = ctx.io }, dry_run);
+        const outcome = fix_mod.executeFix(.{ .prefix = prefix, .io = ctx.io, .only = fix_only }, dry_run);
 
         if (outcome.plan.safe.count() == 0) {
             output.dim("no safe-class fixes to apply", .{});

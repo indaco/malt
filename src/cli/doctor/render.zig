@@ -56,6 +56,30 @@ pub fn fixClassTag(kind: ?FixKind) []const u8 {
     };
 }
 
+/// Resolve a `--fix <id>` token back to its safe-fix class, reusing the
+/// `fixClassTag` vocabulary so the selector and the JSON findings can
+/// never disagree on one set of ids. Unknown ids — including `"none"`
+/// and the empty string — error; only the real safe classes resolve.
+pub fn fixKindFromId(id: []const u8) error{UnknownFixId}!FixKind {
+    inline for (std.meta.fields(FixKind)) |f| {
+        const kind: FixKind = @field(FixKind, f.name);
+        if (std.mem.eql(u8, id, fixClassTag(kind))) return kind;
+    }
+    return error.UnknownFixId;
+}
+
+/// Comma-joined list of the valid `--fix <id>` ids, built from the same
+/// vocabulary so an unknown-id error can name the alternatives without a
+/// hand-maintained string drifting from the enum.
+pub const fix_ids_csv = blk: {
+    var s: []const u8 = "";
+    for (std.meta.fields(FixKind), 0..) |f, i| {
+        const kind: FixKind = @field(FixKind, f.name);
+        s = s ++ (if (i == 0) "" else ", ") ++ fixClassTag(kind);
+    }
+    break :blk s;
+};
+
 /// Serialize findings as a `{"checks":[...]}` object. Pure writer so
 /// tests pin the bytes; every string routes through the shared JSON
 /// escaper. `detail` is always present (empty string when the row had
@@ -171,6 +195,34 @@ test "fixClassTag maps null to none and each FixKind to its tag" {
     try testing.expectEqualStrings("stale_lock", fixClassTag(.stale_lock));
     try testing.expectEqualStrings("orphaned_store", fixClassTag(.orphaned_store));
     try testing.expectEqualStrings("broken_symlinks", fixClassTag(.broken_symlinks));
+}
+
+test "fixKindFromId resolves every published id to its class" {
+    try testing.expectEqual(FixKind.stale_lock, try fixKindFromId("stale_lock"));
+    try testing.expectEqual(FixKind.orphaned_store, try fixKindFromId("orphaned_store"));
+    try testing.expectEqual(FixKind.broken_symlinks, try fixKindFromId("broken_symlinks"));
+}
+
+test "fixKindFromId round-trips fixClassTag for every FixKind" {
+    // The selector must accept exactly the ids the JSON findings emit;
+    // pin the round-trip so the two views can never drift.
+    inline for (std.meta.fields(FixKind)) |f| {
+        const kind: FixKind = @field(FixKind, f.name);
+        try testing.expectEqual(kind, try fixKindFromId(fixClassTag(kind)));
+    }
+}
+
+test "fixKindFromId rejects unknown, none, and empty ids" {
+    try testing.expectError(error.UnknownFixId, fixKindFromId("bogus"));
+    try testing.expectError(error.UnknownFixId, fixKindFromId("none"));
+    try testing.expectError(error.UnknownFixId, fixKindFromId(""));
+}
+
+test "fix_ids_csv lists every safe-fix id" {
+    inline for (std.meta.fields(FixKind)) |f| {
+        const kind: FixKind = @field(FixKind, f.name);
+        try testing.expect(std.mem.indexOf(u8, fix_ids_csv, fixClassTag(kind)) != null);
+    }
 }
 
 fn checksToBuf(findings: []const Finding, buf: []u8) ![]const u8 {

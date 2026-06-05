@@ -316,6 +316,106 @@ test "executeFix: idempotent — second run finds nothing left to do" {
     try testing.expect(second.plan.isEmpty());
 }
 
+// ── selective apply (`--fix <id>`) ──────────────────────────────────
+
+test "executeFix: only=stale_lock removes the lock and leaves broken symlinks" {
+    // A targeted fix must touch only its class. Seed both a stale lock
+    // and a broken symlink; selecting stale_lock alone must remove the
+    // lock and leave the dangling symlink in place.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "only-lock");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+    var lock_buf: [256]u8 = undefined;
+    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    try writeFile(lock_path, dead_pid_str);
+
+    var bin_buf: [256]u8 = undefined;
+    const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, bin_dir);
+    var bin = try fs_compat.openDirAbsolute(std.Options.debug_io, bin_dir, .{ .iterate = true });
+    defer bin.close(std.Options.debug_io);
+    try bin.symLink(std.Options.debug_io, "/tmp/malt-doctor-fix-only-target-dne", "dead", .{});
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const outcome = fix.executeFix(.{ .prefix = prefix, .io = io, .only = .stale_lock }, false);
+    try testing.expect(outcome.stale_lock_removed);
+    try testing.expectEqual(@as(u32, 0), outcome.broken_symlinks_removed);
+    try testing.expectEqual(@as(u32, 1), outcome.fixesApplied());
+    // The plan the user is shown lists only the targeted class.
+    try testing.expectEqual(@as(usize, 1), outcome.plan.safe.count());
+    try testing.expect(outcome.plan.safe.contains(.stale_lock));
+
+    try testing.expect(!pathExists(lock_path));
+    // `access()` follows the link, so a surviving dangling symlink reads
+    // as absent — confirm the entry itself is still present by iterating.
+    try testing.expect(symlinkEntryExists(io, bin_dir, "dead"));
+}
+
+/// True when `name` exists as a symlink entry under `dir_path`, without
+/// following the link (unlike `pathExists`, which `access()`es through).
+fn symlinkEntryExists(io: std.Io, dir_path: []const u8, name: []const u8) bool {
+    var dir = fs_compat.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (entry.kind == .sym_link and std.mem.eql(u8, entry.name, name)) return true;
+    }
+    return false;
+}
+
+test "executeFix: a valid id whose condition is absent is a clean no-op" {
+    // `--fix broken_symlinks` on a prefix that only has a stale lock
+    // must change nothing and leave the lock intact.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "only-absent");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+    var lock_buf: [256]u8 = undefined;
+    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    try writeFile(lock_path, dead_pid_str);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const outcome = fix.executeFix(.{ .prefix = prefix, .io = io, .only = .broken_symlinks }, false);
+    try testing.expectEqual(@as(u32, 0), outcome.fixesApplied());
+    try testing.expect(outcome.plan.isEmpty());
+    try testing.expect(pathExists(lock_path));
+}
+
+test "executeFix: only=stale_lock --dry-run plans but mutates nothing" {
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "only-dry");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+    var lock_buf: [256]u8 = undefined;
+    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix});
+    try writeFile(lock_path, dead_pid_str);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const outcome = fix.executeFix(.{ .prefix = prefix, .io = io, .only = .stale_lock }, true);
+    try testing.expectEqual(@as(u32, 0), outcome.fixesApplied());
+    try testing.expect(outcome.plan.safe.contains(.stale_lock));
+    try testing.expect(pathExists(lock_path));
+}
+
 test "executeFix: dangerous classes carry into the plan, not the safe set" {
     const outcome = fix.executeFix(
         .{

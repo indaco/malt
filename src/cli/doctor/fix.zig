@@ -42,6 +42,15 @@ pub const Plan = struct {
     pub fn isEmpty(self: Plan) bool {
         return self.safe.count() == 0 and self.manual.count() == 0;
     }
+
+    /// Narrow a plan to a single safe class — the `--fix <id>` selector.
+    /// Manual hints are dropped: a targeted fix reports only its class,
+    /// not unrelated remediation noise.
+    pub fn onlySafe(self: Plan, kind: FixKind) Plan {
+        var p: Plan = .{};
+        if (self.safe.contains(kind)) p.safe.insert(kind);
+        return p;
+    }
 };
 
 /// Pure: route conditions to the safe-fix set or the manual-command
@@ -188,10 +197,38 @@ fn deleteRefRow(db: *sqlite.Database, sha: []const u8) void {
 
 // ── flag parsing ────────────────────────────────────────────────────
 
-/// True when argv contains the `--fix` flag.
-pub fn wantsFix(args: []const []const u8) bool {
-    for (args) |a| if (std.mem.eql(u8, a, "--fix")) return true;
-    return false;
+/// How `--fix` was invoked. `--fix` alone applies every safe class
+/// (today's behaviour); `--fix <id>` targets one class so the Doctor
+/// tab can remediate just the finding under the cursor.
+pub const FixRequest = union(enum) {
+    /// `--fix` absent: doctor runs check-only.
+    none,
+    /// `--fix` with no id: apply every safe class.
+    all,
+    /// `--fix <id>`: apply only the named class. The id is validated
+    /// against the published vocabulary by the caller.
+    one: []const u8,
+
+    pub fn isRequested(self: FixRequest) bool {
+        return switch (self) {
+            .none => false,
+            .all, .one => true,
+        };
+    }
+};
+
+/// Parse the `--fix` selector from argv. The id is the token immediately
+/// after `--fix` when it isn't another flag; a trailing `--fix` or one
+/// followed by a flag is apply-all.
+pub fn parseFix(args: []const []const u8) FixRequest {
+    for (args, 0..) |a, i| {
+        if (!std.mem.eql(u8, a, "--fix")) continue;
+        if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "-")) {
+            return .{ .one = args[i + 1] };
+        }
+        return .all;
+    }
+    return .none;
 }
 
 // ── render ──────────────────────────────────────────────────────────
@@ -256,6 +293,9 @@ pub const FixCtx = struct {
     /// safe-class conditions itself. Tests inject explicit conditions
     /// (including dangerous classes) without requiring a real prefix.
     conditions: ?Conditions = null,
+    /// `--fix <id>` selector: when set, only this safe class is applied
+    /// and reported. `null` is apply-all (the same executor, no filter).
+    only: ?FixKind = null,
 };
 
 pub const FixOutcome = struct {
@@ -282,7 +322,9 @@ pub fn executeFix(ctx: FixCtx, dry_run: bool) FixOutcome {
         .orphan_store_count = probeOrphanedStoreCount(ctx.io, ctx.prefix),
         .broken_symlink_count = probeBrokenSymlinks(ctx.io, ctx.prefix),
     };
-    const plan = planFixes(conditions);
+    // `--fix <id>` narrows the same plan to one class; apply-all leaves
+    // the filter empty so this is the identical code path.
+    const plan = if (ctx.only) |kind| planFixes(conditions).onlySafe(kind) else planFixes(conditions);
 
     var outcome: FixOutcome = .{ .plan = plan };
     if (dry_run) return outcome;
@@ -366,6 +408,27 @@ test "planFixes: safe and manual sets coexist" {
     try std.testing.expect(!plan.isEmpty());
 }
 
+test "onlySafe: keeps the targeted class, drops the other safe classes" {
+    const plan = planFixes(.{ .stale_lock = true, .broken_symlink_count = 3 });
+    const narrowed = plan.onlySafe(.stale_lock);
+    try std.testing.expect(narrowed.safe.contains(.stale_lock));
+    try std.testing.expect(!narrowed.safe.contains(.broken_symlinks));
+    try std.testing.expectEqual(@as(usize, 1), narrowed.safe.count());
+}
+
+test "onlySafe: a class not in the plan yields an empty plan" {
+    const plan = planFixes(.{ .stale_lock = true });
+    const narrowed = plan.onlySafe(.orphaned_store);
+    try std.testing.expect(narrowed.isEmpty());
+}
+
+test "onlySafe: drops manual hints so a targeted fix reports only its class" {
+    const plan = planFixes(.{ .stale_lock = true, .db_corrupt = true });
+    const narrowed = plan.onlySafe(.stale_lock);
+    try std.testing.expect(narrowed.safe.contains(.stale_lock));
+    try std.testing.expectEqual(@as(usize, 0), narrowed.manual.count());
+}
+
 fn renderToBuf(plan: Plan, dry_run: bool, buf: []u8) ![]const u8 {
     var w: std.Io.Writer = .fixed(buf);
     try renderPlan(&w, plan, dry_run);
@@ -437,22 +500,40 @@ test "renderPlan: every manual kind has a hint" {
     }
 }
 
-test "wantsFix: empty argv is check-only" {
-    try std.testing.expect(!wantsFix(&.{}));
+test "parseFix: empty argv is check-only" {
+    try std.testing.expect(parseFix(&.{}) == .none);
+    try std.testing.expect(!parseFix(&.{}).isRequested());
 }
 
-test "wantsFix: --fix flips the mode" {
-    try std.testing.expect(wantsFix(&.{"--fix"}));
+test "parseFix: bare --fix is apply-all" {
+    try std.testing.expect(parseFix(&.{"--fix"}) == .all);
+    try std.testing.expect(parseFix(&.{"--fix"}).isRequested());
 }
 
-test "wantsFix: only the exact flag matches" {
-    try std.testing.expect(!wantsFix(&.{"--fixxx"}));
-    try std.testing.expect(!wantsFix(&.{"fix"}));
+test "parseFix: only the exact flag matches" {
+    try std.testing.expect(parseFix(&.{"--fixxx"}) == .none);
+    try std.testing.expect(parseFix(&.{"fix"}) == .none);
 }
 
-test "wantsFix: position does not matter" {
-    try std.testing.expect(wantsFix(&.{ "--quiet", "--fix" }));
-    try std.testing.expect(wantsFix(&.{ "--fix", "--quiet" }));
+test "parseFix: --fix position does not matter" {
+    try std.testing.expect(parseFix(&.{ "--quiet", "--fix" }) == .all);
+}
+
+test "parseFix: --fix <id> captures the id" {
+    const req = parseFix(&.{ "--fix", "stale_lock" });
+    try std.testing.expect(req == .one);
+    try std.testing.expectEqualStrings("stale_lock", req.one);
+}
+
+test "parseFix: a flag after --fix is apply-all, not an id" {
+    // `--fix --verbose` must not read `--verbose` as a finding id.
+    try std.testing.expect(parseFix(&.{ "--fix", "--verbose" }) == .all);
+}
+
+test "parseFix: an empty-string id is captured (caller rejects it as unknown)" {
+    const req = parseFix(&.{ "--fix", "" });
+    try std.testing.expect(req == .one);
+    try std.testing.expectEqualStrings("", req.one);
 }
 
 test "executeFix: dry run does not touch filesystem state" {

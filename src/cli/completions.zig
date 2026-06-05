@@ -133,6 +133,13 @@ pub const bash_script =
     \\                return 0
     \\            fi
     \\            ;;
+    \\        doctor)
+    \\            # `--fix <id>` takes one of the safe-fix class ids as its value.
+    \\            if [[ "${words[cword-1]}" == "--fix" ]]; then
+    \\                COMPREPLY=( $(compgen -W "stale_lock orphaned_store broken_symlinks" -- "$cur") )
+    \\                return 0
+    \\            fi
+    \\            ;;
     \\    esac
     \\
     \\    local cmd_flags=""
@@ -444,6 +451,11 @@ pub const zsh_script =
     \\                        '--json[Emit refresh-all diff as JSON]' \
     \\                        '*::slug:'
     \\                    ;;
+    \\                doctor)
+    \\                    _arguments \
+    \\                        '--fix[Apply safe-class fixers; with <id>, only that class]::fix-id:(stale_lock orphaned_store broken_symlinks)' \
+    \\                        '--dry-run[Preview the fix plan without applying]'
+    \\                    ;;
     \\            esac
     \\            ;;
     \\    esac
@@ -636,6 +648,10 @@ pub const fish_script =
     \\
     \\    # which
     \\    complete -c $__malt_bin -n '__malt_using_command which' -l json -d 'JSON output'
+    \\
+    \\    # doctor — --fix takes an optional safe-fix class id
+    \\    complete -c $__malt_bin -n '__malt_using_command doctor' -l fix -r -a 'stale_lock orphaned_store broken_symlinks' -d 'Apply safe-class fixers; with <id>, only that class'
+    \\    complete -c $__malt_bin -n '__malt_using_command doctor' -l dry-run -d 'Preview the fix plan without applying'
     \\
     \\    # migrate / rollback
     \\    complete -c $__malt_bin -n '__malt_using_command migrate'    -l dry-run -d 'Preview'

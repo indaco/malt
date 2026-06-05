@@ -257,7 +257,7 @@ const search_help =
 ;
 
 const doctor_help =
-    \\Usage: malt doctor [--fix]
+    \\Usage: malt doctor [--fix [<id>]]
     \\
     \\Run system health checks: database integrity, orphaned store
     \\entries, broken symlinks, disk space, API reachability, and more.
@@ -270,11 +270,14 @@ const doctor_help =
     \\  is what actually reclaims the space.
     \\
     \\Options:
-    \\  --fix          Apply the safe-class fixers (stale lock,
+    \\  --fix [<id>]   Apply the safe-class fixers (stale lock,
     \\                 orphaned store entries, broken symlinks).
-    \\                 Pair with --dry-run to preview the plan.
-    \\                 Dangerous classes (corrupt DB, missing kegs)
-    \\                 still print a manual remediation command.
+    \\                 With an <id> (stale_lock, orphaned_store,
+    \\                 broken_symlinks) apply only that class; with
+    \\                 no id apply them all. Pair with --dry-run to
+    \\                 preview the plan. Dangerous classes (corrupt
+    \\                 DB, missing kegs) still print a manual
+    \\                 remediation command.
     \\  --verbose      List every offender under the count-only
     \\                 checks (Mach-O placeholders, broken symlinks,
     \\                 missing kegs) on its own indented line, and
