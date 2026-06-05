@@ -543,7 +543,11 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         // can't reach `cli/help`. Reads parse `mt … --json`; writes re-exec `mt`.
         .tui => {
             if (cli_help.showIfRequested(ctx, cmd_args, "tui")) return;
-            try @import("tui/app.zig").run(ctx.io, allocator, ctx.stderr, ctx.environ);
+            // Resolve this binary's path so the TUI re-execs the *same* `mt` for
+            // delegated mutations; fall back to `mt` (PATH) if it can't be read.
+            var self_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const mt_path = if (std.process.executablePath(ctx.io, &self_buf)) |n| self_buf[0..n] else |_| "mt";
+            try @import("tui/app.zig").run(ctx.io, allocator, ctx.stderr, ctx.environ, mt_path);
         },
         .bundle => try bundle.execute(ctx, allocator, cmd_args),
         .uses => try uses.execute(ctx, allocator, cmd_args),

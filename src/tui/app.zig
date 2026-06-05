@@ -63,7 +63,31 @@ pub const App = struct {
     editing: bool = false,
     quit: bool = false,
     states: TabStates = .{},
+    /// Tabs whose data may be stale after a delegated mutation. Lazy per-tab: a
+    /// dirty tab refetches its `--json` only when entered (README open question
+    /// #4), so an unrelated mutation never pays for a tab the user isn't viewing.
+    dirty: std.EnumSet(Tab) = .initEmpty(),
+    /// Resolved self-exe path injected by the `main.zig` bridge so the data and
+    /// action tabs re-exec *this* `mt` (not whatever PATH resolves) for reads
+    /// and mutations.
+    mt_path: []const u8 = "",
 };
+
+/// After a delegated mutation the active tab was just re-read inline, so it is
+/// fresh; the others may now be stale. Mark them dirty — a dirty tab refetches
+/// only when entered (`takeDirty`), so the cost is paid lazily, on view.
+pub fn markStaleAfterMutation(a: *App) void {
+    a.dirty = std.EnumSet(Tab).initFull();
+    a.dirty.remove(a.active);
+}
+
+/// Consume `t`'s dirty flag: true exactly once after it was marked, so the
+/// caller refetches its `--json` at most once per staleness.
+pub fn takeDirty(a: *App, t: Tab) bool {
+    if (!a.dirty.contains(t)) return false;
+    a.dirty.remove(t);
+    return true;
+}
 
 fn activeChrome(a: *App) *tab.Chrome {
     switch (a.active) {
@@ -251,7 +275,7 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) void {
 
 /// Launch the dashboard. Refuses (exit 2) on a non-interactive terminal rather
 /// than degrading. Every fault path restores the terminal via `errdefer`.
-pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, environ: std.process.Environ) RunError!void {
+pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, environ: std.process.Environ, mt_path: []const u8) RunError!void {
     const in_fd = std.posix.STDIN_FILENO;
     const out_fd = std.posix.STDOUT_FILENO;
     if (refusalReason(
@@ -276,7 +300,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     errdefer t.restore();
     term.installWinch(fd);
 
-    var app: App = .{};
+    var app: App = .{ .mt_path = mt_path }; // re-exec this mt for delegated mutations
     var frame = try allocator.alloc(u8, frameCap(term.currentSize()));
     defer allocator.free(frame);
 
@@ -465,6 +489,27 @@ test "renderFrame reflows on resize from the same state" {
     const small = renderFrame(&b1, &a, 40, 10);
     const large = renderFrame(&b2, &a, 120, 40);
     try std.testing.expect(!std.mem.eql(u8, small, large));
+}
+
+test "a delegated mutation marks every other tab dirty and keeps the active tab fresh" {
+    var a: App = .{ .active = .outdated };
+    markStaleAfterMutation(&a);
+    try std.testing.expect(!a.dirty.contains(.outdated)); // refreshed inline, still fresh
+    try std.testing.expect(a.dirty.contains(.installed));
+    try std.testing.expect(a.dirty.contains(.services));
+    try std.testing.expect(a.dirty.contains(.doctor));
+}
+
+test "entering a dirty tab consumes the flag so its refetch runs at most once" {
+    var a: App = .{ .active = .installed };
+    markStaleAfterMutation(&a);
+    try std.testing.expect(takeDirty(&a, .doctor)); // first entry → refetch
+    try std.testing.expect(!takeDirty(&a, .doctor)); // now fresh → no refetch
+}
+
+test "a tab that was never marked dirty does not trigger a refetch" {
+    var a: App = .{};
+    try std.testing.expect(!takeDirty(&a, .outdated));
 }
 
 test "refusalReason refuses non-tty, NO_COLOR, and CI; allows a clean tty" {
