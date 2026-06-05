@@ -32,7 +32,18 @@ const render = @import("doctor/render.zig");
 pub const CheckStatus = render.CheckStatus;
 pub const CheckStyle = render.CheckStyle;
 pub const renderCheckRow = render.renderCheckRow;
-pub const printCheck = render.printCheck;
+pub const Finding = render.Finding;
+pub const writeChecksJson = render.writeChecksJson;
+
+/// Render a check row to stderr (via the pure renderer) and, when a
+/// finding sink is active, capture the structured finding so
+/// `mt doctor --json` serializes `checks[]` from the same call that drew
+/// the human row — one source of truth for both views. Pub so tests can
+/// drive the row path directly.
+pub fn printCheck(name: []const u8, status: CheckStatus, detail: ?[]const u8) void {
+    render.printCheck(name, status, detail);
+    if (g_sink) |sink| recordFinding(sink, name, status, detail);
+}
 /// Per-check outcome; same tags the row renderer uses so the walker
 /// can tally without re-translating.
 pub const CheckResult = render.CheckStatus;
@@ -103,6 +114,100 @@ pub fn runChecks(ctx: CheckCtx, table: []const Check) Tally {
         }
     }
     return tally;
+}
+
+/// Collects structured findings during a health walk so
+/// `mt doctor --json` can serialize `checks[]`. The arena owns every
+/// string and the list backing, so a single `deinit` frees the lot.
+const FindingSink = struct {
+    arena: std.heap.ArenaAllocator,
+    list: std.ArrayList(render.Finding),
+
+    fn init(gpa: std.mem.Allocator) FindingSink {
+        return .{ .arena = .init(gpa), .list = .empty };
+    }
+    fn deinit(self: *FindingSink) void {
+        self.arena.deinit();
+    }
+};
+
+/// Active finding sink, set only while `collectFindings` drives the
+/// walk; null on the human path so `printCheck` stays render-only and
+/// pays nothing. Process-global to mirror the existing hint flags —
+/// doctor is never run concurrently.
+var g_sink: ?*FindingSink = null;
+
+fn recordFinding(sink: *FindingSink, name: []const u8, status: CheckStatus, detail: ?[]const u8) void {
+    const a = sink.arena.allocator();
+    // Best-effort: an allocator failure drops one finding from the JSON
+    // payload rather than aborting the whole doctor run.
+    const id = findingId(a, name) catch return;
+    const title = a.dupe(u8, name) catch return;
+    const det = a.dupe(u8, detail orelse "") catch return;
+    sink.list.append(a, .{ .id = id, .severity = status, .title = title, .detail = det }) catch {};
+}
+
+/// Stable machine id for a finding: a slug of its title — lowercased,
+/// each run of non-alphanumeric bytes collapsed to a single `_`, edges
+/// trimmed. The title is static, so the id is stable across runs.
+fn findingId(a: std.mem.Allocator, title: []const u8) ![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(a);
+    var pending_sep = false;
+    for (title) |ch| {
+        const lower = std.ascii.toLower(ch);
+        if (std.ascii.isAlphanumeric(lower)) {
+            if (pending_sep and buf.items.len != 0) try buf.append(a, '_');
+            pending_sep = false;
+            try buf.append(a, lower);
+        } else {
+            pending_sep = true;
+        }
+    }
+    return buf.toOwnedSlice(a);
+}
+
+/// Outcome of a finding-collecting walk: the populated sink plus the
+/// same warn/err tally `runChecks` returns. Caller owns the sink.
+pub const WalkResult = struct {
+    sink: FindingSink,
+    tally: Tally,
+
+    pub fn deinit(self: *WalkResult) void {
+        self.sink.deinit();
+    }
+    pub fn findings(self: *const WalkResult) []const render.Finding {
+        return self.sink.list.items;
+    }
+};
+
+/// Run the health walk while capturing each row as a structured finding.
+/// Drives the same `runChecks` walker — identical stderr rows — with a
+/// sink active, so the human rows and `checks[]` share one source of
+/// truth. `collect=false` skips capture entirely (the human path pays
+/// nothing). Caller owns the returned sink.
+pub fn collectFindings(
+    allocator: std.mem.Allocator,
+    ctx: CheckCtx,
+    table: []const Check,
+    collect: bool,
+) WalkResult {
+    var sink = FindingSink.init(allocator);
+    if (collect) g_sink = &sink;
+    defer g_sink = null;
+    const tally = runChecks(ctx, table);
+    return .{ .sink = sink, .tally = tally };
+}
+
+/// Serialize the collected findings as `mt doctor --json`'s `checks[]`
+/// payload to stdout, alongside the existing cask_history/tap_cache/taps
+/// fragments. Best-effort: a writer failure drops the payload rather
+/// than aborting the run.
+fn emitChecksJson(allocator: std.mem.Allocator, findings: []const render.Finding) void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    render.writeChecksJson(&aw.writer, findings) catch return;
+    output.writeStdoutAll(aw.written());
 }
 
 /// Walk retained cask versions and emit the report doctor surfaces
@@ -257,14 +362,20 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     resetVerboseHint();
     resetFixHint();
     output.info("Running health checks...", .{});
-    const tally = runChecks(.{
+    // Capture findings only under --json; the human path stays render-only.
+    const want_checks_json = output.isJson();
+    var walk = collectFindings(allocator, .{
         .allocator = allocator,
         .prefix = prefix,
         .io = ctx.io,
         .environ = ctx.environ,
         .mirrors = ctx.mirrors,
         .offline = ctx.offline,
-    }, &checks);
+    }, &checks, want_checks_json);
+    defer walk.deinit();
+    const tally = walk.tally;
+
+    if (want_checks_json) emitChecksJson(allocator, walk.findings());
 
     emitCaskHistoryReport(allocator, ctx.io, prefix);
     emitTapCacheReport(allocator, ctx.io, prefix);
@@ -367,9 +478,19 @@ pub fn resetFixHint() void {
 
 /// Internal arm — called by checks that detect a safe-class
 /// condition `--fix` can resolve. `emitFixHintIfNeeded` decides
-/// whether to surface the nudge.
-fn armFixHint() void {
+/// whether to surface the nudge. `fix_class` is the safe-fix class the
+/// offender belongs to; it also tags the just-rendered finding so
+/// `mt doctor --json` reports the same `fixable`/`fix_class` the inline
+/// nudge is driven by — one fixability signal for both views.
+fn armFixHint(fix_class: FixKind) void {
     fix_hint_armed = true;
+    if (g_sink) |sink| {
+        if (sink.list.items.len != 0) {
+            const last = &sink.list.items[sink.list.items.len - 1];
+            last.fixable = true;
+            last.fix_class = fix_class;
+        }
+    }
 }
 
 /// Emit a "run with --fix to apply safe-class fixes" nudge after the
@@ -519,7 +640,7 @@ fn checkStaleLock(ctx: CheckCtx, name: []const u8) CheckResult {
         } else {
             const s = std.fmt.bufPrint(&pid_buf, "Stale lock from dead PID {d}. Run: rm {s}", .{ p, lock_path }) catch "Stale lock detected";
             printCheck(name, .warn_status, s);
-            armFixHint();
+            armFixHint(.stale_lock);
         }
         return .warn_status;
     }
@@ -747,7 +868,7 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
         .{orphan_count},
     ) catch "Orphaned store entries found. Run: mt purge --store-orphans";
     printCheck(name, .warn_status, msg);
-    armFixHint();
+    armFixHint(.orphaned_store);
     return .warn_status;
 }
 
@@ -842,7 +963,7 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
     ) catch "Broken symlinks found. Run: mt cleanup";
     printCheck(name, .warn_status, msg);
     armVerboseHint();
-    armFixHint();
+    armFixHint(.broken_symlinks);
     writeVerboseList(offenders.items);
     return .warn_status;
 }
@@ -1230,6 +1351,31 @@ fn captureFixEmit(allocator: std.mem.Allocator, fix_requested: bool) !std.ArrayL
     return buf;
 }
 
+test "findingId: slugifies a title into a stable lowercase id" {
+    const cases = [_]struct { title: []const u8, id: []const u8 }{
+        .{ .title = "MALT_PREFIX", .id = "malt_prefix" },
+        .{ .title = "SQLite integrity", .id = "sqlite_integrity" },
+        .{ .title = "Stale lock", .id = "stale_lock" },
+        .{ .title = "Orphaned store entries", .id = "orphaned_store_entries" },
+        .{ .title = "Mach-O placeholders", .id = "mach_o_placeholders" },
+        .{ .title = "Dependency bin/sbin link census", .id = "dependency_bin_sbin_link_census" },
+        .{ .title = "Prefix on PATH", .id = "prefix_on_path" },
+    };
+    for (cases) |c| {
+        const got = try findingId(testing.allocator, c.title);
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings(c.id, got);
+    }
+}
+
+test "findingId: collapses non-alphanumeric runs and trims the edges" {
+    // Leading/trailing separators and repeated punctuation must never
+    // leak doubled or edge underscores into the id.
+    const got = try findingId(testing.allocator, "  A -- B/C  ");
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("a_b_c", got);
+}
+
 test "formatSslCertDetail: null when present, remediation hint when absent" {
     try testing.expect(formatSslCertDetail(true) == null);
     const missing = formatSslCertDetail(false) orelse return error.TestUnexpectedResult;
@@ -1246,7 +1392,7 @@ test "emitFixHintIfNeeded: silent without arming" {
 
 test "emitFixHintIfNeeded: emits when armed and --fix is off" {
     resetFixHint();
-    armFixHint();
+    armFixHint(.stale_lock);
     var captured = try captureFixEmit(testing.allocator, false);
     defer captured.deinit(testing.allocator);
     try testing.expect(fixHintEmitted(captured.items));
@@ -1254,7 +1400,7 @@ test "emitFixHintIfNeeded: emits when armed and --fix is off" {
 
 test "emitFixHintIfNeeded: silent when --fix was already passed" {
     resetFixHint();
-    armFixHint();
+    armFixHint(.stale_lock);
     var captured = try captureFixEmit(testing.allocator, true);
     defer captured.deinit(testing.allocator);
     try testing.expect(!fixHintEmitted(captured.items));
@@ -1262,7 +1408,7 @@ test "emitFixHintIfNeeded: silent when --fix was already passed" {
 
 test "resetFixHint: clears a previously-armed flag" {
     resetFixHint();
-    armFixHint();
+    armFixHint(.stale_lock);
     resetFixHint();
     var captured = try captureFixEmit(testing.allocator, false);
     defer captured.deinit(testing.allocator);
