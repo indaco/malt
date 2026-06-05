@@ -1,0 +1,1 @@
+{"schema_version":1,"name":"curl","type":"formula","installed":true,"version":"8.20.0","tap":"homebrew/core","dependencies":["brotli","libnghttp2","libnghttp3","libngtcp2","libssh2","openssl@3","zstd"],"pinned":true,"installed_at":"2026-05-04 05:35:20","available_rollback_versions":[]}

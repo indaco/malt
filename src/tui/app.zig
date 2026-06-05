@@ -19,6 +19,10 @@ const term = @import("term.zig");
 const layout = @import("layout.zig");
 const scroll_list = @import("scroll_list.zig");
 
+const spawn = @import("spawn.zig");
+const list_json = @import("json/list.zig");
+const info_json = @import("json/info.zig");
+
 const installed = @import("installed_tab.zig");
 const outdated = @import("outdated_tab.zig");
 const services = @import("services_tab.zig");
@@ -171,10 +175,11 @@ fn stepNormal(a: *App, key: Key) void {
             };
             routeToTab(a, key); // a domain key (e.g. u/f) belongs to the tab
         },
-        .enter, .space, .end => routeToTab(a, key),
+        .enter, .space, .end, .esc => routeToTab(a, key),
         // `end` needs the row count to land on the last row — deferred to the
-        // data tab; `esc`/`backspace`/`unknown` are inert outside edit mode.
-        .esc, .backspace, .unknown => {},
+        // data tab; Esc routes so a tab can close a pane / cancel its guard;
+        // `backspace`/`unknown` are inert outside edit mode.
+        .backspace, .unknown => {},
     }
 }
 
@@ -246,7 +251,79 @@ fn refusalMessage(r: Refusal) []const u8 {
     };
 }
 
-pub const RunError = term.TermError || std.mem.Allocator.Error || error{ReadFailed};
+pub const RunError = term.TermError || std.mem.Allocator.Error ||
+    spawn.ReadError || spawn.InlineError || list_json.Error || info_json.Error || error{ReadFailed};
+
+/// Owns the JSON parse results the tabs borrow from. Reads re-exec `mt … --json`
+/// and reparse into here; the tab `State` slices point at this storage and the
+/// pure `step`/`render` never free it. One per running dashboard.
+const Store = struct {
+    installed: ?list_json.Parsed = null,
+    detail: ?info_json.Parsed = null,
+
+    fn deinit(self: *Store) void {
+        if (self.installed) |p| p.deinit();
+        if (self.detail) |p| p.deinit();
+    }
+};
+
+/// (Re)read `mt list --json --size --linked` and repoint the Installed tab's
+/// rows at the fresh parse, freeing the previous one. The `--size`/`--linked`
+/// keg-dir walk is paid only here — on the Installed tab, lazily.
+fn loadInstalled(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+    const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "list", "--size", "--linked" });
+    defer allocator.free(argv);
+    const bytes = try spawn.readJson(io, allocator, argv);
+    defer allocator.free(bytes);
+
+    const parsed = try list_json.parse(allocator, bytes);
+    if (store.installed) |old| old.deinit();
+    store.installed = parsed;
+    app.states.installed.items = parsed.items;
+    app.states.installed.detail = null; // a refreshed list invalidates the old detail
+}
+
+/// Read `mt info <pkg> --json` for the selected row into the detail pane.
+fn openDetail(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+    const sel = installed.selectedPkg(&app.states.installed) orelse return; // nothing selected
+    const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "info", sel.name });
+    defer allocator.free(argv);
+    const bytes = try spawn.readJson(io, allocator, argv);
+    defer allocator.free(bytes);
+
+    const parsed = try info_json.parse(allocator, bytes);
+    if (store.detail) |old| old.deinit();
+    store.detail = parsed;
+    app.states.installed.detail = .{ .pkg = sel, .info = parsed.info };
+}
+
+/// Delegate uninstall to the real `mt` inline, then refresh the list. `sel.name`
+/// is copied into the argv before the spawn; the post-spawn reload frees the
+/// storage it borrowed from, so it is not read afterwards.
+fn doUninstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+    const sel = installed.selectedPkg(&app.states.installed) orelse return;
+    const argv = try spawn.inlineArgv(allocator, app.mt_path, &.{ "uninstall", sel.name });
+    defer allocator.free(argv);
+    try spawn.runInline(t, argv); // drops the alt-screen, runs mt, re-enters; errdefer restores
+    try loadInstalled(io, allocator, app, store); // the keg is gone — refetch
+    markStaleAfterMutation(app); // the other tabs may now be stale too
+}
+
+/// Perform any effect the pure `step` requested on the Installed tab, then clear
+/// it. The only tab with effects today; reads/spawns live here, never in `step`.
+fn serviceInstalled(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+    const req = app.states.installed.request;
+    app.states.installed.request = .none;
+    switch (req) {
+        .none => {},
+        .open_detail => try openDetail(io, allocator, app, store),
+        .uninstall => try doUninstall(io, allocator, t, app, store),
+    }
+    // Lazy per-tab refresh: a tab marked dirty by a mutation refetches on entry.
+    if (app.active == .installed and takeDirty(app, .installed)) {
+        try loadInstalled(io, allocator, app, store);
+    }
+}
 
 fn isTty(io: std.Io, fd: std.posix.fd_t) bool {
     const f: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
@@ -301,9 +378,12 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     term.installWinch(fd);
 
     var app: App = .{ .mt_path = mt_path }; // re-exec this mt for delegated mutations
+    var store: Store = .{};
+    defer store.deinit();
     var frame = try allocator.alloc(u8, frameCap(term.currentSize()));
     defer allocator.free(frame);
 
+    try loadInstalled(io, allocator, &app, &store); // the default tab's data, before first paint
     try repaint(fd, &frame, allocator, &app);
 
     var decoder: keys.Decoder = .{};
@@ -325,6 +405,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
                     consumed += k.consumed;
                     app = step(app, k.key);
                     if (app.quit) break;
+                    try serviceInstalled(io, allocator, &t, &app, &store);
                 },
             }
         }
@@ -379,6 +460,13 @@ test "a committed filter survives a tab round-trip" {
     a = step(a, .tab);
     a = step(a, .tab); // and come back
     try std.testing.expectEqualStrings("wg", activeFilterText(&a));
+}
+
+test "esc in normal mode routes to the active tab so it can cancel its guard" {
+    var a: App = .{};
+    a.states.installed.confirm_uninstall = true;
+    a = step(a, .esc); // not editing → must reach the tab, which lowers the guard
+    try std.testing.expect(!a.states.installed.confirm_uninstall);
 }
 
 test "esc clears the filter and leaves edit mode" {
