@@ -74,12 +74,32 @@ fn scanContent(
     }
 }
 
-/// The leaf whitelist: `std` (the only bare import), or a relative path that
-/// resolves to one of the two allowed read-only ui helpers.
+/// The leaf whitelist: `std` (the only bare import); a relative path that
+/// resolves to one of the two allowed read-only ui helpers; or a sibling
+/// `src/tui` module (a bare `*.zig` filename — it cannot escape the leaf, so
+/// intra-leaf composition like `layout.zig` → `scroll_list.zig` is permitted).
 fn isAllowedImport(path: []const u8) bool {
     if (std.mem.eql(u8, path, "std")) return true;
     var rest = path;
     while (std.mem.startsWith(u8, rest, "../")) rest = rest[3..];
-    return std.mem.eql(u8, rest, "ui/color.zig") or
-        std.mem.eql(u8, rest, "ui/term_sanitize.zig");
+    if (std.mem.eql(u8, rest, "ui/color.zig") or
+        std.mem.eql(u8, rest, "ui/term_sanitize.zig")) return true;
+    // A bare `*.zig` (no path separator) imports a sibling within `src/tui`,
+    // which is the same leaf — allowed; an outward reach always carries a `/`.
+    return std.mem.indexOfScalar(u8, path, '/') == null and
+        std.mem.endsWith(u8, path, ".zig");
+}
+
+test "isAllowedImport permits std, the ui helpers, and sibling tui modules" {
+    try testing.expect(isAllowedImport("std"));
+    try testing.expect(isAllowedImport("../ui/color.zig"));
+    try testing.expect(isAllowedImport("../ui/term_sanitize.zig"));
+    try testing.expect(isAllowedImport("scroll_list.zig")); // intra-leaf sibling
+}
+
+test "isAllowedImport rejects reaching out of the leaf" {
+    try testing.expect(!isAllowedImport("../cli/list.zig"));
+    try testing.expect(!isAllowedImport("../core/store.zig"));
+    try testing.expect(!isAllowedImport("../app_ctx.zig"));
+    try testing.expect(!isAllowedImport("../ui/output.zig")); // not a whitelisted helper
 }
