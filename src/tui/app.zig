@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const color = @import("../ui/color.zig");
+const term_sanitize = @import("../ui/term_sanitize.zig");
 const tab = @import("tab.zig");
 const tab_bar = @import("tab_bar.zig");
 const filter_input = @import("filter_input.zig");
@@ -62,6 +63,58 @@ comptime {
 /// `scroll_list.clamp` still bounds it to the real list.
 const page_step = 10;
 
+/// Cap on the recoverable-error banner. An op label + an error name fit well
+/// inside this; the cap keeps the buffer fixed so the banner never allocates.
+pub const banner_max = 160;
+
+/// A transient banner for a recoverable backend failure, shown in the footer.
+/// Fixed buffer, no allocation, like the filter. Set when a delegated op fails
+/// recoverably, cleared on the next keypress (`step`). The message is run
+/// through `term_sanitize` at set-time because the op label may carry a
+/// child-derived package name — the leaf's untrusted-input rule.
+pub const Banner = struct {
+    buf: [banner_max]u8 = undefined,
+    len: usize = 0,
+
+    pub fn slice(self: *const Banner) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    pub fn isSet(self: *const Banner) bool {
+        return self.len != 0;
+    }
+
+    pub fn clear(self: *Banner) void {
+        self.len = 0;
+    }
+
+    /// Format "<op>: <reason>" into the fixed buffer, run through `term_sanitize`
+    /// so a child-derived package name in `op` cannot inject escape sequences.
+    /// Truncated at the cap; the footer render also strips line-breakers the
+    /// sanitizer lets through (`putContent`).
+    pub fn set(self: *Banner, op: []const u8, reason: []const u8) void {
+        self.len = 0;
+        var san = term_sanitize.Sanitizer.init();
+        const sink: term_sanitize.Sink = .{ .ctx = self, .write_fn = appendSink };
+        // The buffered sink never fails — it truncates at the cap — so the
+        // sanitizer's propagated error cannot occur here; ignore it deliberately.
+        san.feed(op, sink) catch {};
+        san.feed(": ", sink) catch {};
+        san.feed(reason, sink) catch {};
+        san.flush(sink) catch {};
+    }
+
+    /// `term_sanitize.Sink` callback: append clean bytes, bounded by the cap.
+    /// `@ptrCast` is the sink's `*anyopaque` → `*Banner` round-trip; the ctx was
+    /// set from a `*Banner` just above, so the cast is sound.
+    fn appendSink(ctx: *anyopaque, bytes: []const u8) term_sanitize.SinkError!void {
+        const self: *Banner = @ptrCast(@alignCast(ctx));
+        const n = @min(bytes.len, self.buf.len - self.len);
+        @memcpy(self.buf[self.len..][0..n], bytes[0..n]);
+        self.len += n;
+    }
+};
+
 pub const App = struct {
     active: Tab = .installed,
     editing: bool = false,
@@ -75,6 +128,10 @@ pub const App = struct {
     /// action tabs re-exec *this* `mt` (not whatever PATH resolves) for reads
     /// and mutations.
     mt_path: []const u8 = "",
+    /// A transient banner for the last recoverable backend failure. Shown in the
+    /// footer, dismissed on the next keypress (`step`); a successful action just
+    /// leaves it cleared.
+    banner: Banner = .{},
 };
 
 /// After a delegated mutation the active tab was just re-read inline, so it is
@@ -129,6 +186,7 @@ fn tabTitles() [tab_bar.count][]const u8 {
 /// keys the shell does not own fall through to the active tab.
 pub fn step(app: App, key: Key) App {
     var a = app;
+    a.banner.clear(); // a keypress dismisses the prior transient error banner
     if (a.editing) stepFilter(&a, key) else stepNormal(&a, key);
     return a;
 }
@@ -207,13 +265,23 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
 
             renderActive(app, &f, r.content);
 
-            // Footer: a rule line separating content, then the dimmed help line.
+            // Footer: a rule line separating content, then either the transient
+            // recoverable-error banner or the dimmed help line on the row below.
             f.moveTo(r.footer.row, 1);
             putRule(&f, cols);
             f.moveTo(r.footer.row + 1, 1);
-            f.put(color.Style.dim.code());
-            f.put(scroll_list.truncate(footerHelp(app.editing), cols));
-            f.put(color.Style.reset.code());
+            if (app.banner.isSet()) {
+                // Undimmed + yellow so a recoverable failure reads as a warning,
+                // not chrome; `putContent` drops line-breakers the sanitizer let
+                // through, `truncate` keeps it within the column budget.
+                f.put(color.Style.yellow.code());
+                f.putContent(scroll_list.truncate(app.banner.slice(), cols));
+                f.put(color.Style.reset.code());
+            } else {
+                f.put(color.Style.dim.code());
+                f.put(scroll_list.truncate(footerHelp(app.editing), cols));
+                f.put(color.Style.reset.code());
+            }
         },
     }
     return f.slice();
@@ -254,6 +322,35 @@ fn refusalMessage(r: Refusal) []const u8 {
 pub const RunError = term.TermError || std.mem.Allocator.Error ||
     spawn.ReadError || spawn.InlineError || list_json.Error || info_json.Error || error{ReadFailed};
 
+/// How the event loop treats a run-loop error: a `recoverable` backend fault
+/// becomes an inline banner and the session keeps running; a `fatal` fault
+/// restores the terminal and exits (the TUI-012 crash-safety guarantee).
+pub const ErrorClass = enum { recoverable, fatal };
+
+/// Pure, exhaustive classifier over `RunError`. A child-process or parse fault
+/// is `recoverable` — proportionate to its cause, the dashboard keeps its tab,
+/// selection, and filter. A terminal-integrity or out-of-memory fault is
+/// `fatal`. No `else`, so a newly-added error is a compile error until it is
+/// deliberately classified — the discipline the `Key`/`Tab` enums use. Note:
+/// `ReadFailed` here is the child-pipe drain (recoverable); the controlling-tty
+/// read failure never reaches this — it is a direct fatal return in the loop.
+pub fn classify(err: RunError) ErrorClass {
+    return switch (err) {
+        error.SpawnFailed,
+        error.WaitFailed,
+        error.ChildFailed,
+        error.EmptyOutput,
+        error.ReadFailed,
+        error.BadJson,
+        => .recoverable,
+        error.NotATty,
+        error.WriteFailed,
+        error.TermiosFailed,
+        error.OutOfMemory,
+        => .fatal,
+    };
+}
+
 /// Owns the JSON parse results the tabs borrow from. Reads re-exec `mt … --json`
 /// and reparse into here; the tab `State` slices point at this storage and the
 /// pure `step`/`render` never free it. One per running dashboard.
@@ -271,6 +368,10 @@ const Store = struct {
 /// rows at the fresh parse, freeing the previous one. The `--size`/`--linked`
 /// keg-dir walk is paid only here — on the Installed tab, lazily.
 fn loadInstalled(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+    // Annotate any failure as a recoverable banner; the loop boundary decides
+    // whether to keep looping (recoverable) or restore + exit (fatal). The store
+    // is only swapped after a clean parse, so a failure keeps the last-good rows.
+    errdefer |err| app.banner.set("list refresh failed", @errorName(err));
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "list", "--size", "--linked" });
     defer allocator.free(argv);
     const bytes = try spawn.readJson(io, allocator, argv);
@@ -286,6 +387,13 @@ fn loadInstalled(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *St
 /// Read `mt info <pkg> --json` for the selected row into the detail pane.
 fn openDetail(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
     const sel = installed.selectedPkg(&app.states.installed) orelse return; // nothing selected
+    // Name the package in a recoverable banner on any failure; the detail field
+    // is only set after a clean parse, so a failure leaves the pane closed.
+    errdefer |err| {
+        var sb: [96]u8 = undefined;
+        const op = std.fmt.bufPrint(&sb, "info for {s} failed", .{sel.name}) catch "info read failed";
+        app.banner.set(op, @errorName(err));
+    }
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "info", sel.name });
     defer allocator.free(argv);
     const bytes = try spawn.readJson(io, allocator, argv);
@@ -304,7 +412,14 @@ fn doUninstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *Ap
     const sel = installed.selectedPkg(&app.states.installed) orelse return;
     const argv = try spawn.inlineArgv(allocator, app.mt_path, &.{ "uninstall", sel.name });
     defer allocator.free(argv);
-    try spawn.runInline(t, argv); // drops the alt-screen, runs mt, re-enters; errdefer restores
+    {
+        // A non-zero `mt uninstall` re-enters the dashboard (the user still has
+        // malt's real output in their scrollback) and surfaces the failure as a
+        // recoverable banner — only a terminal fault is fatal. Scoped so the
+        // post-mutation refresh below reports under its own op, not "uninstall".
+        errdefer |err| app.banner.set("uninstall failed", @errorName(err));
+        try spawn.runInlineReenter(t, argv);
+    }
     try loadInstalled(io, allocator, app, store); // the keg is gone — refetch
     markStaleAfterMutation(app); // the other tabs may now be stale too
 }
@@ -403,9 +518,15 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
                 .incomplete => break,
                 .key => |k| {
                     consumed += k.consumed;
-                    app = step(app, k.key);
+                    app = step(app, k.key); // also clears any prior banner
                     if (app.quit) break;
-                    try serviceInstalled(io, allocator, &t, &app, &store);
+                    // A recoverable backend fault becomes the banner the failing
+                    // op already set and the loop continues; only a fatal fault
+                    // (terminal/OOM) propagates to the errdefer restore + exit.
+                    serviceInstalled(io, allocator, &t, &app, &store) catch |err| switch (classify(err)) {
+                        .recoverable => {},
+                        .fatal => return err,
+                    };
                 },
             }
         }
@@ -563,6 +684,33 @@ test "renderFrame uses cursor positioning and never emits a raw newline" {
     try std.testing.expect(std.mem.indexOf(u8, out, "Installed") != null);
 }
 
+test "a recoverable banner renders in the footer in place of the help line" {
+    var a: App = .{};
+    a.banner.set("info for jq failed", "BadJson");
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "info for jq failed: BadJson") != null);
+    // The banner takes the help line's slot, so the help text is not shown.
+    try std.testing.expect(std.mem.indexOf(u8, out, "q: quit") == null);
+}
+
+test "a banner truncates width-aware to the terminal columns" {
+    var a: App = .{};
+    a.banner.set("info for some-very-long-package-name failed", "ChildFailed");
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 24, 24); // narrow terminal
+    // The full message cannot have been painted verbatim into 24 columns.
+    try std.testing.expect(std.mem.indexOf(u8, out, "info for some-very-long-package-name failed: ChildFailed") == null);
+}
+
+test "any keypress clears a transient banner" {
+    var a: App = .{};
+    a.banner.set("uninstall failed", "ChildFailed");
+    try std.testing.expect(a.banner.isSet());
+    a = step(a, .down); // a navigation key dismisses the stale banner
+    try std.testing.expect(!a.banner.isSet());
+}
+
 test "renderFrame falls back cleanly on a too-small terminal" {
     var a: App = .{};
     var buf: [8192]u8 = undefined;
@@ -598,6 +746,84 @@ test "entering a dirty tab consumes the flag so its refetch runs at most once" {
 test "a tab that was never marked dirty does not trigger a refetch" {
     var a: App = .{};
     try std.testing.expect(!takeDirty(&a, .outdated));
+}
+
+test "banner formats op + reason and reports set/clear" {
+    var b: Banner = .{};
+    try std.testing.expect(!b.isSet());
+    b.set("info for jq failed", "BadJson");
+    try std.testing.expect(b.isSet());
+    try std.testing.expectEqualStrings("info for jq failed: BadJson", b.slice());
+    b.clear();
+    try std.testing.expect(!b.isSet());
+    try std.testing.expectEqualStrings("", b.slice());
+}
+
+test "banner sanitizes a child-derived op so a package name cannot inject escapes" {
+    var b: Banner = .{};
+    // A hostile tap could name a package with an OSC title-set; it must be dropped.
+    b.set("info for \x1b]0;pwn\x07evil failed", "BadJson");
+    try std.testing.expect(std.mem.indexOfScalar(u8, b.slice(), 0x1b) == null); // no stray ESC
+    try std.testing.expect(std.mem.indexOf(u8, b.slice(), "evil failed: BadJson") != null);
+}
+
+test "banner truncates an over-cap op to the fixed buffer without overflow" {
+    var b: Banner = .{};
+    var huge: [banner_max * 2]u8 = undefined;
+    @memset(&huge, 'x');
+    b.set(&huge, "BadJson");
+    try std.testing.expect(b.isSet());
+    try std.testing.expect(b.slice().len <= banner_max); // bounded, no overrun
+}
+
+test "a newline in a child-derived op cannot inject an extra footer frame line" {
+    // term_sanitize lets \n through; the footer paints via putContent, which drops
+    // it, so a package name with an embedded newline can't split the frame.
+    var a: App = .{};
+    a.banner.set("info for ev\nil failed", "BadJson");
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 24);
+    try std.testing.expect(std.mem.indexOfScalar(u8, out, '\n') == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "evil failed: BadJson") != null); // \n stripped, text joined
+}
+
+test "classify splits recoverable backend faults from fatal terminal/OOM faults" {
+    // Child-process + parse faults: survivable — show a banner, keep the session.
+    try std.testing.expectEqual(ErrorClass.recoverable, classify(error.SpawnFailed));
+    try std.testing.expectEqual(ErrorClass.recoverable, classify(error.WaitFailed));
+    try std.testing.expectEqual(ErrorClass.recoverable, classify(error.ChildFailed));
+    try std.testing.expectEqual(ErrorClass.recoverable, classify(error.EmptyOutput));
+    try std.testing.expectEqual(ErrorClass.recoverable, classify(error.ReadFailed)); // child pipe
+    try std.testing.expectEqual(ErrorClass.recoverable, classify(error.BadJson));
+    // Terminal-integrity + OOM: fatal — restore and exit (the TUI-012 guarantee).
+    try std.testing.expectEqual(ErrorClass.fatal, classify(error.NotATty));
+    try std.testing.expectEqual(ErrorClass.fatal, classify(error.WriteFailed));
+    try std.testing.expectEqual(ErrorClass.fatal, classify(error.TermiosFailed));
+    try std.testing.expectEqual(ErrorClass.fatal, classify(error.OutOfMemory));
+}
+
+test "a failed list refresh names the op in the banner and keeps the last-good rows" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
+    var store: Store = .{};
+    defer store.deinit();
+    try std.testing.expectError(error.BadJson, loadInstalled(t.io(), std.testing.allocator, &app, &store));
+    try std.testing.expectEqualStrings("list refresh failed: BadJson", app.banner.slice());
+    try std.testing.expectEqual(@as(usize, 0), app.states.installed.items.len); // last-good kept
+}
+
+test "a failed info read names the package in the banner and leaves the pane closed" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/bin/echo" };
+    const items = [_]list_json.Pkg{.{ .name = "jq", .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null }};
+    app.states.installed.items = &items;
+    var store: Store = .{};
+    defer store.deinit();
+    try std.testing.expectError(error.BadJson, openDetail(t.io(), std.testing.allocator, &app, &store));
+    try std.testing.expectEqualStrings("info for jq failed: BadJson", app.banner.slice());
+    try std.testing.expect(app.states.installed.detail == null); // the pane never opened
 }
 
 test "refusalReason refuses non-tty, NO_COLOR, and CI; allows a clean tty" {
