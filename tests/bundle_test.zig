@@ -480,7 +480,10 @@ test "silent-sink dispatcher: member failure surfaces via Report with no stderr 
 
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
-    const app: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    // offline keeps the unresolvable formula failing fast (no network), so the
+    // test never races on connectivity and the HTTP/TLS layer never writes to the
+    // global stderr we assert is empty — the source of the parallel-batch flake.
+    const app: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
     var ictx: SilentInstallCtx = .{ .app = &app };
     const dispatcher = runner.Dispatcher{
         .ctx = &ictx,
