@@ -48,14 +48,17 @@ pub const Frame = struct {
         self.put(term.cursorMove(&tmp, row, col) catch return);
     }
 
-    /// Paint untrusted row content: drop line-breaking controls (LF/VT/FF/CR)
-    /// and turn TAB into a space, so a sanitized child row (where
-    /// `term_sanitize` lets `\n` through) cannot inject an extra frame line or
-    /// disturb column alignment. ESC and everything else pass through.
+    /// Paint untrusted row content as inert text: TAB becomes a space and every
+    /// C0 control byte — ESC included — plus DEL is dropped, so a child-derived
+    /// row can neither re-drive the cursor (ESC/CSI), set the window title (OSC),
+    /// inject an extra frame line (LF/CR/VT/FF), nor disturb column alignment
+    /// (TAB). Printable bytes and UTF-8 continuation bytes (≥ 0x80) pass through.
+    /// Every tab paints row content through here, so frame integrity is enforced
+    /// in this one choke point rather than trusted to each renderer.
     pub fn putContent(self: *Frame, bytes: []const u8) void {
         for (bytes) |b| switch (b) {
-            '\n', '\r', 0x0b, 0x0c => {}, // line breakers: drop
             '\t' => self.put(" "), // tab: collapse to one column
+            0x00...0x08, 0x0a...0x1f, 0x7f => {}, // C0 controls (incl. ESC), CR/LF, DEL: drop
             else => self.put(&[_]u8{b}),
         };
     }
@@ -63,7 +66,7 @@ pub const Frame = struct {
 
 /// Paint `rows` into `rect`: clamp the view to the height, take the visible
 /// window, position each row and paint it through `putContent`. The single
-/// place row content reaches the frame — so the newline defense lives here once.
+/// place row content reaches the frame — so the control-byte defense lives here once.
 pub fn paintRows(f: *Frame, rows: []const []const u8, view: scroll_list.View, rect: Rect) void {
     const v = scroll_list.clamp(view, rows.len, rect.height);
     const win = scroll_list.visible(rows, v, rect.height);
@@ -128,11 +131,23 @@ test "Frame.putContent strips line breakers and turns tab into a space" {
     try std.testing.expectEqualStrings("ab cde", f.slice());
 }
 
-test "putContent keeps an SGR escape intact (only line breakers are dropped)" {
+test "putContent drops an ESC so a child row cannot re-drive the cursor or set color" {
     var buf: [32]u8 = undefined;
     var f: Frame = .{ .buf = &buf };
-    f.putContent("\x1b[1mX\x1b[0m");
-    try std.testing.expectEqualStrings("\x1b[1mX\x1b[0m", f.slice());
+    f.putContent("\x1b[1mX\x1b[0m"); // an SGR a hostile package name might carry
+    try std.testing.expectEqualStrings("[1mX[0m", f.slice()); // ESC bytes gone; the remnant is inert text
+    try std.testing.expect(std.mem.indexOfScalar(u8, f.slice(), 0x1b) == null);
+}
+
+test "putContent strips the control introducers from a hostile row (OSC + BEL + erase)" {
+    var buf: [64]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    // An OSC title-set, a BEL, and an erase-display a hostile child name might carry.
+    f.putContent("x\x1b]0;pwn\x07y\x1b[2J");
+    const out = f.slice();
+    try std.testing.expect(std.mem.indexOfScalar(u8, out, 0x1b) == null); // no ESC → no CSI/OSC executes
+    try std.testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null); // BEL dropped
+    try std.testing.expect(std.mem.indexOf(u8, out, "x") != null and std.mem.indexOf(u8, out, "y") != null);
 }
 
 test "paintRows positions each row and a row's embedded newline never injects a frame line" {

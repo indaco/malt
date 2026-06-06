@@ -316,6 +316,19 @@ test "render reflows: the same state at two widths differs" {
     try testing.expect(!std.mem.eql(u8, fa.slice(), fb.slice()));
 }
 
+test "a hostile service name cannot inject a control sequence into the frame" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const evil = [_]Row{.{ .name = "ev\x1b]0;pwn\x07il", .state = "running", .auto_start = false, .keg_name = "k" }};
+    const s: State = .{ .items = &evil };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    // The dot legitimately emits its own SGR via `put`; the row *content* is funnelled
+    // through `putContent`, so the name's OSC title-set and BEL are neutralized there.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b]0;pwn") == null); // OSC introducer broken
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null); // BEL dropped
+}
+
 test "render on an empty list is a clean no-crash frame" {
     var buf: [1024]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
