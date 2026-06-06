@@ -34,6 +34,11 @@ PREFIX="/tmp/mt_info_hist_reg"
 export MALT_PREFIX="$PREFIX"
 export NO_COLOR=1
 export MALT_NO_EMOJI=1
+# Hermetic: every assertion is served from the seeded DB + store below, so a
+# local-lookup miss must never fall through to live Homebrew metadata, whose real
+# wget version can echo the current "1.22" the rollback section is asserted to
+# skip — the source of the parallel-batch flake.
+export MALT_OFFLINE=1
 rm -rf "$PREFIX"
 mkdir -p "$PREFIX/db"
 trap 'rm -rf "$PREFIX"' EXIT
