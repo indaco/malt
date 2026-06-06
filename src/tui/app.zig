@@ -24,6 +24,7 @@ const spawn = @import("spawn.zig");
 const list_json = @import("json/list.zig");
 const info_json = @import("json/info.zig");
 const outdated_json = @import("json/outdated.zig");
+const services_json = @import("json/services.zig");
 
 const installed = @import("installed_tab.zig");
 const outdated = @import("outdated_tab.zig");
@@ -322,7 +323,7 @@ fn refusalMessage(r: Refusal) []const u8 {
 
 pub const RunError = term.TermError || std.mem.Allocator.Error ||
     spawn.ReadError || spawn.InlineError || list_json.Error || info_json.Error ||
-    outdated_json.Error || error{ReadFailed};
+    outdated_json.Error || services_json.Error || error{ReadFailed};
 
 /// How the event loop treats a run-loop error: a `recoverable` backend fault
 /// becomes an inline banner and the session keeps running; a `fatal` fault
@@ -363,12 +364,14 @@ const Store = struct {
     /// The Outdated tab's checkbox state, parallel to `outdated.?.items`. Owned
     /// here, resized to the row count on each (re)load, borrowed by the tab.
     outdated_checked: []bool = &.{},
+    services: ?services_json.Parsed = null,
 
     fn deinit(self: *Store, allocator: std.mem.Allocator) void {
         if (self.installed) |p| p.deinit();
         if (self.detail) |p| p.deinit();
         if (self.outdated) |p| p.deinit();
         if (self.outdated_checked.len != 0) allocator.free(self.outdated_checked);
+        if (self.services) |p| p.deinit();
     }
 };
 
@@ -525,12 +528,77 @@ fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app:
     }
 }
 
+/// (Re)read `mt services list --json` and repoint the Services tab's rows at the
+/// fresh parse, freeing the previous one.
+fn loadServices(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+    // Annotate any failure as a recoverable banner; the loop boundary decides
+    // recoverable vs fatal. The store is swapped only after a clean parse, so a
+    // failure keeps the last-good rows and their selection.
+    errdefer |err| app.banner.set("services refresh failed", @errorName(err));
+    const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "services", "list" });
+    defer allocator.free(argv);
+    const bytes = try spawn.readJson(io, allocator, argv);
+    defer allocator.free(bytes);
+
+    const parsed = try services_json.parse(allocator, bytes);
+    if (store.services) |old| old.deinit();
+    store.services = parsed;
+    app.states.services.items = parsed.items;
+}
+
+/// Build `mt services <action> <name>` for the selected service. Pure over the
+/// tab state: null when nothing is selected (the no-op), else an owned argv whose
+/// `name` element borrows from the parse storage. Caller frees the returned slice
+/// (not its elements).
+fn serviceActionArgv(allocator: std.mem.Allocator, mt_path: []const u8, action: []const u8, st: *const services.State) std.mem.Allocator.Error!?[]const []const u8 {
+    const svc = services.selectedService(st) orelse return null; // empty list: no-op
+    return try spawn.inlineArgv(allocator, mt_path, &.{ "services", action, svc.name });
+}
+
+/// Delegate a service lifecycle action to the real `mt` inline, then refresh. The
+/// argv's `name` borrows from the current parse storage; the post-spawn reload
+/// frees that storage, so the name is not read afterwards.
+fn doServiceAction(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store, action: []const u8) RunError!void {
+    const argv = (try serviceActionArgv(allocator, app.mt_path, action, &app.states.services)) orelse return; // nothing selected
+    defer allocator.free(argv);
+    {
+        // A non-zero `mt services <action>` re-enters the dashboard (the user
+        // keeps malt's real output in their scrollback) and surfaces as a
+        // recoverable banner; only a terminal fault is fatal. Scoped so the
+        // refresh below reports under its own op, not the action.
+        errdefer |err| app.banner.set("service action failed", @errorName(err));
+        try spawn.runInlineReenter(t, argv);
+    }
+    try loadServices(io, allocator, app, store); // the state changed — refetch
+    markStaleAfterMutation(app);
+}
+
+/// Perform any lifecycle effect the pure `step` requested on the Services tab,
+/// then clear it, and lazily (re)load on first entry or after a mutation marked
+/// it dirty.
+fn serviceServices(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+    const req = app.states.services.request;
+    app.states.services.request = .none;
+    switch (req) {
+        .none => {},
+        .start => try doServiceAction(io, allocator, t, app, store, "start"),
+        .stop => try doServiceAction(io, allocator, t, app, store, "stop"),
+        .restart => try doServiceAction(io, allocator, t, app, store, "restart"),
+    }
+    // Lazy per-tab load: first activation and post-mutation staleness both arrive
+    // as the dirty flag (set at init and by `markStaleAfterMutation`).
+    if (app.active == .services and takeDirty(app, .services)) {
+        try loadServices(io, allocator, app, store);
+    }
+}
+
 /// Drain the active tab's pending effects after a keypress. Each tab's service is
 /// a no-op unless that tab is active and has a request or is due a lazy refresh,
-/// so calling both each loop is cheap and keeps the dispatch flat.
+/// so calling each one each loop is cheap and keeps the dispatch flat.
 fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
     try serviceInstalled(io, allocator, t, app, store);
     try serviceOutdated(io, allocator, t, app, store);
+    try serviceServices(io, allocator, t, app, store);
 }
 
 fn isTty(io: std.Io, fd: std.posix.fd_t) bool {
@@ -587,6 +655,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
 
     var app: App = .{ .mt_path = mt_path }; // re-exec this mt for delegated mutations
     app.dirty.insert(.outdated); // lazy: load `mt outdated --json` on first activation
+    app.dirty.insert(.services); // lazy: load `mt services list --json` on first activation
     var store: Store = .{};
     defer store.deinit(allocator);
     var frame = try allocator.alloc(u8, frameCap(term.currentSize()));
@@ -955,6 +1024,38 @@ test "a failed outdated refresh names the op in the banner and keeps the last-go
     try std.testing.expectError(error.BadJson, loadOutdated(t.io(), std.testing.allocator, &app, &store));
     try std.testing.expectEqualStrings("outdated refresh failed: BadJson", app.banner.slice());
     try std.testing.expectEqual(@as(usize, 0), app.states.outdated.items.len); // last-good kept
+}
+
+test "serviceActionArgv builds `mt services <action> <name>` for the selected service" {
+    const items = [_]services.Row{
+        .{ .name = "redis", .state = "running", .auto_start = true, .keg_name = "redis" },
+        .{ .name = "postgresql", .state = "stopped", .auto_start = false, .keg_name = "postgresql@16" },
+    };
+    var st: services.State = .{ .items = &items };
+    st.chrome.view.selected = 1; // postgresql
+    const argv = (try serviceActionArgv(std.testing.allocator, "/opt/homebrew/bin/mt", "restart", &st)).?;
+    defer std.testing.allocator.free(argv);
+    try std.testing.expectEqual(@as(usize, 4), argv.len);
+    try std.testing.expectEqualStrings("/opt/homebrew/bin/mt", argv[0]);
+    try std.testing.expectEqualStrings("services", argv[1]);
+    try std.testing.expectEqualStrings("restart", argv[2]);
+    try std.testing.expectEqualStrings("postgresql", argv[3]); // the selected row's name
+}
+
+test "serviceActionArgv returns null when nothing is selected so the action is a no-op" {
+    const st: services.State = .{ .items = &.{} };
+    try std.testing.expect((try serviceActionArgv(std.testing.allocator, "/bin/mt", "start", &st)) == null);
+}
+
+test "a failed services refresh names the op in the banner and keeps the last-good rows" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    try std.testing.expectError(error.BadJson, loadServices(t.io(), std.testing.allocator, &app, &store));
+    try std.testing.expectEqualStrings("services refresh failed: BadJson", app.banner.slice());
+    try std.testing.expectEqual(@as(usize, 0), app.states.services.items.len); // last-good kept
 }
 
 test "refusalReason refuses non-tty, NO_COLOR, and CI; allows a clean tty" {

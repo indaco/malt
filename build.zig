@@ -250,6 +250,7 @@ pub fn build(b: *std.Build) void {
         "tests/tui_spawn_test.zig",
         "tests/tui_installed_tab_test.zig",
         "tests/tui_outdated_test.zig",
+        "tests/tui_services_test.zig",
         "tests/tui_purity_test.zig",
     };
 
