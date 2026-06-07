@@ -96,6 +96,7 @@ pub const term_sanitize = @import("ui/term_sanitize.zig");
 pub const tui_app = @import("tui/app.zig");
 pub const tui_detail_pane = @import("tui/detail_pane.zig");
 pub const tui_filter_input = @import("tui/filter_input.zig");
+pub const tui_json_doctor = @import("tui/json/doctor.zig");
 pub const tui_json_info = @import("tui/json/info.zig");
 pub const tui_json_list = @import("tui/json/list.zig");
 pub const tui_json_outdated = @import("tui/json/outdated.zig");
