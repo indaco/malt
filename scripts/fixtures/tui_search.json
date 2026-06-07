@@ -1,0 +1,1 @@
+{"schema_version":1,"query":"fire","results":[{"name":"firefox","type":"cask","installed":true},{"name":"firefox@developer-edition","type":"cask","installed":false},{"name":"firewalld","type":"formula","installed":false},{"name":"firejail","type":"formula","installed":true}]}

@@ -26,11 +26,13 @@ const info_json = @import("json/info.zig");
 const outdated_json = @import("json/outdated.zig");
 const services_json = @import("json/services.zig");
 const doctor_json = @import("json/doctor.zig");
+const search_json = @import("json/search.zig");
 
 const installed = @import("installed_tab.zig");
 const outdated = @import("outdated_tab.zig");
 const services = @import("services_tab.zig");
 const doctor = @import("doctor_tab.zig");
+const search = @import("search_tab.zig");
 
 const Tab = tab_bar.Tab;
 const Key = keys.Key;
@@ -42,6 +44,7 @@ const TabStates = struct {
     outdated: outdated.State = .{},
     services: services.State = .{},
     doctor: doctor.State = .{},
+    search: search.State = .{},
 };
 
 /// Map a tab tag to its module at comptime — the vtable-free dispatch core.
@@ -51,6 +54,7 @@ fn moduleFor(comptime t: Tab) type {
         .outdated => outdated,
         .services => services,
         .doctor => doctor,
+        .search => search,
     };
 }
 
@@ -198,7 +202,14 @@ fn stepFilter(a: *App, key: Key) void {
     switch (key) {
         .char => |c| activeChrome(a).filter.push(c.slice()),
         .backspace => activeChrome(a).filter.backspace(),
-        .enter => a.editing = false, // commit, keep the filter
+        .enter => { // commit, keep the filter
+            a.editing = false;
+            // Search divergence: its filter doubles as the search box, so
+            // committing the query *is* the search. Only the Search tab claims
+            // the commit — every other tab's filter merely narrows an already
+            // loaded list, so routing Enter there would mis-fire their domain key.
+            if (a.active == .search) routeToTab(a, .enter);
+        },
         .esc => { // cancel: clear the filter
             activeChrome(a).filter.clear();
             a.editing = false;
@@ -228,7 +239,7 @@ fn stepNormal(a: *App, key: Key) void {
                     a.editing = true;
                     return;
                 },
-                '1'...'4' => {
+                '1'...'5' => {
                     if (tab_bar.fromDigit(c.bytes[0])) |t| a.active = t;
                     return;
                 },
@@ -299,7 +310,7 @@ fn footerHelp(editing: bool) []const u8 {
     return if (editing)
         "enter: accept   esc: clear"
     else
-        "tab/arrows/1-4: switch   /: filter   q: quit";
+        "tab/arrows/1-5: switch   /: filter   q: quit";
 }
 
 pub const Refusal = enum { not_a_tty, no_color, ci };
@@ -324,7 +335,8 @@ fn refusalMessage(r: Refusal) []const u8 {
 
 pub const RunError = term.TermError || std.mem.Allocator.Error ||
     spawn.ReadError || spawn.InlineError || list_json.Error || info_json.Error ||
-    outdated_json.Error || services_json.Error || doctor_json.Error || error{ReadFailed};
+    outdated_json.Error || services_json.Error || doctor_json.Error ||
+    search_json.Error || error{ReadFailed};
 
 /// How the event loop treats a run-loop error: a `recoverable` backend fault
 /// becomes an inline banner and the session keeps running; a `fatal` fault
@@ -367,6 +379,7 @@ const Store = struct {
     outdated_checked: []bool = &.{},
     services: ?services_json.Parsed = null,
     doctor: ?doctor_json.Parsed = null,
+    search: ?search_json.Parsed = null,
 
     fn deinit(self: *Store, allocator: std.mem.Allocator) void {
         if (self.installed) |p| p.deinit();
@@ -375,6 +388,7 @@ const Store = struct {
         if (self.outdated_checked.len != 0) allocator.free(self.outdated_checked);
         if (self.services) |p| p.deinit();
         if (self.doctor) |p| p.deinit();
+        if (self.search) |p| p.deinit();
     }
 };
 
@@ -656,6 +670,98 @@ fn serviceDoctor(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *
     }
 }
 
+/// Build `mt search <query> --json` for the committed query. Pure over the tab
+/// state: null when the query is empty (the no-op — the view shows guidance, no
+/// spawn), else an owned argv whose `query` element borrows the filter buffer.
+/// Caller frees the returned slice (not its elements).
+fn searchArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const search.State) std.mem.Allocator.Error!?[]const []const u8 {
+    const query = st.chrome.filter.slice();
+    if (query.len == 0) return null; // empty query: no remote read
+    return try spawn.jsonArgv(allocator, mt_path, &.{ "search", query });
+}
+
+/// Run the committed query's `mt search --json`, parse, and repoint the Search
+/// tab's results at the fresh parse. Search is a remote read, so it goes through
+/// `readJson` like the other reads (no alt-screen drop). The store is swapped
+/// only after a clean parse, so a failure keeps the last-good results.
+fn loadSearch(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+    const argv = (try searchArgv(allocator, app.mt_path, &app.states.search)) orelse return; // empty query: no-op
+    defer allocator.free(argv);
+    // Annotate any failure as a recoverable banner; the loop boundary decides
+    // recoverable vs fatal. A failed read must also leave the "searching…" phase
+    // (set by the pre-spawn paint): fall back to the last-good results, or
+    // guidance if none were ever loaded — never a stuck spinner behind the banner.
+    errdefer |err| {
+        app.banner.set("search failed", @errorName(err));
+        app.states.search.phase = if (store.search != null) .loaded else .idle;
+    }
+    const bytes = try spawn.readJson(io, allocator, argv);
+    defer allocator.free(bytes);
+
+    const parsed = try search_json.parse(allocator, bytes);
+    if (store.search) |old| old.deinit();
+    store.search = parsed;
+    app.states.search.items = parsed.items;
+    app.states.search.phase = .loaded;
+    // A fresh query is a new result set, so an old cursor would point at an
+    // unrelated row; reset to the top.
+    app.states.search.chrome.view = .{};
+}
+
+/// Build `mt install [--formula|--cask] <name>` for the selected hit. Pure over
+/// the tab state: null when nothing installable is selected (the no-op), else an
+/// owned argv whose `name` element borrows from the parse storage. Caller frees
+/// the returned slice (not its elements).
+fn installArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const search.State) std.mem.Allocator.Error!?[]const []const u8 {
+    const m = search.selectedMatch(st) orelse return null; // empty list: no-op
+    if (m.installed) return null; // already installed: inert
+    // The search result's kind is authoritative, so disambiguate the install
+    // explicitly: a name can exist as both a formula and a cask, where bare
+    // `mt install <name>` silently picks the formula. Exhaustive switch — a new
+    // kind is a compile error, never a silent default.
+    const kind_flag: []const u8 = switch (m.kind) {
+        .formula => "--formula",
+        .cask => "--cask",
+    };
+    return try spawn.inlineArgv(allocator, mt_path, &.{ "install", kind_flag, m.name });
+}
+
+/// Delegate the selected hit's install to the real `mt` inline, then re-run the
+/// query so its marker flips. The argv's `name` borrows from the current parse
+/// storage; the post-spawn re-search frees that storage, so the name is not read
+/// afterwards.
+fn doInstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+    const argv = (try installArgv(allocator, app.mt_path, &app.states.search)) orelse return; // nothing installable selected
+    defer allocator.free(argv);
+    {
+        // A non-zero `mt install` re-enters the dashboard (the user keeps malt's
+        // real output, including any prompt, in their scrollback) and surfaces as
+        // a recoverable banner; only a terminal fault is fatal. Scoped so the
+        // re-search below reports under its own op, not "install".
+        errdefer |err| app.banner.set("install failed", @errorName(err));
+        try spawn.runInlineReenter(t, argv);
+    }
+    // Re-run the same query so the freshly installed hit's marker flips — the
+    // backend's install-aware `installed` flag does the rest (no `mt list` call).
+    try loadSearch(io, allocator, app, store);
+    markStaleAfterMutation(app); // Installed/Outdated/Services may have changed too
+}
+
+/// Perform any effect the pure `step` requested on the Search tab, then clear it.
+/// Unlike the other tabs there is no lazy dirty-load: Search has no initial data
+/// (idle until the user commits a query), and a remote read on every tab-entry
+/// after an unrelated mutation would be a surprising freeze, so a dirty flag set
+/// by `markStaleAfterMutation` is deliberately never consumed here.
+fn serviceSearch(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+    const req = app.states.search.request;
+    app.states.search.request = .none;
+    switch (req) {
+        .none => {},
+        .search => try loadSearch(io, allocator, app, store),
+        .install => try doInstall(io, allocator, t, app, store),
+    }
+}
+
 /// Drain the active tab's pending effects after a keypress. Each tab's service is
 /// a no-op unless that tab is active and has a request or is due a lazy refresh,
 /// so calling each one each loop is cheap and keeps the dispatch flat.
@@ -664,6 +770,7 @@ fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, s
     try serviceOutdated(io, allocator, t, app, store);
     try serviceServices(io, allocator, t, app, store);
     try serviceDoctor(io, allocator, t, app, store);
+    try serviceSearch(io, allocator, t, app, store);
 }
 
 fn isTty(io: std.Io, fd: std.posix.fd_t) bool {
@@ -749,6 +856,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
                     consumed += k.consumed;
                     app = step(app, k.key); // also clears any prior banner
                     if (app.quit) break;
+                    paintSearching(fd, &frame, allocator, &app); // status before the blocking search
                     // A recoverable backend fault becomes the banner the failing
                     // op already set and the loop continues; only a fatal fault
                     // (terminal/OOM) propagates to the errdefer restore + exit.
@@ -762,6 +870,18 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
         try repaint(fd, &frame, allocator, &app);
     }
     t.restore();
+}
+
+/// Search is the dashboard's first remote read: when the user commits a query,
+/// flip the phase and repaint a "searching…" status *before* the blocking call,
+/// so the synchronous freeze isn't a dead terminal. The only tab-specific paint
+/// in the otherwise tab-agnostic loop, earned by that first-remote-read cost.
+/// Best-effort: a paint failure just means the real read's repaint follows.
+fn paintSearching(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) void {
+    if (app.active != .search or app.states.search.request != .search) return;
+    if (app.states.search.chrome.filter.slice().len == 0) return; // empty query: no spawn
+    app.states.search.phase = .searching;
+    repaint(fd, frame, allocator, app) catch {};
 }
 
 fn repaint(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) std.mem.Allocator.Error!void {
@@ -793,8 +913,8 @@ test "left and right arrows switch tabs both directions and wrap" {
     try std.testing.expectEqual(Tab.outdated, a.active);
     a = step(a, .left);
     try std.testing.expectEqual(Tab.installed, a.active);
-    a = step(a, .left); // wrap backward
-    try std.testing.expectEqual(Tab.doctor, a.active);
+    a = step(a, .left); // wrap backward to the last tab
+    try std.testing.expectEqual(Tab.search, a.active);
 }
 
 test "a committed filter survives a tab round-trip" {
@@ -808,7 +928,8 @@ test "a committed filter survives a tab round-trip" {
     a = step(a, .tab); // leave the tab
     a = step(a, .tab);
     a = step(a, .tab);
-    a = step(a, .tab); // and come back
+    a = step(a, .tab);
+    a = step(a, .tab); // and come back (five tabs now)
     try std.testing.expectEqualStrings("wg", activeFilterText(&a));
 }
 
@@ -1162,6 +1283,138 @@ test "a failed doctor refresh names the op in the banner and keeps the last-good
     try std.testing.expectError(error.BadJson, loadDoctor(t.io(), std.testing.allocator, &app, &store));
     try std.testing.expectEqualStrings("doctor refresh failed: BadJson", app.banner.slice());
     try std.testing.expectEqual(@as(usize, 0), app.states.doctor.items.len); // last-good kept
+}
+
+test "searchArgv builds `mt search <query> --json` for the committed query" {
+    var st: search.State = .{};
+    st.chrome.filter.push("fire");
+    const argv = (try searchArgv(std.testing.allocator, "/opt/homebrew/bin/mt", &st)).?;
+    defer std.testing.allocator.free(argv);
+    try std.testing.expectEqual(@as(usize, 4), argv.len); // mt, search, query, --json
+    try std.testing.expectEqualStrings("/opt/homebrew/bin/mt", argv[0]);
+    try std.testing.expectEqualStrings("search", argv[1]);
+    try std.testing.expectEqualStrings("fire", argv[2]);
+    try std.testing.expectEqualStrings("--json", argv[3]);
+}
+
+test "searchArgv returns null for an empty query so no remote read fires" {
+    const st: search.State = .{};
+    try std.testing.expect((try searchArgv(std.testing.allocator, "/bin/mt", &st)) == null);
+}
+
+test "installArgv disambiguates by kind: --cask for a cask hit, --formula for a formula" {
+    const items = [_]search.Match{
+        .{ .name = "firefox", .kind = .cask, .installed = false },
+        .{ .name = "wget", .kind = .formula, .installed = false },
+    };
+    var st: search.State = .{ .items = &items };
+    st.chrome.view.selected = 0; // firefox (cask)
+    {
+        const argv = (try installArgv(std.testing.allocator, "/opt/homebrew/bin/mt", &st)).?;
+        defer std.testing.allocator.free(argv);
+        try std.testing.expectEqual(@as(usize, 4), argv.len); // mt, install, --cask, name
+        try std.testing.expectEqualStrings("install", argv[1]);
+        try std.testing.expectEqualStrings("--cask", argv[2]);
+        try std.testing.expectEqualStrings("firefox", argv[3]);
+    }
+    st.chrome.view.selected = 1; // wget (formula)
+    {
+        const argv = (try installArgv(std.testing.allocator, "/opt/homebrew/bin/mt", &st)).?;
+        defer std.testing.allocator.free(argv);
+        try std.testing.expectEqualStrings("--formula", argv[2]);
+        try std.testing.expectEqualStrings("wget", argv[3]);
+    }
+}
+
+test "installArgv returns null on an already-installed hit and on an empty list" {
+    const items = [_]search.Match{.{ .name = "jq", .kind = .formula, .installed = true }};
+    const st: search.State = .{ .items = &items };
+    try std.testing.expect((try installArgv(std.testing.allocator, "/bin/mt", &st)) == null); // already installed
+    const empty: search.State = .{ .items = &.{} };
+    try std.testing.expect((try installArgv(std.testing.allocator, "/bin/mt", &empty)) == null); // nothing selected
+}
+
+test "installArgv disambiguates a name that exists as both a formula and a cask" {
+    // The motivating collision: one name, two kinds. The selected hit's kind
+    // picks the flag, so the install can't silently default to the formula when
+    // the user chose the cask — the reason the explicit flag exists.
+    const items = [_]search.Match{
+        .{ .name = "docker", .kind = .formula, .installed = false },
+        .{ .name = "docker", .kind = .cask, .installed = false },
+    };
+    var st: search.State = .{ .items = &items };
+    st.chrome.view.selected = 1; // the cask, not the formula above it
+    const argv = (try installArgv(std.testing.allocator, "/bin/mt", &st)).?;
+    defer std.testing.allocator.free(argv);
+    try std.testing.expectEqualStrings("--cask", argv[2]);
+    try std.testing.expectEqualStrings("docker", argv[3]);
+}
+
+test "a failed search names the op in the banner and leaves no stuck searching phase" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
+    app.states.search.chrome.filter.push("fire");
+    app.states.search.phase = .searching; // as the pre-spawn paint left it
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    try std.testing.expectError(error.BadJson, loadSearch(t.io(), std.testing.allocator, &app, &store));
+    try std.testing.expectEqualStrings("search failed: BadJson", app.banner.slice());
+    // No prior results → guidance, not a spinner frozen behind the banner.
+    try std.testing.expectEqual(search.Phase.idle, app.states.search.phase);
+    try std.testing.expectEqual(@as(usize, 0), app.states.search.items.len);
+}
+
+test "a failed search keeps the last-good results and selection, falling back to the list" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/bin/echo" }; // non-JSON → BadJson on the new query
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    // Prime a prior successful search: store + tab borrow these results.
+    store.search = try search_json.parse(std.testing.allocator,
+        \\{"results":[{"name":"jq","type":"formula","installed":true},{"name":"yq","type":"formula","installed":false}]}
+    );
+    app.states.search.items = store.search.?.items;
+    app.states.search.chrome.filter.push("q");
+    app.states.search.chrome.view.selected = 1; // cursor on yq
+    app.states.search.phase = .searching; // as the pre-spawn paint left it
+
+    try std.testing.expectError(error.BadJson, loadSearch(t.io(), std.testing.allocator, &app, &store));
+    try std.testing.expectEqualStrings("search failed: BadJson", app.banner.slice());
+    // Prior results exist → fall back to the list, not guidance; and the store is
+    // swapped only after a clean parse, so the rows and the cursor both survive.
+    try std.testing.expectEqual(search.Phase.loaded, app.states.search.phase);
+    try std.testing.expectEqual(@as(usize, 2), app.states.search.items.len);
+    try std.testing.expectEqual(@as(usize, 1), app.states.search.chrome.view.selected);
+}
+
+test "committing the filter fires a search on the Search tab but no domain key elsewhere" {
+    // On Search the filter doubles as the search box, so Enter commits *and*
+    // requests the read — 'i' typed mid-edit is literal query text, not install.
+    var a: App = .{ .active = .search };
+    a = step(a, ch('/'));
+    a = step(a, ch('f'));
+    a = step(a, ch('i'));
+    a = step(a, .enter);
+    try std.testing.expect(!a.editing);
+    try std.testing.expectEqual(search.Request.search, a.states.search.request);
+    try std.testing.expectEqualStrings("fi", activeFilterText(&a));
+
+    // The same commit on a non-search tab must not be routed to its domain key
+    // (outdated's Enter would otherwise request an upgrade).
+    var b: App = .{ .active = .outdated };
+    b = step(b, ch('/'));
+    b = step(b, ch('x'));
+    b = step(b, .enter);
+    try std.testing.expect(!b.editing);
+    try std.testing.expectEqual(outdated.Request.none, b.states.outdated.request);
+}
+
+test "the 5 key jumps to the Search tab" {
+    var a: App = .{};
+    a = step(a, ch('5'));
+    try std.testing.expectEqual(Tab.search, a.active);
 }
 
 test "refusalReason refuses non-tty, NO_COLOR, and CI; allows a clean tty" {
