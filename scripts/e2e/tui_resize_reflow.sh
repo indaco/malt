@@ -21,6 +21,7 @@ set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # shellcheck source=scripts/lib/tui_pty.sh
+# shellcheck disable=SC1091 # sourced lib resolved at runtime; absent when this file is linted alone
 source "$ROOT/scripts/lib/tui_pty.sh"
 
 tui_pty_guard
@@ -34,8 +35,6 @@ fail() {
 }
 
 CAP="$TUI_PREFIX/cap.bin"
-# 12 down-arrows put the selection well below the fold at height 14, so the
-# viewport has already scrolled before the resize.
 # 12 down-arrows put the selection well below the fold at height 14, so the
 # viewport has already scrolled before the resize. After the wide->narrow
 # reflow, shrink below the usable minimum (12 cols < the 20-col floor) to prove

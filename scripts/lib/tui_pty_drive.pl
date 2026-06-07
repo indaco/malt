@@ -12,7 +12,7 @@
 #
 # The action program is read from stdin, one action per line:
 #   mark LABEL        write "\n@@LABEL@@\n" into the capture (phase separator)
-#   send BYTES        write BYTES to the pty (\t \n \r \e escapes honoured)
+#   send BYTES        write BYTES to the pty (\t \n \r \e \xHH escapes honoured)
 #   settle [secs]     read+capture until output goes idle (default 0.6s window)
 #   resize COLS ROWS  TIOCSWINSZ the pty; the kernel delivers SIGWINCH
 #   quitwait [secs]   wait for the child to exit, capturing its final bytes
@@ -75,6 +75,7 @@ sub drain {
 
 sub unescape {
   my $s = shift // '';
+  $s =~ s/\\x([0-9A-Fa-f]{2})/chr(hex($1))/ge;    # \xHH — arbitrary control bytes (e.g. \x03 = Ctrl-C)
   $s =~ s/\\t/\t/g;
   $s =~ s/\\n/\n/g;
   $s =~ s/\\r/\r/g;

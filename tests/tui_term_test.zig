@@ -112,6 +112,12 @@ test "on a real tty, winsize reports a non-zero size and raw round-trips termios
     const before = try std.posix.tcgetattr(fd);
     var t = term.Term.init(io, fd);
     try t.enterRaw();
+    // While raw: echo/canon off for byte-at-a-time reads, and ISIG off so
+    // Ctrl-C arrives as a 0x03 byte (decoder -> quit) instead of a signal.
+    const raw = try std.posix.tcgetattr(fd);
+    try testing.expect(!raw.lflag.ECHO);
+    try testing.expect(!raw.lflag.ICANON);
+    try testing.expect(!raw.lflag.ISIG);
     t.restore(); // must put cooked mode back exactly
     const after = try std.posix.tcgetattr(fd);
     try testing.expectEqual(before.lflag, after.lflag);

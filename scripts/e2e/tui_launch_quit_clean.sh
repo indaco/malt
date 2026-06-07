@@ -19,6 +19,7 @@ set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # shellcheck source=scripts/lib/tui_pty.sh
+# shellcheck disable=SC1091 # sourced lib resolved at runtime; absent when this file is linted alone
 source "$ROOT/scripts/lib/tui_pty.sh"
 
 tui_pty_guard
@@ -72,12 +73,27 @@ assert_activated Doctor
 assert_activated Search
 
 # Terminal restored cleanly: one alt-screen enter, one leave, cursor shown.
-count() { grep -c -a -F "$1" "$CAP" || true; }
-enter=$(count $'\x1b[?1049h')
-leave=$(count $'\x1b[?1049l')
-show=$(count $'\x1b[?25h')
+count() { grep -c -a -F "$2" "$1" || true; }
+enter=$(count "$CAP" $'\x1b[?1049h')
+leave=$(count "$CAP" $'\x1b[?1049l')
+show=$(count "$CAP" $'\x1b[?25h')
 [[ "$enter" == "1" ]] || fail "expected exactly 1 alt-screen enter, got $enter"
 [[ "$leave" == "1" ]] || fail "expected exactly 1 alt-screen leave, got $leave"
 [[ "$show" -ge "1" ]] || fail "cursor was never shown again on exit"
 
-echo "tui-launch-quit: OK — launch, tab cycle, and clean terminal restore"
+# Ctrl-C must quit and restore the terminal just like `q` — the command help
+# promises "quit with q or Ctrl-C". Without it the dashboard would leave the
+# alt-screen active on interrupt.
+CAPC="$TUI_PREFIX/cap_ctrlc.bin"
+outc=$(
+  tui_pty_drive "$CAPC" 90 24 <<'ACT'
+settle 0.4
+send \x03
+quitwait 1.5
+ACT
+)
+echo "$outc" | grep -q "EXIT_STATUS=0" || fail "Ctrl-C did not quit mt tui cleanly ($outc)"
+[[ "$(count "$CAPC" $'\x1b[?1049l')" -ge 1 ]] || fail "Ctrl-C left the alt-screen active (terminal not restored)"
+[[ "$(count "$CAPC" $'\x1b[?25h')" -ge 1 ]] || fail "Ctrl-C did not restore the cursor"
+
+echo "tui-launch-quit: OK — launch, tab cycle, q + Ctrl-C both restore the terminal"
