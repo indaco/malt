@@ -474,7 +474,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Flush on teardown; stdout closed by a broken pipe is normal shell usage.
     defer stdout.flush() catch {};
     if (json_mode) {
-        try emitJson(stdout, search_formula, search_cask, formula, cask, search_query);
+        // Installed flag is JSON-only; the set lives in the formula arena,
+        // freed with everything else at function exit.
+        const set = loadInstalledSet(ctx, f_alloc);
+        try emitJson(f_alloc, stdout, formula, cask, search_query, set);
     } else {
         emitHuman(stdout, formula, cask, search_query);
     }
@@ -641,49 +644,282 @@ fn writeHuman(
     }
 }
 
+/// One row of the unified `mt search --json` array. `installed` is derived
+/// by cross-referencing the local DB so the Search tab never offers to
+/// install a package that is already present.
+const Result = struct {
+    name: []const u8,
+    kind: api_mod.BrewApi.Kind,
+    installed: bool,
+};
+
+/// Installed names pulled from the local DB, split by kind. Empty when the
+/// DB is absent (fresh prefix), so every `installed` reads false — correct.
+/// Names are lowercase by Homebrew convention, so membership case-folds.
+const InstalledSet = struct {
+    formulae: []const []const u8 = &.{},
+    casks: []const []const u8 = &.{},
+
+    fn has(self: InstalledSet, kind: api_mod.BrewApi.Kind, name: []const u8) bool {
+        return isInstalled(switch (kind) {
+            .formula => self.formulae,
+            .cask => self.casks,
+        }, name);
+    }
+};
+
+/// Case-insensitive membership over one kind's installed set.
+fn isInstalled(set: []const []const u8, name: []const u8) bool {
+    var qbuf: [128]u8 = undefined;
+    if (name.len == 0 or name.len > qbuf.len) return false;
+    const lower = std.ascii.lowerString(qbuf[0..name.len], name);
+    for (set) |s| {
+        if (std.mem.eql(u8, s, lower)) return true;
+    }
+    return false;
+}
+
 fn emitJson(
+    allocator: std.mem.Allocator,
     stdout: *std.Io.Writer,
-    search_formula: bool,
-    search_cask: bool,
     formula: KindResults,
     cask: KindResults,
     query: []const u8,
+    set: InstalledSet,
 ) !void {
-    try stdout.writeAll("{");
-    if (search_formula) {
-        try stdout.writeAll("\"formulae\":[");
-        try writeJson(stdout, "name", formula, query);
-        try stdout.writeAll("]");
-    }
-    if (search_cask) {
-        if (search_formula) try stdout.writeAll(",");
-        try stdout.writeAll("\"casks\":[");
-        try writeJson(stdout, "token", cask, query);
-        try stdout.writeAll("]");
-    }
-    try stdout.writeAll("}\n");
+    const results = try buildResults(allocator, formula, cask, query, set);
+    defer allocator.free(results);
+    try writeSearchJson(stdout, query, results);
 }
 
-fn writeJson(w: *std.Io.Writer, field: []const u8, r: KindResults, query: []const u8) !void {
-    var first = true;
+/// Flatten the per-kind results into one ranked array — exact match first
+/// (deduped against the substring list), then substrings — tagging each row
+/// with its kind and installed state. Same ordering the split-key writer
+/// used, so the unification is shape-only; empty kinds contribute nothing.
+fn buildResults(
+    allocator: std.mem.Allocator,
+    formula: KindResults,
+    cask: KindResults,
+    query: []const u8,
+    set: InstalledSet,
+) ![]Result {
+    var list: std.ArrayList(Result) = .empty;
+    errdefer list.deinit(allocator);
+    try appendKind(allocator, &list, formula, .formula, query, set);
+    try appendKind(allocator, &list, cask, .cask, query, set);
+    return list.toOwnedSlice(allocator);
+}
+
+fn appendKind(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(Result),
+    r: KindResults,
+    kind: api_mod.BrewApi.Kind,
+    query: []const u8,
+    set: InstalledSet,
+) !void {
     if (r.exact) {
-        try writeJsonObj(w, field, query);
-        first = false;
+        try list.append(allocator, .{ .name = query, .kind = kind, .installed = set.has(kind, query) });
     }
     for (r.matches) |m| {
         if (r.exact and std.mem.eql(u8, m, query)) continue;
-        if (!first) try w.writeAll(",");
-        try writeJsonObj(w, field, m);
-        first = false;
+        try list.append(allocator, .{ .name = m, .kind = kind, .installed = set.has(kind, m) });
     }
 }
 
-fn writeJsonObj(w: *std.Io.Writer, field: []const u8, value: []const u8) !void {
-    try w.writeAll("{\"");
-    try w.writeAll(field);
-    try w.writeAll("\":");
-    try output.jsonStr(w, value);
-    try w.writeAll("}");
+/// Render the versioned, unified `mt search --json` root —
+/// `{"schema_version":1,"query":…,"results":[…]}`. Pure writer so the
+/// byte-pinned tests need no DB or network. Casks share the array with
+/// formulae, each row tagged by `type` (the `outdated` precedent).
+fn writeSearchJson(w: *std.Io.Writer, query: []const u8, results: []const Result) !void {
+    try output.writeSchemaVersionPrefix(w);
+    try w.writeAll("\"query\":");
+    try output.jsonStr(w, query);
+    try w.writeAll(",\"results\":[");
+    for (results, 0..) |r, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try output.jsonStr(w, r.name);
+        try w.writeAll(switch (r.kind) {
+            .formula => ",\"type\":\"formula\",\"installed\":",
+            .cask => ",\"type\":\"cask\",\"installed\":",
+        });
+        try w.writeAll(if (r.installed) "true" else "false");
+        try w.writeAll("}");
+    }
+    try w.writeAll("]}\n");
+}
+
+/// Build the installed set from the local DB, best-effort. A missing DB
+/// (fresh prefix) or any read failure yields an empty set — every result
+/// then reads `installed:false`, which is correct. Slices live in
+/// `allocator`, freed with the caller's arena.
+fn loadInstalledSet(ctx: *const AppCtx, allocator: std.mem.Allocator) InstalledSet {
+    const db_opt = openLocalDb(ctx) catch return .{};
+    var db = db_opt orelse return .{};
+    defer db.close();
+    return .{
+        .formulae = loadInstalledKind(allocator, &db, .formula) catch &.{},
+        .casks = loadInstalledKind(allocator, &db, .cask) catch &.{},
+    };
+}
+
+/// Load every installed name for one kind (no substring filter) so the
+/// `--json` path can flag each result's installed state. Caller owns each
+/// slice; sorted ASC by the SQL.
+fn loadInstalledKind(
+    allocator: std.mem.Allocator,
+    db: *sqlite.Database,
+    kind: api_mod.BrewApi.Kind,
+) ![][]const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (out.items) |s| allocator.free(s);
+        out.deinit(allocator);
+    }
+    const sql: []const u8 = switch (kind) {
+        // DISTINCT collapses per-version `kegs` rows to one per package.
+        .formula => "SELECT DISTINCT name FROM kegs ORDER BY name;",
+        .cask => "SELECT token FROM casks ORDER BY token;",
+    };
+    var stmt = try db.prepare(sql);
+    defer stmt.finalize();
+    while (try stmt.step()) {
+        const name_z = stmt.columnText(0) orelse continue;
+        const owned = try allocator.dupe(u8, std.mem.sliceTo(name_z, 0));
+        errdefer allocator.free(owned);
+        try out.append(allocator, owned);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "writeSearchJson wraps a mixed formula+cask array in the versioned root" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    const results = [_]Result{
+        .{ .name = "firefox", .kind = .cask, .installed = true },
+        .{ .name = "wget", .kind = .formula, .installed = false },
+    };
+    try writeSearchJson(&aw.writer, "fire", &results);
+
+    const want =
+        \\{"schema_version":1,"query":"fire","results":[{"name":"firefox","type":"cask","installed":true},{"name":"wget","type":"formula","installed":false}]}
+    ++ "\n";
+    try testing.expectEqualStrings(want, aw.written());
+}
+
+test "writeSearchJson emits an empty results array under the versioned root" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeSearchJson(&aw.writer, "zzz", &.{});
+    try testing.expectEqualStrings(
+        "{\"schema_version\":1,\"query\":\"zzz\",\"results\":[]}\n",
+        aw.written(),
+    );
+}
+
+test "writeSearchJson escapes embedded quotes in query and name" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const results = [_]Result{
+        .{ .name = "a\"b", .kind = .formula, .installed = false },
+    };
+    try writeSearchJson(&aw.writer, "q\"x", &results);
+    try testing.expectEqualStrings(
+        "{\"schema_version\":1,\"query\":\"q\\\"x\",\"results\":[{\"name\":\"a\\\"b\",\"type\":\"formula\",\"installed\":false}]}\n",
+        aw.written(),
+    );
+}
+
+test "writeSearchJson stays one valid JSON object with schema_version" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    const results = [_]Result{
+        .{ .name = "jq", .kind = .formula, .installed = true },
+    };
+    try writeSearchJson(&aw.writer, "jq", &results);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 1), parsed.value.object.get("schema_version").?.integer);
+    try testing.expectEqualStrings("jq", parsed.value.object.get("query").?.string);
+    try testing.expectEqual(@as(usize, 1), parsed.value.object.get("results").?.array.items.len);
+}
+
+test "buildResults pins the exact match first, dedupes it, and tags type" {
+    const formula: KindResults = .{ .exact = true, .matches = &.{ "jq", "jqp" } };
+    const cask: KindResults = .{ .exact = false, .matches = &.{"jira"} };
+    const set: InstalledSet = .{ .formulae = &.{"jq"}, .casks = &.{} };
+
+    const results = try buildResults(testing.allocator, formula, cask, "jq", set);
+    defer testing.allocator.free(results);
+
+    try testing.expectEqual(@as(usize, 3), results.len);
+    // Exact match first, then the substring-only formula, then the cask.
+    try testing.expectEqualStrings("jq", results[0].name);
+    try testing.expectEqual(api_mod.BrewApi.Kind.formula, results[0].kind);
+    try testing.expect(results[0].installed);
+    try testing.expectEqualStrings("jqp", results[1].name);
+    try testing.expect(!results[1].installed);
+    try testing.expectEqualStrings("jira", results[2].name);
+    try testing.expectEqual(api_mod.BrewApi.Kind.cask, results[2].kind);
+    try testing.expect(!results[2].installed);
+}
+
+test "buildResults marks an installed substring hit regardless of case" {
+    const formula: KindResults = .{ .exact = false, .matches = &.{"WGet"} };
+    const set: InstalledSet = .{ .formulae = &.{"wget"}, .casks = &.{} };
+
+    const results = try buildResults(testing.allocator, formula, .{}, "get", set);
+    defer testing.allocator.free(results);
+
+    try testing.expectEqual(@as(usize, 1), results.len);
+    try testing.expect(results[0].installed);
+}
+
+test "buildResults yields an empty slice when neither kind has hits" {
+    const results = try buildResults(testing.allocator, .{}, .{}, "nope", .{});
+    defer testing.allocator.free(results);
+    try testing.expectEqual(@as(usize, 0), results.len);
+}
+
+test "buildResults flags an installed cask on the exact match" {
+    const cask: KindResults = .{ .exact = true, .matches = &.{"firefox"} };
+    const set: InstalledSet = .{ .formulae = &.{}, .casks = &.{"firefox"} };
+
+    const results = try buildResults(testing.allocator, .{}, cask, "firefox", set);
+    defer testing.allocator.free(results);
+
+    try testing.expectEqual(@as(usize, 1), results.len);
+    try testing.expectEqual(api_mod.BrewApi.Kind.cask, results[0].kind);
+    try testing.expect(results[0].installed);
+}
+
+test "isInstalled rejects an over-long name instead of overflowing the fold buffer" {
+    const long = "a" ** 129;
+    try testing.expect(!isInstalled(&.{long}, long));
+}
+
+test "loadInstalledKind returns every installed name for the kind, sorted" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try seedKegsAndCasks(&db);
+
+    const formulae = try loadInstalledKind(testing.allocator, &db, .formula);
+    defer freeMatches(formulae);
+    try testing.expectEqual(@as(usize, 3), formulae.len);
+    try testing.expectEqualStrings("jq", formulae[0]);
+    try testing.expectEqualStrings("wget", formulae[1]);
+    try testing.expectEqualStrings("wgetpaste", formulae[2]);
+
+    const casks = try loadInstalledKind(testing.allocator, &db, .cask);
+    defer freeMatches(casks);
+    try testing.expectEqual(@as(usize, 3), casks.len);
+    try testing.expectEqualStrings("brave", casks[0]);
+    try testing.expectEqualStrings("firefox", casks[1]);
+    try testing.expectEqualStrings("firefox-developer-edition", casks[2]);
 }
 
 /// Write a single search result with the same ▸ prefix style used by `list`.
