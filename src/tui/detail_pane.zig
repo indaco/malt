@@ -19,10 +19,14 @@ pub const Field = struct {
     value: []const u8,
 };
 
-/// Rows the pane needs to show every field at `width` with values wrapped, so a
-/// caller can size the split to the content instead of a fixed guess.
+// One dim rule sits at the top of the pane, marking where the list ends and the
+// detail begins so the pane doesn't read as overlapping the list.
+const separator_rows: u16 = 1;
+
+/// Rows the pane needs to show its separator plus every field at `width` with
+/// values wrapped, so a caller can size the split to the content.
 pub fn neededRows(fields: []const Field, width: u16) u16 {
-    var rows: u16 = 0;
+    var rows: u16 = separator_rows;
     for (fields) |field| {
         var it = wrapIter(field, width);
         var n: u16 = 0;
@@ -32,13 +36,22 @@ pub fn neededRows(fields: []const Field, width: u16) u16 {
     return rows;
 }
 
-/// Paint `fields` into `rect`: a dim `label:` then its value, the value wrapped
-/// across rows (continuations indented under it) so a long message stays
-/// readable on a narrow pane instead of being cut off. Clipped to `rect.height`,
-/// painted through `Frame.putContent` so untrusted child values can't break the
-/// frame. Pure function of `(fields, rect)` → reflows on resize.
+/// Paint a dim separator rule, then `fields`: a dim `label:` then its value, the
+/// value wrapped across rows (continuations indented under it) so a long message
+/// stays readable on a narrow pane instead of being cut off. Clipped to
+/// `rect.height`, painted through `Frame.putContent` so untrusted child values
+/// can't break the frame. Pure function of `(fields, rect)` → reflows on resize.
 pub fn render(f: *tab.Frame, fields: []const Field, rect: tab.Rect) void {
-    if (rect.width == 0) return;
+    if (rect.width == 0 or rect.height == 0) return;
+    f.moveTo(rect.row, rect.col);
+    f.put(color.roleCode(.muted));
+    var i: u16 = 0;
+    while (i < rect.width) : (i += 1) f.put("─");
+    f.put(color.Style.reset.code());
+    renderFields(f, fields, .{ .row = rect.row + separator_rows, .col = rect.col, .width = rect.width, .height = rect.height -| separator_rows });
+}
+
+fn renderFields(f: *tab.Frame, fields: []const Field, rect: tab.Rect) void {
     var row: u16 = 0;
     for (fields) |field| {
         if (row >= rect.height) break;
@@ -130,27 +143,29 @@ test "render dims the label and shows the value on its row" {
     try testing.expect(std.mem.indexOf(u8, out, "yes") != null);
     // The label is dimmed (muted role == dim on the basic tier under test).
     try testing.expect(std.mem.indexOf(u8, out, color.Style.dim.code()) != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[3;1H") != null); // first field row
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[4;1H") != null); // second field row
+    try testing.expect(std.mem.indexOf(u8, out, "─") != null); // the separator rule
+    // The rule is on the pane's first row; the fields follow below it.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[4;1H") != null); // first field row
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[5;1H") != null); // second field row
 }
 
 test "render wraps a long value across rows instead of cutting it off" {
     var fb: [1024]u8 = undefined;
     var f: tab.Frame = .{ .buf = &fb };
     const fields = [_]Field{.{ .label = "Detail", .value = "the prefix bin dir is not on PATH so installed commands will not be found" }};
-    render(&f, &fields, .{ .row = 1, .col = 1, .width = 24, .height = 6 });
+    render(&f, &fields, .{ .row = 1, .col = 1, .width = 24, .height = 10 });
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "found") != null); // the tail survives on a wrapped row
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[2;") != null); // a continuation row was positioned
+    try testing.expect(std.mem.indexOf(u8, out, ";9H") != null); // a continuation row aligned under the value
 }
 
 test "neededRows grows with a wrapped value and counts at least one row per field" {
     const short = [_]Field{.{ .label = "A", .value = "x" }};
-    try testing.expectEqual(@as(u16, 1), neededRows(&short, 40));
+    try testing.expectEqual(@as(u16, 2), neededRows(&short, 40)); // separator + one field row
     const long = [_]Field{.{ .label = "Detail", .value = "one two three four five six seven eight nine ten" }};
-    try testing.expect(neededRows(&long, 20) > 1); // wraps at width 20
+    try testing.expect(neededRows(&long, 20) > 2); // wraps to several rows at width 20
     const empty = [_]Field{.{ .label = "Deps", .value = "" }};
-    try testing.expectEqual(@as(u16, 1), neededRows(&empty, 40)); // the label row still counts
+    try testing.expectEqual(@as(u16, 2), neededRows(&empty, 40)); // separator + the label row
 }
 
 test "render clips fields past the pane height" {
@@ -161,11 +176,11 @@ test "render clips fields past the pane height" {
         .{ .label = "B", .value = "beta" },
         .{ .label = "C", .value = "gamma" },
     };
-    render(&f, &fields, .{ .row = 1, .col = 1, .width = 40, .height = 2 });
+    render(&f, &fields, .{ .row = 1, .col = 1, .width = 40, .height = 3 }); // separator + 2 field rows
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "alpha") != null);
     try testing.expect(std.mem.indexOf(u8, out, "beta") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "gamma") == null); // third field clipped
+    try testing.expect(std.mem.indexOf(u8, out, "gamma") == null); // third field clipped past the height
 }
 
 test "render hard-breaks a single word longer than the line so its tail survives" {
@@ -177,7 +192,7 @@ test "render hard-breaks a single word longer than the line so its tail survives
     render(&f, &fields, .{ .row = 1, .col = 1, .width = 20, .height = 8 });
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "all") != null); // the tail is reached
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[2;") != null); // wrapped past the first row
+    try testing.expect(std.mem.indexOf(u8, out, ";9H") != null); // wrapped onto an aligned continuation row
 }
 
 test "render and neededRows survive a pane narrower than the label" {
