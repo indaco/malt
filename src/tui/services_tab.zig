@@ -127,6 +127,7 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     if (rect.height == 0) return;
     const filter = s.chrome.filter.slice();
     const nf = filteredCount(s.items, filter);
+    if (nf == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "No services registered.");
     const v = scroll_list.clamp(s.chrome.view, nf, rect.height);
 
     var fi: usize = 0;
@@ -329,11 +330,12 @@ test "a hostile service name cannot inject a control sequence into the frame" {
     try testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null); // BEL dropped
 }
 
-test "render on an empty list is a clean no-crash frame" {
+test "render on an empty list shows the no-services placeholder, not a blank pane" {
     var buf: [1024]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &.{} };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 }); // must not trap
+    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "No services registered") != null);
 }
 
 test "render clamps to a height of one (action line only) without crashing" {

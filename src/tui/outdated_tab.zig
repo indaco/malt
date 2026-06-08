@@ -155,6 +155,7 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     if (rect.height == 0) return;
     const filter = s.chrome.filter.slice();
     const nf = filteredCount(s.items, filter);
+    if (nf == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "Everything is up to date.");
     const v = scroll_list.clamp(s.chrome.view, nf, rect.height);
 
     var fi: usize = 0;
@@ -401,11 +402,12 @@ test "render reflows: the same state at two widths differs" {
     try testing.expect(!std.mem.eql(u8, fa.slice(), fb.slice()));
 }
 
-test "render on an empty list is a clean no-crash frame" {
+test "render on an empty list shows the up-to-date placeholder, not a blank pane" {
     var buf: [1024]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &.{} };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 }); // must not trap
+    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "up to date") != null);
 }
 
 test "the cores tolerate a checked slice shorter than items without trapping" {
