@@ -28,6 +28,11 @@ pub const Theme = enum {
     gruvbox_light,
 };
 
+/// The background a named theme is designed for. `color.zig` gates a theme on
+/// this: a theme whose polarity contradicts the *detected* terminal background
+/// degrades to the background-aware `default` so colours stay legible.
+pub const Polarity = enum { dark, light };
+
 const Rgb = struct { r: u8, g: u8, b: u8 };
 
 /// Pre-rendered truecolor SGR for a role's RGB. Comptime so the tables hold
@@ -175,6 +180,30 @@ pub fn named(t: Theme) ?*const NamedPalette {
         .gruvbox_dark => &gruvbox_dark,
         .gruvbox_light => &gruvbox_light,
     };
+}
+
+/// A named theme's intended background, or null for `.default` (which is itself
+/// background-aware and never conflicts). Exhaustive over `Theme` so a future
+/// theme forces a polarity decision at compile time.
+pub fn polarity(t: Theme) ?Polarity {
+    return switch (t) {
+        .default => null,
+        .dracula, .catppuccin_mocha, .rose_pine, .nord, .tokyo_night, .gruvbox_dark => .dark,
+        .catppuccin_latte, .rose_pine_dawn, .gruvbox_light => .light,
+    };
+}
+
+test "polarity classifies every named theme; default has none" {
+    try std.testing.expectEqual(@as(?Polarity, null), polarity(.default));
+    try std.testing.expectEqual(Polarity.dark, polarity(.dracula).?);
+    try std.testing.expectEqual(Polarity.dark, polarity(.catppuccin_mocha).?);
+    try std.testing.expectEqual(Polarity.light, polarity(.catppuccin_latte).?);
+    try std.testing.expectEqual(Polarity.dark, polarity(.rose_pine).?);
+    try std.testing.expectEqual(Polarity.light, polarity(.rose_pine_dawn).?);
+    try std.testing.expectEqual(Polarity.dark, polarity(.nord).?);
+    try std.testing.expectEqual(Polarity.dark, polarity(.tokyo_night).?);
+    try std.testing.expectEqual(Polarity.dark, polarity(.gruvbox_dark).?);
+    try std.testing.expectEqual(Polarity.light, polarity(.gruvbox_light).?);
 }
 
 /// Env value → theme. `light`/`dark`/`auto`/`default` resolve to `.default`
