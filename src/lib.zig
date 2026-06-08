@@ -98,6 +98,7 @@ pub const tui_filter_input = @import("tui/filter_input.zig");
 pub const tui_keys = @import("tui/keys.zig");
 pub const tui_layout = @import("tui/layout.zig");
 pub const tui_scroll_list = @import("tui/scroll_list.zig");
+pub const tui_spawn = @import("tui/spawn.zig");
 pub const tui_tab = @import("tui/tab.zig");
 pub const tui_tab_bar = @import("tui/tab_bar.zig");
 pub const tui_tab_doctor = @import("tui/doctor_tab.zig");
