@@ -77,6 +77,32 @@ pub fn paintRows(f: *Frame, rows: []const []const u8, view: scroll_list.View, re
     }
 }
 
+/// A multi-select row checkbox: unselected, selected, or blocked (a row that
+/// can't be selected — pinned in Outdated, already-installed in Search).
+pub const Check = enum { off, on, blocked };
+
+/// Paint a selection checkbox at the cursor — the shared widget so Outdated and
+/// Search read identically. The selected check carries its own success colour
+/// via `put` (outside the `putContent` row sanitization). Always four cells
+/// (`[x] `), so callers budget the rest of the row with `width -| 4`.
+pub fn putCheckbox(f: *Frame, state: Check) void {
+    switch (state) {
+        .on => {
+            f.put("[");
+            f.put(color.roleCode(.success));
+            f.put("✓");
+            f.put(color.Style.reset.code());
+            f.put("] ");
+        },
+        .off => f.put("[ ] "),
+        .blocked => {
+            f.put(color.roleCode(.muted));
+            f.put("[-] ");
+            f.put(color.Style.reset.code());
+        },
+    }
+}
+
 /// Paint one dim line at the top of `rect` — the shared empty-state / "no
 /// matches" placeholder so every tab's empty list reads the same way instead of
 /// a blank pane. Content goes through `putContent` like every other row.
@@ -123,6 +149,29 @@ const GoodTab = struct {
 
 test "verify accepts a conforming tab module" {
     comptime verify(GoodTab);
+}
+
+test "putCheckbox renders each selection state with the right glyph" {
+    const cases = [_]struct { state: Check, want: []const u8, absent: []const u8 }{
+        .{ .state = .off, .want = "[ ] ", .absent = "✓" },
+        .{ .state = .on, .want = "✓", .absent = "[-]" },
+        .{ .state = .blocked, .want = "[-] ", .absent = "✓" },
+    };
+    for (cases) |c| {
+        var buf: [64]u8 = undefined;
+        var f: Frame = .{ .buf = &buf };
+        putCheckbox(&f, c.state);
+        try std.testing.expect(std.mem.indexOf(u8, f.slice(), c.want) != null);
+        try std.testing.expect(std.mem.indexOf(u8, f.slice(), c.absent) == null);
+    }
+}
+
+test "putCheckbox colours only the selected check, leaving the brackets plain" {
+    var buf: [64]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    putCheckbox(&f, .on);
+    // A reset follows the check so the row content after it isn't tinted green.
+    try std.testing.expect(std.mem.indexOf(u8, f.slice(), color.Style.reset.code()) != null);
 }
 
 test "renderHint paints the placeholder text into the frame" {
