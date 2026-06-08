@@ -103,7 +103,7 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (body.height == 0) return;
     switch (s.phase) {
         .searching => renderStatus(f, body, "searching…"),
-        .idle => renderStatus(f, body, "Type a query, then Enter to search."),
+        .idle => renderStatus(f, body, "Press Enter or / to type a query, then Enter to search."),
         .loaded => if (s.items.len == 0)
             renderStatus(f, body, "No matches.")
         else
@@ -237,7 +237,7 @@ test "render shows guidance in the idle phase before any query is committed" {
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .phase = .idle };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "Type a query") != null);
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "type a query") != null);
 }
 
 test "render shows the searching status during the remote read" {

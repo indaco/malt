@@ -247,7 +247,13 @@ fn stepNormal(a: *App, key: Key) void {
             };
             routeToTab(a, key); // a domain key (e.g. u/f) belongs to the tab
         },
-        .enter, .space, .end, .esc => routeToTab(a, key),
+        .enter => {
+            // The Search tab's filter doubles as its query box, so Enter focuses
+            // it for typing (a second Enter then commits + searches). Every other
+            // tab uses Enter as a domain key (open detail, upgrade), so route it.
+            if (a.active == .search) a.editing = true else routeToTab(a, key);
+        },
+        .space, .end, .esc => routeToTab(a, key),
         // `end` needs the row count to land on the last row — deferred to the
         // data tab; Esc routes so a tab can close a pane / cancel its guard;
         // `backspace`/`unknown` are inert outside edit mode.
@@ -1035,6 +1041,20 @@ test "per-tab filters are independent across tabs" {
     a = step(a, .enter);
     a = step(a, .tab); // outdated
     try std.testing.expectEqualStrings("", activeFilterText(&a)); // its own empty filter
+}
+
+test "Enter on the Search tab focuses the query box rather than firing an empty search" {
+    var a: App = .{ .active = .search };
+    a = step(a, .enter);
+    try std.testing.expect(a.editing); // the query box is now focused for typing
+    try std.testing.expectEqual(search.Request.none, a.states.search.request); // no search fired yet
+}
+
+test "Enter on a data tab still routes as that tab's domain key, not a focus" {
+    var a: App = .{ .active = .installed };
+    a = step(a, .enter);
+    try std.testing.expect(!a.editing);
+    try std.testing.expectEqual(installed.Request.open_detail, a.states.installed.request);
 }
 
 test "renderFrame shows the committed filter and the editing footer" {
