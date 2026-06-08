@@ -2,7 +2,7 @@
 
 **A fast, drop-in Homebrew alternative for macOS. Warm installs in milliseconds. `post_install` scripts that actually run. Full operational surface beyond install and uninstall.**
 
-Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosystem; installs to its own prefix; ~3 MB single binary; ~3 ms cold start. Designed by a human and implemented by AI.
+Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosystem; installs to its own prefix; ~4 MB single binary; ~3 ms cold start. Drive it all from a built-in terminal dashboard (`mt tui`). Designed by a human and implemented by AI.
 
 ![macOS only](https://img.shields.io/badge/platform-macOS-blue)
 ![Version](https://img.shields.io/github/v/tag/indaco/malt?label=version&sort=semver&color=4c1)
@@ -40,7 +40,7 @@ Three observations shape malt.
 
 **Cold installs happen once. Warm installs happen forever.** The first `brew install ffmpeg` on a fresh checkout is a one-time cost. Every reinstall, upgrade, devbox/nix-style rebuild, and CI cache restore after it is a _warm_ install against an existing store. The ratio over a developer's working life is roughly 1 cold to 10+ warm - the warm row is where the minutes compound. malt's warm `ffmpeg` install finishes in **31 ms**.
 
-**A package manager is also a piece of infrastructure on your machine.** It runs as your user, writes to a privileged-ish prefix, downloads code from the internet, and patches Mach-O headers. It deserves the posture of any other root-adjacent tool: SHA256 streaming, atomic installs, advisory locking, sandboxed subprocesses, cosign-verified releases. malt's binary is ~3 MB and starts in ~3 ms - none of the safety properties are paid for in startup time.
+**A package manager is also a piece of infrastructure on your machine.** It runs as your user, writes to a privileged-ish prefix, downloads code from the internet, and patches Mach-O headers. It deserves the posture of any other root-adjacent tool: SHA256 streaming, atomic installs, advisory locking, sandboxed subprocesses, cosign-verified releases. malt's binary is ~4 MB and starts in ~3 ms - none of the safety properties are paid for in startup time.
 
 malt installs to `/opt/malt`, never touches Homebrew's files, reads existing `Brewfile`s without conversion, and transparently delegates anything it doesn't implement to `brew` if it's installed. It is a client for the Homebrew registry, not a fork.
 
@@ -57,6 +57,7 @@ The full surface area at a glance.
 - **Atomic install protocol.** New versions verified before old versions are touched; `mt rollback --to <version>` reverts from the store with no re-download. Streaming SHA256 + parallel downloads + a 30 s advisory file lock against concurrent mutations.
 - **Ephemeral run.** `mt run <pkg> -- <args...>` extracts and `execvp`s without a permanent install; `--keep` caches the bottle for next time.
 - **Full operational surface.** Services, bundle installs, doctor, purge, backup/restore, migrate, and reverse-dependency queries - see [Command reference](#command-reference) for the full surface.
+- **Interactive dashboard.** `mt tui` is a built-in, resize-aware terminal dashboard - five tabs (search, installed, outdated, services, doctor) that read `mt … --json` and delegate every action back to the real CLI. No daemon, no companion binary, themeable via `MALT_THEME`. See [Interactive dashboard](#interactive-dashboard).
 - **Scriptable.** `--json` and `--output-format=ndjson` everywhere it makes sense; orthogonal flags. `--quiet`, `--verbose`, `--debug`, `--dry-run`, `--offline` are global. `NO_COLOR`, `MALT_NO_EMOJI`, `MALT_PROGRESS`, `MALT_THEME` for shaping output.
 - **Signed, verifiable releases.** Every release is cosign-signed keyless via GitHub OIDC; `install.sh` and `mt version update` verify the signature before trusting the SHA256 checksum. See [Safety and security](#safety-and-security) for the full supply-chain story.
 - **Sandboxed `post_install`.** The `--use-system-ruby` path runs inside a `sandbox-exec` profile scoped to the formula's cellar; the native interpreter validates every mutating operation against the Cellar/malt prefix.
@@ -273,6 +274,33 @@ mt which jq                              # reverse lookup: bin -> keg-path
 `mt search` matches `brew search` by default - it queries the Homebrew API and ranks substring matches across formulas and casks. `--installed` flips it to a local-DB scan over `kegs.name` and `casks.token` (no network), `--all` runs both passes and merges results deduped, and `--api` is the explicit form of the default. `--offline` (or `MALT_OFFLINE=1`) collapses every scope into `--installed`, so a plane-mode user gets an answer instead of a connect timeout. `--json`, `--formula`, and `--cask` compose with every scope.
 
 `mt deps` is the forward symmetric of `mt uses`: "_what does X depend on?_" instead of "_who depends on X?_". Installed kegs read from the local DB; uninstalled formulas walk the upstream API. `--installed` is offline-safe. `--json` emits one entry per visited node, preserving graph shape on recursive walks.
+
+### Interactive dashboard
+
+`mt tui` opens a persistent, resize-aware dashboard over the same data the read commands expose - no daemon, no companion binary, no first dependency.
+
+```bash
+mt tui                                   # launch the dashboard
+MALT_THEME=dracula mt tui                # launch with a named theme
+```
+
+Five tabs, each a live view over `mt … --json`:
+
+| Tab       | Shows                                             | Acts via                         |
+| --------- | ------------------------------------------------- | -------------------------------- |
+| Search    | `mt search` hits with an installed marker         | `mt install`                     |
+| Installed | every keg + cask with a detail pane               | `mt uninstall`                   |
+| Outdated  | upgradable packages, multi-select (pinned greyed) | `mt upgrade`                     |
+| Services  | launchd services + runtime state                  | `mt services start/stop/restart` |
+| Doctor    | structured `mt doctor` findings, errors first     | `mt doctor --fix <class>`        |
+
+Keys: `tab`/`←`/`→`/`1`-`5` switch tabs, `↑`/`↓` move the cursor, `/` filters the list (per-tab, survives a tab round-trip), `enter` searches or opens a detail pane, `q` or `Ctrl-C` quits. Each tab adds its own action keys in the footer - `i` install (Search), `x` uninstall with a `[y/N]` guard (Installed), `space`/`a`/`n` select and `u` upgrade the batch (Outdated), `s`/`x`/`r` start/stop/restart (Services), `f` fix (Doctor).
+
+**It reads with `--json` and acts by delegating.** Every mutation drops out of the alternate screen, runs the real `mt <subcommand>` inline - so malt's own output and any confirmation prompt appear unchanged in your scrollback - then re-enters and refreshes the current tab; the other tabs refetch lazily on next view. The dashboard never reimplements an install, upgrade, or fix - it drives the CLI you already trust.
+
+**It resizes live.** Layout is a pure function of the terminal size: drag the window and the columns reflow, the list re-clamps its viewport, and long rows truncate without a redraw glitch - no keypress needed. Below a usable minimum it renders a "terminal too small" notice instead of a corrupted frame.
+
+**It needs a real terminal.** On a pipe, in CI, or with `NO_COLOR` set, `mt tui` refuses to launch and exits 2 rather than stream escape sequences into a non-TTY. `MALT_THEME` selects the palette (`dracula`, `catppuccin-mocha`/`-latte`, `rose-pine`/`-dawn`, `nord`, `tokyo-night`, `gruvbox-dark`/`-light`); named themes need a truecolor terminal and otherwise fall back to the basic palette.
 
 ### Maintain malt
 
@@ -661,7 +689,7 @@ For hacking on malt itself - debug builds, the test suite, and a universal binar
 ```bash
 # Requires Zig 0.16.x
 zig build                                # debug build
-zig build -Doptimize=ReleaseSafe         # release build (~3 MB)
+zig build -Doptimize=ReleaseSafe         # release build (~4 MB)
 zig build test                           # run tests
 zig build universal                      # universal binary (arm64 + x86_64 via lipo)
 ```

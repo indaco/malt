@@ -607,7 +607,7 @@ fn printUsage(ctx: *const AppCtx) void {
         \\                --housekeeping, --wipe)
         \\  cleanup       Shorthand for `purge --housekeeping`
         \\  services      Manage long-running launchd services (start/stop/status/logs)
-        \\  tui           Interactive dashboard (installed, outdated, services, doctor)
+        \\  tui           Interactive dashboard (search, installed, outdated, services, doctor)
         \\  bundle        Install or export a Brewfile/Maltfile.json set of packages
         \\  version       Show version (use 'version update' to self-update)
         \\

@@ -234,7 +234,7 @@ pub const zsh_script =
     \\        'purge:Housekeeping or full wipe (requires a scope flag)'
     \\        'cleanup:Shorthand for purge --housekeeping (safe daily-driver)'
     \\        'services:Manage long-running launchd services'
-    \\        'tui:Interactive dashboard (installed, outdated, services, doctor)'
+    \\        'tui:Interactive dashboard (search, installed, outdated, services, doctor)'
     \\        'bundle:Install or export a Brewfile/Maltfile.json bundle'
     \\        'help:Show help'
     \\    )
@@ -555,7 +555,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a purge       -d 'Housekeeping or full wipe (requires a scope)'
     \\    complete -c $__malt_bin -n __malt_needs_command -a cleanup     -d 'Shorthand for purge --housekeeping (safe daily-driver)'
     \\    complete -c $__malt_bin -n __malt_needs_command -a services    -d 'Manage long-running launchd services'
-    \\    complete -c $__malt_bin -n __malt_needs_command -a tui         -d 'Interactive dashboard (installed, outdated, services, doctor)'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a tui         -d 'Interactive dashboard (search, installed, outdated, services, doctor)'
     \\    complete -c $__malt_bin -n __malt_needs_command -a bundle      -d 'Install or export a Brewfile/Maltfile.json'
     \\    complete -c $__malt_bin -n __malt_needs_command -a help        -d 'Show help'
     \\
