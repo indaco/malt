@@ -93,6 +93,7 @@ pub const color = @import("ui/color.zig");
 pub const output = @import("ui/output.zig");
 pub const progress = @import("ui/progress.zig");
 pub const term_sanitize = @import("ui/term_sanitize.zig");
+pub const tui_term = @import("tui/term.zig");
 pub const update_cleanup = @import("update/cleanup.zig");
 pub const update_notifier = @import("update/notifier.zig");
 pub const update_origin = @import("update/origin.zig");
