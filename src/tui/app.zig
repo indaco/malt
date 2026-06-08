@@ -139,6 +139,10 @@ pub const App = struct {
     /// footer, dismissed on the next keypress (`step`); a successful action just
     /// leaves it cleared.
     banner: Banner = .{},
+    /// Set by the loop only for the pre-read paint before a blocking lazy
+    /// refetch, so the synchronous freeze shows "Loading…" instead of a stale
+    /// frame. Never persisted: the read's own repaint clears it.
+    loading: bool = false,
 };
 
 /// After a delegated mutation the active tab was just re-read inline, so it is
@@ -184,6 +188,12 @@ fn renderActive(a: *const App, f: *tab.Frame, rect: tab.Rect) void {
 fn activeFooterHint(a: *const App) []const u8 {
     switch (a.active) {
         inline else => |t| return moduleFor(t).footerHint(),
+    }
+}
+
+fn activeTitle(a: *const App) []const u8 {
+    switch (a.active) {
+        inline else => |t| return moduleFor(t).title(),
     }
 }
 
@@ -291,12 +301,17 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
 
             renderActive(app, &f, r.content);
 
-            // Footer: a rule line separating content, then either the transient
-            // recoverable-error banner or the dimmed help line on the row below.
+            // Footer: a rule line separating content, then — by priority — the
+            // pre-read loading status, the transient error banner, or the help line.
             f.moveTo(r.footer.row, 1);
             putRule(&f, cols);
             f.moveTo(r.footer.row + 1, 1);
-            if (app.banner.isSet()) {
+            if (app.loading) {
+                var lb: [64]u8 = undefined;
+                f.put(color.roleCode(.accent));
+                f.putContent(scroll_list.truncate(loadingLine(&lb, app), cols));
+                f.put(color.Style.reset.code());
+            } else if (app.banner.isSet()) {
                 // Undimmed + yellow so a recoverable failure reads as a warning,
                 // not chrome; `putContent` drops line-breakers the sanitizer let
                 // through, `truncate` keeps it within the column budget.
@@ -317,6 +332,10 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
 fn putRule(f: *tab.Frame, cols: u16) void {
     var i: u16 = 0;
     while (i < cols) : (i += 1) f.put("─");
+}
+
+fn loadingLine(buf: []u8, app: *const App) []const u8 {
+    return std.fmt.bufPrint(buf, "Loading {s}…", .{activeTitle(app)}) catch "Loading…";
 }
 
 /// The footer help line: while editing the filter, just the edit keys; otherwise
@@ -910,6 +929,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
                     app = step(app, k.key); // also clears any prior banner
                     if (app.quit) break;
                     paintSearching(fd, &frame, allocator, &app); // status before the blocking search
+                    paintLoading(fd, &frame, allocator, &app); // "Loading…" before a blocking lazy refetch
                     // A recoverable backend fault becomes the banner the failing
                     // op already set and the loop continues; only a fatal fault
                     // (terminal/OOM) propagates to the errdefer restore + exit.
@@ -935,6 +955,17 @@ fn paintSearching(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator
     if (app.states.search.chrome.filter.slice().len == 0) return; // empty query: no spawn
     app.states.search.phase = .searching;
     repaint(fd, frame, allocator, app) catch {};
+}
+
+/// Before the active tab runs a blocking lazy refetch (it is dirty and will
+/// refetch on entry), paint a "Loading…" footer so the synchronous read reads as
+/// intentional, not a frozen or — before stderr was suppressed — garbled frame.
+/// Best-effort, like `paintSearching`; the read's own repaint draws the result.
+fn paintLoading(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) void {
+    if (!app.dirty.contains(app.active)) return; // nothing will refetch this turn
+    app.loading = true;
+    repaint(fd, frame, allocator, app) catch {};
+    app.loading = false;
 }
 
 fn repaint(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) std.mem.Allocator.Error!void {
@@ -1100,6 +1131,15 @@ test "the footer carries the active tab's keys next to the global keys" {
     const out = renderFrame(&buf, &a, 100, 24);
     try std.testing.expect(std.mem.indexOf(u8, out, "s: start") != null); // the active tab's keys
     try std.testing.expect(std.mem.indexOf(u8, out, "switch") != null); // and the global keys
+}
+
+test "the footer shows a per-tab loading status during a blocking refetch" {
+    var a: App = .{ .active = .doctor, .loading = true };
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 100, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Loading Doctor") != null);
+    // Loading takes precedence over the help line so the freeze reads as intentional.
+    try std.testing.expect(std.mem.indexOf(u8, out, "switch") == null);
 }
 
 test "renderFrame uses cursor positioning and never emits a raw newline" {

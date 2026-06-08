@@ -72,7 +72,10 @@ fn captureJson(
     argv: []const []const u8,
     max_ok_exit: u8,
 ) ReadError![]u8 {
-    var child = std.process.spawn(io, .{ .argv = argv, .stdout = .pipe }) catch return error.SpawnFailed;
+    // Discard the child's stderr: inside the alt-screen its status/progress lines
+    // (e.g. `mt doctor`'s check log) would paint over the frame. A real failure is
+    // surfaced by the caller's banner, not by leaking child stderr onto the TUI.
+    var child = std.process.spawn(io, .{ .argv = argv, .stdout = .pipe, .stderr = .ignore }) catch return error.SpawnFailed;
 
     const bytes = drainStdout(io, allocator, child.stdout) catch |e| {
         // Kill so `wait` can't hang on a half-drained pipe, then surface.
