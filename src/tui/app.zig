@@ -173,6 +173,12 @@ fn activeFilterText(a: *const App) []const u8 {
     }
 }
 
+/// The input-box label for the active tab: on Search the box is the query, not a
+/// filter over an already-loaded list, so it says so.
+fn activeFilterLabel(a: *const App) []const u8 {
+    return if (a.active == .search) "search: " else "filter: ";
+}
+
 fn routeToTab(a: *App, key: Key) void {
     switch (a.active) {
         inline else => |t| moduleFor(t).step(&@field(a.states, @tagName(t)), key),
@@ -297,7 +303,7 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
 
             f.moveTo(r.filter.row, 1);
             var fb: [filter_input.max_len + 8]u8 = undefined;
-            f.put(filter_input.render(&fb, activeFilterText(app), app.editing, cols));
+            f.put(filter_input.render(&fb, activeFilterLabel(app), activeFilterText(app), app.editing, cols));
 
             renderActive(app, &f, r.content);
 
@@ -1135,6 +1141,7 @@ test "Enter on a data tab still routes as that tab's domain key, not a focus" {
 
 test "renderFrame shows the committed filter and the editing footer" {
     var a: App = .{};
+    a = step(a, ch('2')); // Installed tab: its box is a filter over the loaded list
     a = step(a, ch('/'));
     a = step(a, ch('j'));
     a = step(a, ch('q')); // 'q' is a literal char while editing, not quit
@@ -1143,6 +1150,17 @@ test "renderFrame shows the committed filter and the editing footer" {
     const out = renderFrame(&buf, &a, 80, 24);
     try std.testing.expect(std.mem.indexOf(u8, out, "filter: jq_") != null); // filter line with caret
     try std.testing.expect(std.mem.indexOf(u8, out, "accept") != null); // editing footer
+}
+
+test "the Search tab labels its input box as a query, not a filter" {
+    var a: App = .{ .active = .search };
+    a = step(a, ch('/'));
+    a = step(a, ch('r'));
+    a = step(a, ch('g'));
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "search: rg_") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "filter:") == null);
 }
 
 test "renderFrame draws a footer rule above a dimmed help line" {
