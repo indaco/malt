@@ -153,33 +153,26 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     }
 }
 
-// Bottom-pane budget for the info pane; the split never takes more than half the
-// content so the result list always survives.
-const detail_rows: u16 = 3;
-
 /// The results, with an `mt info` pane docked at the bottom when one is open.
+/// The pane sizes to its (wrapped) content, capped at half the height so the
+/// result list survives. The info pane works for an uninstalled hit too, which
+/// is why a search result can open it at all.
 fn renderLoaded(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     var list_rect = r;
     if (s.detail) |info| {
-        const dh = @min(@as(u16, detail_rows), r.height / 2);
+        var deps_buf: [512]u8 = undefined;
+        const fields = [_]detail_pane.Field{
+            .{ .label = "Version", .value = if (info.version.len != 0) info.version else "-" },
+            .{ .label = "Tap", .value = if (info.tap.len != 0) info.tap else "-" },
+            .{ .label = "Dependencies", .value = joinDeps(&deps_buf, info.dependencies) },
+        };
+        const dh = @min(detail_pane.neededRows(&fields, r.width), r.height / 2);
         if (dh > 0 and dh < r.height) {
             list_rect.height = r.height - dh;
-            renderDetail(info, f, .{ .row = r.row + list_rect.height, .col = r.col, .width = r.width, .height = dh });
+            detail_pane.render(f, &fields, .{ .row = r.row + list_rect.height, .col = r.col, .width = r.width, .height = dh });
         }
     }
     renderList(s, f, list_rect);
-}
-
-/// The `mt info` pane for the active hit — works for an uninstalled hit too,
-/// which is why a search result can open it at all.
-fn renderDetail(info: info_json.Info, f: *tab.Frame, rect: tab.Rect) void {
-    var deps_buf: [512]u8 = undefined;
-    const fields = [_]detail_pane.Field{
-        .{ .label = "Version", .value = if (info.version.len != 0) info.version else "-" },
-        .{ .label = "Tap", .value = if (info.tap.len != 0) info.tap else "-" },
-        .{ .label = "Dependencies", .value = joinDeps(&deps_buf, info.dependencies) },
-    };
-    detail_pane.render(f, &fields, rect);
 }
 
 /// Comma-join a dependency list into `buf`; "none" when empty. Truncates if the
@@ -347,6 +340,15 @@ test "i is inert when only already-installed rows are checked" {
     var s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
     step(&s, ch('i'));
     try testing.expectEqual(Request.none, s.request);
+}
+
+test "the cores tolerate a checked slice shorter than items without trapping" {
+    // Before the shell sizes `checked` it can be empty; the cores must not index
+    // past it. Toggle is then inert and install falls back to the active row.
+    var s: State = .{ .items = &sample, .checked = &.{}, .phase = .loaded };
+    step(&s, .space); // no checked slot for the active row → inert, no trap
+    step(&s, ch('i')); // resolves over the empty set + the active (installable) row
+    try testing.expectEqual(Request.install, s.request);
 }
 
 test "render draws a multi-select checkbox per result row" {

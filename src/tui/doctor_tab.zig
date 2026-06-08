@@ -127,26 +127,33 @@ fn severityLabel(sev: Severity) []const u8 {
     };
 }
 
-// Bottom-pane budget: severity + fix + detail fit in three rows; the split never
-// takes more than half the content so the list always survives.
-const detail_rows: u16 = 3;
-
 // SGR reverse-video for the selection, matching the other tabs' convention.
 const reverse = "\x1b[7m";
 
 /// Pure render: the severity-ordered finding list and a detail pane for the
 /// selected finding. The `f: fix` key lives in the shared footer (the detail
-/// pane still shows whether the selected finding is fixable). A pure function of
-/// `(state, rect)` so a resize is a re-render.
+/// pane still shows whether the selected finding is fixable). The pane sizes to
+/// its (wrapped) content, capped at half the height so the list survives. A pure
+/// function of `(state, rect)` so a resize is a re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (r.height == 0) return;
     const sel = selectedFinding(s);
     var content: tab.Rect = r;
     if (sel) |fnd| {
-        const dh = @min(@as(u16, detail_rows), content.height / 2);
+        var fix_buf: [96]u8 = undefined;
+        const fix_value = if (fnd.fixable)
+            std.fmt.bufPrint(&fix_buf, "f → mt doctor --fix {s}", .{doctor_json.fixClassTag(fnd.fix_class)}) catch "f: fix"
+        else
+            "not auto-fixable";
+        const fields = [_]detail_pane.Field{
+            .{ .label = "Severity", .value = severityLabel(fnd.severity) },
+            .{ .label = "Fix", .value = fix_value },
+            .{ .label = "Detail", .value = if (fnd.detail.len != 0) fnd.detail else "-" },
+        };
+        const dh = @min(detail_pane.neededRows(&fields, content.width), content.height / 2);
         if (dh > 0 and dh < content.height) {
             content.height -= dh;
-            renderDetail(fnd, f, .{ .row = content.row + content.height, .col = content.col, .width = content.width, .height = dh });
+            detail_pane.render(f, &fields, .{ .row = content.row + content.height, .col = content.col, .width = content.width, .height = dh });
         }
     }
     renderList(s, f, content);
@@ -181,20 +188,6 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
             if (selected) f.put(color.Style.reset.code());
         }
     }
-}
-
-fn renderDetail(fnd: Row, f: *tab.Frame, rect: tab.Rect) void {
-    var fix_buf: [96]u8 = undefined;
-    const fix_value = if (fnd.fixable)
-        std.fmt.bufPrint(&fix_buf, "f → mt doctor --fix {s}", .{doctor_json.fixClassTag(fnd.fix_class)}) catch "f: fix"
-    else
-        "not auto-fixable";
-    const fields = [_]detail_pane.Field{
-        .{ .label = "Severity", .value = severityLabel(fnd.severity) },
-        .{ .label = "Fix", .value = fix_value },
-        .{ .label = "Detail", .value = if (fnd.detail.len != 0) fnd.detail else "-" },
-    };
-    detail_pane.render(f, &fields, rect);
 }
 
 // ─── tests ───────────────────────────────────────────────────────────

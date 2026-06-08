@@ -120,18 +120,23 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     }
     var list_rect = content;
     if (s.detail) |d| {
-        const dh = @min(@as(u16, detail_rows), content.height / 2);
+        var size_buf: [16]u8 = undefined;
+        var deps_buf: [512]u8 = undefined;
+        const fields = [_]detail_pane.Field{
+            .{ .label = "Tap", .value = if (d.info.tap.len != 0) d.info.tap else "-" },
+            .{ .label = "Size", .value = humanSize(&size_buf, d.pkg.size_bytes) },
+            .{ .label = "Linked", .value = yesNo(d.pkg.linked) },
+            .{ .label = "Pinned", .value = if (d.pkg.pinned) "yes" else "no" },
+            .{ .label = "Dependencies", .value = joinDeps(&deps_buf, d.info.dependencies) },
+        };
+        const dh = @min(detail_pane.neededRows(&fields, content.width), content.height / 2);
         if (dh > 0 and dh < content.height) {
             list_rect.height = content.height - dh;
-            renderDetail(d, f, .{ .row = content.row + list_rect.height, .col = content.col, .width = content.width, .height = dh });
+            detail_pane.render(f, &fields, .{ .row = content.row + list_rect.height, .col = content.col, .width = content.width, .height = dh });
         }
     }
     renderList(s, f, list_rect);
 }
-
-/// Bottom-pane budget: five fields fit in `detail_rows`; the split never takes
-/// more than half the content so the list always survives.
-const detail_rows: u16 = 5;
 
 fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     if (rect.height == 0) return;
@@ -164,19 +169,6 @@ fn renderGuard(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     const line = std.fmt.bufPrint(&b, "Uninstall {s}? [y/N]", .{name}) catch "Uninstall? [y/N]";
     f.putContent(scroll_list.truncate(line, rect.width));
     f.put(color.Style.reset.code());
-}
-
-fn renderDetail(d: Detail, f: *tab.Frame, rect: tab.Rect) void {
-    var size_buf: [16]u8 = undefined;
-    var deps_buf: [512]u8 = undefined;
-    const fields = [_]detail_pane.Field{
-        .{ .label = "Tap", .value = if (d.info.tap.len != 0) d.info.tap else "-" },
-        .{ .label = "Size", .value = humanSize(&size_buf, d.pkg.size_bytes) },
-        .{ .label = "Linked", .value = yesNo(d.pkg.linked) },
-        .{ .label = "Pinned", .value = if (d.pkg.pinned) "yes" else "no" },
-        .{ .label = "Dependencies", .value = joinDeps(&deps_buf, d.info.dependencies) },
-    };
-    detail_pane.render(f, &fields, rect);
 }
 
 // SGR reverse-video for the selection / guard, matching `tab_bar`'s convention.
