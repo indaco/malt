@@ -292,11 +292,7 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
     var f: tab.Frame = .{ .buf = buf };
     f.put("\x1b[2J"); // clear; every region then positions its own cursor
     switch (layout.compute(cols, rows)) {
-        .too_small => {
-            f.moveTo(1, 1);
-            var tmp: [80]u8 = undefined;
-            f.put(layout.render(&tmp, .{ .rows = &.{} }, cols, rows));
-        },
+        .too_small => renderTooSmall(&f, cols, rows),
         .ok => |r| {
             f.moveTo(r.tab_bar.row, 1);
             var tb: [256]u8 = undefined;
@@ -340,6 +336,38 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
 fn putRule(f: *tab.Frame, cols: u16) void {
     var i: u16 = 0;
     while (i < cols) : (i += 1) f.put("─");
+}
+
+/// The "terminal too small" fallback: the notice icon + message in the info
+/// colour, wrapped across rows (positioned with cursor moves, no raw newline) so
+/// it stays readable when the terminal is too narrow for one line. Trips on
+/// width or height alone — `layout.fits` requires both axes.
+fn renderTooSmall(f: *tab.Frame, cols: u16, rows: u16) void {
+    if (cols == 0 or rows == 0) return;
+    var mbuf: [64]u8 = undefined;
+    var buf: [96]u8 = undefined;
+    const icon: []const u8 = if (color.isEmojiEnabled()) "ⓘ " else "i ";
+    const msg = std.fmt.bufPrint(&buf, "{s}{s}", .{ icon, layout.tooSmallMessage(&mbuf) }) catch "terminal too small";
+    var rest = msg;
+    var row: u16 = 1;
+    while (rest.len > 0 and row <= rows) : (row += 1) {
+        var take = @min(@as(usize, cols), rest.len);
+        if (take < rest.len) {
+            var i = take; // break at the last space that fits, so words stay whole
+            while (i > 0) : (i -= 1) {
+                if (rest[i - 1] == ' ') {
+                    take = i;
+                    break;
+                }
+            }
+        }
+        f.moveTo(row, 1);
+        f.put(color.roleCode(.accent));
+        f.putContent(rest[0..take]);
+        f.put(color.Style.reset.code());
+        rest = rest[take..];
+        while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+    }
 }
 
 fn loadingLine(buf: []u8, app: *const App) []const u8 {
@@ -1222,6 +1250,15 @@ test "the footer carries the active tab's keys next to the global keys" {
     const out = renderFrame(&buf, &a, 100, 24);
     try std.testing.expect(std.mem.indexOf(u8, out, "s: start") != null); // the active tab's keys
     try std.testing.expect(std.mem.indexOf(u8, out, "switch") != null); // and the global keys
+}
+
+test "a too-small terminal shows a wrapped, styled notice (width alone trips it)" {
+    var a: App = .{};
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 10, 24); // width below the minimum, height fine
+    try std.testing.expect(std.mem.indexOf(u8, out, "terminal") != null); // the notice shows
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2;1H") != null); // wrapped onto a 2nd row
+    try std.testing.expect(std.mem.indexOf(u8, out, color.Style.reset.code()) != null); // info colour applied + reset
 }
 
 test "the footer shows a per-tab loading status during a blocking refetch" {

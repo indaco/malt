@@ -32,7 +32,10 @@ pub const filter_rows: u16 = 1;
 pub const footer_rows: u16 = 2;
 pub const min_content_rows: u16 = 1;
 pub const min_rows: u16 = tab_bar_rows + filter_rows + footer_rows + min_content_rows;
-pub const min_cols: u16 = 20;
+// The narrowest width that still shows all five tabs; below it the bar can't
+// fit them, so the fallback shows rather than a clipped frame. A narrow-but-tall
+// window trips this on width alone — `fits` requires both axes.
+pub const min_cols: u16 = 50;
 
 /// Result of laying out `(cols, rows)`: the tiled regions, or a signal that the
 /// terminal is below the usable minimum and the fallback frame should render.
@@ -101,19 +104,24 @@ fn renderContent(buf: []u8, state: State, content: Rect) []const u8 {
     return buf[0..len];
 }
 
-/// The "terminal too small" frame: a single ASCII line naming the minimum,
-/// truncated to `cols` so it can never overflow the very terminal it reports as
-/// too small. ASCII keeps byte length == column width. Empty when there is no
-/// room to draw at all (`0` cols or rows).
-fn renderFallback(buf: []u8, cols: u16, rows: u16) []const u8 {
-    if (cols == 0 or rows == 0) return buf[0..0];
-    var msg_buf: [64]u8 = undefined;
-    const msg = std.fmt.bufPrint(
-        &msg_buf,
+/// The "terminal too small" notice text, naming the minimum. ASCII keeps byte
+/// length == column width. The single source of the message; callers add their
+/// own icon/colour and wrapping.
+pub fn tooSmallMessage(buf: []u8) []const u8 {
+    return std.fmt.bufPrint(
+        buf,
         "terminal too small (need >= {d}x{d})",
         .{ min_cols, min_rows },
     ) catch "terminal too small";
-    const fitted = scroll_list.truncate(msg, cols);
+}
+
+/// The "terminal too small" frame: the notice line truncated to `cols` so it can
+/// never overflow the very terminal it reports as too small. Empty when there is
+/// no room to draw at all (`0` cols or rows).
+fn renderFallback(buf: []u8, cols: u16, rows: u16) []const u8 {
+    if (cols == 0 or rows == 0) return buf[0..0];
+    var msg_buf: [64]u8 = undefined;
+    const fitted = scroll_list.truncate(tooSmallMessage(&msg_buf), cols);
     const n = @min(fitted.len, buf.len);
     @memcpy(buf[0..n], fitted[0..n]);
     return buf[0..n];
@@ -126,4 +134,10 @@ test "compute tiles the screen exactly and content absorbs the slack" {
     try std.testing.expectEqual(@as(u16, 20), r.content.height);
     try std.testing.expectEqual(@as(u16, 23), r.footer.row);
     try std.testing.expect(compute(1, 1) == .too_small);
+}
+
+test "compute is too_small when either axis alone is below the minimum" {
+    try std.testing.expect(compute(min_cols - 1, 24) == .too_small); // width only
+    try std.testing.expect(compute(80, min_rows - 1) == .too_small); // height only
+    try std.testing.expect(compute(min_cols, min_rows) == .ok); // exactly the minimum fits
 }
