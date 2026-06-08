@@ -22,11 +22,11 @@ fn ch(c: u8) Key {
 test "tab and digit keys switch the active tab" {
     var a: app.App = .{};
     a = app.step(a, .tab);
-    try testing.expectEqual(Tab.outdated, a.active);
-    a = app.step(a, ch('4'));
-    try testing.expectEqual(Tab.doctor, a.active);
-    a = app.step(a, ch('1'));
     try testing.expectEqual(Tab.installed, a.active);
+    a = app.step(a, ch('4'));
+    try testing.expectEqual(Tab.services, a.active);
+    a = app.step(a, ch('1'));
+    try testing.expectEqual(Tab.search, a.active);
 }
 
 test "filter editing toggles edit mode and quit keys set quit" {

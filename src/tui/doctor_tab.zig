@@ -106,11 +106,11 @@ fn glyph(sev: Severity) []const u8 {
     };
 }
 
-fn glyphStyle(sev: Severity) color.Style {
+fn glyphStyle(sev: Severity) color.Role {
     return switch (sev) {
-        .ok => .green,
-        .warn => .yellow,
-        .err => .red,
+        .ok => .success,
+        .warn => .warning,
+        .err => .danger,
     };
 }
 
@@ -155,7 +155,7 @@ fn renderActionLine(sel: ?Row, f: *tab.Frame, rect: tab.Rect) void {
     const fixable = if (sel) |fnd| fnd.fixable else false;
     if (!fixable) return; // blank line; the pane carries the non-fixable guidance
     f.moveTo(rect.row, rect.col);
-    f.put(color.Style.dim.code());
+    f.put(color.roleCode(.muted));
     f.putContent(scroll_list.truncate("f: fix", rect.width));
     f.put(color.Style.reset.code());
 }
@@ -178,7 +178,7 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
             f.moveTo(rect.row + @as(u16, @intCast(screen)), rect.col);
             // The glyph keeps its own colour regardless of selection; the
             // reverse-video selection wraps only the title so the SGRs don't tangle.
-            f.put(glyphStyle(fnd.severity).code());
+            f.put(color.roleCode(glyphStyle(fnd.severity)));
             f.put(glyph(fnd.severity));
             f.put(color.Style.reset.code());
             f.put(" ");

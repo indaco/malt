@@ -3,6 +3,7 @@
 //! awareness so load-bearing lines render on both palettes.
 
 const std = @import("std");
+const themes = @import("themes.zig");
 /// Process-wide io + environ seeded once from `main` via `setRuntime`.
 /// Defaults stay benign so tests that don't seed see deterministic
 /// "no env vars, no terminal probe" output.
@@ -68,10 +69,16 @@ pub const Rgb = struct {
     b: u8,
 };
 
+/// TUI paint role + theme set live in `themes.zig`; re-exported so the TUI leaf
+/// reads them through `color` and never imports the theme tables directly.
+pub const Role = themes.Role;
+pub const Theme = themes.Theme;
+
 var color_enabled: ?bool = null;
 var emoji_enabled: ?bool = null;
 var background_cached: ?Background = null;
 var truecolor_cached: ?bool = null;
+var theme_cached: ?Theme = null;
 
 var pkg_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } };
 
@@ -126,6 +133,12 @@ pub fn setBackgroundForTest(bg: ?Background) void {
 pub fn setTruecolorForTest(v: ?bool) void {
     if (!builtin.is_test) return;
     truecolor_cached = v;
+}
+
+/// Test-only override for the theme cache.
+pub fn setThemeForTest(t: ?Theme) void {
+    if (!builtin.is_test) return;
+    theme_cached = t;
 }
 
 /// Cached background accessor. Detection runs at most once per process.
@@ -394,4 +407,73 @@ test "paletteCode: notice — light + basic uses cyan, distinct from warn-magent
         paletteCode(.notice, .light, false),
         paletteCode(.warn, .light, false),
     ));
+}
+
+// ─── TUI theme palette ───────────────────────────────────────────────
+//
+// `MALT_THEME` doubles as the TUI theme selector. `light`/`dark`/`auto`/
+// `default` (and unknown values) resolve to `.default`, whose colours come from
+// the background-aware tiers above; named themes carry their own truecolor RGB
+// and degrade to the `.default` basic cell on terminals without truecolor.
+
+/// Cached theme accessor. Reads `MALT_THEME` once at boot (pre-warmed in main).
+pub fn theme() Theme {
+    if (theme_cached) |v| return v;
+    const resolved = resolveThemeFromEnv(lookupEnv("MALT_THEME"));
+    theme_cached = resolved;
+    return resolved;
+}
+
+/// Pure: env value → theme. Lowercases into a bounded stack buffer (theme names
+/// are short); anything unrecognised or over-long falls back to `.default`.
+pub fn resolveThemeFromEnv(value: ?[]const u8) Theme {
+    const raw = value orelse return .default;
+    var buf: [32]u8 = undefined;
+    if (raw.len == 0 or raw.len > buf.len) return .default;
+    const lower = std.ascii.lowerString(buf[0..raw.len], raw);
+    return themes.from_env.get(lower) orelse .default;
+}
+
+/// The escape for a role under the active (theme, background, tier).
+pub fn roleCode(role: Role) []const u8 {
+    return resolveRole(theme(), role, background(), truecolorSupported());
+}
+
+/// Secondary accent — a blue with no cell in the existing semantic palette.
+const Secondary = struct { dark_tc: []const u8, light_tc: []const u8, basic: []const u8 };
+const secondary_blue: Secondary = .{
+    .dark_tc = "\x1b[38;2;96;165;250m", // Tailwind blue-400
+    .light_tc = "\x1b[38;2;29;78;216m", // Tailwind blue-700
+    .basic = "\x1b[34m",
+};
+
+/// Pure role resolver. Named themes use their RGB on truecolor and degrade to
+/// the `.default` basic cell otherwise; `.default` reuses the tiered palette.
+pub fn resolveRole(t: Theme, role: Role, bg: Background, truecolor: bool) []const u8 {
+    if (themes.named(t)) |p| {
+        if (truecolor) return p.get(role);
+        return defaultRoleCode(role, bg, false); // 8-colour can't carry identity
+    }
+    return defaultRoleCode(role, bg, truecolor);
+}
+
+/// `.default` theme: map each role onto the existing background-aware cells,
+/// plus the one new `secondary` blue.
+fn defaultRoleCode(role: Role, bg: Background, truecolor: bool) []const u8 {
+    const p: *const Palette = switch (bg) {
+        .light => if (truecolor) &light_truecolor else &light_basic,
+        .dark, .unknown => if (truecolor) &dark_truecolor else &dark_basic,
+    };
+    return switch (role) {
+        .accent => p.info,
+        .success => p.success,
+        .warning => p.warn,
+        .danger => p.err,
+        .muted => p.detail,
+        // secondary has no cell in `Palette`, so `p` is unused here.
+        .secondary => switch (bg) {
+            .light => if (truecolor) secondary_blue.light_tc else secondary_blue.basic,
+            .dark, .unknown => if (truecolor) secondary_blue.dark_tc else secondary_blue.basic,
+        },
+    };
 }

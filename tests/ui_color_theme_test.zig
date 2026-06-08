@@ -227,3 +227,87 @@ test "SemanticStyle.code falls back to basic when truecolor is off" {
     defer color.setTruecolorForTest(null);
     try testing.expectEqualStrings("\x1b[35m", color.SemanticStyle.warn.code());
 }
+
+// ─── theme resolution (TUI roles) ────────────────────────────────────
+
+test "resolveThemeFromEnv: unknown value falls back to default" {
+    try testing.expectEqual(color.Theme.default, color.resolveThemeFromEnv("not-a-theme"));
+    try testing.expectEqual(color.Theme.default, color.resolveThemeFromEnv(null));
+    try testing.expectEqual(color.Theme.default, color.resolveThemeFromEnv("")); // the len==0 guard
+    // A value longer than the 32-byte lowercase buffer must not overflow it — it
+    // falls back to default (the raw.len > buf.len guard).
+    try testing.expectEqual(color.Theme.default, color.resolveThemeFromEnv("d" ** 64));
+}
+
+test "resolveThemeFromEnv: reserved background values resolve to default theme" {
+    try testing.expectEqual(color.Theme.default, color.resolveThemeFromEnv("light"));
+    try testing.expectEqual(color.Theme.default, color.resolveThemeFromEnv("dark"));
+}
+
+test "resolveThemeFromEnv: case-insensitive named theme" {
+    try testing.expectEqual(color.Theme.dracula, color.resolveThemeFromEnv("Dracula"));
+    try testing.expectEqual(color.Theme.dracula, color.resolveThemeFromEnv("DRACULA"));
+}
+
+test "resolveRole: default theme on dark+basic matches today's TUI hues" {
+    try testing.expectEqualStrings("\x1b[36m", color.resolveRole(.default, .accent, .dark, false));
+    try testing.expectEqualStrings("\x1b[32m", color.resolveRole(.default, .success, .dark, false));
+    try testing.expectEqualStrings("\x1b[33m", color.resolveRole(.default, .warning, .dark, false));
+    try testing.expectEqualStrings("\x1b[31m", color.resolveRole(.default, .danger, .dark, false));
+    try testing.expectEqualStrings("\x1b[2m", color.resolveRole(.default, .muted, .dark, false));
+}
+
+test "resolveRole: default theme is background-aware on truecolor" {
+    try testing.expectEqualStrings("\x1b[38;2;125;211;252m", color.resolveRole(.default, .accent, .dark, true));
+    try testing.expectEqualStrings("\x1b[38;2;2;132;199m", color.resolveRole(.default, .accent, .light, true));
+}
+
+test "resolveRole: named theme returns its RGB on truecolor" {
+    try testing.expectEqualStrings("\x1b[38;2;189;147;249m", color.resolveRole(.dracula, .accent, .dark, true));
+}
+
+test "resolveRole: named theme degrades to default-basic on a non-truecolor terminal" {
+    try testing.expectEqualStrings(
+        color.resolveRole(.default, .accent, .dark, false),
+        color.resolveRole(.dracula, .accent, .dark, false),
+    );
+    try testing.expectEqualStrings("\x1b[36m", color.resolveRole(.dracula, .accent, .dark, false));
+    // Degradation passes the background through: a light terminal gets the
+    // light-basic cell, not the dark one.
+    try testing.expectEqualStrings("\x1b[34m", color.resolveRole(.dracula, .accent, .light, false));
+}
+
+test "roleCode: wires theme + background + truecolor caches together" {
+    color.setThemeForTest(.dracula);
+    color.setBackgroundForTest(.dark);
+    color.setTruecolorForTest(true);
+    defer {
+        color.setThemeForTest(null);
+        color.setBackgroundForTest(null);
+        color.setTruecolorForTest(null);
+    }
+    try testing.expectEqualStrings("\x1b[38;2;189;147;249m", color.roleCode(.accent));
+}
+
+test "resolveRole: secondary role has its own blue, distinct from accent" {
+    try testing.expectEqualStrings("\x1b[34m", color.resolveRole(.default, .secondary, .dark, false));
+    try testing.expect(!std.mem.eql(
+        u8,
+        color.resolveRole(.default, .secondary, .dark, true),
+        color.resolveRole(.default, .accent, .dark, true),
+    ));
+}
+
+test "resolveRole: default theme uses the light tier on a light background" {
+    // light+basic warning is magenta (yellow washes out on white) — proves the
+    // role map honours the light tier, not just dark.
+    try testing.expectEqualStrings("\x1b[35m", color.resolveRole(.default, .warning, .light, false));
+    try testing.expectEqualStrings("\x1b[38;2;180;83;9m", color.resolveRole(.default, .warning, .light, true));
+}
+
+test "resolveRole: a light named theme resolves its own RGB on truecolor" {
+    // catppuccin-latte accent = Mauve #8839ef — a light theme carries fixed RGB
+    // regardless of the detected background.
+    try testing.expectEqualStrings("\x1b[38;2;136;57;239m", color.resolveRole(.catppuccin_latte, .accent, .light, true));
+    try testing.expectEqualStrings("\x1b[38;2;136;57;239m", color.resolveRole(.catppuccin_latte, .accent, .dark, true));
+}

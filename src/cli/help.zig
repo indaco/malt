@@ -652,15 +652,23 @@ const deps_help =
 const tui_help =
     \\Usage: malt tui
     \\
-    \\Launch the interactive dashboard: a tab bar (Installed, Outdated,
+    \\Launch the interactive dashboard: a tab bar (Search, Installed, Outdated,
     \\Services, Doctor), a `/`-activated filter, and a list that reflows
     \\live as you resize the terminal. Switch tabs with `tab`, the left/right
-    \\arrows, or `1`-`4`; quit with `q` or Ctrl-C.
+    \\arrows, or `1`-`5`; quit with `q` or Ctrl-C.
     \\
     \\Reads come from `mt … --json`; actions delegate to the real `mt`
     \\subcommands. Requires an interactive terminal — on a pipe, in CI, or
     \\with NO_COLOR set it refuses to launch (exit 2) rather than emit a
     \\corrupted frame.
+    \\
+    \\Environment:
+    \\  MALT_THEME   Dashboard palette: default, dracula, catppuccin-mocha,
+    \\               catppuccin-latte, rose-pine, rose-pine-dawn, nord,
+    \\               tokyo-night, gruvbox-dark, gruvbox-light. light/dark/auto
+    \\               keep the background-aware default theme; unknown ⇒ default.
+    \\               Named themes need a truecolor terminal (COLORTERM); others
+    \\               fall back to the basic palette.
     \\
 ;
 

@@ -140,7 +140,7 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
 /// hint when nothing is selected — the empty-selection no-op's only feedback.
 fn renderActionLine(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     f.moveTo(rect.row, rect.col);
-    f.put(color.Style.dim.code());
+    f.put(color.roleCode(.muted));
     var b: [128]u8 = undefined;
     const n = selectedCount(s);
     const line = if (n > 0)
@@ -167,7 +167,7 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         f.moveTo(rect.row + @as(u16, @intCast(screen)), rect.col);
         const selected = fi == v.selected;
         // The cursor row wins over the pinned dim so the selection stays legible.
-        if (selected) f.put(reverse) else if (p.pinned) f.put(color.Style.dim.code());
+        if (selected) f.put(reverse) else if (p.pinned) f.put(color.roleCode(.muted));
         const is_checked = i < s.checked.len and s.checked[i];
         var rb: [256]u8 = undefined;
         f.putContent(scroll_list.truncate(formatRow(&rb, p, is_checked), rect.width));
@@ -342,7 +342,7 @@ test "render greys a pinned row, gives it no checkbox, and marks it pinned" {
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "pinned") != null); // curl marked
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.dim.code()) != null); // greyed
+    try testing.expect(std.mem.indexOf(u8, out, color.Style.dim.code()) != null); // greyed: muted role == dim on the basic tier
 }
 
 test "render narrows to the filter" {
