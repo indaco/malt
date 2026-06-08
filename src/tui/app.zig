@@ -227,10 +227,10 @@ fn stepFilter(a: *App, key: Key) void {
         .enter => { // commit, keep the filter
             a.editing = false;
             // Search divergence: its filter doubles as the search box, so
-            // committing the query *is* the search. Only the Search tab claims
-            // the commit — every other tab's filter merely narrows an already
-            // loaded list, so routing Enter there would mis-fire their domain key.
-            if (a.active == .search) routeToTab(a, .enter);
+            // committing the query *is* the search. Set the request directly
+            // rather than routing Enter to the tab, whose Enter now means "open
+            // info" — every other tab's filter just narrows a loaded list.
+            if (a.active == .search) a.states.search.request = .search;
         },
         .esc => { // cancel: clear the filter
             activeChrome(a).filter.clear();
@@ -270,10 +270,12 @@ fn stepNormal(a: *App, key: Key) void {
             routeToTab(a, key); // a domain key (e.g. u/f) belongs to the tab
         },
         .enter => {
-            // The Search tab's filter doubles as its query box, so Enter focuses
-            // it for typing (a second Enter then commits + searches). Every other
-            // tab uses Enter as a domain key (open detail, upgrade), so route it.
-            if (a.active == .search) a.editing = true else routeToTab(a, key);
+            // On Search, Enter focuses the query box when there are no results
+            // yet (so the user can type), and opens info for the active hit once
+            // results are loaded. Every other tab uses Enter as a domain key.
+            if (a.active == .search and a.states.search.items.len == 0) {
+                a.editing = true;
+            } else routeToTab(a, key);
         },
         .space, .end, .esc => routeToTab(a, key),
         // `end` needs the row count to land on the last row — deferred to the
@@ -345,12 +347,12 @@ fn loadingLine(buf: []u8, app: *const App) []const u8 {
 }
 
 /// The footer help line: while editing the filter, just the edit keys; otherwise
-/// the active tab's action keys, then the shell-wide keys — so every key a user
-/// can press from here is in one place. Built into `buf`; falls back to the
-/// global keys alone if it can't fit.
+/// the shell-wide keys first (so quit/switch survive a narrow terminal) then the
+/// active tab's action keys. Built into `buf`; falls back to the global keys
+/// alone if it can't fit.
 fn footerLine(buf: []u8, app: *const App) []const u8 {
     if (app.editing) return footerHelp(true);
-    return std.fmt.bufPrint(buf, "{s}   ·   {s}", .{ activeFooterHint(app), footerHelp(false) }) catch footerHelp(false);
+    return std.fmt.bufPrint(buf, "{s}   ·   {s}", .{ footerHelp(false), activeFooterHint(app) }) catch footerHelp(false);
 }
 
 fn footerHelp(editing: bool) []const u8 {
@@ -430,6 +432,9 @@ const Store = struct {
     /// The Search tab's checkbox state, parallel to `search.?.items`. Owned here,
     /// resized to the result count on each query, borrowed by the tab.
     search_checked: []bool = &.{},
+    /// Backing storage for the Search tab's open `mt info` pane (its own slot so
+    /// it never clobbers the Installed tab's detail parse).
+    search_detail: ?info_json.Parsed = null,
 
     fn deinit(self: *Store, allocator: std.mem.Allocator) void {
         if (self.installed) |p| p.deinit();
@@ -440,6 +445,7 @@ const Store = struct {
         if (self.doctor) |p| p.deinit();
         if (self.search) |p| p.deinit();
         if (self.search_checked.len != 0) allocator.free(self.search_checked);
+        if (self.search_detail) |p| p.deinit();
     }
 };
 
@@ -795,8 +801,13 @@ fn loadSearch(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store
     app.states.search.checked = checked;
     app.states.search.phase = .loaded;
     // A fresh query is a new result set, so an old cursor would point at an
-    // unrelated row; reset to the top.
+    // unrelated row, and any open info pane is for a hit that may be gone.
     app.states.search.chrome.view = .{};
+    app.states.search.detail = null;
+    if (store.search_detail) |old| {
+        old.deinit();
+        store.search_detail = null;
+    }
 }
 
 /// Build the `mt install …` argv for the Search tab. Pure over the tab state:
@@ -866,7 +877,30 @@ fn serviceSearch(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *
         .none => {},
         .search => try loadSearch(io, allocator, app, store),
         .install => try doInstall(io, allocator, t, app, store),
+        .info => try openSearchInfo(io, allocator, app, store),
     }
+}
+
+/// Open the `mt info` pane for the active hit. `mt info` resolves installed and
+/// uninstalled packages alike, so a search result can be inspected before any
+/// install. A read (no alt-screen drop); failure names the package in a banner
+/// and leaves the pane closed.
+fn openSearchInfo(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+    const m = search.selectedMatch(&app.states.search) orelse return; // empty list: no-op
+    errdefer |err| {
+        var sb: [96]u8 = undefined;
+        const op = std.fmt.bufPrint(&sb, "info for {s} failed", .{m.name}) catch "info read failed";
+        app.banner.set(op, @errorName(err));
+    }
+    const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "info", m.name });
+    defer allocator.free(argv);
+    const bytes = try spawn.readJson(io, allocator, argv);
+    defer allocator.free(bytes);
+
+    const parsed = try info_json.parse(allocator, bytes);
+    if (store.search_detail) |old| old.deinit();
+    store.search_detail = parsed;
+    app.states.search.detail = parsed.info;
 }
 
 /// Drain the active tab's pending effects after a keypress. Each tab's service is
@@ -1130,6 +1164,16 @@ test "Enter on the Search tab focuses the query box rather than firing an empty 
     a = step(a, .enter);
     try std.testing.expect(a.editing); // the query box is now focused for typing
     try std.testing.expectEqual(search.Request.none, a.states.search.request); // no search fired yet
+}
+
+test "Enter on the Search tab opens info once results are loaded" {
+    const items = [_]search.Match{.{ .name = "wget", .kind = .formula, .installed = false }};
+    var a: App = .{ .active = .search };
+    a.states.search.items = &items;
+    a.states.search.phase = .loaded;
+    a = step(a, .enter);
+    try std.testing.expect(!a.editing); // a row is active, so Enter inspects it, not the box
+    try std.testing.expectEqual(search.Request.info, a.states.search.request);
 }
 
 test "Enter on a data tab still routes as that tab's domain key, not a focus" {

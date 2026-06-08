@@ -25,13 +25,16 @@ const color = @import("../ui/color.zig");
 const search_json = @import("json/search.zig");
 pub const Match = search_json.Match;
 const Kind = search_json.Kind;
+const info_json = @import("json/info.zig");
+const detail_pane = @import("detail_pane.zig");
 const scroll_list = @import("scroll_list.zig");
 const tab = @import("tab.zig");
 
 /// An effect the pure `step` defers to the impure shell, which performs it and
 /// resets the field. `step` never does I/O — this is the command channel.
-/// `search` (re)runs the committed query; `install` installs the selected hit.
-pub const Request = enum { none, search, install };
+/// `search` (re)runs the committed query; `install` installs the selection;
+/// `info` opens `mt info` for the active hit (works for uninstalled hits too).
+pub const Request = enum { none, search, install, info };
 
 /// The read lifecycle the render reflects. `idle` before any query is committed
 /// (show guidance), `searching` while the blocking remote read runs (the shell
@@ -46,6 +49,9 @@ pub const State = struct {
     /// Per-row multi-select state, parallel to `items`, owned + sized by the
     /// shell (like Outdated's). An already-installed hit is never checked.
     checked: []bool = &.{},
+    /// The open info pane for the active hit, if Enter requested one. Borrows
+    /// from shell-owned parse storage; cleared on Esc or a fresh query.
+    detail: ?info_json.Info = null,
     /// Pending effect for the shell to perform, then clear.
     request: Request = .none,
     /// Where the tab is in the read lifecycle; drives the render's status line.
@@ -58,7 +64,7 @@ pub fn title() []const u8 {
 
 /// The tab's action keys, surfaced in the shared footer next to the global keys.
 pub fn footerHint() []const u8 {
-    return "space: select   i: install";
+    return "space: select   enter: info   i: install";
 }
 
 /// The hit the selection points at, clamping the (shell-driven, unbounded)
@@ -90,13 +96,19 @@ fn toggle(s: *State) void {
 /// when it is not already installed; on an installed hit it is inert.
 pub fn step(s: *State, key: tab.Key) void {
     switch (key) {
-        .enter => s.request = .search,
+        // Enter on a result opens `mt info` for it. Committing the query (the
+        // other meaning of Enter) is driven by the shell on filter-commit, not
+        // here, so the two never collide.
+        .enter => if (selectedMatch(s) != null) {
+            s.request = .info;
+        },
         .space => toggle(s),
         // `i` installs the multi-selection (or the active row when nothing is
         // checked); inert when there is nothing installable to do.
         .char => |c| if (c.len == 1 and c.bytes[0] == 'i') {
             if (anyInstallable(s)) s.request = .install;
         },
+        .esc => s.detail = null, // close the info pane
         else => {},
     }
 }
@@ -137,8 +149,49 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
         .loaded => if (s.items.len == 0)
             renderStatus(f, r, "No matches.")
         else
-            renderList(s, f, r),
+            renderLoaded(s, f, r),
     }
+}
+
+// Bottom-pane budget for the info pane; the split never takes more than half the
+// content so the result list always survives.
+const detail_rows: u16 = 3;
+
+/// The results, with an `mt info` pane docked at the bottom when one is open.
+fn renderLoaded(s: *const State, f: *tab.Frame, r: tab.Rect) void {
+    var list_rect = r;
+    if (s.detail) |info| {
+        const dh = @min(@as(u16, detail_rows), r.height / 2);
+        if (dh > 0 and dh < r.height) {
+            list_rect.height = r.height - dh;
+            renderDetail(info, f, .{ .row = r.row + list_rect.height, .col = r.col, .width = r.width, .height = dh });
+        }
+    }
+    renderList(s, f, list_rect);
+}
+
+/// The `mt info` pane for the active hit — works for an uninstalled hit too,
+/// which is why a search result can open it at all.
+fn renderDetail(info: info_json.Info, f: *tab.Frame, rect: tab.Rect) void {
+    var deps_buf: [512]u8 = undefined;
+    const fields = [_]detail_pane.Field{
+        .{ .label = "Version", .value = if (info.version.len != 0) info.version else "-" },
+        .{ .label = "Tap", .value = if (info.tap.len != 0) info.tap else "-" },
+        .{ .label = "Dependencies", .value = joinDeps(&deps_buf, info.dependencies) },
+    };
+    detail_pane.render(f, &fields, rect);
+}
+
+/// Comma-join a dependency list into `buf`; "none" when empty. Truncates if the
+/// list overruns the buffer (the pane truncates to the column budget anyway).
+fn joinDeps(buf: []u8, deps: []const []const u8) []const u8 {
+    if (deps.len == 0) return "none";
+    var len: usize = 0;
+    for (deps, 0..) |d, i| {
+        if (i != 0) append(buf, &len, ", ");
+        append(buf, &len, d);
+    }
+    return buf[0..len];
 }
 
 fn renderStatus(f: *tab.Frame, rect: tab.Rect, msg: []const u8) void {
@@ -222,10 +275,23 @@ test "selectedMatch on an empty list is null (the action becomes a no-op)" {
     try testing.expect(selectedMatch(&s) == null);
 }
 
-test "enter requests a search — committing the query is the search" {
-    var s: State = .{ .items = &sample };
+test "enter opens info for the active hit" {
+    var s: State = .{ .items = &sample, .phase = .loaded };
     step(&s, .enter);
-    try testing.expectEqual(Request.search, s.request);
+    try testing.expectEqual(Request.info, s.request);
+}
+
+test "enter is inert on an empty result list" {
+    var s: State = .{ .items = &.{} };
+    step(&s, .enter);
+    try testing.expectEqual(Request.none, s.request);
+}
+
+test "esc closes the info pane" {
+    const info: info_json.Info = .{ .name = "wget", .version = "1", .tap = "", .dependencies = &.{} };
+    var s: State = .{ .items = &sample, .detail = info };
+    step(&s, .esc);
+    try testing.expect(s.detail == null);
 }
 
 test "i on a not-installed hit requests install; on an installed hit it is inert" {
@@ -293,6 +359,18 @@ test "render draws a multi-select checkbox per result row" {
     try testing.expect(std.mem.indexOf(u8, out, "✓") != null); // wget checked
     try testing.expect(std.mem.indexOf(u8, out, "[ ]") != null); // an unchecked box
     try testing.expect(std.mem.indexOf(u8, out, "[-]") != null); // firefox installed → blocked
+}
+
+test "render docks the info pane when one is open" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const info: info_json.Info = .{ .name = "wget", .version = "1.25.0", .tap = "homebrew/core", .dependencies = &.{"openssl@3"} };
+    const s: State = .{ .items = &sample, .phase = .loaded, .detail = info };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "1.25.0") != null); // version field
+    try testing.expect(std.mem.indexOf(u8, out, "openssl@3") != null); // a dependency
+    try testing.expect(std.mem.indexOf(u8, out, "wget") != null); // the list still shows
 }
 
 test "render shows guidance in the idle phase before any query is committed" {
