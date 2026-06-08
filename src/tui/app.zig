@@ -640,7 +640,10 @@ fn loadDoctor(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store
     errdefer |err| app.banner.set("doctor refresh failed", @errorName(err));
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{"doctor"});
     defer allocator.free(argv);
-    const bytes = (try spawn.readJsonAllowEmpty(io, allocator, argv)) orelse {
+    // `mt doctor` exits non-zero by severity (1 warn / 2 err) while still
+    // emitting its findings JSON — exactly when the tab is most useful — so the
+    // doctor read tolerates those exits where the generic read would reject them.
+    const bytes = (try spawn.readDoctorJson(io, allocator, argv)) orelse {
         // Fresh prefix: no findings. Clear the rows.
         if (store.doctor) |old| old.deinit();
         store.doctor = null;

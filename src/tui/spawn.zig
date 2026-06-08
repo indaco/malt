@@ -61,13 +61,16 @@ pub fn runChild(io: std.Io, argv: []const []const u8) SpawnError!void {
     }
 }
 
-/// Capture `mt … --json` stdout for a tab parser. stderr stays inherited so a
-/// genuine failure is still visible. Errors on a non-zero exit or empty output
-/// so a parser never sees a half-written document. Caller frees the bytes.
-pub fn readJson(
+/// Spawn `argv`, drain its stdout fully, then wait. Returns the captured bytes
+/// (possibly empty) on an accepted exit. `max_ok_exit` is the highest exit code
+/// that still counts as a successful read: most reads pass `0`, but `mt doctor`
+/// passes `2` because its exit code is its severity, not a failure. A signal,
+/// stop, or a code above `max_ok_exit` is `ChildFailed`. Caller frees the bytes.
+fn captureJson(
     io: std.Io,
     allocator: std.mem.Allocator,
     argv: []const []const u8,
+    max_ok_exit: u8,
 ) ReadError![]u8 {
     var child = std.process.spawn(io, .{ .argv = argv, .stdout = .pipe }) catch return error.SpawnFailed;
 
@@ -80,10 +83,40 @@ pub fn readJson(
 
     const status = child.wait(io) catch return error.WaitFailed;
     switch (status) {
-        .exited => |code| if (code != 0) return error.ChildFailed,
+        .exited => |code| if (code > max_ok_exit) return error.ChildFailed,
         .signal, .stopped, .unknown => return error.ChildFailed,
     }
+    return bytes;
+}
+
+/// Capture `mt … --json` stdout for a tab parser. stderr stays inherited so a
+/// genuine failure is still visible. Errors on a non-zero exit or empty output
+/// so a parser never sees a half-written document. Caller frees the bytes.
+pub fn readJson(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+) ReadError![]u8 {
+    const bytes = try captureJson(io, allocator, argv, 0);
+    errdefer allocator.free(bytes);
     if (bytes.len == 0) return error.EmptyOutput; // a parser must never see half a doc
+    return bytes;
+}
+
+/// Capture `mt doctor --json`, whose exit code is its severity (0 ok / 1 warn /
+/// 2 err), not a pass/fail — so a non-zero severity with a document is a
+/// successful read, never `ChildFailed`. An exit-with-no-output (a fresh prefix)
+/// maps to `null` like `readJsonAllowEmpty`. Caller frees the bytes.
+pub fn readDoctorJson(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+) ReadError!?[]u8 {
+    const bytes = try captureJson(io, allocator, argv, 2);
+    if (bytes.len == 0) {
+        allocator.free(bytes);
+        return null;
+    }
     return bytes;
 }
 
@@ -253,6 +286,37 @@ test "readJson errors on a non-zero exit" {
     var t = threaded();
     defer t.deinit();
     try testing.expectError(error.ChildFailed, readJson(t.io(), testing.allocator, &.{"/usr/bin/false"}));
+}
+
+test "readDoctorJson tolerates a severity exit where readJson would fail it" {
+    var t = threaded();
+    defer t.deinit();
+    // `/usr/bin/false` exits 1 — a doctor "warnings" severity, not a fault — so
+    // the doctor read keeps going where the generic read returns ChildFailed.
+    // (A non-zero exit *with* a document is exercised in tests/tui_spawn_test.zig,
+    // which may use a shell fixture the src/ argv-only invariant forbids here.)
+    try testing.expect((try readDoctorJson(t.io(), testing.allocator, &.{"/usr/bin/false"})) == null);
+    try testing.expectError(error.ChildFailed, readJson(t.io(), testing.allocator, &.{"/usr/bin/false"}));
+}
+
+test "readDoctorJson returns the captured document on a successful read" {
+    var t = threaded();
+    defer t.deinit();
+    const out = (try readDoctorJson(t.io(), testing.allocator, &.{ "/bin/echo", "{\"checks\":[]}" })).?;
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "checks") != null);
+}
+
+test "readDoctorJson maps an exit-with-no-output to null (fresh prefix)" {
+    var t = threaded();
+    defer t.deinit();
+    try testing.expect((try readDoctorJson(t.io(), testing.allocator, &.{"/usr/bin/true"})) == null);
+}
+
+test "readDoctorJson surfaces a missing program as SpawnFailed" {
+    var t = threaded();
+    defer t.deinit();
+    try testing.expectError(error.SpawnFailed, readDoctorJson(t.io(), testing.allocator, &.{"/nonexistent/malt_doctor_probe"}));
 }
 
 // A fake terminal controller + body record the call order so the sequencing

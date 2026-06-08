@@ -62,3 +62,28 @@ test "the refresh hook refetches the active tab and marks the rest dirty on view
     try testing.expect(!app.takeDirty(&a, .installed));
     try testing.expect(app.takeDirty(&a, .doctor));
 }
+
+// `mt doctor --json` exits non-zero *by severity* (1 warn / 2 err) while still
+// emitting its findings document — so the Doctor tab must read it as success,
+// not ChildFailed. These need a process that exits non-zero with output, which
+// only a shell fixture produces; the `src/` argv-only invariant forbids naming a
+// shell there, so the with-output cases live here.
+
+test "readDoctorJson keeps the document emitted alongside a severity exit (2)" {
+    var t = threaded();
+    defer t.deinit();
+    const out = (try spawn.readDoctorJson(t.io(), testing.allocator, &.{
+        "/bin/sh", "-c", "printf '{\"checks\":[]}'; exit 2",
+    })).?;
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("{\"checks\":[]}", out);
+}
+
+test "readDoctorJson still rejects an exit above the severity range" {
+    var t = threaded();
+    defer t.deinit();
+    // Only 0/1/2 are doctor severities; a higher code is a genuine fault.
+    try testing.expectError(error.ChildFailed, spawn.readDoctorJson(t.io(), testing.allocator, &.{
+        "/bin/sh", "-c", "printf x; exit 3",
+    }));
+}
