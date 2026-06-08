@@ -117,24 +117,17 @@ fn anyInstallable(s: *const State) bool {
 }
 
 // A closed switch on the kind: a new variant is a compile error here, never a
-// silent default — the glyph/colour must be chosen deliberately.
-fn kindGlyph(k: Kind) []const u8 {
+// silent default — the label must be chosen deliberately.
+fn kindLabel(k: Kind) []const u8 {
     return switch (k) {
-        .formula => "◆",
-        .cask => "▣",
+        .formula => "formula",
+        .cask => "cask",
     };
 }
 
-fn kindStyle(k: Kind) color.Role {
-    return switch (k) {
-        .formula => .accent,
-        .cask => .secondary,
-    };
-}
-
-/// Pure render: a dim action line, then — by phase — guidance, a "searching…"
-/// status, "no matches", or the ranked result list. A pure function of `(state,
-/// rect)` so a resize is a re-render.
+/// Pure render: by phase, guidance, a "searching…" status, "no matches", or the
+/// ranked result list. A pure function of `(state, rect)` so a resize is a
+/// re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (r.height == 0) return;
     // Keys live in the shared footer now, so the body owns the whole rect.
@@ -163,19 +156,15 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         const screen = i - v.offset;
         if (screen >= rect.height) break;
         f.moveTo(rect.row + @as(u16, @intCast(screen)), rect.col);
-        // Multi-select checkbox, then the kind glyph — both keep their own colour;
-        // the reverse-video selection wraps only the text columns so the SGRs
-        // never tangle. An installed hit can't be selected, so it shows blocked.
+        // Multi-select checkbox first (its own colour); the reverse-video
+        // selection wraps only the text columns so the SGRs never tangle. An
+        // installed hit can't be selected, so it shows the blocked box.
         const checked = i < s.checked.len and s.checked[i];
         tab.putCheckbox(f, if (m.installed) .blocked else if (checked) tab.Check.on else .off);
-        f.put(color.roleCode(kindStyle(m.kind)));
-        f.put(kindGlyph(m.kind));
-        f.put(color.Style.reset.code());
-        f.put(" ");
         const selected = i == v.selected;
         if (selected) f.put(reverse);
         var rb: [256]u8 = undefined;
-        f.putContent(scroll_list.truncate(formatRow(&rb, m), rect.width -| 6)); // 4 checkbox + 2 glyph cols
+        f.putContent(scroll_list.truncate(formatRow(&rb, m), rect.width -| 4)); // 4 cols on the checkbox
         if (selected) f.put(color.Style.reset.code());
     }
 }
@@ -183,11 +172,14 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
 // SGR reverse-video for the selection, matching the other tabs' convention.
 const reverse = "\x1b[7m";
 
-/// One list row (after the glyph): the package name, then an "installed" marker
-/// for a hit already on the system. ASCII columns, grapheme-naive like the rest.
+/// One list row (after the checkbox): the package name, the kind (formula/cask),
+/// then an "installed" marker for a hit already on the system. ASCII columns,
+/// grapheme-naive like the rest.
 fn formatRow(buf: []u8, m: Match) []const u8 {
     var len: usize = 0;
-    appendPad(buf, &len, m.name, 32);
+    appendPad(buf, &len, m.name, 28);
+    append(buf, &len, " ");
+    appendPad(buf, &len, kindLabel(m.kind), 8);
     append(buf, &len, " ");
     if (m.installed) append(buf, &len, "installed");
     return buf[0..len];
@@ -327,7 +319,7 @@ test "render shows no-matches when a committed query returned zero results" {
     try testing.expect(std.mem.indexOf(u8, f.slice(), "No matches") != null);
 }
 
-test "render lists hits with a kind glyph and an installed marker" {
+test "render lists hits with the kind label and an installed marker" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &sample, .phase = .loaded };
@@ -335,10 +327,10 @@ test "render lists hits with a kind glyph and an installed marker" {
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "wget") != null);
     try testing.expect(std.mem.indexOf(u8, out, "firefox") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "◆") != null); // formula glyph
-    try testing.expect(std.mem.indexOf(u8, out, "▣") != null); // cask glyph
+    try testing.expect(std.mem.indexOf(u8, out, "formula") != null); // kind as plain text, no glyph
+    try testing.expect(std.mem.indexOf(u8, out, "cask") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "◆") == null); // the glyph is gone
     try testing.expect(std.mem.indexOf(u8, out, "installed") != null); // firefox marker
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.cyan.code()) != null); // a coloured glyph
 }
 
 test "render highlights the selected hit" {
