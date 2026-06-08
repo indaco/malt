@@ -48,6 +48,11 @@ pub fn title() []const u8 {
     return "Installed";
 }
 
+/// The tab's action keys, surfaced in the shared footer next to the global keys.
+pub fn footerHint() []const u8 {
+    return "enter: details   x: uninstall";
+}
+
 /// Case-insensitive substring match of `filter` against `name`. An empty filter
 /// matches everything.
 pub fn matches(name: []const u8, filter: []const u8) bool {

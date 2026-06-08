@@ -35,6 +35,11 @@ pub fn title() []const u8 {
     return "Services";
 }
 
+/// The tab's action keys, surfaced in the shared footer next to the global keys.
+pub fn footerHint() []const u8 {
+    return "s: start   x: stop   r: restart";
+}
+
 /// Case-insensitive substring match of `filter` against `name`. An empty filter
 /// matches everything.
 pub fn matches(name: []const u8, filter: []const u8) bool {
@@ -106,21 +111,12 @@ fn dotStyle(st: Status) color.Role {
     };
 }
 
-/// Pure render: a dim action line on top, then the filtered + scrolled service
-/// list below. A pure function of `(state, rect)` so a resize is a re-render.
+/// Pure render: the filtered + scrolled service list. The lifecycle keys live in
+/// the shared footer, so the list owns the whole rect. A pure function of
+/// `(state, rect)` so a resize is a re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (r.height == 0) return;
-    renderActionLine(f, .{ .row = r.row, .col = r.col, .width = r.width, .height = 1 });
-    renderList(s, f, .{ .row = r.row + 1, .col = r.col, .width = r.width, .height = r.height -| 1 });
-}
-
-/// The dim action line: the lifecycle keys, so they are discoverable (the global
-/// footer carries only the shell-wide keys).
-fn renderActionLine(f: *tab.Frame, rect: tab.Rect) void {
-    f.moveTo(rect.row, rect.col);
-    f.put(color.roleCode(.muted));
-    f.putContent(scroll_list.truncate("s: start   x: stop   r: restart", rect.width));
-    f.put(color.Style.reset.code());
+    renderList(s, f, r);
 }
 
 fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
@@ -296,14 +292,9 @@ test "render highlights the selected row" {
     try testing.expect(std.mem.indexOf(u8, f.slice(), reverse) != null);
 }
 
-test "render shows the lifecycle action line" {
-    var buf: [4096]u8 = undefined;
-    var f: tab.Frame = .{ .buf = &buf };
-    const s: State = .{ .items = &sample };
-    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "start") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "restart") != null);
+test "footerHint exposes the lifecycle keys for the shared footer" {
+    try testing.expect(std.mem.indexOf(u8, footerHint(), "start") != null);
+    try testing.expect(std.mem.indexOf(u8, footerHint(), "restart") != null);
 }
 
 test "render reflows: the same state at two widths differs" {
@@ -338,11 +329,11 @@ test "render on an empty list shows the no-services placeholder, not a blank pan
     try std.testing.expect(std.mem.indexOf(u8, f.slice(), "No services registered") != null);
 }
 
-test "render clamps to a height of one (action line only) without crashing" {
+test "render clamps to a height of one without crashing" {
     var buf: [1024]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &sample };
-    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 }); // no list rows fit
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 }); // one list row fits
 }
 
 test "conforms to the tab contract" {

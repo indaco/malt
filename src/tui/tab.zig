@@ -95,7 +95,7 @@ pub fn verify(comptime M: type) void {
     if (!@hasDecl(M, "State")) @compileError(@typeName(M) ++ ": tab must expose `pub const State`");
     if (!@hasField(M.State, "chrome")) @compileError(@typeName(M) ++ ".State must embed a `chrome` field");
     if (@FieldType(M.State, "chrome") != Chrome) @compileError(@typeName(M) ++ ".State.chrome must be tab.Chrome");
-    for ([_][]const u8{ "title", "step", "render" }) |decl| {
+    for ([_][]const u8{ "title", "footerHint", "step", "render" }) |decl| {
         if (!@hasDecl(M, decl)) @compileError(@typeName(M) ++ ": tab must expose `pub fn " ++ decl ++ "`");
     }
 }
@@ -106,6 +106,9 @@ const GoodTab = struct {
     pub const State = struct { chrome: Chrome = .{} };
     pub fn title() []const u8 {
         return "Good";
+    }
+    pub fn footerHint() []const u8 {
+        return "g: go";
     }
     pub fn step(s: *State, key: Key) void {
         _ = s;

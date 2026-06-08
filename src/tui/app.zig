@@ -181,6 +181,12 @@ fn renderActive(a: *const App, f: *tab.Frame, rect: tab.Rect) void {
     }
 }
 
+fn activeFooterHint(a: *const App) []const u8 {
+    switch (a.active) {
+        inline else => |t| return moduleFor(t).footerHint(),
+    }
+}
+
 fn tabTitles() [tab_bar.count][]const u8 {
     var t: [tab_bar.count][]const u8 = undefined;
     inline for (@typeInfo(Tab).@"enum".fields, 0..) |fld, i| {
@@ -298,8 +304,9 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
                 f.putContent(scroll_list.truncate(app.banner.slice(), cols));
                 f.put(color.Style.reset.code());
             } else {
+                var hb: [256]u8 = undefined;
                 f.put(color.roleCode(.muted));
-                f.put(scroll_list.truncate(footerHelp(app.editing), cols));
+                f.put(scroll_list.truncate(footerLine(&hb, app), cols));
                 f.put(color.Style.reset.code());
             }
         },
@@ -310,6 +317,15 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
 fn putRule(f: *tab.Frame, cols: u16) void {
     var i: u16 = 0;
     while (i < cols) : (i += 1) f.put("─");
+}
+
+/// The footer help line: while editing the filter, just the edit keys; otherwise
+/// the active tab's action keys, then the shell-wide keys — so every key a user
+/// can press from here is in one place. Built into `buf`; falls back to the
+/// global keys alone if it can't fit.
+fn footerLine(buf: []u8, app: *const App) []const u8 {
+    if (app.editing) return footerHelp(true);
+    return std.fmt.bufPrint(buf, "{s}   ·   {s}", .{ activeFooterHint(app), footerHelp(false) }) catch footerHelp(false);
 }
 
 fn footerHelp(editing: bool) []const u8 {
@@ -1076,6 +1092,14 @@ test "renderFrame draws a footer rule above a dimmed help line" {
     try std.testing.expect(std.mem.indexOf(u8, out, "─") != null); // horizontal rule
     try std.testing.expect(std.mem.indexOf(u8, out, color.Style.dim.code()) != null); // dimmed help: muted role == dim on the basic tier
     try std.testing.expect(std.mem.indexOf(u8, out, "quit") != null);
+}
+
+test "the footer carries the active tab's keys next to the global keys" {
+    var a: App = .{ .active = .services };
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 100, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "s: start") != null); // the active tab's keys
+    try std.testing.expect(std.mem.indexOf(u8, out, "switch") != null); // and the global keys
 }
 
 test "renderFrame uses cursor positioning and never emits a raw newline" {

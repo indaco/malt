@@ -37,6 +37,11 @@ pub fn title() []const u8 {
     return "Doctor";
 }
 
+/// The tab's action keys, surfaced in the shared footer next to the global keys.
+pub fn footerHint() []const u8 {
+    return "f: fix";
+}
+
 /// Case-insensitive substring match of `filter` against a finding `title`. An
 /// empty filter matches everything.
 pub fn matches(name: []const u8, filter: []const u8) bool {
@@ -129,16 +134,14 @@ const detail_rows: u16 = 3;
 // SGR reverse-video for the selection, matching the other tabs' convention.
 const reverse = "\x1b[7m";
 
-/// Pure render: a fix-key action line (only when the selected finding is
-/// fixable), the severity-ordered finding list, and a detail pane for the
-/// selected finding. A pure function of `(state, rect)` so a resize is a
-/// re-render.
+/// Pure render: the severity-ordered finding list and a detail pane for the
+/// selected finding. The `f: fix` key lives in the shared footer (the detail
+/// pane still shows whether the selected finding is fixable). A pure function of
+/// `(state, rect)` so a resize is a re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (r.height == 0) return;
     const sel = selectedFinding(s);
-    renderActionLine(sel, f, .{ .row = r.row, .col = r.col, .width = r.width, .height = 1 });
-
-    var content: tab.Rect = .{ .row = r.row + 1, .col = r.col, .width = r.width, .height = r.height -| 1 };
+    var content: tab.Rect = r;
     if (sel) |fnd| {
         const dh = @min(@as(u16, detail_rows), content.height / 2);
         if (dh > 0 and dh < content.height) {
@@ -147,17 +150,6 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
         }
     }
     renderList(s, f, content);
-}
-
-/// The dim action line: the fix key, shown only when the selected finding is
-/// fixable — a non-fixable finding gets guidance in the detail pane, not a key.
-fn renderActionLine(sel: ?Row, f: *tab.Frame, rect: tab.Rect) void {
-    const fixable = if (sel) |fnd| fnd.fixable else false;
-    if (!fixable) return; // blank line; the pane carries the non-fixable guidance
-    f.moveTo(rect.row, rect.col);
-    f.put(color.roleCode(.muted));
-    f.putContent(scroll_list.truncate("f: fix", rect.width));
-    f.put(color.Style.reset.code());
 }
 
 fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
@@ -316,16 +308,19 @@ test "selecting a finding shows its detail" {
     try testing.expect(std.mem.indexOf(u8, f.slice(), "3 orphaned entries") != null);
 }
 
-test "a fixable selection exposes the f key" {
+test "a fixable selection spells out the delegated fix in the detail pane" {
     var buf: [8192]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var s: State = .{ .items = &sample };
     s.chrome.view.selected = 1; // fixable
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
-    const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "f: fix") != null);
-    // The detail pane spells out the exact delegated command, with the class token.
-    try testing.expect(std.mem.indexOf(u8, out, "mt doctor --fix orphaned_store") != null);
+    // The detail pane names the exact delegated command, with the class token;
+    // the `f` key itself now lives in the shared footer, not the tab body.
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "mt doctor --fix orphaned_store") != null);
+}
+
+test "footerHint exposes the fix key for the shared footer" {
+    try testing.expect(std.mem.indexOf(u8, footerHint(), "f: fix") != null);
 }
 
 test "a non-fixable selection shows guidance, not the f key" {
