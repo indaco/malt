@@ -421,6 +421,9 @@ const Store = struct {
     services: ?services_json.Parsed = null,
     doctor: ?doctor_json.Parsed = null,
     search: ?search_json.Parsed = null,
+    /// The Search tab's checkbox state, parallel to `search.?.items`. Owned here,
+    /// resized to the result count on each query, borrowed by the tab.
+    search_checked: []bool = &.{},
 
     fn deinit(self: *Store, allocator: std.mem.Allocator) void {
         if (self.installed) |p| p.deinit();
@@ -430,6 +433,7 @@ const Store = struct {
         if (self.services) |p| p.deinit();
         if (self.doctor) |p| p.deinit();
         if (self.search) |p| p.deinit();
+        if (self.search_checked.len != 0) allocator.free(self.search_checked);
     }
 };
 
@@ -771,31 +775,56 @@ fn loadSearch(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store
     defer allocator.free(bytes);
 
     const parsed = try search_json.parse(allocator, bytes);
+    errdefer parsed.deinit();
+    // A fresh checkbox buffer, all clear: a new result set means an old selection
+    // would point at unrelated rows.
+    const checked = try allocator.alloc(bool, parsed.items.len);
+    @memset(checked, false);
+
     if (store.search) |old| old.deinit();
+    if (store.search_checked.len != 0) allocator.free(store.search_checked);
     store.search = parsed;
+    store.search_checked = checked;
     app.states.search.items = parsed.items;
+    app.states.search.checked = checked;
     app.states.search.phase = .loaded;
     // A fresh query is a new result set, so an old cursor would point at an
     // unrelated row; reset to the top.
     app.states.search.chrome.view = .{};
 }
 
-/// Build `mt install [--formula|--cask] <name>` for the selected hit. Pure over
-/// the tab state: null when nothing installable is selected (the no-op), else an
-/// owned argv whose `name` element borrows from the parse storage. Caller frees
-/// the returned slice (not its elements).
+/// Build the `mt install …` argv for the Search tab. Pure over the tab state:
+/// every checked, not-yet-installed hit, or — when nothing is checked — the
+/// active row. Null when nothing installable is selected (the no-op). A single
+/// target keeps the explicit `--formula`/`--cask` flag, because a name can exist
+/// as both and bare `mt install <name>` silently picks the formula; a multi
+/// install passes bare names and lets `mt` detect each one's kind. Names borrow
+/// from the parse storage; caller frees the returned slice, not its elements.
 fn installArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const search.State) std.mem.Allocator.Error!?[]const []const u8 {
-    const m = search.selectedMatch(st) orelse return null; // empty list: no-op
-    if (m.installed) return null; // already installed: inert
-    // The search result's kind is authoritative, so disambiguate the install
-    // explicitly: a name can exist as both a formula and a cask, where bare
-    // `mt install <name>` silently picks the formula. Exhaustive switch — a new
-    // kind is a compile error, never a silent default.
-    const kind_flag: []const u8 = switch (m.kind) {
-        .formula => "--formula",
-        .cask => "--cask",
-    };
-    return try spawn.inlineArgv(allocator, mt_path, &.{ "install", kind_flag, m.name });
+    var idxs: std.ArrayList(usize) = .empty;
+    defer idxs.deinit(allocator);
+    for (st.items, 0..) |m, i| {
+        if (i < st.checked.len and st.checked[i] and !m.installed) try idxs.append(allocator, i);
+    }
+    if (idxs.items.len == 0) {
+        // Nothing checked: the active row, if it is installable.
+        const i = search.selectedIndex(st) orelse return null;
+        if (st.items[i].installed) return null;
+        try idxs.append(allocator, i);
+    }
+    if (idxs.items.len == 1) {
+        const m = st.items[idxs.items[0]];
+        const kind_flag: []const u8 = switch (m.kind) {
+            .formula => "--formula",
+            .cask => "--cask",
+        };
+        return try spawn.inlineArgv(allocator, mt_path, &.{ "install", kind_flag, m.name });
+    }
+    const argv = try allocator.alloc([]const u8, 2 + idxs.items.len);
+    argv[0] = mt_path;
+    argv[1] = "install";
+    for (idxs.items, 0..) |idx, k| argv[2 + k] = st.items[idx].name;
+    return argv;
 }
 
 /// Delegate the selected hit's install to the real `mt` inline, then re-run the
@@ -1496,6 +1525,38 @@ test "installArgv returns null on an already-installed hit and on an empty list"
     try std.testing.expect((try installArgv(std.testing.allocator, "/bin/mt", &st)) == null); // already installed
     const empty: search.State = .{ .items = &.{} };
     try std.testing.expect((try installArgv(std.testing.allocator, "/bin/mt", &empty)) == null); // nothing selected
+}
+
+test "installArgv installs every checked, not-installed hit as bare names for a batch" {
+    const items = [_]search.Match{
+        .{ .name = "wget", .kind = .formula, .installed = false },
+        .{ .name = "firefox", .kind = .cask, .installed = true }, // installed → excluded
+        .{ .name = "ripgrep", .kind = .formula, .installed = false },
+    };
+    var checked = [_]bool{ true, true, true };
+    const st: search.State = .{ .items = &items, .checked = &checked };
+    const argv = (try installArgv(std.testing.allocator, "/bin/mt", &st)).?;
+    defer std.testing.allocator.free(argv);
+    // mt, install, wget, ripgrep — a batch passes bare names (no global kind flag).
+    try std.testing.expectEqual(@as(usize, 4), argv.len);
+    try std.testing.expectEqualStrings("install", argv[1]);
+    try std.testing.expectEqualStrings("wget", argv[2]);
+    try std.testing.expectEqualStrings("ripgrep", argv[3]);
+}
+
+test "installArgv installs the checked row, not the active one, and keeps the kind flag for a single target" {
+    const items = [_]search.Match{
+        .{ .name = "wget", .kind = .formula, .installed = false },
+        .{ .name = "ripgrep", .kind = .formula, .installed = false },
+    };
+    var checked = [_]bool{ true, false }; // wget checked; ripgrep is active but unchecked
+    var st: search.State = .{ .items = &items, .checked = &checked };
+    st.chrome.view.selected = 1;
+    const argv = (try installArgv(std.testing.allocator, "/bin/mt", &st)).?;
+    defer std.testing.allocator.free(argv);
+    try std.testing.expectEqual(@as(usize, 4), argv.len); // single → mt, install, --formula, name
+    try std.testing.expectEqualStrings("--formula", argv[2]);
+    try std.testing.expectEqualStrings("wget", argv[3]); // the checked row, not active ripgrep
 }
 
 test "installArgv disambiguates a name that exists as both a formula and a cask" {

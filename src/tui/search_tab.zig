@@ -43,6 +43,9 @@ pub const State = struct {
     chrome: tab.Chrome = .{},
     /// The server's ranked results, borrowed from shell-owned parse storage.
     items: []const Match = &.{},
+    /// Per-row multi-select state, parallel to `items`, owned + sized by the
+    /// shell (like Outdated's). An already-installed hit is never checked.
+    checked: []bool = &.{},
     /// Pending effect for the shell to perform, then clear.
     request: Request = .none,
     /// Where the tab is in the read lifecycle; drives the render's status line.
@@ -55,7 +58,7 @@ pub fn title() []const u8 {
 
 /// The tab's action keys, surfaced in the shared footer next to the global keys.
 pub fn footerHint() []const u8 {
-    return "enter: search   i: install";
+    return "space: select   i: install";
 }
 
 /// The hit the selection points at, clamping the (shell-driven, unbounded)
@@ -63,9 +66,23 @@ pub fn footerHint() []const u8 {
 /// so the selection indexes straight into `items`. The shell reads its `name`
 /// and `kind` to build the install argv.
 pub fn selectedMatch(s: *const State) ?Match {
+    const i = selectedIndex(s) orelse return null;
+    return s.items[i];
+}
+
+/// The index of the active row in `items`, clamping the unbounded cursor. No
+/// filter, so the cursor indexes straight into `items`. Null on an empty list.
+pub fn selectedIndex(s: *const State) ?usize {
     if (s.items.len == 0) return null;
-    const sel = @min(s.chrome.view.selected, s.items.len - 1);
-    return s.items[sel];
+    return @min(s.chrome.view.selected, s.items.len - 1);
+}
+
+/// Toggle the active row's checkbox. An already-installed hit is never selectable
+/// (it would be a no-op install), mirroring how a pinned row is held back.
+fn toggle(s: *State) void {
+    const i = selectedIndex(s) orelse return;
+    if (s.items[i].installed) return;
+    if (i < s.checked.len) s.checked[i] = !s.checked[i];
 }
 
 /// Pure transition. Enter (re)runs the committed query — the filter doubles as
@@ -74,12 +91,29 @@ pub fn selectedMatch(s: *const State) ?Match {
 pub fn step(s: *State, key: tab.Key) void {
     switch (key) {
         .enter => s.request = .search,
+        .space => toggle(s),
+        // `i` installs the multi-selection (or the active row when nothing is
+        // checked); inert when there is nothing installable to do.
         .char => |c| if (c.len == 1 and c.bytes[0] == 'i') {
-            const m = selectedMatch(s) orelse return;
-            if (!m.installed) s.request = .install; // inert on an already-installed hit
+            if (anyInstallable(s)) s.request = .install;
         },
         else => {},
     }
+}
+
+/// True when `i` would install something: any checked, not-installed hit, or —
+/// with nothing checked — an installable active row. Mirrors what the shell's
+/// install argv resolves, so `i` stays inert when there is nothing to do.
+fn anyInstallable(s: *const State) bool {
+    var any_checked = false;
+    for (s.items, 0..) |m, i| {
+        if (i >= s.checked.len or !s.checked[i]) continue;
+        any_checked = true;
+        if (!m.installed) return true;
+    }
+    if (any_checked) return false; // only already-installed rows checked
+    const m = selectedMatch(s) orelse return false;
+    return !m.installed;
 }
 
 // A closed switch on the kind: a new variant is a compile error here, never a
@@ -129,9 +163,11 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         const screen = i - v.offset;
         if (screen >= rect.height) break;
         f.moveTo(rect.row + @as(u16, @intCast(screen)), rect.col);
-        // The kind glyph keeps its own colour regardless of selection; the
-        // reverse-video selection wraps only the text columns so the two SGRs
-        // never tangle.
+        // Multi-select checkbox, then the kind glyph — both keep their own colour;
+        // the reverse-video selection wraps only the text columns so the SGRs
+        // never tangle. An installed hit can't be selected, so it shows blocked.
+        const checked = i < s.checked.len and s.checked[i];
+        tab.putCheckbox(f, if (m.installed) .blocked else if (checked) tab.Check.on else .off);
         f.put(color.roleCode(kindStyle(m.kind)));
         f.put(kindGlyph(m.kind));
         f.put(color.Style.reset.code());
@@ -139,7 +175,7 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         const selected = i == v.selected;
         if (selected) f.put(reverse);
         var rb: [256]u8 = undefined;
-        f.putContent(scroll_list.truncate(formatRow(&rb, m), rect.width -| 2)); // 2 cols on the glyph
+        f.putContent(scroll_list.truncate(formatRow(&rb, m), rect.width -| 6)); // 4 checkbox + 2 glyph cols
         if (selected) f.put(color.Style.reset.code());
     }
 }
@@ -226,6 +262,47 @@ test "an unrelated key leaves the request alone" {
     try testing.expectEqual(Request.none, s.request);
 }
 
+test "space toggles the active row's checkbox; an installed hit is never selectable" {
+    var checked = [_]bool{false} ** 3;
+    var s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
+    s.chrome.view.selected = 0; // wget, not installed
+    step(&s, .space);
+    try testing.expect(checked[0]);
+    step(&s, .space);
+    try testing.expect(!checked[0]); // toggles back off
+
+    s.chrome.view.selected = 1; // firefox, already installed
+    step(&s, .space);
+    try testing.expect(!checked[1]); // installed rows can't be checked
+}
+
+test "i installs a checked, not-installed hit even when the active row is installed" {
+    var checked = [_]bool{ true, false, false }; // wget checked
+    var s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
+    s.chrome.view.selected = 1; // active = firefox (installed)
+    step(&s, ch('i'));
+    try testing.expectEqual(Request.install, s.request);
+}
+
+test "i is inert when only already-installed rows are checked" {
+    var checked = [_]bool{ false, true, false }; // firefox (installed) checked
+    var s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
+    step(&s, ch('i'));
+    try testing.expectEqual(Request.none, s.request);
+}
+
+test "render draws a multi-select checkbox per result row" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var checked = [_]bool{ true, false, false };
+    const s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "✓") != null); // wget checked
+    try testing.expect(std.mem.indexOf(u8, out, "[ ]") != null); // an unchecked box
+    try testing.expect(std.mem.indexOf(u8, out, "[-]") != null); // firefox installed → blocked
+}
+
 test "render shows guidance in the idle phase before any query is committed" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
@@ -274,7 +351,7 @@ test "render highlights the selected hit" {
 }
 
 test "footerHint exposes the tab's action keys for the shared footer" {
-    try testing.expect(std.mem.indexOf(u8, footerHint(), "search") != null);
+    try testing.expect(std.mem.indexOf(u8, footerHint(), "select") != null);
     try testing.expect(std.mem.indexOf(u8, footerHint(), "install") != null);
 }
 
