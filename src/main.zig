@@ -8,6 +8,7 @@ const backup = @import("cli/backup.zig");
 const bundle = @import("cli/bundle.zig");
 const completions = @import("cli/completions.zig");
 const deps_cmd = @import("cli/deps.zig");
+const cli_help = @import("cli/help.zig");
 const doctor = @import("cli/doctor.zig");
 const info = @import("cli/info.zig");
 const install = @import("cli/install.zig");
@@ -107,6 +108,7 @@ const Command = enum {
     purge,
     cleanup,
     services,
+    tui,
     bundle,
     uses,
     deps,
@@ -148,6 +150,7 @@ const command_names = [_]struct {
     .{ .tag = .purge, .names = &.{"purge"} },
     .{ .tag = .cleanup, .names = &.{"cleanup"} },
     .{ .tag = .services, .names = &.{"services"} },
+    .{ .tag = .tui, .names = &.{"tui"} },
     .{ .tag = .bundle, .names = &.{"bundle"} },
     .{ .tag = .uses, .names = &.{"uses"} },
     .{ .tag = .deps, .names = &.{"deps"} },
@@ -535,6 +538,13 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
         .purge => try purge.execute(ctx, allocator, cmd_args),
         .cleanup => try purge.executeCleanup(ctx, allocator, cmd_args),
         .services => try services.execute(ctx, allocator, cmd_args),
+        // Lazy: the TUI leaf is referenced only here, so non-`tui` commands pay
+        // no cold-start cost. `--help` is handled in the bridge because the leaf
+        // can't reach `cli/help`. Reads parse `mt … --json`; writes re-exec `mt`.
+        .tui => {
+            if (cli_help.showIfRequested(ctx, cmd_args, "tui")) return;
+            try @import("tui/app.zig").run(ctx.io, allocator, ctx.stderr, ctx.environ);
+        },
         .bundle => try bundle.execute(ctx, allocator, cmd_args),
         .uses => try uses.execute(ctx, allocator, cmd_args),
         .deps => try deps_cmd.execute(ctx, allocator, cmd_args),
@@ -592,6 +602,7 @@ fn printUsage(ctx: *const AppCtx) void {
         \\                --housekeeping, --wipe)
         \\  cleanup       Shorthand for `purge --housekeeping`
         \\  services      Manage long-running launchd services (start/stop/status/logs)
+        \\  tui           Interactive dashboard (installed, outdated, services, doctor)
         \\  bundle        Install or export a Brewfile/Maltfile.json set of packages
         \\  version       Show version (use 'version update' to self-update)
         \\

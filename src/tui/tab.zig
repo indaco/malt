@@ -1,0 +1,147 @@
+//! malt — the tab contract + shared widgets for `mt tui`.
+//!
+//! Leaf module. Defines what a tab *is* so every tab plugs in the same way:
+//! a module exposing `State` (carrying a `chrome: Chrome` the shell drives),
+//! `title`, `step` (domain keys only), and `render`. `verify` checks the shape
+//! at comptime, so adding a non-conforming tab is a build error — no runtime
+//! vtable. `Frame` is the bounded frame-byte appender every renderer paints
+//! into; `paintRows` is the shared list painter and the single place row
+//! content is stripped of line-breaking controls before it reaches the frame.
+
+const std = @import("std");
+const scroll_list = @import("scroll_list.zig");
+const layout = @import("layout.zig");
+const filter_input = @import("filter_input.zig");
+const keys = @import("keys.zig");
+const term = @import("term.zig");
+
+pub const Key = keys.Key;
+pub const Rect = layout.Rect;
+
+/// Cross-cutting per-tab state the shell owns the logic for (filter editing,
+/// list navigation). Every tab `State` embeds one so the shell touches it
+/// uniformly while the tab still owns its whole struct.
+pub const Chrome = struct {
+    filter: filter_input.Filter = .{},
+    view: scroll_list.View = .{},
+};
+
+/// A bounded frame-byte appender. Writes stop at the buffer end (the frame is
+/// truncated, never overflows) — same discipline as `layout.render`.
+pub const Frame = struct {
+    buf: []u8,
+    len: usize = 0,
+
+    pub fn slice(self: *const Frame) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    pub fn put(self: *Frame, bytes: []const u8) void {
+        const n = @min(bytes.len, self.buf.len - self.len);
+        @memcpy(self.buf[self.len..][0..n], bytes[0..n]);
+        self.len += n;
+    }
+
+    /// Position the cursor (1-based). A 32-byte scratch always fits a CUP.
+    pub fn moveTo(self: *Frame, row: u16, col: u16) void {
+        var tmp: [32]u8 = undefined;
+        self.put(term.cursorMove(&tmp, row, col) catch return);
+    }
+
+    /// Paint untrusted row content: drop line-breaking controls (LF/VT/FF/CR)
+    /// and turn TAB into a space, so a sanitized child row (where
+    /// `term_sanitize` lets `\n` through) cannot inject an extra frame line or
+    /// disturb column alignment. ESC and everything else pass through.
+    pub fn putContent(self: *Frame, bytes: []const u8) void {
+        for (bytes) |b| switch (b) {
+            '\n', '\r', 0x0b, 0x0c => {}, // line breakers: drop
+            '\t' => self.put(" "), // tab: collapse to one column
+            else => self.put(&[_]u8{b}),
+        };
+    }
+};
+
+/// Paint `rows` into `rect`: clamp the view to the height, take the visible
+/// window, position each row and paint it through `putContent`. The single
+/// place row content reaches the frame — so the newline defense lives here once.
+pub fn paintRows(f: *Frame, rows: []const []const u8, view: scroll_list.View, rect: Rect) void {
+    const v = scroll_list.clamp(view, rows.len, rect.height);
+    const win = scroll_list.visible(rows, v, rect.height);
+    for (win, 0..) |row, i| {
+        f.moveTo(rect.row + @as(u16, @intCast(i)), rect.col);
+        f.putContent(scroll_list.truncate(row, rect.width));
+    }
+}
+
+/// Comptime contract check: a conforming tab module exposes `State` (with a
+/// `chrome: Chrome` field), `title`, `step`, and `render`. Called on each tab so
+/// a missing or mis-typed piece fails the build, not the dashboard at runtime.
+pub fn verify(comptime M: type) void {
+    if (!@hasDecl(M, "State")) @compileError(@typeName(M) ++ ": tab must expose `pub const State`");
+    if (!@hasField(M.State, "chrome")) @compileError(@typeName(M) ++ ".State must embed a `chrome` field");
+    if (@FieldType(M.State, "chrome") != Chrome) @compileError(@typeName(M) ++ ".State.chrome must be tab.Chrome");
+    for ([_][]const u8{ "title", "step", "render" }) |decl| {
+        if (!@hasDecl(M, decl)) @compileError(@typeName(M) ++ ": tab must expose `pub fn " ++ decl ++ "`");
+    }
+}
+
+// ─── tests ───────────────────────────────────────────────────────────
+
+const GoodTab = struct {
+    pub const State = struct { chrome: Chrome = .{} };
+    pub fn title() []const u8 {
+        return "Good";
+    }
+    pub fn step(s: *State, key: Key) void {
+        _ = s;
+        _ = key;
+    }
+    pub fn render(s: *const State, f: *Frame, r: Rect) void {
+        _ = s;
+        _ = f;
+        _ = r;
+    }
+};
+
+test "verify accepts a conforming tab module" {
+    comptime verify(GoodTab);
+}
+
+test "Frame.put is bounded and never overflows the buffer" {
+    var buf: [4]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    f.put("abcdef"); // longer than the buffer
+    try std.testing.expectEqualStrings("abcd", f.slice());
+}
+
+test "Frame.moveTo emits a 1-based CUP sequence" {
+    var buf: [32]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    f.moveTo(3, 5);
+    try std.testing.expectEqualStrings("\x1b[3;5H", f.slice());
+}
+
+test "Frame.putContent strips line breakers and turns tab into a space" {
+    var buf: [32]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    f.putContent("a\nb\tc\rd\x0b\x0ce"); // LF, TAB, CR, VT, FF
+    try std.testing.expectEqualStrings("ab cde", f.slice());
+}
+
+test "putContent keeps an SGR escape intact (only line breakers are dropped)" {
+    var buf: [32]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    f.putContent("\x1b[1mX\x1b[0m");
+    try std.testing.expectEqualStrings("\x1b[1mX\x1b[0m", f.slice());
+}
+
+test "paintRows positions each row and a row's embedded newline never injects a frame line" {
+    var buf: [128]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    const rows = [_][]const u8{ "x\ny", "z" };
+    paintRows(&f, &rows, .{}, .{ .row = 1, .col = 1, .width = 10, .height = 2 });
+    // A frame positions with cursor moves and carries no raw newline.
+    try std.testing.expect(std.mem.indexOfScalar(u8, f.slice(), '\n') == null);
+    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "xy") != null); // the \n was stripped
+    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "z") != null);
+}

@@ -87,7 +87,7 @@ pub const bash_script =
     \\    words=("${COMP_WORDS[@]}")
     \\    cword=$COMP_CWORD
     \\
-    \\    local commands="install reinstall uninstall remove upgrade update outdated list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services bundle help"
+    \\    local commands="install reinstall uninstall remove upgrade update outdated list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services tui bundle help"
     \\    local global_flags="--verbose -v --quiet -q --json --output-format=ndjson --dry-run --offline --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
@@ -234,6 +234,7 @@ pub const zsh_script =
     \\        'purge:Housekeeping or full wipe (requires a scope flag)'
     \\        'cleanup:Shorthand for purge --housekeeping (safe daily-driver)'
     \\        'services:Manage long-running launchd services'
+    \\        'tui:Interactive dashboard (installed, outdated, services, doctor)'
     \\        'bundle:Install or export a Brewfile/Maltfile.json bundle'
     \\        'help:Show help'
     \\    )
@@ -554,6 +555,7 @@ pub const fish_script =
     \\    complete -c $__malt_bin -n __malt_needs_command -a purge       -d 'Housekeeping or full wipe (requires a scope)'
     \\    complete -c $__malt_bin -n __malt_needs_command -a cleanup     -d 'Shorthand for purge --housekeeping (safe daily-driver)'
     \\    complete -c $__malt_bin -n __malt_needs_command -a services    -d 'Manage long-running launchd services'
+    \\    complete -c $__malt_bin -n __malt_needs_command -a tui         -d 'Interactive dashboard (installed, outdated, services, doctor)'
     \\    complete -c $__malt_bin -n __malt_needs_command -a bundle      -d 'Install or export a Brewfile/Maltfile.json'
     \\    complete -c $__malt_bin -n __malt_needs_command -a help        -d 'Show help'
     \\

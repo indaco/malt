@@ -1,0 +1,476 @@
+//! malt — `mt tui` app shell: event loop, tab dispatch, filter, rendering.
+//!
+//! Leaf module. The pure cores — `step(app, key) -> app` and
+//! `renderFrame(buf, app, cols, rows) -> bytes` — are The Elm Architecture and
+//! are unit-tested without a PTY. `run` is the only impure part: it owns the
+//! terminal lifecycle (raw mode + alt-screen + hidden cursor, each undone by an
+//! `errdefer` restore), refuses to launch on a non-interactive terminal, and
+//! drives the read→decode→step→repaint loop. A `SIGWINCH` re-renders from cached
+//! state with no keypress. The TUI module is referenced only from the lazy
+//! `mt tui` dispatch arm, so non-`tui` commands pay no cold-start cost.
+
+const std = @import("std");
+const color = @import("../ui/color.zig");
+const tab = @import("tab.zig");
+const tab_bar = @import("tab_bar.zig");
+const filter_input = @import("filter_input.zig");
+const keys = @import("keys.zig");
+const term = @import("term.zig");
+const layout = @import("layout.zig");
+const scroll_list = @import("scroll_list.zig");
+
+const installed = @import("installed_tab.zig");
+const outdated = @import("outdated_tab.zig");
+const services = @import("services_tab.zig");
+const doctor = @import("doctor_tab.zig");
+
+const Tab = tab_bar.Tab;
+const Key = keys.Key;
+
+/// Every tab's state, all present at once so a tab switch preserves each one's
+/// filter / scroll / data. Field names match `Tab` tags for `@field` dispatch.
+const TabStates = struct {
+    installed: installed.State = .{},
+    outdated: outdated.State = .{},
+    services: services.State = .{},
+    doctor: doctor.State = .{},
+};
+
+/// Map a tab tag to its module at comptime — the vtable-free dispatch core.
+fn moduleFor(comptime t: Tab) type {
+    return switch (t) {
+        .installed => installed,
+        .outdated => outdated,
+        .services => services,
+        .doctor => doctor,
+    };
+}
+
+// Every tab must satisfy the contract; a non-conforming one is a build error.
+comptime {
+    for (@typeInfo(Tab).@"enum".fields) |fld| {
+        tab.verify(moduleFor(@field(Tab, fld.name)));
+    }
+}
+
+/// A pure step jump for paging — the viewport height is unknown to a pure
+/// `step`, so a fixed page is the data-agnostic approximation; the render's
+/// `scroll_list.clamp` still bounds it to the real list.
+const page_step = 10;
+
+pub const App = struct {
+    active: Tab = .installed,
+    editing: bool = false,
+    quit: bool = false,
+    states: TabStates = .{},
+};
+
+fn activeChrome(a: *App) *tab.Chrome {
+    switch (a.active) {
+        inline else => |t| return &@field(a.states, @tagName(t)).chrome,
+    }
+}
+
+fn activeFilterText(a: *const App) []const u8 {
+    switch (a.active) {
+        inline else => |t| return @field(a.states, @tagName(t)).chrome.filter.slice(),
+    }
+}
+
+fn routeToTab(a: *App, key: Key) void {
+    switch (a.active) {
+        inline else => |t| moduleFor(t).step(&@field(a.states, @tagName(t)), key),
+    }
+}
+
+fn renderActive(a: *const App, f: *tab.Frame, rect: tab.Rect) void {
+    switch (a.active) {
+        inline else => |t| moduleFor(t).render(&@field(a.states, @tagName(t)), f, rect),
+    }
+}
+
+fn tabTitles() [tab_bar.count][]const u8 {
+    var t: [tab_bar.count][]const u8 = undefined;
+    inline for (@typeInfo(Tab).@"enum".fields, 0..) |fld, i| {
+        t[i] = moduleFor(@field(Tab, fld.name)).title();
+    }
+    return t;
+}
+
+/// Pure transition: keys split between filter editing and normal navigation;
+/// keys the shell does not own fall through to the active tab.
+pub fn step(app: App, key: Key) App {
+    var a = app;
+    if (a.editing) stepFilter(&a, key) else stepNormal(&a, key);
+    return a;
+}
+
+fn stepFilter(a: *App, key: Key) void {
+    switch (key) {
+        .char => |c| activeChrome(a).filter.push(c.slice()),
+        .backspace => activeChrome(a).filter.backspace(),
+        .enter => a.editing = false, // commit, keep the filter
+        .esc => { // cancel: clear the filter
+            activeChrome(a).filter.clear();
+            a.editing = false;
+        },
+        .ctrl_c => a.quit = true, // always escapes, even mid-edit
+        .up, .down, .left, .right, .space, .tab, .page_up, .page_down, .home, .end, .unknown => {},
+    }
+}
+
+fn stepNormal(a: *App, key: Key) void {
+    switch (key) {
+        .ctrl_c => a.quit = true,
+        .tab, .right => a.active = tab_bar.next(a.active),
+        .left => a.active = tab_bar.prev(a.active),
+        .up => activeChrome(a).view.selected -|= 1,
+        .down => activeChrome(a).view.selected += 1,
+        .page_up => activeChrome(a).view.selected -|= page_step,
+        .page_down => activeChrome(a).view.selected += page_step,
+        .home => activeChrome(a).view.selected = 0,
+        .char => |c| {
+            if (c.len == 1) switch (c.bytes[0]) {
+                'q' => {
+                    a.quit = true;
+                    return;
+                },
+                '/' => {
+                    a.editing = true;
+                    return;
+                },
+                '1'...'4' => {
+                    if (tab_bar.fromDigit(c.bytes[0])) |t| a.active = t;
+                    return;
+                },
+                else => {},
+            };
+            routeToTab(a, key); // a domain key (e.g. u/f) belongs to the tab
+        },
+        .enter, .space, .end => routeToTab(a, key),
+        // `end` needs the row count to land on the last row — deferred to the
+        // data tab; `esc`/`backspace`/`unknown` are inert outside edit mode.
+        .esc, .backspace, .unknown => {},
+    }
+}
+
+/// Pure render: full-screen clear, then each region painted at its cursor
+/// position. A frame carries no raw newline — positioning is by cursor moves —
+/// so `(state, cols, rows)` fully determines the bytes and resize is a re-render.
+pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 {
+    var f: tab.Frame = .{ .buf = buf };
+    f.put("\x1b[2J"); // clear; every region then positions its own cursor
+    switch (layout.compute(cols, rows)) {
+        .too_small => {
+            f.moveTo(1, 1);
+            var tmp: [80]u8 = undefined;
+            f.put(layout.render(&tmp, .{ .rows = &.{} }, cols, rows));
+        },
+        .ok => |r| {
+            f.moveTo(r.tab_bar.row, 1);
+            var tb: [256]u8 = undefined;
+            f.put(tab_bar.render(&tb, app.active, tabTitles(), cols));
+            f.put(color.Style.reset.code()); // a truncated active title must not bleed bold downward
+
+            f.moveTo(r.filter.row, 1);
+            var fb: [filter_input.max_len + 8]u8 = undefined;
+            f.put(filter_input.render(&fb, activeFilterText(app), app.editing, cols));
+
+            renderActive(app, &f, r.content);
+
+            // Footer: a rule line separating content, then the dimmed help line.
+            f.moveTo(r.footer.row, 1);
+            putRule(&f, cols);
+            f.moveTo(r.footer.row + 1, 1);
+            f.put(color.Style.dim.code());
+            f.put(scroll_list.truncate(footerHelp(app.editing), cols));
+            f.put(color.Style.reset.code());
+        },
+    }
+    return f.slice();
+}
+
+fn putRule(f: *tab.Frame, cols: u16) void {
+    var i: u16 = 0;
+    while (i < cols) : (i += 1) f.put("─");
+}
+
+fn footerHelp(editing: bool) []const u8 {
+    return if (editing)
+        "enter: accept   esc: clear"
+    else
+        "tab/arrows/1-4: switch   /: filter   q: quit";
+}
+
+pub const Refusal = enum { not_a_tty, no_color, ci };
+
+/// Pure launch gate: refuse on a non-interactive terminal instead of degrading
+/// (design doc Alt B "ANSI fallback cliff"). Order: a usable terminal first,
+/// then the ANSI opt-outs.
+pub fn refusalReason(stdin_tty: bool, stdout_tty: bool, no_color: bool, ci: bool) ?Refusal {
+    if (!stdin_tty or !stdout_tty) return .not_a_tty;
+    if (no_color) return .no_color;
+    if (ci) return .ci;
+    return null;
+}
+
+fn refusalMessage(r: Refusal) []const u8 {
+    return switch (r) {
+        .not_a_tty => "mt tui: refusing to launch — stdin and stdout must be a terminal.\n",
+        .no_color => "mt tui: refusing to launch — NO_COLOR is set; the dashboard needs ANSI.\n",
+        .ci => "mt tui: refusing to launch — CI environment detected.\n",
+    };
+}
+
+pub const RunError = term.TermError || std.mem.Allocator.Error || error{ReadFailed};
+
+fn isTty(io: std.Io, fd: std.posix.fd_t) bool {
+    const f: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    return f.isTty(io) catch false;
+}
+
+fn ciSet(environ: std.process.Environ) bool {
+    const v = std.process.Environ.getPosix(environ, "CI") orelse return false;
+    return v.len != 0;
+}
+
+/// Frame byte capacity for a geometry: 4 bytes/cell (max UTF-8) + per-line
+/// cursor/SGR overhead + clear/slack. Grown on resize, never per-frame.
+fn frameCap(size: term.Size) usize {
+    return @as(usize, size.cols) * size.rows * 4 + @as(usize, size.rows) * 48 + 256;
+}
+
+fn writeAll(fd: std.posix.fd_t, bytes: []const u8) void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = std.c.write(fd, bytes[off..].ptr, bytes.len - off);
+        if (n <= 0) return; // best-effort: a vanished tty has nothing to draw
+        off += @intCast(n);
+    }
+}
+
+/// Launch the dashboard. Refuses (exit 2) on a non-interactive terminal rather
+/// than degrading. Every fault path restores the terminal via `errdefer`.
+pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, environ: std.process.Environ) RunError!void {
+    const in_fd = std.posix.STDIN_FILENO;
+    const out_fd = std.posix.STDOUT_FILENO;
+    if (refusalReason(
+        isTty(io, in_fd),
+        isTty(io, out_fd),
+        std.process.Environ.getPosix(environ, "NO_COLOR") != null,
+        ciSet(environ),
+    )) |r| {
+        // exit(2) is the real signal; a closed stderr must not block it.
+        stderr.writeStreamingAll(io, refusalMessage(r)) catch {};
+        std.process.exit(2);
+    }
+
+    // The tty is read+write through one fd; the refusal guard proved it is one.
+    const fd = in_fd;
+    var t = term.Term.init(io, fd);
+    try t.enterRaw();
+    errdefer t.restore();
+    try t.enterAltScreen();
+    errdefer t.restore();
+    try t.hideCursor();
+    errdefer t.restore();
+    term.installWinch(fd);
+
+    var app: App = .{};
+    var frame = try allocator.alloc(u8, frameCap(term.currentSize()));
+    defer allocator.free(frame);
+
+    try repaint(fd, &frame, allocator, &app);
+
+    var decoder: keys.Decoder = .{};
+    var rbuf: [64]u8 = undefined;
+    while (!app.quit) {
+        if (term.takeResized()) try repaint(fd, &frame, allocator, &app);
+        const rc = std.c.read(fd, &rbuf, rbuf.len);
+        if (rc < 0) {
+            if (std.posix.errno(rc) == .INTR) continue; // SIGWINCH woke the read; loop re-checks resize
+            return error.ReadFailed;
+        }
+        if (rc == 0) break; // EOF
+        const bytes = rbuf[0..@intCast(rc)];
+        var consumed: usize = 0;
+        while (consumed < bytes.len) {
+            switch (decoder.decode(bytes[consumed..])) {
+                .incomplete => break,
+                .key => |k| {
+                    consumed += k.consumed;
+                    app = step(app, k.key);
+                    if (app.quit) break;
+                },
+            }
+        }
+        try repaint(fd, &frame, allocator, &app);
+    }
+    t.restore();
+}
+
+fn repaint(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) std.mem.Allocator.Error!void {
+    const size = term.currentSize();
+    const need = frameCap(size);
+    if (need > frame.len) frame.* = try allocator.realloc(frame.*, need);
+    writeAll(fd, renderFrame(frame.*, app, size.cols, size.rows));
+}
+
+// ─── tests ───────────────────────────────────────────────────────────
+
+fn ch(c: u8) Key {
+    return .{ .char = .{ .bytes = .{ c, 0, 0, 0 }, .len = 1 } };
+}
+
+test "tab cycles and 1-4 jump to a tab" {
+    var a: App = .{};
+    a = step(a, .tab);
+    try std.testing.expectEqual(Tab.outdated, a.active);
+    a = step(a, ch('3'));
+    try std.testing.expectEqual(Tab.services, a.active);
+    a = step(a, ch('1'));
+    try std.testing.expectEqual(Tab.installed, a.active);
+}
+
+test "left and right arrows switch tabs both directions and wrap" {
+    var a: App = .{};
+    a = step(a, .right);
+    try std.testing.expectEqual(Tab.outdated, a.active);
+    a = step(a, .left);
+    try std.testing.expectEqual(Tab.installed, a.active);
+    a = step(a, .left); // wrap backward
+    try std.testing.expectEqual(Tab.doctor, a.active);
+}
+
+test "a committed filter survives a tab round-trip" {
+    var a: App = .{};
+    a = step(a, ch('/')); // enter filter mode
+    try std.testing.expect(a.editing);
+    a = step(a, ch('w'));
+    a = step(a, ch('g'));
+    a = step(a, .enter); // commit
+    try std.testing.expect(!a.editing);
+    a = step(a, .tab); // leave the tab
+    a = step(a, .tab);
+    a = step(a, .tab);
+    a = step(a, .tab); // and come back
+    try std.testing.expectEqualStrings("wg", activeFilterText(&a));
+}
+
+test "esc clears the filter and leaves edit mode" {
+    var a: App = .{};
+    a = step(a, ch('/'));
+    a = step(a, ch('x'));
+    a = step(a, .esc);
+    try std.testing.expect(!a.editing);
+    try std.testing.expectEqualStrings("", activeFilterText(&a));
+}
+
+test "backspace edits the active filter while typing" {
+    var a: App = .{};
+    a = step(a, ch('/'));
+    a = step(a, ch('a'));
+    a = step(a, ch('b'));
+    a = step(a, .backspace);
+    try std.testing.expectEqualStrings("a", activeFilterText(&a));
+}
+
+test "q and ctrl_c request quit" {
+    const a: App = .{};
+    try std.testing.expect(step(a, ch('q')).quit);
+    try std.testing.expect(step(a, .ctrl_c).quit);
+}
+
+test "down increments the selection, up saturates at zero" {
+    var a: App = .{};
+    a = step(a, .down);
+    a = step(a, .down);
+    try std.testing.expectEqual(@as(usize, 2), activeChrome(&a).view.selected);
+    a = step(a, .up);
+    a = step(a, .up);
+    a = step(a, .up);
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+}
+
+test "page keys jump by a page and saturate; home returns to the top" {
+    var a: App = .{};
+    a = step(a, .page_down);
+    try std.testing.expectEqual(@as(usize, page_step), activeChrome(&a).view.selected);
+    a = step(a, .page_up);
+    a = step(a, .page_up); // already at 0 → saturates, no underflow
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+    a = step(a, .down);
+    a = step(a, .down);
+    a = step(a, .home);
+    try std.testing.expectEqual(@as(usize, 0), activeChrome(&a).view.selected);
+}
+
+test "a non-command printable key in normal mode is inert (routed, no state change)" {
+    const a: App = .{};
+    const b = step(a, ch('z')); // not q / 1-4 / /
+    try std.testing.expectEqual(a.active, b.active);
+    try std.testing.expect(!b.editing);
+    try std.testing.expect(!b.quit);
+}
+
+test "per-tab filters are independent across tabs" {
+    var a: App = .{};
+    a = step(a, ch('/'));
+    a = step(a, ch('a')); // installed filter = "a"
+    a = step(a, .enter);
+    a = step(a, .tab); // outdated
+    try std.testing.expectEqualStrings("", activeFilterText(&a)); // its own empty filter
+}
+
+test "renderFrame shows the committed filter and the editing footer" {
+    var a: App = .{};
+    a = step(a, ch('/'));
+    a = step(a, ch('j'));
+    a = step(a, ch('q')); // 'q' is a literal char while editing, not quit
+    try std.testing.expect(!a.quit);
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "filter: jq_") != null); // filter line with caret
+    try std.testing.expect(std.mem.indexOf(u8, out, "accept") != null); // editing footer
+}
+
+test "renderFrame draws a footer rule above a dimmed help line" {
+    var a: App = .{};
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "─") != null); // horizontal rule
+    try std.testing.expect(std.mem.indexOf(u8, out, color.Style.dim.code()) != null); // dimmed help
+    try std.testing.expect(std.mem.indexOf(u8, out, "quit") != null);
+}
+
+test "renderFrame uses cursor positioning and never emits a raw newline" {
+    var a: App = .{};
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 24);
+    try std.testing.expect(std.mem.indexOfScalar(u8, out, '\n') == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Installed") != null);
+}
+
+test "renderFrame falls back cleanly on a too-small terminal" {
+    var a: App = .{};
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 2); // wide enough to read the message, too few rows
+    try std.testing.expect(std.mem.indexOf(u8, out, "too small") != null);
+}
+
+test "renderFrame reflows on resize from the same state" {
+    var a: App = .{};
+    var b1: [8192]u8 = undefined;
+    var b2: [8192]u8 = undefined;
+    const small = renderFrame(&b1, &a, 40, 10);
+    const large = renderFrame(&b2, &a, 120, 40);
+    try std.testing.expect(!std.mem.eql(u8, small, large));
+}
+
+test "refusalReason refuses non-tty, NO_COLOR, and CI; allows a clean tty" {
+    try std.testing.expectEqual(@as(?Refusal, .not_a_tty), refusalReason(false, true, false, false));
+    try std.testing.expectEqual(@as(?Refusal, .not_a_tty), refusalReason(true, false, false, false));
+    try std.testing.expectEqual(@as(?Refusal, .no_color), refusalReason(true, true, true, false));
+    try std.testing.expectEqual(@as(?Refusal, .ci), refusalReason(true, true, false, true));
+    try std.testing.expect(refusalReason(true, true, false, false) == null);
+}
