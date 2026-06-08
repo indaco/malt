@@ -87,6 +87,22 @@ pub fn readJson(
     return bytes;
 }
 
+/// Like `readJson`, but an exit-0 response with no output — what every
+/// `mt … --json` read emits against a fresh prefix (no db yet) — is `null`
+/// rather than `error.EmptyOutput`. A genuine fault still surfaces as
+/// `ChildFailed`/`ReadFailed`, so a caller renders an empty tab only when the
+/// command truly succeeded with nothing to show. Caller frees the bytes.
+pub fn readJsonAllowEmpty(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+) ReadError!?[]u8 {
+    return readJson(io, allocator, argv) catch |e| switch (e) {
+        error.EmptyOutput => null,
+        else => |err| err,
+    };
+}
+
 /// Drain the child's stdout pipe fully before `wait`, bounded by
 /// `max_json_bytes`. Mirrors `core/child.zig`'s drain; stdout-only because the
 /// read commands keep stderr inherited.
