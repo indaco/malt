@@ -4,7 +4,7 @@ const std = @import("std");
 const color = @import("../ui/color.zig");
 const scroll_list = @import("scroll_list.zig");
 
-pub const Tab = enum { installed, outdated, services, doctor };
+pub const Tab = enum { installed, outdated, services, doctor, search };
 pub const count = @typeInfo(Tab).@"enum".fields.len;
 
 /// Cycle to the next tab, wrapping after the last so `tab` is a closed loop.
@@ -17,7 +17,7 @@ pub fn prev(t: Tab) Tab {
     return @enumFromInt((@as(usize, @intFromEnum(t)) + count - 1) % count);
 }
 
-/// `'1'`–`'4'` jump straight to a tab; any other byte is not a jump.
+/// `'1'`–`'5'` jump straight to a tab; any other byte is not a jump.
 pub fn fromDigit(b: u8) ?Tab {
     if (b < '1' or b >= '1' + count) return null;
     return @enumFromInt(b - '1');
@@ -60,7 +60,7 @@ pub fn render(buf: []u8, active: Tab, titles: [count][]const u8, cols: u16) []co
     return scroll_list.truncate(buf[0..len], cols);
 }
 
-const test_titles: [count][]const u8 = .{ "Installed", "Outdated", "Services", "Doctor" };
+const test_titles: [count][]const u8 = .{ "Installed", "Outdated", "Services", "Doctor", "Search" };
 
 fn visibleWidth(s: []const u8) usize {
     var w: usize = 0;
@@ -86,20 +86,23 @@ test "next cycles through every tab and wraps" {
     try std.testing.expectEqual(Tab.outdated, next(.installed));
     try std.testing.expectEqual(Tab.services, next(.outdated));
     try std.testing.expectEqual(Tab.doctor, next(.services));
-    try std.testing.expectEqual(Tab.installed, next(.doctor));
+    try std.testing.expectEqual(Tab.search, next(.doctor));
+    try std.testing.expectEqual(Tab.installed, next(.search));
 }
 
 test "prev cycles backward through every tab and wraps" {
-    try std.testing.expectEqual(Tab.doctor, prev(.installed));
+    try std.testing.expectEqual(Tab.search, prev(.installed));
     try std.testing.expectEqual(Tab.installed, prev(.outdated));
     try std.testing.expectEqual(Tab.services, prev(.doctor));
+    try std.testing.expectEqual(Tab.doctor, prev(.search));
 }
 
-test "fromDigit maps 1-4 and rejects everything else" {
+test "fromDigit maps 1-5 and rejects everything else" {
     try std.testing.expectEqual(Tab.installed, fromDigit('1').?);
     try std.testing.expectEqual(Tab.doctor, fromDigit('4').?);
+    try std.testing.expectEqual(Tab.search, fromDigit('5').?);
     try std.testing.expect(fromDigit('0') == null);
-    try std.testing.expect(fromDigit('5') == null);
+    try std.testing.expect(fromDigit('6') == null);
     try std.testing.expect(fromDigit('a') == null);
 }
 
