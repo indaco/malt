@@ -44,6 +44,7 @@ const all_commands = [_][]const u8{
     "run",      "version",   "completions", "shellenv",
     "backup",   "restore",   "purge",       "cleanup",
     "services", "bundle",    "which",       "deps",
+    "tui",
 };
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
@@ -174,6 +175,15 @@ test "all completions expose reinstall as a top-level verb" {
     try expectContains(completions.bash_script, "install reinstall uninstall");
     try expectContains(completions.zsh_script, "'reinstall:");
     try expectContains(completions.fish_script, "__malt_needs_command -a reinstall");
+}
+
+test "all completions expose tui as a top-level verb" {
+    // The dashboard is only reachable by tab-completion if every shell lists
+    // `tui` in its top-level verb set. `tui` is a unique token, but pin the
+    // per-shell row shapes so a regression surfaces as a tui-specific failure.
+    try expectContains(completions.bash_script, "services tui bundle");
+    try expectContains(completions.zsh_script, "'tui:");
+    try expectContains(completions.fish_script, "-a tui ");
 }
 
 test "all completions expose cleanup as a top-level verb" {

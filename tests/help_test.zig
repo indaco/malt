@@ -39,12 +39,12 @@ test "showIfRequested returns true for long --help" {
 test "showIfRequested covers every documented command (exercises every branch of the static map)" {
     const ctx = quietCtx();
     const commands = [_][]const u8{
-        "install",  "uninstall",          "upgrade", "update",
-        "outdated", "list",               "info",    "search",
-        "doctor",   "tap",                "migrate", "rollback",
-        "run",      "link",               "unlink",  "pin",
-        "unpin",    "completions",        "backup",  "restore",
-        "purge",    "not-a-real-command",
+        "install",  "uninstall",   "upgrade",            "update",
+        "outdated", "list",        "info",               "search",
+        "doctor",   "tap",         "migrate",            "rollback",
+        "run",      "link",        "unlink",             "pin",
+        "unpin",    "completions", "backup",             "restore",
+        "purge",    "tui",         "not-a-real-command",
     };
     const args = [_][]const u8{"--help"};
     for (commands) |cmd| {
@@ -116,6 +116,21 @@ test "link help documents --isolate and --all" {
     const text = help.helpFor("link");
     try testing.expect(std.mem.indexOf(u8, text, "--isolate") != null);
     try testing.expect(std.mem.indexOf(u8, text, "--all") != null);
+}
+
+test "tui help documents the tabs, keybindings, delegation, and the non-TTY refusal" {
+    // Discoverability guard: `mt tui --help` is the user's map to the dashboard.
+    // It has to name the tab set, the keys, the delegation model, why it refuses
+    // a non-interactive terminal (exit 2) rather than emit a corrupt frame, and
+    // the MALT_THEME knob.
+    const text = help.helpFor("tui");
+    try testing.expect(std.mem.indexOf(u8, text, "malt tui") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Search") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Doctor") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "resize") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "delegate") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "exit 2") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "MALT_THEME") != null);
 }
 
 test "helpFor falls back gracefully for unknown commands" {
