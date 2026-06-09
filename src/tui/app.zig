@@ -402,7 +402,14 @@ fn loadInstalled(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *St
     errdefer |err| app.banner.set("list refresh failed", @errorName(err));
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "list", "--size", "--linked" });
     defer allocator.free(argv);
-    const bytes = try spawn.readJson(io, allocator, argv);
+    const bytes = (try spawn.readJsonAllowEmpty(io, allocator, argv)) orelse {
+        // Fresh prefix: an empty Cellar, not a failure. Clear the rows.
+        if (store.installed) |old| old.deinit();
+        store.installed = null;
+        app.states.installed.items = &.{};
+        app.states.installed.detail = null;
+        return;
+    };
     defer allocator.free(bytes);
 
     const parsed = try list_json.parse(allocator, bytes);
@@ -479,7 +486,16 @@ fn loadOutdated(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Sto
     errdefer |err| app.banner.set("outdated refresh failed", @errorName(err));
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{"outdated"});
     defer allocator.free(argv);
-    const bytes = try spawn.readJson(io, allocator, argv);
+    const bytes = (try spawn.readJsonAllowEmpty(io, allocator, argv)) orelse {
+        // Fresh prefix: nothing outdated. Clear the rows and the checkbox buffer.
+        if (store.outdated) |old| old.deinit();
+        if (store.outdated_checked.len != 0) allocator.free(store.outdated_checked);
+        store.outdated = null;
+        store.outdated_checked = &.{};
+        app.states.outdated.items = &.{};
+        app.states.outdated.checked = &.{};
+        return;
+    };
     defer allocator.free(bytes);
 
     const parsed = try outdated_json.parse(allocator, bytes);
@@ -554,7 +570,13 @@ fn loadServices(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Sto
     errdefer |err| app.banner.set("services refresh failed", @errorName(err));
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "services", "list" });
     defer allocator.free(argv);
-    const bytes = try spawn.readJson(io, allocator, argv);
+    const bytes = (try spawn.readJsonAllowEmpty(io, allocator, argv)) orelse {
+        // Fresh prefix: no services. Clear the rows.
+        if (store.services) |old| old.deinit();
+        store.services = null;
+        app.states.services.items = &.{};
+        return;
+    };
     defer allocator.free(bytes);
 
     const parsed = try services_json.parse(allocator, bytes);
@@ -618,7 +640,13 @@ fn loadDoctor(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store
     errdefer |err| app.banner.set("doctor refresh failed", @errorName(err));
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{"doctor"});
     defer allocator.free(argv);
-    const bytes = try spawn.readJson(io, allocator, argv);
+    const bytes = (try spawn.readJsonAllowEmpty(io, allocator, argv)) orelse {
+        // Fresh prefix: no findings. Clear the rows.
+        if (store.doctor) |old| old.deinit();
+        store.doctor = null;
+        app.states.doctor.items = &.{};
+        return;
+    };
     defer allocator.free(bytes);
 
     const parsed = try doctor_json.parse(allocator, bytes);
@@ -1162,6 +1190,54 @@ test "a failed list refresh names the op in the banner and keeps the last-good r
     try std.testing.expectError(error.BadJson, loadInstalled(t.io(), std.testing.allocator, &app, &store));
     try std.testing.expectEqualStrings("list refresh failed: BadJson", app.banner.slice());
     try std.testing.expectEqual(@as(usize, 0), app.states.installed.items.len); // last-good kept
+}
+
+// A fresh prefix (no db yet) makes every `mt … --json` read exit 0 with no
+// output. That is an empty Cellar, not a failure — the dashboard must open and
+// each tab show an empty list, never crash on `EmptyOutput`. `/usr/bin/true`
+// reproduces it exactly: exit 0, zero bytes.
+test "loadInstalled treats an exit-0 empty response (fresh prefix) as an empty tab" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/usr/bin/true" };
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    try loadInstalled(t.io(), std.testing.allocator, &app, &store);
+    try std.testing.expectEqual(@as(usize, 0), app.states.installed.items.len);
+    try std.testing.expect(!app.banner.isSet());
+}
+
+test "loadOutdated treats an exit-0 empty response (fresh prefix) as an empty tab" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/usr/bin/true" };
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    try loadOutdated(t.io(), std.testing.allocator, &app, &store);
+    try std.testing.expectEqual(@as(usize, 0), app.states.outdated.items.len);
+    try std.testing.expect(!app.banner.isSet());
+}
+
+test "loadServices treats an exit-0 empty response (fresh prefix) as an empty tab" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/usr/bin/true" };
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    try loadServices(t.io(), std.testing.allocator, &app, &store);
+    try std.testing.expectEqual(@as(usize, 0), app.states.services.items.len);
+    try std.testing.expect(!app.banner.isSet());
+}
+
+test "loadDoctor treats an exit-0 empty response (fresh prefix) as an empty tab" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/usr/bin/true" };
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    try loadDoctor(t.io(), std.testing.allocator, &app, &store);
+    try std.testing.expectEqual(@as(usize, 0), app.states.doctor.items.len);
+    try std.testing.expect(!app.banner.isSet());
 }
 
 test "a failed info read names the package in the banner and leaves the pane closed" {

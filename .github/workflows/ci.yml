@@ -92,8 +92,8 @@ jobs:
 
       - name: Lint shell scripts (shellcheck + shfmt)
         run: |
-          shellcheck scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh
-          shfmt -i 2 -d scripts/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh
+          shellcheck scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh scripts/release/*.sh
+          shfmt -i 2 -d scripts/*.sh scripts/lib/*.sh scripts/test/*.sh scripts/e2e/*.sh scripts/regressions/*.sh scripts/smokes/*.sh scripts/release/*.sh
 
   # Drift guard: re-run gen-pins.sh against the committed pin on every PR
   # and fail on any diff. Catches "bumped pins.zig, forgot to regenerate
