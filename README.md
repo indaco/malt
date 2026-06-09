@@ -38,7 +38,7 @@ Three observations shape malt.
 
 **`post_install` is where most alternative Homebrew clients quietly give up.** A surprising number of formulas don't finish installing the moment their files hit disk: they ship a `post_install` block - symlinks, man pages, config files, service registration - that the binary expects to find at runtime. Other clients tend to skip these scripts or pattern-match a handful of well-known cases. malt ships a built-in Zig interpreter for the Ruby subset these blocks use, so packages like `node`, `openssl`, `fontconfig`, and `docbook` are fully configured by the time the install returns.
 
-**Cold installs happen once. Warm installs happen forever.** The first `brew install ffmpeg` on a fresh checkout is a one-time cost. Every reinstall, upgrade, devbox/nix-style rebuild, and CI cache restore after it is a _warm_ install against an existing store. The ratio over a developer's working life is roughly 1 cold to 10+ warm - the warm row is where the minutes compound. malt's warm `ffmpeg` install finishes in **31 ms**.
+**Cold installs happen once. Warm installs happen forever.** The first `brew install ffmpeg` on a fresh checkout is a one-time cost. Every reinstall, upgrade, devbox/nix-style rebuild, and CI cache restore after it is a _warm_ install against an existing store. The ratio over a developer's working life is roughly 1 cold to 10+ warm - the warm row is where the minutes compound. malt's warm `ffmpeg` install finishes in **tens of milliseconds** (see [Benchmarks](#benchmarks) for the current figure).
 
 **A package manager is also a piece of infrastructure on your machine.** It runs as your user, writes to a privileged-ish prefix, downloads code from the internet, and patches Mach-O headers. It deserves the posture of any other root-adjacent tool: SHA256 streaming, atomic installs, advisory locking, sandboxed subprocesses, cosign-verified releases. malt's binary is ~4 MB and starts in ~3 ms - none of the safety properties are paid for in startup time.
 
@@ -52,12 +52,12 @@ The full surface area at a glance.
 
 - **Drop-in for Homebrew workflows.** Installs formulas, casks, tap formulas, and `user/tap/formula` shortcuts; reads existing `Brewfile`s with no conversion; `mt shellenv` is a drop-in for `eval "$(brew shellenv)"`; `mt services` is a drop-in for `brew services`. Installs to `/opt/malt`, never touches Homebrew's files.
 - **Taps on any major forge.** Third-party taps resolve through the forge API (without cloning the whole repo) on GitHub, GitLab (incl. self-hosted), Codeberg/Forgejo/Gitea, and Gogs - with per-forge token auth for private taps. See [Supported forges](#supported-forges).
-- **Native `post_install`.** A built-in Zig interpreter runs Homebrew `post_install` scripts natively - `node`, `openssl`, `fontconfig`, `docbook` are fully configured by the time the install returns. Unsupported constructs are reported; `--use-system-ruby` delegates to a sandboxed Ruby subprocess. See [Architecture](#architecture) for the fallback flow.
+- **Native `post_install`.** A built-in Zig interpreter runs Homebrew `post_install` scripts natively, in-process - no external Ruby for the common cases. Unsupported constructs are reported; `--use-system-ruby` delegates to a sandboxed Ruby subprocess. See [Architecture](#architecture) for the fallback flow.
 - **Content-addressable store.** Bottles indexed by SHA256; the same bottle is never downloaded or extracted twice. Kegs in `Cellar/` are APFS `clonefile()` copies. Reinstalls and rollbacks cost no bytes and no network.
 - **Atomic install protocol.** New versions verified before old versions are touched; `mt rollback --to <version>` reverts from the store with no re-download. Streaming SHA256 + parallel downloads + a 30 s advisory file lock against concurrent mutations.
+- **Interactive dashboard.** `mt tui` is a built-in, resize-aware terminal dashboard that delegates every action back to the real CLI - no daemon, no companion binary, themed by the same `MALT_THEME` palette as the rest of malt. See [Interactive dashboard](#interactive-dashboard).
 - **Ephemeral run.** `mt run <pkg> -- <args...>` extracts and `execvp`s without a permanent install; `--keep` caches the bottle for next time.
 - **Full operational surface.** Services, bundle installs, doctor, purge, backup/restore, migrate, and reverse-dependency queries - see [Command reference](#command-reference) for the full surface.
-- **Interactive dashboard.** `mt tui` is a built-in, resize-aware terminal dashboard - five tabs (search, installed, outdated, services, doctor) that read `mt … --json` and delegate every action back to the real CLI. No daemon, no companion binary, themeable via `MALT_THEME`. See [Interactive dashboard](#interactive-dashboard).
 - **Scriptable.** `--json` and `--output-format=ndjson` everywhere it makes sense; orthogonal flags. `--quiet`, `--verbose`, `--debug`, `--dry-run`, `--offline` are global. `NO_COLOR`, `MALT_NO_EMOJI`, `MALT_PROGRESS`, `MALT_THEME` for shaping output.
 - **Signed, verifiable releases.** Every release is cosign-signed keyless via GitHub OIDC; `install.sh` and `mt version update` verify the signature before trusting the SHA256 checksum. See [Safety and security](#safety-and-security) for the full supply-chain story.
 - **Sandboxed `post_install`.** The `--use-system-ruby` path runs inside a `sandbox-exec` profile scoped to the formula's cellar; the native interpreter validates every mutating operation against the Cellar/malt prefix.
@@ -79,10 +79,10 @@ curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh
 
 The script needs [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/) on your `PATH`. To bypass verification (not recommended), set `MALT_ALLOW_UNVERIFIED=1`. If no release matches your platform, the script falls back to building from source.
 
-To verify `install.sh` itself out of band, pin to a release tag and compare its SHA256 against the release notes:
+To verify `install.sh` itself out of band, pin to a release tag (replace `v0.17.0` below with the latest) and compare its SHA256 against the release notes:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.5.1/scripts/install.sh" -o install.sh
+curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.17.0/scripts/install.sh" -o install.sh
 shasum -a 256 install.sh
 bash install.sh
 ```
@@ -243,7 +243,7 @@ mt upgrade --force <name>                # bypass a pin for one upgrade
 
 `mt pin <name>` / `mt unpin <name>` hold a package at its current version. Pinned packages are skipped by `mt upgrade` with a "pinned, skipped" line; `mt list --pinned` inspects.
 
-`mt rollback <package>` reverts a formula to its previous version. The store retains every previously installed bottle, so rollback unlinks → re-clones → updates the DB without re-downloading. `--dry-run` previews.
+`mt rollback <package>` reverts a formula to its previous version. The store retains every previously installed bottle, so rollback unlinks → re-clones → updates the DB without re-downloading. `--list` shows the retained versions; `--to <version>` reverts to a specific one instead of the newest prior; `--dry-run` previews.
 
 ### Inspect what's installed
 
@@ -277,12 +277,15 @@ mt which jq                              # reverse lookup: bin -> keg-path
 
 ### Interactive dashboard
 
-`mt tui` opens a persistent, resize-aware dashboard over the same data the read commands expose - no daemon, no companion binary, no first dependency.
+`mt tui` opens a persistent, resize-aware dashboard over the same data the read commands expose - no daemon, no companion binary, nothing to install first.
 
 ```bash
 mt tui                                   # launch the dashboard
 MALT_THEME=dracula mt tui                # launch with a named theme
 ```
+
+> [!NOTE]
+> `mt tui` needs a real terminal: on a pipe, in CI, or with `NO_COLOR` set it refuses to launch and exits 2 rather than stream escape sequences into a non-TTY.
 
 Five tabs, each a live view over `mt … --json`:
 
@@ -296,11 +299,18 @@ Five tabs, each a live view over `mt … --json`:
 
 Keys: `tab`/`←`/`→`/`1`-`5` switch tabs, `↑`/`↓` move the cursor, `/` filters the list (per-tab, survives a tab round-trip), `enter` searches or opens a detail pane, `q` or `Ctrl-C` quits. Each tab adds its own action keys in the footer - `i` install (Search), `x` uninstall with a `[y/N]` guard (Installed), `space`/`a`/`n` select and `u` upgrade the batch (Outdated), `s`/`x`/`r` start/stop/restart (Services), `f` fix (Doctor).
 
-**It reads with `--json` and acts by delegating.** Every mutation drops out of the alternate screen, runs the real `mt <subcommand>` inline - so malt's own output and any confirmation prompt appear unchanged in your scrollback - then re-enters and refreshes the current tab; the other tabs refetch lazily on next view. The dashboard never reimplements an install, upgrade, or fix - it drives the CLI you already trust.
+**It reads with `--json` and acts by delegating.** Every mutation drops out of the alternate screen, runs the real `mt <subcommand>` inline - so output and prompts land unchanged in your scrollback - then re-enters and refreshes the current tab (others refetch lazily). It never reimplements install, upgrade, or fix; it drives the CLI you already trust.
 
-**It resizes live.** Layout is a pure function of the terminal size: drag the window and the columns reflow, the list re-clamps its viewport, and long rows truncate without a redraw glitch - no keypress needed. Below a usable minimum it renders a "terminal too small" notice instead of a corrupted frame.
+**It resizes live.** Layout is a pure function of terminal size: drag the window and columns reflow, the viewport re-clamps, and long rows truncate without a keypress. Below a usable minimum it shows a "terminal too small" notice instead of a corrupted frame.
 
-**It needs a real terminal.** On a pipe, in CI, or with `NO_COLOR` set, `mt tui` refuses to launch and exits 2 rather than stream escape sequences into a non-TTY. `MALT_THEME` selects the palette for all malt output, the dashboard included (`dracula`, `catppuccin-mocha`/`-latte`, `rose-pine`/`-dawn`, `nord`, `tokyo-night`, `gruvbox-dark`/`-light`); named themes need a truecolor terminal and degrade to the default palette on a basic terminal or one whose background contradicts the theme.
+**It's themeable - and so is the rest of malt.** `MALT_THEME` selects the palette for _all_ malt output, the dashboard included, so `MALT_THEME=dracula mt outdated` and `MALT_THEME=dracula mt tui` render in the same colours. Nine named palettes ship, grouped by the terminal background they're designed for:
+
+| Background | Themes                                                                            |
+| ---------- | --------------------------------------------------------------------------------- |
+| Dark       | `dracula`, `catppuccin-mocha`, `rose-pine`, `nord`, `tokyo-night`, `gruvbox-dark` |
+| Light      | `catppuccin-latte`, `rose-pine-dawn`, `gruvbox-light`                             |
+
+`light`/`dark`/`auto` keep the background-aware default palette (`auto` detects via OSC 11). Named themes need a truecolor terminal and degrade to the default palette on a basic terminal, or on one whose background contradicts the theme (a dark theme on a light terminal).
 
 ### Maintain malt
 
@@ -511,16 +521,17 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 
 ### Global flags
 
-| Flag              | Description                                                                                                      |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `--verbose`, `-v` | Verbose output                                                                                                   |
-| `--debug`         | Surface every DSL diagnostic (implies verbose); pair with issue reports                                          |
-| `--quiet`, `-q`   | Suppress non-error output                                                                                        |
-| `--json`          | JSON output (read commands; also emits per-package `post_install` status lines)                                  |
-| `--dry-run`       | Preview without executing                                                                                        |
-| `--offline`       | Serve every fetch from the snapshot cache; fail fast with `OfflineRequired` on a miss (mirrors `MALT_OFFLINE=1`) |
-| `--help`, `-h`    | Show help                                                                                                        |
-| `--version`       | Show version                                                                                                     |
+| Flag                     | Description                                                                                                      |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `--verbose`, `-v`        | Verbose output                                                                                                   |
+| `--debug`                | Surface every DSL diagnostic (implies verbose); pair with issue reports                                          |
+| `--quiet`, `-q`          | Suppress non-error output                                                                                        |
+| `--json`                 | JSON output (read commands; also emits per-package `post_install` status lines)                                  |
+| `--output-format=ndjson` | Stream one JSON event per state transition (stdout); human output stays on stderr                                |
+| `--dry-run`              | Preview without executing                                                                                        |
+| `--offline`              | Serve every fetch from the snapshot cache; fail fast with `OfflineRequired` on a miss (mirrors `MALT_OFFLINE=1`) |
+| `--help`, `-h`           | Show help                                                                                                        |
+| `--version`              | Show version                                                                                                     |
 
 ### Environment variables
 
@@ -743,12 +754,14 @@ Apple Silicon (GitHub Actions macos-14), 2026-06-01. Auto-updated weekly via the
 malt's binary is small because it ships only five subsystems and the glue between them:
 
 - **SQLite.** ACID writes, reverse-dependency queries (`mt uses openssl@3`), linker-conflict detection before any symlink is created, atomic rollback after a failed upgrade. Survives `kill -9` mid-write.
-- **Native `post_install` interpreter.** A Ruby-subset interpreter in Zig - lexer, parser, AST, builtins for `String` and `Pathname`. Only activates for formulas that define `post_install`. Packages like `node`, `openssl`, `fontconfig`, and `docbook` are fully configured by the time the install returns.
+- **Native `post_install` interpreter.** A Ruby-subset interpreter in Zig - lexer, parser, AST, builtins for `String` and `Pathname`. Only activates for formulas that define `post_install` - the likes of `node` and `openssl` that won't configure without it.
 - **Mach-O patching with arm64 ad-hoc codesign.** Every binary patched to rewrite `/opt/homebrew` → `MALT_PREFIX` is re-signed so `dyld` will load it on modern macOS.
 - **Install lock.** `flock` on `db/malt.lock` plus a symlink-tree walk that refuses to overwrite another keg's files, acquired by every mutating command. Two concurrent malt invocations - or a Ctrl-C'd install - cannot corrupt state.
 - **`sandbox-exec` profile.** The opt-in `--use-system-ruby` path runs every formula script inside a deny-default sandbox with a scrubbed environment, `RLIMIT_CPU`/`AS`/`FSIZE` caps, and terminal-escape filtering on child output.
 
 All five run per-install. The warm row above is their combined wall-clock cost.
+
+The interactive dashboard (`mt tui`) is the one piece that doesn't run per-install - it's compiled into the same binary instead of shipping as a companion tool, and costs only about 300 KB to keep there.
 
 ### Methodology
 
