@@ -46,8 +46,16 @@ pass "cask results present"
 
 printf '\n▸ json output: mt --json search wget\n'
 json=$("$BIN" --json search wget)
-printf '%s\n' "$json" | grep -q '"formulae":\[{"name":"wget"}' ||
-  fail "JSON missing wget formula entry"
+# Versioned, unified contract: one object with schema_version, the echoed
+# query, and a single typed results array. `installed` is env-dependent
+# (the runner may have wget installed), so match the field, not its value.
+printf '%s\n' "$json" | grep -q '"schema_version":1,"query":"wget","results":\[' ||
+  fail "JSON missing versioned root / query echo / results array"
+printf '%s\n' "$json" | grep -qE '"name":"wget","type":"formula","installed":(true|false)' ||
+  fail "JSON missing typed, install-aware wget formula entry"
+if printf '%s\n' "$json" | grep -q '"formulae":'; then
+  fail "JSON still emits the old split formulae key"
+fi
 pass "JSON shape ok ($json)"
 
 printf '\n▸ empty result: mt search xyz-no-such-pkg-abc-123\n'

@@ -104,6 +104,40 @@ fn seedCache(allocator: std.mem.Allocator, prefix: []const u8) !void {
     try writeFile(firefox_json, "{\"token\":\"firefox\"}");
 }
 
+// End-to-end stdout capture: back `ctx.stdout` with a real fd to a scratch
+// file so `execute`'s encoder writes survive and can be re-read for byte
+// assertions (the `--json` contract). Caller owns the returned slice.
+fn captureExecute(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    tag: []const u8,
+) ![]u8 {
+    const ts = test_io.nanoTimestamp(std.Options.debug_io);
+    const cap_path = try std.fmt.allocPrintSentinel(
+        allocator,
+        "/tmp/malt_search_cap_{s}_{d}",
+        .{ tag, ts },
+        0,
+    );
+    defer allocator.free(cap_path);
+    defer test_io.deleteFileAbsolute(std.Options.debug_io, cap_path) catch {};
+
+    var file = try test_io.createFileAbsolute(std.Options.debug_io, cap_path, .{ .truncate = true });
+    errdefer file.close(std.Options.debug_io);
+
+    const ctx: malt.app_ctx.AppCtx = .{
+        .io = std.Options.debug_io,
+        .environ = .empty,
+        .stdout = file,
+        .stderr = test_io.testSink(),
+    };
+
+    try search.execute(&ctx, allocator, args);
+    file.close(std.Options.debug_io);
+
+    return try test_io.readFileAbsoluteAlloc(std.Options.debug_io, allocator, cap_path, 64 * 1024);
+}
+
 const OutputState = struct {
     prior_mode: output.OutputMode,
     prior_quiet: bool,
@@ -247,6 +281,27 @@ test "execute --installed --json keeps the JSON dispatch active" {
     output.setQuiet(true);
 
     try search.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--installed", "wget" });
+}
+
+test "execute --installed --json emits the versioned unified install-aware shape" {
+    // End-to-end contract through `execute` on the deterministic local-only
+    // scope: one versioned object, the echoed query, a single typed array
+    // (exact match first, deduped), and `installed:true` derived from the DB.
+    var s = try Scratch.init(testing.allocator, "installed_json_shape");
+    defer s.deinit(testing.allocator);
+    try seedDb(testing.allocator, s.path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.json);
+    output.setQuiet(true);
+
+    const out = try captureExecute(testing.allocator, &.{ "--installed", "wget" }, "installed_json_shape");
+    defer testing.allocator.free(out);
+
+    try testing.expectEqualStrings(
+        \\{"schema_version":1,"query":"wget","results":[{"name":"wget","type":"formula","installed":true},{"name":"wgetpaste","type":"formula","installed":true}]}
+    ++ "\n", out);
 }
 
 test "execute --api still works with only the cache seeded" {
