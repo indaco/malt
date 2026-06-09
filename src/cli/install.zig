@@ -57,13 +57,13 @@ const drive = post_install_mod.drive;
 const rb_parse_mod = @import("install/rb_parse.zig");
 const record_mod = @import("install/record.zig");
 const InstallError = record_mod.InstallError;
-const sink_mod = @import("install/sink.zig");
-const OutputSink = sink_mod.OutputSink;
 const recordKeg = record_mod.recordKeg;
 const deleteKeg = record_mod.deleteKeg;
 const recordDeps = record_mod.recordDeps;
 const ensureDirs = record_mod.ensureDirs;
 const localErrorIsAnnounced = record_mod.localErrorIsAnnounced;
+const sink_mod = @import("install/sink.zig");
+const OutputSink = sink_mod.OutputSink;
 
 // Internal aliases for names the orchestrator body uses. Names not in
 // this block are reached via their submodule (`args_mod.X`, etc.) or
@@ -1236,14 +1236,34 @@ fn maybeRegisterService(
     const def = formula.service orelse return;
     if (def.run.len == 0) return;
 
+    // The Homebrew API renders service paths as `$HOMEBREW_PREFIX/…`; launchd
+    // does not expand the token and the validator rejects it, so resolve it to
+    // malt's prefix here. Scratch strings live in a scoped arena — `register`
+    // renders them into the plist and DB before it returns.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
     var label_buf: [256]u8 = undefined;
     const label = std.fmt.bufPrint(&label_buf, "com.malt.{s}", .{formula.name}) catch return;
 
+    const run = aa.alloc([]const u8, def.run.len) catch return;
+    for (def.run, 0..) |arg, i| run[i] = plist_mod.expandPrefix(aa, arg, prefix) catch return;
+
+    const working_dir = if (def.working_dir) |wd|
+        (plist_mod.expandPrefix(aa, wd, prefix) catch return)
+    else
+        null;
+
     var stdout_buf: [512]u8 = undefined;
     var stderr_buf: [512]u8 = undefined;
-    const stdout_path = def.log_path orelse
+    const stdout_path = if (def.log_path) |lp|
+        (plist_mod.expandPrefix(aa, lp, prefix) catch return)
+    else
         (std.fmt.bufPrint(&stdout_buf, "{s}/var/log/{s}.out", .{ prefix, formula.name }) catch return);
-    const stderr_path = def.error_log_path orelse
+    const stderr_path = if (def.error_log_path) |elp|
+        (plist_mod.expandPrefix(aa, elp, prefix) catch return)
+    else
         (std.fmt.bufPrint(&stderr_buf, "{s}/var/log/{s}.err", .{ prefix, formula.name }) catch return);
 
     // Ensure the log directory exists.
@@ -1262,8 +1282,8 @@ fn maybeRegisterService(
 
     const spec: plist_mod.ServiceSpec = .{
         .label = label,
-        .program_args = def.run,
-        .working_dir = def.working_dir,
+        .program_args = run,
+        .working_dir = working_dir,
         .stdout_path = stdout_path,
         .stderr_path = stderr_path,
         .run_at_load = def.run_at_load,

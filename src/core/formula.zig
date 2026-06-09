@@ -226,8 +226,12 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
                         .working_dir = getString(so, "working_dir"),
                         .log_path = getString(so, "log_path"),
                         .error_log_path = getString(so, "error_log_path"),
+                        // The API encodes keep_alive as a directive object
+                        // (`{"always": true}`, …), not just a bool — treat any
+                        // present value as "keep alive" unless it is literally
+                        // `false`, which malt renders as no KeepAlive.
                         .keep_alive = if (so.get("keep_alive")) |k|
-                            (k == .bool and k.bool)
+                            (k != .bool or k.bool)
                         else
                             true,
                         .run_at_load = if (so.get("run_at_load")) |k|

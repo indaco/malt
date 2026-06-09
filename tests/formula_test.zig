@@ -227,6 +227,47 @@ test "parse formula with service block" {
     try testing.expect(svc.keep_alive);
 }
 
+test "parse formula with realistic Homebrew API service shape" {
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // The live API renders paths with a literal `$HOMEBREW_PREFIX` token (kept
+    // verbatim here; expansion happens at registration) and encodes keep_alive
+    // as an object (`{"always": true}`), not a bare bool.
+    const json =
+        \\{
+        \\  "name": "redis",
+        \\  "full_name": "redis",
+        \\  "tap": "homebrew/core",
+        \\  "desc": "Redis",
+        \\  "homepage": "",
+        \\  "revision": 0,
+        \\  "keg_only": false,
+        \\  "post_install_defined": false,
+        \\  "versions": { "stable": "8.0" },
+        \\  "dependencies": [],
+        \\  "oldnames": [],
+        \\  "bottle": {},
+        \\  "service": {
+        \\    "run": ["$HOMEBREW_PREFIX/opt/redis/bin/redis-server", "$HOMEBREW_PREFIX/etc/redis.conf"],
+        \\    "run_type": "immediate",
+        \\    "keep_alive": { "always": true },
+        \\    "working_dir": "$HOMEBREW_PREFIX/var",
+        \\    "log_path": "$HOMEBREW_PREFIX/var/log/redis.log"
+        \\  }
+        \\}
+    ;
+    var formula = try formula_mod.parseFormula(alloc, json);
+    defer formula.deinit();
+    const svc = formula.service orelse return error.TestExpectedSomething;
+    try testing.expectEqual(@as(usize, 2), svc.run.len);
+    try testing.expectEqualStrings("$HOMEBREW_PREFIX/opt/redis/bin/redis-server", svc.run[0]);
+    // An object keep_alive means "keep this service alive" — not the `false`
+    // that a bool-only check would yield.
+    try testing.expect(svc.keep_alive);
+}
+
 test "formula without service block has null service" {
     var arena = testArena();
     defer arena.deinit();
