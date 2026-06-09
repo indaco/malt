@@ -15,7 +15,9 @@ const schema = malt.schema;
 
 fn makeDb(tag: []const u8) !sqlite.Database {
     var path_buf: [256]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt_uses_test_{s}.db", .{tag}, 0);
+    // Scope the path by pid: two concurrent `zig build test` processes would
+    // otherwise share — and corrupt — the same on-disk database.
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/malt_uses_test_{s}_{d}.db", .{ tag, std.c.getpid() }, 0);
     test_io.deleteFileAbsolute(std.Options.debug_io, path) catch {};
     var db = try sqlite.Database.open(path);
     try schema.initSchema(&db);
