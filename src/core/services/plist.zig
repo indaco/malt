@@ -4,6 +4,8 @@
 //! deterministic (fixed key order) so golden tests can byte-compare.
 
 const std = @import("std");
+const testing = std.testing;
+
 const dsl_sandbox = @import("../dsl/sandbox.zig");
 
 pub const EnvPair = struct {
@@ -51,6 +53,23 @@ pub const ValidationError = error{
 pub const max_program_args: usize = 64;
 /// Cap on a single argv or path string.
 pub const max_arg_len: usize = 4096;
+
+/// The Homebrew API renders every service path with this literal token rather
+/// than the resolved prefix (`$HOMEBREW_PREFIX/opt/redis/bin/redis-server`).
+pub const homebrew_prefix_token = "$HOMEBREW_PREFIX";
+
+/// Resolve `$HOMEBREW_PREFIX` to malt's install prefix in a service string.
+/// launchd does not expand environment variables in `ProgramArguments`, and the
+/// token resolves to the *default Homebrew* prefix, not malt's — so without this
+/// every real formula's `service:` block fails `validate` (its executable head
+/// is not an absolute path under the malt prefix). Replaces every occurrence;
+/// returns an owned copy the caller frees.
+pub fn expandPrefix(allocator: std.mem.Allocator, s: []const u8, prefix: []const u8) std.mem.Allocator.Error![]u8 {
+    const size = std.mem.replacementSize(u8, s, homebrew_prefix_token, prefix);
+    const out = try allocator.alloc(u8, size);
+    _ = std.mem.replace(u8, s, homebrew_prefix_token, prefix, out);
+    return out;
+}
 
 /// Reject launchd interpreters as the leading executable. If a formula
 /// actually ships its own cellar-local `sh` it must invoke it via its
@@ -206,4 +225,47 @@ fn writeEscaped(writer: *std.Io.Writer, s: []const u8) !void {
             else => try writer.writeByte(c),
         }
     }
+}
+
+test "expandPrefix resolves a leading token to malt's prefix" {
+    const out = try expandPrefix(testing.allocator, "$HOMEBREW_PREFIX/opt/redis/bin/redis-server", "/opt/malt");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("/opt/malt/opt/redis/bin/redis-server", out);
+}
+
+test "expandPrefix resolves a token embedded mid-argument" {
+    const out = try expandPrefix(testing.allocator, "--datadir=$HOMEBREW_PREFIX/var/mysql", "/opt/malt");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("--datadir=/opt/malt/var/mysql", out);
+}
+
+test "expandPrefix resolves every occurrence in one string" {
+    const out = try expandPrefix(testing.allocator, "$HOMEBREW_PREFIX/a:$HOMEBREW_PREFIX/b", "/opt/malt");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("/opt/malt/a:/opt/malt/b", out);
+}
+
+test "expandPrefix resolves a token-only string" {
+    const out = try expandPrefix(testing.allocator, "$HOMEBREW_PREFIX", "/opt/malt");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("/opt/malt", out);
+}
+
+test "expandPrefix returns a token-free string unchanged" {
+    const out = try expandPrefix(testing.allocator, "--daemonize", "/opt/malt");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("--daemonize", out);
+}
+
+test "expandPrefix returns an empty string unchanged" {
+    const out = try expandPrefix(testing.allocator, "", "/opt/malt");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("", out);
+}
+
+test "expandPrefix matches the whole token, not a sibling Homebrew variable" {
+    // `$HOMEBREW_CELLAR` shares a prefix with the token but must be left intact.
+    const out = try expandPrefix(testing.allocator, "$HOMEBREW_CELLAR/redis", "/opt/malt");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("$HOMEBREW_CELLAR/redis", out);
 }

@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+
 const plist = @import("malt").services_plist;
 
 const cellar = "/opt/malt/Cellar/foo/1.0";
@@ -148,4 +149,26 @@ test "validate: stderr_path dot-dot escape rejected" {
         .stdout_path = good_out,
         .stderr_path = "/opt/malt/../etc/foo.err",
     }, cellar, prefix));
+}
+
+// The Homebrew API hands us `$HOMEBREW_PREFIX/…` heads: they must be expanded
+// before validation, or every real service is rejected as a relative path.
+test "validate: raw $HOMEBREW_PREFIX head rejected, expanded head passes" {
+    const raw = [_][]const u8{"$HOMEBREW_PREFIX/opt/foo/bin/foo"};
+    try testing.expectError(error.RelativeExecutable, plist.validate(.{
+        .label = "com.malt.foo",
+        .program_args = raw[0..],
+        .stdout_path = good_out,
+        .stderr_path = good_err,
+    }, cellar, prefix));
+
+    const head = try plist.expandPrefix(testing.allocator, raw[0], prefix);
+    defer testing.allocator.free(head);
+    const args = [_][]const u8{head};
+    try plist.validate(.{
+        .label = "com.malt.foo",
+        .program_args = args[0..],
+        .stdout_path = good_out,
+        .stderr_path = good_err,
+    }, cellar, prefix);
 }
