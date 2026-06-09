@@ -23,6 +23,29 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Cap each filesystem walk so a stuck target (stale automount, held
+# resource, multi-GB tree) surfaces as a warning instead of hanging the
+# whole clean. macOS ships no `timeout`; prefer it, fall back to
+# `gtimeout`, else run uncapped. CLEAN_TIMEOUT overrides the cap (seconds).
+timeout_secs=${CLEAN_TIMEOUT:-120}
+if command -v timeout >/dev/null 2>&1; then
+  timeout_bin=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  timeout_bin=gtimeout
+else
+  timeout_bin=
+fi
+
+# Run a command under the cap when one is available, else run it bare.
+# String var (not array) keeps this working under macOS bash 3.2.
+capped() {
+  if [ -n "$timeout_bin" ]; then
+    "$timeout_bin" "$timeout_secs" "$@"
+  else
+    "$@"
+  fi
+}
+
 human() {
   local k=$1
   if [ "$k" -ge 1048576 ]; then
@@ -38,13 +61,20 @@ total_kb=0
 remove_tree() {
   local path="$1"
   [ -e "$path" ] || return 0
+  # Announce before the walks so a slow or stuck target is visible
+  # rather than a silent hang under the section header.
+  printf "  removing %s ...\n" "$path"
   # Test fixtures can land with restricted perms that block rm -rf.
   # Make directories writable and traversable before deleting.
-  find "$path" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+  capped find "$path" -type d -exec chmod u+rwx {} + 2>/dev/null || true
   local kb
-  kb=$(du -sk "$path" 2>/dev/null | awk '{print $1}')
+  kb=$(capped du -sk "$path" 2>/dev/null | awk '{print $1}') || true
   kb=${kb:-0}
-  rm -rf "$path"
+  if ! capped rm -rf "$path"; then
+    printf "  ⚠ skipped %s — exceeded %ss cap (stale mount or held resource?)\n" \
+      "$path" "$timeout_secs" >&2
+    return 0
+  fi
   total_kb=$((total_kb + kb))
   printf "  removed %-44s %7s\n" "$path" "$(human "$kb")"
 }
