@@ -4,6 +4,82 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.17.0 - 2026-06-09
+
+### Highlights
+
+v0.17.0 gives malt a face: a built-in terminal dashboard you can drive entirely from the keyboard - and paint in your own colours, dashboard and CLI alike.
+
+- **A dashboard built in, `mt tui`.** Browse installed packages, upgrade what's outdated, start and stop services, run doctor fixes, and search-and-install new packages - all from one resize-aware screen. No daemon, no companion binary: every action delegates back to the real CLI, so what you see is what `mt` does. See [Interactive dashboard](https://github.com/indaco/malt#interactive-dashboard).
+- **Theme everything, not just the dashboard.** `MALT_THEME` now colours all of malt's output - nine named palettes (Dracula, Catppuccin, Rosé Pine, Nord, Tokyo Night, Gruvbox, and more), so `mt outdated` and `mt tui` render in the same colours.
+- **Services start from the right formulae.** Background services now register against the real installed formula, so `mt services` lists and controls what's actually there.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🚀 Enhancements
+
+- **ui:** apply MALT_THEME named palettes to CLI output, not just the TUI ([35f722e](https://github.com/indaco/malt/commit/35f722e)) ([#464](https://github.com/indaco/malt/pull/464))
+- **tui:** search multi-select & info, loading state, and pane polish ([ca29f1e](https://github.com/indaco/malt/commit/ca29f1e)) ([#463](https://github.com/indaco/malt/pull/463))
+- **tui:** themeable palette via MALT_THEME and Search-first tabs ([3d53be6](https://github.com/indaco/malt/commit/3d53be6)) ([#458](https://github.com/indaco/malt/pull/458))
+- **tui:** search and install packages from a new tab ([228724e](https://github.com/indaco/malt/commit/228724e)) ([#456](https://github.com/indaco/malt/pull/456))
+- **json:** version mt search --json and unify results with installed state ([9346955](https://github.com/indaco/malt/commit/9346955)) ([#455](https://github.com/indaco/malt/pull/455))
+- **tui:** doctor tab with per-finding fix ([b6a1e8b](https://github.com/indaco/malt/commit/b6a1e8b)) ([#454](https://github.com/indaco/malt/pull/454))
+- **tui:** services tab with start/stop/restart ([8d3baf3](https://github.com/indaco/malt/commit/8d3baf3)) ([#453](https://github.com/indaco/malt/pull/453))
+- **tui:** outdated tab with multi-select upgrade ([3c6b96b](https://github.com/indaco/malt/commit/3c6b96b)) ([#451](https://github.com/indaco/malt/pull/451))
+- **tui:** surface recoverable mt/parse failures without exiting ([5d7a92c](https://github.com/indaco/malt/commit/5d7a92c)) ([#450](https://github.com/indaco/malt/pull/450))
+- **tui:** installed packages tab with detail pane ([14c2b52](https://github.com/indaco/malt/commit/14c2b52)) ([#448](https://github.com/indaco/malt/pull/448))
+- **tui:** delegate mutations to mt and refresh after ([4dfb364](https://github.com/indaco/malt/commit/4dfb364)) ([#447](https://github.com/indaco/malt/pull/447))
+- **tui:** app shell with tab bar, filter, and mt tui subcommand ([7553dde](https://github.com/indaco/malt/commit/7553dde)) ([#446](https://github.com/indaco/malt/pull/446))
+- **tui:** responsive layout and scrollable list ([e31410e](https://github.com/indaco/malt/commit/e31410e)) ([#445](https://github.com/indaco/malt/pull/445))
+- **tui:** keyboard input decoder ([9d7c2e1](https://github.com/indaco/malt/commit/9d7c2e1)) ([#444](https://github.com/indaco/malt/pull/444))
+- **tui:** terminal control primitives with resize awareness ([c6b8923](https://github.com/indaco/malt/commit/c6b8923)) ([#443](https://github.com/indaco/malt/pull/443))
+- **json:** add schema_version to read-command JSON output ([231a423](https://github.com/indaco/malt/commit/231a423)) ([#442](https://github.com/indaco/malt/pull/442))
+- **doctor:** allow fixing a single finding by id ([c5f2c4f](https://github.com/indaco/malt/commit/c5f2c4f)) ([#441](https://github.com/indaco/malt/pull/441))
+- **doctor:** emit structured findings in JSON output ([f73a5fb](https://github.com/indaco/malt/commit/f73a5fb)) ([#440](https://github.com/indaco/malt/pull/440))
+- **info:** expose the dependency list in JSON for installed packages ([7af0826](https://github.com/indaco/malt/commit/7af0826)) ([#439](https://github.com/indaco/malt/pull/439))
+- **list:** add pinned, size, and linked status to JSON output ([0f42c3e](https://github.com/indaco/malt/commit/0f42c3e)) ([#438](https://github.com/indaco/malt/pull/438))
+- **outdated:** emit a single unified JSON array for formulae and casks ([bc35d15](https://github.com/indaco/malt/commit/bc35d15)) ([#437](https://github.com/indaco/malt/pull/437))
+
+### 🩹 Fixes
+
+- **services:** register background services from real formulae ([91d2fec](https://github.com/indaco/malt/commit/91d2fec)) ([#467](https://github.com/indaco/malt/pull/467))
+- **tui:** first-pass dashboard usability fixes ([88f7e8a](https://github.com/indaco/malt/commit/88f7e8a)) ([#462](https://github.com/indaco/malt/pull/462))
+- **tui:** open the dashboard on a fresh prefix instead of crashing ([2e7b9cb](https://github.com/indaco/malt/commit/2e7b9cb)) ([#459](https://github.com/indaco/malt/pull/459))
+- **smoke:** put install prefix bin on PATH so doctor stays green ([6f8c3b3](https://github.com/indaco/malt/commit/6f8c3b3)) ([#449](https://github.com/indaco/malt/pull/449))
+
+### 📖 Documentation
+
+- update readme and demo with tui ([57425b3](https://github.com/indaco/malt/commit/57425b3)) ([#469](https://github.com/indaco/malt/pull/469))
+- **tui:** document mt tui and reconcile the size budget ([171d77c](https://github.com/indaco/malt/commit/171d77c)) ([#461](https://github.com/indaco/malt/pull/461))
+
+### ✅ Tests
+
+- **uses:** isolate the temp database per process ([dd958db](https://github.com/indaco/malt/commit/dd958db)) ([#468](https://github.com/indaco/malt/pull/468))
+- **tui:** PTY end-to-end resize and delegation coverage ([29ad639](https://github.com/indaco/malt/commit/29ad639)) ([#457](https://github.com/indaco/malt/pull/457))
+- pin two network-flaky tests offline for deterministic runs ([de4eb84](https://github.com/indaco/malt/commit/de4eb84)) ([#452](https://github.com/indaco/malt/pull/452))
+
+### 🏡 Chores
+
+- refresh source pins and harden maintenance tooling ([6259653](https://github.com/indaco/malt/commit/6259653)) ([#466](https://github.com/indaco/malt/pull/466))
+- **devbox:** bump devbox schema and package lock ([9532b11](https://github.com/indaco/malt/commit/9532b11)) ([#465](https://github.com/indaco/malt/pull/465))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.16.0 - 2026-06-04
 
 ### Highlights
