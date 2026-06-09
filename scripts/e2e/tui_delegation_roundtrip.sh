@@ -21,6 +21,7 @@ set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # shellcheck source=scripts/lib/tui_pty.sh
+# shellcheck disable=SC1091 # sourced lib resolved at runtime; absent when this file is linted alone
 source "$ROOT/scripts/lib/tui_pty.sh"
 
 tui_pty_guard
@@ -34,10 +35,13 @@ fail() {
 }
 
 CAP="$TUI_PREFIX/cap.bin"
-# `x` raises the one-key uninstall guard; `y` confirms and delegates to the real
+# Launch opens on the Search tab; one `tab` reaches Installed. `x` raises the
+# one-key uninstall guard; `y` confirms and delegates to the real
 # `mt uninstall solopkg`, then the Installed pane refetches.
 out=$(
   tui_pty_drive "$CAP" 90 24 <<'ACT'
+settle 0.4
+send \t
 settle 0.4
 send x
 settle 0.4

@@ -123,7 +123,7 @@ pub const Banner = struct {
 };
 
 pub const App = struct {
-    active: Tab = .installed,
+    active: Tab = .search,
     editing: bool = false,
     quit: bool = false,
     states: TabStates = .{},
@@ -288,11 +288,11 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
                 // Undimmed + yellow so a recoverable failure reads as a warning,
                 // not chrome; `putContent` drops line-breakers the sanitizer let
                 // through, `truncate` keeps it within the column budget.
-                f.put(color.Style.yellow.code());
+                f.put(color.roleCode(.warning));
                 f.putContent(scroll_list.truncate(app.banner.slice(), cols));
                 f.put(color.Style.reset.code());
             } else {
-                f.put(color.Style.dim.code());
+                f.put(color.roleCode(.muted));
                 f.put(scroll_list.truncate(footerHelp(app.editing), cols));
                 f.put(color.Style.reset.code());
             }
@@ -834,7 +834,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     var frame = try allocator.alloc(u8, frameCap(term.currentSize()));
     defer allocator.free(frame);
 
-    try loadInstalled(io, allocator, &app, &store); // the default tab's data, before first paint
+    try loadInstalled(io, allocator, &app, &store); // pre-load the Installed list so it is ready when entered
     try repaint(fd, &frame, allocator, &app);
 
     var decoder: keys.Decoder = .{};
@@ -897,24 +897,25 @@ fn ch(c: u8) Key {
     return .{ .char = .{ .bytes = .{ c, 0, 0, 0 }, .len = 1 } };
 }
 
-test "tab cycles and 1-4 jump to a tab" {
+test "tab cycles and 1-5 jump to a tab" {
     var a: App = .{};
+    try std.testing.expectEqual(Tab.search, a.active); // the dashboard opens on Search
     a = step(a, .tab);
-    try std.testing.expectEqual(Tab.outdated, a.active);
-    a = step(a, ch('3'));
-    try std.testing.expectEqual(Tab.services, a.active);
-    a = step(a, ch('1'));
     try std.testing.expectEqual(Tab.installed, a.active);
+    a = step(a, ch('3'));
+    try std.testing.expectEqual(Tab.outdated, a.active);
+    a = step(a, ch('1'));
+    try std.testing.expectEqual(Tab.search, a.active);
 }
 
 test "left and right arrows switch tabs both directions and wrap" {
     var a: App = .{};
     a = step(a, .right);
-    try std.testing.expectEqual(Tab.outdated, a.active);
-    a = step(a, .left);
     try std.testing.expectEqual(Tab.installed, a.active);
-    a = step(a, .left); // wrap backward to the last tab
+    a = step(a, .left);
     try std.testing.expectEqual(Tab.search, a.active);
+    a = step(a, .left); // wrap backward to the last tab
+    try std.testing.expectEqual(Tab.doctor, a.active);
 }
 
 test "a committed filter survives a tab round-trip" {
@@ -934,7 +935,7 @@ test "a committed filter survives a tab round-trip" {
 }
 
 test "esc in normal mode routes to the active tab so it can cancel its guard" {
-    var a: App = .{};
+    var a: App = .{ .active = .installed };
     a.states.installed.confirm_uninstall = true;
     a = step(a, .esc); // not editing → must reach the tab, which lowers the guard
     try std.testing.expect(!a.states.installed.confirm_uninstall);
@@ -1022,7 +1023,7 @@ test "renderFrame draws a footer rule above a dimmed help line" {
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 80, 24);
     try std.testing.expect(std.mem.indexOf(u8, out, "─") != null); // horizontal rule
-    try std.testing.expect(std.mem.indexOf(u8, out, color.Style.dim.code()) != null); // dimmed help
+    try std.testing.expect(std.mem.indexOf(u8, out, color.Style.dim.code()) != null); // dimmed help: muted role == dim on the basic tier
     try std.testing.expect(std.mem.indexOf(u8, out, "quit") != null);
 }
 
@@ -1411,10 +1412,13 @@ test "committing the filter fires a search on the Search tab but no domain key e
     try std.testing.expectEqual(outdated.Request.none, b.states.outdated.request);
 }
 
-test "the 5 key jumps to the Search tab" {
+test "the 1 key jumps to the Search tab, the 5 key to Doctor" {
     var a: App = .{};
-    a = step(a, ch('5'));
+    a = step(a, .tab); // move off Search first
+    a = step(a, ch('1'));
     try std.testing.expectEqual(Tab.search, a.active);
+    a = step(a, ch('5'));
+    try std.testing.expectEqual(Tab.doctor, a.active);
 }
 
 test "refusalReason refuses non-tty, NO_COLOR, and CI; allows a clean tty" {

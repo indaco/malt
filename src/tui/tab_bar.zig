@@ -4,7 +4,7 @@ const std = @import("std");
 const color = @import("../ui/color.zig");
 const scroll_list = @import("scroll_list.zig");
 
-pub const Tab = enum { installed, outdated, services, doctor, search };
+pub const Tab = enum { search, installed, outdated, services, doctor };
 pub const count = @typeInfo(Tab).@"enum".fields.len;
 
 /// Cycle to the next tab, wrapping after the last so `tab` is a closed loop.
@@ -23,10 +23,10 @@ pub fn fromDigit(b: u8) ?Tab {
     return @enumFromInt(b - '1');
 }
 
-/// The single accent seam for tab titles. A theme system will resolve this
-/// from a palette; today it is one fixed accent so the bar reads as intentional.
+/// The single accent seam for tab titles. Resolved through the active theme so
+/// every title recolours together when MALT_THEME changes.
 fn accentCode() []const u8 {
-    return color.Style.cyan.code();
+    return color.roleCode(.accent);
 }
 
 // SGR reverse-video: highlights the active tab as a filled block. `color.zig`
@@ -60,7 +60,7 @@ pub fn render(buf: []u8, active: Tab, titles: [count][]const u8, cols: u16) []co
     return scroll_list.truncate(buf[0..len], cols);
 }
 
-const test_titles: [count][]const u8 = .{ "Installed", "Outdated", "Services", "Doctor", "Search" };
+const test_titles: [count][]const u8 = .{ "Search", "Installed", "Outdated", "Services", "Doctor" };
 
 fn visibleWidth(s: []const u8) usize {
     var w: usize = 0;
@@ -98,9 +98,9 @@ test "prev cycles backward through every tab and wraps" {
 }
 
 test "fromDigit maps 1-5 and rejects everything else" {
-    try std.testing.expectEqual(Tab.installed, fromDigit('1').?);
-    try std.testing.expectEqual(Tab.doctor, fromDigit('4').?);
-    try std.testing.expectEqual(Tab.search, fromDigit('5').?);
+    try std.testing.expectEqual(Tab.search, fromDigit('1').?);
+    try std.testing.expectEqual(Tab.services, fromDigit('4').?);
+    try std.testing.expectEqual(Tab.doctor, fromDigit('5').?);
     try std.testing.expect(fromDigit('0') == null);
     try std.testing.expect(fromDigit('6') == null);
     try std.testing.expect(fromDigit('a') == null);

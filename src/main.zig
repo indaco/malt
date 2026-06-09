@@ -376,6 +376,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // query write could otherwise land inside a progress-bar frame).
     _ = color_mod.background();
     _ = color_mod.truecolorSupported();
+    _ = color_mod.theme(); // resolve MALT_THEME once, before any TUI frame
 
     var arena = std.heap.ArenaAllocator.init(backing);
     defer arena.deinit();

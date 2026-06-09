@@ -98,11 +98,11 @@ fn dotGlyph(st: Status) []const u8 {
     };
 }
 
-fn dotStyle(st: Status) color.Style {
+fn dotStyle(st: Status) color.Role {
     return switch (st) {
-        .running => .green, // a live service reads as healthy
-        .stopped => .dim,
-        .unknown => .dim,
+        .running => .success, // a live service reads as healthy
+        .stopped => .muted,
+        .unknown => .muted,
     };
 }
 
@@ -118,7 +118,7 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
 /// footer carries only the shell-wide keys).
 fn renderActionLine(f: *tab.Frame, rect: tab.Rect) void {
     f.moveTo(rect.row, rect.col);
-    f.put(color.Style.dim.code());
+    f.put(color.roleCode(.muted));
     f.putContent(scroll_list.truncate("s: start   x: stop   r: restart", rect.width));
     f.put(color.Style.reset.code());
 }
@@ -140,7 +140,7 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         // The dot keeps its own colour regardless of selection; the reverse-video
         // selection wraps only the text columns so the two SGRs never tangle.
         const st = statusOf(svc.state);
-        f.put(dotStyle(st).code());
+        f.put(color.roleCode(dotStyle(st)));
         f.put(dotGlyph(st));
         f.put(color.Style.reset.code());
         f.put(" ");

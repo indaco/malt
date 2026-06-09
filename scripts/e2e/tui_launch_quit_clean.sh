@@ -7,7 +7,8 @@
 # proves the terminal lifecycle that only exists under a tty.
 #
 # Asserts:
-#   - the first frame carries the tab bar and a seeded package row;
+#   - the tab bar renders and a seeded package row appears once the Installed
+#     tab becomes active during the cycle (launch opens on the Search tab);
 #   - cycling with `tab` makes each tab the active (reverse-video) one in turn;
 #   - `q` exits 0 and the stream restores the terminal exactly once — one
 #     alt-screen enter paired with one leave, and the cursor shown again.
@@ -33,8 +34,8 @@ fail() {
 }
 
 CAP="$TUI_PREFIX/cap.bin"
-# Start on Installed; four `tab`s cycle through Outdated, Services, Doctor, and
-# Search, settling on each so its frame is captured.
+# Start on Search; four `tab`s cycle through Installed, Outdated, Services, and
+# Doctor, settling on each so its frame is captured.
 out=$(
   tui_pty_drive "$CAP" 90 24 <<'ACT'
 settle 0.4
@@ -53,7 +54,8 @@ ACT
 
 echo "$out" | grep -q "EXIT_STATUS=0" || fail "mt tui did not exit 0 on q ($out)"
 
-# First frame: tab bar + a seeded row both rendered.
+# The tab bar renders (its 'Installed' label is always present) and, once the
+# Installed tab is entered during the cycle, a seeded row appears.
 grep -qa "Installed" "$CAP" || fail "tab bar 'Installed' label never rendered"
 grep -qa "pkg01" "$CAP" || fail "seeded package row never rendered"
 

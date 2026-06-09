@@ -35,13 +35,16 @@ fail() {
 }
 
 CAP="$TUI_PREFIX/cap.bin"
-# 12 down-arrows put the selection well below the fold at height 14, so the
+# Launch opens on Search; one `tab` reaches the Installed list, then 12
+# down-arrows put the selection well below the fold at height 14, so the
 # viewport has already scrolled before the resize. After the wide->narrow
 # reflow, shrink below the usable minimum (12 cols < the 20-col floor) to prove
 # the clean "terminal too small" fallback, then restore the original size to
 # prove the dashboard recovers with its selection intact.
 out=$(
   tui_pty_drive "$CAP" 100 14 <<'ACT'
+send \t
+settle 0.4
 send \e[B\e[B\e[B\e[B\e[B\e[B\e[B\e[B\e[B\e[B\e[B\e[B
 settle 0.5
 mark PRE

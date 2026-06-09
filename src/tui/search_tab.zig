@@ -86,10 +86,10 @@ fn kindGlyph(k: Kind) []const u8 {
     };
 }
 
-fn kindStyle(k: Kind) color.Style {
+fn kindStyle(k: Kind) color.Role {
     return switch (k) {
-        .formula => .cyan,
-        .cask => .blue,
+        .formula => .accent,
+        .cask => .secondary,
     };
 }
 
@@ -115,14 +115,14 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
 /// footer carries only the shell-wide keys).
 fn renderActionLine(f: *tab.Frame, rect: tab.Rect) void {
     f.moveTo(rect.row, rect.col);
-    f.put(color.Style.dim.code());
+    f.put(color.roleCode(.muted));
     f.putContent(scroll_list.truncate("enter: search   i: install", rect.width));
     f.put(color.Style.reset.code());
 }
 
 fn renderStatus(f: *tab.Frame, rect: tab.Rect, msg: []const u8) void {
     f.moveTo(rect.row, rect.col);
-    f.put(color.Style.dim.code());
+    f.put(color.roleCode(.muted));
     f.putContent(scroll_list.truncate(msg, rect.width));
     f.put(color.Style.reset.code());
 }
@@ -138,7 +138,7 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         // The kind glyph keeps its own colour regardless of selection; the
         // reverse-video selection wraps only the text columns so the two SGRs
         // never tangle.
-        f.put(kindStyle(m.kind).code());
+        f.put(color.roleCode(kindStyle(m.kind)));
         f.put(kindGlyph(m.kind));
         f.put(color.Style.reset.code());
         f.put(" ");
