@@ -98,6 +98,7 @@ pub const tui_detail_pane = @import("tui/detail_pane.zig");
 pub const tui_filter_input = @import("tui/filter_input.zig");
 pub const tui_json_info = @import("tui/json/info.zig");
 pub const tui_json_list = @import("tui/json/list.zig");
+pub const tui_json_outdated = @import("tui/json/outdated.zig");
 pub const tui_keys = @import("tui/keys.zig");
 pub const tui_layout = @import("tui/layout.zig");
 pub const tui_scroll_list = @import("tui/scroll_list.zig");

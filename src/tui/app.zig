@@ -23,6 +23,7 @@ const scroll_list = @import("scroll_list.zig");
 const spawn = @import("spawn.zig");
 const list_json = @import("json/list.zig");
 const info_json = @import("json/info.zig");
+const outdated_json = @import("json/outdated.zig");
 
 const installed = @import("installed_tab.zig");
 const outdated = @import("outdated_tab.zig");
@@ -320,7 +321,8 @@ fn refusalMessage(r: Refusal) []const u8 {
 }
 
 pub const RunError = term.TermError || std.mem.Allocator.Error ||
-    spawn.ReadError || spawn.InlineError || list_json.Error || info_json.Error || error{ReadFailed};
+    spawn.ReadError || spawn.InlineError || list_json.Error || info_json.Error ||
+    outdated_json.Error || error{ReadFailed};
 
 /// How the event loop treats a run-loop error: a `recoverable` backend fault
 /// becomes an inline banner and the session keeps running; a `fatal` fault
@@ -357,10 +359,16 @@ pub fn classify(err: RunError) ErrorClass {
 const Store = struct {
     installed: ?list_json.Parsed = null,
     detail: ?info_json.Parsed = null,
+    outdated: ?outdated_json.Parsed = null,
+    /// The Outdated tab's checkbox state, parallel to `outdated.?.items`. Owned
+    /// here, resized to the row count on each (re)load, borrowed by the tab.
+    outdated_checked: []bool = &.{},
 
-    fn deinit(self: *Store) void {
+    fn deinit(self: *Store, allocator: std.mem.Allocator) void {
         if (self.installed) |p| p.deinit();
         if (self.detail) |p| p.deinit();
+        if (self.outdated) |p| p.deinit();
+        if (self.outdated_checked.len != 0) allocator.free(self.outdated_checked);
     }
 };
 
@@ -440,6 +448,91 @@ fn serviceInstalled(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app
     }
 }
 
+/// (Re)read `mt outdated --json` and repoint the Outdated tab's rows at the fresh
+/// parse, freeing the previous one. The checkbox buffer is resized to the new row
+/// count and reset — an upgrade removes the upgraded rows, so a stale selection
+/// would point at the wrong packages.
+fn loadOutdated(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+    // Annotate any failure as a recoverable banner; the loop boundary decides
+    // recoverable vs fatal. The store is swapped only after a clean parse, so a
+    // failure keeps the last-good rows and their selection.
+    errdefer |err| app.banner.set("outdated refresh failed", @errorName(err));
+    const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{"outdated"});
+    defer allocator.free(argv);
+    const bytes = try spawn.readJson(io, allocator, argv);
+    defer allocator.free(bytes);
+
+    const parsed = try outdated_json.parse(allocator, bytes);
+    errdefer parsed.deinit();
+    // A fresh checkbox buffer, all clear: an upgrade removes the upgraded rows, so
+    // carrying the old selection forward would point at the wrong packages.
+    const checked = try allocator.alloc(bool, parsed.items.len);
+    @memset(checked, false);
+
+    if (store.outdated) |old| old.deinit();
+    if (store.outdated_checked.len != 0) allocator.free(store.outdated_checked);
+    store.outdated = parsed;
+    store.outdated_checked = checked;
+    app.states.outdated.items = parsed.items;
+    app.states.outdated.checked = checked;
+}
+
+/// Build the `mt upgrade <names...>` argv for the checked Outdated rows. Pure
+/// over the tab state: returns null when nothing is selected (the no-op), else an
+/// owned argv whose name elements borrow from the parse storage. Caller frees the
+/// returned slice (not its elements).
+fn upgradeArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const outdated.State) std.mem.Allocator.Error!?[]const []const u8 {
+    const count = outdated.selectedCount(st);
+    if (count == 0) return null; // empty selection: the upgrade is a no-op
+    const rest = try allocator.alloc([]const u8, 1 + count);
+    defer allocator.free(rest);
+    rest[0] = "upgrade";
+    _ = outdated.selectedNames(st, rest[1..]); // exactly `count` names, in item order
+    return try spawn.inlineArgv(allocator, mt_path, rest);
+}
+
+/// Delegate the checked upgrades to the real `mt` inline, then refresh. The argv
+/// names borrow from the current parse storage; the post-spawn reload frees that
+/// storage, so the names are not read afterwards.
+fn doUpgrade(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+    const argv = (try upgradeArgv(allocator, app.mt_path, &app.states.outdated)) orelse return; // empty selection: no-op
+    defer allocator.free(argv);
+    {
+        // A non-zero `mt upgrade` re-enters the dashboard (the user keeps malt's
+        // real output in their scrollback) and surfaces as a recoverable banner;
+        // only a terminal fault is fatal. Scoped so the refresh below reports
+        // under its own op, not "upgrade".
+        errdefer |err| app.banner.set("upgrade failed", @errorName(err));
+        try spawn.runInlineReenter(t, argv);
+    }
+    try loadOutdated(io, allocator, app, store); // the upgraded rows are gone — refetch
+    markStaleAfterMutation(app); // Installed sizes/versions changed too
+}
+
+/// Perform any effect the pure `step` requested on the Outdated tab, then clear
+/// it, and lazily (re)load on first entry or after a mutation marked it dirty.
+fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+    const req = app.states.outdated.request;
+    app.states.outdated.request = .none;
+    switch (req) {
+        .none => {},
+        .upgrade => try doUpgrade(io, allocator, t, app, store),
+    }
+    // Lazy per-tab load: first activation and post-mutation staleness both arrive
+    // as the dirty flag (set at init and by `markStaleAfterMutation`).
+    if (app.active == .outdated and takeDirty(app, .outdated)) {
+        try loadOutdated(io, allocator, app, store);
+    }
+}
+
+/// Drain the active tab's pending effects after a keypress. Each tab's service is
+/// a no-op unless that tab is active and has a request or is due a lazy refresh,
+/// so calling both each loop is cheap and keeps the dispatch flat.
+fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+    try serviceInstalled(io, allocator, t, app, store);
+    try serviceOutdated(io, allocator, t, app, store);
+}
+
 fn isTty(io: std.Io, fd: std.posix.fd_t) bool {
     const f: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
     return f.isTty(io) catch false;
@@ -493,8 +586,9 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     term.installWinch(fd);
 
     var app: App = .{ .mt_path = mt_path }; // re-exec this mt for delegated mutations
+    app.dirty.insert(.outdated); // lazy: load `mt outdated --json` on first activation
     var store: Store = .{};
-    defer store.deinit();
+    defer store.deinit(allocator);
     var frame = try allocator.alloc(u8, frameCap(term.currentSize()));
     defer allocator.free(frame);
 
@@ -523,7 +617,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
                     // A recoverable backend fault becomes the banner the failing
                     // op already set and the loop continues; only a fatal fault
                     // (terminal/OOM) propagates to the errdefer restore + exit.
-                    serviceInstalled(io, allocator, &t, &app, &store) catch |err| switch (classify(err)) {
+                    service(io, allocator, &t, &app, &store) catch |err| switch (classify(err)) {
                         .recoverable => {},
                         .fatal => return err,
                     };
@@ -807,7 +901,7 @@ test "a failed list refresh names the op in the banner and keeps the last-good r
     defer t.deinit();
     var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
     var store: Store = .{};
-    defer store.deinit();
+    defer store.deinit(std.testing.allocator);
     try std.testing.expectError(error.BadJson, loadInstalled(t.io(), std.testing.allocator, &app, &store));
     try std.testing.expectEqualStrings("list refresh failed: BadJson", app.banner.slice());
     try std.testing.expectEqual(@as(usize, 0), app.states.installed.items.len); // last-good kept
@@ -820,10 +914,47 @@ test "a failed info read names the package in the banner and leaves the pane clo
     const items = [_]list_json.Pkg{.{ .name = "jq", .version = "1", .kind = .formula, .pinned = false, .size_bytes = null, .linked = null }};
     app.states.installed.items = &items;
     var store: Store = .{};
-    defer store.deinit();
+    defer store.deinit(std.testing.allocator);
     try std.testing.expectError(error.BadJson, openDetail(t.io(), std.testing.allocator, &app, &store));
     try std.testing.expectEqualStrings("info for jq failed: BadJson", app.banner.slice());
     try std.testing.expect(app.states.installed.detail == null); // the pane never opened
+}
+
+test "upgradeArgv builds `mt upgrade <names...>` with exactly the checked names in order" {
+    const items = [_]outdated.Row{
+        .{ .name = "wget", .installed = "1", .latest = "2", .kind = .formula, .pinned = false, .tap = "" },
+        .{ .name = "curl", .installed = "1", .latest = "2", .kind = .formula, .pinned = true, .tap = "" },
+        .{ .name = "ffmpeg", .installed = "1", .latest = "2", .kind = .formula, .pinned = false, .tap = "" },
+    };
+    var checked = [_]bool{ true, true, true }; // curl is pinned → must be excluded
+    var st: outdated.State = .{ .items = &items, .checked = &checked };
+    const argv = (try upgradeArgv(std.testing.allocator, "/opt/homebrew/bin/mt", &st)).?;
+    defer std.testing.allocator.free(argv);
+    try std.testing.expectEqual(@as(usize, 4), argv.len); // mt, upgrade, two names
+    try std.testing.expectEqualStrings("/opt/homebrew/bin/mt", argv[0]);
+    try std.testing.expectEqualStrings("upgrade", argv[1]);
+    try std.testing.expectEqualStrings("wget", argv[2]);
+    try std.testing.expectEqualStrings("ffmpeg", argv[3]); // pinned curl skipped
+}
+
+test "upgradeArgv returns null for an empty selection so the upgrade is a no-op" {
+    const items = [_]outdated.Row{
+        .{ .name = "wget", .installed = "1", .latest = "2", .kind = .formula, .pinned = false, .tap = "" },
+    };
+    var checked = [_]bool{false};
+    var st: outdated.State = .{ .items = &items, .checked = &checked };
+    try std.testing.expect((try upgradeArgv(std.testing.allocator, "/bin/mt", &st)) == null);
+}
+
+test "a failed outdated refresh names the op in the banner and keeps the last-good rows" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    try std.testing.expectError(error.BadJson, loadOutdated(t.io(), std.testing.allocator, &app, &store));
+    try std.testing.expectEqualStrings("outdated refresh failed: BadJson", app.banner.slice());
+    try std.testing.expectEqual(@as(usize, 0), app.states.outdated.items.len); // last-good kept
 }
 
 test "refusalReason refuses non-tty, NO_COLOR, and CI; allows a clean tty" {
