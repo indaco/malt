@@ -58,6 +58,30 @@ test "the SIGWINCH resized flag is consumed exactly once" {
     try testing.expect(!term.takeResized()); // a second read sees nothing
 }
 
+test "classify keeps backend faults recoverable and terminal/OOM faults fatal" {
+    // The whole point of the surface: a flaky child or bad JSON must not exit.
+    try testing.expectEqual(app.ErrorClass.recoverable, app.classify(error.ChildFailed));
+    try testing.expectEqual(app.ErrorClass.recoverable, app.classify(error.BadJson));
+    try testing.expectEqual(app.ErrorClass.recoverable, app.classify(error.SpawnFailed));
+    // Terminal integrity / OOM still tears down cleanly — the TUI-012 guarantee.
+    try testing.expectEqual(app.ErrorClass.fatal, app.classify(error.WriteFailed));
+    try testing.expectEqual(app.ErrorClass.fatal, app.classify(error.OutOfMemory));
+}
+
+test "a recoverable banner is painted in the footer and a keypress dismisses it" {
+    var a: app.App = .{};
+    a.banner.set("info for jq failed", "BadJson");
+    var buf: [8192]u8 = undefined;
+    const shown = app.renderFrame(&buf, &a, 80, 24);
+    try testing.expect(std.mem.indexOf(u8, shown, "info for jq failed: BadJson") != null);
+
+    a = app.step(a, .down); // any key clears the transient banner
+    try testing.expect(!a.banner.isSet());
+    const cleared = app.renderFrame(&buf, &a, 80, 24);
+    try testing.expect(std.mem.indexOf(u8, cleared, "info for jq failed") == null);
+    try testing.expect(std.mem.indexOf(u8, cleared, "quit") != null); // help line is back
+}
+
 test "refusalReason refuses a non-interactive terminal and allows a clean tty" {
     try testing.expectEqual(@as(?app.Refusal, .not_a_tty), app.refusalReason(false, true, false, false));
     try testing.expectEqual(@as(?app.Refusal, .no_color), app.refusalReason(true, true, true, false));

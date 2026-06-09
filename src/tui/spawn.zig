@@ -140,6 +140,28 @@ pub fn runInline(t: *term.Term, argv: []const []const u8) InlineError!void {
     return around(TermCtrl{ .t = t }, ChildBody{ .io = t.io, .argv = argv });
 }
 
+/// Like `around`, but a *child* failure re-enters the dashboard and surfaces the
+/// non-zero exit as a value — the graceful (recoverable) inline path. Only a
+/// terminal re-enter fault is fatal; then the terminal is left restored. The
+/// child outcome is captured (not thrown) so re-entry happens regardless, then
+/// returned, so a failed mutation lands the user back in the dashboard with
+/// `mt`'s real output already in their scrollback.
+fn aroundReenter(ctrl: anytype, body: anytype) !void {
+    ctrl.leave(); // hand the terminal to the child
+    const child = body.run(); // capture: the child's failure is data, not a throw
+    ctrl.enter() catch |e| {
+        ctrl.leave(); // a real terminal fault is fatal — leave it restored
+        return e;
+    };
+    return child; // back in the dashboard; surface a non-zero child exit as a value
+}
+
+/// Run a delegated mutation inline on the graceful path: a non-zero child exit
+/// re-enters the dashboard and is returned as a recoverable value.
+pub fn runInlineReenter(t: *term.Term, argv: []const []const u8) InlineError!void {
+    return aroundReenter(TermCtrl{ .t = t }, ChildBody{ .io = t.io, .argv = argv });
+}
+
 // ─── tests ───────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -267,5 +289,36 @@ test "a re-enter fault still restores the terminal" {
     var ft: FakeTerm = .{ .log = &log, .enter_fails = true };
     try testing.expectError(error.Reenter, around(&ft, FakeBody{ .fails = false, .log = &log }));
     try testing.expectEqualStrings("LSEL", log.items); // leave, spawn, enter(fail), errdefer leave
+    try testing.expect(!ft.entered);
+}
+
+// The graceful inline path: unlike `around`, a child failure re-enters the
+// dashboard and hands the failure back as a value, so a recoverable mutation
+// fault never tears the session down — only a terminal fault does.
+
+test "aroundReenter re-enters the dashboard on a child failure and surfaces it" {
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(testing.allocator);
+    var ft: FakeTerm = .{ .log = &log };
+    try testing.expectError(error.Spawn, aroundReenter(&ft, FakeBody{ .fails = true, .log = &log }));
+    try testing.expectEqualStrings("LSE", log.items); // leave, spawn(fail), re-enter — no trailing leave
+    try testing.expect(ft.entered); // ends IN the dashboard, unlike `around`
+}
+
+test "aroundReenter ends in the dashboard on a successful mutation" {
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(testing.allocator);
+    var ft: FakeTerm = .{ .log = &log };
+    try aroundReenter(&ft, FakeBody{ .fails = false, .log = &log });
+    try testing.expectEqualStrings("LSE", log.items);
+    try testing.expect(ft.entered);
+}
+
+test "aroundReenter treats a re-enter fault as fatal and restores the terminal" {
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(testing.allocator);
+    var ft: FakeTerm = .{ .log = &log, .enter_fails = true };
+    try testing.expectError(error.Reenter, aroundReenter(&ft, FakeBody{ .fails = false, .log = &log }));
+    try testing.expectEqualStrings("LSEL", log.items); // leave, spawn, enter(fail), leave
     try testing.expect(!ft.entered);
 }
