@@ -56,9 +56,16 @@ pub const SemanticStyle = enum {
     /// Used by passive notices (e.g. an available self-update).
     notice,
 
-    /// ANSI escape for the current cached palette cell.
+    /// ANSI escape for the current cached palette cell. A named `MALT_THEME`
+    /// (when it applies — see `namedThemeApplies`) maps this semantic role onto
+    /// the theme's palette so CLI output themes the same as the TUI; otherwise
+    /// the background-aware default palette is used unchanged.
     pub fn code(self: SemanticStyle) []const u8 {
-        return paletteCode(self, background(), truecolorSupported());
+        const t = theme();
+        const bg = background();
+        const tc = truecolorSupported();
+        if (namedThemeApplies(t, bg, tc)) return themes.named(t).?.get(semanticToRole(self));
+        return paletteCode(self, bg, tc);
     }
 };
 
@@ -474,14 +481,47 @@ const secondary_blue: Secondary = .{
     .basic = "\x1b[34m",
 };
 
-/// Pure role resolver. Named themes use their RGB on truecolor and degrade to
-/// the `.default` basic cell otherwise; `.default` reuses the tiered palette.
+/// Pure role resolver. A named theme uses its RGB when it applies; otherwise
+/// (basic terminal, polarity mismatch, or `.default`) it falls back to the
+/// background-aware default palette.
 pub fn resolveRole(t: Theme, role: Role, bg: Background, truecolor: bool) []const u8 {
-    if (themes.named(t)) |p| {
-        if (truecolor) return p.get(role);
-        return defaultRoleCode(role, bg, false); // 8-colour can't carry identity
-    }
+    if (namedThemeApplies(t, bg, truecolor)) return themes.named(t).?.get(role);
     return defaultRoleCode(role, bg, truecolor);
+}
+
+/// A named theme applies only on a truecolor terminal whose detected background
+/// does not contradict its polarity. The one predicate shared by the CLI
+/// (`SemanticStyle.code`) and the TUI (`resolveRole`) so the two surfaces never
+/// disagree about when a theme is in effect. False ⇒ fall back to `.default`.
+fn namedThemeApplies(t: Theme, bg: Background, truecolor: bool) bool {
+    return themes.named(t) != null and truecolor and !polarityConflicts(t, bg);
+}
+
+/// True only when the *detected* background is the opposite polarity to the
+/// theme. `.unknown` never conflicts — an explicit MALT_THEME is overridden only
+/// on positive evidence the theme would be illegible.
+fn polarityConflicts(t: Theme, bg: Background) bool {
+    const p = themes.polarity(t) orelse return false;
+    return switch (bg) {
+        .light => p == .dark,
+        .dark => p == .light,
+        .unknown => false,
+    };
+}
+
+/// Map a CLI semantic role onto the TUI paint role a named theme carries, so a
+/// theme selected via MALT_THEME colours CLI output too. Consulted only on the
+/// named-theme path; under `.default` the CLI keeps its own `notice`/`detail`
+/// cells via `paletteCode`.
+fn semanticToRole(role: SemanticStyle) Role {
+    return switch (role) {
+        .info => .accent,
+        .notice => .secondary,
+        .success => .success,
+        .warn => .warning,
+        .err => .danger,
+        .detail => .muted,
+    };
 }
 
 /// `.default` theme: map each role onto the existing background-aware cells,
@@ -503,4 +543,44 @@ fn defaultRoleCode(role: Role, bg: Background, truecolor: bool) []const u8 {
             .dark, .unknown => if (truecolor) secondary_blue.dark_tc else secondary_blue.basic,
         },
     };
+}
+
+// ─── alignment predicate tests ───────────────────────────────────────
+//
+// These pin the one predicate the CLI and TUI share, so a regression that
+// silently re-splits the two surfaces is caught here rather than by eye.
+
+test "semanticToRole pairs each CLI role with a theme paint role" {
+    // info/notice have no semantic twin in a named palette, so they borrow the
+    // decorative accent/secondary; the other four pair by meaning.
+    try std.testing.expectEqual(Role.accent, semanticToRole(.info));
+    try std.testing.expectEqual(Role.secondary, semanticToRole(.notice));
+    try std.testing.expectEqual(Role.success, semanticToRole(.success));
+    try std.testing.expectEqual(Role.warning, semanticToRole(.warn));
+    try std.testing.expectEqual(Role.danger, semanticToRole(.err));
+    try std.testing.expectEqual(Role.muted, semanticToRole(.detail));
+}
+
+test "polarityConflicts fires only on a detected opposite background" {
+    // dracula is dark: clashes with a light terminal, agrees with dark, and gets
+    // the benefit of the doubt on unknown (we never override on a guess).
+    try std.testing.expect(polarityConflicts(.dracula, .light));
+    try std.testing.expect(!polarityConflicts(.dracula, .dark));
+    try std.testing.expect(!polarityConflicts(.dracula, .unknown));
+    // catppuccin-latte is light: the mirror image.
+    try std.testing.expect(polarityConflicts(.catppuccin_latte, .dark));
+    try std.testing.expect(!polarityConflicts(.catppuccin_latte, .light));
+    try std.testing.expect(!polarityConflicts(.catppuccin_latte, .unknown));
+    // .default has no polarity, so it never conflicts on any background.
+    try std.testing.expect(!polarityConflicts(.default, .light));
+    try std.testing.expect(!polarityConflicts(.default, .dark));
+}
+
+test "namedThemeApplies requires named + truecolor + no polarity conflict" {
+    // All three conditions must hold; failing any one falls back to .default.
+    try std.testing.expect(namedThemeApplies(.dracula, .dark, true));
+    try std.testing.expect(namedThemeApplies(.dracula, .unknown, true));
+    try std.testing.expect(!namedThemeApplies(.dracula, .light, true)); // polarity conflict
+    try std.testing.expect(!namedThemeApplies(.dracula, .dark, false)); // basic terminal
+    try std.testing.expect(!namedThemeApplies(.default, .dark, true)); // .default is never "named"
 }
