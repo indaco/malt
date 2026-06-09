@@ -38,6 +38,11 @@ pub fn title() []const u8 {
     return "Outdated";
 }
 
+/// The tab's action keys, surfaced in the shared footer next to the global keys.
+pub fn footerHint() []const u8 {
+    return "space: toggle   a: all   n: none   u: upgrade";
+}
+
 /// Case-insensitive substring match of `filter` against `name`. An empty filter
 /// matches everything.
 pub fn matches(name: []const u8, filter: []const u8) bool {
@@ -128,33 +133,20 @@ fn requestUpgrade(s: *State) void {
     if (selectedCount(s) > 0) s.request = .upgrade; // empty selection is a no-op
 }
 
-/// Pure render: a dim action line on top, then the filtered + scrolled checkbox
-/// list below. A pure function of `(state, rect)` so a resize is a re-render.
+/// Pure render: the filtered + scrolled checkbox list. The multi-select keys
+/// live in the shared footer, so the list owns the whole rect; the `[x]`
+/// checkboxes carry the selection. A pure function of `(state, rect)` so a
+/// resize is a re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (r.height == 0) return;
-    renderActionLine(s, f, .{ .row = r.row, .col = r.col, .width = r.width, .height = 1 });
-    renderList(s, f, .{ .row = r.row + 1, .col = r.col, .width = r.width, .height = r.height -| 1 });
-}
-
-/// The dim action line: the multi-select keys plus the current batch size, or a
-/// hint when nothing is selected — the empty-selection no-op's only feedback.
-fn renderActionLine(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
-    f.moveTo(rect.row, rect.col);
-    f.put(color.roleCode(.muted));
-    var b: [128]u8 = undefined;
-    const n = selectedCount(s);
-    const line = if (n > 0)
-        std.fmt.bufPrint(&b, "u: upgrade selected ({d})   space: toggle   a: all   n: none", .{n}) catch "u: upgrade   space: toggle   a: all   n: none"
-    else
-        "space: select rows to upgrade   a: all   n: none";
-    f.putContent(scroll_list.truncate(line, rect.width));
-    f.put(color.Style.reset.code());
+    renderList(s, f, r);
 }
 
 fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     if (rect.height == 0) return;
     const filter = s.chrome.filter.slice();
     const nf = filteredCount(s.items, filter);
+    if (nf == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "Everything is up to date.");
     const v = scroll_list.clamp(s.chrome.view, nf, rect.height);
 
     var fi: usize = 0;
@@ -367,26 +359,10 @@ test "render highlights the selected row" {
     try testing.expect(std.mem.indexOf(u8, f.slice(), reverse) != null);
 }
 
-test "the action line shows the batch size when rows are selected" {
-    var buf: [4096]u8 = undefined;
-    var f: tab.Frame = .{ .buf = &buf };
-    var checked = [_]bool{ true, false, true, false }; // wget + firefox
-    const s: State = .{ .items = &sample, .checked = &checked };
-    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "upgrade") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "(2)") != null); // two selected
-}
-
-test "the action line shows the empty-selection hint and no upgrade count" {
-    var buf: [4096]u8 = undefined;
-    var f: tab.Frame = .{ .buf = &buf };
-    var checked = [_]bool{false} ** 4;
-    const s: State = .{ .items = &sample, .checked = &checked };
-    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "select") != null); // a hint, not a count
-    try testing.expect(std.mem.indexOf(u8, out, "(0)") == null);
+test "footerHint exposes the multi-select keys for the shared footer" {
+    // The selection is carried by the row checkboxes; the keys live in the footer.
+    try testing.expect(std.mem.indexOf(u8, footerHint(), "space") != null);
+    try testing.expect(std.mem.indexOf(u8, footerHint(), "upgrade") != null);
 }
 
 test "render reflows: the same state at two widths differs" {
@@ -401,11 +377,12 @@ test "render reflows: the same state at two widths differs" {
     try testing.expect(!std.mem.eql(u8, fa.slice(), fb.slice()));
 }
 
-test "render on an empty list is a clean no-crash frame" {
+test "render on an empty list shows the up-to-date placeholder, not a blank pane" {
     var buf: [1024]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &.{} };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 }); // must not trap
+    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "up to date") != null);
 }
 
 test "the cores tolerate a checked slice shorter than items without trapping" {

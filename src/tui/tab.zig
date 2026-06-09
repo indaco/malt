@@ -9,6 +9,7 @@
 //! content is stripped of line-breaking controls before it reaches the frame.
 
 const std = @import("std");
+const color = @import("../ui/color.zig");
 const scroll_list = @import("scroll_list.zig");
 const layout = @import("layout.zig");
 const filter_input = @import("filter_input.zig");
@@ -76,6 +77,17 @@ pub fn paintRows(f: *Frame, rows: []const []const u8, view: scroll_list.View, re
     }
 }
 
+/// Paint one dim line at the top of `rect` — the shared empty-state / "no
+/// matches" placeholder so every tab's empty list reads the same way instead of
+/// a blank pane. Content goes through `putContent` like every other row.
+pub fn renderHint(f: *Frame, rect: Rect, msg: []const u8) void {
+    if (rect.height == 0) return;
+    f.moveTo(rect.row, rect.col);
+    f.put(color.roleCode(.muted));
+    f.putContent(scroll_list.truncate(msg, rect.width));
+    f.put(color.Style.reset.code());
+}
+
 /// Comptime contract check: a conforming tab module exposes `State` (with a
 /// `chrome: Chrome` field), `title`, `step`, and `render`. Called on each tab so
 /// a missing or mis-typed piece fails the build, not the dashboard at runtime.
@@ -83,7 +95,7 @@ pub fn verify(comptime M: type) void {
     if (!@hasDecl(M, "State")) @compileError(@typeName(M) ++ ": tab must expose `pub const State`");
     if (!@hasField(M.State, "chrome")) @compileError(@typeName(M) ++ ".State must embed a `chrome` field");
     if (@FieldType(M.State, "chrome") != Chrome) @compileError(@typeName(M) ++ ".State.chrome must be tab.Chrome");
-    for ([_][]const u8{ "title", "step", "render" }) |decl| {
+    for ([_][]const u8{ "title", "footerHint", "step", "render" }) |decl| {
         if (!@hasDecl(M, decl)) @compileError(@typeName(M) ++ ": tab must expose `pub fn " ++ decl ++ "`");
     }
 }
@@ -94,6 +106,9 @@ const GoodTab = struct {
     pub const State = struct { chrome: Chrome = .{} };
     pub fn title() []const u8 {
         return "Good";
+    }
+    pub fn footerHint() []const u8 {
+        return "g: go";
     }
     pub fn step(s: *State, key: Key) void {
         _ = s;
@@ -108,6 +123,20 @@ const GoodTab = struct {
 
 test "verify accepts a conforming tab module" {
     comptime verify(GoodTab);
+}
+
+test "renderHint paints the placeholder text into the frame" {
+    var buf: [128]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    renderHint(&f, .{ .row = 2, .col = 1, .width = 40, .height = 6 }, "Nothing here.");
+    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "Nothing here.") != null);
+}
+
+test "renderHint on a zero-height rect is a clean no-op" {
+    var buf: [64]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    renderHint(&f, .{ .row = 1, .col = 1, .width = 40, .height = 0 }, "x"); // must not trap
+    try std.testing.expectEqual(@as(usize, 0), f.slice().len);
 }
 
 test "Frame.put is bounded and never overflows the buffer" {

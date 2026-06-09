@@ -84,9 +84,36 @@ var pkg_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]co
 
 /// Seed the io/environ used by env reads and TTY probes. Called by
 /// `main` after `AppCtx` is built. Inverse of relying on globals.
+///
+/// Re-seeding invalidates every env-derived cache: a value resolved against the
+/// empty default environ (a boot-time pre-warm before this call) must not stick,
+/// or MALT_THEME / COLORTERM / NO_COLOR silently freeze at their unset defaults.
 pub fn setRuntime(io: std.Io, environ: std.process.Environ) void {
     pkg_io = io;
     pkg_environ = environ;
+    color_enabled = null;
+    emoji_enabled = null;
+    background_cached = null;
+    truecolor_cached = null;
+    theme_cached = null;
+}
+
+test "setRuntime re-seeds the theme cache so a pre-seed warm cannot freeze it" {
+    // Reproduces the boot hazard: theme() warmed against the empty default
+    // environ (before main seeds the real one) must not stick at .default once
+    // the environ carrying MALT_THEME arrives — or the TUI never themes.
+    const io = std.Options.debug_io;
+    const empty: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } };
+    const themed: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{"MALT_THEME=dracula"} } };
+
+    setRuntime(io, empty);
+    try std.testing.expectEqual(Theme.default, theme()); // warmed before the env is known
+
+    setRuntime(io, themed); // the real environ arrives; the stale cache must drop
+    try std.testing.expectEqual(Theme.dracula, theme());
+
+    setRuntime(io, empty); // leave module state clean for sibling tests
+    setThemeForTest(null);
 }
 
 fn lookupEnv(name: []const u8) ?[:0]const u8 {

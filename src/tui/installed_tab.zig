@@ -48,6 +48,11 @@ pub fn title() []const u8 {
     return "Installed";
 }
 
+/// The tab's action keys, surfaced in the shared footer next to the global keys.
+pub fn footerHint() []const u8 {
+    return "enter: details   x: uninstall";
+}
+
 /// Case-insensitive substring match of `filter` against `name`. An empty filter
 /// matches everything.
 pub fn matches(name: []const u8, filter: []const u8) bool {
@@ -132,6 +137,7 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     if (rect.height == 0) return;
     const filter = s.chrome.filter.slice();
     const nf = filteredCount(s.items, filter);
+    if (nf == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "No packages installed yet.");
     const v = scroll_list.clamp(s.chrome.view, nf, rect.height);
 
     var fi: usize = 0;
@@ -400,11 +406,21 @@ test "render reflows: the same state at two widths differs" {
     try testing.expect(!std.mem.eql(u8, fa.slice(), fb.slice()));
 }
 
-test "render on an empty list is a clean no-crash empty-ish frame" {
+test "render on an empty list shows the empty-state placeholder, not a blank pane" {
     var buf: [1024]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &.{} };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 }); // must not trap
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "No packages installed") != null);
+}
+
+test "a filter that excludes every row shows the no-matches placeholder" {
+    var buf: [1024]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.chrome.filter.push("zzznomatch");
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "No matches") != null);
 }
 
 test "conforms to the tab contract" {

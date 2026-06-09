@@ -53,6 +53,11 @@ pub fn title() []const u8 {
     return "Search";
 }
 
+/// The tab's action keys, surfaced in the shared footer next to the global keys.
+pub fn footerHint() []const u8 {
+    return "enter: search   i: install";
+}
+
 /// The hit the selection points at, clamping the (shell-driven, unbounded)
 /// selection into the result list. No filter: the query already ran server-side,
 /// so the selection indexes straight into `items`. The shell reads its `name`
@@ -98,26 +103,15 @@ fn kindStyle(k: Kind) color.Role {
 /// rect)` so a resize is a re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (r.height == 0) return;
-    renderActionLine(f, .{ .row = r.row, .col = r.col, .width = r.width, .height = 1 });
-    const body: tab.Rect = .{ .row = r.row + 1, .col = r.col, .width = r.width, .height = r.height -| 1 };
-    if (body.height == 0) return;
+    // Keys live in the shared footer now, so the body owns the whole rect.
     switch (s.phase) {
-        .searching => renderStatus(f, body, "searching…"),
-        .idle => renderStatus(f, body, "Type a query, then Enter to search."),
+        .searching => renderStatus(f, r, "searching…"),
+        .idle => renderStatus(f, r, "Press Enter or / to type a query, then Enter to search."),
         .loaded => if (s.items.len == 0)
-            renderStatus(f, body, "No matches.")
+            renderStatus(f, r, "No matches.")
         else
-            renderList(s, f, body),
+            renderList(s, f, r),
     }
-}
-
-/// The dim action line: the tab's keys, so they are discoverable (the global
-/// footer carries only the shell-wide keys).
-fn renderActionLine(f: *tab.Frame, rect: tab.Rect) void {
-    f.moveTo(rect.row, rect.col);
-    f.put(color.roleCode(.muted));
-    f.putContent(scroll_list.truncate("enter: search   i: install", rect.width));
-    f.put(color.Style.reset.code());
 }
 
 fn renderStatus(f: *tab.Frame, rect: tab.Rect, msg: []const u8) void {
@@ -237,7 +231,7 @@ test "render shows guidance in the idle phase before any query is committed" {
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .phase = .idle };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "Type a query") != null);
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "type a query") != null);
 }
 
 test "render shows the searching status during the remote read" {
@@ -279,14 +273,9 @@ test "render highlights the selected hit" {
     try testing.expect(std.mem.indexOf(u8, f.slice(), reverse) != null);
 }
 
-test "render shows the action line keys so they are discoverable" {
-    var buf: [4096]u8 = undefined;
-    var f: tab.Frame = .{ .buf = &buf };
-    const s: State = .{ .phase = .idle };
-    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "search") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "install") != null);
+test "footerHint exposes the tab's action keys for the shared footer" {
+    try testing.expect(std.mem.indexOf(u8, footerHint(), "search") != null);
+    try testing.expect(std.mem.indexOf(u8, footerHint(), "install") != null);
 }
 
 test "render reflows: the same state at two widths differs" {
