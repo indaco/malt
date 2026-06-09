@@ -321,6 +321,17 @@ verify-cask-paths:
     tar -xzf "$tarball" -C "$tmp"
     bash scripts/release/verify_cask_paths.sh "$tmp" "$cask"
 
+# Regenerate the pinned homebrew-core source manifest (rewrites
+# src/core/pins.zig and src/core/pins_manifest.txt). No arg pins to
+# homebrew-core HEAD; pass a 40-char SHA to pin a specific commit.
+# Hits the network; review `git diff` before committing.
+#
+# Usage: just gen-pins            # pin to HEAD
+#        just gen-pins <sha>      # pin to a specific commit
+[group('release')]
+gen-pins commit="":
+    ./scripts/gen-pins.sh {{ commit }}
+
 # Roll back a published release. Flips the GitHub release back to draft,
 # re-promotes the previous release to --latest, and reverts the matching
 # cask commit on indaco/homebrew-tap. The tag is preserved so existing
