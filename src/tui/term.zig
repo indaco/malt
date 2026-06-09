@@ -101,8 +101,8 @@ pub const Term = struct {
         return f.isTty(self.io) catch false;
     }
 
-    /// Enter cbreak/raw input: ECHO + ICANON off, byte-at-a-time reads. Saves
-    /// the original termios for `exitRaw`/`restore`. Idempotent; cleanly
+    /// Enter cbreak/raw input: ECHO + ICANON + ISIG off, byte-at-a-time reads.
+    /// Saves the original termios for `exitRaw`/`restore`. Idempotent; cleanly
     /// `error.NotATty` off a terminal with no half-entered state.
     pub fn enterRaw(self: *Term) TermError!void {
         if (self.saved != null) return; // idempotent
@@ -111,6 +111,11 @@ pub const Term = struct {
         var raw = saved;
         raw.lflag.ECHO = false;
         raw.lflag.ICANON = false;
+        // ISIG off so Ctrl-C reaches the key decoder as a byte (-> quit) instead
+        // of raising SIGINT, which the global CLI handler would swallow. Cooked
+        // mode (with ISIG) is restored on exit, and during a delegated `mt` run
+        // (`restore` then re-`enterRaw`), so Ctrl-C still interrupts the child.
+        raw.lflag.ISIG = false;
         raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
         raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
         std.posix.tcsetattr(self.fd, .FLUSH, raw) catch return TermError.TermiosFailed;
