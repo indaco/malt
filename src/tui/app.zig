@@ -25,6 +25,7 @@ const list_json = @import("json/list.zig");
 const info_json = @import("json/info.zig");
 const outdated_json = @import("json/outdated.zig");
 const services_json = @import("json/services.zig");
+const doctor_json = @import("json/doctor.zig");
 
 const installed = @import("installed_tab.zig");
 const outdated = @import("outdated_tab.zig");
@@ -323,7 +324,7 @@ fn refusalMessage(r: Refusal) []const u8 {
 
 pub const RunError = term.TermError || std.mem.Allocator.Error ||
     spawn.ReadError || spawn.InlineError || list_json.Error || info_json.Error ||
-    outdated_json.Error || services_json.Error || error{ReadFailed};
+    outdated_json.Error || services_json.Error || doctor_json.Error || error{ReadFailed};
 
 /// How the event loop treats a run-loop error: a `recoverable` backend fault
 /// becomes an inline banner and the session keeps running; a `fatal` fault
@@ -365,6 +366,7 @@ const Store = struct {
     /// here, resized to the row count on each (re)load, borrowed by the tab.
     outdated_checked: []bool = &.{},
     services: ?services_json.Parsed = null,
+    doctor: ?doctor_json.Parsed = null,
 
     fn deinit(self: *Store, allocator: std.mem.Allocator) void {
         if (self.installed) |p| p.deinit();
@@ -372,6 +374,7 @@ const Store = struct {
         if (self.outdated) |p| p.deinit();
         if (self.outdated_checked.len != 0) allocator.free(self.outdated_checked);
         if (self.services) |p| p.deinit();
+        if (self.doctor) |p| p.deinit();
     }
 };
 
@@ -592,6 +595,67 @@ fn serviceServices(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app:
     }
 }
 
+/// (Re)read `mt doctor --json` and repoint the Doctor tab's findings at the fresh
+/// parse, freeing the previous one.
+fn loadDoctor(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+    // Annotate any failure as a recoverable banner; the loop boundary decides
+    // recoverable vs fatal. The store is swapped only after a clean parse, so a
+    // failure keeps the last-good findings and their selection.
+    errdefer |err| app.banner.set("doctor refresh failed", @errorName(err));
+    const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{"doctor"});
+    defer allocator.free(argv);
+    const bytes = try spawn.readJson(io, allocator, argv);
+    defer allocator.free(bytes);
+
+    const parsed = try doctor_json.parse(allocator, bytes);
+    if (store.doctor) |old| old.deinit();
+    store.doctor = parsed;
+    app.states.doctor.items = parsed.items;
+}
+
+/// Build `mt doctor --fix <class>` for the selected finding. Pure over the tab
+/// state: null when nothing is selected or the finding is not fixable (the
+/// no-op), else an owned argv. The token is the finding's `fix_class` — the only
+/// thing `mt doctor --fix` resolves — not its descriptive `id`. Caller frees the
+/// returned slice (not its elements).
+fn doctorFixArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const doctor.State) std.mem.Allocator.Error!?[]const []const u8 {
+    const fnd = doctor.selectedFinding(st) orelse return null; // empty list: no-op
+    if (!fnd.fixable) return null; // a non-fixable finding has no fix target
+    return try spawn.inlineArgv(allocator, mt_path, &.{ "doctor", "--fix", doctor_json.fixClassTag(fnd.fix_class) });
+}
+
+/// Delegate the selected finding's fix to the real `mt` inline, then refresh.
+fn doDoctorFix(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+    const argv = (try doctorFixArgv(allocator, app.mt_path, &app.states.doctor)) orelse return; // nothing fixable selected
+    defer allocator.free(argv);
+    {
+        // A non-zero `mt doctor --fix` re-enters the dashboard (the user keeps
+        // malt's real output, including any typed-confirm, in their scrollback)
+        // and surfaces as a recoverable banner; only a terminal fault is fatal.
+        // Scoped so the refresh below reports under its own op, not the fix.
+        errdefer |err| app.banner.set("doctor fix failed", @errorName(err));
+        try spawn.runInlineReenter(t, argv);
+    }
+    try loadDoctor(io, allocator, app, store); // the finding may be resolved — refetch
+    markStaleAfterMutation(app);
+}
+
+/// Perform any fix effect the pure `step` requested on the Doctor tab, then clear
+/// it, and lazily (re)load on first entry or after a mutation marked it dirty.
+fn serviceDoctor(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+    const req = app.states.doctor.request;
+    app.states.doctor.request = .none;
+    switch (req) {
+        .none => {},
+        .fix => try doDoctorFix(io, allocator, t, app, store),
+    }
+    // Lazy per-tab load: first activation and post-mutation staleness both arrive
+    // as the dirty flag (set at init and by `markStaleAfterMutation`).
+    if (app.active == .doctor and takeDirty(app, .doctor)) {
+        try loadDoctor(io, allocator, app, store);
+    }
+}
+
 /// Drain the active tab's pending effects after a keypress. Each tab's service is
 /// a no-op unless that tab is active and has a request or is due a lazy refresh,
 /// so calling each one each loop is cheap and keeps the dispatch flat.
@@ -599,6 +663,7 @@ fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, s
     try serviceInstalled(io, allocator, t, app, store);
     try serviceOutdated(io, allocator, t, app, store);
     try serviceServices(io, allocator, t, app, store);
+    try serviceDoctor(io, allocator, t, app, store);
 }
 
 fn isTty(io: std.Io, fd: std.posix.fd_t) bool {
@@ -656,6 +721,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     var app: App = .{ .mt_path = mt_path }; // re-exec this mt for delegated mutations
     app.dirty.insert(.outdated); // lazy: load `mt outdated --json` on first activation
     app.dirty.insert(.services); // lazy: load `mt services list --json` on first activation
+    app.dirty.insert(.doctor); // lazy: load `mt doctor --json` on first activation
     var store: Store = .{};
     defer store.deinit(allocator);
     var frame = try allocator.alloc(u8, frameCap(term.currentSize()));
@@ -1056,6 +1122,46 @@ test "a failed services refresh names the op in the banner and keeps the last-go
     try std.testing.expectError(error.BadJson, loadServices(t.io(), std.testing.allocator, &app, &store));
     try std.testing.expectEqualStrings("services refresh failed: BadJson", app.banner.slice());
     try std.testing.expectEqual(@as(usize, 0), app.states.services.items.len); // last-good kept
+}
+
+test "doctorFixArgv builds `mt doctor --fix <class>` from the finding's fix_class, not its id" {
+    const items = [_]doctor.Row{
+        .{ .id = "sqlite_integrity", .severity = .err, .title = "SQLite integrity", .fixable = false, .fix_class = .none },
+        .{ .id = "orphaned_store_entries", .severity = .warn, .title = "Orphaned store entries", .fixable = true, .fix_class = .orphaned_store },
+    };
+    var st: doctor.State = .{ .items = &items };
+    st.chrome.view.selected = 1; // the fixable finding (display order: err then warn)
+    const argv = (try doctorFixArgv(std.testing.allocator, "/opt/homebrew/bin/mt", &st)).?;
+    defer std.testing.allocator.free(argv);
+    try std.testing.expectEqual(@as(usize, 4), argv.len);
+    try std.testing.expectEqualStrings("/opt/homebrew/bin/mt", argv[0]);
+    try std.testing.expectEqualStrings("doctor", argv[1]);
+    try std.testing.expectEqualStrings("--fix", argv[2]);
+    try std.testing.expectEqualStrings("orphaned_store", argv[3]); // the class, not "orphaned_store_entries"
+}
+
+test "doctorFixArgv returns null for a non-fixable selection so f is a no-op" {
+    const items = [_]doctor.Row{
+        .{ .id = "sqlite_integrity", .severity = .err, .title = "SQLite integrity", .fixable = false, .fix_class = .none },
+    };
+    const st: doctor.State = .{ .items = &items };
+    try std.testing.expect((try doctorFixArgv(std.testing.allocator, "/bin/mt", &st)) == null);
+}
+
+test "doctorFixArgv returns null on an empty list" {
+    const st: doctor.State = .{ .items = &.{} };
+    try std.testing.expect((try doctorFixArgv(std.testing.allocator, "/bin/mt", &st)) == null);
+}
+
+test "a failed doctor refresh names the op in the banner and keeps the last-good findings" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    try std.testing.expectError(error.BadJson, loadDoctor(t.io(), std.testing.allocator, &app, &store));
+    try std.testing.expectEqualStrings("doctor refresh failed: BadJson", app.banner.slice());
+    try std.testing.expectEqual(@as(usize, 0), app.states.doctor.items.len); // last-good kept
 }
 
 test "refusalReason refuses non-tty, NO_COLOR, and CI; allows a clean tty" {
