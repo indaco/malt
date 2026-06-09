@@ -25,13 +25,16 @@ const color = @import("../ui/color.zig");
 const search_json = @import("json/search.zig");
 pub const Match = search_json.Match;
 const Kind = search_json.Kind;
+const info_json = @import("json/info.zig");
+const detail_pane = @import("detail_pane.zig");
 const scroll_list = @import("scroll_list.zig");
 const tab = @import("tab.zig");
 
 /// An effect the pure `step` defers to the impure shell, which performs it and
 /// resets the field. `step` never does I/O — this is the command channel.
-/// `search` (re)runs the committed query; `install` installs the selected hit.
-pub const Request = enum { none, search, install };
+/// `search` (re)runs the committed query; `install` installs the selection;
+/// `info` opens `mt info` for the active hit (works for uninstalled hits too).
+pub const Request = enum { none, search, install, info };
 
 /// The read lifecycle the render reflects. `idle` before any query is committed
 /// (show guidance), `searching` while the blocking remote read runs (the shell
@@ -43,6 +46,12 @@ pub const State = struct {
     chrome: tab.Chrome = .{},
     /// The server's ranked results, borrowed from shell-owned parse storage.
     items: []const Match = &.{},
+    /// Per-row multi-select state, parallel to `items`, owned + sized by the
+    /// shell (like Outdated's). An already-installed hit is never checked.
+    checked: []bool = &.{},
+    /// The open info pane for the active hit, if Enter requested one. Borrows
+    /// from shell-owned parse storage; cleared on Esc or a fresh query.
+    detail: ?info_json.Info = null,
     /// Pending effect for the shell to perform, then clear.
     request: Request = .none,
     /// Where the tab is in the read lifecycle; drives the render's status line.
@@ -55,7 +64,7 @@ pub fn title() []const u8 {
 
 /// The tab's action keys, surfaced in the shared footer next to the global keys.
 pub fn footerHint() []const u8 {
-    return "enter: search   i: install";
+    return "space: select   enter: info   i: install";
 }
 
 /// The hit the selection points at, clamping the (shell-driven, unbounded)
@@ -63,9 +72,23 @@ pub fn footerHint() []const u8 {
 /// so the selection indexes straight into `items`. The shell reads its `name`
 /// and `kind` to build the install argv.
 pub fn selectedMatch(s: *const State) ?Match {
+    const i = selectedIndex(s) orelse return null;
+    return s.items[i];
+}
+
+/// The index of the active row in `items`, clamping the unbounded cursor. No
+/// filter, so the cursor indexes straight into `items`. Null on an empty list.
+pub fn selectedIndex(s: *const State) ?usize {
     if (s.items.len == 0) return null;
-    const sel = @min(s.chrome.view.selected, s.items.len - 1);
-    return s.items[sel];
+    return @min(s.chrome.view.selected, s.items.len - 1);
+}
+
+/// Toggle the active row's checkbox. An already-installed hit is never selectable
+/// (it would be a no-op install), mirroring how a pinned row is held back.
+fn toggle(s: *State) void {
+    const i = selectedIndex(s) orelse return;
+    if (s.items[i].installed) return;
+    if (i < s.checked.len) s.checked[i] = !s.checked[i];
 }
 
 /// Pure transition. Enter (re)runs the committed query — the filter doubles as
@@ -73,34 +96,50 @@ pub fn selectedMatch(s: *const State) ?Match {
 /// when it is not already installed; on an installed hit it is inert.
 pub fn step(s: *State, key: tab.Key) void {
     switch (key) {
-        .enter => s.request = .search,
-        .char => |c| if (c.len == 1 and c.bytes[0] == 'i') {
-            const m = selectedMatch(s) orelse return;
-            if (!m.installed) s.request = .install; // inert on an already-installed hit
+        // Enter on a result opens `mt info` for it. Committing the query (the
+        // other meaning of Enter) is driven by the shell on filter-commit, not
+        // here, so the two never collide.
+        .enter => if (selectedMatch(s) != null) {
+            s.request = .info;
         },
+        .space => toggle(s),
+        // `i` installs the multi-selection (or the active row when nothing is
+        // checked); inert when there is nothing installable to do.
+        .char => |c| if (c.len == 1 and c.bytes[0] == 'i') {
+            if (anyInstallable(s)) s.request = .install;
+        },
+        .esc => s.detail = null, // close the info pane
         else => {},
     }
 }
 
+/// True when `i` would install something: any checked, not-installed hit, or —
+/// with nothing checked — an installable active row. Mirrors what the shell's
+/// install argv resolves, so `i` stays inert when there is nothing to do.
+fn anyInstallable(s: *const State) bool {
+    var any_checked = false;
+    for (s.items, 0..) |m, i| {
+        if (i >= s.checked.len or !s.checked[i]) continue;
+        any_checked = true;
+        if (!m.installed) return true;
+    }
+    if (any_checked) return false; // only already-installed rows checked
+    const m = selectedMatch(s) orelse return false;
+    return !m.installed;
+}
+
 // A closed switch on the kind: a new variant is a compile error here, never a
-// silent default — the glyph/colour must be chosen deliberately.
-fn kindGlyph(k: Kind) []const u8 {
+// silent default — the label must be chosen deliberately.
+fn kindLabel(k: Kind) []const u8 {
     return switch (k) {
-        .formula => "◆",
-        .cask => "▣",
+        .formula => "formula",
+        .cask => "cask",
     };
 }
 
-fn kindStyle(k: Kind) color.Role {
-    return switch (k) {
-        .formula => .accent,
-        .cask => .secondary,
-    };
-}
-
-/// Pure render: a dim action line, then — by phase — guidance, a "searching…"
-/// status, "no matches", or the ranked result list. A pure function of `(state,
-/// rect)` so a resize is a re-render.
+/// Pure render: by phase, guidance, a "searching…" status, "no matches", or the
+/// ranked result list. A pure function of `(state, rect)` so a resize is a
+/// re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (r.height == 0) return;
     // Keys live in the shared footer now, so the body owns the whole rect.
@@ -110,8 +149,42 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
         .loaded => if (s.items.len == 0)
             renderStatus(f, r, "No matches.")
         else
-            renderList(s, f, r),
+            renderLoaded(s, f, r),
     }
+}
+
+/// The results, with an `mt info` pane docked at the bottom when one is open.
+/// The pane sizes to its (wrapped) content, capped at half the height so the
+/// result list survives. The info pane works for an uninstalled hit too, which
+/// is why a search result can open it at all.
+fn renderLoaded(s: *const State, f: *tab.Frame, r: tab.Rect) void {
+    var list_rect = r;
+    if (s.detail) |info| {
+        var deps_buf: [512]u8 = undefined;
+        const fields = [_]detail_pane.Field{
+            .{ .label = "Version", .value = if (info.version.len != 0) info.version else "-" },
+            .{ .label = "Tap", .value = if (info.tap.len != 0) info.tap else "-" },
+            .{ .label = "Dependencies", .value = joinDeps(&deps_buf, info.dependencies) },
+        };
+        const dh = @min(detail_pane.neededRows(&fields, r.width), r.height / 2);
+        if (dh > 0 and dh < r.height) {
+            list_rect.height = r.height - dh;
+            detail_pane.render(f, &fields, .{ .row = r.row + list_rect.height, .col = r.col, .width = r.width, .height = dh });
+        }
+    }
+    renderList(s, f, list_rect);
+}
+
+/// Comma-join a dependency list into `buf`; "none" when empty. Truncates if the
+/// list overruns the buffer (the pane truncates to the column budget anyway).
+fn joinDeps(buf: []u8, deps: []const []const u8) []const u8 {
+    if (deps.len == 0) return "none";
+    var len: usize = 0;
+    for (deps, 0..) |d, i| {
+        if (i != 0) append(buf, &len, ", ");
+        append(buf, &len, d);
+    }
+    return buf[0..len];
 }
 
 fn renderStatus(f: *tab.Frame, rect: tab.Rect, msg: []const u8) void {
@@ -129,17 +202,15 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         const screen = i - v.offset;
         if (screen >= rect.height) break;
         f.moveTo(rect.row + @as(u16, @intCast(screen)), rect.col);
-        // The kind glyph keeps its own colour regardless of selection; the
-        // reverse-video selection wraps only the text columns so the two SGRs
-        // never tangle.
-        f.put(color.roleCode(kindStyle(m.kind)));
-        f.put(kindGlyph(m.kind));
-        f.put(color.Style.reset.code());
-        f.put(" ");
+        // Multi-select checkbox first (its own colour); the reverse-video
+        // selection wraps only the text columns so the SGRs never tangle. An
+        // installed hit can't be selected, so it shows the blocked box.
+        const checked = i < s.checked.len and s.checked[i];
+        tab.putCheckbox(f, if (m.installed) .blocked else if (checked) tab.Check.on else .off);
         const selected = i == v.selected;
         if (selected) f.put(reverse);
         var rb: [256]u8 = undefined;
-        f.putContent(scroll_list.truncate(formatRow(&rb, m), rect.width -| 2)); // 2 cols on the glyph
+        f.putContent(scroll_list.truncate(formatRow(&rb, m), rect.width -| 4)); // 4 cols on the checkbox
         if (selected) f.put(color.Style.reset.code());
     }
 }
@@ -147,11 +218,14 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
 // SGR reverse-video for the selection, matching the other tabs' convention.
 const reverse = "\x1b[7m";
 
-/// One list row (after the glyph): the package name, then an "installed" marker
-/// for a hit already on the system. ASCII columns, grapheme-naive like the rest.
+/// One list row (after the checkbox): the package name, the kind (formula/cask),
+/// then an "installed" marker for a hit already on the system. ASCII columns,
+/// grapheme-naive like the rest.
 fn formatRow(buf: []u8, m: Match) []const u8 {
     var len: usize = 0;
-    appendPad(buf, &len, m.name, 32);
+    appendPad(buf, &len, m.name, 28);
+    append(buf, &len, " ");
+    appendPad(buf, &len, kindLabel(m.kind), 8);
     append(buf, &len, " ");
     if (m.installed) append(buf, &len, "installed");
     return buf[0..len];
@@ -194,10 +268,23 @@ test "selectedMatch on an empty list is null (the action becomes a no-op)" {
     try testing.expect(selectedMatch(&s) == null);
 }
 
-test "enter requests a search — committing the query is the search" {
-    var s: State = .{ .items = &sample };
+test "enter opens info for the active hit" {
+    var s: State = .{ .items = &sample, .phase = .loaded };
     step(&s, .enter);
-    try testing.expectEqual(Request.search, s.request);
+    try testing.expectEqual(Request.info, s.request);
+}
+
+test "enter is inert on an empty result list" {
+    var s: State = .{ .items = &.{} };
+    step(&s, .enter);
+    try testing.expectEqual(Request.none, s.request);
+}
+
+test "esc closes the info pane" {
+    const info: info_json.Info = .{ .name = "wget", .version = "1", .tap = "", .dependencies = &.{} };
+    var s: State = .{ .items = &sample, .detail = info };
+    step(&s, .esc);
+    try testing.expect(s.detail == null);
 }
 
 test "i on a not-installed hit requests install; on an installed hit it is inert" {
@@ -226,6 +313,68 @@ test "an unrelated key leaves the request alone" {
     try testing.expectEqual(Request.none, s.request);
 }
 
+test "space toggles the active row's checkbox; an installed hit is never selectable" {
+    var checked = [_]bool{false} ** 3;
+    var s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
+    s.chrome.view.selected = 0; // wget, not installed
+    step(&s, .space);
+    try testing.expect(checked[0]);
+    step(&s, .space);
+    try testing.expect(!checked[0]); // toggles back off
+
+    s.chrome.view.selected = 1; // firefox, already installed
+    step(&s, .space);
+    try testing.expect(!checked[1]); // installed rows can't be checked
+}
+
+test "i installs a checked, not-installed hit even when the active row is installed" {
+    var checked = [_]bool{ true, false, false }; // wget checked
+    var s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
+    s.chrome.view.selected = 1; // active = firefox (installed)
+    step(&s, ch('i'));
+    try testing.expectEqual(Request.install, s.request);
+}
+
+test "i is inert when only already-installed rows are checked" {
+    var checked = [_]bool{ false, true, false }; // firefox (installed) checked
+    var s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
+    step(&s, ch('i'));
+    try testing.expectEqual(Request.none, s.request);
+}
+
+test "the cores tolerate a checked slice shorter than items without trapping" {
+    // Before the shell sizes `checked` it can be empty; the cores must not index
+    // past it. Toggle is then inert and install falls back to the active row.
+    var s: State = .{ .items = &sample, .checked = &.{}, .phase = .loaded };
+    step(&s, .space); // no checked slot for the active row → inert, no trap
+    step(&s, ch('i')); // resolves over the empty set + the active (installable) row
+    try testing.expectEqual(Request.install, s.request);
+}
+
+test "render draws a multi-select checkbox per result row" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var checked = [_]bool{ true, false, false };
+    const s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "✓") != null); // wget checked
+    try testing.expect(std.mem.indexOf(u8, out, "[ ]") != null); // an unchecked box
+    try testing.expect(std.mem.indexOf(u8, out, "[-]") != null); // firefox installed → blocked
+}
+
+test "render docks the info pane when one is open" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const info: info_json.Info = .{ .name = "wget", .version = "1.25.0", .tap = "homebrew/core", .dependencies = &.{"openssl@3"} };
+    const s: State = .{ .items = &sample, .phase = .loaded, .detail = info };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "1.25.0") != null); // version field
+    try testing.expect(std.mem.indexOf(u8, out, "openssl@3") != null); // a dependency
+    try testing.expect(std.mem.indexOf(u8, out, "wget") != null); // the list still shows
+}
+
 test "render shows guidance in the idle phase before any query is committed" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
@@ -250,7 +399,7 @@ test "render shows no-matches when a committed query returned zero results" {
     try testing.expect(std.mem.indexOf(u8, f.slice(), "No matches") != null);
 }
 
-test "render lists hits with a kind glyph and an installed marker" {
+test "render lists hits with the kind label and an installed marker" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &sample, .phase = .loaded };
@@ -258,10 +407,10 @@ test "render lists hits with a kind glyph and an installed marker" {
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "wget") != null);
     try testing.expect(std.mem.indexOf(u8, out, "firefox") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "◆") != null); // formula glyph
-    try testing.expect(std.mem.indexOf(u8, out, "▣") != null); // cask glyph
+    try testing.expect(std.mem.indexOf(u8, out, "formula") != null); // kind as plain text, no glyph
+    try testing.expect(std.mem.indexOf(u8, out, "cask") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "◆") == null); // the glyph is gone
     try testing.expect(std.mem.indexOf(u8, out, "installed") != null); // firefox marker
-    try testing.expect(std.mem.indexOf(u8, out, color.Style.cyan.code()) != null); // a coloured glyph
 }
 
 test "render highlights the selected hit" {
@@ -274,7 +423,7 @@ test "render highlights the selected hit" {
 }
 
 test "footerHint exposes the tab's action keys for the shared footer" {
-    try testing.expect(std.mem.indexOf(u8, footerHint(), "search") != null);
+    try testing.expect(std.mem.indexOf(u8, footerHint(), "select") != null);
     try testing.expect(std.mem.indexOf(u8, footerHint(), "install") != null);
 }
 

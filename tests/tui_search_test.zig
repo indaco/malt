@@ -5,8 +5,8 @@
 //! `mt search <query> --json` fixture (`scripts/fixtures/`), never live `mt` —
 //! proving the parser consumes the real versioned, install-aware schema and that
 //! the selection plus `i` map to installing exactly the selected, not-yet
-//! installed hit (the name the install argv would carry), while an Enter over the
-//! search box commits the query as a fresh remote read.
+//! installed hit (the name the install argv would carry), while Enter over a
+//! result opens its info pane.
 
 const std = @import("std");
 const testing = std.testing;
@@ -83,13 +83,15 @@ test "i over the fixture installs the selected not-yet-installed hit and is iner
     try testing.expectEqual(search_json.Kind.cask, search.selectedMatch(&st).?.kind);
 }
 
-test "Enter over the search box commits the query as a fresh remote read" {
+test "Enter over a result requests its info (committing the query is the shell's job)" {
     const bytes = try readFixture(testing.allocator, "tui_search.json");
     defer testing.allocator.free(bytes);
     var parsed = try search_json.parse(testing.allocator, bytes);
     defer parsed.deinit();
 
+    // Enter over a loaded result opens `mt info` for it; the query-commit path
+    // (filter editing → search) is driven by the app shell, not the tab core.
     var st: search.State = .{ .items = parsed.items, .phase = .loaded };
     search.step(&st, .enter);
-    try testing.expectEqual(search.Request.search, st.request);
+    try testing.expectEqual(search.Request.info, st.request);
 }

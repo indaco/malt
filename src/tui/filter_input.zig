@@ -39,10 +39,12 @@ pub const Filter = struct {
     }
 };
 
-/// Render the filter line. The `filter:` label is always shown so the
-/// affordance is visible; `/` activates editing, which adds a caret (`_`, since
-/// the real cursor is hidden). Truncated to `cols`. Returns a prefix of `buf`.
-pub fn render(buf: []u8, text: []const u8, editing: bool, cols: u16) []const u8 {
+/// Render the input line. `label` names what the box does for the active tab
+/// (`filter: ` everywhere a static list is narrowed, `search: ` on the Search
+/// tab where the box is the query) and is always shown so the affordance is
+/// visible; `/` activates editing, which adds a caret (`_`, since the real cursor
+/// is hidden). Truncated to `cols`. Returns a prefix of `buf`.
+pub fn render(buf: []u8, label: []const u8, text: []const u8, editing: bool, cols: u16) []const u8 {
     var len: usize = 0;
     const put = struct {
         fn f(b: []u8, l: *usize, s: []const u8) void {
@@ -51,7 +53,7 @@ pub fn render(buf: []u8, text: []const u8, editing: bool, cols: u16) []const u8 
             l.* += n;
         }
     }.f;
-    put(buf, &len, "filter: ");
+    put(buf, &len, label);
     put(buf, &len, text);
     if (editing) put(buf, &len, "_");
     return scroll_list.truncate(buf[0..len], cols);
@@ -84,16 +86,18 @@ test "backspace removes a whole multibyte rune" {
     try std.testing.expectEqual(@as(usize, 0), f.len);
 }
 
-test "render keeps the filter label visible; caret only while editing" {
+test "render shows the given label; caret only while editing" {
     var buf: [128]u8 = undefined;
-    try std.testing.expectEqualStrings("filter: ab_", render(&buf, "ab", true, 80));
-    try std.testing.expectEqualStrings("filter: ab", render(&buf, "ab", false, 80));
-    // The label persists even with no filter, so the affordance is discoverable.
-    try std.testing.expectEqualStrings("filter: ", render(&buf, "", false, 80));
+    try std.testing.expectEqualStrings("filter: ab_", render(&buf, "filter: ", "ab", true, 80));
+    try std.testing.expectEqualStrings("filter: ab", render(&buf, "filter: ", "ab", false, 80));
+    // The label persists even with no text, so the affordance is discoverable.
+    try std.testing.expectEqualStrings("filter: ", render(&buf, "filter: ", "", false, 80));
+    // The Search tab labels the same box as the query it really is.
+    try std.testing.expectEqualStrings("search: rip_", render(&buf, "search: ", "rip", true, 80));
 }
 
 test "render truncates to the column budget" {
     var buf: [128]u8 = undefined;
-    const out = render(&buf, "abcdef", true, 3); // "fil" — 3 visible cols
+    const out = render(&buf, "filter: ", "abcdef", true, 3); // "fil" — 3 visible cols
     try std.testing.expectEqual(@as(usize, 3), out.len);
 }

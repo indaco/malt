@@ -134,7 +134,7 @@ fn requestUpgrade(s: *State) void {
 }
 
 /// Pure render: the filtered + scrolled checkbox list. The multi-select keys
-/// live in the shared footer, so the list owns the whole rect; the `[x]`
+/// live in the shared footer, so the list owns the whole rect; the `[✓]`
 /// checkboxes carry the selection. A pure function of `(state, rect)` so a
 /// resize is a re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
@@ -157,12 +157,15 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         const screen = fi - v.offset;
         if (screen >= rect.height) break;
         f.moveTo(rect.row + @as(u16, @intCast(screen)), rect.col);
+        // The checkbox carries its own colour; a pinned row is held back so it
+        // shows the blocked box, never a check.
+        const is_checked = i < s.checked.len and s.checked[i];
+        tab.putCheckbox(f, if (p.pinned) .blocked else if (is_checked) tab.Check.on else .off);
         const selected = fi == v.selected;
         // The cursor row wins over the pinned dim so the selection stays legible.
         if (selected) f.put(reverse) else if (p.pinned) f.put(color.roleCode(.muted));
-        const is_checked = i < s.checked.len and s.checked[i];
         var rb: [256]u8 = undefined;
-        f.putContent(scroll_list.truncate(formatRow(&rb, p, is_checked), rect.width));
+        f.putContent(scroll_list.truncate(formatRow(&rb, p), rect.width -| 4)); // 4 cols on the checkbox
         if (selected or p.pinned) f.put(color.Style.reset.code());
     }
 }
@@ -170,13 +173,11 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
 // SGR reverse-video for the selection, matching the other tabs' convention.
 const reverse = "\x1b[7m";
 
-/// One list row: a checkbox (or a held-back marker for a pinned row), the name,
-/// the current→latest versions, the source type, and a pinned tag. ASCII columns,
-/// grapheme-naive like the rest; the arrow is width-aware via `truncate`.
-fn formatRow(buf: []u8, p: Row, checked: bool) []const u8 {
+/// One list row after the checkbox: the name, the current→latest versions, the
+/// source type, and a pinned tag. ASCII columns, grapheme-naive like the rest;
+/// the arrow is width-aware via `truncate`.
+fn formatRow(buf: []u8, p: Row) []const u8 {
     var len: usize = 0;
-    if (p.pinned) append(buf, &len, " -  ") // pinned: held back, no checkbox
-    else if (checked) append(buf, &len, "[x] ") else append(buf, &len, "[ ] ");
     appendPad(buf, &len, p.name, 22);
     append(buf, &len, " ");
     appendPad(buf, &len, p.installed, 12);
@@ -319,14 +320,14 @@ test "render lists checkboxes with current→latest and the type column" {
     const s: State = .{ .items = &sample, .checked = &checked };
     render(&s, &f, .{ .row = 2, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "[x]") != null); // wget checked
+    try testing.expect(std.mem.indexOf(u8, out, "✓") != null); // wget checked
     try testing.expect(std.mem.indexOf(u8, out, "[ ]") != null); // an unchecked box
     try testing.expect(std.mem.indexOf(u8, out, "→") != null); // current→latest
     try testing.expect(std.mem.indexOf(u8, out, "1.25.0") != null); // latest version
     try testing.expect(std.mem.indexOf(u8, out, "cask") != null); // type column
 }
 
-test "render greys a pinned row, gives it no checkbox, and marks it pinned" {
+test "render greys a pinned row, shows the blocked box, and marks it pinned" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var checked = [_]bool{false} ** 4;
@@ -334,6 +335,7 @@ test "render greys a pinned row, gives it no checkbox, and marks it pinned" {
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "pinned") != null); // curl marked
+    try testing.expect(std.mem.indexOf(u8, out, "[-]") != null); // a pinned row gets the blocked box, never a check
     try testing.expect(std.mem.indexOf(u8, out, color.Style.dim.code()) != null); // greyed: muted role == dim on the basic tier
 }
 

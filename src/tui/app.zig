@@ -139,6 +139,10 @@ pub const App = struct {
     /// footer, dismissed on the next keypress (`step`); a successful action just
     /// leaves it cleared.
     banner: Banner = .{},
+    /// Set by the loop only for the pre-read paint before a blocking lazy
+    /// refetch, so the synchronous freeze shows "Loading…" instead of a stale
+    /// frame. Never persisted: the read's own repaint clears it.
+    loading: bool = false,
 };
 
 /// After a delegated mutation the active tab was just re-read inline, so it is
@@ -169,6 +173,12 @@ fn activeFilterText(a: *const App) []const u8 {
     }
 }
 
+/// The input-box label for the active tab: on Search the box is the query, not a
+/// filter over an already-loaded list, so it says so.
+fn activeFilterLabel(a: *const App) []const u8 {
+    return if (a.active == .search) "search: " else "filter: ";
+}
+
 fn routeToTab(a: *App, key: Key) void {
     switch (a.active) {
         inline else => |t| moduleFor(t).step(&@field(a.states, @tagName(t)), key),
@@ -184,6 +194,12 @@ fn renderActive(a: *const App, f: *tab.Frame, rect: tab.Rect) void {
 fn activeFooterHint(a: *const App) []const u8 {
     switch (a.active) {
         inline else => |t| return moduleFor(t).footerHint(),
+    }
+}
+
+fn activeTitle(a: *const App) []const u8 {
+    switch (a.active) {
+        inline else => |t| return moduleFor(t).title(),
     }
 }
 
@@ -211,10 +227,10 @@ fn stepFilter(a: *App, key: Key) void {
         .enter => { // commit, keep the filter
             a.editing = false;
             // Search divergence: its filter doubles as the search box, so
-            // committing the query *is* the search. Only the Search tab claims
-            // the commit — every other tab's filter merely narrows an already
-            // loaded list, so routing Enter there would mis-fire their domain key.
-            if (a.active == .search) routeToTab(a, .enter);
+            // committing the query *is* the search. Set the request directly
+            // rather than routing Enter to the tab, whose Enter now means "open
+            // info" — every other tab's filter just narrows a loaded list.
+            if (a.active == .search) a.states.search.request = .search;
         },
         .esc => { // cancel: clear the filter
             activeChrome(a).filter.clear();
@@ -254,10 +270,12 @@ fn stepNormal(a: *App, key: Key) void {
             routeToTab(a, key); // a domain key (e.g. u/f) belongs to the tab
         },
         .enter => {
-            // The Search tab's filter doubles as its query box, so Enter focuses
-            // it for typing (a second Enter then commits + searches). Every other
-            // tab uses Enter as a domain key (open detail, upgrade), so route it.
-            if (a.active == .search) a.editing = true else routeToTab(a, key);
+            // On Search, Enter focuses the query box when there are no results
+            // yet (so the user can type), and opens info for the active hit once
+            // results are loaded. Every other tab uses Enter as a domain key.
+            if (a.active == .search and a.states.search.items.len == 0) {
+                a.editing = true;
+            } else routeToTab(a, key);
         },
         .space, .end, .esc => routeToTab(a, key),
         // `end` needs the row count to land on the last row — deferred to the
@@ -274,11 +292,7 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
     var f: tab.Frame = .{ .buf = buf };
     f.put("\x1b[2J"); // clear; every region then positions its own cursor
     switch (layout.compute(cols, rows)) {
-        .too_small => {
-            f.moveTo(1, 1);
-            var tmp: [80]u8 = undefined;
-            f.put(layout.render(&tmp, .{ .rows = &.{} }, cols, rows));
-        },
+        .too_small => renderTooSmall(&f, cols, rows),
         .ok => |r| {
             f.moveTo(r.tab_bar.row, 1);
             var tb: [256]u8 = undefined;
@@ -287,16 +301,21 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
 
             f.moveTo(r.filter.row, 1);
             var fb: [filter_input.max_len + 8]u8 = undefined;
-            f.put(filter_input.render(&fb, activeFilterText(app), app.editing, cols));
+            f.put(filter_input.render(&fb, activeFilterLabel(app), activeFilterText(app), app.editing, cols));
 
             renderActive(app, &f, r.content);
 
-            // Footer: a rule line separating content, then either the transient
-            // recoverable-error banner or the dimmed help line on the row below.
+            // Footer: a rule line separating content, then — by priority — the
+            // pre-read loading status, the transient error banner, or the help line.
             f.moveTo(r.footer.row, 1);
             putRule(&f, cols);
             f.moveTo(r.footer.row + 1, 1);
-            if (app.banner.isSet()) {
+            if (app.loading) {
+                var lb: [64]u8 = undefined;
+                f.put(color.roleCode(.accent));
+                f.putContent(scroll_list.truncate(loadingLine(&lb, app), cols));
+                f.put(color.Style.reset.code());
+            } else if (app.banner.isSet()) {
                 // Undimmed + yellow so a recoverable failure reads as a warning,
                 // not chrome; `putContent` drops line-breakers the sanitizer let
                 // through, `truncate` keeps it within the column budget.
@@ -319,13 +338,49 @@ fn putRule(f: *tab.Frame, cols: u16) void {
     while (i < cols) : (i += 1) f.put("─");
 }
 
+/// The "terminal too small" fallback: the notice icon + message in the info
+/// colour, wrapped across rows (positioned with cursor moves, no raw newline) so
+/// it stays readable when the terminal is too narrow for one line. Trips on
+/// width or height alone — `layout.fits` requires both axes.
+fn renderTooSmall(f: *tab.Frame, cols: u16, rows: u16) void {
+    if (cols == 0 or rows == 0) return;
+    var mbuf: [64]u8 = undefined;
+    var buf: [96]u8 = undefined;
+    const icon: []const u8 = if (color.isEmojiEnabled()) "ⓘ " else "i ";
+    const msg = std.fmt.bufPrint(&buf, "{s}{s}", .{ icon, layout.tooSmallMessage(&mbuf) }) catch "terminal too small";
+    var rest = msg;
+    var row: u16 = 1;
+    while (rest.len > 0 and row <= rows) : (row += 1) {
+        var take = @min(@as(usize, cols), rest.len);
+        if (take < rest.len) {
+            var i = take; // break at the last space that fits, so words stay whole
+            while (i > 0) : (i -= 1) {
+                if (rest[i - 1] == ' ') {
+                    take = i;
+                    break;
+                }
+            }
+        }
+        f.moveTo(row, 1);
+        f.put(color.roleCode(.accent));
+        f.putContent(rest[0..take]);
+        f.put(color.Style.reset.code());
+        rest = rest[take..];
+        while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+    }
+}
+
+fn loadingLine(buf: []u8, app: *const App) []const u8 {
+    return std.fmt.bufPrint(buf, "Loading {s}…", .{activeTitle(app)}) catch "Loading…";
+}
+
 /// The footer help line: while editing the filter, just the edit keys; otherwise
-/// the active tab's action keys, then the shell-wide keys — so every key a user
-/// can press from here is in one place. Built into `buf`; falls back to the
-/// global keys alone if it can't fit.
+/// the shell-wide keys first (so quit/switch survive a narrow terminal) then the
+/// active tab's action keys. Built into `buf`; falls back to the global keys
+/// alone if it can't fit.
 fn footerLine(buf: []u8, app: *const App) []const u8 {
     if (app.editing) return footerHelp(true);
-    return std.fmt.bufPrint(buf, "{s}   ·   {s}", .{ activeFooterHint(app), footerHelp(false) }) catch footerHelp(false);
+    return std.fmt.bufPrint(buf, "{s}   ·   {s}", .{ footerHelp(false), activeFooterHint(app) }) catch footerHelp(false);
 }
 
 fn footerHelp(editing: bool) []const u8 {
@@ -402,6 +457,12 @@ const Store = struct {
     services: ?services_json.Parsed = null,
     doctor: ?doctor_json.Parsed = null,
     search: ?search_json.Parsed = null,
+    /// The Search tab's checkbox state, parallel to `search.?.items`. Owned here,
+    /// resized to the result count on each query, borrowed by the tab.
+    search_checked: []bool = &.{},
+    /// Backing storage for the Search tab's open `mt info` pane (its own slot so
+    /// it never clobbers the Installed tab's detail parse).
+    search_detail: ?info_json.Parsed = null,
 
     fn deinit(self: *Store, allocator: std.mem.Allocator) void {
         if (self.installed) |p| p.deinit();
@@ -411,6 +472,8 @@ const Store = struct {
         if (self.services) |p| p.deinit();
         if (self.doctor) |p| p.deinit();
         if (self.search) |p| p.deinit();
+        if (self.search_checked.len != 0) allocator.free(self.search_checked);
+        if (self.search_detail) |p| p.deinit();
     }
 };
 
@@ -752,31 +815,61 @@ fn loadSearch(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store
     defer allocator.free(bytes);
 
     const parsed = try search_json.parse(allocator, bytes);
+    errdefer parsed.deinit();
+    // A fresh checkbox buffer, all clear: a new result set means an old selection
+    // would point at unrelated rows.
+    const checked = try allocator.alloc(bool, parsed.items.len);
+    @memset(checked, false);
+
     if (store.search) |old| old.deinit();
+    if (store.search_checked.len != 0) allocator.free(store.search_checked);
     store.search = parsed;
+    store.search_checked = checked;
     app.states.search.items = parsed.items;
+    app.states.search.checked = checked;
     app.states.search.phase = .loaded;
     // A fresh query is a new result set, so an old cursor would point at an
-    // unrelated row; reset to the top.
+    // unrelated row, and any open info pane is for a hit that may be gone.
     app.states.search.chrome.view = .{};
+    app.states.search.detail = null;
+    if (store.search_detail) |old| {
+        old.deinit();
+        store.search_detail = null;
+    }
 }
 
-/// Build `mt install [--formula|--cask] <name>` for the selected hit. Pure over
-/// the tab state: null when nothing installable is selected (the no-op), else an
-/// owned argv whose `name` element borrows from the parse storage. Caller frees
-/// the returned slice (not its elements).
+/// Build the `mt install …` argv for the Search tab. Pure over the tab state:
+/// every checked, not-yet-installed hit, or — when nothing is checked — the
+/// active row. Null when nothing installable is selected (the no-op). A single
+/// target keeps the explicit `--formula`/`--cask` flag, because a name can exist
+/// as both and bare `mt install <name>` silently picks the formula; a multi
+/// install passes bare names and lets `mt` detect each one's kind. Names borrow
+/// from the parse storage; caller frees the returned slice, not its elements.
 fn installArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const search.State) std.mem.Allocator.Error!?[]const []const u8 {
-    const m = search.selectedMatch(st) orelse return null; // empty list: no-op
-    if (m.installed) return null; // already installed: inert
-    // The search result's kind is authoritative, so disambiguate the install
-    // explicitly: a name can exist as both a formula and a cask, where bare
-    // `mt install <name>` silently picks the formula. Exhaustive switch — a new
-    // kind is a compile error, never a silent default.
-    const kind_flag: []const u8 = switch (m.kind) {
-        .formula => "--formula",
-        .cask => "--cask",
-    };
-    return try spawn.inlineArgv(allocator, mt_path, &.{ "install", kind_flag, m.name });
+    var idxs: std.ArrayList(usize) = .empty;
+    defer idxs.deinit(allocator);
+    for (st.items, 0..) |m, i| {
+        if (i < st.checked.len and st.checked[i] and !m.installed) try idxs.append(allocator, i);
+    }
+    if (idxs.items.len == 0) {
+        // Nothing checked: the active row, if it is installable.
+        const i = search.selectedIndex(st) orelse return null;
+        if (st.items[i].installed) return null;
+        try idxs.append(allocator, i);
+    }
+    if (idxs.items.len == 1) {
+        const m = st.items[idxs.items[0]];
+        const kind_flag: []const u8 = switch (m.kind) {
+            .formula => "--formula",
+            .cask => "--cask",
+        };
+        return try spawn.inlineArgv(allocator, mt_path, &.{ "install", kind_flag, m.name });
+    }
+    const argv = try allocator.alloc([]const u8, 2 + idxs.items.len);
+    argv[0] = mt_path;
+    argv[1] = "install";
+    for (idxs.items, 0..) |idx, k| argv[2 + k] = st.items[idx].name;
+    return argv;
 }
 
 /// Delegate the selected hit's install to the real `mt` inline, then re-run the
@@ -812,7 +905,30 @@ fn serviceSearch(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *
         .none => {},
         .search => try loadSearch(io, allocator, app, store),
         .install => try doInstall(io, allocator, t, app, store),
+        .info => try openSearchInfo(io, allocator, app, store),
     }
+}
+
+/// Open the `mt info` pane for the active hit. `mt info` resolves installed and
+/// uninstalled packages alike, so a search result can be inspected before any
+/// install. A read (no alt-screen drop); failure names the package in a banner
+/// and leaves the pane closed.
+fn openSearchInfo(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+    const m = search.selectedMatch(&app.states.search) orelse return; // empty list: no-op
+    errdefer |err| {
+        var sb: [96]u8 = undefined;
+        const op = std.fmt.bufPrint(&sb, "info for {s} failed", .{m.name}) catch "info read failed";
+        app.banner.set(op, @errorName(err));
+    }
+    const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "info", m.name });
+    defer allocator.free(argv);
+    const bytes = try spawn.readJson(io, allocator, argv);
+    defer allocator.free(bytes);
+
+    const parsed = try info_json.parse(allocator, bytes);
+    if (store.search_detail) |old| old.deinit();
+    store.search_detail = parsed;
+    app.states.search.detail = parsed.info;
 }
 
 /// Drain the active tab's pending effects after a keypress. Each tab's service is
@@ -910,6 +1026,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
                     app = step(app, k.key); // also clears any prior banner
                     if (app.quit) break;
                     paintSearching(fd, &frame, allocator, &app); // status before the blocking search
+                    paintLoading(fd, &frame, allocator, &app); // "Loading…" before a blocking lazy refetch
                     // A recoverable backend fault becomes the banner the failing
                     // op already set and the loop continues; only a fatal fault
                     // (terminal/OOM) propagates to the errdefer restore + exit.
@@ -935,6 +1052,17 @@ fn paintSearching(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator
     if (app.states.search.chrome.filter.slice().len == 0) return; // empty query: no spawn
     app.states.search.phase = .searching;
     repaint(fd, frame, allocator, app) catch {};
+}
+
+/// Before the active tab runs a blocking lazy refetch (it is dirty and will
+/// refetch on entry), paint a "Loading…" footer so the synchronous read reads as
+/// intentional, not a frozen or — before stderr was suppressed — garbled frame.
+/// Best-effort, like `paintSearching`; the read's own repaint draws the result.
+fn paintLoading(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) void {
+    if (!app.dirty.contains(app.active)) return; // nothing will refetch this turn
+    app.loading = true;
+    repaint(fd, frame, allocator, app) catch {};
+    app.loading = false;
 }
 
 fn repaint(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: *App) std.mem.Allocator.Error!void {
@@ -1066,6 +1194,16 @@ test "Enter on the Search tab focuses the query box rather than firing an empty 
     try std.testing.expectEqual(search.Request.none, a.states.search.request); // no search fired yet
 }
 
+test "Enter on the Search tab opens info once results are loaded" {
+    const items = [_]search.Match{.{ .name = "wget", .kind = .formula, .installed = false }};
+    var a: App = .{ .active = .search };
+    a.states.search.items = &items;
+    a.states.search.phase = .loaded;
+    a = step(a, .enter);
+    try std.testing.expect(!a.editing); // a row is active, so Enter inspects it, not the box
+    try std.testing.expectEqual(search.Request.info, a.states.search.request);
+}
+
 test "Enter on a data tab still routes as that tab's domain key, not a focus" {
     var a: App = .{ .active = .installed };
     a = step(a, .enter);
@@ -1075,6 +1213,7 @@ test "Enter on a data tab still routes as that tab's domain key, not a focus" {
 
 test "renderFrame shows the committed filter and the editing footer" {
     var a: App = .{};
+    a = step(a, ch('2')); // Installed tab: its box is a filter over the loaded list
     a = step(a, ch('/'));
     a = step(a, ch('j'));
     a = step(a, ch('q')); // 'q' is a literal char while editing, not quit
@@ -1083,6 +1222,17 @@ test "renderFrame shows the committed filter and the editing footer" {
     const out = renderFrame(&buf, &a, 80, 24);
     try std.testing.expect(std.mem.indexOf(u8, out, "filter: jq_") != null); // filter line with caret
     try std.testing.expect(std.mem.indexOf(u8, out, "accept") != null); // editing footer
+}
+
+test "the Search tab labels its input box as a query, not a filter" {
+    var a: App = .{ .active = .search };
+    a = step(a, ch('/'));
+    a = step(a, ch('r'));
+    a = step(a, ch('g'));
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 80, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "search: rg_") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "filter:") == null);
 }
 
 test "renderFrame draws a footer rule above a dimmed help line" {
@@ -1100,6 +1250,24 @@ test "the footer carries the active tab's keys next to the global keys" {
     const out = renderFrame(&buf, &a, 100, 24);
     try std.testing.expect(std.mem.indexOf(u8, out, "s: start") != null); // the active tab's keys
     try std.testing.expect(std.mem.indexOf(u8, out, "switch") != null); // and the global keys
+}
+
+test "a too-small terminal shows a wrapped, styled notice (width alone trips it)" {
+    var a: App = .{};
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 10, 24); // width below the minimum, height fine
+    try std.testing.expect(std.mem.indexOf(u8, out, "terminal") != null); // the notice shows
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2;1H") != null); // wrapped onto a 2nd row
+    try std.testing.expect(std.mem.indexOf(u8, out, color.Style.reset.code()) != null); // info colour applied + reset
+}
+
+test "the footer shows a per-tab loading status during a blocking refetch" {
+    var a: App = .{ .active = .doctor, .loading = true };
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 100, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Loading Doctor") != null);
+    // Loading takes precedence over the help line so the freeze reads as intentional.
+    try std.testing.expect(std.mem.indexOf(u8, out, "switch") == null);
 }
 
 test "renderFrame uses cursor positioning and never emits a raw newline" {
@@ -1456,6 +1624,38 @@ test "installArgv returns null on an already-installed hit and on an empty list"
     try std.testing.expect((try installArgv(std.testing.allocator, "/bin/mt", &st)) == null); // already installed
     const empty: search.State = .{ .items = &.{} };
     try std.testing.expect((try installArgv(std.testing.allocator, "/bin/mt", &empty)) == null); // nothing selected
+}
+
+test "installArgv installs every checked, not-installed hit as bare names for a batch" {
+    const items = [_]search.Match{
+        .{ .name = "wget", .kind = .formula, .installed = false },
+        .{ .name = "firefox", .kind = .cask, .installed = true }, // installed → excluded
+        .{ .name = "ripgrep", .kind = .formula, .installed = false },
+    };
+    var checked = [_]bool{ true, true, true };
+    const st: search.State = .{ .items = &items, .checked = &checked };
+    const argv = (try installArgv(std.testing.allocator, "/bin/mt", &st)).?;
+    defer std.testing.allocator.free(argv);
+    // mt, install, wget, ripgrep — a batch passes bare names (no global kind flag).
+    try std.testing.expectEqual(@as(usize, 4), argv.len);
+    try std.testing.expectEqualStrings("install", argv[1]);
+    try std.testing.expectEqualStrings("wget", argv[2]);
+    try std.testing.expectEqualStrings("ripgrep", argv[3]);
+}
+
+test "installArgv installs the checked row, not the active one, and keeps the kind flag for a single target" {
+    const items = [_]search.Match{
+        .{ .name = "wget", .kind = .formula, .installed = false },
+        .{ .name = "ripgrep", .kind = .formula, .installed = false },
+    };
+    var checked = [_]bool{ true, false }; // wget checked; ripgrep is active but unchecked
+    var st: search.State = .{ .items = &items, .checked = &checked };
+    st.chrome.view.selected = 1;
+    const argv = (try installArgv(std.testing.allocator, "/bin/mt", &st)).?;
+    defer std.testing.allocator.free(argv);
+    try std.testing.expectEqual(@as(usize, 4), argv.len); // single → mt, install, --formula, name
+    try std.testing.expectEqualStrings("--formula", argv[2]);
+    try std.testing.expectEqualStrings("wget", argv[3]); // the checked row, not active ripgrep
 }
 
 test "installArgv disambiguates a name that exists as both a formula and a cask" {
