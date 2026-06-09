@@ -1,0 +1,1 @@
+{"schema_version":1,"services":[{"name":"redis","state":"running","auto_start":true,"keg_name":"redis"},{"name":"postgresql@16","state":"stopped","auto_start":false,"keg_name":"postgresql@16"},{"name":"dnsmasq","state":"not-loaded","auto_start":true,"keg_name":"dnsmasq"},{"name":"unbound","state":"degraded","auto_start":false,"keg_name":"unbound"}],"time_ms":4}
