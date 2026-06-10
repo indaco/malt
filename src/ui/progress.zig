@@ -16,6 +16,7 @@ const builtin = @import("builtin");
 
 const color = @import("color.zig");
 const output = @import("output.zig");
+const termsize = @import("termsize.zig");
 
 var pkg_stderr: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
 
@@ -161,6 +162,62 @@ pub fn restoreTerminal() void {
     writeStderrAll("\x1b[?7h\x1b[?25h\r");
 }
 
+/// Widest the download bar ever draws — keeps the happy-path line
+/// byte-identical to the historical fixed bar; only narrow terminals shrink.
+const bar_cap: u16 = 30;
+/// Narrowest usable stub bar on a cramped terminal.
+const bar_floor: u16 = 4;
+
+/// Columns the line spends on everything but the bar: indent (2) + glyph and
+/// its trailing space (2) + label + a space (1) + percent (5) + a nominal
+/// detail readout (~40). The bar gets whatever is left.
+fn barOverhead(label_width: u8) u16 {
+    return 2 + 2 + @as(u16, label_width) + 1 + 5 + 40;
+}
+
+/// Cells the bar may occupy at terminal width `cols`. Clamped to
+/// `[bar_floor, bar_cap]` so a wide terminal is byte-identical to the old
+/// fixed bar and a narrow one shrinks smoothly without ever dipping below the
+/// floor.
+fn barCells(cols: u16, label_width: u8) u16 {
+    const overhead = barOverhead(label_width);
+    if (cols < overhead + bar_floor) return bar_floor;
+    return @min(bar_cap, cols - overhead);
+}
+
+/// How a bar draws at a given width: a sized bar, or — when the terminal is
+/// too narrow for even a floor bar beside the detail — a bare counter
+/// (glyph + label + percent/bytes), mirroring the TUI's "readable text over a
+/// corrupt frame" fallback.
+const BarLayout = union(enum) { counter, bar: u16 };
+
+/// Resolve the layout for terminal width `cols` (`null` = not a TTY, so keep
+/// the historical fixed bar and never query again).
+fn barLayout(cols: ?u16, label_width: u8) BarLayout {
+    const c = cols orelse return .{ .bar = bar_cap };
+    if (c < barOverhead(label_width) + bar_floor) return .counter;
+    return .{ .bar = barCells(c, label_width) };
+}
+
+/// Test-only injected terminal width. `null` reproduces the non-TTY path
+/// (`winsize` → `NotATty`), so existing render tests keep the fixed 30-cell
+/// bar without a real terminal.
+var cols_override: ?u16 = null;
+
+pub fn setColsForTest(v: ?u16) void {
+    if (!builtin.is_test) return;
+    cols_override = v;
+}
+
+/// Live terminal width for the draw, read from the stderr handle the bars
+/// write to. `null` on a non-TTY (piped / redirected) so the caller keeps the
+/// fixed bar. Stderr, not stdin: stderr can be a TTY while stdin is not.
+fn queryCols() ?u16 {
+    if (builtin.is_test) return cols_override;
+    const size = termsize.winsize(pkg_stderr.handle) catch return null;
+    return size.cols;
+}
+
 /// Coordinates multiple progress bars on separate terminal lines.
 /// Reserves N lines upfront, then uses ANSI cursor movement so each
 /// bar updates its own line without interfering with others.
@@ -227,7 +284,6 @@ pub const ProgressBar = struct {
     plain_finished: bool,
 
     const render_interval_ns: i128 = 100 * std.time.ns_per_ms; // 10 Hz max
-    const bar_width: u64 = 30;
 
     pub fn init(label: []const u8, total: u64) ProgressBar {
         return .{
@@ -395,6 +451,60 @@ pub const ProgressBar = struct {
         return pos;
     }
 
+    /// Visible columns `writeLabel` emits: indent (2) + glyph (1) + space (1)
+    /// + label (padded to `label_width`) + a trailing space. Used to budget the
+    /// detail readout against the live terminal width.
+    fn prefixCols(self: *const ProgressBar) usize {
+        const drawn = @max(self.label.len, @as(usize, self.label_width));
+        return 2 + 1 + 1 + drawn + 1;
+    }
+
+    /// The collapsed counter line — `  <glyph> <label> <value>` — for terminals
+    /// too narrow for even a floor-width bar. The label is truncated so the
+    /// visible line never exceeds `cols`; `value` is the percent (determinate)
+    /// or the bytes-so-far (indeterminate). Mirrors the TUI's readable-text
+    /// fallback over a corrupt frame.
+    fn writeCounterLine(self: *const ProgressBar, buf: []u8, start_pos: usize, cols: u16, value: []const u8) usize {
+        var pos = start_pos;
+        const done = self.total > 0 and self.current >= self.total;
+        const use_color = color.isColorEnabled();
+
+        buf[pos] = ' ';
+        pos += 1;
+        buf[pos] = ' ';
+        pos += 1;
+
+        const g = self.glyph();
+        if (use_color) {
+            const c = if (done) color.SemanticStyle.success.code() else color.SemanticStyle.info.code();
+            @memcpy(buf[pos .. pos + c.len], c);
+            pos += c.len;
+        }
+        @memcpy(buf[pos .. pos + g.len], g);
+        pos += g.len;
+        if (use_color) {
+            const r = color.Style.reset.code();
+            @memcpy(buf[pos .. pos + r.len], r);
+            pos += r.len;
+        }
+        buf[pos] = ' ';
+        pos += 1;
+
+        // Columns already spent (indent + glyph + space) plus the space and
+        // value still to come; the label takes whatever is left.
+        const fixed: usize = 2 + 1 + 1 + 1 + value.len;
+        const budget: usize = if (cols > fixed) cols - fixed else 0;
+        const label_len = @min(self.label.len, budget);
+        @memcpy(buf[pos .. pos + label_len], self.label[0..label_len]);
+        pos += label_len;
+
+        buf[pos] = ' ';
+        pos += 1;
+        @memcpy(buf[pos .. pos + value.len], value);
+        pos += value.len;
+        return pos;
+    }
+
     /// Write ANSI escape to move cursor up `n` lines.
     fn writeCursorUp(buf: []u8, pos: usize, n: u16) usize {
         if (n == 0) return pos;
@@ -410,9 +520,9 @@ pub const ProgressBar = struct {
     }
 
     fn renderDeterminate(self: *const ProgressBar) void {
+        const cols = queryCols();
+        const layout = barLayout(cols, self.label_width);
         const pct: u64 = if (self.total > 0) @min((self.current * 100) / self.total, 100) else 0;
-        const filled: u64 = if (self.total > 0) @min((self.current * bar_width) / self.total, bar_width) else 0;
-        const empty = bar_width - filled;
 
         // Lock mutex if part of a MultiProgress group
         if (self.multi) |mp| mp.mutex.lockUncancelable(pkg_io);
@@ -429,100 +539,72 @@ pub const ProgressBar = struct {
         buf[pos] = '\r';
         pos += 1;
 
-        // Prefix + aligned label
-        pos = self.writeLabel(&buf, pos);
+        switch (layout) {
+            .counter => {
+                // Too narrow for a bar: drop to "  <glyph> <label> NN%".
+                var pct_buf: [8]u8 = undefined;
+                const pct_str = std.fmt.bufPrint(&pct_buf, "{d}%", .{pct}) catch "%";
+                pos = self.writeCounterLine(&buf, pos, cols.?, pct_str);
+            },
+            .bar => |bw_u16| {
+                const bw: u64 = bw_u16;
 
-        // Bar
-        if (color.isColorEnabled()) {
-            const cyan_code = color.SemanticStyle.info.code();
-            const dim_code = color.SemanticStyle.detail.code();
-            const reset_code = color.Style.reset.code();
+                // Prefix + aligned label
+                pos = self.writeLabel(&buf, pos);
 
-            @memcpy(buf[pos .. pos + cyan_code.len], cyan_code);
-            pos += cyan_code.len;
+                // Bar
+                const filled: u64 = if (self.total > 0) @min((self.current * bw) / self.total, bw) else 0;
+                const empty = bw - filled;
+                if (color.isColorEnabled()) {
+                    const cyan_code = color.SemanticStyle.info.code();
+                    const dim_code = color.SemanticStyle.detail.code();
+                    const reset_code = color.Style.reset.code();
 
-            var i: u64 = 0;
-            while (i < filled) : (i += 1) {
-                const ch = "\xe2\x94\x81"; // ━
-                @memcpy(buf[pos .. pos + 3], ch);
-                pos += 3;
-            }
+                    @memcpy(buf[pos .. pos + cyan_code.len], cyan_code);
+                    pos += cyan_code.len;
 
-            @memcpy(buf[pos .. pos + reset_code.len], reset_code);
-            pos += reset_code.len;
+                    var i: u64 = 0;
+                    while (i < filled) : (i += 1) {
+                        const ch = "\xe2\x94\x81"; // ━
+                        @memcpy(buf[pos .. pos + 3], ch);
+                        pos += 3;
+                    }
 
-            @memcpy(buf[pos .. pos + dim_code.len], dim_code);
-            pos += dim_code.len;
+                    @memcpy(buf[pos .. pos + reset_code.len], reset_code);
+                    pos += reset_code.len;
 
-            i = 0;
-            while (i < empty) : (i += 1) {
-                const ch = "\xe2\x94\x80"; // ─
-                @memcpy(buf[pos .. pos + 3], ch);
-                pos += 3;
-            }
+                    @memcpy(buf[pos .. pos + dim_code.len], dim_code);
+                    pos += dim_code.len;
 
-            @memcpy(buf[pos .. pos + reset_code.len], reset_code);
-            pos += reset_code.len;
-        } else {
-            var i: u64 = 0;
-            while (i < filled) : (i += 1) {
-                buf[pos] = '=';
-                pos += 1;
-            }
-            i = 0;
-            while (i < empty) : (i += 1) {
-                buf[pos] = ' ';
-                pos += 1;
-            }
+                    i = 0;
+                    while (i < empty) : (i += 1) {
+                        const ch = "\xe2\x94\x80"; // ─
+                        @memcpy(buf[pos .. pos + 3], ch);
+                        pos += 3;
+                    }
+
+                    @memcpy(buf[pos .. pos + reset_code.len], reset_code);
+                    pos += reset_code.len;
+                } else {
+                    var i: u64 = 0;
+                    while (i < filled) : (i += 1) {
+                        buf[pos] = '=';
+                        pos += 1;
+                    }
+                    i = 0;
+                    while (i < empty) : (i += 1) {
+                        buf[pos] = ' ';
+                        pos += 1;
+                    }
+                }
+
+                // Percentage (outside parens, normal color)
+                const pct_part = std.fmt.bufPrint(buf[pos..], " {d: >3}%", .{pct}) catch "";
+                pos += pct_part.len;
+
+                pos = self.writeDetail(&buf, pos, cols, bw);
+            },
         }
-
-        // Percentage (outside parens, normal color)
-        const pct_part = std.fmt.bufPrint(buf[pos..], " {d: >3}%", .{pct}) catch "";
-        pos += pct_part.len;
-
-        // Details in dim color: (64/64 KB | 42 KB/s | ETA 2s)
-        const use_color = color.isColorEnabled();
-        const dim_code = if (use_color) color.SemanticStyle.detail.code() else "";
-        const reset_code2 = if (use_color) color.Style.reset.code() else "";
-
-        @memcpy(buf[pos .. pos + dim_code.len], dim_code);
-        pos += dim_code.len;
-
-        const open = std.fmt.bufPrint(buf[pos..], " (", .{}) catch "";
-        pos += open.len;
-
-        const size_kb = self.current / 1024;
-        const total_kb = self.total / 1024;
-        const size_part = if (total_kb > 1024)
-            std.fmt.bufPrint(buf[pos..], "{d:.1}/{d:.1} MB", .{
-                @as(f64, @floatFromInt(size_kb)) / 1024.0,
-                @as(f64, @floatFromInt(total_kb)) / 1024.0,
-            }) catch ""
-        else
-            std.fmt.bufPrint(buf[pos..], "{d}/{d} KB", .{ size_kb, total_kb }) catch "";
-        pos += size_part.len;
-
-        const rate = self.computeRate();
-        var rate_buf: [32]u8 = undefined;
-        const rate_str = formatRate(&rate_buf, rate);
-        if (self.current > 0) {
-            const rate_part = std.fmt.bufPrint(buf[pos..], " | {s}", .{rate_str}) catch "";
-            pos += rate_part.len;
-        }
-
-        if (self.total > 0 and self.current < self.total and rate > 0) {
-            var eta_buf: [32]u8 = undefined;
-            const eta_str = formatEta(&eta_buf, self.total - self.current, rate);
-            if (eta_str.len > 0) {
-                const eta_part = std.fmt.bufPrint(buf[pos..], " | {s}", .{eta_str}) catch "";
-                pos += eta_part.len;
-            }
-        }
-
-        buf[pos] = ')';
-        pos += 1;
-        @memcpy(buf[pos .. pos + reset_code2.len], reset_code2);
-        pos += reset_code2.len;
 
         // Erase from cursor to end of line. This clears any leftover chars
         // from a previously longer render (e.g. "ETA 10m03s" → "ETA 5s") and,
@@ -542,7 +624,76 @@ pub const ProgressBar = struct {
         writeStderrAll(buf[0..pos]);
     }
 
+    /// Append the dim `(size | rate | ETA)` detail. When `cols` is known, ETA
+    /// then rate are dropped (in that order) if the assembled line would
+    /// overflow — so the verbose readout gives way before the bar does. `bw` is
+    /// the bar width already drawn; the budget is measured against it.
+    fn writeDetail(self: *const ProgressBar, buf: []u8, start_pos: usize, cols: ?u16, bw: u64) usize {
+        var pos = start_pos;
+        const use_color = color.isColorEnabled();
+        const dim_code = if (use_color) color.SemanticStyle.detail.code() else "";
+        const reset_code = if (use_color) color.Style.reset.code() else "";
+
+        var size_buf: [48]u8 = undefined;
+        const size_kb = self.current / 1024;
+        const total_kb = self.total / 1024;
+        const size_str = if (total_kb > 1024)
+            std.fmt.bufPrint(&size_buf, "{d:.1}/{d:.1} MB", .{
+                @as(f64, @floatFromInt(size_kb)) / 1024.0,
+                @as(f64, @floatFromInt(total_kb)) / 1024.0,
+            }) catch ""
+        else
+            std.fmt.bufPrint(&size_buf, "{d}/{d} KB", .{ size_kb, total_kb }) catch "";
+
+        const rate = self.computeRate();
+        var rate_buf: [32]u8 = undefined;
+        const rate_str = formatRate(&rate_buf, rate);
+
+        var eta_buf: [32]u8 = undefined;
+        const eta_str = if (self.total > 0 and self.current < self.total and rate > 0)
+            formatEta(&eta_buf, self.total - self.current, rate)
+        else
+            "";
+
+        var show_rate = self.current > 0;
+        var show_eta = eta_str.len > 0;
+        if (cols) |c| {
+            const budget: usize = c;
+            // Columns through the closing paren of "(size)": prefix + bar +
+            // percent (5) + " (" (2) + size + ")" (1).
+            const base = self.prefixCols() + @as(usize, @intCast(bw)) + 5 + 2 + size_str.len + 1;
+            if (show_rate and base + 3 + rate_str.len > budget) show_rate = false;
+            const after_rate = base + (if (show_rate) 3 + rate_str.len else 0);
+            if (show_eta and (!show_rate or after_rate + 3 + eta_str.len > budget)) show_eta = false;
+        }
+
+        @memcpy(buf[pos .. pos + dim_code.len], dim_code);
+        pos += dim_code.len;
+
+        const open = std.fmt.bufPrint(buf[pos..], " (", .{}) catch "";
+        pos += open.len;
+        @memcpy(buf[pos .. pos + size_str.len], size_str);
+        pos += size_str.len;
+
+        if (show_rate) {
+            const rate_part = std.fmt.bufPrint(buf[pos..], " | {s}", .{rate_str}) catch "";
+            pos += rate_part.len;
+        }
+        if (show_eta) {
+            const eta_part = std.fmt.bufPrint(buf[pos..], " | {s}", .{eta_str}) catch "";
+            pos += eta_part.len;
+        }
+
+        buf[pos] = ')';
+        pos += 1;
+        @memcpy(buf[pos .. pos + reset_code.len], reset_code);
+        pos += reset_code.len;
+        return pos;
+    }
+
     fn renderIndeterminate(self: *const ProgressBar) void {
+        const cols = queryCols();
+
         if (self.multi) |mp| mp.mutex.lockUncancelable(pkg_io);
         defer if (self.multi) |mp| mp.mutex.unlock(pkg_io);
 
@@ -555,36 +706,46 @@ pub const ProgressBar = struct {
         buf[pos] = '\r';
         pos += 1;
 
-        // writeLabel already renders the animated spinner as the line glyph.
-        pos = self.writeLabel(&buf, pos);
-
-        const use_color = color.isColorEnabled();
-        const dim_code = if (use_color) color.SemanticStyle.detail.code() else "";
-        const reset_code = if (use_color) color.Style.reset.code() else "";
-
-        @memcpy(buf[pos .. pos + dim_code.len], dim_code);
-        pos += dim_code.len;
-        buf[pos] = '(';
-        pos += 1;
-
         const size_kb = self.current / 1024;
+        var size_buf: [32]u8 = undefined;
+        const size_str = if (size_kb > 1024)
+            std.fmt.bufPrint(&size_buf, "{d:.1} MB", .{@as(f64, @floatFromInt(size_kb)) / 1024.0}) catch ""
+        else
+            std.fmt.bufPrint(&size_buf, "{d} KB", .{size_kb}) catch "";
+
         const rate = self.computeRate();
         var rate_buf: [32]u8 = undefined;
         const rate_str = formatRate(&rate_buf, rate);
 
-        const info = if (size_kb > 1024)
-            std.fmt.bufPrint(buf[pos..], "{d:.1} MB | {s}", .{
-                @as(f64, @floatFromInt(size_kb)) / 1024.0,
-                rate_str,
-            }) catch ""
-        else
-            std.fmt.bufPrint(buf[pos..], "{d} KB | {s}", .{ size_kb, rate_str }) catch "";
-        pos += info.len;
+        // Indeterminate bars carry no bar to shrink; instead, when the full
+        // "(size | rate)" detail won't fit the live width, collapse to the bare
+        // "  <glyph> <label> <bytes>" counter (drop the rate + parens).
+        const full_width = self.prefixCols() + 1 + size_str.len + 3 + rate_str.len + 1;
+        const collapse = if (cols) |c| full_width > @as(usize, c) else false;
 
-        buf[pos] = ')';
-        pos += 1;
-        @memcpy(buf[pos .. pos + reset_code.len], reset_code);
-        pos += reset_code.len;
+        if (collapse) {
+            pos = self.writeCounterLine(&buf, pos, cols.?, size_str);
+        } else {
+            // writeLabel already renders the animated spinner as the line glyph.
+            pos = self.writeLabel(&buf, pos);
+
+            const use_color = color.isColorEnabled();
+            const dim_code = if (use_color) color.SemanticStyle.detail.code() else "";
+            const reset_code = if (use_color) color.Style.reset.code() else "";
+
+            @memcpy(buf[pos .. pos + dim_code.len], dim_code);
+            pos += dim_code.len;
+            buf[pos] = '(';
+            pos += 1;
+
+            const info = std.fmt.bufPrint(buf[pos..], "{s} | {s}", .{ size_str, rate_str }) catch "";
+            pos += info.len;
+
+            buf[pos] = ')';
+            pos += 1;
+            @memcpy(buf[pos .. pos + reset_code.len], reset_code);
+            pos += reset_code.len;
+        }
 
         // Erase to end of line (see renderDeterminate for rationale).
         const erase = "\x1b[K";
@@ -1248,4 +1409,207 @@ test "ProgressBar quiet trumps none mode" {
     bar.finish();
 
     try std.testing.expectEqualStrings("", buf.items);
+}
+
+// `barCells` is the width-aware replacement for the old fixed `bar_width`.
+// A terminal at least as wide as the full line keeps the historical 30-cell
+// bar so existing output is byte-identical; only narrow terminals shrink it.
+test "barCells caps at the historical 30 on a wide terminal" {
+    try std.testing.expectEqual(@as(u16, 30), barCells(200, 10));
+    try std.testing.expectEqual(@as(u16, 30), barCells(120, 0));
+}
+
+// The bar must give way smoothly as the terminal narrows — no jump from full
+// width to floor.
+test "barCells shrinks monotonically as the terminal narrows" {
+    var prev: u16 = barCells(120, 10);
+    var cols: u16 = 115;
+    while (cols >= 40) : (cols -= 1) {
+        const cur = barCells(cols, 10);
+        try std.testing.expect(cur <= prev);
+        prev = cur;
+    }
+}
+
+// Even a pathologically narrow terminal leaves a usable stub bar rather than
+// a zero-width one that would read as "no bar".
+test "barCells never returns below the 4-cell floor" {
+    try std.testing.expectEqual(@as(u16, 4), barCells(10, 10));
+    try std.testing.expectEqual(@as(u16, 4), barCells(0, 0));
+    var cols: u16 = 0;
+    while (cols < 300) : (cols += 1) {
+        try std.testing.expect(barCells(cols, 20) >= bar_floor);
+    }
+}
+
+// A longer label eats into the budget, so the bar must reserve room for it —
+// a wider label at the same width yields a narrower bar.
+test "barCells reserves room for a wider label" {
+    try std.testing.expect(barCells(80, 30) < barCells(80, 0));
+}
+
+// Counts on-screen columns: strips CSI escapes and CR/LF, then tallies one
+// column per remaining UTF-8 codepoint (the bar/glyph chars are 1 column each).
+fn visibleColumns(s: []const u8) usize {
+    var i: usize = 0;
+    var cols: usize = 0;
+    while (i < s.len) {
+        const b = s[i];
+        if (b == 0x1b) {
+            i += 1;
+            if (i < s.len and s[i] == '[') {
+                i += 1;
+                while (i < s.len and (s[i] < 0x40 or s[i] > 0x7e)) i += 1; // params
+                if (i < s.len) i += 1; // final byte
+            }
+            continue;
+        }
+        if (b == '\r' or b == '\n') {
+            i += 1;
+            continue;
+        }
+        i += std.unicode.utf8ByteSequenceLength(b) catch 1;
+        cols += 1;
+    }
+    return cols;
+}
+
+fn barCellCount(s: []const u8) usize {
+    return std.mem.count(u8, s, "\xe2\x94\x81") + std.mem.count(u8, s, "\xe2\x94\x80"); // ━ + ─
+}
+
+// AC: on a narrow terminal the assembled line must not exceed the column
+// budget — the bar shrinks and detail drops until it fits.
+test "determinate render fits within a narrow terminal width" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    color.setForTest(true, true);
+    defer color.setForTest(null, null);
+    setColsForTest(60);
+    defer setColsForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init("tree", 10 * 1024 * 1024);
+    bar.is_tty = true;
+    bar.update(6 * 1024 * 1024);
+
+    try std.testing.expect(visibleColumns(buf.items) <= 60);
+}
+
+// AC: ETA/rate drop *before* the bar collapses — at a width where the bar is
+// still full but the verbose MB detail would overflow, ETA is dropped while
+// the bar stays at 30 cells.
+test "determinate render drops ETA before shrinking the bar" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    color.setForTest(true, true);
+    defer color.setForTest(null, null);
+    setColsForTest(80);
+    defer setColsForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init("a", 2000 * 1024 * 1024);
+    bar.is_tty = true;
+    bar.start_time_ms = nowMs() - 5000; // 5s elapsed → a real rate + ETA
+    bar.update(100 * 1024 * 1024);
+
+    try std.testing.expect(visibleColumns(buf.items) <= 80);
+    try std.testing.expectEqual(@as(usize, 30), barCellCount(buf.items)); // bar not collapsed
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ETA") == null); // ETA dropped
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "MB") != null); // size kept
+}
+
+// AC: below the floor-bar threshold the bar is dropped entirely for a bare
+// counter — glyph + label + percent, no bar cells — mirroring the TUI fallback.
+test "determinate render collapses to a bare counter on a very narrow terminal" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    color.setForTest(true, true);
+    defer color.setForTest(null, null);
+    setColsForTest(20);
+    defer setColsForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init("tree", 1000);
+    bar.is_tty = true;
+    bar.update(750);
+
+    try std.testing.expect(visibleColumns(buf.items) <= 20);
+    try std.testing.expectEqual(@as(usize, 0), barCellCount(buf.items)); // no bar
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "tree") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "75%") != null); // counter
+}
+
+// AC: a non-TTY (winsize → NotATty, modelled by a null override) keeps the
+// historical fixed 30-cell bar — piped install output is unchanged.
+test "determinate render keeps the fixed 30-cell bar on a non-tty" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    color.setForTest(true, true);
+    defer color.setForTest(null, null);
+    setColsForTest(null);
+    defer setColsForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init("tree", 1000);
+    bar.is_tty = true;
+    bar.update(500);
+
+    try std.testing.expectEqual(@as(usize, 30), barCellCount(buf.items));
+}
+
+// AC: the indeterminate (migrate) path collapses to glyph + label + bytes on a
+// very narrow terminal, dropping the parenthesised rate detail.
+test "indeterminate render collapses to label + bytes on a very narrow terminal" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    color.setForTest(true, true);
+    defer color.setForTest(null, null);
+    setColsForTest(18);
+    defer setColsForTest(null);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var bar = ProgressBar.init("kafka", 0); // total 0 → indeterminate
+    bar.is_tty = true;
+    bar.update(12 * 1024 * 1024);
+
+    try std.testing.expect(visibleColumns(buf.items) <= 18);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "kafka") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "MB") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "(") == null); // no detail parens
 }
