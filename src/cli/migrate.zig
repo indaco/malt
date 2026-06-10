@@ -374,6 +374,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             bars[slot].update(0);
             bar_for_keg[keg_idx] = &bars[slot];
         }
+        // Hand the group its bars so the first worker to see a resize can
+        // repaint every row at the new width. Set after the loop — the alloc
+        // is uninitialised until each slot is written.
+        multi.bars = bars;
 
         var pool: parallel_mod.Pool = .{
             .app_ctx = ctx,
