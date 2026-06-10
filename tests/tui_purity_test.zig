@@ -94,9 +94,10 @@ fn importAllowed(importer_dir: []const u8, path: []const u8) bool {
     const resolved = resolvePosix(&buf, importer_dir, path) orelse return false;
     // Inside the leaf root → intra-leaf composition, always allowed.
     if (std.mem.startsWith(u8, resolved, scanned_root ++ "/")) return true;
-    // Otherwise only the two read-only ui helpers may be reached.
+    // Otherwise only the read-only ui helpers may be reached.
     return std.mem.eql(u8, resolved, "src/ui/color.zig") or
-        std.mem.eql(u8, resolved, "src/ui/term_sanitize.zig");
+        std.mem.eql(u8, resolved, "src/ui/term_sanitize.zig") or
+        std.mem.eql(u8, resolved, "src/ui/termsize.zig");
 }
 
 /// Normalise `rel` against `base` into a repo-relative POSIX path, collapsing
@@ -140,6 +141,11 @@ test "importAllowed permits a subdirectory sibling and the ui helpers from a sub
     try testing.expect(importAllowed("src/tui/json", "list.zig")); // within the subdir
     try testing.expect(importAllowed("src/tui/json", "../../ui/color.zig"));
     try testing.expect(importAllowed("src/tui/json", "../../ui/term_sanitize.zig"));
+}
+
+test "importAllowed permits the shared termsize leaf" {
+    try testing.expect(importAllowed("src/tui", "../ui/termsize.zig"));
+    try testing.expect(importAllowed("src/tui/json", "../../ui/termsize.zig"));
 }
 
 test "importAllowed rejects an outward reach from any depth" {
