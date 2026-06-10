@@ -90,6 +90,7 @@ pub const mirror = @import("net/mirror.zig");
 pub const offline = @import("net/offline.zig");
 pub const text_replace = @import("text_replace.zig");
 pub const color = @import("ui/color.zig");
+pub const custom_theme = @import("ui/custom_theme.zig");
 pub const output = @import("ui/output.zig");
 pub const progress = @import("ui/progress.zig");
 pub const term_sanitize = @import("ui/term_sanitize.zig");
