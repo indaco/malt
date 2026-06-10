@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const themes = @import("themes.zig");
+const theme_registry = @import("theme_registry.zig");
 /// Process-wide io + environ seeded once from `main` via `setRuntime`.
 /// Defaults stay benign so tests that don't seed see deterministic
 /// "no env vars, no terminal probe" output.
@@ -64,6 +65,7 @@ pub const SemanticStyle = enum {
         const t = theme();
         const bg = background();
         const tc = truecolorSupported();
+        if (activeCustomPalette(bg, tc)) |p| return p.get(semanticToRole(self));
         if (namedThemeApplies(t, bg, tc)) return themes.named(t).?.get(semanticToRole(self));
         return paletteCode(self, bg, tc);
     }
@@ -89,6 +91,18 @@ var theme_cached: ?Theme = null;
 
 var pkg_environ: std.process.Environ = .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } };
 
+// ─── custom theme registry (loaded once at boot) ─────────────────────
+//
+// Backing storage for any user-defined themes. Written once by
+// `installCustomThemes` and read-only after — no atomics, single-threaded boot.
+// `custom_count == 0` means "no custom themes"; the resolver then behaves
+// exactly as before. Selection is env-derived (`MALT_THEME`), so it re-resolves
+// lazily and `setRuntime` drops it, mirroring `theme_cached`.
+var custom_storage: theme_registry.Storage = undefined;
+var custom_count: usize = 0;
+var active_custom_index: ?usize = null;
+var active_custom_resolved: bool = false;
+
 /// Seed the io/environ used by env reads and TTY probes. Called by
 /// `main` after `AppCtx` is built. Inverse of relying on globals.
 ///
@@ -103,6 +117,9 @@ pub fn setRuntime(io: std.Io, environ: std.process.Environ) void {
     background_cached = null;
     truecolor_cached = null;
     theme_cached = null;
+    // Selection depends on MALT_THEME; the loaded registry itself is file-derived
+    // and survives a re-seed, so only the resolved choice is dropped.
+    active_custom_resolved = false;
 }
 
 test "setRuntime re-seeds the theme cache so a pre-seed warm cannot freeze it" {
@@ -468,9 +485,83 @@ pub fn resolveThemeFromEnv(value: ?[]const u8) Theme {
     return themes.from_env.get(lower) orelse .default;
 }
 
-/// The escape for a role under the active (theme, background, tier).
+/// Outcome of a custom-theme load attempt. The caller (boot) maps `.rejected`
+/// to a single user-facing notice; `color` itself stays free of any output
+/// dependency so the `cli/tui → color` direction is preserved.
+pub const InstallResult = enum { absent, loaded, rejected };
+
+/// Install user-defined themes from an already-read, already-hardened byte
+/// slice (null = no file present). Strict all-or-nothing: a malformed file is
+/// rejected whole and the built-ins are kept. Read-only after this returns.
+pub fn installCustomThemes(allocator: std.mem.Allocator, bytes: ?[]const u8) InstallResult {
+    custom_count = 0;
+    active_custom_resolved = false; // re-resolve selection against the new registry
+    const b = bytes orelse return .absent;
+    theme_registry.populate(allocator, b, &custom_storage) catch return .rejected;
+    custom_count = custom_storage.registry.count;
+    return .loaded;
+}
+
+/// Lazily-resolved index of the active custom theme, or null when none applies.
+/// Cached like `theme()`; recomputed after a `setRuntime`/`installCustomThemes`.
+fn activeCustomIndex() ?usize {
+    if (!active_custom_resolved) {
+        active_custom_index = if (custom_count == 0) null else resolveActiveCustom(lookupEnv("MALT_THEME"));
+        active_custom_resolved = true;
+    }
+    return active_custom_index;
+}
+
+/// Precedence: a built-in named via `MALT_THEME` always wins (a custom theme can
+/// never shadow `dracula`); else an explicit `MALT_THEME` naming a custom theme
+/// selects it; else (unset or unrecognised selector) the file's `default`
+/// marker. Only called when `custom_count > 0`, so `default_index` is valid.
+fn resolveActiveCustom(raw: ?[:0]const u8) ?usize {
+    if (raw) |r| {
+        if (isBuiltinSelector(r)) return null;
+        if (theme_registry.resolveByName(&custom_storage, r)) |i| return i;
+        // An unrecognised selector falls through to the file default.
+    }
+    return custom_storage.registry.default_index;
+}
+
+/// True when `raw` names a built-in theme (or a reserved background value) the
+/// static `from_env` map already owns — the no-shadow guard.
+fn isBuiltinSelector(raw: []const u8) bool {
+    var buf: [32]u8 = undefined;
+    if (raw.len == 0 or raw.len > buf.len) return false;
+    const lower = std.ascii.lowerString(buf[0..raw.len], raw);
+    return themes.from_env.get(lower) != null;
+}
+
+/// The active custom theme's palette when one is selected *and* applies under
+/// the current tier — truecolor gate (wholesale, but a 256-index-only theme
+/// needs no truecolor) and the polarity gate. Null ⇒ fall back to the built-in
+/// resolver. Shared by the CLI (`SemanticStyle.code`) and TUI (`roleCode`) so
+/// the two surfaces never disagree about when a custom theme is in effect.
+fn activeCustomPalette(bg: Background, truecolor: bool) ?*const themes.NamedPalette {
+    const i = activeCustomIndex() orelse return null;
+    if (!truecolor and custom_storage.requires_truecolor[i]) return null;
+    const t = &custom_storage.registry.themes[i];
+    if (customPolarityConflicts(t.polarity, bg)) return null;
+    return &t.palette;
+}
+
+/// Test-only reset of the custom registry between unit tests.
+pub fn clearCustomForTest() void {
+    if (!builtin.is_test) return;
+    custom_count = 0;
+    active_custom_index = null;
+    active_custom_resolved = false;
+}
+
+/// The escape for a role under the active (theme, background, tier). A selected
+/// custom theme wins when it applies; otherwise the built-in resolver decides.
 pub fn roleCode(role: Role) []const u8 {
-    return resolveRole(theme(), role, background(), truecolorSupported());
+    const bg = background();
+    const tc = truecolorSupported();
+    if (activeCustomPalette(bg, tc)) |p| return p.get(role);
+    return resolveRole(theme(), role, bg, tc);
 }
 
 /// Secondary accent — a blue with no cell in the existing semantic palette.
@@ -502,6 +593,14 @@ fn namedThemeApplies(t: Theme, bg: Background, truecolor: bool) bool {
 /// on positive evidence the theme would be illegible.
 fn polarityConflicts(t: Theme, bg: Background) bool {
     const p = themes.polarity(t) orelse return false;
+    return customPolarityConflicts(p, bg);
+}
+
+/// Core polarity gate over an explicit polarity. Built-in `.default` has no
+/// polarity (handled above); custom themes always carry one, so they call here
+/// directly. `.unknown` never conflicts — a theme is overridden only on positive
+/// evidence its background is the wrong polarity.
+fn customPolarityConflicts(p: themes.Polarity, bg: Background) bool {
     return switch (bg) {
         .light => p == .dark,
         .dark => p == .light,
@@ -583,4 +682,122 @@ test "namedThemeApplies requires named + truecolor + no polarity conflict" {
     try std.testing.expect(!namedThemeApplies(.dracula, .light, true)); // polarity conflict
     try std.testing.expect(!namedThemeApplies(.dracula, .dark, false)); // basic terminal
     try std.testing.expect(!namedThemeApplies(.default, .dark, true)); // .default is never "named"
+}
+
+// ─── custom theme resolver wiring ────────────────────────────────────
+
+const custom_ocean_src =
+    \\{"version":1,"default":"ocean","themes":{
+    \\  "ocean":{"polarity":"dark","accent":"#bd93f9","secondary":2,"success":3,"warning":4,"danger":5,"muted":6}
+    \\}}
+;
+
+/// Seed environ + force the (truecolor, background) tier, install a custom
+/// registry, and return to a clean slate via `defer` in the caller. `theme()`
+/// is left to resolve from `MALT_THEME` so the no-shadow path is exercised
+/// realistically.
+fn seedCustom(comptime malt_theme: ?[]const u8, tc: bool, bg: Background, src: ?[]const u8) InstallResult {
+    const io = std.Options.debug_io;
+    const slice = if (malt_theme) |v|
+        &[_:null]?[*:0]const u8{"MALT_THEME=" ++ v}
+    else
+        &[_:null]?[*:0]const u8{};
+    setRuntime(io, .{ .block = .{ .slice = slice } });
+    setTruecolorForTest(tc);
+    setBackgroundForTest(bg);
+    return installCustomThemes(std.testing.allocator, src);
+}
+
+fn resetCustom() void {
+    clearCustomForTest();
+    setRuntime(std.Options.debug_io, .{ .block = .{ .slice = &[_:null]?[*:0]const u8{} } });
+    setThemeForTest(null);
+    setTruecolorForTest(null);
+    setBackgroundForTest(null);
+}
+
+test "a selected custom theme paints the TUI role via the resolver" {
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, custom_ocean_src));
+    defer resetCustom();
+    try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", roleCode(.accent));
+}
+
+test "the CLI semantic seam carries the custom palette too" {
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, custom_ocean_src));
+    defer resetCustom();
+    // semanticToRole(.info) == .accent; ocean accent is #bd93f9.
+    try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", SemanticStyle.info.code());
+}
+
+test "a custom theme named like a built-in never shadows it" {
+    const src =
+        \\{"version":1,"default":"dracula","themes":{
+        \\  "dracula":{"polarity":"dark","accent":"#000000","secondary":2,"success":3,"warning":4,"danger":5,"muted":6}
+        \\}}
+    ;
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("dracula", true, .unknown, src));
+    defer resetCustom();
+    // The built-in dracula accent wins; the custom "#000000" is unreachable by name.
+    try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", roleCode(.accent));
+}
+
+test "MALT_THEME selects a custom theme over the file default; unset uses the file default" {
+    const src =
+        \\{"version":1,"default":"sand","themes":{
+        \\  "ocean":{"polarity":"dark","accent":"#bd93f9","secondary":2,"success":3,"warning":4,"danger":5,"muted":6},
+        \\  "sand":{"polarity":"dark","accent":"#50fa7b","secondary":2,"success":3,"warning":4,"danger":5,"muted":6}
+        \\}}
+    ;
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, src));
+    try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", roleCode(.accent)); // explicit ocean wins
+    resetCustom();
+
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom(null, true, .unknown, src));
+    defer resetCustom();
+    try std.testing.expectEqualStrings("\x1b[38;2;80;250;123m", roleCode(.accent)); // unset ⇒ file default sand
+}
+
+test "a 256-index custom theme paints without truecolor; a hex one degrades whole" {
+    const c256 =
+        \\{"version":1,"default":"x","themes":{
+        \\  "x":{"polarity":"dark","accent":40,"secondary":2,"success":3,"warning":4,"danger":5,"muted":6}
+        \\}}
+    ;
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("x", false, .unknown, c256)); // truecolor off
+    try std.testing.expectEqualStrings("\x1b[38;5;40m", roleCode(.accent));
+    resetCustom();
+
+    const chex =
+        \\{"version":1,"default":"x","themes":{
+        \\  "x":{"polarity":"dark","accent":"#bd93f9","secondary":2,"success":3,"warning":4,"danger":5,"muted":6}
+        \\}}
+    ;
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("x", false, .unknown, chex)); // truecolor off
+    defer resetCustom();
+    // requires truecolor ⇒ wholesale fall back to the default tier.
+    try std.testing.expectEqualStrings(resolveRole(.default, .accent, .unknown, false), roleCode(.accent));
+}
+
+test "a light custom theme degrades to default on a detected dark terminal" {
+    const src =
+        \\{"version":1,"default":"day","themes":{
+        \\  "day":{"polarity":"light","accent":"#bd93f9","secondary":2,"success":3,"warning":4,"danger":5,"muted":6}
+        \\}}
+    ;
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("day", true, .dark, src));
+    defer resetCustom();
+    // light polarity vs detected dark ⇒ conflict ⇒ default tier.
+    try std.testing.expectEqualStrings(resolveRole(.default, .accent, .dark, true), roleCode(.accent));
+}
+
+test "a rejected file keeps the built-in default output" {
+    try std.testing.expectEqual(InstallResult.rejected, seedCustom("whatever", true, .unknown, "{\"version\":9}"));
+    defer resetCustom();
+    try std.testing.expectEqualStrings(resolveRole(.default, .accent, .unknown, true), roleCode(.accent));
+}
+
+test "no themes file leaves the resolver untouched" {
+    try std.testing.expectEqual(InstallResult.absent, seedCustom(null, true, .unknown, null));
+    defer resetCustom();
+    try std.testing.expectEqualStrings(resolveRole(.default, .accent, .unknown, true), roleCode(.accent));
 }

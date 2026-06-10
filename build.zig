@@ -188,6 +188,7 @@ pub fn build(b: *std.Build) void {
         "tests/forge_purity_test.zig",
         "tests/no_main_reach_in_cli_test.zig",
         "tests/ui_color_theme_test.zig",
+        "tests/custom_theme_test.zig",
         "tests/install_local_test.zig",
         "tests/cask_extra_test.zig",
         "tests/cask_resolve_test.zig",

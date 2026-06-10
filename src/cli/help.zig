@@ -672,6 +672,8 @@ const tui_help =
     \\               degrade to the default palette on a basic terminal or one
     \\               whose background contradicts the theme (e.g. a dark theme
     \\               on a light terminal).
+    \\  MALT_THEMES_FILE  JSON file of custom themes (see the README); read once
+    \\               at boot, else {prefix}/etc/malt/themes.json if present.
     \\
 ;
 
