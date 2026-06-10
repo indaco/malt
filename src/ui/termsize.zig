@@ -63,6 +63,26 @@ pub fn installWinch(fd: std.posix.fd_t) void {
     std.posix.sigaction(std.posix.SIG.WINCH, &act, null);
 }
 
+/// Stricter `SIGWINCH` handler for the CLI progress engine: raise the flag
+/// and nothing else. The repaint owner queries the live size in normal
+/// context, so no syscall runs in signal context.
+fn winchHandlerFlagOnly(_: std.posix.SIG) callconv(.c) void {
+    resized_flag.store(true, .release);
+}
+
+/// Wire `SIGWINCH` to raise only the resize flag — no `ioctl` in signal
+/// context, unlike `installWinch`. The progress engine reads the live width
+/// itself on the next render tick. Idempotent like `installWinch`.
+pub fn installWinchFlagOnly() void {
+    if (winch_installed.swap(true, .acq_rel)) return;
+    const act = std.posix.Sigaction{
+        .handler = .{ .handler = &winchHandlerFlagOnly },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.WINCH, &act, null);
+}
+
 pub fn winchInstalled() bool {
     return winch_installed.load(.acquire);
 }
@@ -124,6 +144,35 @@ test "takeResized consumes the flag exactly once" {
     setResizedForTest(true);
     try std.testing.expect(takeResized());
     try std.testing.expect(!takeResized());
+}
+
+// The install-path handler must do no work in signal context beyond raising
+// the flag — proven by a sentinel size left untouched (a `winsize` query
+// would overwrite it).
+test "flag-only winch handler raises the flag without querying winsize" {
+    setResizedForTest(false);
+    setSizeForTest(.{ .cols = 111, .rows = 222 });
+    winchHandlerFlagOnly(std.posix.SIG.WINCH);
+    try std.testing.expect(takeResized());
+    try std.testing.expectEqual(Size{ .cols = 111, .rows = 222 }, currentSize());
+}
+
+// A redundant install (repeated CLI dispatch, tests re-entering setup) must
+// not clobber a flag a prior handler already raised — the swap guard returns
+// before re-registering. Mirrors the SIGINT idempotency contract.
+test "installWinchFlagOnly does not clobber a raised resize flag" {
+    const prior_installed = winchInstalled();
+    defer setWinchInstalledForTest(prior_installed);
+    setWinchInstalledForTest(false);
+    setResizedForTest(false);
+
+    installWinchFlagOnly();
+    try std.testing.expect(winchInstalled());
+
+    // Simulate the handler firing between two install attempts.
+    setResizedForTest(true);
+    installWinchFlagOnly(); // idempotent no-op
+    try std.testing.expect(takeResized());
 }
 
 test "currentSize reflects the last published size" {

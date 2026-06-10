@@ -938,6 +938,10 @@ fn executeWithOpts(
                     bar_idx += 1;
                 }
             }
+            // Hand the group its bars so the first worker to observe a resize
+            // repaints every row at the new width. `bars` may be shorter than
+            // the slice if alloc partially failed; pass the populated prefix.
+            m.bars = bars[0..bar_idx];
         }
 
         // 4-worker cap — overlap download I/O with codesign CPU inside each

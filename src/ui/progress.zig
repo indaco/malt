@@ -225,6 +225,10 @@ pub const MultiProgress = struct {
     total_lines: u16,
     mutex: std.Io.Mutex,
     is_tty: bool,
+    /// Bars in row order, so the first worker to see a resize can repaint the
+    /// whole group at the new width. Empty for groups whose caller never
+    /// registers its bars (the resize path is then a no-op).
+    bars: []ProgressBar = &.{},
 
     pub fn init(count: u16) MultiProgress {
         // `is_tty` here means "TTY-mode bar is active": the rendering
@@ -236,6 +240,10 @@ pub const MultiProgress = struct {
         // Autowrap disabled so an over-width bar clips instead of wrapping —
         // wrapping would break the ESC[NA cursor-up math each bar relies on.
         if (tty and !output.isQuiet()) {
+            // Arm SIGWINCH so a mid-render resize repaints the group on the
+            // next tick. Flag-only handler: the repaint owner queries the new
+            // width in normal context, no syscall in signal context.
+            termsize.installWinchFlagOnly();
             // 11-byte prefix; newlines emitted in 256-byte chunks so a u16-max
             // line count doesn't blow the stack frame.
             writeStderrAll("\x1b[?25l\x1b[?7l");
@@ -253,6 +261,20 @@ pub const MultiProgress = struct {
             .mutex = .init,
             .is_tty = tty,
         };
+    }
+
+    /// First worker to observe a `SIGWINCH` repaints the whole group at the
+    /// new width; later workers this tick see the consumed flag and skip it.
+    /// Caller holds the group mutex, so the repaint serialises against
+    /// in-flight single-line draws. No-op without a pending resize.
+    fn repaintIfResized(self: *MultiProgress) void {
+        if (!termsize.takeResized()) return;
+        // Some emulators re-enable DECAWM on resize: re-assert autowrap-off so
+        // a reflowed over-width bar clips instead of wrapping and desyncing the
+        // cursor-up math. Each bar's draw re-queries the live width and keeps
+        // its own `\x1b[K`, so a narrowing redraw erases the stale wider tail.
+        writeStderrAll("\x1b[?7l");
+        for (self.bars) |*bar| bar.drawLine();
     }
 
     /// Restore cursor, autowrap, and reset to column 0 after all bars are done.
@@ -354,11 +376,24 @@ pub const ProgressBar = struct {
         // front of the label.
         self.spinner_frame +%= 1;
 
-        if (self.total > 0) {
-            self.renderDeterminate();
+        // The group mutex guards every multi-bar draw; hold it across the
+        // resize check + draw so a resize repaints the whole group atomically
+        // against in-flight worker draws.
+        if (self.multi) |mp| {
+            mp.mutex.lockUncancelable(pkg_io);
+            defer mp.mutex.unlock(pkg_io);
+            mp.repaintIfResized();
+            self.drawLine();
         } else {
-            self.renderIndeterminate();
+            self.drawLine();
         }
+    }
+
+    /// Draw this bar's single line in place — no locking, so the group mutex
+    /// is held by the caller (`render`) and by `repaintIfResized`. Determinacy
+    /// selects the body; both honour the group's cursor-up/down math.
+    fn drawLine(self: *const ProgressBar) void {
+        if (self.total > 0) self.drawDeterminate() else self.drawIndeterminate();
     }
 
     /// Return the glyph shown in front of the label: a spinner frame while
@@ -519,14 +554,10 @@ pub const ProgressBar = struct {
         return pos + seq.len;
     }
 
-    fn renderDeterminate(self: *const ProgressBar) void {
+    fn drawDeterminate(self: *const ProgressBar) void {
         const cols = queryCols();
         const layout = barLayout(cols, self.label_width);
         const pct: u64 = if (self.total > 0) @min((self.current * 100) / self.total, 100) else 0;
-
-        // Lock mutex if part of a MultiProgress group
-        if (self.multi) |mp| mp.mutex.lockUncancelable(pkg_io);
-        defer if (self.multi) |mp| mp.mutex.unlock(pkg_io);
 
         var buf: [768]u8 = undefined;
         var pos: usize = 0;
@@ -691,11 +722,8 @@ pub const ProgressBar = struct {
         return pos;
     }
 
-    fn renderIndeterminate(self: *const ProgressBar) void {
+    fn drawIndeterminate(self: *const ProgressBar) void {
         const cols = queryCols();
-
-        if (self.multi) |mp| mp.mutex.lockUncancelable(pkg_io);
-        defer if (self.multi) |mp| mp.mutex.unlock(pkg_io);
 
         var buf: [512]u8 = undefined;
         var pos: usize = 0;
@@ -1265,6 +1293,275 @@ test "MultiProgress in tty mode on a TTY emits the cursor-hide prelude" {
     // Prelude + 2 reserved newlines + restore-on-finish (autowrap on,
     // cursor on, carriage return).
     try std.testing.expectEqualStrings("\x1b[?25l\x1b[?7l\n\n\x1b[?7h\x1b[?25h\r", buf.items);
+}
+
+// A TTY-mode group arms SIGWINCH so a mid-render resize is observed without
+// a keypress; plain/none never install a handler (next test). The handler is
+// the flag-only variant — no syscall in signal context.
+test "MultiProgress in tty mode installs the flag-only winch handler" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    termsize.setWinchInstalledForTest(false);
+    defer termsize.setWinchInstalledForTest(false);
+
+    var mp = MultiProgress.init(2);
+    mp.finish();
+
+    try std.testing.expect(termsize.winchInstalled());
+}
+
+test "MultiProgress in plain mode installs no winch handler" {
+    const prior_mode = mode();
+    setMode(.plain);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    termsize.setWinchInstalledForTest(false);
+    defer termsize.setWinchInstalledForTest(false);
+
+    var mp = MultiProgress.init(2);
+    mp.finish();
+
+    try std.testing.expect(!termsize.winchInstalled());
+}
+
+// AC: a resize mid-render repaints the whole group at the new width — the
+// autowrap-disable prelude is re-asserted and every bar's line is redrawn, not
+// just the worker that happened to tick. The flag is consumed once, so a burst
+// of resizes collapses to a single repaint per tick.
+test "a resize repaints the whole group with autowrap re-asserted" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+    setColsForTest(100);
+    defer setColsForTest(null);
+    termsize.setWinchInstalledForTest(true); // skip the real sigaction
+    defer termsize.setWinchInstalledForTest(false);
+    termsize.setResizedForTest(false);
+    defer termsize.setResizedForTest(false);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var mp = MultiProgress.init(2);
+    mp.is_tty = true;
+
+    var bars = [_]ProgressBar{
+        ProgressBar.init("alpha", 100),
+        ProgressBar.init("bravo", 100),
+    };
+    for (&bars, 0..) |*b, i| {
+        b.is_tty = true;
+        b.multi = &mp;
+        b.line_index = @intCast(i);
+    }
+    mp.bars = &bars;
+
+    // Isolate the repaint from the init prelude + reserved newlines.
+    buf.clearRetainingCapacity();
+
+    // A resize lands; the next worker to tick repaints the whole group.
+    termsize.setResizedForTest(true);
+    bars[1].update(50);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\x1b[?7l") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "alpha") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "bravo") != null);
+    // The flag is consumed — a burst can't trigger a second repaint this tick.
+    try std.testing.expect(!termsize.takeResized());
+
+    // A later tick with no pending resize redraws only the worker's own line.
+    buf.clearRetainingCapacity();
+    bars[0].last_render_ns = 0; // bypass the 10 Hz throttle
+    bars[0].update(60);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "alpha") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "bravo") == null);
+}
+
+// AC: migrate's indeterminate bars inherit the repaint with no bespoke code —
+// the generic `drawLine` dispatch repaints a sibling spinner row too.
+test "a resize repaints indeterminate (migrate) bars" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+    setColsForTest(100);
+    defer setColsForTest(null);
+    termsize.setWinchInstalledForTest(true);
+    defer termsize.setWinchInstalledForTest(false);
+    termsize.setResizedForTest(false);
+    defer termsize.setResizedForTest(false);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var mp = MultiProgress.init(2);
+    mp.is_tty = true;
+    var bars = [_]ProgressBar{
+        ProgressBar.init("redis", 0), // total 0 → indeterminate
+        ProgressBar.init("kafka", 0),
+    };
+    for (&bars, 0..) |*b, i| {
+        b.is_tty = true;
+        b.multi = &mp;
+        b.line_index = @intCast(i);
+    }
+    mp.bars = &bars;
+    buf.clearRetainingCapacity();
+
+    termsize.setResizedForTest(true);
+    bars[0].update(4096);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\x1b[?7l") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "redis") != null);
+    // The sibling bar, whose worker did not tick, was repainted too.
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "kafka") != null);
+}
+
+// AC headline: the repaint re-derives the live width. A terminal that narrows
+// below the floor collapses the repainted bars to bare counters — proof the
+// repaint reads the new width, not the width the bars were first drawn at.
+test "a resize repaints at the new width, collapsing to counters when it narrows" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    color.setForTest(true, true);
+    defer color.setForTest(null, null);
+    setColsForTest(120); // wide: full bars
+    defer setColsForTest(null);
+    termsize.setWinchInstalledForTest(true);
+    defer termsize.setWinchInstalledForTest(false);
+    termsize.setResizedForTest(false);
+    defer termsize.setResizedForTest(false);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var mp = MultiProgress.init(2);
+    mp.is_tty = true;
+    var bars = [_]ProgressBar{
+        ProgressBar.init("alpha", 1000),
+        ProgressBar.init("bravo", 1000),
+    };
+    for (&bars, 0..) |*b, i| {
+        b.is_tty = true;
+        b.multi = &mp;
+        b.line_index = @intCast(i);
+    }
+    mp.bars = &bars;
+    bars[0].update(500);
+    try std.testing.expect(barCellCount(buf.items) > 0); // wide draw has bars
+    buf.clearRetainingCapacity();
+
+    // The terminal shrinks hard, then a resize lands.
+    setColsForTest(20);
+    termsize.setResizedForTest(true);
+    bars[0].last_render_ns = 0;
+    bars[0].update(600);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\x1b[?7l") != null);
+    try std.testing.expectEqual(@as(usize, 0), barCellCount(buf.items)); // counters at new width
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "alpha") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "bravo") != null);
+}
+
+// Edge: a resize before the caller registers its bars must not crash on the
+// empty slice — the repaint still re-asserts autowrap and the ticking worker
+// draws its own line.
+test "a resize with no registered bars re-asserts autowrap without crashing" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+    setColsForTest(80);
+    defer setColsForTest(null);
+    termsize.setWinchInstalledForTest(true);
+    defer termsize.setWinchInstalledForTest(false);
+    termsize.setResizedForTest(false);
+    defer termsize.setResizedForTest(false);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var mp = MultiProgress.init(1);
+    mp.is_tty = true;
+    var bar = ProgressBar.init("solo", 100);
+    bar.is_tty = true;
+    bar.multi = &mp;
+    bar.line_index = 0;
+    // mp.bars deliberately left empty — caller never registered it.
+    buf.clearRetainingCapacity();
+
+    termsize.setResizedForTest(true);
+    bar.update(50);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\x1b[?7l") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "solo") != null);
+}
+
+// AC: single-package `upgrade` draws through SingleBar — a group of one. A
+// resize must repaint that bar at the new width too: wide bar collapses to a
+// counter, autowrap re-asserted. Proves the upgrade path inherits the fix
+// with no bespoke wiring (the bar repaints itself on its next tick).
+test "a resize repaints the single-bar (upgrade) group at the new width" {
+    const prior_mode = mode();
+    setMode(.tty);
+    defer setMode(prior_mode);
+    setSupportsAnsiForTest(true);
+    defer setSupportsAnsiForTest(null);
+    color.setForTest(true, true);
+    defer color.setForTest(null, null);
+    setColsForTest(100); // wide: a real bar
+    defer setColsForTest(null);
+    termsize.setWinchInstalledForTest(true);
+    defer termsize.setWinchInstalledForTest(false);
+    termsize.setResizedForTest(false);
+    defer termsize.setResizedForTest(false);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    beginStderrCapture(std.testing.allocator, &buf);
+    defer endStderrCapture();
+
+    var sp = SingleBar.init("ffmpeg", 1000);
+    const bar = sp.bind();
+    bar.is_tty = true;
+    bar.update(400);
+    try std.testing.expect(barCellCount(buf.items) > 0); // wide bar present
+    buf.clearRetainingCapacity();
+
+    setColsForTest(20); // narrow, then a resize
+    termsize.setResizedForTest(true);
+    bar.last_render_ns = 0;
+    bar.update(500);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\x1b[?7l") != null);
+    try std.testing.expectEqual(@as(usize, 0), barCellCount(buf.items)); // counter at new width
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ffmpeg") != null);
+    sp.finish();
 }
 
 // The single-bar entry point must inherit the same terminal setup as the
