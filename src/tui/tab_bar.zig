@@ -29,10 +29,6 @@ fn accentCode() []const u8 {
     return color.roleCode(.accent);
 }
 
-// SGR reverse-video: highlights the active tab as a filled block. `color.zig`
-// owns named colours, not this attribute, so the code lives here.
-const reverse_code = "\x1b[7m";
-
 // Divider between tabs — a light vertical bar, one display column wide.
 const sep = " │ ";
 
@@ -51,7 +47,7 @@ pub fn render(buf: []u8, active: Tab, titles: [count][]const u8, cols: u16) []co
         if (i != 0) append(buf, &len, sep);
         append(buf, &len, accentCode()); // every title carries the accent
         if (i == @intFromEnum(active)) { // active is a reverse-video, bold block
-            append(buf, &len, reverse_code);
+            append(buf, &len, color.Style.reverse.code());
             append(buf, &len, color.Style.bold.code());
         }
         append(buf, &len, t);
@@ -112,7 +108,7 @@ test "render divides tabs, reverse+bolds the active, accents the rest" {
     try std.testing.expect(std.mem.indexOf(u8, out, sep) != null); // a divider between tabs
     // active: accent + reverse + bold + title + reset
     var ab: [64]u8 = undefined;
-    const active = try std.fmt.bufPrint(&ab, "{s}{s}{s}Outdated{s}", .{ accentCode(), reverse_code, color.Style.bold.code(), color.Style.reset.code() });
+    const active = try std.fmt.bufPrint(&ab, "{s}{s}{s}Outdated{s}", .{ accentCode(), color.Style.reverse.code(), color.Style.bold.code(), color.Style.reset.code() });
     try std.testing.expect(std.mem.indexOf(u8, out, active) != null);
     // inactive: accent + title (no reverse/bold) + reset
     var ib: [64]u8 = undefined;

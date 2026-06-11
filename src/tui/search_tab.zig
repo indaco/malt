@@ -208,15 +208,15 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         const checked = i < s.checked.len and s.checked[i];
         tab.putCheckbox(f, if (m.installed) .blocked else if (checked) tab.Check.on else .off);
         const selected = i == v.selected;
-        if (selected) f.put(reverse);
+        if (selected) { // the accent backgrounds the cursor row under a theme
+            f.put(color.selectionAccent());
+            f.put(color.Style.reverse.code());
+        }
         var rb: [256]u8 = undefined;
         f.putContent(scroll_list.truncate(formatRow(&rb, m), rect.width -| 4)); // 4 cols on the checkbox
         if (selected) f.put(color.Style.reset.code());
     }
 }
-
-// SGR reverse-video for the selection, matching the other tabs' convention.
-const reverse = "\x1b[7m";
 
 /// One list row (after the checkbox): the package name, the kind (formula/cask),
 /// then an "installed" marker for a hit already on the system. ASCII columns,
@@ -419,7 +419,7 @@ test "render highlights the selected hit" {
     var s: State = .{ .items = &sample, .phase = .loaded };
     s.chrome.view.selected = 0;
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), reverse) != null);
+    try testing.expect(std.mem.indexOf(u8, f.slice(), color.Style.reverse.code()) != null);
 }
 
 test "footerHint exposes the tab's action keys for the shared footer" {
