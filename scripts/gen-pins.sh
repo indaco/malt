@@ -95,9 +95,15 @@ if [ $# -ge 1 ]; then
   COMMIT="$1"
 else
   printf '▸ resolving homebrew-core HEAD\n' >&2
-  COMMIT=$(curl -fsSL --max-time 10 \
-    "https://api.github.com/repos/Homebrew/homebrew-core/commits/HEAD" |
-    awk -F'"' '/^  "sha":/ {print $4; exit}')
+  # The API returns the full commit (incl. the files diff), often well
+  # over the pipe buffer. awk must consume the whole stream — an early
+  # `exit` closes the pipe mid-write and the producer dies (curl error 56
+  # / SIGPIPE), which pipefail turns fatal. Take the first top-level sha
+  # without exiting.
+  head_json=$(curl -fsSL --max-time 10 \
+    "https://api.github.com/repos/Homebrew/homebrew-core/commits/HEAD")
+  COMMIT=$(printf '%s' "$head_json" |
+    awk -F'"' '/^  "sha":/ && !seen {print $4; seen=1}')
   [ -n "$COMMIT" ] || {
     echo "failed to resolve HEAD" >&2
     exit 1
