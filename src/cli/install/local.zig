@@ -270,11 +270,14 @@ fn installTapRb(
     };
     defer rb_resp.deinit();
 
-    // Distinct handle for the Casks/ retry: each fetch pairs with
-    // its own defer, so a future reorder cannot turn the previous
-    // single-`resp` reuse into a double-free or use-after-free.
+    // Distinct handles for the Casks/ and root-layout retries: each
+    // fetch pairs with its own defer, so a future reorder cannot turn
+    // the previous single-`resp` reuse into a double-free or
+    // use-after-free.
     var cask_resp: ?client_mod.Response = null;
     defer if (cask_resp) |*c| c.deinit();
+    var root_resp: ?client_mod.Response = null;
+    defer if (root_resp) |*r| r.deinit();
 
     const resp: *const client_mod.Response = blk: {
         if (rb_resp.status == 200) break :blk &rb_resp;
@@ -296,7 +299,25 @@ fn installTapRb(
             sink.err("Cannot fetch tap from GitHub", .{});
             return InstallError.FormulaNotFound;
         };
-        break :blk &cask_resp.?;
+        if (cask_resp.?.status == 200) break :blk &cask_resp.?;
+
+        // Last resort: the older Homebrew layout keeps `<name>.rb` at the
+        // repo root (koekeishiya/felixkratz taps). Only reached on the
+        // double-miss path, so the common Formula/ install pays no extra GET.
+        const root_url = forge.rawFileUrl(
+            &url_buf,
+            urls.forge,
+            urls.raw_base,
+            commit_sha,
+            .formula_root,
+            parts.formula,
+        ) catch return InstallError.FormulaNotFound;
+
+        root_resp = tap_mod.getRawFile(&http, ctx.environ, urls.forge, root_url) catch {
+            sink.err("Cannot fetch tap from GitHub", .{});
+            return InstallError.FormulaNotFound;
+        };
+        break :blk &root_resp.?;
     };
 
     if (resp.status != 200) {

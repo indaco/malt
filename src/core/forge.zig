@@ -53,11 +53,18 @@ pub fn allocRepoBrowseUrl(
 pub const RawKind = enum {
     formula,
     cask,
+    /// Older Homebrew layout: `<name>.rb` kept at the repo root, no
+    /// subtree. `rawFileUrl` branches on this before the subdir lookup.
+    formula_root,
 
     fn subdir(self: RawKind) []const u8 {
         return switch (self) {
             .formula => "Formula",
             .cask => "Casks",
+            // Never consulted: rawFileUrl emits the no-subdir tail for
+            // this variant before reaching subdir(). An empty infix here
+            // would collapse to `//` in the tail.
+            .formula_root => "",
         };
     }
 };
@@ -74,6 +81,13 @@ pub fn rawFileUrl(
     kind: RawKind,
     name: []const u8,
 ) std.fmt.BufPrintError![]const u8 {
+    // Root-layout taps drop the subdir entirely: `<base>/<sha>/<name>.rb`.
+    // Branch before the forge switch so no empty infix collapses to `//`.
+    // The forge-specific infix already lives in `raw_base`, so this one
+    // arm covers every forge.
+    if (kind == .formula_root) {
+        return std.fmt.bufPrint(buf, "{s}/{s}/{s}.rb", .{ raw_base, sha, name });
+    }
     return switch (forge) {
         // Same tail for all: the forge-specific infix already lives in
         // `raw_base` (github: bare; gitlab: `/-/raw`; gitea/gogs: `/raw`).
@@ -696,6 +710,26 @@ test "rawFileUrl github: overflowing buffer surfaces NoSpaceLeft" {
     );
 }
 
+test "rawFileUrl github: formula_root kind builds the no-subdir root tail" {
+    var buf: [512]u8 = undefined;
+    const url = try rawFileUrl(&buf, .github, github_raw_base, raw_sha_fixture, .formula_root, "yabai");
+    try std.testing.expectEqualStrings(
+        github_raw_base ++ "/" ++ raw_sha_fixture ++ "/yabai.rb",
+        url,
+    );
+    // No `Formula/` infix and no `//` collapse: an empty subdir segment
+    // must never leak into the tail (that double-slash 404s the CDN).
+    try std.testing.expect(std.mem.indexOf(u8, url["https://".len..], "//") == null);
+}
+
+test "rawFileUrl github: formula_root overflowing buffer surfaces NoSpaceLeft" {
+    var buf: [8]u8 = undefined;
+    try std.testing.expectError(
+        error.NoSpaceLeft,
+        rawFileUrl(&buf, .github, github_raw_base, raw_sha_fixture, .formula_root, "yabai"),
+    );
+}
+
 // ── browse URL (github) ────────────────────────────────────────────
 // The `taps.url` projection: the URL that actually resolves in a
 // browser, written at INSERT/rebind and re-derived in `list`. Both
@@ -820,6 +854,18 @@ test "rawFileUrl gitlab: cask kind builds the /-/raw Casks tail" {
         gitlab_raw_base ++ "/" ++ raw_sha_fixture ++ "/Casks/glow.rb",
         url,
     );
+}
+
+test "rawFileUrl gitlab: formula_root kind builds the /-/raw root tail" {
+    // The root variant is forge-uniform: the `/-/raw` infix already lives
+    // in raw_base, so dropping the subdir yields `<base>/<sha>/<name>.rb`.
+    var buf: [512]u8 = undefined;
+    const url = try rawFileUrl(&buf, .gitlab, gitlab_raw_base, raw_sha_fixture, .formula_root, "glow");
+    try std.testing.expectEqualStrings(
+        gitlab_raw_base ++ "/" ++ raw_sha_fixture ++ "/glow.rb",
+        url,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, url["https://".len..], "//") == null);
 }
 
 // ── fromHost (gitea) ────────────────────────────────────────────
@@ -956,6 +1002,16 @@ test "rawFileUrl gitea: cask kind builds the /raw Casks tail" {
         gitea_raw_base ++ "/" ++ raw_sha_fixture ++ "/Casks/glow.rb",
         url,
     );
+}
+
+test "rawFileUrl gitea: formula_root kind builds the /raw root tail" {
+    var buf: [512]u8 = undefined;
+    const url = try rawFileUrl(&buf, .gitea, gitea_raw_base, raw_sha_fixture, .formula_root, "glow");
+    try std.testing.expectEqualStrings(
+        gitea_raw_base ++ "/" ++ raw_sha_fixture ++ "/glow.rb",
+        url,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, url["https://".len..], "//") == null);
 }
 
 // ── authHeader (gitea) ──────────────────────────────────────────
@@ -1131,6 +1187,16 @@ test "rawFileUrl gogs: shares the /raw Formula tail" {
         "https://git.example.org/team/tap/raw/" ++ raw_sha_fixture ++ "/Formula/glow.rb",
         url,
     );
+}
+
+test "rawFileUrl gogs: shares the /raw root tail" {
+    var buf: [512]u8 = undefined;
+    const url = try rawFileUrl(&buf, .gogs, "https://git.example.org/team/tap/raw", raw_sha_fixture, .formula_root, "glow");
+    try std.testing.expectEqualStrings(
+        "https://git.example.org/team/tap/raw/" ++ raw_sha_fixture ++ "/glow.rb",
+        url,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, url["https://".len..], "//") == null);
 }
 
 test "repoBrowseUrl gogs: the instance host drives the browse URL" {
