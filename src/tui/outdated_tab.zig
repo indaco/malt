@@ -162,16 +162,17 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         const is_checked = i < s.checked.len and s.checked[i];
         tab.putCheckbox(f, if (p.pinned) .blocked else if (is_checked) tab.Check.on else .off);
         const selected = fi == v.selected;
-        // The cursor row wins over the pinned dim so the selection stays legible.
-        if (selected) f.put(reverse) else if (p.pinned) f.put(color.roleCode(.muted));
+        // The cursor row wins over the pinned dim so the selection stays legible;
+        // under a theme the accent backgrounds it via reverse-video.
+        if (selected) {
+            f.put(color.selectionAccent());
+            f.put(color.Style.reverse.code());
+        } else if (p.pinned) f.put(color.roleCode(.muted));
         var rb: [256]u8 = undefined;
         f.putContent(scroll_list.truncate(formatRow(&rb, p), rect.width -| 4)); // 4 cols on the checkbox
         if (selected or p.pinned) f.put(color.Style.reset.code());
     }
 }
-
-// SGR reverse-video for the selection, matching the other tabs' convention.
-const reverse = "\x1b[7m";
 
 /// One list row after the checkbox: the name, the current→latest versions, the
 /// source type, and a pinned tag. ASCII columns, grapheme-naive like the rest;
@@ -358,7 +359,7 @@ test "render highlights the selected row" {
     var s: State = .{ .items = &sample, .checked = &checked };
     s.chrome.view.selected = 0;
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), reverse) != null);
+    try testing.expect(std.mem.indexOf(u8, f.slice(), color.Style.reverse.code()) != null);
 }
 
 test "footerHint exposes the multi-select keys for the shared footer" {

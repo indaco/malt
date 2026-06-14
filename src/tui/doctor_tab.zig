@@ -127,9 +127,6 @@ fn severityLabel(sev: Severity) []const u8 {
     };
 }
 
-// SGR reverse-video for the selection, matching the other tabs' convention.
-const reverse = "\x1b[7m";
-
 /// Pure render: the severity-ordered finding list and a detail pane for the
 /// selected finding. The `f: fix` key lives in the shared footer (the detail
 /// pane still shows whether the selected finding is fixable). The pane sizes to
@@ -183,7 +180,10 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
             f.put(color.Style.reset.code());
             f.put(" ");
             const selected = di == v.selected;
-            if (selected) f.put(reverse);
+            if (selected) { // the accent backgrounds the cursor row under a theme
+                f.put(color.selectionAccent());
+                f.put(color.Style.reverse.code());
+            }
             f.putContent(scroll_list.truncate(fnd.title, rect.width -| 2)); // 2 cols spent on the glyph
             if (selected) f.put(color.Style.reset.code());
         }
@@ -333,7 +333,7 @@ test "render highlights the selected row" {
     var s: State = .{ .items = &sample };
     s.chrome.view.selected = 0;
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 });
-    try testing.expect(std.mem.indexOf(u8, f.slice(), reverse) != null);
+    try testing.expect(std.mem.indexOf(u8, f.slice(), color.Style.reverse.code()) != null);
 }
 
 test "render narrows to the filter" {

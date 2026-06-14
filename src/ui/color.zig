@@ -18,6 +18,9 @@ pub const Style = enum {
     reset,
     bold,
     dim,
+    /// SGR reverse-video — the TUI selection / active-block highlight attribute.
+    /// Centralised here so the leaf has one source, not a literal per tab.
+    reverse,
     red,
     green,
     yellow,
@@ -30,6 +33,7 @@ pub const Style = enum {
             .reset => "\x1b[0m",
             .bold => "\x1b[1m",
             .dim => "\x1b[2m",
+            .reverse => "\x1b[7m",
             .red => "\x1b[31m",
             .green => "\x1b[32m",
             .yellow => "\x1b[33m",
@@ -564,6 +568,21 @@ pub fn roleCode(role: Role) []const u8 {
     return resolveRole(theme(), role, bg, tc);
 }
 
+/// The theme `accent` the TUI emits immediately before `Style.reverse`, so
+/// reverse-video renders the accent as the selection/active-block *background*.
+/// Empty under `.default` (and any tier where no theme applies) so the
+/// out-of-box selection stays plain reverse-video; non-empty only when a custom
+/// or named theme is genuinely in effect — the same gate as `roleCode`, so the
+/// selection themes exactly when the rest of the TUI does.
+pub fn selectionAccent() []const u8 {
+    const bg = background();
+    const tc = truecolorSupported();
+    if (activeCustomPalette(bg, tc)) |p| return p.get(.accent);
+    const t = theme();
+    if (namedThemeApplies(t, bg, tc)) return themes.named(t).?.get(.accent);
+    return "";
+}
+
 /// Secondary accent — a blue with no cell in the existing semantic palette.
 const Secondary = struct { dark_tc: []const u8, light_tc: []const u8, basic: []const u8 };
 const secondary_blue: Secondary = .{
@@ -800,4 +819,56 @@ test "no themes file leaves the resolver untouched" {
     try std.testing.expectEqual(InstallResult.absent, seedCustom(null, true, .unknown, null));
     defer resetCustom();
     try std.testing.expectEqualStrings(resolveRole(.default, .accent, .unknown, true), roleCode(.accent));
+}
+
+// ─── selectionAccent (TUI selection highlight) ───────────────────────
+//
+// The accent emitted before reverse-video so the highlight follows the theme.
+// Empty under `.default` keeps the out-of-box selection plain reverse-video.
+
+test "selectionAccent is empty under .default so the selection stays plain reverse" {
+    clearCustomForTest();
+    setThemeForTest(.default);
+    setTruecolorForTest(true);
+    setBackgroundForTest(.unknown);
+    defer {
+        setThemeForTest(null);
+        setTruecolorForTest(null);
+        setBackgroundForTest(null);
+    }
+    try std.testing.expectEqualStrings("", selectionAccent());
+}
+
+test "selectionAccent carries a named theme's accent when it applies" {
+    clearCustomForTest();
+    setThemeForTest(.dracula);
+    setTruecolorForTest(true);
+    setBackgroundForTest(.unknown);
+    defer {
+        setThemeForTest(null);
+        setTruecolorForTest(null);
+        setBackgroundForTest(null);
+    }
+    // The same accent the rest of the TUI paints; reverse-video makes it the bg.
+    try std.testing.expectEqualStrings(themes.named(.dracula).?.get(.accent), selectionAccent());
+    try std.testing.expect(selectionAccent().len != 0);
+}
+
+test "selectionAccent is empty on a basic terminal (a named theme needs truecolor)" {
+    clearCustomForTest();
+    setThemeForTest(.dracula);
+    setTruecolorForTest(false);
+    setBackgroundForTest(.unknown);
+    defer {
+        setThemeForTest(null);
+        setTruecolorForTest(null);
+        setBackgroundForTest(null);
+    }
+    try std.testing.expectEqualStrings("", selectionAccent());
+}
+
+test "selectionAccent carries an active custom theme's accent" {
+    try std.testing.expectEqual(InstallResult.loaded, seedCustom("ocean", true, .unknown, custom_ocean_src));
+    defer resetCustom();
+    try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", selectionAccent());
 }

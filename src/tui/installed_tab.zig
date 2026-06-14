@@ -154,7 +154,10 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         if (screen >= rect.height) break;
         f.moveTo(rect.row + @as(u16, @intCast(screen)), rect.col);
         const selected = fi == v.selected;
-        if (selected) f.put(reverse); // mark the cursor row
+        if (selected) { // mark the cursor row; the accent backgrounds it under a theme
+            f.put(color.selectionAccent());
+            f.put(color.Style.reverse.code());
+        }
         var rb: [256]u8 = undefined;
         f.putContent(scroll_list.truncate(formatRow(&rb, p), rect.width));
         if (selected) f.put(color.Style.reset.code());
@@ -163,16 +166,13 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
 
 fn renderGuard(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     f.moveTo(rect.row, rect.col);
-    f.put(reverse);
+    f.put(color.Style.reverse.code());
     const name = if (selectedPkg(s)) |p| p.name else "?";
     var b: [256]u8 = undefined;
     const line = std.fmt.bufPrint(&b, "Uninstall {s}? [y/N]", .{name}) catch "Uninstall? [y/N]";
     f.putContent(scroll_list.truncate(line, rect.width));
     f.put(color.Style.reset.code());
 }
-
-// SGR reverse-video for the selection / guard, matching `tab_bar`'s convention.
-const reverse = "\x1b[7m";
 
 /// One list row: name and version in fixed columns, a humanized size, then the
 /// pinned / unlinked markers. ASCII columns, grapheme-naive like the rest.
@@ -358,7 +358,7 @@ test "render highlights the selected row" {
     s.chrome.view.selected = 1; // curl
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 10 });
     // The reverse-video SGR marks the cursor row.
-    try testing.expect(std.mem.indexOf(u8, f.slice(), "\x1b[7m") != null);
+    try testing.expect(std.mem.indexOf(u8, f.slice(), color.Style.reverse.code()) != null);
 }
 
 test "render shows the detail pane with the dependency list when open" {
