@@ -36,6 +36,8 @@ const signals = @import("core/signals.zig");
 const mirror_mod = @import("net/mirror.zig");
 const offline_mod = @import("net/offline.zig");
 const color_mod = @import("ui/color.zig");
+const custom_theme = @import("ui/custom_theme.zig");
+const theme_file = @import("fs/theme_file.zig");
 const output_mod = @import("ui/output.zig");
 const progress_mod = @import("ui/progress.zig");
 const notifier = @import("update/notifier.zig");
@@ -413,6 +415,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // never re-read the env so install/upgrade/migrate stay in lockstep.
     progress_mod.setMode(progress_mod.resolveModeFromEnviron(ctx.environ));
     color_mod.setRuntime(ctx.io, ctx.environ);
+
+    // Load any user theme file once, before colour state is read. The file is
+    // read through the hardened fs path (validated, non-symlink, size-capped) and
+    // a malformed file is rejected whole — built-ins kept, one notice, no crash.
+    // Off the install/upgrade hot path; a missing file is a single failed stat.
+    {
+        var theme_buf: [custom_theme.max_file_bytes]u8 = undefined;
+        const bytes = theme_file.read(ctx.io, ctx.environ, &theme_buf);
+        if (color_mod.installCustomThemes(allocator, bytes) == .rejected)
+            output_mod.notice("ignoring malformed themes file; using built-in themes", .{});
+    }
 
     // Resolve the env-derived colour state once, now that the real environ is
     // seeded — before any output (or TUI frame) reads it. Doing the OSC 11
