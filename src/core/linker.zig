@@ -17,6 +17,13 @@ pub const Linker = struct {
     db: *sqlite.Database,
     prefix: []const u8,
 
+    /// Keg subdirectories whose top-level files get symlinked into the
+    /// prefix. `bin`/`sbin` lead so the bin-isolated variant is a tail
+    /// slice (`[2..]`). The install path also reads this to decide whether
+    /// an extracted archive produced anything linkable at all — keep that
+    /// check and `link` reading the same list so they cannot drift.
+    pub const linkable_dirs = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc" };
+
     pub fn init(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, prefix: []const u8) Linker {
         return .{ .allocator = allocator, .io = io, .db = db, .prefix = prefix };
     }
@@ -94,9 +101,8 @@ pub const Linker = struct {
     /// `LC_LOAD_DYLIB` paths continue to resolve via `lib`, so compiled
     /// formulae are unaffected; only the global PATH entries disappear.
     pub fn link(self: *Linker, keg_path: []const u8, name: []const u8, keg_id: i64, bin_isolated: bool) !void {
-        const dirs_full = [_][]const u8{ "bin", "sbin", "lib", "include", "share", "etc" };
-        const dirs_isolated = [_][]const u8{ "lib", "include", "share", "etc" };
-        const dirs_to_link: []const []const u8 = if (bin_isolated) &dirs_isolated else &dirs_full;
+        // bin-isolated drops the leading `bin`/`sbin`; full keeps them.
+        const dirs_to_link: []const []const u8 = if (bin_isolated) linkable_dirs[2..] else &linkable_dirs;
 
         for (dirs_to_link) |subdir| {
             self.linkSubdir(keg_path, subdir, name, keg_id) catch continue;
