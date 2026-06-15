@@ -712,6 +712,13 @@ pub fn materializeRubyFormula(
     // mixes new and prior files at the same paths, and the post-link
     // sweep would only address symlinks + DB rows. Matches the JSON
     // pipeline's pre-materialize call.
+    //
+    // Known limitation: pruning here, before extraction, means a --force
+    // reinstall of a formula whose *same-version* artifact flipped from a
+    // prebuilt binary to a source build hits the no-artifact backstop below
+    // with the old keg already gone (doctor reclaims the dangling links).
+    // Not staged behind the backstop because an artifact swap without a
+    // version bump does not happen in practice.
     if (force) {
         install_mod.pruneCellarForReinstall(ctx, prefix, resolved.name, resolved.version);
     }
@@ -773,6 +780,39 @@ pub fn materializeRubyFormula(
                 bin_file.setPermissions(ctx.io, std.Io.File.Permissions.fromMode(0o755)) catch {};
                 break;
             }
+        }
+    }
+
+    // Refuse a source archive: a formula whose `def install` builds from
+    // source (`system "make"`, etc.) ships no prebuilt artifacts, so after
+    // extraction + the promote walk none of the keg's linkable dirs hold
+    // anything. Detecting it here — on the actual extracted result — is
+    // precise where a textual `def install` check is not: a prebuilt
+    // formula carries a `def install` too (just `bin.install "<file>"`),
+    // and that case lands a binary in bin/ and passes. Gate on the same
+    // dir set the linker links so a binary-, lib-, or header-only keg all
+    // count as success; only a raw source tree (its files nested under a
+    // `<name>-<version>/` wrapper, never at a keg prefix) is empty here.
+    // Unwind the half-extracted keg and return ahead of the DB
+    // transaction — nothing is recorded.
+    {
+        var produced_artifact = false;
+        for (linker_mod.Linker.linkable_dirs) |sub| {
+            var sub_buf: [512]u8 = undefined;
+            const sub_path = std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ cellar_path, sub }) catch continue;
+            var sub_dir = std.Io.Dir.openDirAbsolute(ctx.io, sub_path, .{ .iterate = true }) catch continue;
+            defer sub_dir.close(ctx.io);
+            var sub_it = sub_dir.iterate();
+            if ((sub_it.next(ctx.io) catch null) != null) {
+                produced_artifact = true;
+                break;
+            }
+        }
+        if (!produced_artifact) {
+            sink.err("{s} ships no prebuilt files — its archive builds from source, which malt does not run.", .{resolved.name});
+            sink.err("Install it with: brew install {s}", .{resolved.full_name});
+            std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};
+            return InstallError.BuildFromSourceUnsupported;
         }
     }
 

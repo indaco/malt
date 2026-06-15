@@ -33,6 +33,12 @@ pub const InstallError = error{
     /// Raised before any dep resolution or job queueing so nothing is
     /// downloaded, materialised, or linked for the affected package.
     PostInstallUnsupported,
+    /// The formula's archive builds from source: after extraction the
+    /// promote walk found no binary and bin/ is empty, so nothing
+    /// runnable would be linked. malt (a bottle/binary client) does not
+    /// run build blocks, so it unwinds the half-extracted keg and records
+    /// nothing — the user is pointed at `brew install` instead.
+    BuildFromSourceUnsupported,
     /// `--use-system-ruby` used with multiple formulas and no explicit
     /// scope list. The flag widens the trust boundary (runs full Ruby
     /// with only OS-level sandboxing), so malt requires the user to
@@ -56,6 +62,19 @@ pub const InstallError = error{
     NetworkError,
 };
 
+/// True for any `InstallError`. The install/upgrade commands always print
+/// a user-facing line before returning one of these, so the top-level
+/// dispatch in `main` exits non-zero *quietly* on them — the same
+/// treatment as `error.Aborted` — instead of dumping the error enum name
+/// (and, in debug, a return trace) on top of the message the command
+/// already showed. Comptime-derived so a new tag is covered automatically.
+pub fn isReportedInstallError(e: anyerror) bool {
+    inline for (@typeInfo(InstallError).error_set.?) |variant| {
+        if (e == @field(InstallError, variant.name)) return true;
+    }
+    return false;
+}
+
 /// True when the given error has already surfaced a specific,
 /// user-facing `output.err` line from inside the install helpers, so
 /// the dispatch-loop shouldn't add a generic "Failed to install X: E"
@@ -71,6 +90,9 @@ pub fn localErrorIsAnnounced(e: InstallError) bool {
         InstallError.CellarFailed,
         InstallError.RateLimited,
         InstallError.NetworkError,
+        // Raise site prints the actionable "builds from source" line, so
+        // the generic dispatch summary stays suppressed.
+        InstallError.BuildFromSourceUnsupported,
         => true,
 
         InstallError.NoPackages,

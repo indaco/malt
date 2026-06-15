@@ -116,6 +116,19 @@ fn pathExists(path: []const u8) bool {
     return true;
 }
 
+// Real `Threaded` io to spawn `tar` — `std.Options.debug_io`'s failing
+// allocator can't back a child spawn. Used to mint a source-tree fixture.
+fn runTar(argv: []const []const u8) !void {
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{ .environ = malt.app_ctx.processEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var child = try std.process.spawn(io, .{ .argv = argv, .stdout = .ignore, .stderr = .ignore });
+    switch (try child.wait(io)) {
+        .exited => |code| if (code != 0) return error.TarFailed,
+        else => return error.TarFailed,
+    }
+}
+
 test "execute refuses --download-only combined with --only-dependencies" {
     // The two flags are semantically ambiguous: one says "don't touch the
     // requested package", the other says "don't materialise anything".
@@ -740,4 +753,186 @@ test "--download-only populates the store and skips Cellar + kegs" {
     try testing.expect(pathExists(store_dir));
 
     try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
+}
+
+test "materializeRubyFormula refuses a source archive that yields no linkable artifact, unwinding the keg" {
+    // A source-built formula ships a tree with no prebuilt binary: after
+    // extraction the promote walk lifts nothing and bin/ stays empty.
+    // materialise must refuse with BuildFromSourceUnsupported and unwind —
+    // no keg row, no leftover Cellar/<name>/<version>. Pre-fix this linked
+    // an empty bin/, recorded the keg, and printed `installed`.
+    //
+    // The detection is on the extracted result, not a textual `def install`
+    // check: a prebuilt formula carries `def install` too, so the warm-tap
+    // sibling test above (which lands a binary) proves the happy path still
+    // records — together they pin "refuse only when no binary was produced".
+    const prefix = try setupPrefix("srcbackstop");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha = "cd" ** 32;
+
+    // Build a real source-tree tarball (a file NOT named after the
+    // formula) and seed it at the sha-keyed cache path so materialise
+    // takes the warm-cache branch and never hits the network.
+    const work = try std.fmt.allocPrint(testing.allocator, "{s}/srcwork", .{prefix});
+    defer testing.allocator.free(work);
+    {
+        const payload_dir = try std.fmt.allocPrint(testing.allocator, "{s}/payload", .{work});
+        defer testing.allocator.free(payload_dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, payload_dir);
+    }
+    {
+        const readme = try std.fmt.allocPrint(testing.allocator, "{s}/payload/readme.txt", .{work});
+        defer testing.allocator.free(readme);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, readme, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "source, no binary\n");
+    }
+
+    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache/Tap", .{prefix});
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_parent);
+    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    try runTar(&.{ "tar", "czf", cache_path, "-C", work, "payload" });
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(
+        testing.allocator,
+        "{s}/db/malt.db",
+        .{prefix},
+        0,
+    );
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "srcpkg",
+        .full_name = "user/repo/srcpkg",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-srcbuild-test.invalid/srcpkg-1.0.tar.gz",
+        .sha256 = sha,
+    };
+
+    try testing.expectError(install_record.InstallError.BuildFromSourceUnsupported, malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        false, // force
+        false, // download_only
+        malt.install_sink.terminal,
+    ));
+
+    // Keg unwound: the version dir is gone and no keg row was written.
+    const keg_ver = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/srcpkg/1.0", .{prefix});
+    defer testing.allocator.free(keg_ver);
+    try testing.expect(!pathExists(keg_ver));
+    try testing.expectEqual(@as(i64, 0), try kegRowCount(prefix));
+}
+
+test "materializeRubyFormula installs a lib-only keg that ships no binary" {
+    // A prebuilt formula may ship only libs/headers (no bin/). The refusal
+    // gate is "no linkable artifact at all", not "no binary" — so a keg
+    // whose archive is keg-shaped (top-level lib/) installs and links,
+    // keeping malt usable for non-CLI tap formulas. Distinguishes from the
+    // source-tree case above, whose files nest under a wrapper dir and
+    // never land at a keg prefix.
+    const prefix = try setupPrefix("libonly");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const sha = "ef" ** 32;
+
+    // Keg-shaped archive: a top-level lib/ with one file, no binary.
+    const work = try std.fmt.allocPrint(testing.allocator, "{s}/libwork", .{prefix});
+    defer testing.allocator.free(work);
+    {
+        const lib_dir = try std.fmt.allocPrint(testing.allocator, "{s}/lib", .{work});
+        defer testing.allocator.free(lib_dir);
+        try test_io.cwd().createDirPath(std.Options.debug_io, lib_dir);
+        const dylib = try std.fmt.allocPrint(testing.allocator, "{s}/libfoo.dylib", .{lib_dir});
+        defer testing.allocator.free(dylib);
+        const f = try test_io.cwd().createFile(std.Options.debug_io, dylib, .{});
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "prebuilt lib\n");
+    }
+
+    var cache_parent_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_parent = try std.fmt.bufPrint(&cache_parent_buf, "{s}/cache/Tap", .{prefix});
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_parent);
+    var cache_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cache_path = try malt.tap_cache.cachePath(&cache_path_buf, prefix, sha, ".tar.gz");
+    try runTar(&.{ "tar", "czf", cache_path, "-C", work, "lib" });
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var http = malt.client.HttpClient.init(ctx.io, ctx.environ, allocator);
+    defer http.deinit();
+
+    const db_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/db/malt.db", .{prefix}, 0);
+    defer testing.allocator.free(db_path);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var linker = malt.linker.Linker.init(ctx.io, allocator, &db, prefix);
+
+    const resolved: malt.install_local.ResolvedRubyFormula = .{
+        .name = "libpkg",
+        .full_name = "user/repo/libpkg",
+        .tap_label = "user/repo",
+        .version = "1.0",
+        .url = "https://malt-libonly-test.invalid/libpkg-1.0.tar.gz",
+        .sha256 = sha,
+    };
+
+    try malt.install_local.materializeRubyFormula(
+        &ctx,
+        allocator,
+        resolved,
+        &http,
+        &db,
+        &linker,
+        prefix,
+        false, // dry_run
+        false, // force
+        false, // download_only
+        malt.install_sink.terminal,
+    );
+
+    // Recorded and linked: a keg row exists and lib/libfoo.dylib is linked
+    // into the prefix.
+    try testing.expectEqual(@as(i64, 1), try kegRowCount(prefix));
+    const link = try std.fmt.allocPrint(testing.allocator, "{s}/lib/libfoo.dylib", .{prefix});
+    defer testing.allocator.free(link);
+    try testing.expect(pathExists(link));
 }

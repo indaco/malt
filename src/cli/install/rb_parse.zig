@@ -498,3 +498,23 @@ test "tapCaskArtifactKind: tar.gz formula archives stay on the keg path" {
     try std.testing.expect(tapCaskArtifactKind("https://example.com/tool.tgz", true) == null);
     try std.testing.expect(tapCaskArtifactKind("https://example.com/tool.tar.xz", false) == null);
 }
+
+test "parseRubyFormula: a formula carrying a def install block still parses" {
+    // A `def install` block is no refusal signal — a prebuilt formula
+    // also carries one (`bin.install "<file-in-archive>"`). The parser
+    // must surface version/url/sha256 regardless; whether the archive
+    // yields a binary is decided downstream on the extracted result.
+    const rb =
+        \\class Sketchybar < Formula
+        \\  url "https://example.com/sketchybar-2.24.0.tar.gz"
+        \\  sha256 "deadbeef"
+        \\  version "2.24.0"
+        \\  def install
+        \\    system "make"
+        \\  end
+        \\end
+    ;
+    const got = parseRubyFormula(rb) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("2.24.0", got.version);
+    try std.testing.expectEqualStrings("deadbeef", got.sha256);
+}
