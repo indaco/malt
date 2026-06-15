@@ -17,6 +17,7 @@ Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosyste
   <b><a href="#features">Features</a></b> &middot;
   <b><a href="#installation">Install</a></b> &middot;
   <b><a href="#first-commands">First commands</a></b> &middot;
+  <b><a href="#theming">Theming</a></b> &middot;
   <b><a href="#command-reference">Reference</a></b> &middot;
   <b><a href="#safety-and-security">Security</a></b> &middot;
   <b><a href="#architecture">Architecture</a></b> &middot;
@@ -138,6 +139,43 @@ If you typed something malt doesn't implement, malt checks for `brew` and silent
 malt: '<cmd>' is not a malt command and brew was not found.
 Install Homebrew: https://brew.sh
 ```
+
+## Theming
+
+**Theming applies to all malt output - the CLI and the `mt tui` dashboard alike.** `MALT_THEME` selects the palette for _all_ malt output, so `MALT_THEME=dracula mt outdated` and `MALT_THEME=dracula mt tui` render in the same colours. Nine named palettes ship, grouped by the terminal background they're designed for:
+
+| Background | Themes                                                                            |
+| ---------- | --------------------------------------------------------------------------------- |
+| Dark       | `dracula`, `catppuccin-mocha`, `rose-pine`, `nord`, `tokyo-night`, `gruvbox-dark` |
+| Light      | `catppuccin-latte`, `rose-pine-dawn`, `gruvbox-light`                             |
+
+`light`/`dark`/`auto` keep the background-aware default palette (`auto` detects via OSC 11). Named themes need a truecolor terminal and degrade to the default palette on a basic terminal, or on one whose background contradicts the theme (a dark theme on a light terminal).
+
+### Custom themes
+
+Define your own palettes in a JSON file at `MALT_THEMES_FILE` (else `{prefix}/etc/malt/themes.json`). It is read once at boot and resolved through the same seam as built-ins, so custom themes colour both the CLI and `mt tui`. Select one with `MALT_THEME=<name>`, or mark a file `default` to apply when `MALT_THEME` is unset. A built-in name always wins, so a custom theme cannot shadow `dracula`.
+
+```json
+{
+  "version": 1,
+  "default": "my-dark",
+  "themes": {
+    "my-dark": {
+      "polarity": "dark",
+      "accent": "#bd93f9",
+      "secondary": [139, 233, 253],
+      "success": "#50fa7b",
+      "warning": "#ffb86c",
+      "danger": "#ff5555",
+      "muted": 240
+    }
+  }
+}
+```
+
+Each theme needs a `polarity` (`dark`/`light`) and all six roles. A colour is a hex string (`"#rgb"`/`"#rrggbb"`), an `[r, g, b]` array (0–255), or a single 0–255 integer (a 256-colour index).
+
+The file is validated all-or-nothing: any malformed value rejects the whole file and malt keeps the built-in themes (a one-line notice, never a crash). A theme is gated like a built-in - it applies only when its polarity matches the detected background; one built from hex/`[r,g,b]` colours additionally needs a truecolor terminal, while a theme written entirely with 256-colour indexes also paints on a 256-colour terminal.
 
 ## Command reference
 
@@ -304,39 +342,6 @@ Keys: `tab`/`←`/`→`/`1`-`5` switch tabs, `↑`/`↓` move the cursor, `/` fi
 **It reads with `--json` and acts by delegating.** Every mutation drops out of the alternate screen, runs the real `mt <subcommand>` inline - so output and prompts land unchanged in your scrollback - then re-enters and refreshes the current tab (others refetch lazily). It never reimplements install, upgrade, or fix; it drives the CLI you already trust.
 
 **It resizes live.** Layout is a pure function of terminal size: drag the window and columns reflow, the viewport re-clamps, and long rows truncate without a keypress. Below a usable minimum it shows a "terminal too small" notice instead of a corrupted frame.
-
-### Theming
-
-**Theming applies to all malt output - the CLI and the `mt tui` dashboard alike.** `MALT_THEME` selects the palette for _all_ malt output, so `MALT_THEME=dracula mt outdated` and `MALT_THEME=dracula mt tui` render in the same colours. Nine named palettes ship, grouped by the terminal background they're designed for:
-
-| Background | Themes                                                                            |
-| ---------- | --------------------------------------------------------------------------------- |
-| Dark       | `dracula`, `catppuccin-mocha`, `rose-pine`, `nord`, `tokyo-night`, `gruvbox-dark` |
-| Light      | `catppuccin-latte`, `rose-pine-dawn`, `gruvbox-light`                             |
-
-`light`/`dark`/`auto` keep the background-aware default palette (`auto` detects via OSC 11). Named themes need a truecolor terminal and degrade to the default palette on a basic terminal, or on one whose background contradicts the theme (a dark theme on a light terminal).
-
-**Custom themes.** Define your own palettes in a JSON file at `MALT_THEMES_FILE` (else `{prefix}/etc/malt/themes.json`). It is read once at boot and resolved through the same seam as built-ins, so custom themes colour both the CLI and `mt tui`. Select one with `MALT_THEME=<name>`, or mark a file `default` to apply when `MALT_THEME` is unset. A built-in name always wins, so a custom theme cannot shadow `dracula`.
-
-```json
-{
-  "version": 1,
-  "default": "my-dark",
-  "themes": {
-    "my-dark": {
-      "polarity": "dark",
-      "accent": "#bd93f9",
-      "secondary": [139, 233, 253],
-      "success": "#50fa7b",
-      "warning": "#ffb86c",
-      "danger": "#ff5555",
-      "muted": 240
-    }
-  }
-}
-```
-
-Each theme needs a `polarity` (`dark`/`light`) and all six roles. A colour is a hex string (`"#rgb"`/`"#rrggbb"`), an `[r, g, b]` array (0–255), or a single 0–255 integer (a 256-colour index). The file is validated all-or-nothing: any malformed value rejects the whole file and malt keeps the built-in themes (a one-line notice, never a crash). A theme is gated like a built-in — it applies only when its polarity matches the detected background; one built from hex/`[r,g,b]` colours additionally needs a truecolor terminal, while a theme written entirely with 256-colour indexes also paints on a 256-colour terminal.
 
 ### Maintain malt
 
