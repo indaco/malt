@@ -9,4 +9,4 @@ coverage/
 .swarm
 .mcp.json
 
-docs/
+/docs
