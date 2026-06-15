@@ -12,6 +12,7 @@
 const std = @import("std");
 const color = @import("../ui/color.zig");
 const term_sanitize = @import("../ui/term_sanitize.zig");
+const spinner_frames = @import("../ui/spinner_frames.zig");
 const tab = @import("tab.zig");
 const tab_bar = @import("tab_bar.zig");
 const header = @import("header.zig");
@@ -140,10 +141,16 @@ pub const App = struct {
     /// footer, dismissed on the next keypress (`step`); a successful action just
     /// leaves it cleared.
     banner: Banner = .{},
-    /// Set by the loop only for the pre-read paint before a blocking lazy
-    /// refetch, so the synchronous freeze shows "Loading…" instead of a stale
-    /// frame. Never persisted: the read's own repaint clears it.
+    /// Set while a lazy tab refetches so the footer shows the loading status.
+    /// The polled read keeps it set across its poll loop and clears it after, so
+    /// the spinner animates while the child runs and the result replaces it.
     loading: bool = false,
+    /// Spinner animation index, advanced one frame per poll tick while a lazy
+    /// read is in flight (mirrors `progress.zig`). Lives on `App` so `renderFrame`
+    /// stays a pure function of `(state, cols, rows)`: the glyph is
+    /// `frames[spinner_frame % count]`, deterministic per state, so a resize
+    /// re-renders the same frame. Wraps freely (`+%=`); only its modulus matters.
+    spinner_frame: u8 = 0,
     /// Header inputs. `version` (comptime) and `prefix` (env-resolved) are set
     /// once in `run`; the counts mirror the loaded stores and stay null until
     /// each store loads, so the header shows a placeholder rather than a wrong
@@ -390,7 +397,10 @@ fn renderTooSmall(f: *tab.Frame, cols: u16, rows: u16) void {
 }
 
 fn loadingLine(buf: []u8, app: *const App) []const u8 {
-    return std.fmt.bufPrint(buf, "Loading {s}…", .{activeTitle(app)}) catch "Loading…";
+    // The braille glyph for the current frame, ahead of the text, so a slow load
+    // reads as working. Pure over `spinner_frame`, so the frame is deterministic.
+    const glyph = spinner_frames.frames[app.spinner_frame % spinner_frames.count];
+    return std.fmt.bufPrint(buf, "{s} Loading {s}…", .{ glyph, activeTitle(app) }) catch "Loading…";
 }
 
 /// The footer help line: while editing the filter, just the edit keys; otherwise
@@ -462,6 +472,34 @@ pub fn classify(err: RunError) ErrorClass {
         => .fatal,
     };
 }
+
+/// Mid-load repaint handle for the polled lazy reads: the controlling-tty fd and
+/// the (resizable) frame buffer, threaded from `run` to wherever a lazy `loadX`
+/// runs so its spinner can repaint without `spawn.zig` knowing about rendering.
+const Painter = struct {
+    fd: std.posix.fd_t,
+    frame: *[]u8,
+};
+
+/// The `tick` callback `spawn.readJsonPolled` invokes on every poll timeout while
+/// a lazy tab is loading: advance the spinner one frame and repaint. Closes over
+/// the paint handle + `App`, so the animation lives here, not in the generic
+/// leaf `spawn.zig`.
+const LoadTicker = struct {
+    p: Painter,
+    allocator: std.mem.Allocator,
+    app: *App,
+    pub fn tick(self: LoadTicker) void {
+        self.app.spinner_frame +%= 1;
+        // A resize during the load is absorbed here: repaint reads currentSize so
+        // it reflows; consume the flag so the loop's own resize check doesn't
+        // redundantly repaint the same frame once the read returns.
+        _ = term.takeResized();
+        // Best-effort, like paintLoading/paintSearching: a dropped animation frame
+        // is cosmetic, and a genuine OOM resurfaces on the next real allocation.
+        repaint(self.p.fd, self.p.frame, self.allocator, self.app) catch {};
+    }
+};
 
 /// Owns the JSON parse results the tabs borrow from. Reads re-exec `mt … --json`
 /// and reparse into here; the tab `State` slices point at this storage and the
@@ -585,14 +623,19 @@ fn serviceInstalled(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app
 /// parse, freeing the previous one. The checkbox buffer is resized to the new row
 /// count and reset — an upgrade removes the upgraded rows, so a stale selection
 /// would point at the wrong packages.
-fn loadOutdated(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+fn loadOutdated(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, store: *Store) RunError!void {
     // Annotate any failure as a recoverable banner; the loop boundary decides
     // recoverable vs fatal. The store is swapped only after a clean parse, so a
     // failure keeps the last-good rows and their selection.
     errdefer |err| app.banner.set("outdated refresh failed", @errorName(err));
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{"outdated"});
     defer allocator.free(argv);
-    const bytes = (try spawn.readJsonAllowEmpty(io, allocator, argv)) orelse {
+    // Animate the spinner across the poll: `loading` stays set so each tick
+    // paints it, cleared once the result (or the empty/banner state) replaces it.
+    app.loading = true;
+    defer app.loading = false;
+    const ticker = LoadTicker{ .p = painter, .allocator = allocator, .app = app };
+    const bytes = (try spawn.readJsonPolled(io, allocator, argv, 0, ticker)) orelse {
         // Fresh prefix: nothing outdated. Clear the rows and the checkbox buffer.
         if (store.outdated) |old| old.deinit();
         if (store.outdated_checked.len != 0) allocator.free(store.outdated_checked);
@@ -638,7 +681,7 @@ fn upgradeArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const out
 /// Delegate the checked upgrades to the real `mt` inline, then refresh. The argv
 /// names borrow from the current parse storage; the post-spawn reload frees that
 /// storage, so the names are not read afterwards.
-fn doUpgrade(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+fn doUpgrade(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store) RunError!void {
     const argv = (try upgradeArgv(allocator, app.mt_path, &app.states.outdated)) orelse return; // empty selection: no-op
     defer allocator.free(argv);
     {
@@ -649,36 +692,41 @@ fn doUpgrade(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App,
         errdefer |err| app.banner.set("upgrade failed", @errorName(err));
         try spawn.runInlineReenter(t, argv);
     }
-    try loadOutdated(io, allocator, app, store); // the upgraded rows are gone — refetch
+    try loadOutdated(io, allocator, painter, app, store); // the upgraded rows are gone — refetch
     markStaleAfterMutation(app); // Installed sizes/versions changed too
 }
 
 /// Perform any effect the pure `step` requested on the Outdated tab, then clear
 /// it, and lazily (re)load on first entry or after a mutation marked it dirty.
-fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store) RunError!void {
     const req = app.states.outdated.request;
     app.states.outdated.request = .none;
     switch (req) {
         .none => {},
-        .upgrade => try doUpgrade(io, allocator, t, app, store),
+        .upgrade => try doUpgrade(io, allocator, t, painter, app, store),
     }
     // Lazy per-tab load: first activation and post-mutation staleness both arrive
     // as the dirty flag (set at init and by `markStaleAfterMutation`).
     if (app.active == .outdated and takeDirty(app, .outdated)) {
-        try loadOutdated(io, allocator, app, store);
+        try loadOutdated(io, allocator, painter, app, store);
     }
 }
 
 /// (Re)read `mt services list --json` and repoint the Services tab's rows at the
 /// fresh parse, freeing the previous one.
-fn loadServices(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+fn loadServices(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, store: *Store) RunError!void {
     // Annotate any failure as a recoverable banner; the loop boundary decides
     // recoverable vs fatal. The store is swapped only after a clean parse, so a
     // failure keeps the last-good rows and their selection.
     errdefer |err| app.banner.set("services refresh failed", @errorName(err));
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{ "services", "list" });
     defer allocator.free(argv);
-    const bytes = (try spawn.readJsonAllowEmpty(io, allocator, argv)) orelse {
+    // Animate the spinner across the poll: `loading` stays set so each tick
+    // paints it, cleared once the result (or the empty/banner state) replaces it.
+    app.loading = true;
+    defer app.loading = false;
+    const ticker = LoadTicker{ .p = painter, .allocator = allocator, .app = app };
+    const bytes = (try spawn.readJsonPolled(io, allocator, argv, 0, ticker)) orelse {
         // Fresh prefix: no services. Clear the rows.
         if (store.services) |old| old.deinit();
         store.services = null;
@@ -705,7 +753,7 @@ fn serviceActionArgv(allocator: std.mem.Allocator, mt_path: []const u8, action: 
 /// Delegate a service lifecycle action to the real `mt` inline, then refresh. The
 /// argv's `name` borrows from the current parse storage; the post-spawn reload
 /// frees that storage, so the name is not read afterwards.
-fn doServiceAction(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store, action: []const u8) RunError!void {
+fn doServiceAction(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store, action: []const u8) RunError!void {
     const argv = (try serviceActionArgv(allocator, app.mt_path, action, &app.states.services)) orelse return; // nothing selected
     defer allocator.free(argv);
     {
@@ -716,42 +764,47 @@ fn doServiceAction(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app:
         errdefer |err| app.banner.set("service action failed", @errorName(err));
         try spawn.runInlineReenter(t, argv);
     }
-    try loadServices(io, allocator, app, store); // the state changed — refetch
+    try loadServices(io, allocator, painter, app, store); // the state changed — refetch
     markStaleAfterMutation(app);
 }
 
 /// Perform any lifecycle effect the pure `step` requested on the Services tab,
 /// then clear it, and lazily (re)load on first entry or after a mutation marked
 /// it dirty.
-fn serviceServices(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+fn serviceServices(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store) RunError!void {
     const req = app.states.services.request;
     app.states.services.request = .none;
     switch (req) {
         .none => {},
-        .start => try doServiceAction(io, allocator, t, app, store, "start"),
-        .stop => try doServiceAction(io, allocator, t, app, store, "stop"),
-        .restart => try doServiceAction(io, allocator, t, app, store, "restart"),
+        .start => try doServiceAction(io, allocator, t, painter, app, store, "start"),
+        .stop => try doServiceAction(io, allocator, t, painter, app, store, "stop"),
+        .restart => try doServiceAction(io, allocator, t, painter, app, store, "restart"),
     }
     // Lazy per-tab load: first activation and post-mutation staleness both arrive
     // as the dirty flag (set at init and by `markStaleAfterMutation`).
     if (app.active == .services and takeDirty(app, .services)) {
-        try loadServices(io, allocator, app, store);
+        try loadServices(io, allocator, painter, app, store);
     }
 }
 
 /// (Re)read `mt doctor --json` and repoint the Doctor tab's findings at the fresh
 /// parse, freeing the previous one.
-fn loadDoctor(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store) RunError!void {
+fn loadDoctor(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *App, store: *Store) RunError!void {
     // Annotate any failure as a recoverable banner; the loop boundary decides
     // recoverable vs fatal. The store is swapped only after a clean parse, so a
     // failure keeps the last-good findings and their selection.
     errdefer |err| app.banner.set("doctor refresh failed", @errorName(err));
     const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{"doctor"});
     defer allocator.free(argv);
-    // `mt doctor` exits non-zero by severity (1 warn / 2 err) while still
-    // emitting its findings JSON — exactly when the tab is most useful — so the
-    // doctor read tolerates those exits where the generic read would reject them.
-    const bytes = (try spawn.readDoctorJson(io, allocator, argv)) orelse {
+    // Animate the spinner across the poll: `loading` stays set so each tick
+    // paints it, cleared once the result (or the empty/banner state) replaces it.
+    app.loading = true;
+    defer app.loading = false;
+    const ticker = LoadTicker{ .p = painter, .allocator = allocator, .app = app };
+    // `mt doctor` exits non-zero by severity (1 warn / 2 err) while still emitting
+    // its findings JSON — exactly when the tab is most useful — so the doctor read
+    // tolerates exits up to 2 (`max_ok_exit`) where the generic read rejects them.
+    const bytes = (try spawn.readJsonPolled(io, allocator, argv, 2, ticker)) orelse {
         // Fresh prefix: no findings. Clear the rows.
         if (store.doctor) |old| old.deinit();
         store.doctor = null;
@@ -778,7 +831,7 @@ fn doctorFixArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const d
 }
 
 /// Delegate the selected finding's fix to the real `mt` inline, then refresh.
-fn doDoctorFix(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+fn doDoctorFix(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store) RunError!void {
     const argv = (try doctorFixArgv(allocator, app.mt_path, &app.states.doctor)) orelse return; // nothing fixable selected
     defer allocator.free(argv);
     {
@@ -789,23 +842,23 @@ fn doDoctorFix(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *Ap
         errdefer |err| app.banner.set("doctor fix failed", @errorName(err));
         try spawn.runInlineReenter(t, argv);
     }
-    try loadDoctor(io, allocator, app, store); // the finding may be resolved — refetch
+    try loadDoctor(io, allocator, painter, app, store); // the finding may be resolved — refetch
     markStaleAfterMutation(app);
 }
 
 /// Perform any fix effect the pure `step` requested on the Doctor tab, then clear
 /// it, and lazily (re)load on first entry or after a mutation marked it dirty.
-fn serviceDoctor(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+fn serviceDoctor(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store) RunError!void {
     const req = app.states.doctor.request;
     app.states.doctor.request = .none;
     switch (req) {
         .none => {},
-        .fix => try doDoctorFix(io, allocator, t, app, store),
+        .fix => try doDoctorFix(io, allocator, t, painter, app, store),
     }
     // Lazy per-tab load: first activation and post-mutation staleness both arrive
     // as the dirty flag (set at init and by `markStaleAfterMutation`).
     if (app.active == .doctor and takeDirty(app, .doctor)) {
-        try loadDoctor(io, allocator, app, store);
+        try loadDoctor(io, allocator, painter, app, store);
     }
 }
 
@@ -957,11 +1010,11 @@ fn openSearchInfo(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *S
 /// Drain the active tab's pending effects after a keypress. Each tab's service is
 /// a no-op unless that tab is active and has a request or is due a lazy refresh,
 /// so calling each one each loop is cheap and keeps the dispatch flat.
-fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
+fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store) RunError!void {
     try serviceInstalled(io, allocator, t, app, store);
-    try serviceOutdated(io, allocator, t, app, store);
-    try serviceServices(io, allocator, t, app, store);
-    try serviceDoctor(io, allocator, t, app, store);
+    try serviceOutdated(io, allocator, t, painter, app, store);
+    try serviceServices(io, allocator, t, painter, app, store);
+    try serviceDoctor(io, allocator, t, painter, app, store);
     try serviceSearch(io, allocator, t, app, store);
 }
 
@@ -1027,6 +1080,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     defer store.deinit(allocator);
     var frame = try allocator.alloc(u8, frameCap(term.currentSize()));
     defer allocator.free(frame);
+    // The paint handle the polled lazy reads tick against to animate the spinner.
+    const painter: Painter = .{ .fd = fd, .frame = &frame };
 
     try loadInstalled(io, allocator, &app, &store); // pre-load the Installed list so it is ready when entered
     try repaint(fd, &frame, allocator, &app);
@@ -1055,7 +1110,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
                     // A recoverable backend fault becomes the banner the failing
                     // op already set and the loop continues; only a fatal fault
                     // (terminal/OOM) propagates to the errdefer restore + exit.
-                    service(io, allocator, &t, &app, &store) catch |err| switch (classify(err)) {
+                    service(io, allocator, &t, painter, &app, &store) catch |err| switch (classify(err)) {
                         .recoverable => {},
                         .fatal => return err,
                     };
@@ -1101,6 +1156,13 @@ fn repaint(fd: std.posix.fd_t, frame: *[]u8, allocator: std.mem.Allocator, app: 
 
 fn ch(c: u8) Key {
     return .{ .char = .{ .bytes = .{ c, 0, 0, 0 }, .len = 1 } };
+}
+
+/// A no-op paint handle for unit tests that drive a lazy loader directly: the
+/// test children all finish before the first poll timeout, so the tick never
+/// fires and the fd/frame are never touched.
+fn testPainter(frame: *[]u8) Painter {
+    return .{ .fd = -1, .frame = frame };
 }
 
 test "tab cycles and 1-5 jump to a tab" {
@@ -1295,6 +1357,36 @@ test "the footer shows a per-tab loading status during a blocking refetch" {
     try std.testing.expect(std.mem.indexOf(u8, out, "switch") == null);
 }
 
+test "the loading footer paints the spinner glyph ahead of the Loading text" {
+    var a: App = .{ .active = .outdated, .loading = true, .spinner_frame = 0 };
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 100, 24);
+    // The braille glyph for frame 0, immediately before the loading text.
+    const expected = spinner_frames.frames[0] ++ " Loading Outdated";
+    try std.testing.expect(std.mem.indexOf(u8, out, expected) != null);
+}
+
+test "a different spinner_frame paints a different glyph (the animation advances)" {
+    var a: App = .{ .active = .services, .loading = true, .spinner_frame = 0 };
+    var b: [8192]u8 = undefined;
+    const f0 = try std.testing.allocator.dupe(u8, renderFrame(&b, &a, 100, 24));
+    defer std.testing.allocator.free(f0);
+    a.spinner_frame = 1;
+    const f1 = renderFrame(&b, &a, 100, 24);
+    // Distinct frames render distinct bytes, so a repaint per tick visibly ticks.
+    try std.testing.expect(!std.mem.eql(u8, f0, f1));
+    try std.testing.expect(std.mem.indexOf(u8, f1, spinner_frames.frames[1]) != null);
+}
+
+test "the loading glyph is deterministic per (state, cols, rows)" {
+    var a: App = .{ .active = .doctor, .loading = true, .spinner_frame = 3 };
+    var b1: [8192]u8 = undefined;
+    var b2: [8192]u8 = undefined;
+    // Same state + geometry → byte-identical frame, so a resize redraws the same
+    // glyph rather than skipping or doubling the animation.
+    try std.testing.expectEqualStrings(renderFrame(&b1, &a, 100, 24), renderFrame(&b2, &a, 100, 24));
+}
+
 test "renderFrame uses cursor positioning and never emits a raw newline" {
     var a: App = .{};
     var buf: [8192]u8 = undefined;
@@ -1453,7 +1545,8 @@ test "loadOutdated treats an exit-0 empty response (fresh prefix) as an empty ta
     var app: App = .{ .mt_path = "/usr/bin/true" };
     var store: Store = .{};
     defer store.deinit(std.testing.allocator);
-    try loadOutdated(t.io(), std.testing.allocator, &app, &store);
+    var frame: []u8 = &.{};
+    try loadOutdated(t.io(), std.testing.allocator, testPainter(&frame), &app, &store);
     try std.testing.expectEqual(@as(usize, 0), app.states.outdated.items.len);
     try std.testing.expect(!app.banner.isSet());
 }
@@ -1464,7 +1557,8 @@ test "loadServices treats an exit-0 empty response (fresh prefix) as an empty ta
     var app: App = .{ .mt_path = "/usr/bin/true" };
     var store: Store = .{};
     defer store.deinit(std.testing.allocator);
-    try loadServices(t.io(), std.testing.allocator, &app, &store);
+    var frame: []u8 = &.{};
+    try loadServices(t.io(), std.testing.allocator, testPainter(&frame), &app, &store);
     try std.testing.expectEqual(@as(usize, 0), app.states.services.items.len);
     try std.testing.expect(!app.banner.isSet());
 }
@@ -1475,7 +1569,8 @@ test "loadDoctor treats an exit-0 empty response (fresh prefix) as an empty tab"
     var app: App = .{ .mt_path = "/usr/bin/true" };
     var store: Store = .{};
     defer store.deinit(std.testing.allocator);
-    try loadDoctor(t.io(), std.testing.allocator, &app, &store);
+    var frame: []u8 = &.{};
+    try loadDoctor(t.io(), std.testing.allocator, testPainter(&frame), &app, &store);
     try std.testing.expectEqual(@as(usize, 0), app.states.doctor.items.len);
     try std.testing.expect(!app.banner.isSet());
 }
@@ -1525,7 +1620,8 @@ test "a failed outdated refresh names the op in the banner and keeps the last-go
     var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
     var store: Store = .{};
     defer store.deinit(std.testing.allocator);
-    try std.testing.expectError(error.BadJson, loadOutdated(t.io(), std.testing.allocator, &app, &store));
+    var frame: []u8 = &.{};
+    try std.testing.expectError(error.BadJson, loadOutdated(t.io(), std.testing.allocator, testPainter(&frame), &app, &store));
     try std.testing.expectEqualStrings("outdated refresh failed: BadJson", app.banner.slice());
     try std.testing.expectEqual(@as(usize, 0), app.states.outdated.items.len); // last-good kept
 }
@@ -1557,7 +1653,8 @@ test "a failed services refresh names the op in the banner and keeps the last-go
     var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
     var store: Store = .{};
     defer store.deinit(std.testing.allocator);
-    try std.testing.expectError(error.BadJson, loadServices(t.io(), std.testing.allocator, &app, &store));
+    var frame: []u8 = &.{};
+    try std.testing.expectError(error.BadJson, loadServices(t.io(), std.testing.allocator, testPainter(&frame), &app, &store));
     try std.testing.expectEqualStrings("services refresh failed: BadJson", app.banner.slice());
     try std.testing.expectEqual(@as(usize, 0), app.states.services.items.len); // last-good kept
 }
@@ -1597,7 +1694,8 @@ test "a failed doctor refresh names the op in the banner and keeps the last-good
     var app: App = .{ .mt_path = "/bin/echo" }; // echo emits non-JSON → parse fails
     var store: Store = .{};
     defer store.deinit(std.testing.allocator);
-    try std.testing.expectError(error.BadJson, loadDoctor(t.io(), std.testing.allocator, &app, &store));
+    var frame: []u8 = &.{};
+    try std.testing.expectError(error.BadJson, loadDoctor(t.io(), std.testing.allocator, testPainter(&frame), &app, &store));
     try std.testing.expectEqualStrings("doctor refresh failed: BadJson", app.banner.slice());
     try std.testing.expectEqual(@as(usize, 0), app.states.doctor.items.len); // last-good kept
 }

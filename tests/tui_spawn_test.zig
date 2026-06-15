@@ -87,3 +87,52 @@ test "readDoctorJson still rejects an exit above the severity range" {
         "/bin/sh", "-c", "printf x; exit 3",
     }));
 }
+
+// A counting ticker stands in for the app's spinner-advancing closure: the
+// polled read must invoke `tick()` while the child is still running so the
+// dashboard can animate the spinner instead of freezing on one frame.
+const CountTicker = struct {
+    n: *usize,
+    pub fn tick(self: CountTicker) void {
+        self.n.* += 1;
+    }
+};
+
+test "readJsonPolled ticks while a slow child runs and returns the same bytes a blocking read would" {
+    var t = threaded();
+    defer t.deinit();
+    var ticks: usize = 0;
+    // A child that outlives one poll timeout: the read must tick at least once
+    // before its output arrives, proving the spinner animates mid-load.
+    const out = (try spawn.readJsonPolled(t.io(), testing.allocator, &.{
+        "/bin/sh", "-c", "sleep 0.25; printf '{\"ok\":true}'",
+    }, 0, CountTicker{ .n = &ticks })).?;
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("{\"ok\":true}", out);
+    try testing.expect(ticks >= 1);
+}
+
+test "readJsonPolled maps an exit-0 empty response to null (fresh prefix), no tick needed" {
+    var t = threaded();
+    defer t.deinit();
+    var ticks: usize = 0;
+    try testing.expect((try spawn.readJsonPolled(t.io(), testing.allocator, &.{"/usr/bin/true"}, 0, CountTicker{ .n = &ticks })) == null);
+}
+
+test "readJsonPolled honours max_ok_exit like the doctor read (severity exit 2 with a document)" {
+    var t = threaded();
+    defer t.deinit();
+    var ticks: usize = 0;
+    const out = (try spawn.readJsonPolled(t.io(), testing.allocator, &.{
+        "/bin/sh", "-c", "printf '{\"checks\":[]}'; exit 2",
+    }, 2, CountTicker{ .n = &ticks })).?;
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("{\"checks\":[]}", out);
+}
+
+test "readJsonPolled surfaces a non-zero exit above the cap as ChildFailed" {
+    var t = threaded();
+    defer t.deinit();
+    var ticks: usize = 0;
+    try testing.expectError(error.ChildFailed, spawn.readJsonPolled(t.io(), testing.allocator, &.{"/usr/bin/false"}, 0, CountTicker{ .n = &ticks }));
+}

@@ -139,6 +139,92 @@ pub fn readJsonAllowEmpty(
     };
 }
 
+/// Poll timeout between spinner ticks while a lazy `--json` read is in flight.
+/// Short enough to read as animation, long enough not to busy-spin the loop.
+const poll_tick_ms: i32 = 80;
+
+/// Polled sibling of `readJsonAllowEmpty` / `readDoctorJson`: capture
+/// `mt … --json` while invoking `ticker.tick()` on every poll timeout, so a
+/// caller can advance + repaint a spinner instead of blocking opaquely. The read
+/// no longer freezes: a `SIGWINCH` mid-load lands on the next tick (poll retries
+/// `EINTR` internally, so the ≤80 ms tick reflows the frame). Same exit policy as
+/// the blocking reads — `max_ok_exit` is 0 for list/outdated/services and 2 for
+/// doctor's severity exit — and an exit-0 empty response (fresh prefix) maps to
+/// `null`. `ticker` is duck-typed (`fn tick(self) void`) so this stays generic:
+/// no `App` or render import crosses into the leaf. Caller frees the bytes.
+pub fn readJsonPolled(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    max_ok_exit: u8,
+    ticker: anytype,
+) ReadError!?[]u8 {
+    const bytes = try capturePolled(io, allocator, argv, max_ok_exit, ticker);
+    if (bytes.len == 0) {
+        allocator.free(bytes);
+        return null;
+    }
+    return bytes;
+}
+
+/// Like `captureJson`, but drain the child's stdout by polling so `ticker` fires
+/// while the child still runs. Same spawn shape (stdout piped, stderr ignored so
+/// child status lines can't paint over the frame) and same exit-code gate.
+fn capturePolled(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    max_ok_exit: u8,
+    ticker: anytype,
+) ReadError![]u8 {
+    var child = std.process.spawn(io, .{ .argv = argv, .stdout = .pipe, .stderr = .ignore }) catch return error.SpawnFailed;
+    const fd = (child.stdout orelse {
+        child.kill(io);
+        return error.ReadFailed;
+    }).handle;
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    drainPolled(allocator, fd, &buf, ticker) catch |e| {
+        child.kill(io); // don't let `wait` hang on a half-drained pipe
+        return e;
+    };
+
+    const status = child.wait(io) catch return error.WaitFailed;
+    switch (status) {
+        .exited => |code| if (code > max_ok_exit) return error.ChildFailed,
+        .signal, .stopped, .unknown => return error.ChildFailed,
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
+/// Drain `fd` to EOF, polling on `poll_tick_ms`. On each timeout call
+/// `ticker.tick()` — the hook that advances the spinner + repaints — then keep
+/// waiting; on readiness, read the available bytes (a `POLLHUP` still delivers
+/// the final buffered bytes before the next read returns EOF). Bounded by
+/// `max_json_bytes` like the blocking drain. A poll or read fault is `ReadFailed`
+/// (recoverable, classified into a banner), never swallowed.
+fn drainPolled(
+    allocator: std.mem.Allocator,
+    fd: std.posix.fd_t,
+    buf: *std.ArrayList(u8),
+    ticker: anytype,
+) ReadError!void {
+    var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const ready = std.posix.poll(&fds, poll_tick_ms) catch return error.ReadFailed;
+        if (ready == 0) {
+            ticker.tick(); // timed out: advance the spinner, repaint, keep waiting
+            continue;
+        }
+        const n = std.posix.read(fd, &chunk) catch return error.ReadFailed;
+        if (n == 0) return; // EOF: the child closed stdout
+        if (buf.items.len + n > max_json_bytes) return error.ReadFailed; // bounded like the blocking drain
+        try buf.appendSlice(allocator, chunk[0..n]);
+    }
+}
+
 /// Drain the child's stdout pipe fully before `wait`, bounded by
 /// `max_json_bytes`. Mirrors `core/child.zig`'s drain; stdout-only because the
 /// read commands keep stderr inherited.

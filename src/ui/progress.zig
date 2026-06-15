@@ -17,6 +17,7 @@ const builtin = @import("builtin");
 const color = @import("color.zig");
 const output = @import("output.zig");
 const termsize = @import("termsize.zig");
+const spinner_frames = @import("spinner_frames.zig");
 
 var pkg_stderr: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
 
@@ -132,9 +133,6 @@ fn sleepNs(ns: u64) bool {
     };
     return true;
 }
-
-/// Braille-based spinner frames, shared by ProgressBar and Spinner.
-const spinner_chars = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
 
 /// Single-line plain-mode event: `<label>: <status>\n`. No colour, no
 /// glyph, no rate-limited redraws — one byte stream that survives `tee`
@@ -405,7 +403,7 @@ pub const ProgressBar = struct {
         if (done) {
             return if (color.isEmojiEnabled()) "\xe2\x9c\x93" else "*"; // ✓
         }
-        return spinner_chars[self.spinner_frame % spinner_chars.len];
+        return spinner_frames.frames[self.spinner_frame % spinner_frames.count];
     }
 
     fn computeRate(self: *const ProgressBar) f64 {
@@ -952,7 +950,7 @@ pub const Spinner = struct {
             @memcpy(buf[pos .. pos + c.len], c);
             pos += c.len;
         }
-        const g = spinner_chars[frame % spinner_chars.len];
+        const g = spinner_frames.frames[frame % spinner_frames.count];
         @memcpy(buf[pos .. pos + g.len], g);
         pos += g.len;
         if (use_color) {
