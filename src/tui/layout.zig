@@ -3,8 +3,8 @@
 //! Leaf module: imports only `std` and the read-only `ui/term_sanitize` helper
 //! (via `scroll_list`). The frame is a *pure function of `(cols, rows)`* so a
 //! terminal resize is just a re-render, not a data refetch, and the whole layer
-//! is testable without a PTY. Splits the screen into four stacked, full-width
-//! regions — tab-bar / filter / content / footer — and, below a minimum size,
+//! is testable without a PTY. Splits the screen into five stacked, full-width
+//! regions — header / tab-bar / filter / content / footer — and, below a minimum size,
 //! renders a clean "terminal too small" fallback instead of a corrupt frame.
 //! Nothing here touches the terminal, so a degenerate size yields the fallback,
 //! never a panic that would bypass the caller's `errdefer` restoration.
@@ -16,9 +16,10 @@ const scroll_list = @import("scroll_list.zig");
 /// loop can position the cursor at `region.row`/`region.col` directly.
 pub const Rect = struct { row: u16, col: u16, width: u16, height: u16 };
 
-/// The four stacked regions, top to bottom. They tile the screen exactly: no
+/// The five stacked regions, top to bottom. They tile the screen exactly: no
 /// gaps, no overlap, total height == `rows`.
 pub const Regions = struct {
+    header: Rect,
     tab_bar: Rect,
     filter: Rect,
     content: Rect,
@@ -27,11 +28,12 @@ pub const Regions = struct {
 
 // Fixed region heights; `content` takes whatever rows remain. `min_rows` is
 // derived so at least one content row always survives.
+pub const header_rows: u16 = 1;
 pub const tab_bar_rows: u16 = 1;
 pub const filter_rows: u16 = 1;
 pub const footer_rows: u16 = 2;
 pub const min_content_rows: u16 = 1;
-pub const min_rows: u16 = tab_bar_rows + filter_rows + footer_rows + min_content_rows;
+pub const min_rows: u16 = header_rows + tab_bar_rows + filter_rows + footer_rows + min_content_rows;
 // The narrowest width that still shows all five tabs; below it the bar can't
 // fit them, so the fallback shows rather than a clipped frame. A narrow-but-tall
 // window trips this on width alone — `fits` requires both axes.
@@ -52,12 +54,14 @@ pub fn fits(cols: u16, rows: u16) bool {
 /// `.too_small`; otherwise the four regions tile the screen exactly.
 pub fn compute(cols: u16, rows: u16) Layout {
     if (!fits(cols, rows)) return .too_small;
-    const content_rows = rows - tab_bar_rows - filter_rows - footer_rows;
-    const filter_row = 1 + tab_bar_rows;
+    const content_rows = rows - header_rows - tab_bar_rows - filter_rows - footer_rows;
+    const tab_bar_row = 1 + header_rows;
+    const filter_row = tab_bar_row + tab_bar_rows;
     const content_row = filter_row + filter_rows;
     const footer_row = content_row + content_rows;
     return .{ .ok = .{
-        .tab_bar = .{ .row = 1, .col = 1, .width = cols, .height = tab_bar_rows },
+        .header = .{ .row = 1, .col = 1, .width = cols, .height = header_rows },
+        .tab_bar = .{ .row = tab_bar_row, .col = 1, .width = cols, .height = tab_bar_rows },
         .filter = .{ .row = filter_row, .col = 1, .width = cols, .height = filter_rows },
         .content = .{ .row = content_row, .col = 1, .width = cols, .height = content_rows },
         .footer = .{ .row = footer_row, .col = 1, .width = cols, .height = footer_rows },
@@ -127,13 +131,22 @@ fn renderFallback(buf: []u8, cols: u16, rows: u16) []const u8 {
     return buf[0..n];
 }
 
-test "compute tiles the screen exactly and content absorbs the slack" {
+test "compute reserves the header row and tiles the screen exactly" {
     const r = compute(80, 24).ok;
-    try std.testing.expectEqual(@as(u16, 1), r.tab_bar.row);
-    try std.testing.expectEqual(@as(u16, 3), r.content.row);
-    try std.testing.expectEqual(@as(u16, 20), r.content.height);
+    try std.testing.expectEqual(@as(u16, 1), r.header.row);
+    try std.testing.expectEqual(@as(u16, 2), r.tab_bar.row);
+    try std.testing.expectEqual(@as(u16, 4), r.content.row);
+    try std.testing.expectEqual(@as(u16, 19), r.content.height);
     try std.testing.expectEqual(@as(u16, 23), r.footer.row);
     try std.testing.expect(compute(1, 1) == .too_small);
+}
+
+test "min_rows reserves a row for the header" {
+    try std.testing.expectEqual(
+        header_rows + tab_bar_rows + filter_rows + footer_rows + min_content_rows,
+        min_rows,
+    );
+    try std.testing.expectEqual(@as(u16, 6), min_rows);
 }
 
 test "compute is too_small when either axis alone is below the minimum" {

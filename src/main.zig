@@ -569,7 +569,7 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
             // delegated mutations; fall back to `mt` (PATH) if it can't be read.
             var self_buf: [std.fs.max_path_bytes]u8 = undefined;
             const mt_path = if (std.process.executablePath(ctx.io, &self_buf)) |n| self_buf[0..n] else |_| "mt";
-            try @import("tui/app.zig").run(ctx.io, allocator, ctx.stderr, ctx.environ, mt_path);
+            try @import("tui/app.zig").run(ctx.io, allocator, ctx.stderr, ctx.environ, mt_path, version);
         },
         .bundle => try bundle.execute(ctx, allocator, cmd_args),
         .uses => try uses.execute(ctx, allocator, cmd_args),

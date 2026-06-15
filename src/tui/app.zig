@@ -14,6 +14,7 @@ const color = @import("../ui/color.zig");
 const term_sanitize = @import("../ui/term_sanitize.zig");
 const tab = @import("tab.zig");
 const tab_bar = @import("tab_bar.zig");
+const header = @import("header.zig");
 const filter_input = @import("filter_input.zig");
 const keys = @import("keys.zig");
 const term = @import("term.zig");
@@ -143,6 +144,14 @@ pub const App = struct {
     /// refetch, so the synchronous freeze shows "Loading…" instead of a stale
     /// frame. Never persisted: the read's own repaint clears it.
     loading: bool = false,
+    /// Header inputs. `version` (comptime) and `prefix` (env-resolved) are set
+    /// once in `run`; the counts mirror the loaded stores and stay null until
+    /// each store loads, so the header shows a placeholder rather than a wrong
+    /// number.
+    version: []const u8 = "",
+    prefix: []const u8 = "",
+    installed_count: ?usize = null,
+    outdated_count: ?usize = null,
 };
 
 /// After a delegated mutation the active tab was just re-read inline, so it is
@@ -294,6 +303,16 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
     switch (layout.compute(cols, rows)) {
         .too_small => renderTooSmall(&f, cols, rows),
         .ok => |r| {
+            f.moveTo(r.header.row, 1);
+            var hdb: [256]u8 = undefined;
+            f.put(header.render(&hdb, .{
+                .version = app.version,
+                .prefix = app.prefix,
+                .kegs = app.installed_count,
+                .outdated = app.outdated_count,
+            }, cols));
+            f.put(color.Style.reset.code()); // a truncated muted segment must not bleed downward
+
             f.moveTo(r.tab_bar.row, 1);
             var tb: [256]u8 = undefined;
             f.put(tab_bar.render(&tb, app.active, tabTitles(), cols));
@@ -493,6 +512,7 @@ fn loadInstalled(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *St
         store.installed = null;
         app.states.installed.items = &.{};
         app.states.installed.detail = null;
+        app.installed_count = 0; // empty Cellar is a known zero, not "unknown"
         return;
     };
     defer allocator.free(bytes);
@@ -502,6 +522,7 @@ fn loadInstalled(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *St
     store.installed = parsed;
     app.states.installed.items = parsed.items;
     app.states.installed.detail = null; // a refreshed list invalidates the old detail
+    app.installed_count = parsed.items.len;
 }
 
 /// Read `mt info <pkg> --json` for the selected row into the detail pane.
@@ -579,6 +600,7 @@ fn loadOutdated(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Sto
         store.outdated_checked = &.{};
         app.states.outdated.items = &.{};
         app.states.outdated.checked = &.{};
+        app.outdated_count = 0; // nothing outdated is a known zero, not "unknown"
         return;
     };
     defer allocator.free(bytes);
@@ -596,6 +618,7 @@ fn loadOutdated(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Sto
     store.outdated_checked = checked;
     app.states.outdated.items = parsed.items;
     app.states.outdated.checked = checked;
+    app.outdated_count = parsed.items.len;
 }
 
 /// Build the `mt upgrade <names...>` argv for the checked Outdated rows. Pure
@@ -969,7 +992,7 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) void {
 
 /// Launch the dashboard. Refuses (exit 2) on a non-interactive terminal rather
 /// than degrading. Every fault path restores the terminal via `errdefer`.
-pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, environ: std.process.Environ, mt_path: []const u8) RunError!void {
+pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, environ: std.process.Environ, mt_path: []const u8, version: []const u8) RunError!void {
     const in_fd = std.posix.STDIN_FILENO;
     const out_fd = std.posix.STDOUT_FILENO;
     if (refusalReason(
@@ -994,7 +1017,9 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     errdefer t.restore();
     term.installWinch(fd);
 
-    var app: App = .{ .mt_path = mt_path }; // re-exec this mt for delegated mutations
+    // The prefix the dashboard acts on, resolved the way the rest of malt does.
+    const prefix = std.process.Environ.getPosix(environ, "MALT_PREFIX") orelse "/opt/malt";
+    var app: App = .{ .mt_path = mt_path, .version = version, .prefix = prefix }; // re-exec this mt for delegated mutations
     app.dirty.insert(.outdated); // lazy: load `mt outdated --json` on first activation
     app.dirty.insert(.services); // lazy: load `mt services list --json` on first activation
     app.dirty.insert(.doctor); // lazy: load `mt doctor --json` on first activation
