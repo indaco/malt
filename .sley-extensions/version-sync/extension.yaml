@@ -1,0 +1,9 @@
+schema_version: 1
+name: version-sync
+version: 1.0.0
+description: Syncs version to build.zig.zon and README after bumps
+author: local
+repository: "local"
+entry: hook.sh
+hooks:
+  - post-bump
