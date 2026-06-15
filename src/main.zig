@@ -489,10 +489,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // Any command can signal a user-facing failure by returning
         // `error.Aborted`; the message has already been emitted via
         // `output.err`, so we just exit non-zero without a stack trace.
-        // Every other error still propagates and surfaces normally.
+        // install / reinstall / upgrade additionally surface typed
+        // `InstallError` values (kept that way for testability) that have
+        // likewise already been printed — treat them the same so a clean
+        // refusal isn't followed by a raw `error: <Enum>` line. Scoped to
+        // that family because Zig error values are global by name: a
+        // same-named error (e.g. NetworkError) from another command must
+        // still surface loudly. Truly unexpected errors propagate too.
+        const install_family = cmd == .install or cmd == .reinstall or cmd == .upgrade;
         dispatch(allocator, &ctx, cmd, cmd_args) catch |e| switch (e) {
             error.Aborted => std.process.exit(1),
-            else => return e,
+            else => if (install_family and install.isReportedInstallError(e)) std.process.exit(1) else return e,
         };
         // Best-effort passive notice on successful subcommands. Owns its
         // own suppression list (CI, --quiet/--json/ndjson/--dry-run, env

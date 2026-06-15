@@ -57,6 +57,9 @@ const drive = post_install_mod.drive;
 const rb_parse_mod = @import("install/rb_parse.zig");
 const record_mod = @import("install/record.zig");
 const InstallError = record_mod.InstallError;
+/// Re-exported so `main`'s dispatch handler can exit quietly on an
+/// already-printed install/upgrade failure (see `isReportedInstallError`).
+pub const isReportedInstallError = record_mod.isReportedInstallError;
 const recordKeg = record_mod.recordKeg;
 const deleteKeg = record_mod.deleteKeg;
 const recordDeps = record_mod.recordDeps;
@@ -720,7 +723,14 @@ fn executeWithOpts(
         // Handle tap formulas separately (they don't use GHCR)
         if (isTapFormula(pkg_name)) {
             installTapFormula(ctx, allocator, pkg_name, &db, &linker, prefix, dry_run, force, download_only, sink) catch |e| {
-                sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+                // A source-build refusal already printed an actionable line
+                // plus the `brew install` hint, so don't bury it under a
+                // generic summary that just repeats the error enum name.
+                // (installTapFormula's error set is wider than InstallError,
+                // so this checks the one value rather than localErrorIsAnnounced.)
+                if (e != InstallError.BuildFromSourceUnsupported) {
+                    sink.err("Failed to install {s}: {s}", .{ pkg_name, @errorName(e) });
+                }
                 failed_count += 1;
             };
             continue;

@@ -62,6 +62,19 @@ pub const InstallError = error{
     NetworkError,
 };
 
+/// True for any `InstallError`. The install/upgrade commands always print
+/// a user-facing line before returning one of these, so the top-level
+/// dispatch in `main` exits non-zero *quietly* on them — the same
+/// treatment as `error.Aborted` — instead of dumping the error enum name
+/// (and, in debug, a return trace) on top of the message the command
+/// already showed. Comptime-derived so a new tag is covered automatically.
+pub fn isReportedInstallError(e: anyerror) bool {
+    inline for (@typeInfo(InstallError).error_set.?) |variant| {
+        if (e == @field(InstallError, variant.name)) return true;
+    }
+    return false;
+}
+
 /// True when the given error has already surfaced a specific,
 /// user-facing `output.err` line from inside the install helpers, so
 /// the dispatch-loop shouldn't add a generic "Failed to install X: E"
