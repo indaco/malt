@@ -94,6 +94,7 @@ pub const color = @import("ui/color.zig");
 pub const custom_theme = @import("ui/custom_theme.zig");
 pub const output = @import("ui/output.zig");
 pub const progress = @import("ui/progress.zig");
+pub const spinner_frames = @import("ui/spinner_frames.zig");
 pub const term_sanitize = @import("ui/term_sanitize.zig");
 pub const theme_registry = @import("ui/theme_registry.zig");
 pub const themes = @import("ui/themes.zig");
