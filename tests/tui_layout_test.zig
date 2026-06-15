@@ -17,7 +17,7 @@ fn expectTiles(cols: u16, rows: u16) !void {
     const r = lay.ok;
 
     // Stacked top-to-bottom, full width, in order.
-    const regs = [_]layout.Rect{ r.tab_bar, r.filter, r.content, r.footer };
+    const regs = [_]layout.Rect{ r.header, r.tab_bar, r.filter, r.content, r.footer };
     var expected_row: u16 = 1;
     var total_height: u16 = 0;
     for (regs) |reg| {
@@ -46,7 +46,7 @@ test "fixed regions keep their heights; content absorbs the remainder" {
     try testing.expectEqual(layout.tab_bar_rows, r.tab_bar.height);
     try testing.expectEqual(layout.filter_rows, r.filter.height);
     try testing.expectEqual(layout.footer_rows, r.footer.height);
-    try testing.expectEqual(@as(u16, 24 - layout.tab_bar_rows - layout.filter_rows - layout.footer_rows), r.content.height);
+    try testing.expectEqual(@as(u16, 24 - layout.header_rows - layout.tab_bar_rows - layout.filter_rows - layout.footer_rows), r.content.height);
 }
 
 test "below the minimum is too_small; at or above is ok" {
@@ -121,7 +121,7 @@ test "compute at max u16 dimensions stays in bounds and tiles exactly" {
     const r = layout.compute(65535, 65535).ok;
     try testing.expectEqual(@as(u16, 65535), r.content.width);
     // content takes everything the fixed regions don't; footer still ends at the last row.
-    try testing.expectEqual(@as(u16, 65535 - layout.tab_bar_rows - layout.filter_rows - layout.footer_rows), r.content.height);
+    try testing.expectEqual(@as(u16, 65535 - layout.header_rows - layout.tab_bar_rows - layout.filter_rows - layout.footer_rows), r.content.height);
     try testing.expectEqual(@as(u32, 65535), @as(u32, r.footer.row) + r.footer.height - 1);
 }
 

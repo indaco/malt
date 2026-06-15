@@ -82,6 +82,30 @@ test "a recoverable banner is painted in the footer and a keypress dismisses it"
     try testing.expect(std.mem.indexOf(u8, cleared, "quit") != null); // help line is back
 }
 
+test "the header bar paints name, version and prefix on row 1 above the tab bar" {
+    var a: app.App = .{ .version = "0.1.0", .prefix = "/opt/malt" };
+    var buf: [8192]u8 = undefined;
+    const out = app.renderFrame(&buf, &a, 80, 24);
+    const hdr = std.mem.indexOf(u8, out, "mt 0.1.0").?;
+    try testing.expect(std.mem.indexOf(u8, out, "/opt/malt") != null);
+    // Painted before the tab bar, which moves the cursor to row 2.
+    try testing.expect(hdr < std.mem.indexOf(u8, out, "\x1b[2;1H").?);
+}
+
+test "header counts are an em-dash before their stores load, the numbers after" {
+    var a: app.App = .{ .version = "0.1.0", .prefix = "/opt/malt" };
+    var buf: [8192]u8 = undefined;
+    const empty = app.renderFrame(&buf, &a, 120, 24);
+    try testing.expect(std.mem.indexOf(u8, empty, "\xe2\x80\x94 kegs") != null); // em-dash
+    try testing.expect(std.mem.indexOf(u8, empty, "\xe2\x80\x94 outdated") != null);
+
+    a.installed_count = 192;
+    a.outdated_count = 17;
+    const loaded = app.renderFrame(&buf, &a, 120, 24);
+    try testing.expect(std.mem.indexOf(u8, loaded, "192 kegs") != null);
+    try testing.expect(std.mem.indexOf(u8, loaded, "17 outdated") != null);
+}
+
 test "refusalReason refuses a non-interactive terminal and allows a clean tty" {
     try testing.expectEqual(@as(?app.Refusal, .not_a_tty), app.refusalReason(false, true, false, false));
     try testing.expectEqual(@as(?app.Refusal, .no_color), app.refusalReason(true, true, true, false));
