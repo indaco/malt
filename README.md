@@ -737,42 +737,36 @@ For installing malt from a local checkout (the end-user path), see [From source]
 Install times on macOS 14 (Apple Silicon).
 
 <!-- BENCH:COLD:START -->
-
 ### Cold Install (median ±σ)
 
-| Package              | malt         | nanobrew     | zerobrew      | Homebrew      |
-| -------------------- | ------------ | ------------ | ------------- | ------------- |
-| **tree** (0 deps)    | 0.664±0.109s | 0.719±0.038s | 1.673±0.084s  | 3.991±0.176s  |
-| **wget** (6 deps)    | 3.337±0.131s | 4.090±0.557s | 7.858±0.357s  | 4.781±0.401s  |
-| **ffmpeg** (11 deps) | 4.181±0.496s | 4.784±0.528s | 11.930±1.818s | 30.164±1.690s |
-
+| Package | malt | nanobrew | zerobrew | Homebrew |
+| ------- | ---- | -------- | -------- | -------- |
+| **tree** (0 deps) | 0.629±0.032s | 0.788±0.076s | 1.290±0.182s | 2.417±0.107s |
+| **wget** (6 deps) | 2.384±0.359s | 2.818±0.123s | 5.490±0.140s | 2.652±0.089s |
+| **ffmpeg** (11 deps) | 2.681±0.103s | 3.343±0.495s | 6.174±0.192s | 6.503±0.178s |
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
-
 ### Warm Install
 
-| Package              | malt   | nanobrew | zerobrew |
-| -------------------- | ------ | -------- | -------- |
-| **tree** (0 deps)    | 0.008s | 0.012s   | 0.273s   |
-| **wget** (6 deps)    | 0.012s | 0.016s   | 0.846s   |
-| **ffmpeg** (11 deps) | 0.060s | 0.031s   | 5.490s   |
-
+| Package | malt | nanobrew | zerobrew |
+| ------- | ---- | -------- | -------- |
+| **tree** (0 deps) | 0.006s | 0.017s | 0.285s |
+| **wget** (6 deps) | 0.007s | 0.010s | 0.784s |
+| **ffmpeg** (11 deps) | 0.023s | 0.018s | 2.592s |
 <!-- BENCH:WARM:END -->
 
 <!-- BENCH:SIZE:START -->
-
 ### Binary Size
 
-| Tool     | Size   |
-| -------- | ------ |
-| **malt** | 3.6 MB |
-| nanobrew | 2.6 MB |
+| Tool | Size |
+| ---- | ---- |
+| **malt** | 3.8 MB |
+| nanobrew | 2.8 MB |
 | zerobrew | 8.7 MB |
-
 <!-- BENCH:SIZE:END -->
 
-Apple Silicon (GitHub Actions macos-14), 2026-06-01. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
+Apple Silicon (GitHub Actions macos-14), 2026-06-15. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
 
 ### Inside the binary
 
