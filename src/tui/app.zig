@@ -1022,6 +1022,10 @@ fn doInstall(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *App,
     // backend's install-aware `installed` flag does the rest (no `mt list` call).
     try loadSearch(io, allocator, app, store);
     markStaleAfterMutation(app); // Installed/Outdated/Services may have changed too
+    // The keg set grew but we are on Search, so the lazy Installed reload won't
+    // run until that tab is entered — refresh just the count now (cheaply) so the
+    // header is live immediately, not stale until Installed is opened.
+    try refreshInstalledCount(io, allocator, app);
 }
 
 /// Perform any effect the pure `step` requested on the Search tab, then clear it.
@@ -1648,6 +1652,35 @@ test "refreshOutdatedCount populates the outdated count on a fresh prefix" {
     try refreshOutdatedCount(t.io(), std.testing.allocator, &app);
     try std.testing.expectEqual(@as(?usize, 0), app.outdated_count);
     try std.testing.expect(!app.banner.isSet());
+}
+
+test "the post-install count refresh overwrites a stale count without entering Installed" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    // The cross-tab-install gap: a count from before the mutation, with Installed
+    // marked dirty (its full --size --linked payload reloads only on entry).
+    var app: App = .{ .mt_path = "/usr/bin/true", .active = .search, .installed_count = 6 };
+    app.dirty.insert(.installed);
+    try refreshInstalledCount(t.io(), std.testing.allocator, &app);
+    try std.testing.expectEqual(@as(?usize, 0), app.installed_count); // live again, not the stale 6
+    try std.testing.expect(app.dirty.contains(.installed)); // full payload still loads lazily on entry
+}
+
+test "a broken keg-count read banners and leaves the prior count untouched" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/bin/echo", .installed_count = 6 }; // echo emits non-JSON → parse fails
+    try std.testing.expectError(error.BadJson, refreshInstalledCount(t.io(), std.testing.allocator, &app));
+    try std.testing.expectEqualStrings("keg count refresh failed: BadJson", app.banner.slice());
+    try std.testing.expectEqual(@as(?usize, 6), app.installed_count); // a failed read keeps the last-good count
+}
+
+test "a broken outdated-count read banners under its own op" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/bin/echo" };
+    try std.testing.expectError(error.BadJson, refreshOutdatedCount(t.io(), std.testing.allocator, &app));
+    try std.testing.expectEqualStrings("outdated count refresh failed: BadJson", app.banner.slice());
 }
 
 test "loadOutdated treats an exit-0 empty response (fresh prefix) as an empty tab" {
