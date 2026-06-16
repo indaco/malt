@@ -568,19 +568,13 @@ pub fn roleCode(role: Role) []const u8 {
     return resolveRole(theme(), role, bg, tc);
 }
 
-/// The theme `accent` the TUI emits immediately before `Style.reverse`, so
-/// reverse-video renders the accent as the selection/active-block *background*.
-/// Empty under `.default` (and any tier where no theme applies) so the
-/// out-of-box selection stays plain reverse-video; non-empty only when a custom
-/// or named theme is genuinely in effect — the same gate as `roleCode`, so the
-/// selection themes exactly when the rest of the TUI does.
+/// The `accent` the TUI emits immediately before `Style.reverse`, so reverse-video
+/// renders it as the selection background. Resolves exactly like `roleCode(.accent)`
+/// — the same accent the tab bar paints the active tab with — so the selection and
+/// the active tab always carry one colour, including under the background-aware
+/// `.default` palette and on a basic terminal.
 pub fn selectionAccent() []const u8 {
-    const bg = background();
-    const tc = truecolorSupported();
-    if (activeCustomPalette(bg, tc)) |p| return p.get(.accent);
-    const t = theme();
-    if (namedThemeApplies(t, bg, tc)) return themes.named(t).?.get(.accent);
-    return "";
+    return roleCode(.accent);
 }
 
 /// Secondary accent — a blue with no cell in the existing semantic palette.
@@ -824,9 +818,10 @@ test "no themes file leaves the resolver untouched" {
 // ─── selectionAccent (TUI selection highlight) ───────────────────────
 //
 // The accent emitted before reverse-video so the highlight follows the theme.
-// Empty under `.default` keeps the out-of-box selection plain reverse-video.
+// It must equal the active-tab accent (`roleCode(.accent)`) on every tier, so
+// the selection and the active tab never carry mismatched colours.
 
-test "selectionAccent is empty under .default so the selection stays plain reverse" {
+test "selectionAccent matches the active-tab accent under .default" {
     clearCustomForTest();
     setThemeForTest(.default);
     setTruecolorForTest(true);
@@ -836,7 +831,10 @@ test "selectionAccent is empty under .default so the selection stays plain rever
         setTruecolorForTest(null);
         setBackgroundForTest(null);
     }
-    try std.testing.expectEqualStrings("", selectionAccent());
+    // The default palette has an accent; the selection must use it, not plain
+    // reverse, so it reads the same as the tab bar's active block.
+    try std.testing.expectEqualStrings(roleCode(.accent), selectionAccent());
+    try std.testing.expect(selectionAccent().len != 0);
 }
 
 test "selectionAccent carries a named theme's accent when it applies" {
@@ -854,7 +852,7 @@ test "selectionAccent carries a named theme's accent when it applies" {
     try std.testing.expect(selectionAccent().len != 0);
 }
 
-test "selectionAccent is empty on a basic terminal (a named theme needs truecolor)" {
+test "selectionAccent falls back to the default accent on a basic terminal" {
     clearCustomForTest();
     setThemeForTest(.dracula);
     setTruecolorForTest(false);
@@ -864,7 +862,9 @@ test "selectionAccent is empty on a basic terminal (a named theme needs truecolo
         setTruecolorForTest(null);
         setBackgroundForTest(null);
     }
-    try std.testing.expectEqualStrings("", selectionAccent());
+    // A named theme needs truecolor, so it doesn't apply here; the selection
+    // follows the same default accent the tab bar uses, never plain reverse.
+    try std.testing.expectEqualStrings(roleCode(.accent), selectionAccent());
 }
 
 test "selectionAccent carries an active custom theme's accent" {
