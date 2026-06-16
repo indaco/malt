@@ -433,6 +433,12 @@ clean:
 record-demo:
     ./scripts/record-demo.sh
 
+# Render the builtin-theme gallery (CLI + mt tui per theme) via VHS into
+# docs/themes/theme-<name>.png. Requires vhs + imagemagick.
+[group('docs')]
+record-themes:
+    ./scripts/record-themes.sh
+
 # Regenerate docs/contrast-previews/*.png for the four palette cells
 # (dark|light) × (truecolor|basic). Internal: only run after editing
 # the palette cells in src/ui/color.zig or the sample text in
