@@ -169,6 +169,16 @@ pub fn markStaleAfterMutation(a: *App) void {
     a.dirty.remove(a.active);
 }
 
+/// Mark every data tab dirty at launch so each loads lazily on first entry.
+/// Search is the active tab and renders without data, so launch never blocks on
+/// a child read — the load cost is paid on view, behind `paintLoading`.
+fn initLaunchDirty(a: *App) void {
+    a.dirty.insert(.installed);
+    a.dirty.insert(.outdated);
+    a.dirty.insert(.services);
+    a.dirty.insert(.doctor);
+}
+
 /// Consume `t`'s dirty flag: true exactly once after it was marked, so the
 /// caller refetches its `--json` at most once per staleness.
 pub fn takeDirty(a: *App, t: Tab) bool {
@@ -561,6 +571,51 @@ fn loadInstalled(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *St
     app.states.installed.items = parsed.items;
     app.states.installed.detail = null; // a refreshed list invalidates the old detail
     app.installed_count = parsed.items.len;
+}
+
+/// Argv for the cheap keg-count read: `mt list --json` with **no**
+/// `--size --linked`, so it is a DB read, not the keg-dir size/symlink walk that
+/// `loadInstalled` pays. Kept separate so a test can pin that the count path
+/// stays cheap.
+fn installedCountArgv(allocator: std.mem.Allocator, mt_path: []const u8) std.mem.Allocator.Error![]const []const u8 {
+    return spawn.jsonArgv(allocator, mt_path, &.{"list"});
+}
+
+/// Refresh only the header keg count, cheaply (see `installedCountArgv`). The
+/// full `--size --linked` Installed payload still loads lazily on tab entry; this
+/// keeps `<n> kegs` live at launch and after a cross-tab install. A second writer
+/// of `installed_count` beside `loadInstalled` — both compute `items.len`, so
+/// they cannot diverge.
+fn refreshInstalledCount(io: std.Io, allocator: std.mem.Allocator, app: *App) RunError!void {
+    errdefer |err| app.banner.set("keg count refresh failed", @errorName(err));
+    const argv = try installedCountArgv(allocator, app.mt_path);
+    defer allocator.free(argv);
+    const bytes = (try spawn.readJsonAllowEmpty(io, allocator, argv)) orelse {
+        app.installed_count = 0; // empty Cellar is a known zero, not "unknown"
+        return;
+    };
+    defer allocator.free(bytes);
+    const parsed = try list_json.parse(allocator, bytes);
+    defer parsed.deinit(); // count only — the lazy full load owns the rows
+    app.installed_count = parsed.items.len;
+}
+
+/// Refresh only the `<m> outdated` header count: `mt outdated --json`, row count
+/// only. The full Outdated payload still loads lazily on tab entry; this keeps
+/// the count live from launch (upgrade already refreshes it in place via
+/// `loadOutdated`).
+fn refreshOutdatedCount(io: std.Io, allocator: std.mem.Allocator, app: *App) RunError!void {
+    errdefer |err| app.banner.set("outdated count refresh failed", @errorName(err));
+    const argv = try spawn.jsonArgv(allocator, app.mt_path, &.{"outdated"});
+    defer allocator.free(argv);
+    const bytes = (try spawn.readJsonAllowEmpty(io, allocator, argv)) orelse {
+        app.outdated_count = 0; // nothing outdated is a known zero, not "unknown"
+        return;
+    };
+    defer allocator.free(bytes);
+    const parsed = try outdated_json.parse(allocator, bytes);
+    defer parsed.deinit();
+    app.outdated_count = parsed.items.len;
 }
 
 /// Read `mt info <pkg> --json` for the selected row into the detail pane.
@@ -1043,38 +1098,6 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) void {
     }
 }
 
-/// Prime the launch: paint the data-free chrome *before* the eager Installed
-/// load, so the alt-screen never flashes blank while that load's `mt list` child
-/// spawns and returns. Generic over painter + loader so the paint-before-spawn
-/// order is provable against fakes (no PTY, no child), the way `spawn.around`
-/// proves its leave→run→enter order.
-fn primeFirstFrame(painter: anytype, loader: anytype) !void {
-    try painter.paint();
-    try loader.load();
-}
-
-/// Live paint effect for `primeFirstFrame`: draw the current frame to the tty.
-const FramePainter = struct {
-    fd: std.posix.fd_t,
-    frame: *[]u8,
-    allocator: std.mem.Allocator,
-    app: *App,
-    fn paint(self: FramePainter) std.mem.Allocator.Error!void {
-        return repaint(self.fd, self.frame, self.allocator, self.app);
-    }
-};
-
-/// Live load effect for `primeFirstFrame`: the eager Installed read.
-const InstalledLoader = struct {
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    app: *App,
-    store: *Store,
-    fn load(self: InstalledLoader) RunError!void {
-        return loadInstalled(self.io, self.allocator, self.app, self.store);
-    }
-};
-
 /// Launch the dashboard. Refuses (exit 2) on a non-interactive terminal rather
 /// than degrading. Every fault path restores the terminal via `errdefer`.
 pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, environ: std.process.Environ, mt_path: []const u8, version: []const u8) RunError!void {
@@ -1105,9 +1128,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     // The prefix the dashboard acts on, resolved the way the rest of malt does.
     const prefix = std.process.Environ.getPosix(environ, "MALT_PREFIX") orelse "/opt/malt";
     var app: App = .{ .mt_path = mt_path, .version = version, .prefix = prefix }; // re-exec this mt for delegated mutations
-    app.dirty.insert(.outdated); // lazy: load `mt outdated --json` on first activation
-    app.dirty.insert(.services); // lazy: load `mt services list --json` on first activation
-    app.dirty.insert(.doctor); // lazy: load `mt doctor --json` on first activation
+    initLaunchDirty(&app); // every data tab loads lazily on first entry
     var store: Store = .{};
     defer store.deinit(allocator);
     var frame = try allocator.alloc(u8, frameCap(term.currentSize()));
@@ -1115,14 +1136,15 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     // The paint handle the polled lazy reads tick against to animate the spinner.
     const painter: Painter = .{ .fd = fd, .frame = &frame };
 
-    // Paint the chrome before the eager Installed load so a slow `mt list` child
-    // can't leave the alt-screen blank on launch; the Installed list stays eager
-    // (ready when entered) and its rows land on the repaint below. Paint-before-
-    // load order is proven by `primeFirstFrame`.
-    try primeFirstFrame(
-        FramePainter{ .fd = fd, .frame = &frame, .allocator = allocator, .app = &app },
-        InstalledLoader{ .io = io, .allocator = allocator, .app = &app, .store = &store },
-    );
+    // Paint the data-free chrome first so the alt-screen never flashes blank,
+    // then prime the header counts cheaply (DB reads, no keg-dir walk) and
+    // repaint — launch shows `<n> kegs · <m> outdated` while the full tab
+    // payloads still load lazily on entry. Best-effort: a failed count read just
+    // leaves an em-dash, never blocks the dashboard from opening.
+    try repaint(fd, &frame, allocator, &app);
+    refreshInstalledCount(io, allocator, &app) catch {};
+    refreshOutdatedCount(io, allocator, &app) catch {};
+    app.banner.clear(); // a failed startup count read is an em-dash, not a nag
     try repaint(fd, &frame, allocator, &app);
 
     var decoder: keys.Decoder = .{};
@@ -1202,52 +1224,6 @@ fn ch(c: u8) Key {
 /// fires and the fd/frame are never touched.
 fn testPainter(frame: *[]u8) Painter {
     return .{ .fd = -1, .frame = frame };
-}
-
-// Order probes for `primeFirstFrame`: each appends its mark to a shared log so
-// the launch sequence (and its fault paths) is provable without a PTY or a child
-// (mirrors spawn.zig's FakeTerm/FakeBody). `fails` forces the effect to error.
-const PaintProbe = struct {
-    log: *std.ArrayList(u8),
-    fails: bool = false,
-    fn paint(self: PaintProbe) error{Paint}!void {
-        self.log.append(std.testing.allocator, 'P') catch {};
-        if (self.fails) return error.Paint;
-    }
-};
-const LoadProbe = struct {
-    log: *std.ArrayList(u8),
-    fails: bool = false,
-    fn load(self: LoadProbe) error{Load}!void {
-        self.log.append(std.testing.allocator, 'S') catch {};
-        if (self.fails) return error.Load;
-    }
-};
-
-test "launch paints the chrome before the first Installed load spawns" {
-    var log: std.ArrayList(u8) = .empty;
-    defer log.deinit(std.testing.allocator);
-    try primeFirstFrame(PaintProbe{ .log = &log }, LoadProbe{ .log = &log });
-    // Paint must reach the tty before any child spawn, or a slow `mt list`
-    // leaves the alt-screen blank on launch.
-    try std.testing.expectEqualStrings("PS", log.items);
-}
-
-test "a failed first paint aborts before any child is spawned" {
-    var log: std.ArrayList(u8) = .empty;
-    defer log.deinit(std.testing.allocator);
-    // A fatal first-frame write must not be followed by a child spawn.
-    try std.testing.expectError(error.Paint, primeFirstFrame(PaintProbe{ .log = &log, .fails = true }, LoadProbe{ .log = &log }));
-    try std.testing.expectEqualStrings("P", log.items); // paint tried, load never ran
-}
-
-test "a failed Installed load still leaves the chrome painted" {
-    var log: std.ArrayList(u8) = .empty;
-    defer log.deinit(std.testing.allocator);
-    // The skeleton is already on screen, so a list-read fault surfaces as a
-    // banner over chrome — never a blank alt-screen.
-    try std.testing.expectError(error.Load, primeFirstFrame(PaintProbe{ .log = &log }, LoadProbe{ .log = &log, .fails = true }));
-    try std.testing.expectEqualStrings("PS", log.items); // painted, then the load failed
 }
 
 test "a data-free App renders the full chrome so the skeleton paint is real" {
@@ -1553,6 +1529,17 @@ test "a tab that was never marked dirty does not trigger a refetch" {
     try std.testing.expect(!takeDirty(&a, .outdated));
 }
 
+test "every data tab is dirty at launch so none blocks the first paint" {
+    var a: App = .{}; // opens on Search
+    initLaunchDirty(&a);
+    // Installed joins the other three: no eager load, so launch never blocks input.
+    try std.testing.expect(a.dirty.contains(.installed));
+    try std.testing.expect(a.dirty.contains(.outdated));
+    try std.testing.expect(a.dirty.contains(.services));
+    try std.testing.expect(a.dirty.contains(.doctor));
+    try std.testing.expect(!a.dirty.contains(.search)); // active tab renders without data
+}
+
 test "banner formats op + reason and reports set/clear" {
     var b: Banner = .{};
     try std.testing.expect(!b.isSet());
@@ -1630,6 +1617,36 @@ test "loadInstalled treats an exit-0 empty response (fresh prefix) as an empty t
     defer store.deinit(std.testing.allocator);
     try loadInstalled(t.io(), std.testing.allocator, &app, &store);
     try std.testing.expectEqual(@as(usize, 0), app.states.installed.items.len);
+    try std.testing.expect(!app.banner.isSet());
+}
+
+test "the keg-count read stays cheap — list --json, no --size/--linked walk" {
+    const argv = try installedCountArgv(std.testing.allocator, "/opt/homebrew/bin/mt");
+    defer std.testing.allocator.free(argv);
+    try std.testing.expectEqual(@as(usize, 3), argv.len); // [mt, list, --json]
+    try std.testing.expectEqualStrings("list", argv[1]);
+    try std.testing.expectEqualStrings("--json", argv[2]);
+    for (argv) |a| { // the keg-dir walk flags must never sneak into the count path
+        try std.testing.expect(!std.mem.eql(u8, a, "--size"));
+        try std.testing.expect(!std.mem.eql(u8, a, "--linked"));
+    }
+}
+
+test "refreshInstalledCount populates the keg count on a fresh prefix (0, not unknown)" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/usr/bin/true" }; // exit 0, no output = empty Cellar
+    try refreshInstalledCount(t.io(), std.testing.allocator, &app);
+    try std.testing.expectEqual(@as(?usize, 0), app.installed_count); // populated, never null
+    try std.testing.expect(!app.banner.isSet());
+}
+
+test "refreshOutdatedCount populates the outdated count on a fresh prefix" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/usr/bin/true" };
+    try refreshOutdatedCount(t.io(), std.testing.allocator, &app);
+    try std.testing.expectEqual(@as(?usize, 0), app.outdated_count);
     try std.testing.expect(!app.banner.isSet());
 }
 
