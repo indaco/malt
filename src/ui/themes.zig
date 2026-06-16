@@ -26,6 +26,7 @@ pub const Theme = enum {
     tokyo_night,
     gruvbox_dark,
     gruvbox_light,
+    everforest,
 };
 
 /// The background a named theme is designed for. `color.zig` gates a theme on
@@ -165,6 +166,17 @@ const gruvbox_light = palette(.{
     .muted = .{ .r = 0x7c, .g = 0x6f, .b = 0x64 },
 });
 
+// The only green-led palette: everforest's soft forest greens, the standout in a
+// gallery otherwise full of muted purples and blues.
+const everforest = palette(.{
+    .accent = .{ .r = 0xa7, .g = 0xc0, .b = 0x80 },
+    .secondary = .{ .r = 0x7f, .g = 0xbb, .b = 0xb3 },
+    .success = .{ .r = 0xa7, .g = 0xc0, .b = 0x80 },
+    .warning = .{ .r = 0xdb, .g = 0xbc, .b = 0x7f },
+    .danger = .{ .r = 0xe6, .g = 0x7e, .b = 0x80 },
+    .muted = .{ .r = 0x85, .g = 0x92, .b = 0x89 },
+});
+
 /// The named palette for a theme, or null for `.default` (resolved by
 /// color.zig's background-aware tiers).
 pub fn named(t: Theme) ?*const NamedPalette {
@@ -179,6 +191,7 @@ pub fn named(t: Theme) ?*const NamedPalette {
         .tokyo_night => &tokyo_night,
         .gruvbox_dark => &gruvbox_dark,
         .gruvbox_light => &gruvbox_light,
+        .everforest => &everforest,
     };
 }
 
@@ -188,7 +201,7 @@ pub fn named(t: Theme) ?*const NamedPalette {
 pub fn polarity(t: Theme) ?Polarity {
     return switch (t) {
         .default => null,
-        .dracula, .catppuccin_mocha, .rose_pine, .nord, .tokyo_night, .gruvbox_dark => .dark,
+        .dracula, .catppuccin_mocha, .rose_pine, .nord, .tokyo_night, .gruvbox_dark, .everforest => .dark,
         .catppuccin_latte, .rose_pine_dawn, .gruvbox_light => .light,
     };
 }
@@ -204,6 +217,7 @@ test "polarity classifies every named theme; default has none" {
     try std.testing.expectEqual(Polarity.dark, polarity(.tokyo_night).?);
     try std.testing.expectEqual(Polarity.dark, polarity(.gruvbox_dark).?);
     try std.testing.expectEqual(Polarity.light, polarity(.gruvbox_light).?);
+    try std.testing.expectEqual(Polarity.dark, polarity(.everforest).?);
 }
 
 /// Env value → theme. `light`/`dark`/`auto`/`default` resolve to `.default`
@@ -231,6 +245,7 @@ pub const from_env = std.StaticStringMap(Theme).initComptime(.{
     .{ "gruvbox_dark", Theme.gruvbox_dark },
     .{ "gruvbox-light", Theme.gruvbox_light },
     .{ "gruvbox_light", Theme.gruvbox_light },
+    .{ "everforest", Theme.everforest },
 });
 
 test "every named theme resolves all six roles to a non-empty truecolor escape" {
@@ -238,6 +253,7 @@ test "every named theme resolves all six roles to a non-empty truecolor escape" 
         Theme.dracula,     Theme.catppuccin_mocha, Theme.catppuccin_latte,
         Theme.rose_pine,   Theme.rose_pine_dawn,   Theme.nord,
         Theme.tokyo_night, Theme.gruvbox_dark,     Theme.gruvbox_light,
+        Theme.everforest,
     }) |t| {
         const p = named(t).?;
         inline for (.{ Role.accent, .secondary, .success, .warning, .danger, .muted }) |r| {
@@ -250,6 +266,10 @@ test "every named theme resolves all six roles to a non-empty truecolor escape" 
 
 test "dracula accent is the published mauve RGB" {
     try std.testing.expectEqualStrings("\x1b[38;2;189;147;249m", named(.dracula).?.accent);
+}
+
+test "everforest accent is the published forest green RGB" {
+    try std.testing.expectEqualStrings("\x1b[38;2;167;192;128m", named(.everforest).?.accent);
 }
 
 test "from_env accepts both - and _ spellings for every multi-word theme" {
