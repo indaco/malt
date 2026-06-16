@@ -666,8 +666,9 @@ const tui_help =
     \\  MALT_THEME   Colour theme for all malt output — the CLI and this
     \\               dashboard alike: default, dracula, catppuccin-mocha,
     \\               catppuccin-latte, rose-pine, rose-pine-dawn, nord,
-    \\               tokyo-night, gruvbox-dark, gruvbox-light. light/dark/auto
-    \\               keep the background-aware default theme; unknown ⇒ default.
+    \\               tokyo-night, gruvbox-dark, gruvbox-light, everforest.
+    \\               light/dark/auto keep the background-aware default theme;
+    \\               unknown ⇒ default.
     \\               Named themes need a truecolor terminal (COLORTERM) and
     \\               degrade to the default palette on a basic terminal or one
     \\               whose background contradicts the theme (e.g. a dark theme
