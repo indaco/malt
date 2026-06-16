@@ -1043,6 +1043,38 @@ fn writeAll(fd: std.posix.fd_t, bytes: []const u8) void {
     }
 }
 
+/// Prime the launch: paint the data-free chrome *before* the eager Installed
+/// load, so the alt-screen never flashes blank while that load's `mt list` child
+/// spawns and returns. Generic over painter + loader so the paint-before-spawn
+/// order is provable against fakes (no PTY, no child), the way `spawn.around`
+/// proves its leave→run→enter order.
+fn primeFirstFrame(painter: anytype, loader: anytype) !void {
+    try painter.paint();
+    try loader.load();
+}
+
+/// Live paint effect for `primeFirstFrame`: draw the current frame to the tty.
+const FramePainter = struct {
+    fd: std.posix.fd_t,
+    frame: *[]u8,
+    allocator: std.mem.Allocator,
+    app: *App,
+    fn paint(self: FramePainter) std.mem.Allocator.Error!void {
+        return repaint(self.fd, self.frame, self.allocator, self.app);
+    }
+};
+
+/// Live load effect for `primeFirstFrame`: the eager Installed read.
+const InstalledLoader = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    app: *App,
+    store: *Store,
+    fn load(self: InstalledLoader) RunError!void {
+        return loadInstalled(self.io, self.allocator, self.app, self.store);
+    }
+};
+
 /// Launch the dashboard. Refuses (exit 2) on a non-interactive terminal rather
 /// than degrading. Every fault path restores the terminal via `errdefer`.
 pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, environ: std.process.Environ, mt_path: []const u8, version: []const u8) RunError!void {
@@ -1083,7 +1115,14 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
     // The paint handle the polled lazy reads tick against to animate the spinner.
     const painter: Painter = .{ .fd = fd, .frame = &frame };
 
-    try loadInstalled(io, allocator, &app, &store); // pre-load the Installed list so it is ready when entered
+    // Paint the chrome before the eager Installed load so a slow `mt list` child
+    // can't leave the alt-screen blank on launch; the Installed list stays eager
+    // (ready when entered) and its rows land on the repaint below. Paint-before-
+    // load order is proven by `primeFirstFrame`.
+    try primeFirstFrame(
+        FramePainter{ .fd = fd, .frame = &frame, .allocator = allocator, .app = &app },
+        InstalledLoader{ .io = io, .allocator = allocator, .app = &app, .store = &store },
+    );
     try repaint(fd, &frame, allocator, &app);
 
     var decoder: keys.Decoder = .{};
@@ -1163,6 +1202,61 @@ fn ch(c: u8) Key {
 /// fires and the fd/frame are never touched.
 fn testPainter(frame: *[]u8) Painter {
     return .{ .fd = -1, .frame = frame };
+}
+
+// Order probes for `primeFirstFrame`: each appends its mark to a shared log so
+// the launch sequence (and its fault paths) is provable without a PTY or a child
+// (mirrors spawn.zig's FakeTerm/FakeBody). `fails` forces the effect to error.
+const PaintProbe = struct {
+    log: *std.ArrayList(u8),
+    fails: bool = false,
+    fn paint(self: PaintProbe) error{Paint}!void {
+        self.log.append(std.testing.allocator, 'P') catch {};
+        if (self.fails) return error.Paint;
+    }
+};
+const LoadProbe = struct {
+    log: *std.ArrayList(u8),
+    fails: bool = false,
+    fn load(self: LoadProbe) error{Load}!void {
+        self.log.append(std.testing.allocator, 'S') catch {};
+        if (self.fails) return error.Load;
+    }
+};
+
+test "launch paints the chrome before the first Installed load spawns" {
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(std.testing.allocator);
+    try primeFirstFrame(PaintProbe{ .log = &log }, LoadProbe{ .log = &log });
+    // Paint must reach the tty before any child spawn, or a slow `mt list`
+    // leaves the alt-screen blank on launch.
+    try std.testing.expectEqualStrings("PS", log.items);
+}
+
+test "a failed first paint aborts before any child is spawned" {
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(std.testing.allocator);
+    // A fatal first-frame write must not be followed by a child spawn.
+    try std.testing.expectError(error.Paint, primeFirstFrame(PaintProbe{ .log = &log, .fails = true }, LoadProbe{ .log = &log }));
+    try std.testing.expectEqualStrings("P", log.items); // paint tried, load never ran
+}
+
+test "a failed Installed load still leaves the chrome painted" {
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(std.testing.allocator);
+    // The skeleton is already on screen, so a list-read fault surfaces as a
+    // banner over chrome — never a blank alt-screen.
+    try std.testing.expectError(error.Load, primeFirstFrame(PaintProbe{ .log = &log }, LoadProbe{ .log = &log, .fails = true }));
+    try std.testing.expectEqualStrings("PS", log.items); // painted, then the load failed
+}
+
+test "a data-free App renders the full chrome so the skeleton paint is real" {
+    var app: App = .{}; // active .search, empty Store, no counts loaded
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &app, 80, 24);
+    for ([_][]const u8{ "Search", "Installed", "Outdated", "Services", "Doctor" }) |title|
+        try std.testing.expect(std.mem.indexOf(u8, out, title) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "quit") != null); // footer help present
 }
 
 test "tab cycles and 1-5 jump to a tab" {
