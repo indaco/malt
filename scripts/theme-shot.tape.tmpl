@@ -1,0 +1,28 @@
+# Replay template — rendered from this template by scripts/record-themes.sh.
+# It does NOT drive malt. The wrapper drives the CLI install and the mt tui
+# dashboard inside tmux, polls the real screen until the content is right, and
+# captures it to an ANSI dump. This tape just `cat`s that static dump so VHS
+# renders it faithfully — truecolor and the reverse-video selection background,
+# both of which freeze drops. Because the content is already settled, there is no
+# timing to race: the capture is deterministic, the render is just a redraw.
+#
+# @PLACEHOLDERS@ are substituted per still before vhs runs.
+
+Output "@SINK@"
+
+Set Shell "bash"
+Set FontSize 14
+Set Width 1060
+Set Height 820
+Set Padding 16
+Set Theme "@VHS_THEME@"
+Set TypingSpeed 0ms
+
+# Print the captured screen, then block on `sleep` so no shell prompt or cursor
+# lands in the frame. VHS renders the redraw; we snapshot it.
+Hide
+Type "clear; cat '@ANSI@'; sleep 30"
+Enter
+Show
+Sleep 700ms
+Screenshot "@OUT@"
