@@ -84,6 +84,16 @@ tui_pty_seed_keg_real() {
   : >"$TUI_PREFIX/Cellar/$name/1.0/marker"
 }
 
+# Seed one orphaned store entry: a sha256 dir under store/ with no live
+# store_refs row — the exact shape `mt doctor --fix orphaned_store` sweeps. The
+# doctor walker counts any store dir lacking a refcount>0 row as orphaned, so the
+# missing row alone makes it a fixable warning. Optional arg overrides the sha.
+tui_pty_seed_orphan_store() {
+  local sha="${1:-deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef}"
+  mkdir -p "$TUI_PREFIX/store/$sha"
+  : >"$TUI_PREFIX/store/$sha/payload"
+}
+
 # Drive `mt tui` under the pty. Args: <capfile> <cols> <rows>; the action
 # program is read from this function's stdin. Echoes the driver's
 # "EXIT_STATUS=<n>" line so the caller can assert on the child's exit code.

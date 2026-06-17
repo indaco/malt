@@ -890,14 +890,16 @@ fn doDoctorFix(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter:
     const argv = (try doctorFixArgv(allocator, app.mt_path, &app.states.doctor)) orelse return; // nothing fixable selected
     defer allocator.free(argv);
     {
-        // A non-zero `mt doctor --fix` re-enters the dashboard (the user keeps
-        // malt's real output, including any typed-confirm, in their scrollback)
-        // and surfaces as a recoverable banner; only a terminal fault is fatal.
+        // `mt doctor --fix` exits by severity (1 warn / 2 err), not pass/fail —
+        // a clean sweep of a warning-class finding still exits 1 — so tolerate
+        // exits up to 2 (symmetric with the doctor read's `max_ok_exit`). A real
+        // fault (exit > 2, signal, terminal fault) still surfaces as a banner;
+        // a severity exit re-enters cleanly and falls through to the refresh.
         // Scoped so the refresh below reports under its own op, not the fix.
         errdefer |err| app.banner.set("doctor fix failed", @errorName(err));
-        try spawn.runInlineReenter(t, argv);
+        try spawn.runInlineReenterTolerant(t, argv, 2);
     }
-    try loadDoctor(io, allocator, painter, app, store); // the finding may be resolved — refetch
+    try loadDoctor(io, allocator, painter, app, store); // exit can't say what remains — the refresh is the truth
     markStaleAfterMutation(app);
 }
 

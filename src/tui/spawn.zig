@@ -50,15 +50,26 @@ pub fn jsonArgv(
 }
 
 /// Spawn `argv` inheriting the parent's stdio (so the child's prompts and
-/// progress reach the user's scrollback) and map its exit to an error. A
-/// non-zero exit, signal, or stop surfaces as `ChildFailed` — never swallowed.
-pub fn runChild(io: std.Io, argv: []const []const u8) SpawnError!void {
+/// progress reach the user's scrollback) and map its exit to an error. `code <=
+/// max_ok_exit` is success: most mutations pass `0`, but `mt doctor --fix` passes
+/// `2` because its exit code is the *pre-fix* severity (1 warn / 2 err), not a
+/// pass/fail — so a successful sweep of a warning-class finding still exits 1.
+/// A signal, stop, or a code above the cap is `ChildFailed` — never swallowed.
+/// Mirrors `captureJson`'s `max_ok_exit` so the read and mutation paths share
+/// one exit policy.
+pub fn runChildTolerant(io: std.Io, argv: []const []const u8, max_ok_exit: u8) SpawnError!void {
     var child = std.process.spawn(io, .{ .argv = argv }) catch return error.SpawnFailed;
     const status = child.wait(io) catch return error.WaitFailed;
     switch (status) {
-        .exited => |code| if (code != 0) return error.ChildFailed,
+        .exited => |code| if (code > max_ok_exit) return error.ChildFailed,
         .signal, .stopped, .unknown => return error.ChildFailed,
     }
+}
+
+/// `runChildTolerant` with a zero cap: any non-zero exit is `ChildFailed`. The
+/// policy for install/uninstall/upgrade/services, whose success is exit 0.
+pub fn runChild(io: std.Io, argv: []const []const u8) SpawnError!void {
+    return runChildTolerant(io, argv, 0);
 }
 
 /// Spawn `argv`, drain its stdout fully, then wait. Returns the captured bytes
@@ -263,19 +274,22 @@ const TermCtrl = struct {
     }
 };
 
-/// The mutation body: re-exec `mt` inheriting stdio.
+/// The mutation body: re-exec `mt` inheriting stdio. `max_ok_exit` is the highest
+/// child exit code that still counts as success (0 for plain mutations, 2 for the
+/// doctor severity exit).
 const ChildBody = struct {
     io: std.Io,
     argv: []const []const u8,
+    max_ok_exit: u8,
     fn run(self: ChildBody) SpawnError!void {
-        return runChild(self.io, self.argv);
+        return runChildTolerant(self.io, self.argv, self.max_ok_exit);
     }
 };
 
 /// Run a delegated mutation inline: leave the alt-screen, re-exec `mt`, wait,
 /// re-enter. On any fault the terminal is restored before the error propagates.
 pub fn runInline(t: *term.Term, argv: []const []const u8) InlineError!void {
-    return around(TermCtrl{ .t = t }, ChildBody{ .io = t.io, .argv = argv });
+    return around(TermCtrl{ .t = t }, ChildBody{ .io = t.io, .argv = argv, .max_ok_exit = 0 });
 }
 
 /// Like `around`, but a *child* failure re-enters the dashboard and surfaces the
@@ -297,7 +311,15 @@ fn aroundReenter(ctrl: anytype, body: anytype) !void {
 /// Run a delegated mutation inline on the graceful path: a non-zero child exit
 /// re-enters the dashboard and is returned as a recoverable value.
 pub fn runInlineReenter(t: *term.Term, argv: []const []const u8) InlineError!void {
-    return aroundReenter(TermCtrl{ .t = t }, ChildBody{ .io = t.io, .argv = argv });
+    return aroundReenter(TermCtrl{ .t = t }, ChildBody{ .io = t.io, .argv = argv, .max_ok_exit = 0 });
+}
+
+/// Like `runInlineReenter`, but accept child exit codes up to `max_ok_exit` as
+/// success — for `mt doctor --fix`, whose exit code is its severity (≤ 2), not a
+/// pass/fail. The caller runs its own refresh regardless; only an exit above the
+/// cap, a signal, or a terminal fault surfaces as an error.
+pub fn runInlineReenterTolerant(t: *term.Term, argv: []const []const u8, max_ok_exit: u8) InlineError!void {
+    return aroundReenter(TermCtrl{ .t = t }, ChildBody{ .io = t.io, .argv = argv, .max_ok_exit = max_ok_exit });
 }
 
 // ─── tests ───────────────────────────────────────────────────────────
@@ -355,6 +377,36 @@ test "runChild surfaces a missing program as SpawnFailed" {
     var t = threaded();
     defer t.deinit();
     try testing.expectError(error.SpawnFailed, runChild(t.io(), &.{"/nonexistent/malt_tui_spawn_probe"}));
+}
+
+test "runChildTolerant accepts a zero exit" {
+    var t = threaded();
+    defer t.deinit();
+    try runChildTolerant(t.io(), &.{"/usr/bin/true"}, 2);
+}
+
+test "runChildTolerant tolerates a severity exit within the cap where runChild would fail it" {
+    var t = threaded();
+    defer t.deinit();
+    // `/usr/bin/false` exits 1 — a doctor "warnings" severity, not a fault — so a
+    // cap of 2 accepts it where the generic runner rejects any non-zero exit.
+    try runChildTolerant(t.io(), &.{"/usr/bin/false"}, 2);
+    try testing.expectError(error.ChildFailed, runChild(t.io(), &.{"/usr/bin/false"}));
+}
+
+test "runChildTolerant rejects an exit above the cap" {
+    var t = threaded();
+    defer t.deinit();
+    // A cap of 0 is the install/uninstall policy: even exit 1 is a fault.
+    // (An exit > 2 with the doctor cap needs a shell fixture the argv-only
+    // invariant forbids here; tests/tui_spawn_test.zig covers it.)
+    try testing.expectError(error.ChildFailed, runChildTolerant(t.io(), &.{"/usr/bin/false"}, 0));
+}
+
+test "runChildTolerant surfaces a missing program as SpawnFailed" {
+    var t = threaded();
+    defer t.deinit();
+    try testing.expectError(error.SpawnFailed, runChildTolerant(t.io(), &.{"/nonexistent/malt_tui_spawn_probe"}, 2));
 }
 
 test "readJson captures the child's stdout for the parser" {
