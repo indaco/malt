@@ -313,3 +313,66 @@ test "every finding keeps the fixable/fix_class invariant" {
     // The planted broken symlink guarantees at least one fixable arm ran.
     try testing.expect(saw_fixable);
 }
+
+test "the capturing walk renders no rows to stderr (--json stays stdout-only)" {
+    // `--json` is a machine-output mode: the JSON document goes to stdout
+    // and stderr must stay silent. The capturing walk (collect=true) is the
+    // JSON path, so it must record findings without drawing the human rows —
+    // here, with quiet OFF, so the only thing keeping stderr clean is the
+    // capture gate, not `--quiet`.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "json_quiet_stderr");
+    defer s.deinit(allocator);
+    try s.initSchema();
+
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(false);
+    defer output.setQuiet(prior_quiet);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    var result = doctor.collectFindings(allocator, .{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks, true);
+    defer result.deinit();
+
+    // Findings still captured for the JSON document …
+    try testing.expect(result.findings().len >= 5);
+    // … but not one byte of the human report reached stderr.
+    try testing.expectEqualStrings("", stderr_buf.items);
+}
+
+test "the human walk still renders rows to stderr (capture gate is JSON-only)" {
+    // The fix must not silence the human path: with collect=false and quiet
+    // off, the check rows still render — proving the gate keys on capture
+    // mode, not a blanket mute.
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "human_rows");
+    defer s.deinit(allocator);
+    try s.initSchema();
+
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(false);
+    defer output.setQuiet(prior_quiet);
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    var result = doctor.collectFindings(allocator, .{
+        .allocator = allocator,
+        .prefix = s.path,
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &doctor.checks, false);
+    defer result.deinit();
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "MALT_PREFIX") != null);
+}
