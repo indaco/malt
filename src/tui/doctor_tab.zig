@@ -190,15 +190,18 @@ fn worst(c: Counts) Severity {
 
 fn verdictLabel(sev: Severity) []const u8 {
     return switch (sev) {
-        .err => "unhealthy",
-        .warn => "needs attention",
-        .ok => "healthy",
+        // Worst severity only; `err` may sit over warnings too, so its label
+        // covers both ("issues") while `warn` means warnings alone.
+        .err => "issues found",
+        .warn => "warnings found",
+        .ok => "all checks passed",
     };
 }
 
-/// Rows the band occupies at full size: a dim rule, the three segments, a dim
+/// Rows the band occupies at full size, sans the reclaimable section: a dim rule,
+/// the banner, the composition bar, the counts legend, the fixable line, a dim
 /// rule. The enclosing rules set it apart from the list above and below.
-const band_full_height: u16 = 5;
+const band_full_height: u16 = 6;
 /// Smallest enclosed band: top rule, banner, bottom rule.
 const band_min_height: u16 = 3;
 
@@ -210,8 +213,8 @@ fn bandCap(content_height: u16, full: u16) u16 {
     return @min(full, content_height -| 1);
 }
 
-/// Build the colored status banner (`✗ unhealthy` / `⚠ needs attention` /
-/// `✓ healthy`) into `lb`; the worst severity drives both glyph and colour.
+/// Build the colored status banner (`✗ issues found` / `⚠ warnings found` /
+/// `✓ all checks passed`) into `lb`; the worst severity drives both glyph and colour.
 fn buildBanner(lb: *tab.Frame, c: Counts) void {
     const sev = worst(c);
     lb.put(color.roleCode(glyphStyle(sev)));
@@ -221,61 +224,88 @@ fn buildBanner(lb: *tab.Frame, c: Counts) void {
     lb.put(color.Style.reset.code());
 }
 
-/// Bar cells for the largest bucket; smaller buckets scale proportionally.
-const histogram_cells: usize = 6;
-
-/// Block cells proportional to `count`/`max` over the cell budget; any nonzero
-/// count keeps at least one cell so a small-but-present bucket stays visible.
-fn barCells(count: usize, max: usize) usize {
-    if (count == 0 or max == 0) return 0;
-    const scaled = (count * histogram_cells + max - 1) / max; // ceil
-    return @min(histogram_cells, @max(@as(usize, 1), scaled));
+/// Cells per severity for a `bar`-wide stacked bar, summing to `bar`. Cumulative
+/// rounding keeps the sum exact (the boundaries telescope, so they can't drift off
+/// the bar width); a present-but-tiny bucket is then guaranteed ≥1 cell — stolen
+/// from the largest segment — so it stays visible. Per-segment ceil scaling can't
+/// be reused here: three segments sharing one bar must partition it, not overshoot.
+fn compositionCells(c: Counts, bar: usize) [3]usize {
+    const total = c.total(); // caller guards total > 0
+    const b_err = (c.err * bar + total / 2) / total;
+    const b_ew = ((c.err + c.warn) * bar + total / 2) / total;
+    var seg = [3]usize{ b_err, b_ew - b_err, bar - b_ew };
+    const counts = [3]usize{ c.err, c.warn, c.ok };
+    for (counts, 0..) |n, i| {
+        if (n > 0 and seg[i] == 0) {
+            var max_i: usize = 0;
+            for (seg, 0..) |v, j| {
+                if (v > seg[max_i]) max_i = j;
+            }
+            seg[max_i] -= 1;
+            seg[i] = 1;
+        }
+    }
+    return seg;
 }
 
-/// One severity's `glyph bars count` cell, glyph and bars in the severity colour.
-fn buildBar(lb: *tab.Frame, sev: Severity, count: usize, max: usize) void {
-    lb.put(color.roleCode(glyphStyle(sev)));
-    lb.put(glyph(sev));
-    lb.put(" ");
-    var i: usize = 0;
-    while (i < barCells(count, max)) : (i += 1) lb.put("█");
+/// Paint the stacked composition bar: err→warn→ok cells, each run in its severity
+/// colour, on the shared `total` scale. Empty segments emit no colour, so adjacent
+/// runs stay visually distinct.
+fn buildCompositionBar(lb: *tab.Frame, c: Counts, bar: usize) void {
+    const seg = compositionCells(c, bar);
+    for (severity_order, seg) |sev, n| {
+        if (n == 0) continue;
+        lb.put(color.roleCode(glyphStyle(sev)));
+        var i: usize = 0;
+        while (i < n) : (i += 1) lb.put("█");
+    }
     lb.put(color.Style.reset.code());
-    lb.put(" ");
-    var nbuf: [16]u8 = undefined;
-    lb.put(std.fmt.bufPrint(&nbuf, "{d}", .{count}) catch "");
 }
 
-/// Narrowest width that still fits the three scaled bars; below it the histogram
-/// drops the bars for a plain `✗N ⚠N ✓N` count line that can't wrap into the list.
+/// Narrowest width that still fits a useful bar; below it the histogram drops the
+/// bar row and shows only the `✗N ⚠N ✓N  (N checks)` legend, which can't wrap into
+/// the list.
 const histogram_min_width: u16 = 36;
+/// The bar never shrinks below this, so a present bucket can still show a cell.
+const band_min_bar: u16 = 6;
+/// Fixed bar width: the bars read the same on a laptop and a wall-wide terminal —
+/// a wider pane carries more list, not a longer bar.
+const band_bar_cells: u16 = 40;
 
-/// Build the severity histogram into `lb`: `✗ N  ⚠ N  ✓ N` as bars scaled to the
-/// largest count, or a plain count line when the pane is too narrow for bars.
-fn buildHistogram(lb: *tab.Frame, c: Counts, width: u16) void {
-    if (width < histogram_min_width) return buildPlainCounts(lb, c);
-    const max = @max(c.err, @max(c.warn, c.ok));
-    buildBar(lb, .err, c.err, max);
-    lb.put("  ");
-    buildBar(lb, .warn, c.warn, max);
-    lb.put("  ");
-    buildBar(lb, .ok, c.ok, max);
+/// Cells a band bar spans at `width`: the fixed width, clamped down only when the
+/// pane is too narrow for it. Shared by the severity composition bar and the
+/// reclaimable split so the two bars line up.
+fn barWidth(width: u16) usize {
+    return @min(@as(usize, band_bar_cells), @max(@as(usize, band_min_bar), width));
 }
 
-/// One severity's `glyphN` cell with the glyph in its colour, for the narrow
-/// fallback line.
+/// The histogram's counts legend: `✗N ⚠N ✓N  (N checks)` — the numbers and the
+/// shared total, on their own row beneath the bar (the bar is the picture, this
+/// the figures). Also the whole histogram when the pane is too narrow for a bar.
+fn buildCountsLegend(lb: *tab.Frame, c: Counts) void {
+    buildPlainCounts(lb, c);
+    lb.put("  ");
+    lb.put(color.roleCode(.muted));
+    var nbuf: [32]u8 = undefined;
+    lb.put(std.fmt.bufPrint(&nbuf, "({d} checks)", .{c.total()}) catch "");
+    lb.put(color.Style.reset.code());
+}
+
+/// One severity's `glyph N` cell with the glyph in its colour — a space sets the
+/// glyph off from its number so the count reads cleanly.
 fn buildPlainCount(lb: *tab.Frame, sev: Severity, count: usize) void {
     lb.put(color.roleCode(glyphStyle(sev)));
     lb.put(glyph(sev));
     lb.put(color.Style.reset.code());
     var nbuf: [16]u8 = undefined;
-    lb.put(std.fmt.bufPrint(&nbuf, "{d}", .{count}) catch "");
+    lb.put(std.fmt.bufPrint(&nbuf, " {d}", .{count}) catch "");
 }
 
 fn buildPlainCounts(lb: *tab.Frame, c: Counts) void {
     buildPlainCount(lb, .err, c.err);
-    lb.put(" ");
+    lb.put("  ");
     buildPlainCount(lb, .warn, c.warn);
-    lb.put(" ");
+    lb.put("  ");
     buildPlainCount(lb, .ok, c.ok);
 }
 
@@ -308,49 +338,61 @@ fn reclaimFrom(stats: doctor_json.Stats) ?Reclaim {
     };
 }
 
-/// The advisory's plain text (no colour, no line breaks): each present figure
-/// paired with what it is, then the inert `→ mt purge --cache` guidance (text,
-/// not a key binding). A zero figure is dropped so a cask-only or cache-only
-/// store reads cleanly. The band colours and wraps it.
-fn reclaimText(rc: Reclaim, buf: []u8) []const u8 {
-    var fb: tab.Frame = .{ .buf = buf };
-    var bbuf: [16]u8 = undefined; // humanBytes scratch; reused after each put copies it
-    fb.put("Reclaimable: ");
-    var have_segment = false;
-    if (rc.cask_bytes > 0) {
-        fb.put(humanBytes(rc.cask_bytes, &bbuf));
-        fb.put(" cask history");
-        if (rc.retained_versions > 0) {
-            var rb: [32]u8 = undefined;
-            fb.put(std.fmt.bufPrint(&rb, " ({d} old versions)", .{rc.retained_versions}) catch "");
-        }
-        have_segment = true;
-    }
-    if (rc.tap_cache_bytes > 0) {
-        if (have_segment) fb.put(" · ");
-        fb.put(humanBytes(rc.tap_cache_bytes, &bbuf));
-        fb.put(" tap cache");
-    }
-    fb.put(" → mt purge --cache");
-    return fb.slice();
+/// The CLI info-bullet glyph, with the same basic-tier `>` fallback the rest of
+/// the CLI uses; our own constant bytes either way, so no new injection surface.
+fn infoGlyph() []const u8 {
+    return if (color.isEmojiEnabled()) "▸" else ">";
 }
 
-/// Longest prefix of `text` for one `width`-column row, broken at the last space
-/// that fits — or a hard rune-boundary break for a word wider than the row.
-/// Rune- and escape-aware via `scroll_list.truncate`, so a break never splits a
-/// multibyte glyph (`→`, `·`); the advisory wraps cleanly instead of truncating.
-fn wrapChunk(text: []const u8, width: u16) []const u8 {
-    const hard = scroll_list.truncate(text, width);
-    if (hard.len == text.len) return hard; // the rest fits on one row
-    var i = hard.len;
-    while (i > 0) : (i -= 1) if (text[i - 1] == ' ') return text[0..i]; // break on a word boundary
-    return hard; // a single word wider than the row: hard break
+/// `mt purge` reclaims cask history and the tap cache with *different* flags, so
+/// each bullet quotes the one that reclaims it — pinning a single hint onto a
+/// combined total would mislead. Literal text mirroring the CLI's own guidance.
+const cask_hint = "mt purge --old-versions";
+const tap_hint = "mt purge --cache";
+
+/// The header line: the combined reclaimable total only — no per-source figure and
+/// no command hint, so it can't claim a flag reclaims more than it does. Saturating
+/// add keeps a hostile near-u64-max payload from wrapping the total.
+fn buildReclaimHeader(lb: *tab.Frame, rc: Reclaim) void {
+    lb.put(color.roleCode(.muted));
+    lb.put("Reclaimable: ");
+    var bbuf: [24]u8 = undefined;
+    lb.put(humanBytes(rc.cask_bytes +| rc.tap_cache_bytes, &bbuf));
+    lb.put(color.Style.reset.code());
 }
 
-fn trimLeadingSpaces(s: []const u8) []const u8 {
-    var r = s;
-    while (r.len > 0 and r[0] == ' ') r = r[1..];
-    return r;
+/// One source's bullet: `▸ <size> <label>`, muted — the size left-aligned under
+/// the glyph and a single space to the label (no alignment padding). The command
+/// hint lives on its own sub-line (`buildReclaimHint`), so the bullet reads as the
+/// figure and the hint as the action. `label` carries any suffix (the cask's
+/// retained-versions note).
+fn buildReclaimBullet(lb: *tab.Frame, bytes: u64, label: []const u8) void {
+    lb.put(color.roleCode(.muted));
+    lb.put(infoGlyph());
+    lb.put(" ");
+    var bbuf: [24]u8 = undefined;
+    lb.put(humanBytes(bytes, &bbuf));
+    lb.put(" ");
+    lb.put(label);
+    lb.put(color.Style.reset.code());
+}
+
+/// A bullet's reclaiming command, indented onto its own dim sub-line beneath the
+/// bullet so the action is visually subordinate to the figure.
+fn buildReclaimHint(lb: *tab.Frame, hint: []const u8) void {
+    lb.put(color.roleCode(.muted));
+    lb.put("   → ");
+    lb.put(hint);
+    lb.put(color.Style.reset.code());
+}
+
+fn buildCaskBullet(lb: *tab.Frame, rc: Reclaim) void {
+    var lblbuf: [48]u8 = undefined;
+    const label = if (rc.retained_versions > 0)
+        std.fmt.bufPrint(&lblbuf, "cask history ({d} old versions)", .{rc.retained_versions}) catch "cask history"
+    else
+        "cask history";
+    buildReclaimBullet(lb, rc.cask_bytes, label);
 }
 
 /// A ratio bar only reads as a comparison when there are two values to compare;
@@ -359,77 +401,90 @@ fn reclaimHasBar(rc: Reclaim) bool {
     return rc.cask_bytes > 0 and rc.tap_cache_bytes > 0;
 }
 
-/// Cells in the reclaimable ratio bar — small, inline, just enough to read the
-/// split at a glance.
-const ratio_bar_cells: u16 = 10;
-
-/// Paint a compact two-tone bar showing how the reclaimable bytes split between
-/// cask history (accent) and the tap cache (secondary), so their relative sizes
-/// read at a glance. Each side keeps at least one cell so a tiny-but-present
-/// share stays visible. Single row, truncated — the caller gates on two figures.
+/// Paint the reclaimable split as a contiguous two-tone stacked bar: the cask
+/// share (secondary) abutting the tap-cache share (accent), full band-bar width.
+/// Cask leads in `secondary` rather than `accent` so the dominant block isn't the
+/// selection-highlight colour the tabs and list cursor already use. The labelled
+/// bullets above are its legend, so the bar carries no inline text. Each side keeps
+/// at least one cell so a tiny-but-present share stays visible.
 fn paintRatioBar(f: *tab.Frame, rect: tab.Rect, row: u16, rc: Reclaim) void {
+    const bar: u16 = @intCast(barWidth(rect.width));
     // u128 so the sum and the cell-scaling can't overflow on a hostile payload's
-    // near-u64-max byte counts; the result is at most `ratio_bar_cells`.
-    const cells: u128 = ratio_bar_cells;
+    // near-u64-max byte counts; the result is at most `bar`.
+    const cells: u128 = bar;
     const total: u128 = @as(u128, rc.cask_bytes) + rc.tap_cache_bytes; // both > 0 here
     const share: u128 = (@as(u128, rc.cask_bytes) * cells + total / 2) / total; // rounded
     const cask_cells: u16 = @intCast(@max(@as(u128, 1), @min(cells - 1, share)));
-    const cache_cells: u16 = ratio_bar_cells - cask_cells;
+    const cache_cells: u16 = bar - cask_cells;
 
-    var lb_buf: [256]u8 = undefined;
+    var lb_buf: [512]u8 = undefined;
     var lb: tab.Frame = .{ .buf = &lb_buf };
-    lb.put(color.roleCode(.muted));
-    lb.put("cask ");
-    lb.put(color.roleCode(.accent));
+    lb.put(color.roleCode(.secondary));
     var i: u16 = 0;
     while (i < cask_cells) : (i += 1) lb.put("█");
-    lb.put(color.roleCode(.muted));
-    lb.put(" cache ");
-    lb.put(color.roleCode(.secondary));
+    lb.put(color.roleCode(.accent));
     i = 0;
     while (i < cache_cells) : (i += 1) lb.put("█");
     lb.put(color.Style.reset.code());
     paintBandLine(f, rect, row, lb.slice());
 }
 
-/// Rows the wrapped advisory needs at `width` (text rows plus the ratio bar when
-/// present), so the band can reserve them up front (and grow past its base
-/// height) before the list claims the rest.
-fn reclaimRowCount(rc: Reclaim, width: u16) u16 {
-    if (width == 0) return 0;
-    var tbuf: [256]u8 = undefined;
-    var rest = reclaimText(rc, &tbuf);
-    var n: u16 = 0;
-    while (rest.len > 0) {
-        const chunk = wrapChunk(rest, width);
-        rest = trimLeadingSpaces(rest[chunk.len..]);
-        n += 1;
-    }
-    return n + @as(u16, @intFromBool(reclaimHasBar(rc)));
+/// Sources with something to reclaim — one bullet (plus its hint sub-line) each.
+fn reclaimSourceCount(rc: Reclaim) u16 {
+    return @as(u16, @intFromBool(rc.cask_bytes > 0)) + @intFromBool(rc.tap_cache_bytes > 0);
 }
 
-/// Paint the advisory wrapped across at most `max_rows` muted rows from
-/// `start_row`, returning the rows used. Each row is recoloured so a wrapped
-/// continuation stays muted. It never wraps into the list because the band only
-/// paints within the rows it reserved.
+/// Rows the section needs: a blank spacer, the header, two rows per source
+/// (bullet + hint sub-line), and the stacked bar when both sources are present.
+/// The band reserves them up front so it can grow past its base height before the
+/// list claims the rest.
+fn reclaimRowCount(rc: Reclaim) u16 {
+    return 2 + 2 * reclaimSourceCount(rc) + @as(u16, @intFromBool(reclaimHasBar(rc)));
+}
+
+/// Paint the section top-down — a blank spacer, the header total, the stacked bar
+/// directly beneath it, then each source's bullet and its indented hint sub-line
+/// (the bullets are the bar's legend) — into at most `max_rows` rows from
+/// `start_row`, returning the rows used (spacer included). Lines are truncated,
+/// never wrapped, so they can't bleed into the list; the per-source detail paints
+/// last so it sheds first under height pressure, keeping the total and split.
 fn paintReclaim(f: *tab.Frame, rect: tab.Rect, start_row: u16, rc: Reclaim, max_rows: u16) u16 {
-    if (rect.width == 0) return 0;
-    var tbuf: [256]u8 = undefined;
-    var rest = reclaimText(rc, &tbuf);
-    var n: u16 = 0;
-    while (rest.len > 0 and n < max_rows) {
-        f.moveTo(start_row + n, rect.col);
-        f.put(color.roleCode(.muted));
-        const chunk = wrapChunk(rest, rect.width);
-        f.putContent(chunk);
-        f.put(color.Style.reset.code());
-        rest = trimLeadingSpaces(rest[chunk.len..]);
-        n += 1;
-    }
-    // The ratio bar follows the text, so under height pressure it sheds before
-    // the actionable command does.
+    if (rect.width == 0 or max_rows == 0) return 0;
+    var buf: [256]u8 = undefined;
+    // Skip a blank spacer row only when the header still fits below it.
+    var n: u16 = if (max_rows >= 2) 1 else 0;
+
+    var hdr: tab.Frame = .{ .buf = &buf };
+    buildReclaimHeader(&hdr, rc);
+    paintBandLine(f, rect, start_row + n, hdr.slice());
+    n += 1;
+
     if (reclaimHasBar(rc) and n < max_rows) {
         paintRatioBar(f, rect, start_row + n, rc);
+        n += 1;
+    }
+    if (rc.cask_bytes > 0) {
+        if (n >= max_rows) return n;
+        var lb: tab.Frame = .{ .buf = &buf };
+        buildCaskBullet(&lb, rc);
+        paintBandLine(f, rect, start_row + n, lb.slice());
+        n += 1;
+        if (n >= max_rows) return n;
+        var hb: tab.Frame = .{ .buf = &buf };
+        buildReclaimHint(&hb, cask_hint);
+        paintBandLine(f, rect, start_row + n, hb.slice());
+        n += 1;
+    }
+    if (rc.tap_cache_bytes > 0) {
+        if (n >= max_rows) return n;
+        var lb: tab.Frame = .{ .buf = &buf };
+        buildReclaimBullet(&lb, rc.tap_cache_bytes, "tap cache");
+        paintBandLine(f, rect, start_row + n, lb.slice());
+        n += 1;
+        if (n >= max_rows) return n;
+        var hb: tab.Frame = .{ .buf = &buf };
+        buildReclaimHint(&hb, tap_hint);
+        paintBandLine(f, rect, start_row + n, hb.slice());
         n += 1;
     }
     return n;
@@ -454,10 +509,12 @@ fn paintRule(f: *tab.Frame, rect: tab.Rect, row: u16) void {
 
 /// Paint the health band into `rect` and return the rows used. The band is
 /// enclosed by a dim rule top and bottom; inside, the segments shed lowest-signal
-/// first (histogram, then the fixable line) so a short pane keeps the verdict.
+/// first (histogram, then the fixable line) so a short pane keeps the verdict. The
+/// histogram is two rows — the composition bar then its counts legend — but
+/// collapses to the legend alone on a pane too narrow for a bar.
 fn renderBand(f: *tab.Frame, counts: Counts, reclaim: ?Reclaim, rect: tab.Rect) u16 {
     if (rect.height < band_min_height) return 0; // can't enclose even the banner
-    var buf: [256]u8 = undefined;
+    var buf: [512]u8 = undefined; // wide enough for a full-row composition bar
     var used: u16 = 0;
 
     paintRule(f, rect, rect.row + used);
@@ -468,14 +525,20 @@ fn renderBand(f: *tab.Frame, counts: Counts, reclaim: ?Reclaim, rect: tab.Rect) 
     paintBandLine(f, rect, rect.row + used, banner.slice());
     used += 1;
 
-    // Histogram needs a full-height band; it is the first severity segment shed.
+    // The histogram needs a full-height band; it is the first segment shed. The
+    // fixable call-to-action sheds after it but before the verdict.
     const show_hist = rect.height >= band_full_height;
-    // The fixable call-to-action sheds after the histogram but before the verdict.
-    const show_fixable = rect.height >= band_full_height - 1;
+    const show_fixable = rect.height >= band_full_height - 2;
     if (show_hist) {
-        var hist: tab.Frame = .{ .buf = &buf };
-        buildHistogram(&hist, counts, rect.width);
-        paintBandLine(f, rect, rect.row + used, hist.slice());
+        if (rect.width >= histogram_min_width) { // the bar's own row, full width
+            var bar: tab.Frame = .{ .buf = &buf };
+            buildCompositionBar(&bar, counts, barWidth(rect.width));
+            paintBandLine(f, rect, rect.row + used, bar.slice());
+            used += 1;
+        }
+        var legend: tab.Frame = .{ .buf = &buf };
+        buildCountsLegend(&legend, counts);
+        paintBandLine(f, rect, rect.row + used, legend.slice());
         used += 1;
     }
     if (show_fixable) {
@@ -484,13 +547,12 @@ fn renderBand(f: *tab.Frame, counts: Counts, reclaim: ?Reclaim, rect: tab.Rect) 
         paintBandLine(f, rect, rect.row + used, fx.slice());
         used += 1;
     }
-    // The reclaimable advisory is lowest-signal: it fills whatever rows remain
-    // between the segments above and the closing rule, wrapping across them. So
-    // it grows the band when there's room and is the first to shed when there
-    // isn't — it never wraps into the list, only into rows the band reserved.
+    // The reclaimable section is lowest-signal: it fills whatever rows remain
+    // between the segments above and the closing rule. So it grows the band when
+    // there's room and is the first to shed when there isn't — it never wraps into
+    // the list, only into rows the band reserved.
     if (reclaim) |rc| {
-        const base: u16 = 1 + @as(u16, @intFromBool(show_hist)) + @as(u16, @intFromBool(show_fixable));
-        const capacity: u16 = (rect.height -| 2) -| base; // rows between the rules left for it
+        const capacity: u16 = (rect.height -| 1) -| used; // rows left before the closing rule
         if (capacity > 0) used += paintReclaim(f, rect, rect.row + used, rc, capacity);
     }
 
@@ -518,7 +580,7 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (counts.total() > 0) {
         // A present advisory lets the band grow past full by however many rows it
         // wraps to at this width; bandCap still caps it so the list keeps a row.
-        const adv_rows = if (reclaim) |rc| reclaimRowCount(rc, content.width) else 0;
+        const adv_rows = if (reclaim) |rc| reclaimRowCount(rc) else 0;
         const full = band_full_height + adv_rows;
         const budget = bandCap(content.height, full);
         if (budget > 0) {
@@ -621,6 +683,16 @@ const warn_only = [_]Row{
 };
 const all_ok = [_]Row{
     .{ .id = "malt_prefix", .severity = .ok, .title = "MALT_PREFIX", .detail = "/opt/malt", .fixable = false, .fix_class = .none },
+};
+
+// A skewed store (0 err, 2 warn, 16 ok) for the total-scaled composition bar:
+// on a shared scale ok must dominate warn, not sit at near-parity.
+const skew_0_2_16 = blk: {
+    var rows: [18]Row = undefined;
+    for (0..16) |i| rows[i] = .{ .id = "ok", .severity = .ok, .title = "ok" };
+    rows[16] = .{ .id = "w", .severity = .warn, .title = "warn a", .fixable = true, .fix_class = .stale_lock };
+    rows[17] = .{ .id = "w", .severity = .warn, .title = "warn b", .fixable = true, .fix_class = .stale_lock };
+    break :blk rows;
 };
 
 test "matches is a case-insensitive substring; empty filter matches all" {
@@ -796,9 +868,9 @@ test "render on an empty list shows the no-findings placeholder, not a blank pan
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 }); // must not trap
     const out = f.slice();
     try std.testing.expect(std.mem.indexOf(u8, out, "No findings") != null);
-    // No-data is not a verdict: neither the "healthy" banner nor the all-clear
-    // line may appear — we can't vouch for checks we never received.
-    try std.testing.expect(std.mem.indexOf(u8, out, "healthy") == null);
+    // No-data is not a verdict: neither the "all checks passed" banner nor the
+    // all-clear line may appear — we can't vouch for checks we never received.
+    try std.testing.expect(std.mem.indexOf(u8, out, "all checks passed") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "All clear") == null);
 }
 
@@ -864,9 +936,9 @@ test "render clamps to a height of one without crashing" {
 
 test "the band's status banner reads the worst severity present" {
     const cases = [_]struct { items: []const Row, verdict: []const u8 }{
-        .{ .items = &sample, .verdict = "unhealthy" }, // an err is present
-        .{ .items = &warn_only, .verdict = "needs attention" }, // warn is the worst
-        .{ .items = &all_ok, .verdict = "healthy" }, // nothing wrong
+        .{ .items = &sample, .verdict = "issues found" }, // an err is present (may include warnings)
+        .{ .items = &warn_only, .verdict = "warnings found" }, // warn is the worst, no errors
+        .{ .items = &all_ok, .verdict = "all checks passed" }, // nothing wrong
     };
     for (cases) |c| {
         var buf: [4096]u8 = undefined;
@@ -883,8 +955,162 @@ test "the band histogram shows a scaled bar and count per severity" {
     const s: State = .{ .items = &sample }; // 1 err, 2 warn, 1 ok
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "█") != null); // bars scaled to the largest count
+    try testing.expect(std.mem.indexOf(u8, out, "█") != null); // a composition bar is drawn
     try testing.expect(std.mem.indexOf(u8, out, "2") != null); // the warn count (only the histogram carries it)
+}
+
+// Count a composition-bar segment's cells. The banner and legend also carry these
+// role codes, but always followed by a glyph — only the bar follows a role code
+// with a `█`, so `open ++ "█"` pins the segment start unambiguously; count cells
+// until the colour that ends it (`close`).
+fn segCells(out: []const u8, open: []const u8, close: []const u8) usize {
+    var pat: [48]u8 = undefined;
+    // 48 bytes always holds a role-code escape plus one `█`; overflow is a test bug.
+    const needle = std.fmt.bufPrint(&pat, "{s}█", .{open}) catch unreachable;
+    const s = (std.mem.indexOf(u8, out, needle) orelse return 0) + open.len;
+    const e = std.mem.indexOfPos(u8, out, s, close) orelse out.len;
+    return std.mem.count(u8, out[s..e], "█");
+}
+
+test "the histogram is one bar scaled to the total, so ok dominates warn (not near-parity)" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &skew_0_2_16 }; // 0 err, 2 warn, 16 ok over a total of 18
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    const out = f.slice();
+    const warn_cells = segCells(out, color.roleCode(.warning), color.roleCode(.success));
+    const ok_cells = segCells(out, color.roleCode(.success), color.Style.reset.code());
+    try testing.expect(warn_cells >= 1); // a present bucket stays visible
+    try testing.expect(ok_cells > warn_cells * 2); // 16 vs 2 reads as dominance, not parity
+    // The segments compose one bar: their cells sum to the bar's width.
+    try testing.expectEqual(barWidth(80), warn_cells + ok_cells); // err is 0 here
+}
+
+test "an all-ok store renders a full all-success composition bar" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const only_ok = [_]Row{
+        .{ .id = "a", .severity = .ok, .title = "a" },
+        .{ .id = "b", .severity = .ok, .title = "b" },
+        .{ .id = "c", .severity = .ok, .title = "c" },
+    };
+    const st: State = .{ .items = &only_ok };
+    render(&st, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    const out = f.slice();
+    const ok_cells = segCells(out, color.roleCode(.success), color.Style.reset.code());
+    try testing.expectEqual(barWidth(80), ok_cells); // the whole bar is the ok segment
+}
+
+test "the histogram surfaces the total checks count alongside the bar" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &skew_0_2_16 }; // 18 checks total
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "18 checks") != null);
+}
+
+// The 1-based screen row of the band line that paints `needle`, read from the
+// `CUP` (`ESC [ row ; col H`) that positions it. Band text carries no capital `H`,
+// so the nearest `H` before the needle is that line's cursor move.
+fn bandRowOf(out: []const u8, needle: []const u8) u16 {
+    const at = std.mem.indexOf(u8, out, needle).?;
+    const h = std.mem.lastIndexOfScalar(u8, out[0..at], 'H').?;
+    const esc = std.mem.lastIndexOf(u8, out[0..h], "\x1b[").?;
+    var row: u16 = 0;
+    var i = esc + 2;
+    while (out[i] >= '0' and out[i] <= '9') : (i += 1) row = row * 10 + (out[i] - '0');
+    return row;
+}
+
+test "the composition bar and the counts legend sit on their own rows" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &skew_0_2_16 }; // worst is warn → "warnings found" banner
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    const out = f.slice();
+    // banner, then the bar on the next row, then the counts a row below that.
+    try testing.expectEqual(@as(u16, 2), bandRowOf(out, "18 checks") - bandRowOf(out, "warnings found"));
+}
+
+test "a blank spacer separates the fixable line from the reclaimable section" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample, .stats = .{ .cask_bytes = 2048, .retained_versions = 2 } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 24 });
+    const out = f.slice();
+    // One blank row between the CTA and the header, so the two read as distinct.
+    try testing.expectEqual(@as(u16, 2), bandRowOf(out, "Reclaimable:") - bandRowOf(out, "auto-fixable"));
+}
+
+test "each reclaimable bullet drops its purge hint onto an indented sub-line" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample, .stats = .{
+        .cask_bytes = 1288490189,
+        .tap_cache_bytes = 88 * 1024 * 1024,
+        .retained_versions = 4,
+    } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 24 });
+    const out = f.slice();
+    // The hint is the row directly below its bullet, not trailing it inline.
+    try testing.expectEqual(@as(u16, 1), bandRowOf(out, "mt purge --old-versions") - bandRowOf(out, "cask history (4 old versions)"));
+    try testing.expectEqual(@as(u16, 1), bandRowOf(out, "mt purge --cache") - bandRowOf(out, "tap cache"));
+}
+
+test "the reclaimable bar is a contiguous two-tone stacked bar, not labelled rectangles" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample, .stats = .{ .cask_bytes = 3 * 1024, .tap_cache_bytes = 1024 } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 24 });
+    const out = f.slice();
+    // The cask (secondary) run abuts the cache (accent) run with only the colour
+    // change between — a stacked split, not two text-labelled blocks with a gap.
+    // Cask leads in `secondary`, not `accent`, so the dominant block isn't the
+    // selection-highlight colour.
+    var pat: [64]u8 = undefined;
+    const seam = std.fmt.bufPrint(&pat, "█{s}█", .{color.roleCode(.accent)}) catch unreachable;
+    try testing.expect(std.mem.indexOf(u8, out, seam) != null);
+}
+
+test "the band bars keep a fixed width instead of widening with the terminal" {
+    var a: [16384]u8 = undefined;
+    var b: [16384]u8 = undefined;
+    var fa: tab.Frame = .{ .buf = &a };
+    var fb: tab.Frame = .{ .buf = &b };
+    const s: State = .{ .items = &skew_0_2_16 }; // no reclaim → the only bar is the histogram
+    render(&s, &fa, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    render(&s, &fb, .{ .row = 1, .col = 1, .width = 200, .height = 20 });
+    // A far wider pane must not grow the bar: same cell count at 80 and 200 cols.
+    try testing.expectEqual(std.mem.count(u8, fa.slice(), "█"), std.mem.count(u8, fb.slice(), "█"));
+}
+
+test "the counts legend spaces each glyph from its number" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &skew_0_2_16 }; // 0 err, 2 warn, 16 ok
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    const out = f.slice();
+    // The glyph's colour resets, then a space sets the number off: `⚠<reset> 2`.
+    var pat: [48]u8 = undefined;
+    const warn = std.fmt.bufPrint(&pat, "⚠{s} 2", .{color.Style.reset.code()}) catch unreachable;
+    try testing.expect(std.mem.indexOf(u8, out, warn) != null);
+}
+
+test "the reclaimable bullets left-align their sizes, each one space from its label" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    // 180.7 MB cask + 2.0 MB tap: differently-sized figures.
+    const s: State = .{ .items = &sample, .stats = .{
+        .cask_bytes = 180 * 1024 * 1024 + 700 * 1024,
+        .tap_cache_bytes = 2 * 1024 * 1024,
+        .retained_versions = 2,
+    } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 24 });
+    const out = f.slice();
+    // Every size starts right after the glyph and sits exactly one space from its
+    // label — no alignment padding stretching the gap on the shorter figure.
+    try testing.expect(std.mem.indexOf(u8, out, "▸ 180.7 MB cask history") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "▸ 2.0 MB tap cache") != null);
 }
 
 test "the band histogram degrades to a plain count line on a narrow pane" {
@@ -914,7 +1140,7 @@ test "on a height-1 rect only the findings list renders, never the band" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "unhealthy") == null); // band suppressed
+    try testing.expect(std.mem.indexOf(u8, out, "issues found") == null); // band suppressed
     try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // a list row survives
 }
 
@@ -925,7 +1151,7 @@ test "a short pane sheds the histogram but keeps the verdict, CTA, and the list"
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 5 });
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "█") == null); // histogram shed first (lowest signal)
-    try testing.expect(std.mem.indexOf(u8, out, "unhealthy") != null); // verdict survives (highest signal)
+    try testing.expect(std.mem.indexOf(u8, out, "issues found") != null); // verdict survives (highest signal)
     try testing.expect(std.mem.indexOf(u8, out, "auto-fixable") != null); // actionable CTA survives
     try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // the list is the floor
 }
@@ -937,7 +1163,7 @@ test "the band is enclosed by a dim rule above and below" {
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
     const top_rule = std.mem.indexOf(u8, out, "─") orelse return error.NoTopRule;
-    const verdict = std.mem.indexOf(u8, out, "unhealthy").?;
+    const verdict = std.mem.indexOf(u8, out, "issues found").?;
     const bottom_rule = std.mem.indexOfPos(u8, out, verdict, "─") orelse return error.NoBottomRule;
     const first_title = std.mem.indexOf(u8, out, "SQLite integrity").?;
     try testing.expect(top_rule < verdict); // rule above the banner
@@ -952,7 +1178,7 @@ test "the band needs room for its enclosure, else only the list renders" {
     // 3 rows can't hold the enclosed band (rule+banner+rule) plus a list row.
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 3 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "unhealthy") == null); // band dropped
+    try testing.expect(std.mem.indexOf(u8, out, "issues found") == null); // band dropped
     try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // list survives
 }
 
@@ -962,8 +1188,8 @@ test "the band paints above the findings list" {
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "unhealthy") != null); // banner present
-    const verdict_at = std.mem.indexOf(u8, out, "unhealthy").?;
+    try testing.expect(std.mem.indexOf(u8, out, "issues found") != null); // banner present
+    const verdict_at = std.mem.indexOf(u8, out, "issues found").?;
     const first_title_at = std.mem.indexOf(u8, out, "SQLite integrity").?;
     try testing.expect(verdict_at < first_title_at); // banner precedes the list
 }
@@ -980,22 +1206,27 @@ test "humanBytes matches the CLI's formatBytes shape at the unit boundaries" {
     try testing.expectEqualStrings("1.0 GB", humanBytes(1024 * 1024 * 1024, &buf));
 }
 
-test "the reclaimable line names both figures, the retained count, and the purge guidance" {
+test "reclaimable breaks into a header total plus one labelled bullet per source" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
-    // 1.2 GB cask history over 4 retained versions · 88 MB tap cache.
+    // 1.2 GB cask history over 4 retained versions + 88 MB tap cache.
     const s: State = .{ .items = &sample, .stats = .{
         .cask_bytes = 1288490189,
         .tap_cache_bytes = 88 * 1024 * 1024,
         .retained_versions = 4,
     } };
-    // A wide pane so the full phrasing fits (≈88 cols); narrow collapse is its own test.
     render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "1.2 GB cask history") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "(4 old versions)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "88.0 MB tap cache") != null);
+    // Header carries the *total* only (1.2 GB + 88 MB ≈ 1.3 GB), no command hint.
+    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable: 1.3 GB") != null);
+    // One bullet per non-zero source, each with its own size, label, and the hint
+    // that actually reclaims it.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out, "▸"));
+    try testing.expect(std.mem.indexOf(u8, out, "1.2 GB") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "cask history (4 old versions)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "→ mt purge --old-versions") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "88.0 MB") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "tap cache") != null);
     try testing.expect(std.mem.indexOf(u8, out, "→ mt purge --cache") != null);
     // The advisory rides in the band, above the findings list.
     const reclaim_at = std.mem.indexOf(u8, out, "Reclaimable:").?;
@@ -1003,47 +1234,54 @@ test "the reclaimable line names both figures, the retained count, and the purge
     try testing.expect(reclaim_at < first_title_at);
 }
 
-test "the reclaimable advisory wraps across rows on a narrow pane rather than truncating its command" {
-    var buf: [8192]u8 = undefined;
+test "the cask-inclusive total never wears the cache-only purge hint" {
+    var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &sample, .stats = .{
         .cask_bytes = 1288490189,
         .tap_cache_bytes = 88 * 1024 * 1024,
         .retained_versions = 4,
     } };
-    // 40 cols can't fit the ~88-col advisory on one line: a single truncated row
-    // would drop the command, so its presence proves the line wrapped.
-    render(&s, &f, .{ .row = 1, .col = 1, .width = 40, .height = 24 });
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
     const out = f.slice();
-    // Head ("Reclaimable:") and tail ("--cache") both present: they cannot share a
-    // single 40-col row in the ~88-col advisory, so the line must have wrapped.
-    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "purge") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "--cache") != null);
-    // The (now taller) band still leaves the findings list as the floor.
-    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null);
+    // The header line (everything before the first bullet) is the combined total;
+    // pinning `--cache` to it would claim it reclaims cask history too. It must not.
+    const header = out[0..std.mem.indexOf(u8, out, "▸").?];
+    try testing.expect(std.mem.indexOf(u8, header, "Reclaimable:") != null);
+    try testing.expect(std.mem.indexOf(u8, header, "mt purge") == null);
+    // `--cache` appears only after the tap-cache label, never the cask one.
+    const cache_at = std.mem.indexOf(u8, out, "--cache").?;
+    const tap_at = std.mem.indexOf(u8, out, "tap cache").?;
+    const cask_at = std.mem.indexOf(u8, out, "cask history").?;
+    try testing.expect(tap_at < cache_at and cask_at < tap_at);
 }
 
-test "a cask-only store names the cask figure and omits the tap-cache segment" {
+test "a cask-only store shows a header, one cask bullet, and no bar" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &sample, .stats = .{ .cask_bytes = 2048, .retained_versions = 2 } };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "2.0 KB cask history") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "(2 old versions)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable: 2.0 KB") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "▸")); // one source, one bullet
+    try testing.expect(std.mem.indexOf(u8, out, "cask history (2 old versions)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "→ mt purge --old-versions") != null);
     try testing.expect(std.mem.indexOf(u8, out, "tap cache") == null); // nothing to reclaim there
+    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.secondary)) == null); // single source → no bar
 }
 
-test "a cache-only store names the tap-cache figure and omits the cask segment" {
+test "a cache-only store shows a header, one tap bullet, and no bar" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &sample, .stats = .{ .tap_cache_bytes = 512 } };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
     const out = f.slice();
-    try testing.expect(std.mem.indexOf(u8, out, "512.0 B tap cache") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "cask history") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable: 512.0 B") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "▸"));
+    try testing.expect(std.mem.indexOf(u8, out, "tap cache") != null);
     try testing.expect(std.mem.indexOf(u8, out, "→ mt purge --cache") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "cask history") == null);
+    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.secondary)) == null); // single source → no bar
 }
 
 test "zero reclaimable bytes suppress the advisory, and the all-clear state stays clean" {
@@ -1105,6 +1343,32 @@ test "the purge guidance is inert: f on a non-fixable selection stays a no-op wi
     s.chrome.view.selected = 0; // sqlite_integrity — not fixable
     step(&s, ch('f'));
     try testing.expectEqual(Request.none, s.request); // the advisory added no action
+}
+
+test "the reclaimable bullet glyph falls back to ASCII when emoji are off" {
+    color.setForTest(null, false); // emoji disabled, colour left to the environment
+    defer color.setForTest(null, null);
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample, .stats = .{ .cask_bytes = 2048, .retained_versions = 2 } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "▸") == null); // the emoji bullet is gone
+    try testing.expect(std.mem.indexOf(u8, out, "> 2.0 KB") != null); // its basic-tier `>` stands in
+}
+
+test "the reclaimable section renders on a narrow pane without wrapping into the list" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample, .stats = .{
+        .cask_bytes = 1288490189,
+        .tap_cache_bytes = 88 * 1024 * 1024,
+        .retained_versions = 4,
+    } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 48, .height = 24 }); // ≤50 cols, must not crash
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") != null); // header survives the cut
+    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // the list stays the floor
 }
 
 test "conforms to the tab contract" {
