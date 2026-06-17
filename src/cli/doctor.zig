@@ -1139,14 +1139,9 @@ fn checkDiskSpace(ctx: CheckCtx, name: []const u8) CheckResult {
     return .warn_status;
 }
 
-/// Surface the dep-keg bin/sbin link census. Linked deps are the
-/// default state, not a defect — the check stays at `.ok` severity so
-/// `mt doctor` exits clean. Detail + enumeration only emit under
-/// `--verbose` so default runs stay silent on this dimension and
-/// downstream "grep for warnings" gates don't false-positive.
 /// Detail line for the "SSL CA bundle" row. `null` when the bundle is
-/// present (clean row); a short flag when it's missing. `pub` so the
-/// render test can pin the text without a filesystem fixture.
+/// present (clean row); the unlinked-bundle hint when it's missing. `pub`
+/// so the render test can pin the text without a filesystem fixture.
 pub fn formatSslCertDetail(present: bool) ?[]const u8 {
     return if (present)
         null
@@ -1192,6 +1187,11 @@ fn checkSslCaBundle(ctx: CheckCtx, name: []const u8) CheckResult {
     return status;
 }
 
+/// Surface the dep-keg bin/sbin link census. Linked deps are the
+/// default state, not a defect — the check stays at `.ok` severity so
+/// `mt doctor` exits clean. Detail + enumeration only emit under
+/// `--verbose` so default runs stay silent on this dimension and
+/// downstream "grep for warnings" gates don't false-positive.
 fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
     var db_path_buf: [512]u8 = undefined;
     const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{ctx.prefix}, 0) catch {
