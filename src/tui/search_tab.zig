@@ -196,12 +196,20 @@ fn renderStatus(f: *tab.Frame, rect: tab.Rect, msg: []const u8) void {
 
 fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     if (rect.height == 0) return;
-    const v = scroll_list.clamp(s.chrome.view, s.items.len, rect.height);
+    // A fixed bold heading rides above the results and costs them one row, past
+    // the 4-col checkbox.
+    tab.renderHeading(f, rect, 4, &.{
+        .{ .label = "NAME", .width = 28 },
+        .{ .label = "KIND", .width = 8 },
+    });
+    const list: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    if (list.height == 0) return; // the heading took the only row
+    const v = scroll_list.clamp(s.chrome.view, s.items.len, list.height);
     for (s.items, 0..) |m, i| {
         if (i < v.offset) continue;
         const screen = i - v.offset;
-        if (screen >= rect.height) break;
-        f.moveTo(rect.row + @as(u16, @intCast(screen)), rect.col);
+        if (screen >= list.height) break;
+        f.moveTo(list.row + @as(u16, @intCast(screen)), list.col);
         // Multi-select checkbox first (its own colour); the reverse-video
         // selection wraps only the text columns so the SGRs never tangle. An
         // installed hit can't be selected, so it shows the blocked box.
@@ -213,7 +221,7 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
             f.put(color.Style.reverse.code());
         }
         var rb: [256]u8 = undefined;
-        f.putContent(scroll_list.truncate(formatRow(&rb, m), rect.width -| 4)); // 4 cols on the checkbox
+        f.putContent(scroll_list.truncate(formatRow(&rb, m), list.width -| 4)); // 4 cols on the checkbox
         if (selected) f.put(color.Style.reset.code());
     }
 }
@@ -397,6 +405,18 @@ test "render shows no-matches when a committed query returned zero results" {
     const s: State = .{ .items = &.{}, .phase = .loaded };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
     try testing.expect(std.mem.indexOf(u8, f.slice(), "No matches") != null);
+}
+
+test "render heads the result columns in bold, indented past the checkbox" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample, .phase = .loaded };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
+    // 4-col checkbox indent plus exact padding aligns NAME / KIND over their values.
+    try testing.expect(std.mem.indexOf(u8, out, "    NAME" ++ " " ** 25 ++ "KIND") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "wget") != null); // the list still renders below
 }
 
 test "render lists hits with the kind label and an installed marker" {

@@ -147,7 +147,16 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     const filter = s.chrome.filter.slice();
     const nf = filteredCount(s.items, filter);
     if (nf == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "Everything is up to date.");
-    const v = scroll_list.clamp(s.chrome.view, nf, rect.height);
+    // A fixed bold heading rides above the list and costs it one row.
+    tab.renderHeading(f, rect, 4, &.{
+        .{ .label = "NAME", .width = 22 },
+        .{ .label = "CURRENT", .width = 12 },
+        .{ .label = "AVAILABLE", .width = 12 },
+        .{ .label = "KIND", .width = 8 },
+    });
+    const list: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    if (list.height == 0) return; // the heading took the only row
+    const v = scroll_list.clamp(s.chrome.view, nf, list.height);
 
     var fi: usize = 0;
     for (s.items, 0..) |p, i| {
@@ -155,8 +164,8 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         defer fi += 1;
         if (fi < v.offset) continue;
         const screen = fi - v.offset;
-        if (screen >= rect.height) break;
-        f.moveTo(rect.row + @as(u16, @intCast(screen)), rect.col);
+        if (screen >= list.height) break;
+        f.moveTo(list.row + @as(u16, @intCast(screen)), list.col);
         // The checkbox carries its own colour; a pinned row is held back so it
         // shows the blocked box, never a check.
         const is_checked = i < s.checked.len and s.checked[i];
@@ -169,20 +178,21 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
             f.put(color.Style.reverse.code());
         } else if (p.pinned) f.put(color.roleCode(.muted));
         var rb: [256]u8 = undefined;
-        f.putContent(scroll_list.truncate(formatRow(&rb, p), rect.width -| 4)); // 4 cols on the checkbox
+        f.putContent(scroll_list.truncate(formatRow(&rb, p), list.width -| 4)); // 4 cols on the checkbox
         if (selected or p.pinned) f.put(color.Style.reset.code());
     }
 }
 
-/// One list row after the checkbox: the name, the current→latest versions, the
-/// source type, and a pinned tag. ASCII columns, grapheme-naive like the rest;
-/// the arrow is width-aware via `truncate`.
+/// One list row after the checkbox: the name, the current and latest versions,
+/// the source type, and a pinned tag. The CURRENT/AVAILABLE headings name the two
+/// version columns, so they sit side by side with no arrow between them. ASCII
+/// columns, grapheme-naive like the rest.
 fn formatRow(buf: []u8, p: Row) []const u8 {
     var len: usize = 0;
     appendPad(buf, &len, p.name, 22);
     append(buf, &len, " ");
     appendPad(buf, &len, p.installed, 12);
-    append(buf, &len, "→ ");
+    append(buf, &len, " ");
     appendPad(buf, &len, p.latest, 12);
     append(buf, &len, " ");
     appendPad(buf, &len, kindLabel(p.kind), 8);
@@ -314,7 +324,20 @@ test "selectedIndex maps the cursor through the filter and clamps out-of-range" 
     try testing.expectEqual(@as(?usize, null), selectedIndex(&s));
 }
 
-test "render lists checkboxes with current→latest and the type column" {
+test "render heads the columns in bold, indented past the checkbox" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var checked = [_]bool{false} ** 4;
+    const s: State = .{ .items = &sample, .checked = &checked };
+    render(&s, &f, .{ .row = 3, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
+    // The 4-col checkbox indent plus exact padding aligns the labels over values.
+    try testing.expect(std.mem.indexOf(u8, out, "    NAME" ++ " " ** 19 ++ "CURRENT" ++ " " ** 6 ++ "AVAILABLE" ++ " " ** 4 ++ "KIND") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "wget") != null); // the list still renders below
+}
+
+test "render lists checkboxes with the current and latest versions and the type column" {
     var buf: [4096]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     var checked = [_]bool{ true, false, false, false };
@@ -323,7 +346,8 @@ test "render lists checkboxes with current→latest and the type column" {
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, "✓") != null); // wget checked
     try testing.expect(std.mem.indexOf(u8, out, "[ ]") != null); // an unchecked box
-    try testing.expect(std.mem.indexOf(u8, out, "→") != null); // current→latest
+    try testing.expect(std.mem.indexOf(u8, out, "→") == null); // the arrow is gone; the headings name the columns
+    try testing.expect(std.mem.indexOf(u8, out, "1.24.5") != null); // current version
     try testing.expect(std.mem.indexOf(u8, out, "1.25.0") != null); // latest version
     try testing.expect(std.mem.indexOf(u8, out, "cask") != null); // type column
 }

@@ -43,11 +43,7 @@ pub fn neededRows(fields: []const Field, width: u16) u16 {
 /// can't break the frame. Pure function of `(fields, rect)` → reflows on resize.
 pub fn render(f: *tab.Frame, fields: []const Field, rect: tab.Rect) void {
     if (rect.width == 0 or rect.height == 0) return;
-    f.moveTo(rect.row, rect.col);
-    f.put(color.roleCode(.muted));
-    var i: u16 = 0;
-    while (i < rect.width) : (i += 1) f.put("─");
-    f.put(color.Style.reset.code());
+    tab.renderSeparator(f, rect, rect.row, true);
     renderFields(f, fields, .{ .row = rect.row + separator_rows, .col = rect.col, .width = rect.width, .height = rect.height -| separator_rows });
 }
 

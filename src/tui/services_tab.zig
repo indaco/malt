@@ -124,7 +124,16 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     const filter = s.chrome.filter.slice();
     const nf = filteredCount(s.items, filter);
     if (nf == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "No services registered.");
-    const v = scroll_list.clamp(s.chrome.view, nf, rect.height);
+    // A fixed bold heading rides above the list and costs it one row.
+    tab.renderHeading(f, rect, 2, &.{
+        .{ .label = "NAME", .width = 24 },
+        .{ .label = "STATE", .width = 12 },
+        .{ .label = "START", .width = 8 },
+        .{ .label = "KEG", .width = 3, .gap = 0 }, // formatRow appends the keg with no separator
+    });
+    const list: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    if (list.height == 0) return; // the heading took the only row
+    const v = scroll_list.clamp(s.chrome.view, nf, list.height);
 
     var fi: usize = 0;
     for (s.items) |svc| {
@@ -132,8 +141,8 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         defer fi += 1;
         if (fi < v.offset) continue;
         const screen = fi - v.offset;
-        if (screen >= rect.height) break;
-        f.moveTo(rect.row + @as(u16, @intCast(screen)), rect.col);
+        if (screen >= list.height) break;
+        f.moveTo(list.row + @as(u16, @intCast(screen)), list.col);
         // The dot keeps its own colour regardless of selection; the reverse-video
         // selection wraps only the text columns so the two SGRs never tangle.
         const st = statusOf(svc.state);
@@ -147,7 +156,7 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
             f.put(color.Style.reverse.code());
         }
         var rb: [256]u8 = undefined;
-        f.putContent(scroll_list.truncate(formatRow(&rb, svc), rect.width -| 2)); // 2 cols spent on the dot
+        f.putContent(scroll_list.truncate(formatRow(&rb, svc), list.width -| 2)); // 2 cols spent on the dot
         if (selected) f.put(color.Style.reset.code());
     }
 }
@@ -244,6 +253,18 @@ test "statusOf buckets known states and treats anything else as unknown" {
     try testing.expectEqual(Status.unknown, statusOf("loaded"));
     try testing.expectEqual(Status.unknown, statusOf("degraded"));
     try testing.expectEqual(Status.unknown, statusOf(""));
+}
+
+test "render heads the columns in bold, indented past the status dot" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample };
+    render(&s, &f, .{ .row = 3, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
+    // The 2-col dot indent plus exact padding aligns the labels over values.
+    try testing.expect(std.mem.indexOf(u8, out, "  NAME" ++ " " ** 21 ++ "STATE" ++ " " ** 8 ++ "START" ++ " " ** 3 ++ "KEG") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "redis") != null); // the list still renders below
 }
 
 test "render lists services with a state dot, the state, and the auto-start hint" {

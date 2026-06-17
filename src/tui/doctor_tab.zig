@@ -497,16 +497,6 @@ fn paintBandLine(f: *tab.Frame, rect: tab.Rect, row: u16, line: []const u8) void
     f.put(scroll_list.truncate(line, rect.width));
 }
 
-/// A dim full-width rule, like the detail pane's, setting the band off from the
-/// list above and below it.
-fn paintRule(f: *tab.Frame, rect: tab.Rect, row: u16) void {
-    f.moveTo(row, rect.col);
-    f.put(color.roleCode(.muted));
-    var i: u16 = 0;
-    while (i < rect.width) : (i += 1) f.put("─");
-    f.put(color.Style.reset.code());
-}
-
 /// Paint the health band into `rect` and return the rows used. The band is
 /// enclosed by a dim rule top and bottom; inside, the segments shed lowest-signal
 /// first (histogram, then the fixable line) so a short pane keeps the verdict. The
@@ -517,7 +507,7 @@ fn renderBand(f: *tab.Frame, counts: Counts, reclaim: ?Reclaim, rect: tab.Rect) 
     var buf: [512]u8 = undefined; // wide enough for a full-row composition bar
     var used: u16 = 0;
 
-    paintRule(f, rect, rect.row + used);
+    tab.renderSeparator(f, rect, rect.row + used, true);
     used += 1;
 
     var banner: tab.Frame = .{ .buf = &buf };
@@ -556,7 +546,7 @@ fn renderBand(f: *tab.Frame, counts: Counts, reclaim: ?Reclaim, rect: tab.Rect) 
         if (capacity > 0) used += paintReclaim(f, rect, rect.row + used, rc, capacity);
     }
 
-    paintRule(f, rect, rect.row + used);
+    tab.renderSeparator(f, rect, rect.row + used, true);
     used += 1;
 
     return used;

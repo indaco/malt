@@ -103,6 +103,48 @@ pub fn putCheckbox(f: *Frame, state: Check) void {
     }
 }
 
+/// A full-width horizontal rule across `rect` at `row` — the shared `<hr>` of
+/// the dashboard. `dimmed` muted-styles it (the band, detail pane, and chrome
+/// separator) or leaves it in the terminal default (the footer divider), so
+/// every rule is drawn by this one helper.
+pub fn renderSeparator(f: *Frame, rect: Rect, row: u16, dimmed: bool) void {
+    f.moveTo(row, rect.col);
+    if (dimmed) f.put(color.roleCode(.muted));
+    var i: u16 = 0;
+    while (i < rect.width) : (i += 1) f.put("─");
+    if (dimmed) f.put(color.Style.reset.code());
+}
+
+/// One column in a list heading: its `label`, the `width` it pads to (matching
+/// the row's `appendPad`), and the `gap` of blank cells before it — 1 for a
+/// normal column, 2 where the row uses a two-cell separator like `→ `. The first
+/// column's gap is unused; the checkbox/dot prefix is the heading's `indent`.
+pub const HeadingCol = struct { label: []const u8, width: u16, gap: u16 = 1 };
+
+/// Paint a bold column heading at the top of `rect`: `indent` leading blanks for
+/// a checkbox/dot prefix, then each column left-justified to its width and
+/// preceded by its gap, so labels sit over `appendPad`-formatted values. The one
+/// heading painter every list tab shares; width-truncated and reset like a row.
+pub fn renderHeading(f: *Frame, rect: Rect, indent: u16, cols: []const HeadingCol) void {
+    var b: [128]u8 = undefined;
+    var hf: Frame = .{ .buf = &b };
+    blanks(&hf, indent);
+    for (cols, 0..) |c, i| {
+        if (i != 0) blanks(&hf, c.gap);
+        hf.put(c.label);
+        if (c.label.len < c.width) blanks(&hf, c.width - @as(u16, @intCast(c.label.len)));
+    }
+    f.moveTo(rect.row, rect.col);
+    f.put(color.Style.bold.code());
+    f.putContent(scroll_list.truncate(hf.slice(), rect.width));
+    f.put(color.Style.reset.code());
+}
+
+fn blanks(f: *Frame, n: u16) void {
+    var i: u16 = 0;
+    while (i < n) : (i += 1) f.put(" ");
+}
+
 /// Paint one dim line at the top of `rect` — the shared empty-state / "no
 /// matches" placeholder so every tab's empty list reads the same way instead of
 /// a blank pane. Content goes through `putContent` like every other row.
@@ -179,6 +221,50 @@ test "renderHint paints the placeholder text into the frame" {
     var f: Frame = .{ .buf = &buf };
     renderHint(&f, .{ .row = 2, .col = 1, .width = 40, .height = 6 }, "Nothing here.");
     try std.testing.expect(std.mem.indexOf(u8, f.slice(), "Nothing here.") != null);
+}
+
+test "renderSeparator paints a full-width rule, dim only when asked" {
+    var buf: [256]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    renderSeparator(&f, .{ .row = 5, .col = 1, .width = 4, .height = 1 }, 5, true);
+    const dim = f.slice();
+    try std.testing.expect(std.mem.indexOf(u8, dim, color.roleCode(.muted)) != null);
+    try std.testing.expect(std.mem.indexOf(u8, dim, "────") != null); // width box-drawing cells
+    try std.testing.expect(std.mem.indexOf(u8, dim, color.Style.reset.code()) != null);
+
+    // Undimmed: the bare rule, terminal default — no muted SGR, no reset.
+    var pbuf: [256]u8 = undefined;
+    var pf: Frame = .{ .buf = &pbuf };
+    renderSeparator(&pf, .{ .row = 1, .col = 1, .width = 4, .height = 1 }, 1, false);
+    const plain = pf.slice();
+    try std.testing.expect(std.mem.indexOf(u8, plain, "────") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, color.roleCode(.muted)) == null);
+}
+
+test "renderHeading lays bold columns with an indent and per-column gaps" {
+    var buf: [256]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    renderHeading(&f, .{ .row = 1, .col = 1, .width = 80, .height = 1 }, 2, &.{
+        .{ .label = "A", .width = 4 },
+        .{ .label = "B", .width = 4, .gap = 2 },
+    });
+    const out = f.slice();
+    try std.testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
+    // 2-space indent, A padded to width 4, then a 2-cell gap before B.
+    try std.testing.expect(std.mem.indexOf(u8, out, "  A" ++ " " ** 5 ++ "B") != null);
+}
+
+test "renderHeading truncates to the rect width and still closes the bold" {
+    var buf: [512]u8 = undefined;
+    var f: Frame = .{ .buf = &buf };
+    // Width 6 is narrower than the heading: it must cut cleanly, never overflow.
+    renderHeading(&f, .{ .row = 1, .col = 1, .width = 6, .height = 1 }, 2, &.{
+        .{ .label = "NAME", .width = 22 },
+        .{ .label = "VERSION", .width = 14 },
+    });
+    const out = f.slice();
+    try std.testing.expect(std.mem.indexOf(u8, out, "VERSION") == null); // cut past the width
+    try std.testing.expect(std.mem.indexOf(u8, out, color.Style.reset.code()) != null); // bold still closed
 }
 
 test "renderHint on a zero-height rect is a clean no-op" {
