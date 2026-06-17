@@ -52,6 +52,34 @@ test "runChild surfaces a non-zero exit instead of swallowing it" {
     try testing.expectError(error.ChildFailed, spawn.runChild(t.io(), &.{"/usr/bin/false"}));
 }
 
+// `runChildTolerant` is the mutation-side mirror of the doctor read's
+// `max_ok_exit`: `mt doctor --fix` exits by severity (≤ 2) even on a clean
+// sweep, so the inline runner must accept that yet still reject a genuine fault
+// above the cap. The exit-above-cap case needs a non-zero exit from a known
+// program, which only a shell fixture gives; the `src/` argv-only invariant
+// keeps it here rather than inline.
+
+test "runChildTolerant accepts a severity exit at the cap" {
+    var t = threaded();
+    defer t.deinit();
+    try spawn.runChildTolerant(t.io(), &.{ "/bin/sh", "-c", "exit 2" }, 2);
+}
+
+test "runChildTolerant rejects an exit above the cap as ChildFailed" {
+    var t = threaded();
+    defer t.deinit();
+    // Only 0/1/2 are doctor severities; a higher code is a genuine fault.
+    try testing.expectError(error.ChildFailed, spawn.runChildTolerant(t.io(), &.{ "/bin/sh", "-c", "exit 3" }, 2));
+}
+
+test "runChildTolerant treats a signalled child as ChildFailed regardless of the cap" {
+    var t = threaded();
+    defer t.deinit();
+    // A signal is a crash, not a severity — tolerance must never mask it, or a
+    // doctor that segfaults mid-fix would read as a clean sweep.
+    try testing.expectError(error.ChildFailed, spawn.runChildTolerant(t.io(), &.{ "/bin/sh", "-c", "kill -TERM $$" }, 2));
+}
+
 test "the refresh hook refetches the active tab and marks the rest dirty on view" {
     var a: app.App = .{ .active = .services };
     app.markStaleAfterMutation(&a);
