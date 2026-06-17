@@ -376,3 +376,67 @@ test "the human walk still renders rows to stderr (capture gate is JSON-only)" {
 
     try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "MALT_PREFIX") != null);
 }
+
+// ── SSL CA bundle: gated on ca-certificates being installed ───────────
+// The human/severity behaviour is pinned in doctor_ssl_test.zig; these
+// lock the `--json` `checks[]` contract for each state.
+
+fn linkCaCerts(allocator: std.mem.Allocator, prefix: []const u8) !void {
+    const opt = try std.fmt.allocPrint(allocator, "{s}/opt/ca-certificates", .{prefix});
+    defer allocator.free(opt);
+    try test_io.cwd().createDirPath(std.Options.debug_io, opt);
+}
+
+test "ca-certificates not installed: no ssl_ca_bundle finding in checks[]" {
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "ssl_absent");
+    defer s.deinit(allocator);
+    try s.initSchema();
+
+    var result = walk(allocator, s.path);
+    defer result.deinit();
+
+    // The precondition is absent, so the check emits nothing — consumers
+    // see no entry rather than a misleading ok/warn.
+    try testing.expect(findById(result.findings(), "ssl_ca_bundle") == null);
+}
+
+test "ca-certificates installed but unlinked: a warn ssl_ca_bundle finding" {
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "ssl_unlinked");
+    defer s.deinit(allocator);
+    try s.initSchema();
+    try linkCaCerts(allocator, s.path);
+
+    var result = walk(allocator, s.path);
+    defer result.deinit();
+
+    const f = findById(result.findings(), "ssl_ca_bundle") orelse
+        return error.MissingSslFinding;
+    try testing.expectEqual(doctor.CheckStatus.warn_status, f.severity);
+    // Informational warn — doctor surfaces it but --fix can't act on it.
+    try testing.expect(!f.fixable);
+    try testing.expect(f.fix_class == null);
+}
+
+test "ca-certificates installed and linked: an ok ssl_ca_bundle finding" {
+    const allocator = testing.allocator;
+    var s = try Scratch.init(allocator, "ssl_linked");
+    defer s.deinit(allocator);
+    try s.initSchema();
+    try linkCaCerts(allocator, s.path);
+
+    const dir = try std.fmt.allocPrint(allocator, "{s}/etc/openssl@3", .{s.path});
+    defer allocator.free(dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, dir);
+    const cert = try std.fmt.allocPrint(allocator, "{s}/cert.pem", .{dir});
+    defer allocator.free(cert);
+    (try test_io.createFileAbsolute(std.Options.debug_io, cert, .{})).close(std.Options.debug_io);
+
+    var result = walk(allocator, s.path);
+    defer result.deinit();
+
+    const f = findById(result.findings(), "ssl_ca_bundle") orelse
+        return error.MissingSslFinding;
+    try testing.expectEqual(doctor.CheckStatus.ok, f.severity);
+}
