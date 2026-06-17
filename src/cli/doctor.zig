@@ -1151,14 +1151,22 @@ pub fn formatSslCertDetail(present: bool) ?[]const u8 {
     return if (present)
         null
     else
-        "cert.pem missing — HTTPS verification fails until ca-certificates is installed";
+        "ca-certificates installed but cert.pem isn't linked";
 }
 
-/// Informational check: `<prefix>/etc/openssl@3/cert.pem` is what
-/// OpenSSL reaches for at runtime. A missing bundle breaks every HTTPS
-/// client behind OpenSSL, but it's a remediation hint, never a failure —
-/// the row stays `.ok` so doctor exits clean.
+/// Check gated on its precondition: `<prefix>/etc/openssl@3/cert.pem` is
+/// what OpenSSL reaches for at runtime, but it only exists once
+/// `ca-certificates` is installed. A prefix that never installed it has no
+/// bundle to verify — the absence is expected, not a defect — so the check
+/// stays silent. When `ca-certificates` *is* installed but its bundle
+/// isn't linked, that's a real misconfiguration: warn.
 fn checkSslCaBundle(ctx: CheckCtx, name: []const u8) CheckResult {
+    // Precondition: the `ca-certificates` opt link. Absent ⇒ nothing to
+    // verify, so emit no row at all (default runs stay quiet on this).
+    var opt_buf: [512]u8 = undefined;
+    const opt = std.fmt.bufPrint(&opt_buf, "{s}/opt/ca-certificates", .{ctx.prefix}) catch return .ok;
+    std.Io.Dir.cwd().access(ctx.io, opt, .{}) catch return .ok;
+
     var buf: [512]u8 = undefined;
     const cert = std.fmt.bufPrint(&buf, "{s}/etc/openssl@3/cert.pem", .{ctx.prefix}) catch {
         printCheck(name, .ok, null);
@@ -1168,19 +1176,20 @@ fn checkSslCaBundle(ctx: CheckCtx, name: []const u8) CheckResult {
         std.Io.Dir.cwd().access(ctx.io, cert, .{}) catch break :blk false;
         break :blk true;
     };
-    printCheck(name, .ok, formatSslCertDetail(present));
+    const status: CheckStatus = if (present) .ok else .warn_status;
+    printCheck(name, status, formatSslCertDetail(present));
     if (!present) {
-        // Verbose-only remediation: install the formula, or relink the
-        // bundle by hand if the keg is already on disk.
+        // Verbose-only remediation: the keg is on disk, so relink the
+        // bundle by hand.
         var manual_buf: [768]u8 = undefined;
         const manual = std.fmt.bufPrint(
             &manual_buf,
             "ln -sf {s}/opt/ca-certificates/share/ca-certificates/cacert.pem {s}/etc/openssl@3/cert.pem",
             .{ ctx.prefix, ctx.prefix },
         ) catch "ln -sf <prefix>/opt/ca-certificates/share/ca-certificates/cacert.pem <prefix>/etc/openssl@3/cert.pem";
-        writeVerboseList(&.{ "mt install ca-certificates", manual });
+        writeVerboseList(&.{manual});
     }
-    return .ok;
+    return status;
 }
 
 fn checkIsolationLeaks(ctx: CheckCtx, name: []const u8) CheckResult {
@@ -1430,11 +1439,13 @@ test "findingId: collapses non-alphanumeric runs and trims the edges" {
     try testing.expectEqualStrings("a_b_c", got);
 }
 
-test "formatSslCertDetail: null when present, remediation hint when absent" {
+test "formatSslCertDetail: null when present, unlinked-bundle hint when absent" {
     try testing.expect(formatSslCertDetail(true) == null);
     const missing = formatSslCertDetail(false) orelse return error.TestUnexpectedResult;
-    // The hint must name the fix so a user can act on it directly.
+    // The hint names the precondition (ca-certificates is installed) and
+    // the actual fault (the bundle isn't linked) so a user can act on it.
     try testing.expect(std.mem.indexOf(u8, missing, "ca-certificates") != null);
+    try testing.expect(std.mem.indexOf(u8, missing, "isn't linked") != null);
 }
 
 test "emitFixHintIfNeeded: silent without arming" {
