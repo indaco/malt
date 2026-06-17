@@ -364,15 +364,33 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
             detail_pane.render(f, &fields, .{ .row = content.row + content.height, .col = content.col, .width = content.width, .height = dh });
         }
     }
-    renderList(s, f, content);
+    renderList(s, f, counts, content);
 }
 
-fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
+/// All checks passed: one calm summary line instead of a list of ok rows, in the
+/// success role. Reuses the band's severity counts (no second pass over `items`)
+/// and its truncating painter, so it degrades on a narrow pane like the band does.
+fn renderAllClear(f: *tab.Frame, rect: tab.Rect, counts: Counts) void {
+    var buf: [96]u8 = undefined;
+    var line: tab.Frame = .{ .buf = &buf };
+    line.put(color.roleCode(.success));
+    line.put(glyph(.ok));
+    line.put(" ");
+    var nbuf: [48]u8 = undefined;
+    line.put(std.fmt.bufPrint(&nbuf, "All clear - {d} checks passed, nothing to fix.", .{counts.total()}) catch "");
+    line.put(color.Style.reset.code());
+    paintBandLine(f, rect, rect.row, line.slice());
+}
+
+fn renderList(s: *const State, f: *tab.Frame, counts: Counts, rect: tab.Rect) void {
     if (rect.height == 0) return;
     const filter = s.chrome.filter.slice();
-    const nf = filteredCount(s.items, filter);
-    if (nf == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "No findings.");
-    const v = scroll_list.clamp(s.chrome.view, nf, rect.height);
+    // No-data stays neutral: we can't claim "all clear" for checks we never received.
+    if (counts.total() == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "No findings.");
+    // Only without a filter: "N checks passed" must mean the whole run, and a
+    // filter that matches only ok rows should still list them.
+    if (filter.len == 0 and counts.attention() == 0) return renderAllClear(f, rect, counts);
+    const v = scroll_list.clamp(s.chrome.view, counts.total(), rect.height);
 
     var di: usize = 0;
     for (severity_order) |sev| {
@@ -596,9 +614,61 @@ test "render on an empty list shows the no-findings placeholder, not a blank pan
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 }); // must not trap
     const out = f.slice();
     try std.testing.expect(std.mem.indexOf(u8, out, "No findings") != null);
-    // No-data is not a verdict: the band stays out so DT-01 never claims a store
-    // with nothing parsed is "healthy" (the all-clear wording is DT-02's job).
+    // No-data is not a verdict: neither the "healthy" banner nor the all-clear
+    // line may appear — we can't vouch for checks we never received.
     try std.testing.expect(std.mem.indexOf(u8, out, "healthy") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "All clear") == null);
+}
+
+test "render shows an all-clear summary when every check passed, not a per-check list" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &all_ok }; // 1 ok, 0 err, 0 warn
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "All clear") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1 checks passed") != null); // names the passed count
+    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.success)) != null); // success role
+}
+
+test "an active filter matching only ok findings lists them, never the all-clear summary" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.chrome.filter.push("malt"); // matches only MALT_PREFIX (ok)
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "All clear") == null); // "N passed" can't mean the whole run under a filter
+    try testing.expect(std.mem.indexOf(u8, out, "MALT_PREFIX") != null); // the matching ok row is still listed
+}
+
+test "the all-clear summary truncates on a narrow pane" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &all_ok };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 18, .height = 4 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "All clear") != null); // the verdict survives the cut
+    try testing.expect(std.mem.indexOf(u8, out, "nothing to fix.") == null); // the tail is dropped, never wrapped
+}
+
+test "an active filter with no matches still shows No matches, never the all-clear line" {
+    var buf: [1024]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    var s: State = .{ .items = &sample };
+    s.chrome.filter.push("zzz"); // matches nothing
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "No matches.") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "All clear") == null);
+}
+
+test "the all-clear summary renders at height 1 without crashing" {
+    var buf: [1024]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &all_ok };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 }); // band suppressed; the list is the floor
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "All clear") != null);
 }
 
 test "render clamps to a height of one without crashing" {
