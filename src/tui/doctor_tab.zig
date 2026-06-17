@@ -127,6 +127,203 @@ fn severityLabel(sev: Severity) []const u8 {
     };
 }
 
+// ─── health band ─────────────────────────────────────────────────────
+
+/// Per-severity tallies for the health band, plus the count of fixable findings
+/// among the attention set (err+warn). Computed once and passed to the band.
+const Counts = struct {
+    err: usize = 0,
+    warn: usize = 0,
+    ok: usize = 0,
+    /// Fixable findings within err+warn — `ok` findings are never "fixable" work.
+    fixable: usize = 0,
+
+    fn total(self: Counts) usize {
+        return self.err + self.warn + self.ok;
+    }
+    fn attention(self: Counts) usize {
+        return self.err + self.warn;
+    }
+};
+
+/// One pass over the filtered findings, mirroring the list's filter so the band
+/// and list always describe the same set.
+fn tally(items: []const Row, filter: []const u8) Counts {
+    var c: Counts = .{};
+    for (items) |fnd| {
+        if (!matches(fnd.title, filter)) continue;
+        switch (fnd.severity) {
+            .err => c.err += 1,
+            .warn => c.warn += 1,
+            .ok => c.ok += 1,
+        }
+        if (fnd.severity != .ok and fnd.fixable) c.fixable += 1;
+    }
+    return c;
+}
+
+/// The worst severity present — the verdict the banner reports.
+fn worst(c: Counts) Severity {
+    if (c.err > 0) return .err;
+    if (c.warn > 0) return .warn;
+    return .ok;
+}
+
+fn verdictLabel(sev: Severity) []const u8 {
+    return switch (sev) {
+        .err => "unhealthy",
+        .warn => "needs attention",
+        .ok => "healthy",
+    };
+}
+
+/// Rows the band occupies at full size: a dim rule, the three segments, a dim
+/// rule. The enclosing rules set it apart from the list above and below.
+const band_full_height: u16 = 5;
+/// Smallest enclosed band: top rule, banner, bottom rule.
+const band_min_height: u16 = 3;
+
+/// Band rows to reserve from the top of `content`. The findings list is the
+/// floor, so the band never claims the last row; below the enclosed minimum
+/// (plus that one list row) it drops entirely.
+fn bandCap(content_height: u16) u16 {
+    if (content_height < band_min_height + 1) return 0; // no room to enclose + a list row
+    return @min(band_full_height, content_height -| 1);
+}
+
+/// Build the colored status banner (`✗ unhealthy` / `⚠ needs attention` /
+/// `✓ healthy`) into `lb`; the worst severity drives both glyph and colour.
+fn buildBanner(lb: *tab.Frame, c: Counts) void {
+    const sev = worst(c);
+    lb.put(color.roleCode(glyphStyle(sev)));
+    lb.put(glyph(sev));
+    lb.put(" ");
+    lb.put(verdictLabel(sev));
+    lb.put(color.Style.reset.code());
+}
+
+/// Bar cells for the largest bucket; smaller buckets scale proportionally.
+const histogram_cells: usize = 6;
+
+/// Block cells proportional to `count`/`max` over the cell budget; any nonzero
+/// count keeps at least one cell so a small-but-present bucket stays visible.
+fn barCells(count: usize, max: usize) usize {
+    if (count == 0 or max == 0) return 0;
+    const scaled = (count * histogram_cells + max - 1) / max; // ceil
+    return @min(histogram_cells, @max(@as(usize, 1), scaled));
+}
+
+/// One severity's `glyph bars count` cell, glyph and bars in the severity colour.
+fn buildBar(lb: *tab.Frame, sev: Severity, count: usize, max: usize) void {
+    lb.put(color.roleCode(glyphStyle(sev)));
+    lb.put(glyph(sev));
+    lb.put(" ");
+    var i: usize = 0;
+    while (i < barCells(count, max)) : (i += 1) lb.put("█");
+    lb.put(color.Style.reset.code());
+    lb.put(" ");
+    var nbuf: [16]u8 = undefined;
+    lb.put(std.fmt.bufPrint(&nbuf, "{d}", .{count}) catch "");
+}
+
+/// Narrowest width that still fits the three scaled bars; below it the histogram
+/// drops the bars for a plain `✗N ⚠N ✓N` count line that can't wrap into the list.
+const histogram_min_width: u16 = 36;
+
+/// Build the severity histogram into `lb`: `✗ N  ⚠ N  ✓ N` as bars scaled to the
+/// largest count, or a plain count line when the pane is too narrow for bars.
+fn buildHistogram(lb: *tab.Frame, c: Counts, width: u16) void {
+    if (width < histogram_min_width) return buildPlainCounts(lb, c);
+    const max = @max(c.err, @max(c.warn, c.ok));
+    buildBar(lb, .err, c.err, max);
+    lb.put("  ");
+    buildBar(lb, .warn, c.warn, max);
+    lb.put("  ");
+    buildBar(lb, .ok, c.ok, max);
+}
+
+/// One severity's `glyphN` cell with the glyph in its colour, for the narrow
+/// fallback line.
+fn buildPlainCount(lb: *tab.Frame, sev: Severity, count: usize) void {
+    lb.put(color.roleCode(glyphStyle(sev)));
+    lb.put(glyph(sev));
+    lb.put(color.Style.reset.code());
+    var nbuf: [16]u8 = undefined;
+    lb.put(std.fmt.bufPrint(&nbuf, "{d}", .{count}) catch "");
+}
+
+fn buildPlainCounts(lb: *tab.Frame, c: Counts) void {
+    buildPlainCount(lb, .err, c.err);
+    lb.put(" ");
+    buildPlainCount(lb, .warn, c.warn);
+    lb.put(" ");
+    buildPlainCount(lb, .ok, c.ok);
+}
+
+/// Build the call-to-action into `lb`: how many findings needing attention are
+/// auto-fixable vs left to manual work. Muted — it's guidance, not a verdict.
+fn buildFixable(lb: *tab.Frame, c: Counts) void {
+    const manual = c.attention() - c.fixable; // fixable ⊆ attention, so this can't underflow
+    lb.put(color.roleCode(.muted));
+    var nbuf: [48]u8 = undefined;
+    lb.put(std.fmt.bufPrint(&nbuf, "{d} auto-fixable · {d} manual", .{ c.fixable, manual }) catch "");
+    lb.put(color.Style.reset.code());
+}
+
+/// Paint one pre-built band line, width-truncated so it can never wrap into the
+/// list (its colour codes ride along whole; counts/glyphs are our own bytes).
+fn paintBandLine(f: *tab.Frame, rect: tab.Rect, row: u16, line: []const u8) void {
+    f.moveTo(row, rect.col);
+    f.put(scroll_list.truncate(line, rect.width));
+}
+
+/// A dim full-width rule, like the detail pane's, setting the band off from the
+/// list above and below it.
+fn paintRule(f: *tab.Frame, rect: tab.Rect, row: u16) void {
+    f.moveTo(row, rect.col);
+    f.put(color.roleCode(.muted));
+    var i: u16 = 0;
+    while (i < rect.width) : (i += 1) f.put("─");
+    f.put(color.Style.reset.code());
+}
+
+/// Paint the health band into `rect` and return the rows used. The band is
+/// enclosed by a dim rule top and bottom; inside, the segments shed lowest-signal
+/// first (histogram, then the fixable line) so a short pane keeps the verdict.
+fn renderBand(f: *tab.Frame, counts: Counts, rect: tab.Rect) u16 {
+    if (rect.height < band_min_height) return 0; // can't enclose even the banner
+    var buf: [256]u8 = undefined;
+    var used: u16 = 0;
+
+    paintRule(f, rect, rect.row + used);
+    used += 1;
+
+    var banner: tab.Frame = .{ .buf = &buf };
+    buildBanner(&banner, counts);
+    paintBandLine(f, rect, rect.row + used, banner.slice());
+    used += 1;
+
+    // Histogram needs a full-height band; it is the first segment shed.
+    if (rect.height >= band_full_height) {
+        var hist: tab.Frame = .{ .buf = &buf };
+        buildHistogram(&hist, counts, rect.width);
+        paintBandLine(f, rect, rect.row + used, hist.slice());
+        used += 1;
+    }
+    // The fixable call-to-action sheds after the histogram but before the verdict.
+    if (rect.height >= band_full_height - 1) {
+        var fx: tab.Frame = .{ .buf = &buf };
+        buildFixable(&fx, counts);
+        paintBandLine(f, rect, rect.row + used, fx.slice());
+        used += 1;
+    }
+
+    paintRule(f, rect, rect.row + used);
+    used += 1;
+
+    return used;
+}
+
 /// Pure render: the severity-ordered finding list and a detail pane for the
 /// selected finding. The `f: fix` key lives in the shared footer (the detail
 /// pane still shows whether the selected finding is fixable). The pane sizes to
@@ -134,8 +331,22 @@ fn severityLabel(sev: Severity) []const u8 {
 /// function of `(state, rect)` so a resize is a re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (r.height == 0) return;
-    const sel = selectedFinding(s);
+    const filter = s.chrome.filter.slice();
+    const counts = tally(s.items, filter);
+
     var content: tab.Rect = r;
+    // The band rides above the list: reserve its rows from the top before the
+    // detail pane claims from the bottom, so the list gets height − band − detail.
+    if (counts.total() > 0) {
+        const budget = bandCap(content.height);
+        if (budget > 0) {
+            const used = renderBand(f, counts, .{ .row = content.row, .col = content.col, .width = content.width, .height = budget });
+            content.row += used;
+            content.height -= used;
+        }
+    }
+
+    const sel = selectedFinding(s);
     if (sel) |fnd| {
         var fix_buf: [96]u8 = undefined;
         const fix_value = if (fnd.fixable)
@@ -201,6 +412,15 @@ const sample = [_]Row{
     .{ .id = "orphaned_store_entries", .severity = .warn, .title = "Orphaned store entries", .detail = "3 orphaned entries", .fixable = true, .fix_class = .orphaned_store },
     .{ .id = "sqlite_integrity", .severity = .err, .title = "SQLite integrity", .detail = "database malformed", .fixable = false, .fix_class = .none },
     .{ .id = "stale_lock", .severity = .warn, .title = "Stale lock", .detail = "dead PID 42", .fixable = true, .fix_class = .stale_lock },
+};
+
+// Worst-severity-is-warn and all-ok stores, for the band's verdict cases.
+const warn_only = [_]Row{
+    .{ .id = "stale_lock", .severity = .warn, .title = "Stale lock", .detail = "dead PID 42", .fixable = true, .fix_class = .stale_lock },
+    .{ .id = "malt_prefix", .severity = .ok, .title = "MALT_PREFIX", .detail = "/opt/malt", .fixable = false, .fix_class = .none },
+};
+const all_ok = [_]Row{
+    .{ .id = "malt_prefix", .severity = .ok, .title = "MALT_PREFIX", .detail = "/opt/malt", .fixable = false, .fix_class = .none },
 };
 
 test "matches is a case-insensitive substring; empty filter matches all" {
@@ -374,7 +594,11 @@ test "render on an empty list shows the no-findings placeholder, not a blank pan
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &.{} };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 16 }); // must not trap
-    try std.testing.expect(std.mem.indexOf(u8, f.slice(), "No findings") != null);
+    const out = f.slice();
+    try std.testing.expect(std.mem.indexOf(u8, out, "No findings") != null);
+    // No-data is not a verdict: the band stays out so DT-01 never claims a store
+    // with nothing parsed is "healthy" (the all-clear wording is DT-02's job).
+    try std.testing.expect(std.mem.indexOf(u8, out, "healthy") == null);
 }
 
 test "render clamps to a height of one without crashing" {
@@ -382,6 +606,114 @@ test "render clamps to a height of one without crashing" {
     var f: tab.Frame = .{ .buf = &buf };
     const s: State = .{ .items = &sample };
     render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 }); // no list rows fit
+}
+
+// ─── health band ─────────────────────────────────────────────────────
+
+test "the band's status banner reads the worst severity present" {
+    const cases = [_]struct { items: []const Row, verdict: []const u8 }{
+        .{ .items = &sample, .verdict = "unhealthy" }, // an err is present
+        .{ .items = &warn_only, .verdict = "needs attention" }, // warn is the worst
+        .{ .items = &all_ok, .verdict = "healthy" }, // nothing wrong
+    };
+    for (cases) |c| {
+        var buf: [4096]u8 = undefined;
+        var f: tab.Frame = .{ .buf = &buf };
+        const s: State = .{ .items = c.items };
+        render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+        try testing.expect(std.mem.indexOf(u8, f.slice(), c.verdict) != null);
+    }
+}
+
+test "the band histogram shows a scaled bar and count per severity" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample }; // 1 err, 2 warn, 1 ok
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "█") != null); // bars scaled to the largest count
+    try testing.expect(std.mem.indexOf(u8, out, "2") != null); // the warn count (only the histogram carries it)
+}
+
+test "the band histogram degrades to a plain count line on a narrow pane" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 30, .height = 20 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "█") == null); // bars shed at narrow width
+    try testing.expect(std.mem.indexOf(u8, out, "2") != null); // the warn count still reported
+}
+
+test "the band's fixable line splits auto-fixable from manual over the attention set" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    // sample: err+warn = 3 needing attention; 2 of them fixable (orphaned, stale_lock).
+    const s: State = .{ .items = &sample };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "2 auto-fixable") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1 manual") != null);
+}
+
+test "on a height-1 rect only the findings list renders, never the band" {
+    var buf: [1024]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "unhealthy") == null); // band suppressed
+    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // a list row survives
+}
+
+test "a short pane sheds the histogram but keeps the verdict, CTA, and the list" {
+    var buf: [2048]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 5 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "█") == null); // histogram shed first (lowest signal)
+    try testing.expect(std.mem.indexOf(u8, out, "unhealthy") != null); // verdict survives (highest signal)
+    try testing.expect(std.mem.indexOf(u8, out, "auto-fixable") != null); // actionable CTA survives
+    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // the list is the floor
+}
+
+test "the band is enclosed by a dim rule above and below" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    const out = f.slice();
+    const top_rule = std.mem.indexOf(u8, out, "─") orelse return error.NoTopRule;
+    const verdict = std.mem.indexOf(u8, out, "unhealthy").?;
+    const bottom_rule = std.mem.indexOfPos(u8, out, verdict, "─") orelse return error.NoBottomRule;
+    const first_title = std.mem.indexOf(u8, out, "SQLite integrity").?;
+    try testing.expect(top_rule < verdict); // rule above the banner
+    try testing.expect(verdict < bottom_rule); // rule below the band content
+    try testing.expect(bottom_rule < first_title); // and the list follows the lower rule
+}
+
+test "the band needs room for its enclosure, else only the list renders" {
+    var buf: [2048]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample };
+    // 3 rows can't hold the enclosed band (rule+banner+rule) plus a list row.
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 3 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "unhealthy") == null); // band dropped
+    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // list survives
+}
+
+test "the band paints above the findings list" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "unhealthy") != null); // banner present
+    const verdict_at = std.mem.indexOf(u8, out, "unhealthy").?;
+    const first_title_at = std.mem.indexOf(u8, out, "SQLite integrity").?;
+    try testing.expect(verdict_at < first_title_at); // banner precedes the list
 }
 
 test "conforms to the tab contract" {
