@@ -83,9 +83,9 @@ fn captureJson(
     argv: []const []const u8,
     max_ok_exit: u8,
 ) ReadError![]u8 {
-    // Discard the child's stderr: inside the alt-screen its status/progress lines
-    // (e.g. `mt doctor`'s check log) would paint over the frame. A real failure is
-    // surfaced by the caller's banner, not by leaking child stderr onto the TUI.
+    // Discard the child's stderr: a `--json` read parses stdout only, and a real
+    // failure is surfaced by the caller's banner — never by leaking child stderr
+    // onto the alt-screen frame.
     var child = std.process.spawn(io, .{ .argv = argv, .stdout = .pipe, .stderr = .ignore }) catch return error.SpawnFailed;
 
     const bytes = drainStdout(io, allocator, child.stdout) catch |e| {
@@ -179,8 +179,8 @@ pub fn readJsonPolled(
 }
 
 /// Like `captureJson`, but drain the child's stdout by polling so `ticker` fires
-/// while the child still runs. Same spawn shape (stdout piped, stderr ignored so
-/// child status lines can't paint over the frame) and same exit-code gate.
+/// while the child still runs. Same spawn shape (stdout piped, stderr discarded —
+/// the read parses stdout, a failure surfaces via the banner) and exit-code gate.
 fn capturePolled(
     io: std.Io,
     allocator: std.mem.Allocator,
