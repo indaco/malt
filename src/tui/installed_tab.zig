@@ -143,7 +143,15 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     const filter = s.chrome.filter.slice();
     const nf = filteredCount(s.items, filter);
     if (nf == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "No packages installed yet.");
-    const v = scroll_list.clamp(s.chrome.view, nf, rect.height);
+    // A fixed bold heading rides above the list and costs it one row.
+    tab.renderHeading(f, rect, 0, &.{
+        .{ .label = "NAME", .width = 22 },
+        .{ .label = "VERSION", .width = 14 },
+        .{ .label = "SIZE", .width = 10 },
+    });
+    const list: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    if (list.height == 0) return; // the heading took the only row
+    const v = scroll_list.clamp(s.chrome.view, nf, list.height);
 
     var fi: usize = 0;
     for (s.items) |p| {
@@ -151,15 +159,15 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         defer fi += 1;
         if (fi < v.offset) continue;
         const screen = fi - v.offset;
-        if (screen >= rect.height) break;
-        f.moveTo(rect.row + @as(u16, @intCast(screen)), rect.col);
+        if (screen >= list.height) break;
+        f.moveTo(list.row + @as(u16, @intCast(screen)), list.col);
         const selected = fi == v.selected;
         if (selected) { // mark the cursor row; the accent backgrounds it under a theme
             f.put(color.selectionAccent());
             f.put(color.Style.reverse.code());
         }
         var rb: [256]u8 = undefined;
-        f.putContent(scroll_list.truncate(formatRow(&rb, p), rect.width));
+        f.putContent(scroll_list.truncate(formatRow(&rb, p), list.width));
         if (selected) f.put(color.Style.reset.code());
     }
 }
@@ -316,6 +324,39 @@ test "while the guard is up, x's domain keys do not re-arm or leak" {
     step(&s, .enter); // Enter is "default No" — cancels, no detail request
     try testing.expect(!s.confirm_uninstall);
     try testing.expectEqual(Request.none, s.request);
+}
+
+test "render heads the columns in bold, aligned over their values" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample };
+    render(&s, &f, .{ .row = 3, .col = 1, .width = 80, .height = 10 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
+    // Exact padding proves NAME / VERSION / SIZE sit over their value columns.
+    try testing.expect(std.mem.indexOf(u8, out, "NAME" ++ " " ** 19 ++ "VERSION" ++ " " ** 8 ++ "SIZE") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "brotli") != null); // the list still renders below
+}
+
+test "the heading sits at the top row and shifts the first list row down one" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample };
+    render(&s, &f, .{ .row = 5, .col = 1, .width = 80, .height = 10 });
+    const out = f.slice();
+    const head = std.mem.indexOf(u8, out, "\x1b[5;1H").?; // heading at the content top row
+    const first = std.mem.indexOf(u8, out, "\x1b[6;1H").?; // first item one row below
+    try testing.expect(head < first);
+    try testing.expect(std.mem.indexOf(u8, out[head..first], "NAME") != null); // heading on the top row
+    try testing.expect(std.mem.indexOf(u8, out[first..], "brotli") != null); // first item below it
+}
+
+test "render at height one shows only the heading and never traps" {
+    var buf: [1024]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 }); // the heading eats the only row
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "NAME") != null);
 }
 
 test "render lists rows with name, version, and a humanized size" {

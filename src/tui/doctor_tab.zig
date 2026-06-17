@@ -497,16 +497,6 @@ fn paintBandLine(f: *tab.Frame, rect: tab.Rect, row: u16, line: []const u8) void
     f.put(scroll_list.truncate(line, rect.width));
 }
 
-/// A dim full-width rule, like the detail pane's, setting the band off from the
-/// list above and below it.
-fn paintRule(f: *tab.Frame, rect: tab.Rect, row: u16) void {
-    f.moveTo(row, rect.col);
-    f.put(color.roleCode(.muted));
-    var i: u16 = 0;
-    while (i < rect.width) : (i += 1) f.put("─");
-    f.put(color.Style.reset.code());
-}
-
 /// Paint the health band into `rect` and return the rows used. The band is
 /// enclosed by a dim rule top and bottom; inside, the segments shed lowest-signal
 /// first (histogram, then the fixable line) so a short pane keeps the verdict. The
@@ -517,7 +507,7 @@ fn renderBand(f: *tab.Frame, counts: Counts, reclaim: ?Reclaim, rect: tab.Rect) 
     var buf: [512]u8 = undefined; // wide enough for a full-row composition bar
     var used: u16 = 0;
 
-    paintRule(f, rect, rect.row + used);
+    tab.renderSeparator(f, rect, rect.row + used, true);
     used += 1;
 
     var banner: tab.Frame = .{ .buf = &buf };
@@ -556,7 +546,7 @@ fn renderBand(f: *tab.Frame, counts: Counts, reclaim: ?Reclaim, rect: tab.Rect) 
         if (capacity > 0) used += paintReclaim(f, rect, rect.row + used, rc, capacity);
     }
 
-    paintRule(f, rect, rect.row + used);
+    tab.renderSeparator(f, rect, rect.row + used, true);
     used += 1;
 
     return used;
@@ -573,6 +563,19 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     const counts = tally(s.items, filter);
 
     const reclaim = reclaimFrom(s.stats);
+
+    // An all-clear run (no filter, findings present, none needing attention) has
+    // no verdict to weigh: collapse the band to the calm summary line, plus the
+    // reclaimable section when there is disk to reclaim. No histogram, fixable
+    // line, or detail pane — nothing needs the user's attention.
+    if (filter.len == 0 and counts.total() > 0 and counts.attention() == 0) {
+        renderAllClear(f, r, counts);
+        if (reclaim) |rc| {
+            const max = r.height -| 1; // the summary line takes the top row
+            if (max > 0) _ = paintReclaim(f, r, r.row + 1, rc, max);
+        }
+        return;
+    }
 
     var content: tab.Rect = r;
     // The band rides above the list: reserve its rows from the top before the
@@ -631,9 +634,8 @@ fn renderList(s: *const State, f: *tab.Frame, counts: Counts, rect: tab.Rect) vo
     const filter = s.chrome.filter.slice();
     // No-data stays neutral: we can't claim "all clear" for checks we never received.
     if (counts.total() == 0) return tab.renderHint(f, rect, if (filter.len != 0) "No matches." else "No findings.");
-    // Only without a filter: "N checks passed" must mean the whole run, and a
-    // filter that matches only ok rows should still list them.
-    if (filter.len == 0 and counts.attention() == 0) return renderAllClear(f, rect, counts);
+    // The unfiltered all-clear summary is handled in `render`; here a filter that
+    // matches only ok rows still lists them, so we always fall through to the list.
     const v = scroll_list.clamp(s.chrome.view, counts.total(), rect.height);
 
     var di: usize = 0;
@@ -883,6 +885,22 @@ test "render shows an all-clear summary when every check passed, not a per-check
     try testing.expect(std.mem.indexOf(u8, out, "All clear") != null);
     try testing.expect(std.mem.indexOf(u8, out, "1 checks passed") != null); // names the passed count
     try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.success)) != null); // success role
+    try testing.expect(std.mem.indexOf(u8, out, "all checks passed") == null); // the band verdict is collapsed away
+    try testing.expect(std.mem.indexOf(u8, out, "auto-fixable") == null); // and so is the fixable line
+}
+
+test "the all-clear collapse keeps the reclaimable section but drops the band verdict" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    // Every check passes, but there is cask disk to reclaim: the reclaimable
+    // section stays, the verdict/histogram/fixable band does not.
+    const s: State = .{ .items = &all_ok, .stats = .{ .cask_bytes = 2048, .retained_versions = 1 } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "All clear") != null); // the calm summary
+    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") != null); // reclaimable kept
+    try testing.expect(std.mem.indexOf(u8, out, "all checks passed") == null); // verdict dropped
+    try testing.expect(std.mem.indexOf(u8, out, "auto-fixable") == null); // fixable line dropped
 }
 
 test "an active filter matching only ok findings lists them, never the all-clear summary" {
@@ -935,10 +953,11 @@ test "render clamps to a height of one without crashing" {
 // ─── health band ─────────────────────────────────────────────────────
 
 test "the band's status banner reads the worst severity present" {
+    // all_ok has no band — its all-clear case is covered separately — so only the
+    // attention verdicts are exercised here.
     const cases = [_]struct { items: []const Row, verdict: []const u8 }{
         .{ .items = &sample, .verdict = "issues found" }, // an err is present (may include warnings)
         .{ .items = &warn_only, .verdict = "warnings found" }, // warn is the worst, no errors
-        .{ .items = &all_ok, .verdict = "all checks passed" }, // nothing wrong
     };
     for (cases) |c| {
         var buf: [4096]u8 = undefined;
@@ -986,7 +1005,7 @@ test "the histogram is one bar scaled to the total, so ok dominates warn (not ne
     try testing.expectEqual(barWidth(80), warn_cells + ok_cells); // err is 0 here
 }
 
-test "an all-ok store renders a full all-success composition bar" {
+test "an all-ok store collapses the band, so no composition bar is drawn" {
     var buf: [8192]u8 = undefined;
     var f: tab.Frame = .{ .buf = &buf };
     const only_ok = [_]Row{
@@ -998,7 +1017,7 @@ test "an all-ok store renders a full all-success composition bar" {
     render(&st, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
     const out = f.slice();
     const ok_cells = segCells(out, color.roleCode(.success), color.Style.reset.code());
-    try testing.expectEqual(barWidth(80), ok_cells); // the whole bar is the ok segment
+    try testing.expectEqual(@as(u16, 0), ok_cells); // all-clear collapses away the histogram
 }
 
 test "the histogram surfaces the total checks count alongside the bar" {

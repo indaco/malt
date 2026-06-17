@@ -339,12 +339,20 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
             var fb: [filter_input.max_len + 8]u8 = undefined;
             f.put(filter_input.render(&fb, activeFilterLabel(app), activeFilterText(app), app.editing, cols));
 
-            renderActive(app, &f, r.content);
+            // A dim rule below the filter sets the chrome off from the content on
+            // the list tabs. Doctor paints its own rule at the band top, so it is
+            // left out here and never shows a doubled rule; the rule costs the tab
+            // one content row.
+            var body = r.content;
+            if (app.active != .doctor) {
+                tab.renderSeparator(&f, r.content, r.content.row, true);
+                body = .{ .row = r.content.row + 1, .col = r.content.col, .width = r.content.width, .height = r.content.height -| 1 };
+            }
+            renderActive(app, &f, body);
 
             // Footer: a rule line separating content, then — by priority — the
             // pre-read loading status, the transient error banner, or the help line.
-            f.moveTo(r.footer.row, 1);
-            putRule(&f, cols);
+            tab.renderSeparator(&f, r.footer, r.footer.row, false);
             f.moveTo(r.footer.row + 1, 1);
             if (app.loading) {
                 var lb: [64]u8 = undefined;
@@ -367,11 +375,6 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
         },
     }
     return f.slice();
-}
-
-fn putRule(f: *tab.Frame, cols: u16) void {
-    var i: u16 = 0;
-    while (i < cols) : (i += 1) f.put("─");
 }
 
 /// The "terminal too small" fallback: the notice icon + message in the info
@@ -1591,6 +1594,32 @@ test "a newline in a child-derived op cannot inject an extra footer frame line" 
     const out = renderFrame(&buf, &a, 80, 24);
     try std.testing.expect(std.mem.indexOfScalar(u8, out, '\n') == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "evil failed: BadJson") != null); // \n stripped, text joined
+}
+
+/// True when `out` paints a dim separator at `row`: the cursor move to that row,
+/// the muted SGR, then a box-drawing rule. Matches the exact chrome signature so
+/// Doctor's muted "No findings." hint at the same row doesn't read as a rule.
+fn hasSeparatorAtRow(out: []const u8, comptime row: u16) bool {
+    const cup = std.fmt.comptimePrint("\x1b[{d};1H", .{row});
+    const at = std.mem.indexOf(u8, out, cup) orelse return false;
+    const after = out[at + cup.len ..];
+    const muted = color.roleCode(.muted);
+    if (!std.mem.startsWith(u8, after, muted)) return false;
+    return std.mem.startsWith(u8, after[muted.len..], "─");
+}
+
+test "a dim rule separates the filter from the content; Doctor keeps its own" {
+    var buf: [8192]u8 = undefined;
+    var a: App = .{}; // Search — a list-style tab
+    const out = renderFrame(&buf, &a, 80, 24);
+    // Content starts at row 4 (header 1, tab-bar 2, filter 3); the rule sits there.
+    try std.testing.expect(hasSeparatorAtRow(out, 4));
+
+    // Doctor paints its own band rule at the content top, so the shell must not
+    // add one there — or the tab would show a doubled rule.
+    var d: App = .{ .active = .doctor };
+    const dout = renderFrame(&buf, &d, 80, 24);
+    try std.testing.expect(!hasSeparatorAtRow(dout, 4));
 }
 
 test "classify splits recoverable backend faults from fatal terminal/OOM faults" {
