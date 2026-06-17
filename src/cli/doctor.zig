@@ -41,8 +41,14 @@ pub const writeChecksJson = render.writeChecksJson;
 /// the human row — one source of truth for both views. Pub so tests can
 /// drive the row path directly.
 pub fn printCheck(name: []const u8, status: CheckStatus, detail: ?[]const u8) void {
+    // Under --json the sink is active: capture the structured finding for
+    // stdout and skip the human row, so the JSON document isn't mirrored
+    // onto stderr. The human path (no sink) renders as before.
+    if (g_sink) |sink| {
+        recordFinding(sink, name, status, detail);
+        return;
+    }
     render.printCheck(name, status, detail);
-    if (g_sink) |sink| recordFinding(sink, name, status, detail);
 }
 /// Per-check outcome; same tags the row renderer uses so the walker
 /// can tally without re-translating.
@@ -394,9 +400,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     resetVerboseHint();
     resetFixHint();
-    output.info("Running health checks...", .{});
     // Capture findings only under --json; the human path stays render-only.
     const want_checks_json = output.isJson();
+    // The progress line is human-only: --json keeps stderr silent.
+    if (!want_checks_json) output.info("Running health checks...", .{});
     var walk = collectFindings(allocator, .{
         .allocator = allocator,
         .prefix = prefix,
@@ -452,17 +459,27 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         }
     }
 
-    output.plain("", .{});
-    emitVerboseHintIfNeeded();
+    // The severity footer is the human view; --json carries each finding's
+    // severity in the document itself. Suppress the stderr prints under
+    // --json but keep the severity-based exit code — the TUI fix round-trip
+    // depends on it.
+    if (!want_checks_json) {
+        output.plain("", .{});
+        emitVerboseHintIfNeeded();
+    }
     if (tally.errors > 0) {
-        output.err("{d} error(s), {d} warning(s)", .{ tally.errors, tally.warnings });
-        emitFixHintIfNeeded(fix_requested);
+        if (!want_checks_json) {
+            output.err("{d} error(s), {d} warning(s)", .{ tally.errors, tally.warnings });
+            emitFixHintIfNeeded(fix_requested);
+        }
         std.process.exit(2);
     } else if (tally.warnings > 0) {
-        output.warn("{d} warning(s)", .{tally.warnings});
-        emitFixHintIfNeeded(fix_requested);
+        if (!want_checks_json) {
+            output.warn("{d} warning(s)", .{tally.warnings});
+            emitFixHintIfNeeded(fix_requested);
+        }
         std.process.exit(1);
-    } else {
+    } else if (!want_checks_json) {
         output.success("Your malt installation is healthy", .{});
     }
 }
