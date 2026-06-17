@@ -1,10 +1,12 @@
 //! malt — parse `mt doctor --json` `checks[]` into TUI-local structs.
 //!
-//! Leaf module: imports only `std`. The versioned `checks` array is the only
-//! part consumed; `schema_version`, `cask_history`, `tap_cache`, `taps`, and any
-//! future field are ignored, so a schema addition never breaks parsing. `Finding`
-//! is TUI-local — never the core `render.Finding` — so the `--json` shape is the
-//! only coupling. Unlike the Services tab's free-form `state`, `severity` and
+//! Leaf module: imports only `std`. The versioned `checks` array drives the
+//! findings list; `cask_history`, `tap_cache`, and `taps` are read for their
+//! disk/tap totals (flat `Stats`). `schema_version` and any future field are
+//! ignored, and the consumed keys are defaulted, so a schema addition or an
+//! older payload never breaks parsing. `Finding` is TUI-local — never the core
+//! `render.Finding` — so the `--json` shape is the only coupling. Unlike the
+//! Services tab's free-form `state`, `severity` and
 //! `fix_class` are **closed** enums: the TUI-004/005 contract pins their
 //! vocabulary, so an exhaustive `switch` (no `else`) maps each glyph/fix target
 //! and a renamed/new tag is a compile error here, not a silent miss.
@@ -37,19 +39,37 @@ pub const Finding = struct {
     fix_class: FixClass = .none,
 };
 
+/// Flat, copy-by-value disk/tap totals lifted off the wire. Plain scalars, so
+/// they outlive the parsed document's arena without borrowing it.
+pub const Stats = struct {
+    cask_bytes: u64 = 0,
+    tap_cache_bytes: u64 = 0,
+    retained_versions: usize = 0,
+    taps: usize = 0,
+};
+
 /// Owns the parsed findings; `items` borrow from the arena. Free with `deinit`.
 pub const Parsed = struct {
     doc: std.json.Parsed(Doc),
     items: []const Finding,
+    stats: Stats = .{},
 
     pub fn deinit(self: Parsed) void {
         self.doc.deinit();
     }
 };
 
-// Everything outside `checks` is dropped via `ignore_unknown_fields`.
+// Disk/tap fields the CLI already emits. Defaulted so an older `mt` whose schema
+// omits them still parses; everything else is dropped via `ignore_unknown_fields`.
 const Doc = struct {
     checks: []Finding,
+    cask_history: CaskHistory = .{},
+    tap_cache: TapCache = .{},
+    taps: []Tap = &.{},
+
+    const CaskHistory = struct { retained_versions: usize = 0, bytes: u64 = 0 };
+    const TapCache = struct { bytes: u64 = 0 };
+    const Tap = struct {}; // only its count is used
 };
 
 /// Parse the captured `mt doctor --json` document. Malformed, non-conforming, or
@@ -62,7 +82,16 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) Error!Parsed {
         // after parsing while the tab keeps borrowing the findings.
         .allocate = .alloc_always,
     }) catch return error.BadJson;
-    return .{ .doc = doc, .items = doc.value.checks };
+    return .{
+        .doc = doc,
+        .items = doc.value.checks,
+        .stats = .{
+            .cask_bytes = doc.value.cask_history.bytes,
+            .tap_cache_bytes = doc.value.tap_cache.bytes,
+            .retained_versions = doc.value.cask_history.retained_versions,
+            .taps = doc.value.taps.len,
+        },
+    };
 }
 
 /// The `--fix <token>` the `f` action delegates to. Exhaustive `switch` (no
@@ -79,6 +108,52 @@ pub fn fixClassTag(c: FixClass) []const u8 {
 }
 
 // ─── tests ───────────────────────────────────────────────────────────
+
+test "parse populates stats from cask_history, tap_cache, and the taps count" {
+    const bytes =
+        \\{"checks":[{"id":"a","severity":"ok","title":"A"}],
+        \\"cask_history":{"retained_versions":3,"bytes":4096},
+        \\"tap_cache":{"bytes":512},
+        \\"taps":[{"name":"x/y"},{"name":"z/w"}]}
+    ;
+    var p = try parse(testing.allocator, bytes);
+    defer p.deinit();
+    try testing.expectEqual(@as(u64, 4096), p.stats.cask_bytes);
+    try testing.expectEqual(@as(u64, 512), p.stats.tap_cache_bytes);
+    try testing.expectEqual(@as(usize, 3), p.stats.retained_versions);
+    try testing.expectEqual(@as(usize, 2), p.stats.taps);
+}
+
+test "parse without disk/tap keys yields zeroed stats and still succeeds" {
+    // An older `mt` whose schema omits these keys must still parse.
+    const bytes =
+        \\{"checks":[{"id":"x","severity":"ok","title":"X"}]}
+    ;
+    var p = try parse(testing.allocator, bytes);
+    defer p.deinit();
+    try testing.expectEqual(Stats{}, p.stats);
+}
+
+test "stats.taps counts the array length regardless of element fields" {
+    const bytes =
+        \\{"checks":[],"taps":[{"name":"a/b","extra":1},{"name":"c/d"},{"weird":true}]}
+    ;
+    var p = try parse(testing.allocator, bytes);
+    defer p.deinit();
+    try testing.expectEqual(@as(usize, 3), p.stats.taps);
+}
+
+test "unknown nested keys (a future cask_history.entries[]) are tolerated" {
+    // The per-cask census is deliberately off the wire; if a newer mt ever adds
+    // it, the nested ignore must keep the aggregate readable, not fail the parse.
+    const bytes =
+        \\{"checks":[],"cask_history":{"retained_versions":2,"bytes":99,"entries":[{"name":"a","bytes":1}]}}
+    ;
+    var p = try parse(testing.allocator, bytes);
+    defer p.deinit();
+    try testing.expectEqual(@as(u64, 99), p.stats.cask_bytes);
+    try testing.expectEqual(@as(usize, 2), p.stats.retained_versions);
+}
 
 test "fixClassTag maps each fixable class to the mt doctor --fix token" {
     try testing.expectEqualStrings("stale_lock", fixClassTag(.stale_lock));
@@ -174,6 +249,23 @@ test "parse rejects malformed input, an absent checks key, and an unknown tag" {
     try testing.expectError(error.BadJson, parse(testing.allocator, "{}")); // no checks key
     // An unknown severity is a contract break, not a tolerated unknown — reject it.
     try testing.expectError(error.BadJson, parse(testing.allocator, "{\"checks\":[{\"id\":\"a\",\"severity\":\"meh\",\"title\":\"A\"}]}"));
+}
+
+test "stats survive overwriting the source buffer — plain scalars, no borrow" {
+    // T-004 keeps `stats` after the shell frees the captured buffer; the scalars
+    // must be copied, never sliced into the input.
+    const src =
+        \\{"checks":[{"id":"a","severity":"ok","title":"A"}],"cask_history":{"retained_versions":7,"bytes":2048},"tap_cache":{"bytes":64},"taps":[{"name":"x/y"}]}
+    ;
+    const buf = try testing.allocator.dupe(u8, src);
+    defer testing.allocator.free(buf);
+    var p = try parse(testing.allocator, buf);
+    defer p.deinit();
+    @memset(buf, 'X'); // scribble the source — a borrowing parse would read garbage
+    try testing.expectEqual(@as(u64, 2048), p.stats.cask_bytes);
+    try testing.expectEqual(@as(u64, 64), p.stats.tap_cache_bytes);
+    try testing.expectEqual(@as(usize, 7), p.stats.retained_versions);
+    try testing.expectEqual(@as(usize, 1), p.stats.taps);
 }
 
 test "parsed strings own their bytes — the source buffer can be freed/overwritten" {
