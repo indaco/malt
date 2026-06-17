@@ -869,9 +869,17 @@ fn loadDoctor(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *
     defer allocator.free(bytes);
 
     const parsed = try doctor_json.parse(allocator, bytes);
+    applyDoctorParse(app, store, parsed);
+}
+
+/// Repoint the Doctor tab at a fresh parse, freeing the previous one. Split from
+/// the spawn so the findings + reclaimable stats wiring is testable without a
+/// child process.
+fn applyDoctorParse(app: *App, store: *Store, parsed: doctor_json.Parsed) void {
     if (store.doctor) |old| old.deinit();
     store.doctor = parsed;
     app.states.doctor.items = parsed.items;
+    app.states.doctor.stats = parsed.stats;
 }
 
 /// Build `mt doctor --fix <class>` for the selected finding. Pure over the tab
@@ -1719,6 +1727,23 @@ test "loadDoctor treats an exit-0 empty response (fresh prefix) as an empty tab"
     try loadDoctor(t.io(), std.testing.allocator, testPainter(&frame), &app, &store);
     try std.testing.expectEqual(@as(usize, 0), app.states.doctor.items.len);
     try std.testing.expect(!app.banner.isSet());
+}
+
+test "applyDoctorParse points the Doctor tab at the parsed findings and reclaimable stats" {
+    var app: App = .{};
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    const bytes =
+        \\{"checks":[{"id":"a","severity":"warn","title":"A","fixable":true,"fix_class":"stale_lock"}],
+        \\"cask_history":{"retained_versions":3,"bytes":4096},"tap_cache":{"bytes":512}}
+    ;
+    const parsed = try doctor_json.parse(std.testing.allocator, bytes);
+    applyDoctorParse(&app, &store, parsed);
+    try std.testing.expectEqual(@as(usize, 1), app.states.doctor.items.len);
+    // The reclaimable figures ride through to the tab so the band can show them.
+    try std.testing.expectEqual(@as(u64, 4096), app.states.doctor.stats.cask_bytes);
+    try std.testing.expectEqual(@as(u64, 512), app.states.doctor.stats.tap_cache_bytes);
+    try std.testing.expectEqual(@as(usize, 3), app.states.doctor.stats.retained_versions);
 }
 
 test "a failed info read names the package in the banner and leaves the pane closed" {

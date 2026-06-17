@@ -29,6 +29,10 @@ pub const State = struct {
     chrome: tab.Chrome = .{},
     /// Findings, borrowed from shell-owned parse storage.
     items: []const Row = &.{},
+    /// Reclaimable disk/tap totals, copied from the parse by the shell. Plain
+    /// scalars (T-003's `Stats`), defaulted to zero so a tab built without a
+    /// parse — or against an older `mt` — simply shows no reclaimable line.
+    stats: doctor_json.Stats = .{},
     /// Pending fix effect for the shell to perform, then clear.
     request: Request = .none,
 };
@@ -127,6 +131,21 @@ fn severityLabel(sev: Severity) []const u8 {
     };
 }
 
+/// Byte formatter replicated from the CLI's `formatBytes` (the leaf rule forbids
+/// importing `cli/*`) so a reclaimable figure reads identically across
+/// `mt doctor` / `mt purge` and the TUI: same units, same 1024 step, same
+/// one-decimal shape. Pinned to that shape by a boundary test.
+fn humanBytes(bytes: u64, buf: []u8) []const u8 {
+    const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB" };
+    var value: f64 = @floatFromInt(bytes);
+    var unit: usize = 0;
+    while (value >= 1024.0 and unit + 1 < units.len) {
+        value /= 1024.0;
+        unit += 1;
+    }
+    return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ value, units[unit] }) catch "?";
+}
+
 // ─── health band ─────────────────────────────────────────────────────
 
 /// Per-severity tallies for the health band, plus the count of fixable findings
@@ -186,9 +205,9 @@ const band_min_height: u16 = 3;
 /// Band rows to reserve from the top of `content`. The findings list is the
 /// floor, so the band never claims the last row; below the enclosed minimum
 /// (plus that one list row) it drops entirely.
-fn bandCap(content_height: u16) u16 {
+fn bandCap(content_height: u16, full: u16) u16 {
     if (content_height < band_min_height + 1) return 0; // no room to enclose + a list row
-    return @min(band_full_height, content_height -| 1);
+    return @min(full, content_height -| 1);
 }
 
 /// Build the colored status banner (`✗ unhealthy` / `⚠ needs attention` /
@@ -270,6 +289,152 @@ fn buildFixable(lb: *tab.Frame, c: Counts) void {
     lb.put(color.Style.reset.code());
 }
 
+/// The reclaimable-disk advisory, lifted from `Stats`. Present only when there is
+/// something to reclaim — a clean store gets `null` and no row, so the band never
+/// nags about zero bytes.
+const Reclaim = struct {
+    cask_bytes: u64,
+    tap_cache_bytes: u64,
+    retained_versions: usize,
+};
+
+fn reclaimFrom(stats: doctor_json.Stats) ?Reclaim {
+    // A clean store has nothing to reclaim; suppressing the row avoids nagging it.
+    if (stats.cask_bytes == 0 and stats.tap_cache_bytes == 0) return null;
+    return .{
+        .cask_bytes = stats.cask_bytes,
+        .tap_cache_bytes = stats.tap_cache_bytes,
+        .retained_versions = stats.retained_versions,
+    };
+}
+
+/// The advisory's plain text (no colour, no line breaks): each present figure
+/// paired with what it is, then the inert `→ mt purge --cache` guidance (text,
+/// not a key binding). A zero figure is dropped so a cask-only or cache-only
+/// store reads cleanly. The band colours and wraps it.
+fn reclaimText(rc: Reclaim, buf: []u8) []const u8 {
+    var fb: tab.Frame = .{ .buf = buf };
+    var bbuf: [16]u8 = undefined; // humanBytes scratch; reused after each put copies it
+    fb.put("Reclaimable: ");
+    var have_segment = false;
+    if (rc.cask_bytes > 0) {
+        fb.put(humanBytes(rc.cask_bytes, &bbuf));
+        fb.put(" cask history");
+        if (rc.retained_versions > 0) {
+            var rb: [32]u8 = undefined;
+            fb.put(std.fmt.bufPrint(&rb, " ({d} old versions)", .{rc.retained_versions}) catch "");
+        }
+        have_segment = true;
+    }
+    if (rc.tap_cache_bytes > 0) {
+        if (have_segment) fb.put(" · ");
+        fb.put(humanBytes(rc.tap_cache_bytes, &bbuf));
+        fb.put(" tap cache");
+    }
+    fb.put(" → mt purge --cache");
+    return fb.slice();
+}
+
+/// Longest prefix of `text` for one `width`-column row, broken at the last space
+/// that fits — or a hard rune-boundary break for a word wider than the row.
+/// Rune- and escape-aware via `scroll_list.truncate`, so a break never splits a
+/// multibyte glyph (`→`, `·`); the advisory wraps cleanly instead of truncating.
+fn wrapChunk(text: []const u8, width: u16) []const u8 {
+    const hard = scroll_list.truncate(text, width);
+    if (hard.len == text.len) return hard; // the rest fits on one row
+    var i = hard.len;
+    while (i > 0) : (i -= 1) if (text[i - 1] == ' ') return text[0..i]; // break on a word boundary
+    return hard; // a single word wider than the row: hard break
+}
+
+fn trimLeadingSpaces(s: []const u8) []const u8 {
+    var r = s;
+    while (r.len > 0 and r[0] == ' ') r = r[1..];
+    return r;
+}
+
+/// A ratio bar only reads as a comparison when there are two values to compare;
+/// with a single figure the wrapped text already says it all.
+fn reclaimHasBar(rc: Reclaim) bool {
+    return rc.cask_bytes > 0 and rc.tap_cache_bytes > 0;
+}
+
+/// Cells in the reclaimable ratio bar — small, inline, just enough to read the
+/// split at a glance.
+const ratio_bar_cells: u16 = 10;
+
+/// Paint a compact two-tone bar showing how the reclaimable bytes split between
+/// cask history (accent) and the tap cache (secondary), so their relative sizes
+/// read at a glance. Each side keeps at least one cell so a tiny-but-present
+/// share stays visible. Single row, truncated — the caller gates on two figures.
+fn paintRatioBar(f: *tab.Frame, rect: tab.Rect, row: u16, rc: Reclaim) void {
+    // u128 so the sum and the cell-scaling can't overflow on a hostile payload's
+    // near-u64-max byte counts; the result is at most `ratio_bar_cells`.
+    const cells: u128 = ratio_bar_cells;
+    const total: u128 = @as(u128, rc.cask_bytes) + rc.tap_cache_bytes; // both > 0 here
+    const share: u128 = (@as(u128, rc.cask_bytes) * cells + total / 2) / total; // rounded
+    const cask_cells: u16 = @intCast(@max(@as(u128, 1), @min(cells - 1, share)));
+    const cache_cells: u16 = ratio_bar_cells - cask_cells;
+
+    var lb_buf: [256]u8 = undefined;
+    var lb: tab.Frame = .{ .buf = &lb_buf };
+    lb.put(color.roleCode(.muted));
+    lb.put("cask ");
+    lb.put(color.roleCode(.accent));
+    var i: u16 = 0;
+    while (i < cask_cells) : (i += 1) lb.put("█");
+    lb.put(color.roleCode(.muted));
+    lb.put(" cache ");
+    lb.put(color.roleCode(.secondary));
+    i = 0;
+    while (i < cache_cells) : (i += 1) lb.put("█");
+    lb.put(color.Style.reset.code());
+    paintBandLine(f, rect, row, lb.slice());
+}
+
+/// Rows the wrapped advisory needs at `width` (text rows plus the ratio bar when
+/// present), so the band can reserve them up front (and grow past its base
+/// height) before the list claims the rest.
+fn reclaimRowCount(rc: Reclaim, width: u16) u16 {
+    if (width == 0) return 0;
+    var tbuf: [256]u8 = undefined;
+    var rest = reclaimText(rc, &tbuf);
+    var n: u16 = 0;
+    while (rest.len > 0) {
+        const chunk = wrapChunk(rest, width);
+        rest = trimLeadingSpaces(rest[chunk.len..]);
+        n += 1;
+    }
+    return n + @as(u16, @intFromBool(reclaimHasBar(rc)));
+}
+
+/// Paint the advisory wrapped across at most `max_rows` muted rows from
+/// `start_row`, returning the rows used. Each row is recoloured so a wrapped
+/// continuation stays muted. It never wraps into the list because the band only
+/// paints within the rows it reserved.
+fn paintReclaim(f: *tab.Frame, rect: tab.Rect, start_row: u16, rc: Reclaim, max_rows: u16) u16 {
+    if (rect.width == 0) return 0;
+    var tbuf: [256]u8 = undefined;
+    var rest = reclaimText(rc, &tbuf);
+    var n: u16 = 0;
+    while (rest.len > 0 and n < max_rows) {
+        f.moveTo(start_row + n, rect.col);
+        f.put(color.roleCode(.muted));
+        const chunk = wrapChunk(rest, rect.width);
+        f.putContent(chunk);
+        f.put(color.Style.reset.code());
+        rest = trimLeadingSpaces(rest[chunk.len..]);
+        n += 1;
+    }
+    // The ratio bar follows the text, so under height pressure it sheds before
+    // the actionable command does.
+    if (reclaimHasBar(rc) and n < max_rows) {
+        paintRatioBar(f, rect, start_row + n, rc);
+        n += 1;
+    }
+    return n;
+}
+
 /// Paint one pre-built band line, width-truncated so it can never wrap into the
 /// list (its colour codes ride along whole; counts/glyphs are our own bytes).
 fn paintBandLine(f: *tab.Frame, rect: tab.Rect, row: u16, line: []const u8) void {
@@ -290,7 +455,7 @@ fn paintRule(f: *tab.Frame, rect: tab.Rect, row: u16) void {
 /// Paint the health band into `rect` and return the rows used. The band is
 /// enclosed by a dim rule top and bottom; inside, the segments shed lowest-signal
 /// first (histogram, then the fixable line) so a short pane keeps the verdict.
-fn renderBand(f: *tab.Frame, counts: Counts, rect: tab.Rect) u16 {
+fn renderBand(f: *tab.Frame, counts: Counts, reclaim: ?Reclaim, rect: tab.Rect) u16 {
     if (rect.height < band_min_height) return 0; // can't enclose even the banner
     var buf: [256]u8 = undefined;
     var used: u16 = 0;
@@ -303,19 +468,30 @@ fn renderBand(f: *tab.Frame, counts: Counts, rect: tab.Rect) u16 {
     paintBandLine(f, rect, rect.row + used, banner.slice());
     used += 1;
 
-    // Histogram needs a full-height band; it is the first segment shed.
-    if (rect.height >= band_full_height) {
+    // Histogram needs a full-height band; it is the first severity segment shed.
+    const show_hist = rect.height >= band_full_height;
+    // The fixable call-to-action sheds after the histogram but before the verdict.
+    const show_fixable = rect.height >= band_full_height - 1;
+    if (show_hist) {
         var hist: tab.Frame = .{ .buf = &buf };
         buildHistogram(&hist, counts, rect.width);
         paintBandLine(f, rect, rect.row + used, hist.slice());
         used += 1;
     }
-    // The fixable call-to-action sheds after the histogram but before the verdict.
-    if (rect.height >= band_full_height - 1) {
+    if (show_fixable) {
         var fx: tab.Frame = .{ .buf = &buf };
         buildFixable(&fx, counts);
         paintBandLine(f, rect, rect.row + used, fx.slice());
         used += 1;
+    }
+    // The reclaimable advisory is lowest-signal: it fills whatever rows remain
+    // between the segments above and the closing rule, wrapping across them. So
+    // it grows the band when there's room and is the first to shed when there
+    // isn't — it never wraps into the list, only into rows the band reserved.
+    if (reclaim) |rc| {
+        const base: u16 = 1 + @as(u16, @intFromBool(show_hist)) + @as(u16, @intFromBool(show_fixable));
+        const capacity: u16 = (rect.height -| 2) -| base; // rows between the rules left for it
+        if (capacity > 0) used += paintReclaim(f, rect, rect.row + used, rc, capacity);
     }
 
     paintRule(f, rect, rect.row + used);
@@ -334,13 +510,19 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     const filter = s.chrome.filter.slice();
     const counts = tally(s.items, filter);
 
+    const reclaim = reclaimFrom(s.stats);
+
     var content: tab.Rect = r;
     // The band rides above the list: reserve its rows from the top before the
     // detail pane claims from the bottom, so the list gets height − band − detail.
     if (counts.total() > 0) {
-        const budget = bandCap(content.height);
+        // A present advisory lets the band grow past full by however many rows it
+        // wraps to at this width; bandCap still caps it so the list keeps a row.
+        const adv_rows = if (reclaim) |rc| reclaimRowCount(rc, content.width) else 0;
+        const full = band_full_height + adv_rows;
+        const budget = bandCap(content.height, full);
         if (budget > 0) {
-            const used = renderBand(f, counts, .{ .row = content.row, .col = content.col, .width = content.width, .height = budget });
+            const used = renderBand(f, counts, reclaim, .{ .row = content.row, .col = content.col, .width = content.width, .height = budget });
             content.row += used;
             content.height -= used;
         }
@@ -784,6 +966,145 @@ test "the band paints above the findings list" {
     const verdict_at = std.mem.indexOf(u8, out, "unhealthy").?;
     const first_title_at = std.mem.indexOf(u8, out, "SQLite integrity").?;
     try testing.expect(verdict_at < first_title_at); // banner precedes the list
+}
+
+// ─── reclaimable advisory ─────────────────────────────────────────────
+
+test "humanBytes matches the CLI's formatBytes shape at the unit boundaries" {
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("0.0 B", humanBytes(0, &buf));
+    try testing.expectEqualStrings("1023.0 B", humanBytes(1023, &buf));
+    try testing.expectEqualStrings("1.0 KB", humanBytes(1024, &buf));
+    try testing.expectEqualStrings("1.5 KB", humanBytes(1536, &buf));
+    try testing.expectEqualStrings("1.0 MB", humanBytes(1024 * 1024, &buf));
+    try testing.expectEqualStrings("1.0 GB", humanBytes(1024 * 1024 * 1024, &buf));
+}
+
+test "the reclaimable line names both figures, the retained count, and the purge guidance" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    // 1.2 GB cask history over 4 retained versions · 88 MB tap cache.
+    const s: State = .{ .items = &sample, .stats = .{
+        .cask_bytes = 1288490189,
+        .tap_cache_bytes = 88 * 1024 * 1024,
+        .retained_versions = 4,
+    } };
+    // A wide pane so the full phrasing fits (≈88 cols); narrow collapse is its own test.
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "1.2 GB cask history") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "(4 old versions)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "88.0 MB tap cache") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "→ mt purge --cache") != null);
+    // The advisory rides in the band, above the findings list.
+    const reclaim_at = std.mem.indexOf(u8, out, "Reclaimable:").?;
+    const first_title_at = std.mem.indexOf(u8, out, "SQLite integrity").?;
+    try testing.expect(reclaim_at < first_title_at);
+}
+
+test "the reclaimable advisory wraps across rows on a narrow pane rather than truncating its command" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample, .stats = .{
+        .cask_bytes = 1288490189,
+        .tap_cache_bytes = 88 * 1024 * 1024,
+        .retained_versions = 4,
+    } };
+    // 40 cols can't fit the ~88-col advisory on one line: a single truncated row
+    // would drop the command, so its presence proves the line wrapped.
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 40, .height = 24 });
+    const out = f.slice();
+    // Head ("Reclaimable:") and tail ("--cache") both present: they cannot share a
+    // single 40-col row in the ~88-col advisory, so the line must have wrapped.
+    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "purge") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "--cache") != null);
+    // The (now taller) band still leaves the findings list as the floor.
+    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null);
+}
+
+test "a cask-only store names the cask figure and omits the tap-cache segment" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample, .stats = .{ .cask_bytes = 2048, .retained_versions = 2 } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "2.0 KB cask history") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "(2 old versions)") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "tap cache") == null); // nothing to reclaim there
+}
+
+test "a cache-only store names the tap-cache figure and omits the cask segment" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample, .stats = .{ .tap_cache_bytes = 512 } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "512.0 B tap cache") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "cask history") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "→ mt purge --cache") != null);
+}
+
+test "zero reclaimable bytes suppress the advisory, and the all-clear state stays clean" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    // all_ok with default (zero) stats: nothing to reclaim on a clean store.
+    const s: State = .{ .items = &all_ok };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 20 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") == null); // no nagging row
+    try testing.expect(std.mem.indexOf(u8, out, "All clear") != null); // all-clear reads cleanly
+}
+
+test "the band suppresses the advisory at height 1, leaving only the list" {
+    var buf: [1024]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample, .stats = .{ .cask_bytes = 2048, .retained_versions = 2 } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 1 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "Reclaimable:") == null); // band dropped whole
+    try testing.expect(std.mem.indexOf(u8, out, "SQLite integrity") != null); // a list row survives
+}
+
+test "with both figures present the band shows a two-tone reclaimable ratio bar" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample, .stats = .{ .cask_bytes = 3 * 1024, .tap_cache_bytes = 1024 } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 24 });
+    const out = f.slice();
+    // The ratio bar is the only band element painted in the secondary role.
+    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.secondary)) != null);
+    try testing.expect(std.mem.indexOf(u8, out, "█") != null);
+}
+
+test "the ratio bar survives pathologically large byte figures without overflowing" {
+    var buf: [8192]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    // A garbage/hostile doctor payload could carry near-u64-max byte counts; the
+    // share maths must not overflow when scaling them to the bar's cell budget.
+    const s: State = .{ .items = &sample, .stats = .{
+        .cask_bytes = std.math.maxInt(u64),
+        .tap_cache_bytes = std.math.maxInt(u64) - 1,
+    } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 24 }); // must not trap
+    try testing.expect(std.mem.indexOf(u8, f.slice(), color.roleCode(.secondary)) != null);
+}
+
+test "a single reclaimable figure shows no ratio bar — there is nothing to compare" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &all_ok, .stats = .{ .cask_bytes = 2048, .retained_versions = 1 } };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 100, .height = 20 });
+    // Cask-only: no second value, so no bar → the secondary role appears nowhere.
+    try testing.expect(std.mem.indexOf(u8, f.slice(), color.roleCode(.secondary)) == null);
+}
+
+test "the purge guidance is inert: f on a non-fixable selection stays a no-op with stats present" {
+    var s: State = .{ .items = &sample, .stats = .{ .cask_bytes = 2048, .tap_cache_bytes = 512 } };
+    s.chrome.view.selected = 0; // sqlite_integrity — not fixable
+    step(&s, ch('f'));
+    try testing.expectEqual(Request.none, s.request); // the advisory added no action
 }
 
 test "conforms to the tab contract" {
