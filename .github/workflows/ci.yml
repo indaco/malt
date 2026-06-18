@@ -34,11 +34,21 @@ jobs:
         with:
           version: 0.16.0
 
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
       - name: Build (Debug)
-        run: zig build
+        run: just build
+
+      # Drift guard: the committed man page is generated from the binary's
+      # own --help, so a --help edit that skips `just man-gen` fails here.
+      - name: Man page drift check
+        run: just man-check
 
       - name: Build (ReleaseSafe)
-        run: zig build -Doptimize=ReleaseSafe
+        run: just build-release
 
       - name: Run unit tests
         run: zig build test --summary all
@@ -65,7 +75,7 @@ jobs:
         run: ./scripts/smokes/smoke_security.sh
 
       - name: Build universal binary
-        run: zig build universal -Doptimize=ReleaseSafe
+        run: just build-universal
 
   lint:
     name: Lint
