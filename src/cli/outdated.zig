@@ -30,7 +30,7 @@ pub const loadCaskRows = rows_mod.loadCaskRows;
 pub const freeKegRows = rows_mod.freeKegRows;
 pub const tapExists = rows_mod.tapExists;
 const snap_mod = @import("outdated/snapshot.zig");
-pub const snapshot_default_max_age_hours = snap_mod.snapshot_default_max_age_hours;
+pub const snapshot_default_max_age_minutes = snap_mod.snapshot_default_max_age_minutes;
 pub const snapshot_max_age_env = snap_mod.snapshot_max_age_env;
 pub const snapshot_version = snap_mod.snapshot_version;
 pub const snapshot_file = snap_mod.snapshot_file;
@@ -39,7 +39,7 @@ pub const Snapshot = snap_mod.Snapshot;
 pub const OwnedSnapshot = snap_mod.OwnedSnapshot;
 pub const RenderError = snap_mod.RenderError;
 pub const SnapshotParseError = snap_mod.SnapshotParseError;
-pub const parseMaxAgeHoursEnv = snap_mod.parseMaxAgeHoursEnv;
+pub const parseMaxAgeMinutesEnv = snap_mod.parseMaxAgeMinutesEnv;
 pub const isStale = snap_mod.isStale;
 pub const renderSnapshot = snap_mod.renderSnapshot;
 pub const parseSnapshot = snap_mod.parseSnapshot;
@@ -161,9 +161,10 @@ pub const EmitPlan = enum {
 pub fn planEmit(
     args: []const []const u8,
     snap_present: bool,
+    offline: bool,
     snap_generated_at_ms: i64,
     now_ms: i64,
-    max_age_hours: u64,
+    max_age_minutes: u64,
 ) EmitPlan {
     for (args) |a| {
         if (std.mem.eql(u8, a, "--refresh")) return .recompute;
@@ -174,8 +175,11 @@ pub fn planEmit(
         if (std.mem.eql(u8, a, "--tap") or std.mem.startsWith(u8, a, "--tap=")) return .recompute;
     }
     if (!snap_present) return .recompute;
-    if (isStale(snap_generated_at_ms, now_ms, max_age_hours)) return .use_snapshot_stale;
-    return .use_snapshot_fresh;
+    if (!isStale(snap_generated_at_ms, now_ms, max_age_minutes)) return .use_snapshot_fresh;
+    // Past the TTL: refresh live so `mt outdated` tracks the same ~5-minute
+    // freshness as `mt upgrade`. Offline can't refresh, so serve the best data
+    // we have — a stale-but-complete cached read beats silently under-reporting.
+    return if (offline) .use_snapshot_stale else .recompute;
 }
 
 /// Trim ASCII whitespace from a `--tap` label; return null when the
@@ -339,41 +343,54 @@ test "intersectWithDb returns empty for empty inputs" {
 
 test "planEmit picks a fresh snapshot when one exists and age is below threshold" {
     const args = [_][]const u8{};
-    try std.testing.expectEqual(EmitPlan.use_snapshot_fresh, planEmit(&args, true, 0, 0, 24));
+    try std.testing.expectEqual(EmitPlan.use_snapshot_fresh, planEmit(&args, true, false, 0, 0, 24));
 }
 
-test "planEmit warns on stale snapshots" {
-    const hour_ms: i64 = 60 * 60 * 1000;
+test "planEmit recomputes a stale snapshot when online" {
+    // The TTL is a refresh trigger, not just a warning: past it, `mt outdated`
+    // refreshes live so it can't disagree with the always-live `mt upgrade`.
+    const minute_ms: i64 = 60 * 1000;
+    const args = [_][]const u8{};
+    try std.testing.expectEqual(
+        EmitPlan.recompute,
+        planEmit(&args, true, false, 0, 25 * minute_ms, 24),
+    );
+}
+
+test "planEmit serves a stale snapshot offline rather than under-reporting" {
+    // Offline can't refresh; a complete cached read beats a recompute that
+    // would silently drop every formula it can't fetch.
+    const minute_ms: i64 = 60 * 1000;
     const args = [_][]const u8{};
     try std.testing.expectEqual(
         EmitPlan.use_snapshot_stale,
-        planEmit(&args, true, 0, 25 * hour_ms, 24),
+        planEmit(&args, true, true, 0, 25 * minute_ms, 24),
     );
 }
 
 test "planEmit falls back to recompute when no snapshot is present" {
     const args = [_][]const u8{};
-    try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, false, 0, 0, 24));
+    try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, false, false, 0, 0, 24));
 }
 
 test "planEmit recomputes on --refresh even when snapshot is fresh" {
     const args = [_][]const u8{"--refresh"};
-    try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, 0, 0, 24));
+    try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, false, 0, 0, 24));
 }
 
 test "planEmit recomputes when --pinned-only narrows the scope" {
     const args = [_][]const u8{"--pinned-only"};
-    try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, 0, 0, 24));
+    try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, false, 0, 0, 24));
 }
 
 test "planEmit recomputes when --tap narrows the scope (space form)" {
     const args = [_][]const u8{ "--tap", "user/repo" };
-    try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, 0, 0, 24));
+    try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, false, 0, 0, 24));
 }
 
 test "planEmit recomputes when --tap= narrows the scope (equals form)" {
     const args = [_][]const u8{"--tap=user/repo"};
-    try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, 0, 0, 24));
+    try std.testing.expectEqual(EmitPlan.recompute, planEmit(&args, true, false, 0, 0, 24));
 }
 
 test "normalizeTapLabel returns null for empty and whitespace-only labels" {
@@ -482,25 +499,26 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         }
     }
 
-    const max_age_hours = parseMaxAgeHoursEnv(std.process.Environ.getPosix(ctx.environ, snapshot_max_age_env)) orelse
-        snapshot_default_max_age_hours;
+    const max_age_minutes = parseMaxAgeMinutesEnv(std.process.Environ.getPosix(ctx.environ, snapshot_max_age_env)) orelse
+        snapshot_default_max_age_minutes;
     const snap_opt = readSnapshot(ctx.io, allocator, cache_dir);
     defer if (snap_opt) |s| freeSnapshot(allocator, s);
 
     const plan = planEmit(
         args,
         snap_opt != null,
+        ctx.offline,
         if (snap_opt) |s| s.generated_at_ms else 0,
         std.Io.Clock.real.now(ctx.io).toMilliseconds(),
-        max_age_hours,
+        max_age_minutes,
     );
 
     switch (plan) {
         .use_snapshot_fresh, .use_snapshot_stale => {
             if (plan == .use_snapshot_stale) {
                 output.warn(
-                    "Outdated snapshot is older than {d}h; run `mt update --check` to refresh.",
-                    .{max_age_hours},
+                    "Offline: serving a cached outdated snapshot older than {d}m; reconnect and re-run to refresh.",
+                    .{max_age_minutes},
                 );
             }
             try emitFromSnapshot(allocator, &db, snap_opt.?, stdout, json_mode, .{

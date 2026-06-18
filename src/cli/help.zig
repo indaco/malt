@@ -188,8 +188,8 @@ const outdated_help =
     \\  --quiet, -q    Suppress status messages
     \\
     \\Reads the cached snapshot at {cache}/outdated.json when fresh
-    \\(<= MALT_OUTDATED_MAX_AGE hours, default 24); falls back to a live
-    \\recompute on miss or --refresh.
+    \\(<= MALT_OUTDATED_MAX_AGE minutes, default 5); past that it recomputes
+    \\live (or serves the cached read offline). --refresh always recomputes.
     \\
 ;
 

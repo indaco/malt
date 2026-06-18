@@ -10,12 +10,13 @@ const std = @import("std");
 const atomic = @import("../../fs/atomic.zig");
 const output = @import("../../ui/output.zig");
 
-/// Default max age (hours) for the cached `outdated.json` snapshot. Picked
-/// to match the analysis doc: "shell-prompt integrations want instant
-/// startup; ~daily refresh is plenty for security awareness".
-pub const snapshot_default_max_age_hours: u64 = 24;
+/// Default max age (minutes) for the cached `outdated.json` snapshot. Matched
+/// to the per-formula HTTP cache TTL (api.zig `cache_ttl_secs = 300`): the
+/// snapshot is built from that cache, so a longer window would let `mt outdated`
+/// disagree with the always-live `mt upgrade`.
+pub const snapshot_default_max_age_minutes: u64 = 5;
 
-/// Env var override for `snapshot_default_max_age_hours`. Same lenient
+/// Env var override for `snapshot_default_max_age_minutes`. Same lenient
 /// parsing rules as `outdated_workers_env`.
 pub const snapshot_max_age_env = "MALT_OUTDATED_MAX_AGE";
 
@@ -53,11 +54,11 @@ pub const OwnedSnapshot = struct {
     casks: []OutdatedEntry,
 };
 
-/// Resolve the snapshot max-age threshold (in hours) from an env value.
+/// Resolve the snapshot max-age threshold (in minutes) from an env value.
 /// Returns `null` for unset / empty / non-numeric so the caller can apply
-/// `snapshot_default_max_age_hours`; preserves an explicit `"0"` as `0`
+/// `snapshot_default_max_age_minutes`; preserves an explicit `"0"` as `0`
 /// so users who set the env to 0 actually get "always stale".
-pub fn parseMaxAgeHoursEnv(s: ?[]const u8) ?u64 {
+pub fn parseMaxAgeMinutesEnv(s: ?[]const u8) ?u64 {
     const raw = s orelse return null;
     if (raw.len == 0) return null;
     return std.fmt.parseInt(u64, raw, 10) catch null;
@@ -66,13 +67,13 @@ pub fn parseMaxAgeHoursEnv(s: ?[]const u8) ?u64 {
 /// True when `now_ms - generated_at_ms` exceeds the threshold. Future-
 /// dated snapshots (clock skew) are treated as fresh — better than
 /// surprising the user with a "stale" warning right after `mt update`.
-pub fn isStale(generated_at_ms: i64, now_ms: i64, max_age_hours: u64) bool {
+pub fn isStale(generated_at_ms: i64, now_ms: i64, max_age_minutes: u64) bool {
     if (now_ms <= generated_at_ms) return false;
     const age_ms: u64 = @intCast(now_ms - generated_at_ms);
     // Saturating multiply: a pathological env value (e.g. u64 max) folds
     // to "never stale" rather than wrapping to 0 and reporting fresh
     // snapshots as stale.
-    const max_ms = std.math.mul(u64, max_age_hours, 60 * 60 * 1000) catch std.math.maxInt(u64);
+    const max_ms = std.math.mul(u64, max_age_minutes, 60 * 1000) catch std.math.maxInt(u64);
     return age_ms > max_ms;
 }
 
@@ -262,41 +263,41 @@ pub fn freeSnapshot(allocator: std.mem.Allocator, snap: OwnedSnapshot) void {
     freeEntrySlice(allocator, snap.casks);
 }
 
-test "parseMaxAgeHoursEnv yields null for null/empty/garbage so callers default" {
-    try std.testing.expectEqual(@as(?u64, null), parseMaxAgeHoursEnv(null));
-    try std.testing.expectEqual(@as(?u64, null), parseMaxAgeHoursEnv(""));
-    try std.testing.expectEqual(@as(?u64, null), parseMaxAgeHoursEnv("nope"));
-    try std.testing.expectEqual(@as(?u64, null), parseMaxAgeHoursEnv("-3"));
+test "parseMaxAgeMinutesEnv yields null for null/empty/garbage so callers default" {
+    try std.testing.expectEqual(@as(?u64, null), parseMaxAgeMinutesEnv(null));
+    try std.testing.expectEqual(@as(?u64, null), parseMaxAgeMinutesEnv(""));
+    try std.testing.expectEqual(@as(?u64, null), parseMaxAgeMinutesEnv("nope"));
+    try std.testing.expectEqual(@as(?u64, null), parseMaxAgeMinutesEnv("-3"));
 }
 
-test "parseMaxAgeHoursEnv preserves explicit 0 as 'always stale'" {
+test "parseMaxAgeMinutesEnv preserves explicit 0 as 'always stale'" {
     // The user reaches for 0 to opt out of caching; treating it as
     // 'fall back to default' would silently re-enable the snapshot.
-    try std.testing.expectEqual(@as(?u64, 0), parseMaxAgeHoursEnv("0"));
+    try std.testing.expectEqual(@as(?u64, 0), parseMaxAgeMinutesEnv("0"));
 }
 
-test "parseMaxAgeHoursEnv parses positive integers verbatim" {
-    try std.testing.expectEqual(@as(?u64, 1), parseMaxAgeHoursEnv("1"));
-    try std.testing.expectEqual(@as(?u64, 12), parseMaxAgeHoursEnv("12"));
-    try std.testing.expectEqual(@as(?u64, 168), parseMaxAgeHoursEnv("168"));
+test "parseMaxAgeMinutesEnv parses positive integers verbatim" {
+    try std.testing.expectEqual(@as(?u64, 1), parseMaxAgeMinutesEnv("1"));
+    try std.testing.expectEqual(@as(?u64, 12), parseMaxAgeMinutesEnv("12"));
+    try std.testing.expectEqual(@as(?u64, 168), parseMaxAgeMinutesEnv("168"));
 }
 
 test "isStale flips at the max-age boundary in milliseconds" {
-    const hour_ms: i64 = 60 * 60 * 1000;
+    const minute_ms: i64 = 60 * 1000;
     // Same instant -> fresh.
     try std.testing.expect(!isStale(0, 0, 24));
     // Exactly at the boundary -> still fresh.
-    try std.testing.expect(!isStale(0, 24 * hour_ms, 24));
+    try std.testing.expect(!isStale(0, 24 * minute_ms, 24));
     // One ms past the boundary -> stale.
-    try std.testing.expect(isStale(0, 24 * hour_ms + 1, 24));
+    try std.testing.expect(isStale(0, 24 * minute_ms + 1, 24));
     // Future-dated snapshot (clock skew) -> treated as fresh.
-    try std.testing.expect(!isStale(100 * hour_ms, 0, 24));
+    try std.testing.expect(!isStale(100 * minute_ms, 0, 24));
     // Custom threshold honoured.
-    try std.testing.expect(isStale(0, 2 * hour_ms, 1));
-    try std.testing.expect(!isStale(0, 1 * hour_ms, 2));
+    try std.testing.expect(isStale(0, 2 * minute_ms, 1));
+    try std.testing.expect(!isStale(0, 1 * minute_ms, 2));
 }
 
-test "isStale with max_age_hours == 0 marks any non-zero age as stale" {
+test "isStale with max_age_minutes == 0 marks any non-zero age as stale" {
     try std.testing.expect(!isStale(0, 0, 0));
     try std.testing.expect(isStale(0, 1, 0));
 }
@@ -305,6 +306,15 @@ test "isStale folds a u64-overflowing threshold to 'never stale'" {
     // A pathological MALT_OUTDATED_MAX_AGE shouldn't wrap to 0 ms and
     // report otherwise-fresh snapshots as stale.
     try std.testing.expect(!isStale(0, std.math.maxInt(i64), std.math.maxInt(u64)));
+}
+
+test "default snapshot max age tracks the api http cache (~5 minutes)" {
+    // The snapshot must not outlive the per-formula HTTP cache it is built from
+    // (api.zig cache_ttl_secs = 300s). A longer window lets `mt outdated` report
+    // an upgrade the always-live `mt upgrade` already sees — or hide one.
+    const min_ms: i64 = 60 * 1000;
+    try std.testing.expect(!isStale(0, 5 * min_ms, snapshot_default_max_age_minutes));
+    try std.testing.expect(isStale(0, 5 * min_ms + 1, snapshot_default_max_age_minutes));
 }
 
 test "renderSnapshot emits the canonical JSON shape" {
