@@ -439,6 +439,25 @@ record-demo:
 record-themes:
     ./scripts/record-themes.sh
 
+# Regenerate the committed man page from the built binary's --help.
+[group('docs')]
+man-gen: build
+    ./scripts/gen-man.sh dist/man/malt.1
+
+# Drift guard: fail if dist/man/malt.1 is stale vs the binary's --help.
+# Reuses the already-built binary (CI runs it right after the build step).
+[group('docs')]
+man-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp=$(mktemp)
+    trap 'rm -f "$tmp"' EXIT
+    ./scripts/gen-man.sh "$tmp"
+    if ! diff -u dist/man/malt.1 "$tmp"; then
+      echo "error: dist/man/malt.1 is out of date — run 'just man-gen'" >&2
+      exit 1
+    fi
+
 # Regenerate docs/contrast-previews/*.png for the four palette cells
 # (dark|light) × (truecolor|basic). Internal: only run after editing
 # the palette cells in src/ui/color.zig or the sample text in
