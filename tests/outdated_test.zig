@@ -1090,7 +1090,7 @@ test "outdated execute drops snapshot entries whose keg was uninstalled" {
     try testing.expectEqualStrings("alpha", filtered[0].name);
 }
 
-test "outdated execute on a stale snapshot emits the cached entries (used as proof of read)" {
+test "outdated execute serves a stale snapshot offline rather than recomputing" {
     var env = try UpdateEnv.init("outdated_stale_uses_cache");
     defer env.deinit();
 
@@ -1100,7 +1100,9 @@ test "outdated execute on a stale snapshot emits the cached entries (used as pro
         try insertKegV1(&db, "alpha");
     }
 
-    // 30-day-old snapshot — well past the 24h default threshold.
+    // 30-day-old snapshot — well past the default threshold. Online this would
+    // recompute; offline we can't refresh, so the cached read is served and the
+    // snapshot is left intact (a complete stale read beats under-reporting).
     const month_ms: i64 = 30 * 24 * 60 * 60 * 1000;
     const formulas = [_]outdated_mod.OutdatedEntry{
         .{ .name = @constCast("alpha"), .installed = @constCast("1.0"), .latest = @constCast("3.0") },
@@ -1113,13 +1115,12 @@ test "outdated execute on a stale snapshot emits the cached entries (used as pro
         .casks = &[_]outdated_mod.OutdatedEntry{},
     });
 
-    // Stale snapshot: emits entries (so shell prompts stay instant), warning
-    // on stderr — but should NOT overwrite the snapshot. We verify the
-    // post-execute snapshot still contains "alpha->3.0" rather than a fresh
-    // empty recompute.
+    // Offline + stale: emits entries with a staleness warning on stderr, and
+    // must NOT overwrite the snapshot. We verify the post-execute snapshot
+    // still contains "alpha->3.0" rather than a fresh empty recompute.
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
-    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty, .offline = true };
     try outdated_mod.execute(&ctx, testing.allocator, &.{});
 
     const after_opt = outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, env.cache_path);
