@@ -61,6 +61,8 @@ pub const max_program_args: usize = 64;
 pub const max_arg_len: usize = 4096;
 /// Upper bound on an interval schedule, in seconds (shared with the parser).
 pub const max_interval_secs = types.max_interval_secs;
+/// Cap on calendar entries (shared with the cron parser).
+pub const max_calendar_entries = types.max_calendar_entries;
 
 /// The Homebrew API renders every service path with this literal token rather
 /// than the resolved prefix (`$HOMEBREW_PREFIX/opt/redis/bin/redis-server`).
@@ -120,8 +122,13 @@ pub fn validate(
         .immediate => {},
         .interval => |secs| if (secs == 0 or secs > max_interval_secs)
             return ValidationError.BadSchedule,
-        // No rules yet; the parser never builds this and render rejects it.
-        .calendar => {},
+        // Defence in depth: reject an empty or over-cap entry list, or any
+        // field out of range, even though the cron parser already bounds these.
+        .calendar => |entries| {
+            if (entries.len == 0 or entries.len > max_calendar_entries)
+                return ValidationError.BadSchedule;
+            for (entries) |ci| if (!calInRange(ci)) return ValidationError.BadSchedule;
+        },
     }
 
     for (spec.program_args) |a| try checkString(a);
@@ -159,6 +166,17 @@ pub fn validate(
         dsl_sandbox.validatePath(p, cellar_path, malt_prefix) catch
             return ValidationError.PathEscape;
     }
+}
+
+/// True when every set field of a CalendarInterval sits in launchd's range.
+/// Weekday allows 0–7 (both 0 and 7 are Sunday).
+fn calInRange(ci: CalendarInterval) bool {
+    if (ci.minute) |m| if (m > 59) return false;
+    if (ci.hour) |h| if (h > 23) return false;
+    if (ci.day) |d| if (d < 1 or d > 31) return false;
+    if (ci.weekday) |w| if (w > 7) return false;
+    if (ci.month) |mo| if (mo < 1 or mo > 12) return false;
+    return true;
 }
 
 fn checkString(s: []const u8) ValidationError!void {
@@ -236,11 +254,39 @@ pub fn render(spec: ServiceSpec, writer: *std.Io.Writer) !void {
             try writer.print("{d}", .{secs});
             try writer.writeAll("</integer>\n");
         },
-        // Reserved for cron support; the parser never builds this yet.
-        .calendar => unreachable,
+        .calendar => |entries| {
+            try writer.writeAll("    <key>RunAtLoad</key>\n    <false/>\n");
+            try writer.writeAll("    <key>StartCalendarInterval</key>\n");
+            // launchd accepts a bare dict for one entry; a list/step/range
+            // expansion becomes an array of dicts it ORs together.
+            if (entries.len == 1) {
+                try writeCalDict(writer, entries[0], "    ");
+            } else {
+                try writer.writeAll("    <array>\n");
+                for (entries) |ci| try writeCalDict(writer, ci, "        ");
+                try writer.writeAll("    </array>\n");
+            }
+        },
     }
 
     try writer.writeAll("</dict>\n</plist>\n");
+}
+
+/// Emit one launchd `CalendarInterval` as a `<dict>` indented by `indent`.
+/// Only set fields appear; values are validated integers, never formula text.
+fn writeCalDict(writer: *std.Io.Writer, ci: CalendarInterval, indent: []const u8) !void {
+    try writer.print("{s}<dict>\n", .{indent});
+    try writeCalField(writer, indent, "Minute", ci.minute);
+    try writeCalField(writer, indent, "Hour", ci.hour);
+    try writeCalField(writer, indent, "Day", ci.day);
+    try writeCalField(writer, indent, "Weekday", ci.weekday);
+    try writeCalField(writer, indent, "Month", ci.month);
+    try writer.print("{s}</dict>\n", .{indent});
+}
+
+fn writeCalField(writer: *std.Io.Writer, indent: []const u8, key: []const u8, value: ?u8) !void {
+    const v = value orelse return;
+    try writer.print("{s}    <key>{s}</key>\n{s}    <integer>{d}</integer>\n", .{ indent, key, indent, v });
 }
 
 fn writeEscaped(writer: *std.Io.Writer, s: []const u8) !void {

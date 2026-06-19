@@ -6,15 +6,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const service_types = @import("services/types.zig");
+const cron = @import("services/cron.zig");
 pub const Schedule = service_types.Schedule;
 
 pub const FormulaError = error{
     InvalidJson,
     MissingField,
     NoBottleAvailable,
-    /// `run_type :cron` — malt can't manage calendar schedules yet, so reject
-    /// loudly rather than silently installing a run-once service.
-    UnsupportedRunType,
     /// `run_type` is neither immediate, interval, nor cron.
     UnknownRunType,
     /// `run_type :interval` with a missing, non-numeric, or out-of-range
@@ -143,12 +141,17 @@ fn getInt(obj: std.json.ObjectMap, key: []const u8) i64 {
 
 /// Map a service block's `run_type` to a `Schedule`. Absent/`"immediate"`
 /// keeps today's run-at-load behaviour; `"interval"` requires a numeric,
-/// in-range `interval`; `"cron"` and anything else are rejected loudly so a
-/// mis-scheduled service never materialises silently.
-fn parseSchedule(so: std.json.ObjectMap) FormulaError!Schedule {
+/// in-range `interval`; `"cron"` parses its expression into calendar entries;
+/// anything else is rejected loudly so a mis-scheduled service never
+/// materialises silently. Calendar entries are allocated in `arena`.
+fn parseSchedule(arena: std.mem.Allocator, so: std.json.ObjectMap) !Schedule {
     const run_type = getString(so, "run_type") orelse return .immediate;
     if (std.mem.eql(u8, run_type, "immediate")) return .immediate;
-    if (std.mem.eql(u8, run_type, "cron")) return FormulaError.UnsupportedRunType;
+    if (std.mem.eql(u8, run_type, "cron")) {
+        // A missing `cron` string is a hard error, never a silent fallback.
+        const expr = getString(so, "cron") orelse return cron.CronError.CronMalformed;
+        return .{ .calendar = try cron.parseCron(arena, expr) };
+    }
     if (!std.mem.eql(u8, run_type, "interval")) return FormulaError.UnknownRunType;
 
     const iv = so.get("interval") orelse return FormulaError.InvalidInterval;
@@ -264,7 +267,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
                             (k != .bool or k.bool)
                         else
                             true,
-                        .schedule = try parseSchedule(so),
+                        .schedule = try parseSchedule(arena, so),
                     };
                 };
             }

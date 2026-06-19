@@ -128,6 +128,98 @@ test "render interval schedule emits StartInterval and RunAtLoad false" {
     try testing.expectEqualStrings(expected, aw.written());
 }
 
+test "render calendar schedule with one entry emits a StartCalendarInterval dict" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    const spec: plist.ServiceSpec = .{
+        .label = "com.malt.report",
+        .program_args = &.{"/opt/malt/opt/report/bin/report"},
+        .stdout_path = "/opt/malt/var/log/report.out",
+        .stderr_path = "/opt/malt/var/log/report.err",
+        .schedule = .{ .calendar = &.{.{ .minute = 30, .hour = 4 }} },
+    };
+    try plist.render(spec, &aw.writer);
+
+    const expected =
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        \\<plist version="1.0">
+        \\<dict>
+        \\    <key>Label</key>
+        \\    <string>com.malt.report</string>
+        \\    <key>ProgramArguments</key>
+        \\    <array>
+        \\        <string>/opt/malt/opt/report/bin/report</string>
+        \\    </array>
+        \\    <key>StandardOutPath</key>
+        \\    <string>/opt/malt/var/log/report.out</string>
+        \\    <key>StandardErrorPath</key>
+        \\    <string>/opt/malt/var/log/report.err</string>
+        \\    <key>RunAtLoad</key>
+        \\    <false/>
+        \\    <key>StartCalendarInterval</key>
+        \\    <dict>
+        \\        <key>Minute</key>
+        \\        <integer>30</integer>
+        \\        <key>Hour</key>
+        \\        <integer>4</integer>
+        \\    </dict>
+        \\</dict>
+        \\</plist>
+        \\
+    ;
+    try testing.expectEqualStrings(expected, aw.written());
+}
+
+test "render calendar schedule with many entries emits a StartCalendarInterval array" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    const spec: plist.ServiceSpec = .{
+        .label = "com.malt.report",
+        .program_args = &.{"/opt/malt/opt/report/bin/report"},
+        .stdout_path = "/opt/malt/var/log/report.out",
+        .stderr_path = "/opt/malt/var/log/report.err",
+        .schedule = .{ .calendar = &.{ .{ .minute = 0 }, .{ .minute = 30 } } },
+    };
+    try plist.render(spec, &aw.writer);
+
+    const expected =
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        \\<plist version="1.0">
+        \\<dict>
+        \\    <key>Label</key>
+        \\    <string>com.malt.report</string>
+        \\    <key>ProgramArguments</key>
+        \\    <array>
+        \\        <string>/opt/malt/opt/report/bin/report</string>
+        \\    </array>
+        \\    <key>StandardOutPath</key>
+        \\    <string>/opt/malt/var/log/report.out</string>
+        \\    <key>StandardErrorPath</key>
+        \\    <string>/opt/malt/var/log/report.err</string>
+        \\    <key>RunAtLoad</key>
+        \\    <false/>
+        \\    <key>StartCalendarInterval</key>
+        \\    <array>
+        \\        <dict>
+        \\            <key>Minute</key>
+        \\            <integer>0</integer>
+        \\        </dict>
+        \\        <dict>
+        \\            <key>Minute</key>
+        \\            <integer>30</integer>
+        \\        </dict>
+        \\    </array>
+        \\</dict>
+        \\</plist>
+        \\
+    ;
+    try testing.expectEqualStrings(expected, aw.written());
+}
+
 test "keep_alive false omits KeepAlive dict" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();

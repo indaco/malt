@@ -204,3 +204,22 @@ test "validate: interval above the cap rejected" {
 test "validate: interval at the cap passes" {
     try validateWithSchedule(.{ .interval = plist.max_interval_secs });
 }
+
+test "validate: in-range calendar entry passes" {
+    try validateWithSchedule(.{ .calendar = &.{.{ .minute = 30, .hour = 4 }} });
+}
+
+test "validate: empty calendar rejected" {
+    try testing.expectError(error.BadSchedule, validateWithSchedule(.{ .calendar = &.{} }));
+}
+
+test "validate: calendar above the entry cap rejected" {
+    const too_many = [_]plist.CalendarInterval{.{}} ** (plist.max_calendar_entries + 1);
+    try testing.expectError(error.BadSchedule, validateWithSchedule(.{ .calendar = &too_many }));
+}
+
+test "validate: out-of-range calendar field rejected" {
+    // Defence in depth: even a spec the cron parser never builds is caught.
+    try testing.expectError(error.BadSchedule, validateWithSchedule(.{ .calendar = &.{.{ .minute = 60 }} }));
+    try testing.expectError(error.BadSchedule, validateWithSchedule(.{ .calendar = &.{.{ .weekday = 8 }} }));
+}

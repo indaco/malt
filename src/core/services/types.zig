@@ -27,3 +27,9 @@ pub const Schedule = union(enum) {
 /// real periodic service while keeping the value a small bounded integer —
 /// the same value gates both the parser and `plist.validate`.
 pub const max_interval_secs: u32 = 365 * 24 * 60 * 60;
+
+/// Cap on enumerated `StartCalendarInterval` entries. A pathological cron
+/// expansion (e.g. `*/1` across two fields) would otherwise produce a huge
+/// plist; 60 covers every real formula ("every 5 minutes" is 12 entries)
+/// while staying small. Gates both the cron parser and `plist.validate`.
+pub const max_calendar_entries: usize = 60;
