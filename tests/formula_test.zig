@@ -268,6 +268,91 @@ test "parse formula with realistic Homebrew API service shape" {
     try testing.expect(svc.keep_alive);
 }
 
+// Wrap a `service` block in an otherwise-minimal formula and parse it, so the
+// schedule tests vary only the part under test.
+fn parseWithService(alloc: std.mem.Allocator, service_block: []const u8) !formula_mod.Formula {
+    const json = try std.fmt.allocPrint(alloc,
+        \\{{
+        \\  "name": "svc", "full_name": "svc", "tap": "homebrew/core",
+        \\  "desc": "", "homepage": "", "revision": 0, "keg_only": false,
+        \\  "post_install_defined": false, "versions": {{ "stable": "1.0" }},
+        \\  "dependencies": [], "oldnames": [], "bottle": {{}},
+        \\  "service": {{ "run": ["/opt/malt/opt/svc/bin/svc"]{s} }}
+        \\}}
+    , .{service_block});
+    return formula_mod.parseFormula(alloc, json);
+}
+
+test "parse run_type interval builds an interval schedule" {
+    var arena = testArena();
+    defer arena.deinit();
+    var formula = try parseWithService(arena.allocator(), ", \"run_type\": \"interval\", \"interval\": 300");
+    defer formula.deinit();
+    const svc = formula.service orelse return error.TestExpectedSomething;
+    try testing.expectEqual(formula_mod.Schedule{ .interval = 300 }, svc.schedule);
+}
+
+test "parse run_type immediate yields immediate schedule" {
+    var arena = testArena();
+    defer arena.deinit();
+    var formula = try parseWithService(arena.allocator(), ", \"run_type\": \"immediate\"");
+    defer formula.deinit();
+    const svc = formula.service orelse return error.TestExpectedSomething;
+    try testing.expectEqual(formula_mod.Schedule.immediate, svc.schedule);
+}
+
+test "parse absent run_type defaults to immediate" {
+    var arena = testArena();
+    defer arena.deinit();
+    var formula = try parseWithService(arena.allocator(), "");
+    defer formula.deinit();
+    const svc = formula.service orelse return error.TestExpectedSomething;
+    try testing.expectEqual(formula_mod.Schedule.immediate, svc.schedule);
+}
+
+test "parse run_type cron is rejected loudly" {
+    var arena = testArena();
+    defer arena.deinit();
+    try testing.expectError(
+        error.UnsupportedRunType,
+        parseWithService(arena.allocator(), ", \"run_type\": \"cron\""),
+    );
+}
+
+test "parse unknown run_type is a hard error" {
+    var arena = testArena();
+    defer arena.deinit();
+    try testing.expectError(
+        error.UnknownRunType,
+        parseWithService(arena.allocator(), ", \"run_type\": \"sometimes\""),
+    );
+}
+
+test "parse interval run_type with a malformed interval is a hard error" {
+    var arena = testArena();
+    defer arena.deinit();
+    const malformed = [_][]const u8{
+        ", \"run_type\": \"interval\"", // missing interval
+        ", \"run_type\": \"interval\", \"interval\": \"300\"", // non-numeric
+        ", \"run_type\": \"interval\", \"interval\": 0", // zero, out of range
+        ", \"run_type\": \"interval\", \"interval\": -5", // negative
+        ", \"run_type\": \"interval\", \"interval\": 31536001", // one past the cap
+    };
+    for (malformed) |block| {
+        try testing.expectError(error.InvalidInterval, parseWithService(arena.allocator(), block));
+    }
+}
+
+test "parse interval at the cap is accepted" {
+    var arena = testArena();
+    defer arena.deinit();
+    // max_interval_secs == 365 days in seconds; the boundary must parse, not reject.
+    var formula = try parseWithService(arena.allocator(), ", \"run_type\": \"interval\", \"interval\": 31536000");
+    defer formula.deinit();
+    const svc = formula.service orelse return error.TestExpectedSomething;
+    try testing.expectEqual(formula_mod.Schedule{ .interval = 31_536_000 }, svc.schedule);
+}
+
 test "formula without service block has null service" {
     var arena = testArena();
     defer arena.deinit();

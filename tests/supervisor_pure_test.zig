@@ -106,7 +106,6 @@ test "register writes a plist and a DB row that list reports back" {
         .program_args = &.{ "/tmp/malt_sup_register/Cellar/testkeg/1.0/bin/echo", "hi" },
         .working_dir = null,
         .env = &.{},
-        .run_at_load = false,
         .keep_alive = false,
         .stdout_path = "/tmp/malt_sup_register/out.log",
         .stderr_path = "/tmp/malt_sup_register/err.log",
@@ -127,6 +126,62 @@ test "register writes a plist and a DB row that list reports back" {
     // plist file exists on disk
     var f = try test_io.openFileAbsolute(std.Options.debug_io, list[0].plist_path, .{});
     f.close(std.Options.debug_io);
+}
+
+test "register writes an interval plist with StartInterval and RunAtLoad false" {
+    const prefix = "/tmp/malt_sup_interval";
+    const cellar = "/tmp/malt_sup_interval/Cellar/testkeg/1.0";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    _ = c.setenv("MALT_PREFIX", prefix, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const spec = plist_mod.ServiceSpec{
+        .label = "com.malt.test.interval",
+        .program_args = &.{"/tmp/malt_sup_interval/Cellar/testkeg/1.0/bin/backup"},
+        .stdout_path = "/tmp/malt_sup_interval/out.log",
+        .stderr_path = "/tmp/malt_sup_interval/err.log",
+        .schedule = .{ .interval = 3600 },
+    };
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
+    try supervisor.register(ctx, spec, "testkeg", true, cellar, prefix);
+
+    const list = try supervisor.list(ctx);
+    defer supervisor.freeServiceInfos(testing.allocator, list);
+    try testing.expectEqual(@as(usize, 1), list.len);
+
+    // The plist that landed on disk through the real validate→render path
+    // must carry the interval, not a run-at-load fallback.
+    const xml = try test_io.readFileAbsoluteAlloc(std.Options.debug_io, testing.allocator, list[0].plist_path, 64 * 1024);
+    defer testing.allocator.free(xml);
+    try testing.expect(std.mem.indexOf(u8, xml, "<key>StartInterval</key>") != null);
+    try testing.expect(std.mem.indexOf(u8, xml, "<integer>3600</integer>") != null);
+    try testing.expect(std.mem.indexOf(u8, xml, "<key>RunAtLoad</key>\n    <false/>") != null);
+    try testing.expect(std.mem.indexOf(u8, xml, "KeepAlive") == null);
+}
+
+test "register rejects an out-of-range interval via the validate gate" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const prefix = "/tmp/malt_sup_badsched";
+    const cellar = "/tmp/malt_sup_badsched/Cellar/testkeg/1.0";
+    const spec = plist_mod.ServiceSpec{
+        .label = "com.malt.test.badsched",
+        .program_args = &.{"/tmp/malt_sup_badsched/Cellar/testkeg/1.0/bin/svc"},
+        .stdout_path = "/tmp/malt_sup_badsched/out.log",
+        .stderr_path = "/tmp/malt_sup_badsched/err.log",
+        .schedule = .{ .interval = 0 },
+    };
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
+    // validate is the single gate; a zero interval must never reach disk or the DB.
+    try testing.expectError(error.InvalidService, supervisor.register(ctx, spec, "testkeg", true, cellar, prefix));
+    try testing.expect(!supervisor.hasService(&db, "com.malt.test.badsched"));
 }
 
 test "tailLog writes the last N lines into the provided writer" {
