@@ -2390,6 +2390,136 @@ test "tap fallback stays silent when the tap formula has no post_install" {
     try testing.expect(!containsLine(stderr_buf.items, "post_install"));
 }
 
+// ── Renamed/aliased homebrew/core keg migrates from the local copy ──────
+//
+// A core keg whose name 404s on the brew API (renamed/aliased upstream, e.g.
+// `sdl2` → alias of `sdl2-compat`) is still installed locally. A clean 404 is
+// not an API outage — outages surface as ApiUnreachable and never reach the
+// fallback — so the locally-installed keg is the authoritative artifact and
+// must migrate, not be reported as a failure.
+
+test "renamed homebrew/core keg migrates from the local Cellar copy" {
+    resetOutput();
+    const brew = try scratchDir("brew_core_renamed");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    const mt_z: [:0]const u8 = "/tmp/mt_core_renamed";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    // Core keg present locally with a receipt; no tap .rb (core kegs carry none).
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/widget/2.0", .{brew});
+    defer testing.allocator.free(keg_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
+    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    defer testing.allocator.free(receipt_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io,
+            \\{"source":{"tap":"homebrew/core","versions":{"stable":"2.0"}}}
+        );
+    }
+
+    // 404 marker → fetchFormula returns NotFound offline, routing to the fallback.
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_widget.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqual(@as(usize, 1), root.get("migrated").?.array.items.len);
+    try testing.expectEqualStrings("widget", root.get("migrated").?.array.items[0].string);
+    try testing.expectEqual(@as(usize, 0), root.get("failed").?.array.items.len);
+}
+
+test "core keg with a malformed receipt still fails after the core guard is gone" {
+    resetOutput();
+    const brew = try scratchDir("brew_core_bad_receipt");
+    defer {
+        test_io.deleteTreeAbsolute(std.Options.debug_io, brew) catch {};
+        testing.allocator.free(brew);
+    }
+
+    const mt_z: [:0]const u8 = "/tmp/mt_core_badrcpt";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, mt_z);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, mt_z) catch {};
+
+    try setenvZ("HOMEBREW_PREFIX", brew);
+    defer _ = c.unsetenv("HOMEBREW_PREFIX");
+    _ = c.setenv("MALT_PREFIX", mt_z.ptr, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+
+    const keg_dir = try std.fmt.allocPrint(testing.allocator, "{s}/Cellar/widget/2.0", .{brew});
+    defer testing.allocator.free(keg_dir);
+    try test_io.cwd().createDirPath(std.Options.debug_io, keg_dir);
+    const receipt_path = try std.fmt.allocPrint(testing.allocator, "{s}/INSTALL_RECEIPT.json", .{keg_dir});
+    defer testing.allocator.free(receipt_path);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, receipt_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "{ not json");
+    }
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{mt_z});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_widget.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    (try test_io.createFileAbsolute(std.Options.debug_io, marker, .{})).close(std.Options.debug_io);
+
+    output.setMode(.json);
+    defer resetOutput();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    io_mod.beginStdoutCapture(testing.allocator, &buf);
+    defer io_mod.endStdoutCapture();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = malt.app_ctx.processEnviron() };
+    try migrate.execute(&ctx, arena.allocator(), &.{});
+
+    const parsed = try parseAndCheck(buf.items);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqual(@as(usize, 0), root.get("migrated").?.array.items.len);
+    try testing.expectEqual(@as(usize, 1), root.get("failed").?.array.items.len);
+    try testing.expectEqualStrings("widget", root.get("failed").?.array.items[0].string);
+}
+
 // ── post_install drain runs only after every keg's linkOpt ──────────────
 //
 // Two kegs migrate via the parallel pool; each tap formula's post_install

@@ -253,16 +253,18 @@ pub fn migrateKeg(
     return .migrated;
 }
 
-/// Copy-from-Cellar fallback for kegs the brew API can't resolve
-/// (private/third-party taps). Locates `<homebrew_prefix>/Cellar/<name>/`,
-/// picks the version subdir whose `INSTALL_RECEIPT.json` mtime is
-/// newest (matches brew's "current" version when multiples are present),
-/// reads the receipt, and — if the recorded tap is non-core — copies
-/// the keg tree into malt's Cellar via the same relocation pipeline
-/// the bottle path uses. A `homebrew/core` keg that's missing from
-/// the API is treated as a real API problem, not a fallback case:
-/// returning `.failed_api` keeps the user's attention on the brew side
-/// instead of papering over an upstream outage with a stale local copy.
+/// Copy-from-Cellar fallback for kegs the brew API can't resolve. Locates
+/// `<homebrew_prefix>/Cellar/<name>/`, picks the version subdir whose
+/// `INSTALL_RECEIPT.json` mtime is newest (matches brew's "current" version
+/// when multiples are present), reads the receipt, and copies the keg tree
+/// into malt's Cellar via the same relocation pipeline the bottle path uses.
+///
+/// This covers two cases that both reach here only on a clean `NotFound`:
+/// private/third-party taps (never in the API), and `homebrew/core` kegs
+/// renamed/aliased/removed upstream (e.g. `sdl2`, now an alias of
+/// `sdl2-compat`). A clean 404 is *not* an outage — outages surface as
+/// `ApiUnreachable` and never reach this fallback — so the locally-installed
+/// keg is the authoritative artifact to migrate, whatever its tap.
 fn migrateFromLocalCellar(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -288,10 +290,6 @@ fn migrateFromLocalCellar(
     };
     defer receipt.deinit();
 
-    if (install_receipt_mod.isCoreTap(receipt.tap)) {
-        output.err("  {s}: not found in Homebrew API (homebrew/core keg — refusing local-Cellar fallback)", .{keg_name});
-        return .failed_api;
-    }
     if (receipt.version.len == 0) {
         output.err("  {s}: INSTALL_RECEIPT.json has no source.versions.stable", .{keg_name});
         return .failed_api;
