@@ -54,7 +54,7 @@ test "initSchema runs v1 then migrates to the current known version" {
     try testing.expect(try tableExists(&tdb.db, "bundle_members"));
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 12), ver);
+    try testing.expectEqual(@as(i64, 13), ver);
 }
 
 test "migrate is idempotent on re-run" {
@@ -66,7 +66,7 @@ test "migrate is idempotent on re-run" {
     try schema.migrate(&tdb.db);
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 12), ver);
+    try testing.expectEqual(@as(i64, 13), ver);
 }
 
 test "v4 migration adds pinned column to casks" {
@@ -96,7 +96,7 @@ test "v4 migration is idempotent on re-run" {
     try schema.migrate(&tdb.db);
 
     const ver = try schema.currentVersion(&tdb.db);
-    try testing.expectEqual(@as(i64, 12), ver);
+    try testing.expectEqual(@as(i64, 13), ver);
 }
 
 test "v6 migration adds tap column to casks" {

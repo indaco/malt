@@ -23,6 +23,8 @@ pub const JsonRow = struct {
     state: []const u8,
     auto_start: bool,
     keg_name: []const u8,
+    /// Schedule label ("interval 300s", "cron 30 4 * * 6"); "" for run-at-load.
+    schedule: []const u8,
 };
 
 /// Emit `{"schema_version":1,"services":[{name,state,auto_start,keg_name},...]}\n`
@@ -41,6 +43,8 @@ pub fn writeServicesJson(w: *std.Io.Writer, rows: []const JsonRow) !void {
         try w.writeAll(if (row.auto_start) "true" else "false");
         try w.writeAll(",\"keg_name\":");
         try output.jsonStr(w, row.keg_name);
+        try w.writeAll(",\"schedule\":");
+        try output.jsonStr(w, row.schedule);
         try w.writeAll("}");
     }
     try w.writeAll("]}\n");
@@ -126,11 +130,13 @@ fn cmdList(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database) !void
     for (items) |s| {
         const runtime = supervisor.queryRuntime(io, allocator, s.name);
         const as: []const u8 = if (s.auto_start) "auto" else "manual";
-        output.plain("{s}\t{s}\t{s}\t{s}", .{
+        // Trailing schedule column; empty for run-at-load services.
+        output.plain("{s}\t{s}\t{s}\t{s}\t{s}", .{
             s.name,
             supervisor.runtimeStateName(runtime),
             as,
             s.keg_name,
+            s.schedule,
         });
     }
 }
@@ -170,6 +176,7 @@ fn emitJson(io: std.Io, allocator: std.mem.Allocator, items: []const supervisor.
             .state = state,
             .auto_start = s.auto_start,
             .keg_name = s.keg_name,
+            .schedule = s.schedule,
         });
     }
     var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -235,16 +242,33 @@ test "writeServicesJson: empty input still emits the versioned root with an empt
 
 test "writeServicesJson: emits name, state, auto_start, keg_name per row under the versioned root" {
     const rows = [_]JsonRow{
-        .{ .name = "redis", .state = "running", .auto_start = true, .keg_name = "redis" },
-        .{ .name = "postgres", .state = "not-loaded", .auto_start = false, .keg_name = "postgresql@16" },
+        .{ .name = "redis", .state = "running", .auto_start = true, .keg_name = "redis", .schedule = "" },
+        .{ .name = "postgres", .state = "not-loaded", .auto_start = false, .keg_name = "postgresql@16", .schedule = "" },
     };
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
     try writeServicesJson(&aw.writer, &rows);
     try std.testing.expectEqualStrings(
         "{\"schema_version\":1,\"services\":[" ++
-            "{\"name\":\"redis\",\"state\":\"running\",\"auto_start\":true,\"keg_name\":\"redis\"}," ++
-            "{\"name\":\"postgres\",\"state\":\"not-loaded\",\"auto_start\":false,\"keg_name\":\"postgresql@16\"}" ++
+            "{\"name\":\"redis\",\"state\":\"running\",\"auto_start\":true,\"keg_name\":\"redis\",\"schedule\":\"\"}," ++
+            "{\"name\":\"postgres\",\"state\":\"not-loaded\",\"auto_start\":false,\"keg_name\":\"postgresql@16\",\"schedule\":\"\"}" ++
+            "]}\n",
+        aw.written(),
+    );
+}
+
+test "writeServicesJson: emits the schedule label as a trailing field per row" {
+    const rows = [_]JsonRow{
+        .{ .name = "redis", .state = "running", .auto_start = true, .keg_name = "redis", .schedule = "interval 300s" },
+        .{ .name = "postgres", .state = "not-loaded", .auto_start = false, .keg_name = "postgresql@16", .schedule = "" },
+    };
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writeServicesJson(&aw.writer, &rows);
+    try std.testing.expectEqualStrings(
+        "{\"schema_version\":1,\"services\":[" ++
+            "{\"name\":\"redis\",\"state\":\"running\",\"auto_start\":true,\"keg_name\":\"redis\",\"schedule\":\"interval 300s\"}," ++
+            "{\"name\":\"postgres\",\"state\":\"not-loaded\",\"auto_start\":false,\"keg_name\":\"postgresql@16\",\"schedule\":\"\"}" ++
             "]}\n",
         aw.written(),
     );

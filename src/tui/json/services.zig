@@ -20,6 +20,9 @@ pub const ServiceRow = struct {
     state: []const u8,
     auto_start: bool,
     keg_name: []const u8 = "",
+    /// Schedule label ("interval 300s", "cron 30 4 * * 6"); "" / absent for
+    /// run-at-load. Defaulted so a row from an older malt still parses.
+    schedule: []const u8 = "",
 };
 
 /// Owns the parsed rows; `items` borrow from the arena. Free with `deinit`.
@@ -92,6 +95,24 @@ test "parse ignores unknown fields and schema_version" {
     defer p.deinit();
     try testing.expectEqual(@as(usize, 1), p.items.len);
     try testing.expectEqualStrings("a", p.items[0].name);
+}
+
+test "parse reads the schedule label when present" {
+    const bytes =
+        \\{"services":[{"name":"backup","state":"loaded","auto_start":false,"keg_name":"backup","schedule":"interval 300s"}]}
+    ;
+    var p = try parse(testing.allocator, bytes);
+    defer p.deinit();
+    try testing.expectEqualStrings("interval 300s", p.items[0].schedule);
+}
+
+test "parse tolerates an absent schedule (defaults to empty — backward compatible)" {
+    const bytes =
+        \\{"services":[{"name":"redis","state":"running","auto_start":true,"keg_name":"redis"}]}
+    ;
+    var p = try parse(testing.allocator, bytes);
+    defer p.deinit();
+    try testing.expectEqualStrings("", p.items[0].schedule);
 }
 
 test "parse tolerates an absent keg_name (defaults to empty)" {

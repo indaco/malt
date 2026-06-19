@@ -126,7 +126,7 @@ pub fn initSchema(db: *sqlite.Database) MigrateError!void {
 /// Highest schema version this binary knows how to operate on. Bump in
 /// lockstep with the last `migrateVNtoVN+1` step so a future binary's
 /// DB doesn't get silently used against older SQL.
-pub const known_schema_version: i64 = 12;
+pub const known_schema_version: i64 = 13;
 
 pub const MigrateError = sqlite.SqliteError || error{SchemaTooNew};
 
@@ -148,12 +148,15 @@ pub fn migrate(db: *sqlite.Database) MigrateError!void {
     if (ver < 10) try migrateV9toV10(db);
     if (ver < 11) try migrateV10toV11(db);
     if (ver < 12) try migrateV11toV12(db);
+    if (ver < 13) try migrateV12toV13(db);
 }
 
 fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.beginTransaction();
     errdefer db.rollback();
 
+    // `schedule` is added by v13's ALTER on upgraded DBs; the fresh shape
+    // ships with it so both paths converge. Nullable: a NULL means run-at-load.
     try db.exec(
         \\CREATE TABLE IF NOT EXISTS services (
         \\    name             TEXT PRIMARY KEY,
@@ -161,7 +164,8 @@ fn migrateV1toV2(db: *sqlite.Database) sqlite.SqliteError!void {
         \\    plist_path       TEXT NOT NULL,
         \\    auto_start       INTEGER NOT NULL DEFAULT 0,
         \\    last_started_at  INTEGER,
-        \\    last_status      TEXT
+        \\    last_status      TEXT,
+        \\    schedule         TEXT
         \\);
     );
 
@@ -639,6 +643,40 @@ fn migrateV11toV12(db: *sqlite.Database) sqlite.SqliteError!void {
     try db.commit();
 }
 
+/// v13 — record a service's schedule as a short human label so
+/// `mt services list` can show *why* a service exists ("interval 300s",
+/// "cron 30 4 * * 6") without re-parsing the on-disk plist. Nullable: a
+/// NULL means run-at-load, so every pre-feature row reads back as
+/// no-schedule. The plist stays authoritative; this column is a listing
+/// cache. Same PRAGMA-guarded shape as the column-adds above so re-runs
+/// against partial fixtures stay idempotent.
+fn migrateV12toV13(db: *sqlite.Database) sqlite.SqliteError!void {
+    try db.beginTransaction();
+    errdefer db.rollback();
+
+    var have_table = false;
+    var have_column = false;
+    {
+        var stmt = try db.prepare("PRAGMA table_info(services);");
+        defer stmt.finalize();
+        while (try stmt.step()) {
+            have_table = true;
+            const name = stmt.columnText(1) orelse continue;
+            if (std.mem.eql(u8, std.mem.sliceTo(name, 0), "schedule")) {
+                have_column = true;
+                break;
+            }
+        }
+    }
+    if (have_table and !have_column) {
+        try db.exec("ALTER TABLE services ADD COLUMN schedule TEXT;");
+    }
+
+    try db.exec("INSERT OR IGNORE INTO schema_version (version) VALUES (13);");
+
+    try db.commit();
+}
+
 /// Return true iff every column in `wanted` is present on the `casks`
 /// table. Mirrors the PRAGMA-guarded probes used by v2→v3 / v3→v4 /
 /// v5→v6; centralised here because the v6→v7 backfill needs five
@@ -832,7 +870,7 @@ test "v6→v7 migration backfills cask_versions from existing casks rows" {
     const token1 = stmt.columnText(0) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("flux-markdown", std.mem.sliceTo(token1, 0));
 
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 }
 
 test "v6→v7 migration is idempotent when cask_versions already carries the rows" {
@@ -881,7 +919,7 @@ test "fresh DB ships with taps.head_etag (v8 shape)" {
         }
     }
     try testing.expect(found);
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 }
 
 test "v7→v8 migration adds head_etag and preserves existing tap rows" {
@@ -912,7 +950,7 @@ test "v7→v8 migration adds head_etag and preserves existing tap rows" {
     );
     // Pre-v8 rows must carry NULL until a conditional GET populates it.
     try testing.expect(probe.columnText(1) == null);
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 }
 
 test "v7→v8 migration is idempotent when head_etag is already present" {
@@ -961,7 +999,7 @@ test "fresh DB ships with taps.github_owner and taps.github_repo (v9 shape)" {
     }
     try testing.expect(owner_seen);
     try testing.expect(repo_seen);
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 }
 
 test "v8→v9 migration backfills (user, \"homebrew-\" || repo) from existing slugs" {
@@ -981,7 +1019,7 @@ test "v8→v9 migration backfills (user, \"homebrew-\" || repo) from existing sl
 
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 
     var probe = try db.prepare(
         "SELECT name, github_owner, github_repo FROM taps ORDER BY name;",
@@ -1043,7 +1081,7 @@ test "v8→v9 migration bumps the marker even when taps is empty" {
     try db.exec("DELETE FROM schema_version WHERE version >= 9;");
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 }
 
 // Pre-v3 rows could in theory have escaped slug validation. The CASE
@@ -1070,7 +1108,7 @@ test "v8→v9 migration tolerates a slug starting with a slash (degenerate fixtu
 
     // We don't pin the specific (owner, repo) values for degenerate
     // input — only that the migration completes and the marker bumps.
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 }
 
 test "v8→v9 migration falls back to verbatim name on a slug missing the slash" {
@@ -1115,7 +1153,7 @@ test "fresh DB ships with kegs.bin_isolated (v10 shape)" {
         }
     }
     try testing.expect(found);
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 }
 
 test "v9→v10 migration adds bin_isolated and defaults existing rows to 0" {
@@ -1134,7 +1172,7 @@ test "v9→v10 migration adds bin_isolated and defaults existing rows to 0" {
 
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 
     var probe = try db.prepare("SELECT name, bin_isolated FROM kegs ORDER BY name;");
     defer probe.finalize();
@@ -1208,7 +1246,7 @@ test "fresh DB ships with taps.host defaulting to github.com (v11 shape)" {
     try testing.expect(try probe.step());
     try testing.expectEqualStrings("github.com", std.mem.sliceTo(probe.columnText(0) orelse "", 0));
 
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 }
 
 test "v10→v11 migration backfills host=github.com on existing tap rows" {
@@ -1226,7 +1264,7 @@ test "v10→v11 migration backfills host=github.com on existing tap rows" {
 
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 
     var probe = try db.prepare("SELECT host FROM taps WHERE name='aeroxy/tap';");
     defer probe.finalize();
@@ -1267,7 +1305,7 @@ test "v10→v11 migration bumps the marker even when taps is empty" {
     try db.exec("DELETE FROM schema_version WHERE version >= 11;");
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 }
 
 // v11→v12 adds taps.forge so a tap can name its provider explicitly when
@@ -1303,7 +1341,7 @@ test "fresh DB ships with a nullable taps.forge column (v12 shape)" {
     try testing.expect(try probe.step());
     try testing.expect(probe.columnText(0) == null);
 
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 }
 
 test "v11→v12 migration adds taps.forge as NULL on existing rows" {
@@ -1319,7 +1357,7 @@ test "v11→v12 migration adds taps.forge as NULL on existing rows" {
 
     try migrate(&db);
 
-    try testing.expectEqual(@as(i64, 12), try currentVersion(&db));
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
 
     var probe = try db.prepare("SELECT forge FROM taps WHERE name='aeroxy/tap';");
     defer probe.finalize();
@@ -1345,6 +1383,88 @@ test "v11→v12 migration is idempotent and preserves an explicit forge" {
     defer probe.finalize();
     try testing.expect(try probe.step());
     try testing.expectEqualStrings("gitlab", std.mem.sliceTo(probe.columnText(0) orelse "", 0));
+}
+
+// v12→v13 adds services.schedule, a nullable human label cache ("interval
+// 300s", "cron 30 4 * * 6", or NULL for run-at-load). The plist stays the
+// source of truth; this column is a listing convenience. Nullable so every
+// pre-feature row reads back as no-schedule with no migration error.
+
+test "fresh DB ships with a nullable services.schedule column (v13 shape)" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    var stmt = try db.prepare("PRAGMA table_info(services);");
+    defer stmt.finalize();
+    var found = false;
+    while (try stmt.step()) {
+        const name = stmt.columnText(1) orelse continue;
+        if (std.mem.eql(u8, std.mem.sliceTo(name, 0), "schedule")) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+
+    // A row inserted without naming `schedule` leaves it NULL — the path a
+    // pre-schedule registration relied on.
+    try db.exec(
+        \\INSERT INTO services (name, keg_name, plist_path)
+        \\VALUES ('redis', 'redis', '/dev/null');
+    );
+    var probe = try db.prepare("SELECT schedule FROM services WHERE name='redis';");
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    try testing.expect(probe.columnText(0) == null);
+
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+}
+
+test "v12→v13 migration adds services.schedule as NULL on existing rows" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    // Seed a service on the current shape, then rewind the marker so migrate
+    // re-enters the v12→v13 step against a row that pre-dates the column.
+    try db.exec(
+        \\INSERT INTO services (name, keg_name, plist_path, auto_start, last_status)
+        \\VALUES ('redis', 'redis', '/dev/null', 0, 'registered');
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 13;");
+
+    try migrate(&db);
+
+    try testing.expectEqual(@as(i64, 13), try currentVersion(&db));
+
+    var probe = try db.prepare("SELECT schedule FROM services WHERE name='redis';");
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    try testing.expect(probe.columnText(0) == null);
+}
+
+test "v12→v13 migration is idempotent and preserves an explicit schedule" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try initSchema(&db);
+
+    try db.exec(
+        \\INSERT INTO services (name, keg_name, plist_path, schedule)
+        \\VALUES ('redis', 'redis', '/dev/null', 'interval 300s');
+    );
+    try db.exec("DELETE FROM schema_version WHERE version >= 13;");
+    try migrate(&db);
+    try db.exec("DELETE FROM schema_version WHERE version >= 13;");
+    try migrate(&db);
+
+    var probe = try db.prepare("SELECT schedule FROM services WHERE name='redis';");
+    defer probe.finalize();
+    try testing.expect(try probe.step());
+    try testing.expectEqualStrings(
+        "interval 300s",
+        std.mem.sliceTo(probe.columnText(0) orelse "", 0),
+    );
 }
 
 test "migrate refuses a DB whose schema_version exceeds the known max" {

@@ -188,6 +188,73 @@ fn seedService(prefix: []const u8, name: []const u8, keg: []const u8, auto_start
     _ = try stmt.step();
 }
 
+fn seedScheduledService(prefix: []const u8, name: []const u8, keg: []const u8, schedule: []const u8) !void {
+    var path_buf: [512]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try malt.sqlite.Database.open(db_path);
+    defer db.close();
+    try malt.schema.initSchema(&db);
+
+    var stmt = try db.prepare(
+        \\INSERT INTO services(name, keg_name, plist_path, auto_start, last_status, schedule)
+        \\VALUES (?, ?, '/dev/null', 0, 'registered', ?);
+    );
+    defer stmt.finalize();
+    try stmt.bindText(1, name);
+    try stmt.bindText(2, keg);
+    try stmt.bindText(3, schedule);
+    _ = try stmt.step();
+}
+
+test "execute list (human) shows the schedule label" {
+    const prefix = try setupPrefix("list_schedule_human");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedScheduledService(prefix, "backup", "backup", "interval 60s");
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.human);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    // The human table prints to stderr; stdout is reserved for --json.
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &stderr_buf);
+    defer malt.output.endStderrCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try services_cli.execute(&ctx, testing.allocator, &.{"list"});
+
+    try testing.expect(std.mem.indexOf(u8, stderr_buf.items, "interval 60s") != null);
+}
+
+test "execute list --json surfaces the schedule label end-to-end" {
+    const prefix = try setupPrefix("list_schedule_json");
+    defer testing.allocator.free(prefix);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    defer _ = c.unsetenv("MALT_PREFIX");
+    try seedScheduledService(prefix, "backup", "backup", "interval 60s");
+
+    const prior_json = malt.output.isJson();
+    malt.output.setMode(.json);
+    defer malt.output.setMode(if (prior_json) .json else .human);
+
+    var stdout_buf: std.ArrayList(u8) = .empty;
+    defer stdout_buf.deinit(testing.allocator);
+    malt.output.beginStdoutCapture(testing.allocator, &stdout_buf);
+    defer malt.output.endStdoutCapture();
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: malt.app_ctx.AppCtx = .{ .io = threaded.io(), .environ = .empty };
+    try services_cli.execute(&ctx, testing.allocator, &.{"list"});
+
+    try testing.expect(std.mem.indexOf(u8, stdout_buf.items, "\"schedule\":\"interval 60s\"") != null);
+}
+
 test "execute list --json on a populated DB emits one object per row" {
     const prefix = try setupPrefix("list_populated_json");
     defer testing.allocator.free(prefix);

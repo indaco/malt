@@ -129,7 +129,8 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
         .{ .label = "NAME", .width = 24 },
         .{ .label = "STATE", .width = 12 },
         .{ .label = "START", .width = 8 },
-        .{ .label = "KEG", .width = 3, .gap = 0 }, // formatRow appends the keg with no separator
+        .{ .label = "KEG", .width = 16, .gap = 0 }, // START→KEG carries no separator
+        .{ .label = "SCHED", .width = 5 },
     });
     const list: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
     if (list.height == 0) return; // the heading took the only row
@@ -162,7 +163,8 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
 }
 
 /// One list row (after the dot): the name, the runtime state, the auto-start
-/// hint, then the owning keg. ASCII columns, grapheme-naive like the rest.
+/// hint, the owning keg, then the schedule label. ASCII columns, grapheme-naive
+/// like the rest. An empty schedule (run-at-load) leaves the last column blank.
 fn formatRow(buf: []u8, s: Row) []const u8 {
     var len: usize = 0;
     appendPad(buf, &len, s.name, 24);
@@ -170,7 +172,9 @@ fn formatRow(buf: []u8, s: Row) []const u8 {
     appendPad(buf, &len, s.state, 12);
     append(buf, &len, " ");
     appendPad(buf, &len, if (s.auto_start) "auto" else "manual", 8);
-    append(buf, &len, s.keg_name);
+    appendPad(buf, &len, s.keg_name, 16);
+    append(buf, &len, " ");
+    append(buf, &len, s.schedule);
     return buf[0..len];
 }
 
@@ -263,8 +267,21 @@ test "render heads the columns in bold, indented past the status dot" {
     const out = f.slice();
     try testing.expect(std.mem.indexOf(u8, out, color.Style.bold.code()) != null);
     // The 2-col dot indent plus exact padding aligns the labels over values.
-    try testing.expect(std.mem.indexOf(u8, out, "  NAME" ++ " " ** 21 ++ "STATE" ++ " " ** 8 ++ "START" ++ " " ** 3 ++ "KEG") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "  NAME" ++ " " ** 21 ++ "STATE" ++ " " ** 8 ++ "START" ++ " " ** 3 ++ "KEG" ++ " " ** 14 ++ "SCHED") != null);
     try testing.expect(std.mem.indexOf(u8, out, "redis") != null); // the list still renders below
+}
+
+test "render shows the schedule label and heads a SCHED column" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const rows = [_]Row{
+        .{ .name = "backup", .state = "loaded", .auto_start = false, .keg_name = "backup", .schedule = "interval 300s" },
+    };
+    const s: State = .{ .items = &rows };
+    render(&s, &f, .{ .row = 2, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "SCHED") != null); // column heading
+    try testing.expect(std.mem.indexOf(u8, out, "interval 300s") != null); // the row's label
 }
 
 test "render lists services with a state dot, the state, and the auto-start hint" {
