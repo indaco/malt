@@ -83,6 +83,9 @@ stop_server() {
 make_release_fixture() {
   local dest="$1"
   local version="$2"
+  # include_man=1 mirrors a post-T-003 tarball (page at the goreleaser
+  # path share/man/man1/malt.1); 0 mimics an older binary-only tarball.
+  local include_man="${3:-1}"
   rm -rf "$dest"
   mkdir -p "$dest/v${version}"
   local archive_name="malt_${version}_darwin_all.tar.gz"
@@ -97,7 +100,11 @@ make_release_fixture() {
 exit 0
 SH
   chmod +x "$stage/malt"
-  tar -C "$stage" -czf "$dest/v${version}/${archive_name}" malt
+  if [ "$include_man" = 1 ]; then
+    mkdir -p "$stage/share/man/man1"
+    printf '.TH MALT 1\n' >"$stage/share/man/man1/malt.1"
+  fi
+  tar -C "$stage" -czf "$dest/v${version}/${archive_name}" .
   # Correct checksum so the happy path passes. install.sh itself uses
   # /usr/bin/shasum; the fixture generator avoids it because some
   # developer environments ship a broken perl-backed shasum ahead of
@@ -153,9 +160,9 @@ split_result() {
   local line="$1"
   RC=${line%%|*}
   local rest=${line#*|}
-  # We only track the install_dir side — callers assert on the
-  # binary landing (or not) there. The prefix dir is populated by
-  # run_installer but never inspected after the fact.
+  # Track both sides: the binary lands in install_dir, the man page
+  # under prefix/share/man/man1 — callers assert on each.
+  PREFIX_USED=${rest%%|*}
   INSTALL_DIR_USED=${rest#*|}
 }
 
@@ -173,6 +180,25 @@ else
   printf '  ✗ happy path: binary NOT installed at %s\n' "$INSTALL_DIR_USED/malt" >&2
   fail=$((fail + 1))
   failures+=("binary-missing")
+fi
+MAN1_DIR="$PREFIX_USED/share/man/man1"
+if [ -f "$MAN1_DIR/malt.1" ]; then
+  printf '  ✓ happy path: man page installed\n'
+  pass=$((pass + 1))
+else
+  printf '  ✗ happy path: man page NOT installed at %s\n' "$MAN1_DIR/malt.1" >&2
+  fail=$((fail + 1))
+  failures+=("man-missing")
+fi
+# Reinstall must be able to overwrite the page → the dir is user-owned.
+man_owner=$(stat -f '%Su' "$MAN1_DIR" 2>/dev/null || stat -c '%U' "$MAN1_DIR" 2>/dev/null || true)
+if [ "$man_owner" = "$USER" ]; then
+  printf '  ✓ happy path: man1 dir owned by %s\n' "$USER"
+  pass=$((pass + 1))
+else
+  printf '  ✗ happy path: man1 dir owned by %s, expected %s\n' "$man_owner" "$USER" >&2
+  fail=$((fail + 1))
+  failures+=("man-ownership")
 fi
 
 # ── test 2: missing checksums.txt ────────────────────────────────────
@@ -300,6 +326,80 @@ else
   printf '  ✗ refuse message missing the opt-out env hint\n' >&2
   fail=$((fail + 1))
   failures+=("source-fallback-message")
+fi
+
+# ── test 6: tarball without a man page still installs the binary ─────
+# Pre-T-003 tarballs carry no man page. The installer must warn and
+# keep going — a missing page never blocks a binary install.
+printf '▸ tarball without man page\n'
+make_release_fixture "$TMP/releases6" "9.9.9" 0
+start_server "$TMP/releases6"
+split_result "$(run_installer)"
+stop_server
+case_result "no man page: rc=0" 0 "$RC"
+if [ -x "$INSTALL_DIR_USED/malt" ]; then
+  printf '  ✓ no man page: binary still installed\n'
+  pass=$((pass + 1))
+else
+  printf '  ✗ no man page: binary NOT installed\n' >&2
+  fail=$((fail + 1))
+  failures+=("nomanpage-binary-missing")
+fi
+[ ! -e "$PREFIX_USED/share/man/man1/malt.1" ] || {
+  printf '  ✗ no man page: a page appeared from nowhere\n' >&2
+  fail=$((fail + 1))
+  failures+=("nomanpage-ghost")
+}
+if grep -qi 'man page' "$TMP/out.log"; then
+  printf '  ✓ no man page: install warned\n'
+  pass=$((pass + 1))
+else
+  printf '  ✗ no man page: no warning emitted\n' >&2
+  fail=$((fail + 1))
+  failures+=("nomanpage-no-warn")
+fi
+
+# ── test 7: build-from-source places the committed man page ──────────
+# No network: drive the local-repo branch with a fake repo + a fake zig
+# that drops an executable at zig-out/bin/malt. Asserts the committed
+# man/malt.1 lands under the prefix without going through a tarball.
+printf '▸ build-from-source places man page\n'
+FAKE_REPO="$TMP/fake-repo-7"
+mkdir -p "$FAKE_REPO/scripts" "$FAKE_REPO/src" "$FAKE_REPO/man"
+cp scripts/install.sh "$FAKE_REPO/scripts/install.sh"
+printf '// build\n' >"$FAKE_REPO/build.zig"
+printf '// main\n' >"$FAKE_REPO/src/main.zig"
+printf '.TH MALT 1\n' >"$FAKE_REPO/man/malt.1"
+FAKE_BIN7="$TMP/fake-bin-7"
+mkdir -p "$FAKE_BIN7"
+cat >"$FAKE_BIN7/zig" <<'EOF'
+#!/bin/bash
+# Mimic `zig build`: drop an executable at zig-out/bin/malt under cwd.
+mkdir -p zig-out/bin
+printf '#!/bin/sh\nexit 0\n' >zig-out/bin/malt
+chmod +x zig-out/bin/malt
+EOF
+chmod +x "$FAKE_BIN7/zig"
+prefix7="$TMP/prefix_7"
+install_dir7="$TMP/bin_7"
+mkdir -p "$prefix7" "$install_dir7"
+rc7=0
+env -i \
+  HOME="$HOME" \
+  PATH="$FAKE_BIN7:/usr/bin:/bin:/usr/sbin:/sbin" \
+  USER="$USER" \
+  PREFIX="$prefix7" \
+  INSTALL_DIR="$install_dir7" \
+  NO_COLOR=1 \
+  bash "$FAKE_REPO/scripts/install.sh" >"$TMP/out.log" 2>&1 || rc7=$?
+if [ "$rc7" = 0 ] && [ -f "$prefix7/share/man/man1/malt.1" ]; then
+  printf '  ✓ build-from-source installed man page\n'
+  pass=$((pass + 1))
+else
+  printf '  ✗ build-from-source did not place man page (rc=%s)\n' "$rc7" >&2
+  fail=$((fail + 1))
+  failures+=("source-man-missing")
+  sed 's/^/      /' "$TMP/out.log" >&2 || true
 fi
 
 printf '\n── summary ──\n'

@@ -146,6 +146,7 @@ if [ -z "$LATEST" ]; then
     cd "$REPO_ROOT"
     zig build -Doptimize=ReleaseSafe
     BUILD_BIN_DIR="${REPO_ROOT}/zig-out/bin"
+    MAN_SRC="${REPO_ROOT}/man/malt.1"
   else
     TMPDIR=$(mktemp -d)
     trap 'rm -rf "$TMPDIR"' EXIT
@@ -174,6 +175,7 @@ if [ -z "$LATEST" ]; then
     cd "$TMPDIR/malt"
     zig build -Doptimize=ReleaseSafe
     BUILD_BIN_DIR="$TMPDIR/malt/zig-out/bin"
+    MAN_SRC="$TMPDIR/malt/man/malt.1"
   fi
 
   BINARY_PATH="${BUILD_BIN_DIR}/malt"
@@ -267,6 +269,10 @@ else
   BINARY_PATH=$(find "$TMPDIR" -name "$BINARY" -type f -perm -u+x | head -1)
   [ -n "$BINARY_PATH" ] || error "Binary '${BINARY}' not found in archive"
 
+  # The page rides the tarball at share/man/man1/malt.1. Locate it the
+  # same way; absence is tolerated below so older tarballs still install.
+  MAN_SRC=$(find "$TMPDIR" -name "malt.1" -type f | head -1)
+
   # ── Install binary ──────────────────────────────────────────────
   info "Installing to ${INSTALL_DIR}..."
   $SUDO install -m 755 "$BINARY_PATH" "${INSTALL_DIR}/${BINARY}"
@@ -289,6 +295,23 @@ else
     $SUDO chown "$USER" "$PREFIX"
   fi
   ok "${PREFIX} already exists"
+fi
+
+# ── Install man page ────────────────────────────────────────────────
+# `man malt` resolves only when the page sits under ${PREFIX}/share/man,
+# which `mt shellenv` puts on MANPATH. Place it after prefix creation so
+# ${PREFIX} exists and is user-owned. A missing page (older tarball, or
+# a build with no committed page) must never fail a binary install.
+MAN1_DIR="${PREFIX}/share/man/man1"
+if [ -n "${MAN_SRC:-}" ] && [ -f "$MAN_SRC" ]; then
+  info "Installing man page..."
+  $SUDO mkdir -p "$MAN1_DIR"
+  $SUDO install -m 644 "$MAN_SRC" "${MAN1_DIR}/malt.1"
+  # Match ${PREFIX} ownership so a later non-sudo reinstall can overwrite.
+  $SUDO chown -R "$USER" "${PREFIX}/share"
+  ok "Installed man page to ${MAN1_DIR}/malt.1"
+else
+  warn "No man page found; skipping (\`man malt\` lands on the next release)"
 fi
 
 # ── Verify ──────────────────────────────────────────────────────────
