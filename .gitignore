@@ -10,7 +10,3 @@ coverage/
 .mcp.json
 
 /docs
-
-!dist/
-/dist/*
-!/dist/man/

@@ -38,22 +38,26 @@ cask="$2"
 
 # Collect every declared path, deduped via `sort -u`. The postflight
 # typically re-references a path already declared as `binary`, and
-# reporting the same miss twice is just noise. `binary "x"` lives
-# anywhere in the cask; `#{staged_path}/x` references live inside
-# `postflight do ... end` but the regex is specific enough that a
-# flat scan is safe.
+# reporting the same miss twice is just noise. `binary "x"` and
+# `manpage "x"` live anywhere in the cask; `#{staged_path}/x` references
+# live inside `postflight do ... end` but the regex is specific enough
+# that a flat scan is safe. `manpage` resolves relative to the staged
+# path just like `binary`, so the tarball must carry it too — otherwise
+# goreleaser's `manpages:` stanza and the archive layout could disagree
+# unnoticed until a user's `brew install --cask` fails.
 paths=()
 while IFS= read -r p; do
   [ -n "$p" ] && paths+=("$p")
 done < <(
   {
     sed -nE 's/^[[:space:]]*binary[[:space:]]+"([^"]+)".*/\1/p' "$cask"
+    sed -nE 's/^[[:space:]]*manpage[[:space:]]+"([^"]+)".*/\1/p' "$cask"
     sed -nE 's/.*#\{staged_path\}\/([^"]+).*/\1/p' "$cask"
   } | sort -u
 )
 
 if [ "${#paths[@]}" -eq 0 ]; then
-  echo "no binary or staged_path references found in $cask" >&2
+  echo "no binary, manpage, or staged_path references found in $cask" >&2
   exit 2
 fi
 
