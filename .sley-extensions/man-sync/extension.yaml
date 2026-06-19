@@ -1,0 +1,9 @@
+schema_version: 1
+name: man-sync
+version: 1.0.0
+description: Regenerates the committed man page after bumps
+author: local
+repository: "local"
+entry: hook.sh
+hooks:
+  - post-bump
