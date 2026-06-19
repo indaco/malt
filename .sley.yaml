@@ -27,3 +27,7 @@ extensions:
   - name: version-sync
     path: .sley-extensions/version-sync
     enabled: true
+  # After version-sync so zig build compiles at the freshly written version.
+  - name: man-sync
+    path: .sley-extensions/man-sync
+    enabled: true
