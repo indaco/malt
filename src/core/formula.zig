@@ -5,10 +5,21 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const service_types = @import("services/types.zig");
+pub const Schedule = service_types.Schedule;
+
 pub const FormulaError = error{
     InvalidJson,
     MissingField,
     NoBottleAvailable,
+    /// `run_type :cron` — malt can't manage calendar schedules yet, so reject
+    /// loudly rather than silently installing a run-once service.
+    UnsupportedRunType,
+    /// `run_type` is neither immediate, interval, nor cron.
+    UnknownRunType,
+    /// `run_type :interval` with a missing, non-numeric, or out-of-range
+    /// `interval`. Never falls back to `.immediate`.
+    InvalidInterval,
 };
 
 /// Bottle descriptor for one platform. All three strings live in the
@@ -31,7 +42,7 @@ pub const ServiceDef = struct {
     log_path: ?[]const u8 = null,
     error_log_path: ?[]const u8 = null,
     keep_alive: bool = true,
-    run_at_load: bool = true,
+    schedule: Schedule = .immediate,
 };
 
 /// Format Homebrew's canonical on-disk version label into `buf`.
@@ -128,6 +139,25 @@ fn getInt(obj: std.json.ObjectMap, key: []const u8) i64 {
         .integer => |i| i,
         else => 0,
     };
+}
+
+/// Map a service block's `run_type` to a `Schedule`. Absent/`"immediate"`
+/// keeps today's run-at-load behaviour; `"interval"` requires a numeric,
+/// in-range `interval`; `"cron"` and anything else are rejected loudly so a
+/// mis-scheduled service never materialises silently.
+fn parseSchedule(so: std.json.ObjectMap) FormulaError!Schedule {
+    const run_type = getString(so, "run_type") orelse return .immediate;
+    if (std.mem.eql(u8, run_type, "immediate")) return .immediate;
+    if (std.mem.eql(u8, run_type, "cron")) return FormulaError.UnsupportedRunType;
+    if (!std.mem.eql(u8, run_type, "interval")) return FormulaError.UnknownRunType;
+
+    const iv = so.get("interval") orelse return FormulaError.InvalidInterval;
+    const secs = switch (iv) {
+        .integer => |n| n,
+        else => return FormulaError.InvalidInterval,
+    };
+    if (secs < 1 or secs > service_types.max_interval_secs) return FormulaError.InvalidInterval;
+    return .{ .interval = @intCast(secs) };
 }
 
 fn getStringArray(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]const []const u8 {
@@ -234,10 +264,7 @@ pub fn parseFormula(allocator: std.mem.Allocator, json_data: []const u8) !Formul
                             (k != .bool or k.bool)
                         else
                             true,
-                        .run_at_load = if (so.get("run_at_load")) |k|
-                            (k == .bool and k.bool)
-                        else
-                            true,
+                        .schedule = try parseSchedule(so),
                     };
                 };
             }

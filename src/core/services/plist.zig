@@ -7,6 +7,10 @@ const std = @import("std");
 const testing = std.testing;
 
 const dsl_sandbox = @import("../dsl/sandbox.zig");
+const types = @import("types.zig");
+
+pub const Schedule = types.Schedule;
+pub const CalendarInterval = types.CalendarInterval;
 
 pub const EnvPair = struct {
     key: []const u8,
@@ -20,7 +24,7 @@ pub const ServiceSpec = struct {
     env: []const EnvPair = &.{},
     stdout_path: []const u8,
     stderr_path: []const u8,
-    run_at_load: bool = true,
+    schedule: Schedule = .immediate,
     keep_alive: bool = true,
 };
 
@@ -47,12 +51,16 @@ pub const ValidationError = error{
     EmbeddedNul,
     /// program_args[0] is not an absolute path.
     RelativeExecutable,
+    /// schedule is `.interval` with a zero or out-of-range second count.
+    BadSchedule,
 };
 
 /// Cap on argv count. Real launchd services carry fewer than a dozen.
 pub const max_program_args: usize = 64;
 /// Cap on a single argv or path string.
 pub const max_arg_len: usize = 4096;
+/// Upper bound on an interval schedule, in seconds (shared with the parser).
+pub const max_interval_secs = types.max_interval_secs;
 
 /// The Homebrew API renders every service path with this literal token rather
 /// than the resolved prefix (`$HOMEBREW_PREFIX/opt/redis/bin/redis-server`).
@@ -107,6 +115,14 @@ pub fn validate(
 ) ValidationError!void {
     if (spec.program_args.len == 0) return ValidationError.Empty;
     if (spec.program_args.len > max_program_args) return ValidationError.TooManyArgs;
+
+    switch (spec.schedule) {
+        .immediate => {},
+        .interval => |secs| if (secs == 0 or secs > max_interval_secs)
+            return ValidationError.BadSchedule,
+        // No rules yet; the parser never builds this and render rejects it.
+        .calendar => {},
+    }
 
     for (spec.program_args) |a| try checkString(a);
     try checkString(spec.label);
@@ -197,18 +213,31 @@ pub fn render(spec: ServiceSpec, writer: *std.Io.Writer) !void {
     try writeEscaped(writer, spec.stderr_path);
     try writer.writeAll("</string>\n");
 
-    try writer.writeAll("    <key>RunAtLoad</key>\n    ");
-    try writer.writeAll(if (spec.run_at_load) "<true/>\n" else "<false/>\n");
-
-    if (spec.keep_alive) {
-        try writer.writeAll(
-            \\    <key>KeepAlive</key>
-            \\    <dict>
-            \\        <key>SuccessfulExit</key>
-            \\        <false/>
-            \\    </dict>
-            \\
-        );
+    // RunAtLoad is derived from the schedule. An interval job also gets a
+    // StartInterval and, deliberately, no KeepAlive: relaunch-on-exit would
+    // restart it immediately and defeat the interval.
+    switch (spec.schedule) {
+        .immediate => {
+            try writer.writeAll("    <key>RunAtLoad</key>\n    <true/>\n");
+            if (spec.keep_alive) {
+                try writer.writeAll(
+                    \\    <key>KeepAlive</key>
+                    \\    <dict>
+                    \\        <key>SuccessfulExit</key>
+                    \\        <false/>
+                    \\    </dict>
+                    \\
+                );
+            }
+        },
+        .interval => |secs| {
+            try writer.writeAll("    <key>RunAtLoad</key>\n    <false/>\n");
+            try writer.writeAll("    <key>StartInterval</key>\n    <integer>");
+            try writer.print("{d}", .{secs});
+            try writer.writeAll("</integer>\n");
+        },
+        // Reserved for cron support; the parser never builds this yet.
+        .calendar => unreachable,
     }
 
     try writer.writeAll("</dict>\n</plist>\n");

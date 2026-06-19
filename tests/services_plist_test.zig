@@ -61,7 +61,6 @@ test "render full spec with env and working_dir" {
         },
         .stdout_path = "/opt/malt/var/log/postgresql@16.out",
         .stderr_path = "/opt/malt/var/log/postgresql@16.err",
-        .run_at_load = true,
         .keep_alive = true,
     };
     try plist.render(spec, &aw.writer);
@@ -86,6 +85,47 @@ test "XML-escapes special characters" {
 
     try testing.expect(std.mem.indexOf(u8, aw.written(), "&lt;ampersand&amp;test&gt;") != null);
     try testing.expect(std.mem.indexOf(u8, aw.written(), "a&quot;b.log") != null);
+}
+
+test "render interval schedule emits StartInterval and RunAtLoad false" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    const spec: plist.ServiceSpec = .{
+        .label = "com.malt.backup",
+        .program_args = &.{"/opt/malt/opt/backup/bin/backup"},
+        .stdout_path = "/opt/malt/var/log/backup.out",
+        .stderr_path = "/opt/malt/var/log/backup.err",
+        .schedule = .{ .interval = 300 },
+        // keep_alive is irrelevant for interval jobs — it must not appear.
+        .keep_alive = true,
+    };
+    try plist.render(spec, &aw.writer);
+
+    const expected =
+        \\<?xml version="1.0" encoding="UTF-8"?>
+        \\<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        \\<plist version="1.0">
+        \\<dict>
+        \\    <key>Label</key>
+        \\    <string>com.malt.backup</string>
+        \\    <key>ProgramArguments</key>
+        \\    <array>
+        \\        <string>/opt/malt/opt/backup/bin/backup</string>
+        \\    </array>
+        \\    <key>StandardOutPath</key>
+        \\    <string>/opt/malt/var/log/backup.out</string>
+        \\    <key>StandardErrorPath</key>
+        \\    <string>/opt/malt/var/log/backup.err</string>
+        \\    <key>RunAtLoad</key>
+        \\    <false/>
+        \\    <key>StartInterval</key>
+        \\    <integer>300</integer>
+        \\</dict>
+        \\</plist>
+        \\
+    ;
+    try testing.expectEqualStrings(expected, aw.written());
 }
 
 test "keep_alive false omits KeepAlive dict" {

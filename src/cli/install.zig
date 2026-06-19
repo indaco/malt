@@ -1300,7 +1300,7 @@ fn maybeRegisterService(
         .working_dir = working_dir,
         .stdout_path = stdout_path,
         .stderr_path = stderr_path,
-        .run_at_load = def.run_at_load,
+        .schedule = def.schedule,
         .keep_alive = def.keep_alive,
     };
 

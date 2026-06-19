@@ -172,3 +172,35 @@ test "validate: raw $HOMEBREW_PREFIX head rejected, expanded head passes" {
         .stderr_path = good_err,
     }, cellar, prefix);
 }
+
+// validate is the single gate before launchd; the interval bound is enforced
+// here too, independently of the parser, so a spec built any other way is caught.
+fn validateWithSchedule(sched: plist.Schedule) anyerror!void {
+    const args = [_][]const u8{"/opt/malt/Cellar/foo/1.0/bin/foo"};
+    return plist.validate(.{
+        .label = "com.malt.foo",
+        .program_args = args[0..],
+        .stdout_path = good_out,
+        .stderr_path = good_err,
+        .schedule = sched,
+    }, cellar, prefix);
+}
+
+test "validate: in-range interval passes" {
+    try validateWithSchedule(.{ .interval = 300 });
+}
+
+test "validate: zero interval rejected" {
+    try testing.expectError(error.BadSchedule, validateWithSchedule(.{ .interval = 0 }));
+}
+
+test "validate: interval above the cap rejected" {
+    try testing.expectError(
+        error.BadSchedule,
+        validateWithSchedule(.{ .interval = plist.max_interval_secs + 1 }),
+    );
+}
+
+test "validate: interval at the cap passes" {
+    try validateWithSchedule(.{ .interval = plist.max_interval_secs });
+}
