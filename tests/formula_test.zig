@@ -310,13 +310,31 @@ test "parse absent run_type defaults to immediate" {
     try testing.expectEqual(formula_mod.Schedule.immediate, svc.schedule);
 }
 
-test "parse run_type cron is rejected loudly" {
+test "parse run_type cron builds a calendar schedule" {
     var arena = testArena();
     defer arena.deinit();
-    try testing.expectError(
-        error.UnsupportedRunType,
-        parseWithService(arena.allocator(), ", \"run_type\": \"cron\""),
-    );
+    var formula = try parseWithService(arena.allocator(), ", \"run_type\": \"cron\", \"cron\": \"30 4 * * *\"");
+    defer formula.deinit();
+    const svc = formula.service orelse return error.TestExpectedSomething;
+    switch (svc.schedule) {
+        .calendar => |entries| {
+            try testing.expectEqual(@as(usize, 1), entries.len);
+            try testing.expectEqual(@as(?u8, 30), entries[0].minute);
+            try testing.expectEqual(@as(?u8, 4), entries[0].hour);
+        },
+        else => return error.TestExpectedCalendarSchedule,
+    }
+}
+
+test "parse run_type cron with a missing or malformed expression is a hard error" {
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    // A missing `cron` string never silently falls back to immediate.
+    try testing.expectError(error.CronMalformed, parseWithService(alloc, ", \"run_type\": \"cron\""));
+    // Bounds and unsupported tokens surface the parser's specific errors.
+    try testing.expectError(error.CronOutOfRange, parseWithService(alloc, ", \"run_type\": \"cron\", \"cron\": \"99 0 * * *\""));
+    try testing.expectError(error.CronUnsupported, parseWithService(alloc, ", \"run_type\": \"cron\", \"cron\": \"@daily\""));
 }
 
 test "parse unknown run_type is a hard error" {
