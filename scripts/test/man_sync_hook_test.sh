@@ -85,7 +85,7 @@ if [ -x "$HOOK" ]; then
     ko "hook did not print success:true (got: $out)"
   fi
 
-  page="$proj/dist/man/malt.1"
+  page="$proj/man/malt.1"
   if [ -f "$page" ]; then
     ok "page written under project_root"
     if grep -q '9\.9\.9' "$page"; then

@@ -35,6 +35,11 @@ archives:
       # archive root.
       - src: "dist/*_darwin_all*/mt"
         dst: "."
+      # The committed, drift-guarded page, landed at the standard man1
+      # path the cask `manpages` stanza and install.sh both resolve.
+      # For a single-file src, dst is the full in-archive path.
+      - src: man/malt.1
+        dst: share/man/man1/malt.1
 
 checksum:
   name_template: checksums.txt
@@ -77,6 +82,11 @@ homebrew_casks:
     binaries:
       - malt
       - mt
+    # Path inside the archive (see archives.files). GoReleaser ≥ v2.11
+    # renders a native `manpage "..."` stanza; Homebrew links it onto
+    # the system MANPATH at cask install.
+    manpages:
+      - share/man/man1/malt.1
     # The cask drops the binaries but cannot create malt's install prefix:
     # it lives under root-owned /opt, so it needs one privileged step the
     # cask itself must not take. Spell it out, plus the PATH entry that

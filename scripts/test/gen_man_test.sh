@@ -21,7 +21,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 GEN="$ROOT/scripts/gen-man.sh"
 BIN="$ROOT/zig-out/bin/malt"
-COMMITTED="$ROOT/dist/man/malt.1"
+COMMITTED="$ROOT/man/malt.1"
 
 [ -x "$BIN" ] || {
   echo "malt binary missing at $BIN — run 'zig build' first" >&2

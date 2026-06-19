@@ -26,9 +26,9 @@ fi
 
 # Regenerate into the working tree only — the maintainer stages it by hand with
 # the other bump artefacts, so the hook stays a pure generator.
-if ! GEN_LOG=$("$PROJECT_ROOT/scripts/gen-man.sh" "$PROJECT_ROOT/dist/man/malt.1" 2>&1); then
+if ! GEN_LOG=$("$PROJECT_ROOT/scripts/gen-man.sh" "$PROJECT_ROOT/man/malt.1" 2>&1); then
   echo "{\"success\": false, \"message\": \"man generation failed: $(printf '%s' "$GEN_LOG" | sanitize)\"}"
   exit 1
 fi
 
-echo '{"success": true, "message": "Regenerated dist/man/malt.1"}'
+echo '{"success": true, "message": "Regenerated man/malt.1"}'

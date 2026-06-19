@@ -9,6 +9,10 @@
 #   2. wrapped tarball + cask declaring wrapped-relative binaries → pass
 #   3. cask declares a path the tarball doesn't contain → fail with
 #      "cask path missing in tarball: <path>" per missing entry
+#   4. cask declares a `manpage "..."` the tarball contains → pass, and
+#      the helper reports it verified (proves the path is checked, not
+#      ignored)
+#   5. cask declares a `manpage "..."` the tarball lacks → fail naming it
 #
 # Usage:
 #   ./scripts/test/verify_cask_paths_test.sh
@@ -54,8 +58,10 @@ make_wrapped_root() {
 # Render a minimal cask.rb. $1 is the path, $2 is the binary stanza
 # body (one path per line, e.g. "malt\nmt" or "wrap/malt\nwrap/mt"),
 # $3 is the postflight reference suffix (e.g. "malt" → "#{staged_path}/malt").
+# $4 (optional) is a manpage path; when set, a `manpage "..."` stanza is
+# emitted to mirror what goreleaser's `manpages:` renders.
 write_cask() {
-  local cask_path="$1" binaries="$2" staged_suffix="$3"
+  local cask_path="$1" binaries="$2" staged_suffix="$3" manpage="${4:-}"
   {
     printf 'cask "malt" do\n'
     printf '  version "9.9.9"\n'
@@ -63,6 +69,7 @@ write_cask() {
       [ -n "$b" ] || continue
       printf '  binary "%s"\n' "$b"
     done <<<"$binaries"
+    [ -n "$manpage" ] && printf '  manpage "%s"\n' "$manpage"
     printf '  postflight do\n'
     printf '    if OS.mac?\n'
     printf '      system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/%s"]\n' "$staged_suffix"
@@ -138,6 +145,65 @@ for missing in "$WRAP/malt" "$WRAP/mt"; do
     failures+=("missing-no-mention-$missing")
   fi
 done
+
+# ── test 4: cask manpage stanza, page present in tarball → pass and the
+#            helper must report it verified (not silently ignored). ─────
+printf '▸ cask manpage present in tarball\n'
+ROOT4="$TMP/manpage-ok-root"
+CASK4="$TMP/manpage-ok.rb"
+MANPATH_REL="share/man/man1/malt.1"
+make_flat_root "$ROOT4"
+mkdir -p "$ROOT4/$(dirname "$MANPATH_REL")"
+printf '.TH MALT 1\n' >"$ROOT4/$MANPATH_REL"
+write_cask "$CASK4" "malt
+mt" "malt" "$MANPATH_REL"
+if "$HELPER" "$ROOT4" "$CASK4" >"$TMP/manpage-ok.out" 2>&1; then
+  printf '  ✓ manpage layout accepted\n'
+  pass=$((pass + 1))
+else
+  printf '  ✗ manpage layout rejected (rc=%s)\n' "$?" >&2
+  cat "$TMP/manpage-ok.out" >&2
+  fail=$((fail + 1))
+  failures+=("manpage-rejected")
+fi
+# The page must be actively checked: its path appears in the verified list.
+if grep -q "verified: $MANPATH_REL" "$TMP/manpage-ok.out"; then
+  printf '  ✓ manpage path verified\n'
+  pass=$((pass + 1))
+else
+  printf '  ✗ manpage path not checked (ignored)\n' >&2
+  cat "$TMP/manpage-ok.out" >&2
+  fail=$((fail + 1))
+  failures+=("manpage-ignored")
+fi
+
+# ── test 5: cask manpage stanza, page absent from tarball → fail naming
+#            it (today's helper ignores manpages, so this would pass). ──
+printf '▸ cask manpage missing from tarball\n'
+ROOT5="$TMP/manpage-missing-root"
+CASK5="$TMP/manpage-missing.rb"
+make_flat_root "$ROOT5"
+write_cask "$CASK5" "malt
+mt" "malt" "$MANPATH_REL"
+rc=0
+"$HELPER" "$ROOT5" "$CASK5" >"$TMP/manpage-missing.out" 2>&1 || rc=$?
+if [ "$rc" = "0" ]; then
+  printf '  ✗ missing manpage NOT rejected (rc=0)\n' >&2
+  fail=$((fail + 1))
+  failures+=("manpage-missing-allowed")
+else
+  printf '  ✓ missing manpage rejected (rc=%s)\n' "$rc"
+  pass=$((pass + 1))
+fi
+if grep -q "cask path missing in tarball: $MANPATH_REL" "$TMP/manpage-missing.out"; then
+  printf '  ✓ stderr names %s\n' "$MANPATH_REL"
+  pass=$((pass + 1))
+else
+  printf '  ✗ stderr did not name %s\n' "$MANPATH_REL" >&2
+  cat "$TMP/manpage-missing.out" >&2
+  fail=$((fail + 1))
+  failures+=("manpage-missing-no-mention")
+fi
 
 # ── summary ──────────────────────────────────────────────────────────
 printf '\n── summary ──\npass: %d\nfail: %d\n' "$pass" "$fail"

@@ -442,9 +442,9 @@ record-themes:
 # Regenerate the committed man page from the built binary's --help.
 [group('docs')]
 man-gen: build
-    ./scripts/gen-man.sh dist/man/malt.1
+    ./scripts/gen-man.sh man/malt.1
 
-# Drift guard: fail if dist/man/malt.1 is stale vs the binary's --help.
+# Drift guard: fail if man/malt.1 is stale vs the binary's --help.
 # Reuses the already-built binary (CI runs it right after the build step).
 [group('docs')]
 man-check:
@@ -453,8 +453,8 @@ man-check:
     tmp=$(mktemp)
     trap 'rm -f "$tmp"' EXIT
     ./scripts/gen-man.sh "$tmp"
-    if ! diff -u dist/man/malt.1 "$tmp"; then
-      echo "error: dist/man/malt.1 is out of date — run 'just man-gen'" >&2
+    if ! diff -u man/malt.1 "$tmp"; then
+      echo "error: man/malt.1 is out of date — run 'just man-gen'" >&2
       exit 1
     fi
 

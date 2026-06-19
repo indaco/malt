@@ -11,7 +11,7 @@
 # version (from .version) instead. Re-running must be byte-identical.
 #
 # Usage:
-#   scripts/gen-man.sh dist/man/malt.1
+#   scripts/gen-man.sh man/malt.1
 #   MALT_BIN=/path/to/malt scripts/gen-man.sh out.1
 
 set -euo pipefail
