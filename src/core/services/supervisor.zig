@@ -30,6 +30,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const sqlite = @import("../../db/sqlite.zig");
 const plist_mod = @import("plist.zig");
+const service_types = @import("types.zig");
 const atomic = @import("../../fs/atomic.zig");
 
 pub const SupervisorError = error{
@@ -74,6 +75,9 @@ pub const ServiceInfo = struct {
     plist_path: []const u8,
     auto_start: bool,
     last_status: []const u8,
+    /// Human schedule label ("interval 300s", "cron 30 4 * * 6"); "" for
+    /// run-at-load. A convenience cache; the plist stays authoritative.
+    schedule: []const u8,
 };
 
 /// Returns the services directory: `{prefix}/var/malt/services`.
@@ -103,7 +107,7 @@ pub fn logPath(allocator: std.mem.Allocator, name: []const u8, stream: enum { st
 /// List services from the `services` table.
 pub fn list(ctx: SupervisorCtx) SupervisorError![]ServiceInfo {
     const allocator = ctx.allocator;
-    var stmt = ctx.db.prepare("SELECT name, keg_name, plist_path, auto_start, last_status FROM services ORDER BY name;") catch
+    var stmt = ctx.db.prepare("SELECT name, keg_name, plist_path, auto_start, last_status, schedule FROM services ORDER BY name;") catch
         return SupervisorError.DatabaseError;
     defer stmt.finalize();
 
@@ -137,6 +141,10 @@ pub fn list(ctx: SupervisorCtx) SupervisorError![]ServiceInfo {
             allocator.dupe(u8, "unknown") catch
                 return SupervisorError.OutOfMemory;
         errdefer allocator.free(status_owned);
+        // NULL schedule (pre-feature rows / run-at-load) reads back as "".
+        const sched_owned = allocator.dupe(u8, if (stmt.columnText(5)) |p| std.mem.sliceTo(p, 0) else "") catch
+            return SupervisorError.OutOfMemory;
+        errdefer allocator.free(sched_owned);
 
         buf.append(allocator, .{
             .name = name_owned,
@@ -144,6 +152,7 @@ pub fn list(ctx: SupervisorCtx) SupervisorError![]ServiceInfo {
             .plist_path = plist_owned,
             .auto_start = stmt.columnBool(3),
             .last_status = status_owned,
+            .schedule = sched_owned,
         }) catch return SupervisorError.OutOfMemory;
     }
 
@@ -155,6 +164,7 @@ fn freeServiceInfoFields(allocator: std.mem.Allocator, info: ServiceInfo) void {
     allocator.free(info.keg_name);
     allocator.free(info.plist_path);
     allocator.free(info.last_status);
+    allocator.free(info.schedule);
 }
 
 pub fn freeServiceInfos(allocator: std.mem.Allocator, services: []ServiceInfo) void {
@@ -206,15 +216,22 @@ pub fn register(
     plist_mod.render(spec, &aw.writer) catch return SupervisorError.IoFailed;
     file.writeStreamingAll(ctx.io, aw.written()) catch return SupervisorError.IoFailed;
 
+    // Cache the schedule as a human label so `services list` shows why a
+    // service exists without re-parsing the plist.
+    const schedule_label = service_types.scheduleLabel(allocator, spec.schedule) catch
+        return SupervisorError.OutOfMemory;
+    defer allocator.free(schedule_label);
+
     var stmt = ctx.db.prepare(
-        \\INSERT OR REPLACE INTO services(name, keg_name, plist_path, auto_start, last_status)
-        \\VALUES (?, ?, ?, ?, 'registered');
+        \\INSERT OR REPLACE INTO services(name, keg_name, plist_path, auto_start, last_status, schedule)
+        \\VALUES (?, ?, ?, ?, 'registered', ?);
     ) catch return SupervisorError.DatabaseError;
     defer stmt.finalize();
     stmt.bindText(1, spec.label) catch return SupervisorError.DatabaseError;
     stmt.bindText(2, keg_name) catch return SupervisorError.DatabaseError;
     stmt.bindText(3, plist_path) catch return SupervisorError.DatabaseError;
     stmt.bindInt(4, if (auto_start) 1 else 0) catch return SupervisorError.DatabaseError;
+    stmt.bindText(5, schedule_label) catch return SupervisorError.DatabaseError;
     _ = stmt.step() catch return SupervisorError.DatabaseError;
 }
 

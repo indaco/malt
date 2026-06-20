@@ -16,6 +16,7 @@ const testing = std.testing;
 const color = @import("../ui/color.zig");
 const services_json = @import("json/services.zig");
 pub const Row = services_json.ServiceRow;
+const detail_pane = @import("detail_pane.zig");
 const scroll_list = @import("scroll_list.zig");
 const tab = @import("tab.zig");
 
@@ -29,6 +30,9 @@ pub const State = struct {
     items: []const Row = &.{},
     /// Pending lifecycle effect for the shell to perform, then clear.
     request: Request = .none,
+    /// The row whose detail pane is open (Enter), or null when closed (Esc).
+    /// A copy of the selected Row — its slices borrow the same shell storage.
+    detail: ?Row = null,
 };
 
 pub fn title() []const u8 {
@@ -37,7 +41,7 @@ pub fn title() []const u8 {
 
 /// The tab's action keys, surfaced in the shared footer next to the global keys.
 pub fn footerHint() []const u8 {
-    return "s: start   x: stop   r: restart";
+    return "enter: details   s: start   x: stop   r: restart";
 }
 
 /// Case-insensitive substring match of `filter` against `name`. An empty filter
@@ -72,9 +76,13 @@ pub fn selectedService(s: *const State) ?Row {
 }
 
 /// Pure transition: record a lifecycle intent for the shell to act on. `s` start,
-/// `x`/`X` stop, `r` restart — reversible, so no confirm guard.
+/// `x`/`X` stop, `r` restart — reversible, so no confirm guard. Enter opens the
+/// detail pane (all its fields are already on the Row, so no shell round-trip),
+/// Esc closes it.
 pub fn step(s: *State, key: tab.Key) void {
     switch (key) {
+        .enter => s.detail = selectedService(s),
+        .esc => s.detail = null,
         .char => |c| if (c.len == 1) switch (c.bytes[0]) {
             's' => s.request = .start,
             'x', 'X' => s.request = .stop,
@@ -116,7 +124,21 @@ fn dotStyle(st: Status) color.Role {
 /// `(state, rect)` so a resize is a re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (r.height == 0) return;
-    renderList(s, f, r);
+    var list_rect = r;
+    if (s.detail) |d| {
+        const fields = [_]detail_pane.Field{
+            .{ .label = "Schedule", .value = if (d.schedule.len != 0) d.schedule else "-" },
+            .{ .label = "Keg", .value = if (d.keg_name.len != 0) d.keg_name else "-" },
+            .{ .label = "State", .value = d.state },
+            .{ .label = "Auto-start", .value = if (d.auto_start) "yes" else "no" },
+        };
+        const dh = @min(detail_pane.neededRows(&fields, r.width), r.height / 2);
+        if (dh > 0 and dh < r.height) {
+            list_rect.height = r.height - dh;
+            detail_pane.render(f, &fields, .{ .row = r.row + list_rect.height, .col = r.col, .width = r.width, .height = dh });
+        }
+    }
+    renderList(s, f, list_rect);
 }
 
 fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
@@ -161,17 +183,37 @@ fn renderList(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     }
 }
 
-/// One list row (after the dot): the name, the runtime state, the auto-start
-/// hint, then the owning keg. ASCII columns, grapheme-naive like the rest.
+/// A single-cell clock marking a scheduled service. Same single-width family as
+/// the status dots (`● ○ ◌`); the full label lives in the ENTER detail pane.
+const sched_marker = "◷"; // U+25F7, 3 bytes, 1 display column
+
+/// One list row (after the dot): the name (with a `◷` when scheduled), the
+/// runtime state, the auto-start hint, then the owning keg. ASCII columns,
+/// grapheme-naive like the rest.
 fn formatRow(buf: []u8, s: Row) []const u8 {
     var len: usize = 0;
-    appendPad(buf, &len, s.name, 24);
+    appendName(buf, &len, s.name, s.schedule.len != 0, 24);
     append(buf, &len, " ");
     appendPad(buf, &len, s.state, 12);
     append(buf, &len, " ");
     appendPad(buf, &len, if (s.auto_start) "auto" else "manual", 8);
     append(buf, &len, s.keg_name);
     return buf[0..len];
+}
+
+/// Write the name, a ` ◷` marker when scheduled, then pad to `width` *display*
+/// cells so the next column aligns regardless of the marker. The marker's extra
+/// bytes (3-byte glyph, 1 cell) don't count toward the cell budget, so columns
+/// never drift. A name too long to fit the marker simply doesn't get one.
+fn appendName(buf: []u8, len: *usize, name: []const u8, scheduled: bool, width: usize) void {
+    append(buf, len, name);
+    var cells = name.len; // one byte ≈ one cell for the ASCII name
+    if (scheduled and cells + 2 <= width) {
+        append(buf, len, " ");
+        append(buf, len, sched_marker);
+        cells += 2; // a space plus the 1-cell clock
+    }
+    while (cells < width) : (cells += 1) append(buf, len, " ");
 }
 
 fn append(buf: []u8, len: *usize, s: []const u8) void {
@@ -198,6 +240,12 @@ const sample = [_]Row{
     .{ .name = "dnsmasq", .state = "not-loaded", .auto_start = true, .keg_name = "dnsmasq" },
     .{ .name = "weird", .state = "degraded", .auto_start = false, .keg_name = "weird" },
 };
+
+test "footerHint advertises the details affordance alongside the lifecycle keys" {
+    const h = footerHint();
+    try testing.expect(std.mem.indexOf(u8, h, "enter: details") != null);
+    try testing.expect(std.mem.indexOf(u8, h, "s: start") != null);
+}
 
 test "matches is a case-insensitive substring; empty filter matches all" {
     try testing.expect(matches("redis", ""));
@@ -265,6 +313,72 @@ test "render heads the columns in bold, indented past the status dot" {
     // The 2-col dot indent plus exact padding aligns the labels over values.
     try testing.expect(std.mem.indexOf(u8, out, "  NAME" ++ " " ** 21 ++ "STATE" ++ " " ** 8 ++ "START" ++ " " ** 3 ++ "KEG") != null);
     try testing.expect(std.mem.indexOf(u8, out, "redis") != null); // the list still renders below
+}
+
+test "formatRow marks a scheduled service with a clock and keeps STATE aligned" {
+    var a: [256]u8 = undefined;
+    var b: [256]u8 = undefined;
+    const scheduled = formatRow(&a, .{ .name = "backup", .state = "loaded", .auto_start = false, .keg_name = "backup", .schedule = "interval 300s" });
+    const plain = formatRow(&b, .{ .name = "backup", .state = "loaded", .auto_start = false, .keg_name = "backup", .schedule = "" });
+    // The clock marks only the scheduled row; the label itself stays out of the list.
+    try testing.expect(std.mem.indexOf(u8, scheduled, "◷") != null);
+    try testing.expect(std.mem.indexOf(u8, plain, "◷") == null);
+    try testing.expect(std.mem.indexOf(u8, scheduled, "interval 300s") == null);
+    // STATE lands at the same display column: the marker's only byte cost over the
+    // plain row is the clock's 2 non-display bytes (3-byte glyph, 1 display cell).
+    const i_plain = std.mem.indexOf(u8, plain, "loaded").?;
+    const i_sched = std.mem.indexOf(u8, scheduled, "loaded").?;
+    try testing.expectEqual(i_plain + 2, i_sched);
+}
+
+test "ENTER opens a detail pane showing the schedule label; ESC closes it" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const rows = [_]Row{
+        .{ .name = "backup", .state = "loaded", .auto_start = false, .keg_name = "backup", .schedule = "interval 300s" },
+    };
+    var s: State = .{ .items = &rows };
+    step(&s, .enter);
+    try testing.expect(s.detail != null);
+
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 60, .height = 12 });
+    const out = f.slice();
+    // The label moved off the list into the pane, so this text can only be here.
+    try testing.expect(std.mem.indexOf(u8, out, "Schedule") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "interval 300s") != null);
+
+    step(&s, .esc);
+    try testing.expect(s.detail == null);
+}
+
+test "detail pane shows no schedule label for a run-at-load service" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const rows = [_]Row{
+        .{ .name = "redis", .state = "running", .auto_start = true, .keg_name = "redis", .schedule = "" },
+    };
+    var s: State = .{ .items = &rows };
+    step(&s, .enter);
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 60, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "Schedule") != null);
+    // An empty schedule must not surface a bogus interval/cron label.
+    try testing.expect(std.mem.indexOf(u8, out, "interval") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "cron") == null);
+}
+
+test "render shows the schedule marker but not the label or a SCHED column" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const rows = [_]Row{
+        .{ .name = "backup", .state = "loaded", .auto_start = false, .keg_name = "backup", .schedule = "interval 300s" },
+    };
+    const s: State = .{ .items = &rows };
+    render(&s, &f, .{ .row = 2, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "◷") != null); // at-a-glance marker
+    try testing.expect(std.mem.indexOf(u8, out, "SCHED") == null); // no 5th column heading
+    try testing.expect(std.mem.indexOf(u8, out, "interval 300s") == null); // label lives in the detail pane
 }
 
 test "render lists services with a state dot, the state, and the auto-start hint" {

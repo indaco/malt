@@ -122,6 +122,8 @@ test "register writes a plist and a DB row that list reports back" {
     try testing.expectEqualStrings("testkeg", list[0].keg_name);
     try testing.expectEqualStrings("registered", list[0].last_status);
     try testing.expect(list[0].auto_start);
+    // A run-at-load service carries no schedule label.
+    try testing.expectEqualStrings("", list[0].schedule);
 
     // plist file exists on disk
     var f = try test_io.openFileAbsolute(std.Options.debug_io, list[0].plist_path, .{});
@@ -153,6 +155,7 @@ test "register writes an interval plist with StartInterval and RunAtLoad false" 
     const list = try supervisor.list(ctx);
     defer supervisor.freeServiceInfos(testing.allocator, list);
     try testing.expectEqual(@as(usize, 1), list.len);
+    try testing.expectEqualStrings("interval 3600s", list[0].schedule);
 
     // The plist that landed on disk through the real validate→render path
     // must carry the interval, not a run-at-load fallback.
@@ -162,6 +165,37 @@ test "register writes an interval plist with StartInterval and RunAtLoad false" 
     try testing.expect(std.mem.indexOf(u8, xml, "<integer>3600</integer>") != null);
     try testing.expect(std.mem.indexOf(u8, xml, "<key>RunAtLoad</key>\n    <false/>") != null);
     try testing.expect(std.mem.indexOf(u8, xml, "KeepAlive") == null);
+}
+
+test "register stores a cron schedule label that list reports back" {
+    const prefix = "/tmp/malt_sup_cron_label";
+    const cellar = prefix ++ "/Cellar/testkeg/1.0";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    _ = c.setenv("MALT_PREFIX", prefix, 1);
+    defer _ = c.unsetenv("MALT_PREFIX");
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // `30 4 * * 6` → one calendar entry; the label re-renders it in cron order
+    // (minute hour day-of-month month day-of-week) with `*` for unset fields.
+    const entries = [_]plist_mod.CalendarInterval{.{ .minute = 30, .hour = 4, .weekday = 6 }};
+    const spec = plist_mod.ServiceSpec{
+        .label = "com.malt.test.cron",
+        .program_args = &.{cellar ++ "/bin/backup"},
+        .stdout_path = prefix ++ "/out.log",
+        .stderr_path = prefix ++ "/err.log",
+        .schedule = .{ .calendar = &entries },
+    };
+    const ctx: supervisor.SupervisorCtx = .{ .allocator = testing.allocator, .io = std.Options.debug_io, .db = &db };
+    try supervisor.register(ctx, spec, "testkeg", true, cellar, prefix);
+
+    const list = try supervisor.list(ctx);
+    defer supervisor.freeServiceInfos(testing.allocator, list);
+    try testing.expectEqual(@as(usize, 1), list.len);
+    try testing.expectEqualStrings("cron 30 4 * * 6", list[0].schedule);
 }
 
 test "register rejects an out-of-range interval via the validate gate" {
