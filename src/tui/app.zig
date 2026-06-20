@@ -789,6 +789,7 @@ fn loadServices(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app:
         if (store.services) |old| old.deinit();
         store.services = null;
         app.states.services.items = &.{};
+        app.states.services.detail = null; // the old detail borrowed the freed rows
         return;
     };
     defer allocator.free(bytes);
@@ -797,6 +798,7 @@ fn loadServices(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app:
     if (store.services) |old| old.deinit();
     store.services = parsed;
     app.states.services.items = parsed.items;
+    app.states.services.detail = null; // a refreshed list invalidates the old detail
 }
 
 /// Build `mt services <action> <name>` for the selected service. Pure over the
