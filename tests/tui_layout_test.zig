@@ -38,7 +38,7 @@ test "regions tile the screen exactly across a range of sizes" {
     try expectTiles(80, 24);
     try expectTiles(120, 50);
     try expectTiles(200, 120);
-    try expectTiles(52, 6); // a narrow-but-valid size, just above the width floor
+    try expectTiles(52, 7); // a narrow-but-valid size, just above the width floor
 }
 
 test "fixed regions keep their heights; content absorbs the remainder" {

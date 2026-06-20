@@ -31,7 +31,10 @@ pub const Regions = struct {
 pub const header_rows: u16 = 1;
 pub const tab_bar_rows: u16 = 1;
 pub const filter_rows: u16 = 1;
-pub const footer_rows: u16 = 2;
+// One separator row + two text rows: the footer help/banner line wraps into the
+// two text rows on a narrow terminal instead of truncating its tail (the active
+// tab's action keys). Bounded so the layout stays a pure function of (cols, rows).
+pub const footer_rows: u16 = 3;
 pub const min_content_rows: u16 = 1;
 pub const min_rows: u16 = header_rows + tab_bar_rows + filter_rows + footer_rows + min_content_rows;
 // The narrowest width that still shows all five tabs; below it the bar can't
@@ -136,8 +139,8 @@ test "compute reserves the header row and tiles the screen exactly" {
     try std.testing.expectEqual(@as(u16, 1), r.header.row);
     try std.testing.expectEqual(@as(u16, 2), r.tab_bar.row);
     try std.testing.expectEqual(@as(u16, 4), r.content.row);
-    try std.testing.expectEqual(@as(u16, 19), r.content.height);
-    try std.testing.expectEqual(@as(u16, 23), r.footer.row);
+    try std.testing.expectEqual(@as(u16, 18), r.content.height);
+    try std.testing.expectEqual(@as(u16, 22), r.footer.row);
     try std.testing.expect(compute(1, 1) == .too_small);
 }
 
@@ -146,7 +149,7 @@ test "min_rows reserves a row for the header" {
         header_rows + tab_bar_rows + filter_rows + footer_rows + min_content_rows,
         min_rows,
     );
-    try std.testing.expectEqual(@as(u16, 6), min_rows);
+    try std.testing.expectEqual(@as(u16, 7), min_rows);
 }
 
 test "compute is too_small when either axis alone is below the minimum" {

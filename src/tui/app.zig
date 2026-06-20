@@ -21,6 +21,7 @@ const keys = @import("keys.zig");
 const term = @import("term.zig");
 const layout = @import("layout.zig");
 const scroll_list = @import("scroll_list.zig");
+const text_wrap = @import("text_wrap.zig");
 
 const spawn = @import("spawn.zig");
 const list_json = @import("json/list.zig");
@@ -352,25 +353,21 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
 
             // Footer: a rule line separating content, then — by priority — the
             // pre-read loading status, the transient error banner, or the help line.
+            // Each wraps across the footer's text rows (below the separator) so a
+            // long line keeps its tail on a narrow terminal instead of truncating.
             tab.renderSeparator(&f, r.footer, r.footer.row, false);
-            f.moveTo(r.footer.row + 1, 1);
+            const text_rows = r.footer.height -| 1;
             if (app.loading) {
                 var lb: [64]u8 = undefined;
-                f.put(color.roleCode(.accent));
-                f.putContent(scroll_list.truncate(loadingLine(&lb, app), cols));
-                f.put(color.Style.reset.code());
+                renderFooterText(&f, loadingLine(&lb, app), color.roleCode(.accent), r.footer.row + 1, text_rows, cols);
             } else if (app.banner.isSet()) {
-                // Undimmed + yellow so a recoverable failure reads as a warning,
-                // not chrome; `putContent` drops line-breakers the sanitizer let
-                // through, `truncate` keeps it within the column budget.
-                f.put(color.roleCode(.warning));
-                f.putContent(scroll_list.truncate(app.banner.slice(), cols));
-                f.put(color.Style.reset.code());
+                // Undimmed + yellow so a recoverable failure reads as a warning, not
+                // chrome; the wrap paints through `putContent`, which drops the
+                // line-breakers the sanitizer let through.
+                renderFooterText(&f, app.banner.slice(), color.roleCode(.warning), r.footer.row + 1, text_rows, cols);
             } else {
                 var hb: [256]u8 = undefined;
-                f.put(color.roleCode(.muted));
-                f.put(scroll_list.truncate(footerLine(&hb, app), cols));
-                f.put(color.Style.reset.code());
+                renderFooterText(&f, footerLine(&hb, app), color.roleCode(.muted), r.footer.row + 1, text_rows, cols);
             }
         },
     }
@@ -406,6 +403,24 @@ fn renderTooSmall(f: *tab.Frame, cols: u16, rows: u16) void {
         f.put(color.Style.reset.code());
         rest = rest[take..];
         while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+    }
+}
+
+/// Paint `text` wrapped across at most `max_rows` rows from `start_row`, styled
+/// with `role`. Each row is positioned by a cursor move (no raw newline) and
+/// painted through `putContent` so a child-derived banner can't inject a frame
+/// line. Rows past the cap are dropped — truncation only as the last resort
+/// below the bound. Shares `text_wrap` with the detail pane, so one wrap rule.
+fn renderFooterText(f: *tab.Frame, text: []const u8, role: []const u8, start_row: u16, max_rows: u16, cols: u16) void {
+    if (cols == 0 or max_rows == 0) return;
+    var it = text_wrap.iter(text, cols);
+    var row: u16 = 0;
+    while (it.next()) |chunk| : (row += 1) {
+        if (row >= max_rows) break;
+        f.moveTo(start_row + row, 1);
+        f.put(role);
+        f.putContent(chunk);
+        f.put(color.Style.reset.code());
     }
 }
 
@@ -1426,6 +1441,28 @@ test "the footer carries the active tab's keys next to the global keys" {
     const out = renderFrame(&buf, &a, 100, 24);
     try std.testing.expect(std.mem.indexOf(u8, out, "s: start") != null); // the active tab's keys
     try std.testing.expect(std.mem.indexOf(u8, out, "switch") != null); // and the global keys
+}
+
+test "the footer wraps a long hint so the tab's action keys survive a narrow terminal" {
+    var a: App = .{ .active = .outdated };
+    var buf: [8192]u8 = undefined;
+    // 70 cols is too narrow for the composed help+hint line on one row; truncating
+    // would drop the tail (the tab's action keys), wrapping keeps them.
+    const out = renderFrame(&buf, &a, 70, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "u: upgrade") != null); // the action key survives
+    try std.testing.expect(std.mem.indexOf(u8, out, "switch") != null); // global keys still present
+}
+
+test "renderFooterText wraps into the row cap and drops any overflow below it" {
+    var buf: [512]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    // Three rows' worth of text at width 8, but the cap is two: the third row
+    // must not paint, or the footer would bleed into the content region.
+    renderFooterText(&f, "aaaa bbbb cccc dddd eeee", color.roleCode(.muted), 6, 2, 8);
+    const out = f.slice();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[6;1H") != null); // first text row
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[7;1H") != null); // second text row
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[8;1H") == null); // capped — no third row
 }
 
 test "a too-small terminal shows a wrapped, styled notice (width alone trips it)" {

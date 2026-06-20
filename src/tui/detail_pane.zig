@@ -10,6 +10,7 @@
 const std = @import("std");
 const color = @import("../ui/color.zig");
 const tab = @import("tab.zig");
+const text_wrap = @import("text_wrap.zig");
 
 /// One labelled row. `value` is a single logical line; a multi-valued field
 /// (e.g. a dependency list) is pre-joined by the caller so the pane stays
@@ -87,37 +88,10 @@ fn valueWidth(field: Field, width: u16) usize {
     return if (width > prefix) width - prefix else 1;
 }
 
-const WrapIter = struct {
-    rest: []const u8,
-    width: usize,
-
-    fn next(self: *WrapIter) ?[]const u8 {
-        if (self.rest.len == 0) return null;
-        const take = wrapTake(self.rest, self.width);
-        const chunk = self.rest[0..take];
-        self.rest = trimLeading(self.rest[take..]);
-        return chunk;
-    }
-};
-
-fn wrapIter(field: Field, width: u16) WrapIter {
-    return .{ .rest = field.value, .width = valueWidth(field, width) };
-}
-
-/// Bytes of `s` for one line of at most `max` columns: break at the last space
-/// that fits, else hard-break at `max` (a single word wider than the line).
-/// Grapheme-naive — one byte ≈ one column, like the rest of the TUI.
-fn wrapTake(s: []const u8, max: usize) usize {
-    if (s.len <= max) return s.len;
-    var i = max;
-    while (i > 0) : (i -= 1) if (s[i - 1] == ' ') return i; // include the break space
-    return max; // no space in the window: hard break
-}
-
-fn trimLeading(s: []const u8) []const u8 {
-    var r = s;
-    while (r.len > 0 and r[0] == ' ') r = r[1..];
-    return r;
+// The value wraps through the shared `text_wrap` leaf, so the footer and the
+// detail pane share one wrapping rule rather than two that drift.
+fn wrapIter(field: Field, width: u16) text_wrap.Iter {
+    return text_wrap.iter(field.value, valueWidth(field, width));
 }
 
 // ─── tests ───────────────────────────────────────────────────────────
