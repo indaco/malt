@@ -71,6 +71,47 @@ test "uninstall unlinks every font listed in the manifest, then drops Caskroom a
     try testing.expect(!cask.isInstalled(&db, "font-x"));
 }
 
+test "uninstall removes only manifested fonts and tolerates a stale entry" {
+    const io = std.Options.debug_io;
+    const prefix: [:0]const u8 = "/tmp/malt_font_uninstall_precise_it";
+    test_io.deleteTreeAbsolute(io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+
+    const fonts = prefix ++ "/Fonts";
+    try putFile(io, fonts ++ "/A.ttf", "AAA"); // manifested, present
+    try putFile(io, fonts ++ "/Keep.ttf", "KEEP"); // a co-resident font from another cask
+
+    // The manifest also lists a font that was already manually deleted; the
+    // stale entry must not abort uninstall, and Keep.ttf (never recorded here)
+    // must survive — the manifest is the exact record of what this cask placed.
+    const manifest_path = prefix ++ "/Caskroom/font-x/1.0/" ++ cask_font.MANIFEST_NAME;
+    try cask_font.writeManifest(io, manifest_path, fonts ++ "/A.ttf\n" ++ fonts ++ "/Gone.ttf");
+
+    var c = try cask.parseCask(testing.allocator, font_cask_json);
+    defer c.deinit();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    try cask.recordInstall(&db, &c, manifest_path, null);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    var installer = newInstaller(&threaded, &db, prefix);
+
+    try installer.uninstall("font-x");
+
+    try testing.expectError(error.FileNotFound, test_io.openFileAbsolute(io, fonts ++ "/A.ttf", .{}));
+    try expectKept(io, fonts ++ "/Keep.ttf", "KEEP");
+    try testing.expect(!cask.isInstalled(&db, "font-x"));
+}
+
+fn expectKept(io: std.Io, path: []const u8, body: []const u8) !void {
+    const got = try test_io.readFileAbsoluteAlloc(io, testing.allocator, path, 4096);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(body, got);
+}
+
 test "uninstall survives a missing manifest and still clears the DB row" {
     const io = std.Options.debug_io;
     const prefix: [:0]const u8 = "/tmp/malt_font_uninstall_drift_it";
