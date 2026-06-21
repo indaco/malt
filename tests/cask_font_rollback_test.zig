@@ -157,6 +157,26 @@ test "a fresh font install persists a per-version sidecar that round-trips the s
     try testing.expect(spec.entries[1].target == null);
 }
 
+fn readSpecUnderOom(alloc: std.mem.Allocator, db: *sqlite.Database, prefix: [:0]const u8) !void {
+    var installer = cask.CaskInstaller.init(std.Options.debug_io, testEnviron(), alloc, db, prefix);
+    if (try installer.readFontSpec("font-x", "1.0")) |spec| {
+        var s = spec;
+        s.deinit(alloc);
+    }
+}
+
+test "readFontSpec frees its buffers on allocation failure" {
+    const io = std.Options.debug_io;
+    const prefix: [:0]const u8 = "/tmp/malt_font_rollback_oom_it";
+    test_io.deleteTreeAbsolute(io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    try putFile(io, prefix ++ "/cache/Cask/font-x-1.0.fonts", "ttf/A.ttf\t/x/Renamed.ttf\nB.ttf\n");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try testing.checkAllAllocationFailures(testing.allocator, readSpecUnderOom, .{ &db, prefix });
+}
+
 test "readFontSpec returns null when no sidecar was written" {
     const prefix: [:0]const u8 = "/tmp/malt_font_rollback_nospec_it";
     test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
