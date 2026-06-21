@@ -51,6 +51,7 @@ pub const bundle_cleanup = @import("core/bundle/cleanup.zig");
 pub const bundle_manifest = @import("core/bundle/manifest.zig");
 pub const bundle_runner = @import("core/bundle/runner.zig");
 pub const cask = @import("core/cask.zig");
+pub const cask_font = @import("core/cask_font.zig");
 pub const cellar = @import("core/cellar.zig");
 pub const child = @import("core/child.zig");
 pub const deps = @import("core/deps.zig");
