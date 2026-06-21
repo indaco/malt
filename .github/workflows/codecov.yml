@@ -1,0 +1,17 @@
+name: Codecov
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/codecov.json"]
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: codecov/codecov-action@v5
+        with:
+          files: .github/codecov.json
+          disable_search: true
+          token: ${{ secrets.CODECOV_TOKEN }}
