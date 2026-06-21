@@ -598,11 +598,18 @@ pub const CaskInstaller = struct {
         if (app_path_len > 0) {
             const app_path = app_path_buf[0..app_path_len];
 
-            // Check if the app is running (best-effort)
-            if (isAppRunning(self.io, app_path)) return CaskError.UninstallFailed;
+            if (std.mem.eql(u8, std.fs.path.basename(app_path), cask_font.MANIFEST_NAME)) {
+                // Font cask: app_path is the manifest, not a removable bundle.
+                // Unlink each placed font; the Caskroom wipe below removes the
+                // manifest itself.
+                self.removeManifestedFonts(app_path);
+            } else {
+                // Check if the app is running (best-effort)
+                if (isAppRunning(self.io, app_path)) return CaskError.UninstallFailed;
 
-            // app may already be gone (manual delete); continue to DB cleanup.
-            std.Io.Dir.cwd().deleteTree(self.io, app_path) catch {};
+                // app may already be gone (manual delete); continue to DB cleanup.
+                std.Io.Dir.cwd().deleteTree(self.io, app_path) catch {};
+            }
         }
 
         // Caskroom bookkeeping; continue so later removals still run.
@@ -633,6 +640,25 @@ pub const CaskInstaller = struct {
         // failure lets the CLI caller log `db.errMsg()` instead of
         // silently leaving the row behind.
         try removeRecord(self.db, token);
+    }
+
+    /// Unlink every font recorded in the `.malt-fonts` manifest at
+    /// `manifest_path`. Best-effort by contract: a missing manifest (manual
+    /// Caskroom deletion) reads as empty and an already-removed font unlinks
+    /// as a no-op, so uninstall always proceeds to DB cleanup. The manifest
+    /// file itself is left for the caller's Caskroom wipe to remove.
+    fn removeManifestedFonts(self: *CaskInstaller, manifest_path: []const u8) void {
+        // A read error (e.g. permissions) leaves the fonts in place rather
+        // than aborting uninstall — drift is recoverable, a stuck row is not.
+        const bytes = cask_font.readManifest(self.io, self.allocator, manifest_path) catch return;
+        defer self.allocator.free(bytes);
+
+        var it = std.mem.splitScalar(u8, bytes, '\n');
+        while (it.next()) |line| {
+            if (line.len == 0) continue;
+            // Stale entry (font already gone) is a no-op; never abort here.
+            std.Io.Dir.deleteFileAbsolute(self.io, line) catch {};
+        }
     }
 
     /// Reinstall a previously-installed cask version from history. Drives
