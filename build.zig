@@ -191,6 +191,7 @@ pub fn build(b: *std.Build) void {
         "tests/custom_theme_test.zig",
         "tests/install_local_test.zig",
         "tests/cask_extra_test.zig",
+        "tests/cask_font_install_test.zig",
         "tests/cask_resolve_test.zig",
         "tests/dsl_interpreter_extra_test.zig",
         "tests/list_test.zig",
