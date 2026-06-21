@@ -478,6 +478,10 @@ pub const CaskInstaller = struct {
     progress: ?client_mod.ProgressCallback,
     /// Pre-resolved type for extensionless URLs (HEAD fallback).
     artifact_type_override: ?ArtifactType = null,
+    /// Font stanzas to place instead of parsing them from the cask JSON.
+    /// Set by `reinstallFromHistory` from the per-version sidecar so a
+    /// rollback's synthetic, artifact-less cask still restores its fonts.
+    font_entries_override: ?[]const cask_font.FontEntry = null,
     /// Mirrors `ctx.offline` from the cli/ caller. Threaded onto the
     /// internal HttpClient so a download miss surfaces `OfflineRequired`
     /// instead of stalling on connect.
@@ -714,6 +718,17 @@ pub const CaskInstaller = struct {
             .parsed = parsed_empty,
         };
 
+        // Re-source font stanzas for this version from the sidecar: the
+        // synthetic cask carries no artifacts, so without this a font cask
+        // would fall through to the .app path and fail. Non-font casks have no
+        // sidecar — the override stays null and behaviour is unchanged. A read
+        // error degrades to "no override" (a font cask then fails loud at the
+        // .app path); it never aborts the rollback before the install attempt.
+        var spec_opt = self.readFontSpec(row.token, row.version) catch null;
+        defer if (spec_opt) |*s| s.deinit(self.allocator);
+        if (spec_opt) |*s| self.font_entries_override = s.entries;
+        defer self.font_entries_override = null;
+
         const app_path = try self.install(&synthetic);
         defer self.allocator.free(app_path);
 
@@ -862,6 +877,12 @@ pub const CaskInstaller = struct {
     /// the dispatch is exercisable in tests without driving ditto extraction
     /// or the network. Returns the path recorded as `app_path`.
     pub fn placeExtracted(self: *CaskInstaller, extract_dir: []const u8, app_dir: []const u8, cask: *const Cask) ![]const u8 {
+        // Rollback re-sources the stanzas via this override (the synthetic
+        // cask's JSON is empty); a fresh install collects them from the JSON.
+        if (self.font_entries_override) |entries| {
+            return self.installFontArtifacts(extract_dir, cask, entries);
+        }
+
         // Font casks carry one `font` stanza per file and no `.app`; route
         // them to the leaf before the .app demand below. Everything else
         // falls through to the unchanged bundle-promotion path.
@@ -923,7 +944,98 @@ pub const CaskInstaller = struct {
         const manifest_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ caskroom_ver, cask_font.MANIFEST_NAME });
         errdefer self.allocator.free(manifest_path);
         try cask_font.writeManifest(self.io, manifest_path, manifest);
+
+        // Persist the stanzas next to the cached artifact so a later rollback
+        // restores them offline. Best-effort: a failed sidecar only degrades a
+        // future rollback, never this install (as with recordCaskVersion).
+        self.writeFontSpec(cask.token, cask.version, entries) catch {};
+
         return manifest_path;
+    }
+
+    /// Per-version sidecar of the placed font stanzas, co-located with the
+    /// cached artifact at `<prefix>/cache/Cask/<token>-<version>.fonts`. It
+    /// lets `reinstallFromHistory` re-place fonts offline without the cask
+    /// JSON, which the synthetic rollback cask lacks. Format: one
+    /// `source\ttarget` line per stanza; a tab-less line has no rename target.
+    /// Sanitization still runs in the leaf at placement, so the persisted
+    /// strings are re-validated there rather than trusted here.
+    pub const FontSpec = struct {
+        bytes: []u8,
+        entries: []cask_font.FontEntry,
+
+        pub fn deinit(self: *FontSpec, allocator: std.mem.Allocator) void {
+            allocator.free(self.entries);
+            allocator.free(self.bytes);
+        }
+    };
+
+    fn fontSpecPath(self: *CaskInstaller, token: []const u8, version: []const u8, buf: []u8) ![]const u8 {
+        return std.fmt.bufPrint(buf, "{s}/cache/Cask/{s}-{s}.fonts", .{ self.prefix, token, version });
+    }
+
+    fn writeFontSpec(self: *CaskInstaller, token: []const u8, version: []const u8, entries: []const cask_font.FontEntry) !void {
+        var path_buf: [512]u8 = undefined;
+        const path = try self.fontSpecPath(token, version, &path_buf);
+
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(self.allocator);
+        for (entries) |e| {
+            try bytes.appendSlice(self.allocator, e.source);
+            if (e.target) |t| {
+                try bytes.append(self.allocator, '\t');
+                try bytes.appendSlice(self.allocator, t);
+            }
+            try bytes.append(self.allocator, '\n');
+        }
+
+        if (std.fs.path.dirname(path)) |dir| try std.Io.Dir.cwd().createDirPath(self.io, dir);
+        const file = try std.Io.Dir.createFileAbsolute(self.io, path, .{ .truncate = true });
+        defer file.close(self.io);
+        try file.writeStreamingAll(self.io, bytes.items);
+    }
+
+    /// Read the sidecar for `(token, version)`, or null when none was written
+    /// (a non-font cask, or a pre-sidecar install). Entries borrow the
+    /// returned `bytes`; free both via `FontSpec.deinit`.
+    pub fn readFontSpec(self: *CaskInstaller, token: []const u8, version: []const u8) !?FontSpec {
+        var path_buf: [512]u8 = undefined;
+        const path = try self.fontSpecPath(token, version, &path_buf);
+
+        const file = std.Io.Dir.openFileAbsolute(self.io, path, .{}) catch |e| switch (e) {
+            error.FileNotFound => return null,
+            else => return e,
+        };
+        defer file.close(self.io);
+
+        const stat = try file.stat(self.io);
+        const bytes = try self.allocator.alloc(u8, stat.size);
+        errdefer self.allocator.free(bytes);
+        const n = try file.readPositionalAll(self.io, bytes, 0);
+        const data = bytes[0..n];
+
+        var count: usize = 0;
+        var counter = std.mem.splitScalar(u8, data, '\n');
+        while (counter.next()) |line| {
+            if (line.len != 0) count += 1;
+        }
+
+        const entries = try self.allocator.alloc(cask_font.FontEntry, count);
+        errdefer self.allocator.free(entries);
+
+        var i: usize = 0;
+        var it = std.mem.splitScalar(u8, data, '\n');
+        while (it.next()) |line| {
+            if (line.len == 0) continue;
+            if (std.mem.indexOfScalar(u8, line, '\t')) |t| {
+                entries[i] = .{ .source = line[0..t], .target = line[t + 1 ..] };
+            } else {
+                entries[i] = .{ .source = line, .target = null };
+            }
+            i += 1;
+        }
+
+        return .{ .bytes = bytes, .entries = entries };
     }
 
     /// Install a `.tar.gz` cask. Two shapes are supported:
