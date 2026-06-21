@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# Run unit tests under kcov, print line-coverage percentage, and refresh
-# the README badge SVG at .github/badges/coverage.svg.
+# Run unit tests under kcov, print line-coverage percentage, and write the
+# Codecov report to .github/codecov.json for CI to upload (commit to refresh).
 #
 # HTML report lands at coverage/merged/kcov-merged/index.html.
-# Requires kcov (brew install kcov). Internet is needed for the badge fetch.
+# Requires kcov (brew install kcov).
 
 set -euo pipefail
 
@@ -63,39 +63,16 @@ if [ ! -f "$report" ]; then
   exit 1
 fi
 
+# Commit kcov's native Codecov report so CI uploads it without running kcov
+# (which is flaky on macOS CI runners). Regenerate + commit to refresh.
+cp coverage/merged/kcov-merged/codecov.json .github/codecov.json
+
 if command -v jq >/dev/null 2>&1; then
   percent=$(jq -r '.percent_covered' "$report")
 else
   percent=$(grep -oE '"percent_covered"[^,}]*' "$report" | grep -oE '[0-9]+(\.[0-9]+)?' | head -1)
 fi
 
-# Pick a shields.io color based on the integer part of the percentage.
-pct_int=${percent%.*}
-if [ "$pct_int" -ge 90 ]; then
-  color="brightgreen"
-elif [ "$pct_int" -ge 80 ]; then
-  color="green"
-elif [ "$pct_int" -ge 70 ]; then
-  color="yellowgreen"
-elif [ "$pct_int" -ge 60 ]; then
-  color="yellow"
-elif [ "$pct_int" -ge 50 ]; then
-  color="orange"
-else
-  color="red"
-fi
-
-# Fetch the static badge SVG from shields.io and commit it under .github/badges/.
-# This keeps the README badge in-repo so it updates with normal commits — no CI needed.
-mkdir -p .github/badges
-badge_url="https://img.shields.io/badge/coverage-${percent}%25-${color}"
-if curl -sSLf "$badge_url" -o .github/badges/coverage.svg; then
-  badge_msg=".github/badges/coverage.svg (refreshed — remember to commit it)"
-else
-  badge_msg="warning: could not fetch badge from shields.io (offline?) — badge not refreshed"
-fi
-
 echo ""
 echo "Coverage: ${percent}%"
 echo "Report:   coverage/merged/kcov-merged/index.html"
-echo "Badge:    ${badge_msg}"

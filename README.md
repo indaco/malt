@@ -6,7 +6,7 @@ Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosyste
 
 ![macOS only](https://img.shields.io/badge/platform-macOS-blue)
 ![Version](https://img.shields.io/github/v/tag/indaco/malt?label=version&sort=semver&color=4c1)
-![Coverage](.github/badges/coverage.svg)
+[![codecov](https://codecov.io/gh/indaco/malt/branch/main/graph/badge.svg)](https://codecov.io/gh/indaco/malt)
 ![Zig 0.16.x](https://img.shields.io/badge/zig-0.16.x-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![Signed by cosign](https://img.shields.io/badge/signed-cosign-brightgreen?logo=sigstore&logoColor=white)](#safety-and-security)
