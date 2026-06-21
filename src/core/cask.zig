@@ -8,6 +8,7 @@ const client_mod = @import("../net/client.zig");
 const archive_mod = @import("../fs/archive.zig");
 const hash_mod = @import("hash.zig");
 const child_mod = @import("child.zig");
+const cask_font = @import("cask_font.zig");
 
 pub const CaskError = error{
     ParseFailed,
@@ -828,6 +829,21 @@ pub const CaskInstaller = struct {
         const ditto_argv = [_][]const u8{ "ditto", "-xk", zip_path, extract_dir };
         child_mod.runOrFail(self.io, self.allocator, &ditto_argv) catch return error.InstallFailed;
 
+        return self.placeExtracted(extract_dir, app_dir, cask);
+    }
+
+    /// Dispatch a freshly-extracted zip to its placement strategy. Public so
+    /// the dispatch is exercisable in tests without driving ditto extraction
+    /// or the network. Returns the path recorded as `app_path`.
+    pub fn placeExtracted(self: *CaskInstaller, extract_dir: []const u8, app_dir: []const u8, cask: *const Cask) ![]const u8 {
+        // Font casks carry one `font` stanza per file and no `.app`; route
+        // them to the leaf before the .app demand below. Everything else
+        // falls through to the unchanged bundle-promotion path.
+        if (try cask_font.collectFontArtifacts(self.allocator, cask.parsed.value.object)) |entries| {
+            defer self.allocator.free(entries);
+            return self.installFontArtifacts(extract_dir, cask, entries);
+        }
+
         // Find the .app. app_name_buf owns the fallback past iterator teardown.
         var app_name_buf: [256]u8 = undefined;
         const app_name = parseAppName(cask.parsed.value.object) orelse
@@ -849,6 +865,39 @@ pub const CaskInstaller = struct {
         child_mod.runOrFail(self.io, self.allocator, &mv_argv) catch return error.InstallFailed;
 
         return dst_app;
+    }
+
+    /// Font branch of the zip dispatch. Wires the installer's environ,
+    /// prefix, and Caskroom layout to the leaf, which owns all font-
+    /// specific policy (destination, sanitization, manifest format).
+    /// Places every artifact, persists the placed-paths manifest under
+    /// `Caskroom/<token>/<version>/`, and returns that manifest path —
+    /// recorded as `app_path` so uninstall reads it back. Caller owns the
+    /// returned slice.
+    fn installFontArtifacts(
+        self: *CaskInstaller,
+        extract_dir: []const u8,
+        cask: *const Cask,
+        entries: []const cask_font.FontEntry,
+    ) ![]const u8 {
+        var fonts_buf: [512]u8 = undefined;
+        const env_home = std.process.Environ.getPosix(self.environ, "HOME");
+        const fonts_dir = cask_font.resolveFontsDir(self.prefix, env_home, &fonts_buf);
+
+        const manifest = try cask_font.placeFonts(self.io, self.allocator, extract_dir, fonts_dir, entries);
+        defer self.allocator.free(manifest);
+
+        // Create Caskroom/<token>/<version>/ before the manifest write,
+        // mirroring recordCaskroom's ordering.
+        var caskroom_buf: [512]u8 = undefined;
+        const caskroom_ver = std.fmt.bufPrint(&caskroom_buf, "{s}/Caskroom/{s}/{s}", .{
+            self.prefix, cask.token, cask.version,
+        }) catch return error.InstallFailed;
+
+        const manifest_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ caskroom_ver, cask_font.MANIFEST_NAME });
+        errdefer self.allocator.free(manifest_path);
+        try cask_font.writeManifest(self.io, manifest_path, manifest);
+        return manifest_path;
     }
 
     /// Install a `.tar.gz` cask. Two shapes are supported:
