@@ -23,6 +23,10 @@
 #   - src/cli/migrate/keg.zig   on-disk Cellar path
 #                                 (<prefix>/Library/Taps/<user>/homebrew-<repo>) —
 #                                 Homebrew's filesystem layout, not a URL
+#   - Zig multiline-string (`\\`) lines — documentation, e.g. the `--help`
+#                                 env-var listing. A real token reach is
+#                                 executable code; it can never live inside
+#                                 a string literal, so doc mentions are exempt.
 #
 # Usage: scripts/regressions/tap-resolution-contract.sh
 # Requirements: POSIX grep — no network, no build.
@@ -43,10 +47,16 @@ hits_auth_helper=$(grep -rn --include='*.zig' -F 'authHeader' src || true)
 all=$(printf '%s\n%s\n%s\n%s\n' \
   "$hits_prefix" "$hits_bare_slug" "$hits_token" "$hits_auth_helper")
 
+# A leading backslash after the `path:line:` prefix marks a Zig
+# multiline-string line (documentation, e.g. the --help env listing) — never
+# a token reach, so exempt it. `bs` holds one backslash via ANSI-C quoting so
+# the regex stays shellcheck-clean.
+bs=$'\\'
 filtered=$(printf '%s\n' "$all" |
   grep -v '^src/core/forge\.zig:' |
   grep -v '^src/core/tap\.zig:' |
   grep -v '^src/cli/migrate/keg\.zig:' |
+  grep -vE ":[0-9]+:[[:space:]]*${bs}${bs}" |
   grep -v '^$' || true)
 
 if [[ -n "$filtered" ]]; then

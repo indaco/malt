@@ -145,6 +145,15 @@ test "all global-flag completions expose --output-format=ndjson" {
     try expectContains(completions.fish_script, "output-format=ndjson");
 }
 
+test "all global-flag completions expose --debug" {
+    // Regression guard: --debug is a global flag (help + man + README),
+    // so every shell's top-level flag list must offer it. It was missing
+    // from all three scripts until parity with the help banner was restored.
+    try expectContains(completions.bash_script, "--debug");
+    try expectContains(completions.zsh_script, "--debug[");
+    try expectContains(completions.fish_script, "-l debug");
+}
+
 test "purge completions expose --verbose with command-specific semantics" {
     // --verbose is a global flag, so bash/fish pick it up automatically;
     // zsh's per-command _arguments block has to declare it locally so the

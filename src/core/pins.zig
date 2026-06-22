@@ -20,7 +20,7 @@ const std = @import("std");
 /// slice header is emitted at use sites.
 ///
 /// Bump at release time via `scripts/gen-pins.sh`.
-pub const homebrew_core_commit_sha: [40]u8 = "9fc9fc78b2fe1e183579aa29ccb45a538c060b4f".*;
+pub const homebrew_core_commit_sha: [40]u8 = "cec1a905b268342f4ee0724fec0768994eb2bf13".*;
 
 const MANIFEST_TEXT: []const u8 = @embedFile("pins_manifest.txt");
 

@@ -590,9 +590,9 @@ fn dispatch(allocator: std.mem.Allocator, ctx: *const AppCtx, cmd: Command, cmd_
 
 fn printUsage(ctx: *const AppCtx) void {
     const usage =
-        \\malt — a fast, drop-in Homebrew alternative for macOS.
-        \\Warm installs in milliseconds. post_install scripts that actually run.
-        \\Full operational surface beyond install and uninstall.
+        \\malt — Homebrew's whole ecosystem, none of its weight.
+        \\Reuses every formula, bottle, and Brewfile; runs post_install natively.
+        \\Themeable TUI and CLI.
         \\
         \\Usage: malt <command> [options] [arguments]
         \\       mt <command> [options] [arguments]    (alias)
@@ -649,16 +649,41 @@ fn printUsage(ctx: *const AppCtx) void {
         \\
         \\Environment:
         \\  MALT_PREFIX       Override install prefix (default: /opt/malt)
-        \\  MALT_CACHE        Override cache directory
+        \\  MALT_CACHE        Override cache directory (default: {prefix}/cache)
         \\  NO_COLOR          Disable colored output
         \\  MALT_NO_EMOJI     Disable emoji in output
+        \\  MALT_NO_VERSION_NOTIFIER=1
+        \\                    Suppress the "newer malt available" stderr notice
         \\  MALT_PROGRESS=tty|plain|none
         \\                    Choose how install/upgrade/migrate report progress;
         \\                    default auto-detects (CI=true flips to plain)
+        \\  MALT_THEME        Colour theme for CLI and tui: light/dark/auto, or a
+        \\                    named palette (dracula, nord, gruvbox-dark, ...);
+        \\                    default auto
+        \\  MALT_THEMES_FILE  Path to a JSON file of custom themes
+        \\                    (default: {prefix}/etc/malt/themes.json)
+        \\  HOMEBREW_GITHUB_API_TOKEN
+        \\                    GitHub token for higher API rate limits
+        \\  MALT_GITHUB_TOKEN GitHub token sent as Bearer on tap commit lookups
+        \\  MALT_GITLAB_TOKEN GitLab token (PRIVATE-TOKEN) for GitLab-hosted taps
+        \\  MALT_GITEA_TOKEN  Codeberg/Forgejo/Gitea token for those taps
+        \\  MALT_HTTP_IDLE_TIMEOUT_SECS
+        \\                    HTTP idle read timeout, seconds (clamped to [5, 600])
+        \\  MALT_API_DOMAIN   Override metadata API base URL (HTTPS only)
+        \\  MALT_BOTTLE_DOMAIN
+        \\                    Override bottle registry base URL (HTTPS only)
         \\  MALT_OFFLINE=1    Same as --offline: every fetch must serve from
         \\                    the snapshot cache
-        \\  MALT_NO_VERSION_NOTIFIER=1
-        \\                    Suppress the "newer malt available" stderr notice
+        \\  MALT_MIGRATE_PARALLEL_WORKERS
+        \\                    Worker count for migrate --parallel (clamped to [1, 32])
+        \\  MALT_OUTDATED_MAX_AGE
+        \\                    TTL in minutes for the outdated.json snapshot
+        \\  MALT_ALLOW_RAW_POST_INSTALL
+        \\                    Disable the terminal-escape filter on ruby
+        \\                    post_install output
+        \\  MALT_ALLOW_UNVERIFIED=1
+        \\                    Skip signature + checksum verify for version update
+        \\                    --no-verify (not recommended)
         \\
     ;
     ctx.stdout.writeStreamingAll(ctx.io, usage) catch {};
