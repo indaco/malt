@@ -33,8 +33,10 @@ const tab = @import("tab.zig");
 /// An effect the pure `step` defers to the impure shell, which performs it and
 /// resets the field. `step` never does I/O — this is the command channel.
 /// `search` (re)runs the committed query; `install` installs the selection;
-/// `info` opens `mt info` for the active hit (works for uninstalled hits too).
-pub const Request = enum { none, search, install, info };
+/// `info` opens `mt info` for the active hit (works for uninstalled hits too);
+/// `toggle` adds/removes the active hit in the shell-owned cross-query basket
+/// (selection outlives the per-query result list, so the leaf cannot own it).
+pub const Request = enum { none, search, install, info, toggle };
 
 /// The read lifecycle the render reflects. `idle` before any query is committed
 /// (show guidance), `searching` while the blocking remote read runs (the shell
@@ -83,12 +85,13 @@ pub fn selectedIndex(s: *const State) ?usize {
     return @min(s.chrome.view.selected, s.items.len - 1);
 }
 
-/// Toggle the active row's checkbox. An already-installed hit is never selectable
-/// (it would be a no-op install), mirroring how a pinned row is held back.
-fn toggle(s: *State) void {
-    const i = selectedIndex(s) orelse return;
-    if (s.items[i].installed) return;
-    if (i < s.checked.len) s.checked[i] = !s.checked[i];
+/// Request a basket toggle for the active row. An already-installed hit is never
+/// selectable, so it is inert. The shell owns the cross-query basket and writes
+/// the projected `checked` slice; the pure leaf only signals intent here.
+fn requestToggle(s: *State) void {
+    const m = selectedMatch(s) orelse return;
+    if (m.installed) return;
+    s.request = .toggle;
 }
 
 /// Pure transition. Enter (re)runs the committed query — the filter doubles as
@@ -102,7 +105,7 @@ pub fn step(s: *State, key: tab.Key) void {
         .enter => if (selectedMatch(s) != null) {
             s.request = .info;
         },
-        .space => toggle(s),
+        .space => requestToggle(s),
         // `i` installs the multi-selection (or the active row when nothing is
         // checked); inert when there is nothing installable to do.
         .char => |c| if (c.len == 1 and c.bytes[0] == 'i') {
@@ -321,18 +324,24 @@ test "an unrelated key leaves the request alone" {
     try testing.expectEqual(Request.none, s.request);
 }
 
-test "space toggles the active row's checkbox; an installed hit is never selectable" {
-    var checked = [_]bool{false} ** 3;
-    var s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
+test "space requests a basket toggle for the active not-installed row" {
+    var s: State = .{ .items = &sample, .phase = .loaded };
     s.chrome.view.selected = 0; // wget, not installed
     step(&s, .space);
-    try testing.expect(checked[0]);
-    step(&s, .space);
-    try testing.expect(!checked[0]); // toggles back off
+    try testing.expectEqual(Request.toggle, s.request);
+}
 
+test "space is inert on an already-installed row (never selectable)" {
+    var s: State = .{ .items = &sample, .phase = .loaded };
     s.chrome.view.selected = 1; // firefox, already installed
     step(&s, .space);
-    try testing.expect(!checked[1]); // installed rows can't be checked
+    try testing.expectEqual(Request.none, s.request);
+}
+
+test "space is inert on an empty result list" {
+    var s: State = .{ .items = &.{} };
+    step(&s, .space);
+    try testing.expectEqual(Request.none, s.request);
 }
 
 test "i installs a checked, not-installed hit even when the active row is installed" {
