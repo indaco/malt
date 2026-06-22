@@ -51,7 +51,7 @@ emit() {
   printf '.TH MALT 1 "malt %s" "malt %s" "malt manual"\n' "$VERSION" "$VERSION"
 
   printf '.SH NAME\n'
-  printf 'malt \\- a fast, drop-in Homebrew alternative for macOS\n'
+  printf 'malt \\- Homebrew'\''s whole ecosystem, none of its weight\n'
 
   printf '.SH SYNOPSIS\n.nf\n'
   printf 'malt <command> [options] [arguments]\n'
