@@ -58,6 +58,10 @@ pub const State = struct {
     request: Request = .none,
     /// Where the tab is in the read lifecycle; drives the render's status line.
     phase: Phase = .idle,
+    /// Cross-query basket size, mirrored from the shell-owned selection (no
+    /// allocator here). Gates `i` (a non-empty basket installs even with no rows
+    /// on screen) and sizes the footer's `N selected`.
+    selected_count: usize = 0,
 };
 
 pub fn title() []const u8 {
@@ -116,17 +120,12 @@ pub fn step(s: *State, key: tab.Key) void {
     }
 }
 
-/// True when `i` would install something: any checked, not-installed hit, or —
-/// with nothing checked — an installable active row. Mirrors what the shell's
-/// install argv resolves, so `i` stays inert when there is nothing to do.
+/// True when `i` would install something: a non-empty basket (which installs as a
+/// whole, even off-screen picks), or — with an empty basket — an installable
+/// active row. Mirrors what the shell's install argv resolves, so `i` stays inert
+/// only when the basket is empty and the active row is not installable.
 fn anyInstallable(s: *const State) bool {
-    var any_checked = false;
-    for (s.items, 0..) |m, i| {
-        if (i >= s.checked.len or !s.checked[i]) continue;
-        any_checked = true;
-        if (!m.installed) return true;
-    }
-    if (any_checked) return false; // only already-installed rows checked
+    if (s.selected_count > 0) return true;
     const m = selectedMatch(s) orelse return false;
     return !m.installed;
 }
@@ -344,17 +343,24 @@ test "space is inert on an empty result list" {
     try testing.expectEqual(Request.none, s.request);
 }
 
-test "i installs a checked, not-installed hit even when the active row is installed" {
-    var checked = [_]bool{ true, false, false }; // wget checked
-    var s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
-    s.chrome.view.selected = 1; // active = firefox (installed)
+test "i installs the basket even when the active row is already installed" {
+    var s: State = .{ .items = &sample, .selected_count = 1, .phase = .loaded };
+    s.chrome.view.selected = 1; // active = firefox (installed); the basket still wins
     step(&s, ch('i'));
     try testing.expectEqual(Request.install, s.request);
 }
 
-test "i is inert when only already-installed rows are checked" {
-    var checked = [_]bool{ false, true, false }; // firefox (installed) checked
-    var s: State = .{ .items = &sample, .checked = &checked, .phase = .loaded };
+test "i installs the basket even when none of its picks are on screen" {
+    // The cross-query case: the basket holds off-list picks, so `i` must fire even
+    // though the current query returned nothing checkable.
+    var s: State = .{ .items = &.{}, .selected_count = 2, .phase = .loaded };
+    step(&s, ch('i'));
+    try testing.expectEqual(Request.install, s.request);
+}
+
+test "i is inert only when the basket is empty and the active row is not installable" {
+    var s: State = .{ .items = &sample, .selected_count = 0, .phase = .loaded };
+    s.chrome.view.selected = 1; // empty basket + active firefox (installed) → nothing to do
     step(&s, ch('i'));
     try testing.expectEqual(Request.none, s.request);
 }
