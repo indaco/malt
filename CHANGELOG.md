@@ -4,6 +4,97 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.19.0 - 2026-06-22
+
+### Highlights
+
+v0.19.0 sharpens the `mt tui` dashboard - a calmer Doctor, clearer tabs, and a Search basket you fill across queries - adds scheduled background services, and ships `man malt`.
+
+- **Search once, install the lot.** The Search tab now keeps your selection as you change queries, collecting matches into a basket you can review, clear, and install in one go - no more re-finding packages one at a time.
+- **A Doctor you can read at a glance.** The Doctor tab opens with a health band above the findings, tells apart all-clear from no-data, and surfaces how much cache and cask disk you can reclaim - and every list tab now carries a clear column heading.
+- **Background services on a schedule.** Services can run on a fixed interval or a cron-style calendar, and `mt services` lists each service's schedule alongside it.
+- **`man malt`, built in.** A single man page now ships with every install - tarball and cask alike - so `man malt` works straight after setup.
+
+#### Upgrading
+
+`mt version update`
+
+If you're on an older release, grab the installer or use Homebrew:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
+
+# or
+brew install --cask indaco/tap/malt
+```
+
+---
+
+### 🚀 Enhancements
+
+- **tui:** basket view with clear and remove keys ([f4f0a1a](https://github.com/indaco/malt/commit/f4f0a1a)) ([#530](https://github.com/indaco/malt/pull/530))
+- **tui:** install the cross-query Search basket ([2255843](https://github.com/indaco/malt/commit/2255843)) ([#529](https://github.com/indaco/malt/pull/529))
+- **tui:** persist Search selection across queries ([9295f35](https://github.com/indaco/malt/commit/9295f35)) ([#528](https://github.com/indaco/malt/pull/528))
+- **cask:** remove placed font files on uninstall ([c290b62](https://github.com/indaco/malt/commit/c290b62)) ([#523](https://github.com/indaco/malt/pull/523))
+- **cask:** install font casks into the user Fonts directory ([060959d](https://github.com/indaco/malt/commit/060959d)) ([#519](https://github.com/indaco/malt/pull/519))
+- **core/cask:** add font-artifact leaf module ([8976eae](https://github.com/indaco/malt/commit/8976eae)) ([#518](https://github.com/indaco/malt/pull/518))
+- **cli/services:** surface a service's schedule in list output ([5b66e2b](https://github.com/indaco/malt/commit/5b66e2b)) ([#516](https://github.com/indaco/malt/pull/516))
+- **core/services:** support run_type :cron via StartCalendarInterval ([e2d89d7](https://github.com/indaco/malt/commit/e2d89d7)) ([#515](https://github.com/indaco/malt/pull/515))
+- **core/services:** add Schedule type and StartInterval support ([9ed1264](https://github.com/indaco/malt/commit/9ed1264)) ([#513](https://github.com/indaco/malt/pull/513))
+- **install:** place man malt page in the install prefix ([254469a](https://github.com/indaco/malt/commit/254469a)) ([#512](https://github.com/indaco/malt/pull/512))
+- **release:** ship man malt via tarball and cask ([3f04d0e](https://github.com/indaco/malt/commit/3f04d0e)) ([#511](https://github.com/indaco/malt/pull/511))
+- **man:** generate and commit a single man malt page ([7262b00](https://github.com/indaco/malt/commit/7262b00)) ([#508](https://github.com/indaco/malt/pull/508))
+- **tui:** clearer list tabs and a calmer Doctor ([5fc4295](https://github.com/indaco/malt/commit/5fc4295)) ([#506](https://github.com/indaco/malt/pull/506))
+- **tui/doctor:** surface reclaimable cache/cask disk in the band ([29555d5](https://github.com/indaco/malt/commit/29555d5)) ([#504](https://github.com/indaco/malt/pull/504))
+- **tui/doctor:** distinguish all-clear from no-data ([8036eb1](https://github.com/indaco/malt/commit/8036eb1)) ([#500](https://github.com/indaco/malt/pull/500))
+- **tui/doctor:** add a health band above the findings list ([804feb6](https://github.com/indaco/malt/commit/804feb6)) ([#499](https://github.com/indaco/malt/pull/499))
+
+### 🩹 Fixes
+
+- **cask:** restore font files on rollback and reinstall ([dcb852f](https://github.com/indaco/malt/commit/dcb852f)) ([#521](https://github.com/indaco/malt/pull/521))
+- **tui:** wrap the footer help line so a tab's action keys survive a narrow terminal ([2ac73a6](https://github.com/indaco/malt/commit/2ac73a6)) ([#517](https://github.com/indaco/malt/pull/517))
+- **migrate:** migrate renamed homebrew-core kegs instead of failing ([2c7f552](https://github.com/indaco/malt/commit/2c7f552)) ([#514](https://github.com/indaco/malt/pull/514))
+- **outdated:** keep the outdated list in step with mt upgrade ([2a95e7a](https://github.com/indaco/malt/commit/2a95e7a)) ([#507](https://github.com/indaco/malt/pull/507))
+- **doctor:** drop the noisy SSL CA bundle row until ca-certificates is installed ([f21f2d0](https://github.com/indaco/malt/commit/f21f2d0)) ([#503](https://github.com/indaco/malt/pull/503))
+- **doctor:** keep --json a clean stdout-only stream ([dc51b0c](https://github.com/indaco/malt/commit/dc51b0c)) ([#502](https://github.com/indaco/malt/pull/502))
+- **tui:** refresh the Doctor tab after a fix instead of treating its severity exit as a failure ([1de0813](https://github.com/indaco/malt/commit/1de0813)) ([#498](https://github.com/indaco/malt/pull/498))
+
+### 💅 Refactors
+
+- **tui/doctor:** rescale the health histogram and break reclaimable into labelled lines ([015489c](https://github.com/indaco/malt/commit/015489c)) ([#505](https://github.com/indaco/malt/pull/505))
+- **tui/doctor:** parse cask_history, tap_cache, taps into Stats ([429ff57](https://github.com/indaco/malt/commit/429ff57)) ([#501](https://github.com/indaco/malt/pull/501))
+
+### 📖 Documentation
+
+- **benchmark:** update results 2026-06-22 ([d49455b](https://github.com/indaco/malt/commit/d49455b)) ([#526](https://github.com/indaco/malt/pull/526))
+- docs/tui-demo (#535) ([4cda1b9](https://github.com/indaco/malt/commit/4cda1b9))
+- sharpen README positioning and align CLI help, man, and completions ([7880549](https://github.com/indaco/malt/commit/7880549)) ([#527](https://github.com/indaco/malt/pull/527))
+
+### ✅ Tests
+
+- **e2e:** keep TUI delegation roundtrip green under full-suite load ([292c687](https://github.com/indaco/malt/commit/292c687)) ([#536](https://github.com/indaco/malt/pull/536))
+- fix - stop parallel outdated_test runs from clobbering each other's cache ([a39728a](https://github.com/indaco/malt/commit/a39728a)) ([#534](https://github.com/indaco/malt/pull/534))
+- **cask:** e2e and regression coverage for font casks ([b81692b](https://github.com/indaco/malt/commit/b81692b)) ([#524](https://github.com/indaco/malt/pull/524))
+
+### 🏡 Chores
+
+- **pins:** resync manifest with the committed core pin ([b0e1944](https://github.com/indaco/malt/commit/b0e1944)) ([#537](https://github.com/indaco/malt/pull/537))
+- update codecov.json ([6017ac4](https://github.com/indaco/malt/commit/6017ac4))
+- **devbox:** add vhs and imagemagick ([757d9f9](https://github.com/indaco/malt/commit/757d9f9)) ([#533](https://github.com/indaco/malt/pull/533))
+- **pins:** update pins and homebrew core commit sha ([368f998](https://github.com/indaco/malt/commit/368f998)) ([#532](https://github.com/indaco/malt/pull/532))
+- **devbox:** bump devbox schema and package lock ([9ecdb41](https://github.com/indaco/malt/commit/9ecdb41)) ([#531](https://github.com/indaco/malt/pull/531))
+- **release:** regenerate man page on version bump ([c4ee8df](https://github.com/indaco/malt/commit/c4ee8df)) ([#510](https://github.com/indaco/malt/pull/510))
+- track dist/man ([0358260](https://github.com/indaco/malt/commit/0358260)) ([#509](https://github.com/indaco/malt/pull/509))
+
+### 🤖 CI
+
+- report coverage to Codecov ([ec61f4e](https://github.com/indaco/malt/commit/ec61f4e)) ([#525](https://github.com/indaco/malt/pull/525))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+- [@github-actions[bot]](https://github.com/github-actions[bot])
+
 ## v0.18.0 - 2026-06-16
 
 ### Highlights

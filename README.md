@@ -86,7 +86,7 @@ The script needs [`cosign`](https://docs.sigstore.dev/cosign/system_config/insta
 To verify `install.sh` itself out of band, pin to a release tag and compare its SHA256 against the release notes:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.18.0/scripts/install.sh" -o install.sh
+curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.19.0/scripts/install.sh" -o install.sh
 shasum -a 256 install.sh
 bash install.sh
 ```
