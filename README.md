@@ -4,11 +4,11 @@
 
 Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosystem; installs to its own prefix; ~3 ms cold start. Both the CLI and the built-in terminal dashboard (`mt tui`) are themeable through one `MALT_THEME` palette. Designed by a human and implemented by AI.
 
-![macOS only](https://img.shields.io/badge/platform-macOS-blue)
 ![Version](https://img.shields.io/github/v/tag/indaco/malt?label=version&sort=semver&color=4c1)
-[![codecov](https://codecov.io/gh/indaco/malt/branch/main/graph/badge.svg)](https://codecov.io/gh/indaco/malt)
-![Zig 0.16.x](https://img.shields.io/badge/zig-0.16.x-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
+![macOS only](https://img.shields.io/badge/platform-macOS-blue)
+![Zig 0.16.x](https://img.shields.io/badge/zig-0.16.x-orange)
+[![codecov](https://codecov.io/gh/indaco/malt/branch/main/graph/badge.svg)](https://codecov.io/gh/indaco/malt)
 [![Signed by cosign](https://img.shields.io/badge/signed-cosign-brightgreen?logo=sigstore&logoColor=white)](#safety-and-security)
 [![Built with Devbox](https://www.jetify.com/img/devbox/shield_galaxy.svg)](https://www.jetify.com/devbox/docs/contributor-quickstart/)
 
@@ -17,6 +17,7 @@ Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosyste
   <b><a href="#features">Features</a></b> &middot;
   <b><a href="#installation">Install</a></b> &middot;
   <b><a href="#first-commands">First commands</a></b> &middot;
+  <b><a href="#interactive-dashboard">TUI</a></b> &middot;
   <b><a href="#theming">Theming</a></b> &middot;
   <b><a href="#command-reference">Reference</a></b> &middot;
   <b><a href="#safety-and-security">Security</a></b> &middot;
@@ -352,7 +353,11 @@ mt which jq                              # reverse lookup: bin -> keg-path
 
 ### Interactive dashboard
 
-`mt tui` opens a persistent, resize-aware dashboard over the same data the read commands expose - no daemon, no companion binary, nothing to install first.
+`mt tui` opens a persistent, resize-aware dashboard over the same data the read commands expose - search and install, manage services, and run doctor from one screen, not just a read-only viewer. No daemon, no companion binary, nothing to install first.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/indaco/gh-assets/main/malt/tui-demo.gif" alt="mt tui - search, install, services, doctor" width="800">
+</p>
 
 ```bash
 mt tui                                   # launch the dashboard
@@ -366,13 +371,15 @@ Five tabs, each a live view over `mt … --json`:
 
 | Tab       | Shows                                             | Acts via                         |
 | --------- | ------------------------------------------------- | -------------------------------- |
-| Search    | `mt search` hits with an installed marker         | `mt install`                     |
+| Search    | `mt search` hits, basket select across queries    | `mt install` the basket          |
 | Installed | every keg + cask with a detail pane               | `mt uninstall`                   |
 | Outdated  | upgradable packages, multi-select (pinned greyed) | `mt upgrade`                     |
 | Services  | launchd services + runtime state                  | `mt services start/stop/restart` |
 | Doctor    | structured `mt doctor` findings, errors first     | `mt doctor --fix <class>`        |
 
-Keys: `tab`/`←`/`→`/`1`-`5` switch tabs, `↑`/`↓` move the cursor, `/` filters the list (per-tab, survives a tab round-trip), `enter` searches or opens a detail pane, `q` or `Ctrl-C` quits. Each tab adds its own action keys in the footer - `i` install (Search), `x` uninstall with a `[y/N]` guard (Installed), `space`/`a`/`n` select and `u` upgrade the batch (Outdated), `s`/`x`/`r` start/stop/restart (Services), `f` fix (Doctor).
+Keys: `tab`/`←`/`→`/`1`-`5` switch tabs, `↑`/`↓` move the cursor, `/` filters the list (per-tab, survives a tab round-trip), `enter` searches or opens a detail pane, `q` or `Ctrl-C` quits. Each tab adds its own action keys in the footer - `space` select, `l` basket view, `i` install the basket (Search), `x` uninstall with a `[y/N]` guard (Installed), `space`/`a`/`n` select and `u` upgrade the batch (Outdated), `s`/`x`/`r` start/stop/restart (Services), `f` fix (Doctor).
+
+**It batches installs across searches.** The Search tab carries a cross-query basket: `space` adds the highlighted hit, and a pick survives when you run a new query - so you can search `bat`, then `redis`, and install both with a single `i`. `l` opens the basket to review it (`space`/`d` removes a pick, `n` clears it); the footer tracks the running count as `i: install N selected`.
 
 **It reads with `--json` and acts by delegating.** Every mutation drops out of the alternate screen, runs the real `mt <subcommand>` inline - so output and prompts land unchanged in your scrollback - then re-enters and refreshes the current tab (others refetch lazily). It never reimplements install, upgrade, or fix; it drives the CLI you already trust.
 
@@ -779,42 +786,36 @@ For installing malt from a local checkout (the end-user path), see [From source]
 Install times on macOS 14 (Apple Silicon).
 
 <!-- BENCH:COLD:START -->
-
 ### Cold Install (median ±σ)
 
-| Package              | malt         | nanobrew     | zerobrew     | Homebrew     |
-| -------------------- | ------------ | ------------ | ------------ | ------------ |
-| **tree** (0 deps)    | 0.620±0.063s | 0.702±0.028s | 1.309±0.049s | 2.378±0.120s |
-| **wget** (6 deps)    | 2.246±0.499s | 2.750±0.109s | 5.348±0.102s | 2.928±0.497s |
-| **ffmpeg** (11 deps) | 2.769±0.115s | 3.028±0.106s | 5.963±0.397s | 6.167±0.079s |
-
+| Package | malt | nanobrew | zerobrew | Homebrew |
+| ------- | ---- | -------- | -------- | -------- |
+| **tree** (0 deps) | 0.370±0.056s | 0.382±0.114s | 0.867±0.099s | 2.287±0.141s |
+| **wget** (6 deps) | 1.912±0.375s | 2.362±0.154s | 5.268±0.650s | 2.428±0.209s |
+| **ffmpeg** (11 deps) | 3.419±0.574s | 4.066±0.404s | 8.558±1.172s | 7.628±0.645s |
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
-
 ### Warm Install
 
-| Package              | malt   | nanobrew | zerobrew |
-| -------------------- | ------ | -------- | -------- |
-| **tree** (0 deps)    | 0.005s | 0.016s   | 0.278s   |
-| **wget** (6 deps)    | 0.007s | 0.010s   | 0.765s   |
-| **ffmpeg** (11 deps) | 0.022s | 0.017s   | 2.634s   |
-
+| Package | malt | nanobrew | zerobrew |
+| ------- | ---- | -------- | -------- |
+| **tree** (0 deps) | 0.007s | 0.010s | 0.224s |
+| **wget** (6 deps) | 0.008s | 0.011s | 0.652s |
+| **ffmpeg** (11 deps) | 0.060s | 0.020s | 3.882s |
 <!-- BENCH:WARM:END -->
 
 <!-- BENCH:SIZE:START -->
-
 ### Binary Size
 
-| Tool     | Size   |
-| -------- | ------ |
+| Tool | Size |
+| ---- | ---- |
 | **malt** | 3.8 MB |
 | nanobrew | 2.8 MB |
 | zerobrew | 8.7 MB |
-
 <!-- BENCH:SIZE:END -->
 
-Apple Silicon (GitHub Actions macos-14), 2026-06-16. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
+Apple Silicon (GitHub Actions macos-14), 2026-06-22. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
 
 ### Inside the binary
 
