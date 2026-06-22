@@ -22,11 +22,11 @@ const std = @import("std");
 const testing = std.testing;
 
 const color = @import("../ui/color.zig");
+const detail_pane = @import("detail_pane.zig");
+const info_json = @import("json/info.zig");
 const search_json = @import("json/search.zig");
 pub const Match = search_json.Match;
 const Kind = search_json.Kind;
-const info_json = @import("json/info.zig");
-const detail_pane = @import("detail_pane.zig");
 const scroll_list = @import("scroll_list.zig");
 const tab = @import("tab.zig");
 
@@ -231,11 +231,17 @@ fn renderResults(s: *const State, f: *tab.Frame, r: tab.Rect) void {
 /// `(basket, rect)` so a resize is a re-render.
 fn renderBasket(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
     if (s.basket.len == 0) return tab.renderHint(f, rect, "Nothing selected.");
-    tab.renderHeading(f, rect, 0, &.{
+    // A dim title orients a fresh toggle-in and carries the count, so the row it
+    // costs isn't pure decoration.
+    var tb: [48]u8 = undefined;
+    tab.renderHint(f, rect, std.fmt.bufPrint(&tb, "Basket - {d} selected", .{s.basket.len}) catch "Basket");
+    const head: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    if (head.height == 0) return; // the title took the only row
+    tab.renderHeading(f, head, 0, &.{
         .{ .label = "NAME", .width = 28 },
         .{ .label = "KIND", .width = 8 },
     });
-    const list: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    const list: tab.Rect = .{ .row = head.row + 1, .col = head.col, .width = head.width, .height = head.height -| 1 };
     if (list.height == 0) return; // the heading took the only row
     const v = scroll_list.clamp(s.chrome.view, s.basket.len, list.height);
     for (s.basket, 0..) |e, i| {
@@ -597,6 +603,18 @@ test "the basket view lists every pick, including ones off the current results" 
     try testing.expect(std.mem.indexOf(u8, out, "firefox") != null);
     try testing.expect(std.mem.indexOf(u8, out, "formula") != null);
     try testing.expect(std.mem.indexOf(u8, out, "cask") != null);
+}
+
+test "the basket view heads the list with a dim selected-count title" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .phase = .loaded, .view = .basket, .basket = &basket_sample }; // 2 picks
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "Basket") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "2 selected") != null); // the live count
+    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.muted)) != null); // dim
+    try testing.expect(std.mem.indexOf(u8, out, "bat") != null); // the list still renders below
 }
 
 test "the basket view shows a placeholder when nothing is selected, not a blank pane" {
