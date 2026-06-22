@@ -88,7 +88,7 @@ pub const bash_script =
     \\    cword=$COMP_CWORD
     \\
     \\    local commands="install reinstall uninstall remove upgrade update outdated list ls info search uses deps which doctor tap untap migrate rollback link unlink pin unpin run version completions shellenv backup restore purge cleanup services tui bundle help"
-    \\    local global_flags="--verbose -v --quiet -q --json --output-format=ndjson --dry-run --offline --help -h --version"
+    \\    local global_flags="--verbose -v --debug --quiet -q --json --output-format=ndjson --dry-run --offline --help -h --version"
     \\
     \\    # Find the first non-flag word after the program — that's the subcommand.
     \\    local cmd="" i
@@ -241,6 +241,7 @@ pub const zsh_script =
     \\
     \\    _arguments -C \
     \\        '(--verbose -v)'{--verbose,-v}'[Verbose output]' \
+    \\        '--debug[Surface every DSL diagnostic (implies verbose)]' \
     \\        '(--quiet -q)'{--quiet,-q}'[Suppress non-error output]' \
     \\        '--json[JSON output]' \
     \\        '--output-format=ndjson[Stream one JSON event per state transition]' \
@@ -514,6 +515,7 @@ pub const fish_script =
     \\
     \\    # Global flags
     \\    complete -c $__malt_bin -s v -l verbose -d 'Verbose output'
+    \\    complete -c $__malt_bin      -l debug   -d 'Surface every DSL diagnostic (implies verbose)'
     \\    complete -c $__malt_bin -s q -l quiet   -d 'Suppress non-error output'
     \\    complete -c $__malt_bin      -l json    -d 'JSON output'
     \\    complete -c $__malt_bin      -l output-format=ndjson -d 'Stream one JSON event per state transition'
