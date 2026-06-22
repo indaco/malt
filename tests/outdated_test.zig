@@ -18,22 +18,50 @@ const schema = malt.schema;
 const c = struct {
     extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
     extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    extern "c" fn getpid() c_int;
 };
 
 // --- Integration: collectOutdatedFormulas / collectOutdatedCasks ---
 
+// Per-init counter; with the pid it makes every cache dir unique across both
+// concurrent processes and repeated inits within one process.
+var temp_seq = std.atomic.Value(u32).init(0);
+
 const TempCacheDir = struct {
+    allocator: std.mem.Allocator,
     path: []const u8,
 
-    fn init(comptime tag: []const u8) !TempCacheDir {
-        const p = "/tmp/malt_outdated_test_" ++ tag;
+    fn init(allocator: std.mem.Allocator, tag: []const u8) !TempCacheDir {
+        // Unique per process+init so overlapping test runs never share a tree
+        // (a shared tree let one init's deleteTree wipe another's seeded cache).
+        const p = try std.fmt.allocPrint(allocator, "/tmp/malt_outdated_test_{s}_{d}_{d}", .{
+            tag, c.getpid(), temp_seq.fetchAdd(1, .monotonic),
+        });
+        errdefer allocator.free(p);
         test_io.deleteTreeAbsolute(std.Options.debug_io, p) catch {};
         try test_io.makeDirAbsolute(std.Options.debug_io, p);
-        return .{ .path = p };
+        return .{ .allocator = allocator, .path = p };
     }
 
     fn deinit(self: *TempCacheDir) void {
         test_io.deleteTreeAbsolute(std.Options.debug_io, self.path) catch {};
+        self.allocator.free(self.path);
+    }
+
+    // Two instances sharing a tag model two concurrent test processes opening
+    // their cache dir. The second's setup must not wipe the first's seeded
+    // files — that clobber is what makes the suite flaky under overlapping runs.
+    test "a second cache dir with the same tag does not clobber the first" {
+        var a = try TempCacheDir.init(testing.allocator, "clobber_guard");
+        defer a.deinit();
+        try a.writeCacheFile("formula_x.json", "{}");
+
+        var b = try TempCacheDir.init(testing.allocator, "clobber_guard");
+        defer b.deinit();
+
+        var buf: [512]u8 = undefined;
+        const seeded = try std.fmt.bufPrint(&buf, "{s}/api/formula_x.json", .{a.path});
+        try test_io.accessAbsolute(std.Options.debug_io, seeded, .{});
     }
 
     fn writeCacheFile(self: *TempCacheDir, rel: []const u8, content: []const u8) !void {
@@ -96,7 +124,7 @@ fn seedCask(dir: *TempCacheDir, token: []const u8, latest: []const u8) !void {
 test "collectOutdatedFormulas (small-N, single-client path) returns sorted outdated rows only" {
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
-    var dir = try TempCacheDir.init("formulas_small");
+    var dir = try TempCacheDir.init(testing.allocator, "formulas_small");
     defer dir.deinit();
 
     try seedFormula(&dir, "alpha", "2.0");
@@ -128,7 +156,7 @@ test "collectOutdatedFormulas (small-N, single-client path) returns sorted outda
 test "collectOutdatedFormulas (large-N, pool path) preserves sorted order" {
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
-    var dir = try TempCacheDir.init("formulas_large");
+    var dir = try TempCacheDir.init(testing.allocator, "formulas_large");
     defer dir.deinit();
 
     // 10 fake formulas, all outdated (installed=1.0, latest=2.0).
@@ -162,7 +190,7 @@ test "collectOutdatedFormulas tolerates a missing/404 entry without aborting" {
     // whole command.
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
-    var dir = try TempCacheDir.init("formulas_partial");
+    var dir = try TempCacheDir.init(testing.allocator, "formulas_partial");
     defer dir.deinit();
 
     try seedFormula(&dir, "alpha", "2.0");
@@ -190,7 +218,7 @@ test "collectOutdatedFormulas tolerates a missing/404 entry without aborting" {
 test "collectOutdatedCasks (small-N) returns sorted outdated rows only" {
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
-    var dir = try TempCacheDir.init("casks_small");
+    var dir = try TempCacheDir.init(testing.allocator, "casks_small");
     defer dir.deinit();
 
     try seedCask(&dir, "appone", "5.0");
@@ -218,7 +246,7 @@ test "collectOutdatedCasks (small-N) returns sorted outdated rows only" {
 test "collectOutdatedCasks (large-N, pool path) preserves sorted order" {
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
-    var dir = try TempCacheDir.init("casks_large");
+    var dir = try TempCacheDir.init(testing.allocator, "casks_large");
     defer dir.deinit();
 
     const tokens = [_][]const u8{
@@ -1169,7 +1197,7 @@ test "outdated execute --refresh skips the snapshot and recomputes" {
 }
 
 test "writeSnapshot then readSnapshot round-trips entries through the cache file" {
-    var dir = try TempCacheDir.init("snapshot_round_trip");
+    var dir = try TempCacheDir.init(testing.allocator, "snapshot_round_trip");
     defer dir.deinit();
 
     const formulas = [_]outdated_mod.OutdatedEntry{
@@ -1199,13 +1227,13 @@ test "writeSnapshot then readSnapshot round-trips entries through the cache file
 }
 
 test "readSnapshot returns null when the file is missing" {
-    var dir = try TempCacheDir.init("snapshot_missing");
+    var dir = try TempCacheDir.init(testing.allocator, "snapshot_missing");
     defer dir.deinit();
     try testing.expectEqual(@as(?outdated_mod.OwnedSnapshot, null), outdated_mod.readSnapshot(std.Options.debug_io, testing.allocator, dir.path));
 }
 
 test "readSnapshot returns null on garbage contents" {
-    var dir = try TempCacheDir.init("snapshot_garbage");
+    var dir = try TempCacheDir.init(testing.allocator, "snapshot_garbage");
     defer dir.deinit();
     const path = try outdated_mod.snapshotPath(testing.allocator, dir.path);
     defer testing.allocator.free(path);
@@ -1216,8 +1244,12 @@ test "readSnapshot returns null on garbage contents" {
 }
 
 test "writeSnapshot creates the cache directory if missing" {
-    const tag = "snapshot_mkdir";
-    const path = "/tmp/malt_outdated_test_" ++ tag;
+    // Unique per process+init so overlapping runs don't share this dir; it must
+    // not exist yet, so writeSnapshot is the one that creates it.
+    const path = try std.fmt.allocPrint(testing.allocator, "/tmp/malt_outdated_test_snapshot_mkdir_{d}_{d}", .{
+        c.getpid(), temp_seq.fetchAdd(1, .monotonic),
+    });
+    defer testing.allocator.free(path);
     test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, path) catch {};
 
