@@ -2116,6 +2116,24 @@ test "installArgv keeps the entry's kind flag for a single-entry basket" {
     try std.testing.expectEqualStrings("docker", argv[3]);
 }
 
+test "installArgv keeps a basket pick whose on-screen row reads installed (no per-package prune)" {
+    const alloc = std.testing.allocator;
+    var sel: SearchSelection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "git", .formula);
+    // The same name is on screen and already installed, but the basket still
+    // installs it: the post-install re-search only refreshes the current query,
+    // so an off-list pick's `installed` flag can't be trusted — `mt install` is
+    // idempotent instead. The basket path never consults the on-screen rows.
+    const items = [_]search.Match{.{ .name = "git", .kind = .formula, .installed = true }};
+    const st: search.State = .{ .items = &items };
+    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    defer alloc.free(argv);
+    try std.testing.expectEqual(@as(usize, 4), argv.len); // single-entry basket → flag form
+    try std.testing.expectEqualStrings("--formula", argv[2]); // and the formula flag, not just --cask
+    try std.testing.expectEqualStrings("git", argv[3]);
+}
+
 test "installArgv over an empty basket falls back to the active row, keeping its kind flag" {
     const alloc = std.testing.allocator;
     const items = [_]search.Match{
