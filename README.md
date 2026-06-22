@@ -4,11 +4,11 @@
 
 Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosystem; installs to its own prefix; ~3 ms cold start. Both the CLI and the built-in terminal dashboard (`mt tui`) are themeable through one `MALT_THEME` palette. Designed by a human and implemented by AI.
 
-![macOS only](https://img.shields.io/badge/platform-macOS-blue)
 ![Version](https://img.shields.io/github/v/tag/indaco/malt?label=version&sort=semver&color=4c1)
-[![codecov](https://codecov.io/gh/indaco/malt/branch/main/graph/badge.svg)](https://codecov.io/gh/indaco/malt)
-![Zig 0.16.x](https://img.shields.io/badge/zig-0.16.x-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
+![macOS only](https://img.shields.io/badge/platform-macOS-blue)
+![Zig 0.16.x](https://img.shields.io/badge/zig-0.16.x-orange)
+[![codecov](https://codecov.io/gh/indaco/malt/branch/main/graph/badge.svg)](https://codecov.io/gh/indaco/malt)
 [![Signed by cosign](https://img.shields.io/badge/signed-cosign-brightgreen?logo=sigstore&logoColor=white)](#safety-and-security)
 [![Built with Devbox](https://www.jetify.com/img/devbox/shield_galaxy.svg)](https://www.jetify.com/devbox/docs/contributor-quickstart/)
 
@@ -17,6 +17,7 @@ Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosyste
   <b><a href="#features">Features</a></b> &middot;
   <b><a href="#installation">Install</a></b> &middot;
   <b><a href="#first-commands">First commands</a></b> &middot;
+  <b><a href="#interactive-dashboard">TUI</a></b> &middot;
   <b><a href="#theming">Theming</a></b> &middot;
   <b><a href="#command-reference">Reference</a></b> &middot;
   <b><a href="#safety-and-security">Security</a></b> &middot;
@@ -352,7 +353,11 @@ mt which jq                              # reverse lookup: bin -> keg-path
 
 ### Interactive dashboard
 
-`mt tui` opens a persistent, resize-aware dashboard over the same data the read commands expose - no daemon, no companion binary, nothing to install first.
+`mt tui` opens a persistent, resize-aware dashboard over the same data the read commands expose - search and install, manage services, and run doctor from one screen, not just a read-only viewer. No daemon, no companion binary, nothing to install first.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/indaco/gh-assets/main/malt/tui-demo.gif" alt="mt tui - search, install, services, doctor" width="800">
+</p>
 
 ```bash
 mt tui                                   # launch the dashboard
@@ -366,13 +371,15 @@ Five tabs, each a live view over `mt … --json`:
 
 | Tab       | Shows                                             | Acts via                         |
 | --------- | ------------------------------------------------- | -------------------------------- |
-| Search    | `mt search` hits with an installed marker         | `mt install`                     |
+| Search    | `mt search` hits, basket select across queries    | `mt install` the basket          |
 | Installed | every keg + cask with a detail pane               | `mt uninstall`                   |
 | Outdated  | upgradable packages, multi-select (pinned greyed) | `mt upgrade`                     |
 | Services  | launchd services + runtime state                  | `mt services start/stop/restart` |
 | Doctor    | structured `mt doctor` findings, errors first     | `mt doctor --fix <class>`        |
 
-Keys: `tab`/`←`/`→`/`1`-`5` switch tabs, `↑`/`↓` move the cursor, `/` filters the list (per-tab, survives a tab round-trip), `enter` searches or opens a detail pane, `q` or `Ctrl-C` quits. Each tab adds its own action keys in the footer - `i` install (Search), `x` uninstall with a `[y/N]` guard (Installed), `space`/`a`/`n` select and `u` upgrade the batch (Outdated), `s`/`x`/`r` start/stop/restart (Services), `f` fix (Doctor).
+Keys: `tab`/`←`/`→`/`1`-`5` switch tabs, `↑`/`↓` move the cursor, `/` filters the list (per-tab, survives a tab round-trip), `enter` searches or opens a detail pane, `q` or `Ctrl-C` quits. Each tab adds its own action keys in the footer - `space` select, `l` basket view, `i` install the basket (Search), `x` uninstall with a `[y/N]` guard (Installed), `space`/`a`/`n` select and `u` upgrade the batch (Outdated), `s`/`x`/`r` start/stop/restart (Services), `f` fix (Doctor).
+
+**It batches installs across searches.** The Search tab carries a cross-query basket: `space` adds the highlighted hit, and a pick survives when you run a new query - so you can search `bat`, then `redis`, and install both with a single `i`. `l` opens the basket to review it (`space`/`d` removes a pick, `n` clears it); the footer tracks the running count as `i: install N selected`.
 
 **It reads with `--json` and acts by delegating.** Every mutation drops out of the alternate screen, runs the real `mt <subcommand>` inline - so output and prompts land unchanged in your scrollback - then re-enters and refreshes the current tab (others refetch lazily). It never reimplements install, upgrade, or fix; it drives the CLI you already trust.
 
