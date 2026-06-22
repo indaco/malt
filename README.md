@@ -786,42 +786,36 @@ For installing malt from a local checkout (the end-user path), see [From source]
 Install times on macOS 14 (Apple Silicon).
 
 <!-- BENCH:COLD:START -->
-
 ### Cold Install (median ±σ)
 
-| Package              | malt         | nanobrew     | zerobrew     | Homebrew     |
-| -------------------- | ------------ | ------------ | ------------ | ------------ |
-| **tree** (0 deps)    | 0.620±0.063s | 0.702±0.028s | 1.309±0.049s | 2.378±0.120s |
-| **wget** (6 deps)    | 2.246±0.499s | 2.750±0.109s | 5.348±0.102s | 2.928±0.497s |
-| **ffmpeg** (11 deps) | 2.769±0.115s | 3.028±0.106s | 5.963±0.397s | 6.167±0.079s |
-
+| Package | malt | nanobrew | zerobrew | Homebrew |
+| ------- | ---- | -------- | -------- | -------- |
+| **tree** (0 deps) | 0.370±0.056s | 0.382±0.114s | 0.867±0.099s | 2.287±0.141s |
+| **wget** (6 deps) | 1.912±0.375s | 2.362±0.154s | 5.268±0.650s | 2.428±0.209s |
+| **ffmpeg** (11 deps) | 3.419±0.574s | 4.066±0.404s | 8.558±1.172s | 7.628±0.645s |
 <!-- BENCH:COLD:END -->
 
 <!-- BENCH:WARM:START -->
-
 ### Warm Install
 
-| Package              | malt   | nanobrew | zerobrew |
-| -------------------- | ------ | -------- | -------- |
-| **tree** (0 deps)    | 0.005s | 0.016s   | 0.278s   |
-| **wget** (6 deps)    | 0.007s | 0.010s   | 0.765s   |
-| **ffmpeg** (11 deps) | 0.022s | 0.017s   | 2.634s   |
-
+| Package | malt | nanobrew | zerobrew |
+| ------- | ---- | -------- | -------- |
+| **tree** (0 deps) | 0.007s | 0.010s | 0.224s |
+| **wget** (6 deps) | 0.008s | 0.011s | 0.652s |
+| **ffmpeg** (11 deps) | 0.060s | 0.020s | 3.882s |
 <!-- BENCH:WARM:END -->
 
 <!-- BENCH:SIZE:START -->
-
 ### Binary Size
 
-| Tool     | Size   |
-| -------- | ------ |
+| Tool | Size |
+| ---- | ---- |
 | **malt** | 3.8 MB |
 | nanobrew | 2.8 MB |
 | zerobrew | 8.7 MB |
-
 <!-- BENCH:SIZE:END -->
 
-Apple Silicon (GitHub Actions macos-14), 2026-06-16. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
+Apple Silicon (GitHub Actions macos-14), 2026-06-22. Auto-updated weekly via the [benchmark workflow](.github/workflows/benchmark.yml).
 
 ### Inside the binary
 
