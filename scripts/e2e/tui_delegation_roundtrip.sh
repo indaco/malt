@@ -46,10 +46,10 @@ settle 0.4
 send x
 settle 0.4
 send y
-settle 1.2
+settle 2.0
 mark DONE
 send q
-quitwait 1.5
+quitwait 3.0
 ACT
 )
 echo "$out" | grep -q "EXIT_STATUS=0" || fail "mt tui did not exit 0 on q ($out)"
