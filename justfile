@@ -305,6 +305,7 @@ patch:
 # rendered cask against the extracted release tarball in dist/. Run after
 # `goreleaser release --snapshot --clean` to catch a cask/tarball path
 # mismatch locally before CI does — the same check runs in
+
 # verify-artifacts at release time.
 [group('release')]
 verify-cask-paths:
@@ -327,7 +328,8 @@ verify-cask-paths:
 # Hits the network; review `git diff` before committing.
 #
 # Usage: just gen-pins            # pin to HEAD
-#        just gen-pins <sha>      # pin to a specific commit
+
+# just gen-pins <sha>      # pin to a specific commit
 [group('release')]
 gen-pins commit="":
     ./scripts/gen-pins.sh {{ commit }}
@@ -340,6 +342,7 @@ gen-pins commit="":
 # Usage: just release-rollback v0.10.1
 #
 # Requires: gh authenticated, push access to indaco/homebrew-tap.
+
 # See RELEASING.md for the manual follow-up checklist.
 [group('release')]
 release-rollback tag:
@@ -428,16 +431,28 @@ clean:
 # Docs & media
 # ---------------------------------------------------------------------------
 
+# Record all three demo assets (README gif, theme gallery, TUI gif) in one go.
+[group('demos')]
+record-all-demos: record-demo record-themes record-tui-demo
+
 # Record the README demo gif via VHS into docs/demo.gif.
-[group('docs')]
+[group('demos')]
 record-demo:
     ./scripts/record-demo.sh
 
 # Render the builtin-theme gallery (CLI + mt tui per theme) via VHS into
+
 # docs/themes/theme-<name>.png. Requires vhs + imagemagick.
-[group('docs')]
+[group('demos')]
 record-themes:
     ./scripts/record-themes.sh
+
+# Record the TUI feature demo gif (search, basket install, services, doctor)
+
+# via VHS into docs/tui-demo.gif. Requires vhs.
+[group('demos')]
+record-tui-demo:
+    ./scripts/record-tui-demo.sh
 
 # Regenerate the committed man page from the built binary's --help.
 [group('docs')]
@@ -445,6 +460,7 @@ man-gen: build
     ./scripts/gen-man.sh man/malt.1
 
 # Drift guard: fail if man/malt.1 is stale vs the binary's --help.
+
 # Reuses the already-built binary (CI runs it right after the build step).
 [group('docs')]
 man-check:
