@@ -4,11 +4,11 @@
 
 Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosystem; installs to its own prefix; ~3 ms cold start. Both the CLI and the built-in terminal dashboard (`mt tui`) are themeable through one `MALT_THEME` palette. Designed by a human and implemented by AI.
 
-![macOS only](https://img.shields.io/badge/platform-macOS-blue)
 ![Version](https://img.shields.io/github/v/tag/indaco/malt?label=version&sort=semver&color=4c1)
-[![codecov](https://codecov.io/gh/indaco/malt/branch/main/graph/badge.svg)](https://codecov.io/gh/indaco/malt)
-![Zig 0.16.x](https://img.shields.io/badge/zig-0.16.x-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
+![macOS only](https://img.shields.io/badge/platform-macOS-blue)
+![Zig 0.16.x](https://img.shields.io/badge/zig-0.16.x-orange)
+[![codecov](https://codecov.io/gh/indaco/malt/branch/main/graph/badge.svg)](https://codecov.io/gh/indaco/malt)
 [![Signed by cosign](https://img.shields.io/badge/signed-cosign-brightgreen?logo=sigstore&logoColor=white)](#safety-and-security)
 [![Built with Devbox](https://www.jetify.com/img/devbox/shield_galaxy.svg)](https://www.jetify.com/devbox/docs/contributor-quickstart/)
 
