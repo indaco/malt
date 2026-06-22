@@ -2142,6 +2142,40 @@ test "installArgv is null with an empty basket and no installable active row" {
     try std.testing.expect((try installArgv(alloc, "/bin/mt", &sel, &empty)) == null); // nothing on screen, empty basket
 }
 
+test "a basket filled across two separate queries installs every pick in one argv" {
+    const alloc = std.testing.allocator;
+    var sel: SearchSelection = .{};
+    defer sel.deinit(alloc);
+
+    // Query A returns bat; the user checks it, then the query is re-run and A's
+    // parse is freed — the pick must survive into the next query.
+    {
+        var a = try search_json.parse(alloc,
+            \\{"results":[{"name":"bat","type":"formula","installed":false}]}
+        );
+        try sel.toggle(alloc, a.items[0].name, a.items[0].kind);
+        a.deinit();
+    }
+    // Query B returns redis; the user checks it too. bat is now off-list.
+    {
+        var b = try search_json.parse(alloc,
+            \\{"results":[{"name":"redis","type":"formula","installed":false}]}
+        );
+        try sel.toggle(alloc, b.items[0].name, b.items[0].kind);
+        b.deinit();
+    }
+
+    // One `i` installs both, in a single argv, no matter which results are on
+    // screen — the owned basket spans the two queries.
+    const st: search.State = .{ .items = &.{} };
+    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    defer alloc.free(argv);
+    try std.testing.expectEqual(@as(usize, 4), argv.len);
+    try std.testing.expectEqualStrings("install", argv[1]);
+    try std.testing.expectEqualStrings("bat", argv[2]);
+    try std.testing.expectEqualStrings("redis", argv[3]);
+}
+
 test "installArgv reads names from the owned basket, not the freed parse it was checked in" {
     const alloc = std.testing.allocator;
     var sel: SearchSelection = .{};
