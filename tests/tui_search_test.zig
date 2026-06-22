@@ -83,6 +83,27 @@ test "i over the fixture installs the selected not-yet-installed hit and is iner
     try testing.expectEqual(search_json.Kind.cask, search.selectedMatch(&st).?.kind);
 }
 
+test "i fires for a cross-query basket even when the cursor sits on an installed row" {
+    const bytes = try readFixture(testing.allocator, "tui_search.json");
+    defer testing.allocator.free(bytes);
+    var parsed = try search_json.parse(testing.allocator, bytes);
+    defer parsed.deinit();
+
+    // The shell mirrors the cross-query basket onto the leaf as `selected_count`
+    // (picks from earlier queries, none on this result set). `i` must install the
+    // basket even with the cursor parked on an already-installed hit.
+    var st: search.State = .{ .items = parsed.items, .phase = .loaded, .selected_count = 2 };
+    st.chrome.view.selected = 0; // firefox (index 0, already installed)
+    search.step(&st, ch('i'));
+    try testing.expectEqual(search.Request.install, st.request);
+
+    // Empty basket + the same installed row → nothing to do, so `i` is inert.
+    st.request = .none;
+    st.selected_count = 0;
+    search.step(&st, ch('i'));
+    try testing.expectEqual(search.Request.none, st.request);
+}
+
 test "Enter over a result requests its info (committing the query is the shell's job)" {
     const bytes = try readFixture(testing.allocator, "tui_search.json");
     defer testing.allocator.free(bytes);
