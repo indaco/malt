@@ -104,6 +104,33 @@ test "i fires for a cross-query basket even when the cursor sits on an installed
     try testing.expectEqual(search.Request.none, st.request);
 }
 
+test "the basket view surfaces and removes an off-results pick from a real query" {
+    const bytes = try readFixture(testing.allocator, "tui_search.json");
+    defer testing.allocator.free(bytes);
+    var parsed = try search_json.parse(testing.allocator, bytes);
+    defer parsed.deinit();
+
+    // The cross-query case the basket exists for: `gimp` was checked under an
+    // earlier query and is absent from this result set, while `firejail` is on
+    // screen. The shell hands both to the leaf as the borrowed basket.
+    const basket = [_]search.SelEntry{
+        .{ .name = "gimp", .kind = .cask }, // off the current results
+        .{ .name = "firejail", .kind = .formula }, // also a row in the fixture
+    };
+    var st: search.State = .{ .items = parsed.items, .phase = .loaded, .basket = &basket };
+
+    // `l` opens the basket; the off-results pick is the highlighted row.
+    search.step(&st, ch('l'));
+    try testing.expectEqual(search.View.basket, st.view);
+    st.chrome.view.selected = 0;
+    try testing.expectEqualStrings("gimp", search.selectedBasketEntry(&st).?.name);
+
+    // `d` asks the shell to drop exactly that pick — the name the removal carries.
+    search.step(&st, ch('d'));
+    try testing.expectEqual(search.Request.remove, st.request);
+    try testing.expectEqualStrings("gimp", search.selectedBasketEntry(&st).?.name);
+}
+
 test "Enter over a result requests its info (committing the query is the shell's job)" {
     const bytes = try readFixture(testing.allocator, "tui_search.json");
     defer testing.allocator.free(bytes);
