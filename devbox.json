@@ -7,7 +7,9 @@
     "just@latest",
     "shellcheck@latest",
     "shfmt@latest",
-    "sqlite@latest"
+    "sqlite@latest",
+    "vhs@latest",
+    "imagemagick@latest"
   ],
   "shell": {
     "scripts": {

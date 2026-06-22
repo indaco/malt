@@ -201,6 +201,86 @@
       "last_modified": "2026-06-16T10:57:20Z",
       "resolved": "github:NixOS/nixpkgs/3e41b24abd260e8f71dbe2f5737d24122f972158?lastModified=1781607440&narHash=sha256-rxO%2Buc%2FKFbSJp%2BpgyXRuAX6QlG9hJdnt0BXpEQRXY%2BU%3D"
     },
+    "imagemagick@latest": {
+      "last_modified": "2026-06-14T16:21:05Z",
+      "resolved": "github:NixOS/nixpkgs/9eac87a12312b8f60dd52e1c6e1a265f6fc7f5fc#imagemagick",
+      "source": "devbox-search",
+      "version": "7.1.2-23",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/paxfk2s1gb9qylklxdlvicc5x0hf3fy7-imagemagick-7.1.2-23",
+              "default": true
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/4as8dc7lb02lnnqdi7278705h7ayc4zg-imagemagick-7.1.2-23-dev"
+            },
+            {
+              "name": "doc",
+              "path": "/nix/store/kmzihbxg9n3j6l12fr1l4mz0lqmqrim9-imagemagick-7.1.2-23-doc"
+            }
+          ],
+          "store_path": "/nix/store/paxfk2s1gb9qylklxdlvicc5x0hf3fy7-imagemagick-7.1.2-23"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/nqqi92858bzd9sx119kcyrybbriaz4ab-imagemagick-7.1.2-23",
+              "default": true
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/z77shkv7hqjffi2zygbl9gxspswmrqvs-imagemagick-7.1.2-23-dev"
+            },
+            {
+              "name": "doc",
+              "path": "/nix/store/fk4qf1lj4yv486hk2v55p3yddxgskkl8-imagemagick-7.1.2-23-doc"
+            }
+          ],
+          "store_path": "/nix/store/nqqi92858bzd9sx119kcyrybbriaz4ab-imagemagick-7.1.2-23"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/52dp7qa7c566z1px4fq50in87jx6s3yb-imagemagick-7.1.2-23",
+              "default": true
+            },
+            {
+              "name": "doc",
+              "path": "/nix/store/90naf9g7bjbhjj544wdql90dm7yad2bg-imagemagick-7.1.2-23-doc"
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/yxdrxin5kv207nmhgg1sgf5va467b0z9-imagemagick-7.1.2-23-dev"
+            }
+          ],
+          "store_path": "/nix/store/52dp7qa7c566z1px4fq50in87jx6s3yb-imagemagick-7.1.2-23"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/vwalk1kcnb5mr5c5c8100a96r9kgq4g2-imagemagick-7.1.2-23",
+              "default": true
+            },
+            {
+              "name": "dev",
+              "path": "/nix/store/mqn50k3viz5wb0gwbdfwb23v7l32kfxf-imagemagick-7.1.2-23-dev"
+            },
+            {
+              "name": "doc",
+              "path": "/nix/store/fqly9ymadz5cj8kq18wv2flq45m00rs1-imagemagick-7.1.2-23-doc"
+            }
+          ],
+          "store_path": "/nix/store/vwalk1kcnb5mr5c5c8100a96r9kgq4g2-imagemagick-7.1.2-23"
+        }
+      }
+    },
     "just@latest": {
       "last_modified": "2026-05-21T08:15:18Z",
       "resolved": "github:NixOS/nixpkgs/4a29d733e8a7d5b824c3d8c958a946a9867b3eb2#just",
@@ -558,6 +638,54 @@
             }
           ],
           "store_path": "/nix/store/jl35p88sb0jjm11sr2p9v37q6hm3c6pm-sqlite-3.51.2-bin"
+        }
+      }
+    },
+    "vhs@latest": {
+      "last_modified": "2026-06-11T01:27:03Z",
+      "resolved": "github:NixOS/nixpkgs/b503dde361500433ca25a32e8f4d218bf58fb659#vhs",
+      "source": "devbox-search",
+      "version": "0.11.0",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/r8gqfhy774mwns9qhqn82vq1za3k7hrz-vhs-0.11.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/r8gqfhy774mwns9qhqn82vq1za3k7hrz-vhs-0.11.0"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/7k1j250b3f7pcllhb207km5nks00qs4c-vhs-0.11.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/7k1j250b3f7pcllhb207km5nks00qs4c-vhs-0.11.0"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/v2p1n4rhcy9b8jcip32crkdk5zhbdd2d-vhs-0.11.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/v2p1n4rhcy9b8jcip32crkdk5zhbdd2d-vhs-0.11.0"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/sc5ywr7i492l4a0yrfl3s4nwg96d6555-vhs-0.11.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/sc5ywr7i492l4a0yrfl3s4nwg96d6555-vhs-0.11.0"
         }
       }
     },
