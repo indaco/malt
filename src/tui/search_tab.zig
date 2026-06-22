@@ -22,11 +22,11 @@ const std = @import("std");
 const testing = std.testing;
 
 const color = @import("../ui/color.zig");
+const detail_pane = @import("detail_pane.zig");
+const info_json = @import("json/info.zig");
 const search_json = @import("json/search.zig");
 pub const Match = search_json.Match;
 const Kind = search_json.Kind;
-const info_json = @import("json/info.zig");
-const detail_pane = @import("detail_pane.zig");
 const scroll_list = @import("scroll_list.zig");
 const tab = @import("tab.zig");
 
@@ -35,14 +35,20 @@ const tab = @import("tab.zig");
 /// `search` (re)runs the committed query; `install` installs the selection;
 /// `info` opens `mt info` for the active hit (works for uninstalled hits too);
 /// `toggle` adds/removes the active hit in the shell-owned cross-query basket
-/// (selection outlives the per-query result list, so the leaf cannot own it).
-pub const Request = enum { none, search, install, info, toggle };
+/// (selection outlives the per-query result list, so the leaf cannot own it);
+/// `remove` drops the highlighted basket pick; `clear` empties the whole basket.
+pub const Request = enum { none, search, install, info, toggle, remove, clear };
 
 /// The read lifecycle the render reflects. `idle` before any query is committed
 /// (show guidance), `searching` while the blocking remote read runs (the shell
 /// flips it and repaints first), `loaded` once results are parsed (the list, or
 /// "no matches" when empty).
 pub const Phase = enum { idle, searching, loaded };
+
+/// Which list the body shows. `results` is the ranked query hits (default);
+/// `basket` is the cross-query selection, so a pick made under an earlier query
+/// stays visible — and removable — even when its row is off the current results.
+pub const View = enum { results, basket };
 
 pub const State = struct {
     chrome: tab.Chrome = .{},
@@ -62,15 +68,37 @@ pub const State = struct {
     /// allocator here). Gates `i` (a non-empty basket installs even with no rows
     /// on screen) and sizes the footer's `N selected`.
     selected_count: usize = 0,
+    /// The cross-query basket's entries, borrowed from the shell-owned set (no
+    /// allocator here). Rendered in the `basket` view and indexed by the cursor
+    /// there; the leaf reads names/kinds only — the shell owns and frees them.
+    basket: []const SelEntry = &.{},
+    /// Which list the body shows; `l` toggles it.
+    view: View = .results,
 };
+
+/// One basket row the shell hands the leaf: a borrowed `(name, kind)`. The bytes
+/// are owned (and freed) by the shell-owned set; the leaf renders them (scrubbed)
+/// and reads them to name a removal — never interprets or frees them.
+pub const SelEntry = struct { name: []const u8, kind: Kind };
 
 pub fn title() []const u8 {
     return "Search";
 }
 
 /// The tab's action keys, surfaced in the shared footer next to the global keys.
+/// The contract default is the results view; the shell calls `footerHintFor` with
+/// the live view so the footer tracks `l`.
 pub fn footerHint() []const u8 {
-    return "space: select   enter: info   i: install";
+    return footerHintFor(.results);
+}
+
+/// The action keys for a given view. Both hints end in `i: install` so the shell
+/// can fold the basket count straight onto the tail (`i: install N selected`).
+pub fn footerHintFor(view: View) []const u8 {
+    return switch (view) {
+        .results => "space: select   enter: info   l: basket   i: install",
+        .basket => "space/d: remove   l: results   n: clear   i: install",
+    };
 }
 
 /// The hit the selection points at, clamping the (shell-driven, unbounded)
@@ -98,6 +126,28 @@ fn requestToggle(s: *State) void {
     s.request = .toggle;
 }
 
+/// The basket pick the cursor points at, clamping the (shell-driven, unbounded)
+/// selection into the basket. The shell reads its `name`/`kind` to resolve a
+/// removal. Null on an empty basket.
+pub fn selectedBasketEntry(s: *const State) ?SelEntry {
+    if (s.basket.len == 0) return null;
+    return s.basket[@min(s.chrome.view.selected, s.basket.len - 1)];
+}
+
+/// Request dropping the highlighted basket pick; inert on an empty basket.
+fn requestRemove(s: *State) void {
+    if (selectedBasketEntry(s) != null) s.request = .remove;
+}
+
+/// `space` selects in the results view and removes in the basket view — the one
+/// key, its meaning set by the view.
+fn selectKey(s: *State) void {
+    switch (s.view) {
+        .results => requestToggle(s),
+        .basket => requestRemove(s),
+    }
+}
+
 /// Pure transition. Enter (re)runs the committed query — the filter doubles as
 /// the search box, so committing it is the search. `i` installs the selected hit
 /// when it is not already installed; on an installed hit it is inert.
@@ -109,11 +159,22 @@ pub fn step(s: *State, key: tab.Key) void {
         .enter => if (selectedMatch(s) != null) {
             s.request = .info;
         },
-        .space => requestToggle(s),
-        // `i` installs the multi-selection (or the active row when nothing is
-        // checked); inert when there is nothing installable to do.
-        .char => |c| if (c.len == 1 and c.bytes[0] == 'i') {
-            if (anyInstallable(s)) s.request = .install;
+        // `space` selects in the results view and removes in the basket view; `d`
+        // is the basket-view remove alias and is inert in the results view.
+        .space => selectKey(s),
+        .char => |c| if (c.len == 1) switch (c.bytes[0]) {
+            // `i` installs the multi-selection (or the active row when nothing is
+            // checked); inert when there is nothing installable to do.
+            'i' => if (anyInstallable(s)) {
+                s.request = .install;
+            },
+            'l' => s.view = if (s.view == .results) .basket else .results,
+            // `n` clears the whole basket from either view; inert when it is empty.
+            'n' => if (s.selected_count > 0) {
+                s.request = .clear;
+            },
+            'd' => if (s.view == .basket) requestRemove(s),
+            else => {},
         },
         .esc => s.detail = null, // close the info pane
         else => {},
@@ -144,7 +205,16 @@ fn kindLabel(k: Kind) []const u8 {
 /// re-render.
 pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     if (r.height == 0) return;
-    // Keys live in the shared footer now, so the body owns the whole rect.
+    // Keys live in the shared footer now, so the body owns the whole rect. The
+    // basket view is phase-independent: it shows the cross-query picks, which
+    // outlive any single query's lifecycle.
+    switch (s.view) {
+        .results => renderResults(s, f, r),
+        .basket => renderBasket(s, f, r),
+    }
+}
+
+fn renderResults(s: *const State, f: *tab.Frame, r: tab.Rect) void {
     switch (s.phase) {
         .searching => renderStatus(f, r, "searching…"),
         .idle => renderStatus(f, r, "Press Enter or / to type a query, then Enter to search."),
@@ -153,6 +223,51 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
         else
             renderLoaded(s, f, r),
     }
+}
+
+/// The cross-query basket: every pick listed by `(name, kind)`, with the cursor
+/// row highlighted. No checkbox — membership is the list — and the names go
+/// through `putContent`, so a hostile pick name stays inert. A pure function of
+/// `(basket, rect)` so a resize is a re-render.
+fn renderBasket(s: *const State, f: *tab.Frame, rect: tab.Rect) void {
+    if (s.basket.len == 0) return tab.renderHint(f, rect, "Nothing selected.");
+    // A dim title orients a fresh toggle-in and carries the count, so the row it
+    // costs isn't pure decoration.
+    var tb: [48]u8 = undefined;
+    tab.renderHint(f, rect, std.fmt.bufPrint(&tb, "Basket - {d} selected", .{s.basket.len}) catch "Basket");
+    const head: tab.Rect = .{ .row = rect.row + 1, .col = rect.col, .width = rect.width, .height = rect.height -| 1 };
+    if (head.height == 0) return; // the title took the only row
+    tab.renderHeading(f, head, 0, &.{
+        .{ .label = "NAME", .width = 28 },
+        .{ .label = "KIND", .width = 8 },
+    });
+    const list: tab.Rect = .{ .row = head.row + 1, .col = head.col, .width = head.width, .height = head.height -| 1 };
+    if (list.height == 0) return; // the heading took the only row
+    const v = scroll_list.clamp(s.chrome.view, s.basket.len, list.height);
+    for (s.basket, 0..) |e, i| {
+        if (i < v.offset) continue;
+        const screen = i - v.offset;
+        if (screen >= list.height) break;
+        f.moveTo(list.row + @as(u16, @intCast(screen)), list.col);
+        const selected = i == v.selected;
+        if (selected) {
+            f.put(color.selectionAccent());
+            f.put(color.Style.reverse.code());
+        }
+        var rb: [256]u8 = undefined;
+        f.putContent(scroll_list.truncate(formatBasketRow(&rb, e), list.width));
+        if (selected) f.put(color.Style.reset.code());
+    }
+}
+
+/// One basket row: the package name and its kind, same column widths as a result
+/// row's. ASCII columns, grapheme-naive like the rest.
+fn formatBasketRow(buf: []u8, e: SelEntry) []const u8 {
+    var len: usize = 0;
+    appendPad(buf, &len, e.name, 28);
+    append(buf, &len, " ");
+    appendPad(buf, &len, kindLabel(e.kind), 8);
+    return buf[0..len];
 }
 
 /// The results, with an `mt info` pane docked at the bottom when one is open.
@@ -460,6 +575,139 @@ test "render highlights the selected hit" {
 test "footerHint exposes the tab's action keys for the shared footer" {
     try testing.expect(std.mem.indexOf(u8, footerHint(), "select") != null);
     try testing.expect(std.mem.indexOf(u8, footerHint(), "install") != null);
+}
+
+test "l flips the body between the results and basket views" {
+    var s: State = .{ .items = &sample, .phase = .loaded };
+    try testing.expectEqual(View.results, s.view); // results by default
+    step(&s, ch('l'));
+    try testing.expectEqual(View.basket, s.view);
+    step(&s, ch('l')); // and back
+    try testing.expectEqual(View.results, s.view);
+}
+
+const basket_sample = [_]SelEntry{
+    .{ .name = "bat", .kind = .formula },
+    .{ .name = "firefox", .kind = .cask },
+};
+
+test "the basket view lists every pick, including ones off the current results" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    // `sample` holds wget/firefox/ripgrep; the basket holds bat (off the results)
+    // and firefox. The basket view must show bat even though no result row carries it.
+    const s: State = .{ .items = &sample, .phase = .loaded, .view = .basket, .basket = &basket_sample };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "bat") != null); // an off-results pick is visible
+    try testing.expect(std.mem.indexOf(u8, out, "firefox") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "formula") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "cask") != null);
+}
+
+test "the basket view heads the list with a dim selected-count title" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .phase = .loaded, .view = .basket, .basket = &basket_sample }; // 2 picks
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "Basket") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "2 selected") != null); // the live count
+    try testing.expect(std.mem.indexOf(u8, out, color.roleCode(.muted)) != null); // dim
+    try testing.expect(std.mem.indexOf(u8, out, "bat") != null); // the list still renders below
+}
+
+test "the basket view shows a placeholder when nothing is selected, not a blank pane" {
+    var buf: [1024]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .items = &sample, .phase = .loaded, .view = .basket, .basket = &.{} };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    try testing.expect(std.mem.indexOf(u8, f.slice(), "Nothing selected") != null);
+}
+
+test "a hostile basket name cannot inject a control sequence into the frame" {
+    var buf: [4096]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const evil = [_]SelEntry{.{ .name = "ev\x1b]0;pwn\x07il", .kind = .formula }};
+    const s: State = .{ .phase = .loaded, .view = .basket, .basket = &evil };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 12 });
+    const out = f.slice();
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b]0;pwn") == null); // OSC introducer broken
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null); // BEL dropped
+}
+
+test "the basket view on a zero-height rect is a clean no-op" {
+    var buf: [256]u8 = undefined;
+    var f: tab.Frame = .{ .buf = &buf };
+    const s: State = .{ .phase = .loaded, .view = .basket, .basket = &basket_sample };
+    render(&s, &f, .{ .row = 1, .col = 1, .width = 80, .height = 0 }); // must not trap
+    try testing.expectEqual(@as(usize, 0), f.slice().len);
+}
+
+test "selectedBasketEntry names the highlighted pick, clamping the cursor" {
+    var s: State = .{ .view = .basket, .basket = &basket_sample };
+    s.chrome.view.selected = 0;
+    try testing.expectEqualStrings("bat", selectedBasketEntry(&s).?.name);
+    s.chrome.view.selected = 99; // clamps to the last pick
+    try testing.expectEqualStrings("firefox", selectedBasketEntry(&s).?.name);
+}
+
+test "selectedBasketEntry on an empty basket is null" {
+    const s: State = .{ .view = .basket, .basket = &.{} };
+    try testing.expect(selectedBasketEntry(&s) == null);
+}
+
+test "space in the basket view requests removing the highlighted pick" {
+    var s: State = .{ .view = .basket, .basket = &basket_sample };
+    s.chrome.view.selected = 0;
+    step(&s, .space);
+    try testing.expectEqual(Request.remove, s.request);
+}
+
+test "d in the basket view also requests a remove" {
+    var s: State = .{ .view = .basket, .basket = &basket_sample };
+    s.chrome.view.selected = 1;
+    step(&s, ch('d'));
+    try testing.expectEqual(Request.remove, s.request);
+}
+
+test "d in the results view is inert (remove is a basket-only key)" {
+    var s: State = .{ .items = &sample, .phase = .loaded, .view = .results };
+    step(&s, ch('d'));
+    try testing.expectEqual(Request.none, s.request);
+}
+
+test "space in the basket view is inert when the basket is empty" {
+    var s: State = .{ .view = .basket, .basket = &.{} };
+    step(&s, .space);
+    try testing.expectEqual(Request.none, s.request);
+}
+
+test "n requests clearing the basket from either view when it holds picks" {
+    var s: State = .{ .items = &sample, .phase = .loaded, .selected_count = 2 };
+    step(&s, ch('n')); // results view
+    try testing.expectEqual(Request.clear, s.request);
+
+    s.request = .none;
+    s.view = .basket;
+    step(&s, ch('n')); // basket view
+    try testing.expectEqual(Request.clear, s.request);
+}
+
+test "n on an empty basket is inert" {
+    var s: State = .{ .items = &sample, .phase = .loaded, .selected_count = 0 };
+    step(&s, ch('n'));
+    try testing.expectEqual(Request.none, s.request);
+}
+
+test "the footer hint reflects the active view" {
+    // Results view: the select/install keys plus the basket toggle.
+    try testing.expect(std.mem.indexOf(u8, footerHintFor(.results), "l: basket") != null);
+    try testing.expect(std.mem.indexOf(u8, footerHintFor(.results), "install") != null);
+    // Basket view: remove + the toggle back to results.
+    try testing.expect(std.mem.indexOf(u8, footerHintFor(.basket), "remove") != null);
+    try testing.expect(std.mem.indexOf(u8, footerHintFor(.basket), "l: results") != null);
+    try testing.expect(std.mem.indexOf(u8, footerHintFor(.basket), "install") != null);
 }
 
 test "render reflows: the same state at two widths differs" {

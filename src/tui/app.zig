@@ -439,19 +439,20 @@ fn footerLine(buf: []u8, app: *const App) []const u8 {
     if (app.editing) return footerHelp(true);
     var hb: [96]u8 = undefined;
     const hint = if (app.active == .search)
-        searchFooterHint(&hb, app.states.search.selected_count)
+        searchFooterHint(&hb, app.states.search.view, app.states.search.selected_count)
     else
         activeFooterHint(app);
     return std.fmt.bufPrint(buf, "{s}   ·   {s}", .{ footerHelp(false), hint }) catch footerHelp(false);
 }
 
-/// The Search footer hint with the live basket count folded in — the shell owns
-/// the basket, so it owns the count. `i: install N selected` once a pick is in
-/// the basket (also signalling `i` acts on the basket, not the cursor row); the
-/// bare `i: install` when empty. Built into `buf`.
-fn searchFooterHint(buf: []u8, selected: usize) []const u8 {
-    if (selected == 0) return search.footerHint();
-    return std.fmt.bufPrint(buf, "{s} {d} selected", .{ search.footerHint(), selected }) catch search.footerHint();
+/// The Search footer hint for the active view, with the live basket count folded
+/// in — the shell owns the basket, so it owns the count. `i: install N selected`
+/// once a pick is in the basket (also signalling `i` acts on the basket, not the
+/// cursor row); the bare view hint when empty. Built into `buf`.
+fn searchFooterHint(buf: []u8, view: search.View, selected: usize) []const u8 {
+    const base = search.footerHintFor(view);
+    if (selected == 0) return base;
+    return std.fmt.bufPrint(buf, "{s} {d} selected", .{ base, selected }) catch base;
 }
 
 fn footerHelp(editing: bool) []const u8 {
@@ -548,7 +549,9 @@ const LoadTicker = struct {
 /// so a pick outlives the per-query parse it was checked in. Shell-owned; the
 /// pure leaf never sees it — only the projected `checked` slice.
 const SearchSelection = struct {
-    const Entry = struct { name: []u8, kind: search_json.Kind };
+    // The leaf's borrowed-row type, so the basket view reads `entries.items`
+    // directly with no copy. The shell still owns and frees each `name`.
+    const Entry = search.SelEntry;
     entries: std.ArrayList(Entry) = .empty,
 
     fn indexOf(self: *const SearchSelection, name: []const u8, kind: search_json.Kind) ?usize {
@@ -575,6 +578,22 @@ const SearchSelection = struct {
         try self.entries.append(allocator, .{ .name = owned, .kind = kind });
     }
 
+    /// Drop the pick if present, freeing its bytes — the basket-view `d`/`space`.
+    /// Absent is a no-op, so a stale removal can never trap.
+    fn remove(self: *SearchSelection, allocator: std.mem.Allocator, name: []const u8, kind: search_json.Kind) void {
+        if (self.indexOf(name, kind)) |i| {
+            allocator.free(self.entries.items[i].name);
+            _ = self.entries.swapRemove(i); // order is irrelevant for a set
+        }
+    }
+
+    /// Empty the basket, freeing every pick's bytes — the `n` escape hatch. Keeps
+    /// the backing capacity for reuse; `deinit` releases that at teardown.
+    fn clear(self: *SearchSelection, allocator: std.mem.Allocator) void {
+        for (self.entries.items) |e| allocator.free(e.name);
+        self.entries.clearRetainingCapacity();
+    }
+
     fn deinit(self: *SearchSelection, allocator: std.mem.Allocator) void {
         for (self.entries.items) |e| allocator.free(e.name);
         self.entries.deinit(allocator);
@@ -595,11 +614,14 @@ fn projectSearchChecked(store: *Store) void {
     projectChecked(items, store.search_checked, &store.search_selected);
 }
 
-/// Mirror the shell-owned basket size onto the leaf so the pure core can gate `i`
-/// and the footer can size `N selected` — the leaf holds no allocator and never
-/// sees the selection itself. Called wherever the basket changes.
+/// Mirror the shell-owned basket onto the leaf: the count (so the core can gate
+/// `i` and the footer can size `N selected`) and the entries slice the basket view
+/// renders. The leaf holds no allocator and never owns the picks — it borrows this
+/// slice, which the shell refreshes here after every basket mutation (an append
+/// can move the backing buffer, so a stale slice would dangle).
 fn syncSearchSelectedCount(app: *App, store: *const Store) void {
     app.states.search.selected_count = store.search_selected.entries.items.len;
+    app.states.search.basket = store.search_selected.entries.items;
 }
 
 /// Owns the JSON parse results the tabs borrow from. Reads re-exec `mt … --json`
@@ -1175,6 +1197,20 @@ fn serviceSearch(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, app: *
         .toggle => {
             const m = search.selectedMatch(&app.states.search) orelse return;
             try store.search_selected.toggle(allocator, m.name, m.kind);
+            projectSearchChecked(store);
+            syncSearchSelectedCount(app, store);
+        },
+        // Drop the highlighted basket pick (read its name/kind before freeing it),
+        // then re-project so any on-screen row for it clears its checkmark.
+        .remove => {
+            const e = search.selectedBasketEntry(&app.states.search) orelse return;
+            store.search_selected.remove(allocator, e.name, e.kind);
+            projectSearchChecked(store);
+            syncSearchSelectedCount(app, store);
+        },
+        // Empty the whole basket; the projection then clears every on-screen check.
+        .clear => {
+            store.search_selected.clear(allocator);
             projectSearchChecked(store);
             syncSearchSelectedCount(app, store);
         },
@@ -2250,6 +2286,85 @@ test "re-adding a removed pick yields a single entry, not a duplicate" {
     try sel.toggle(alloc, "bat", .formula); // add again
     try std.testing.expect(sel.contains("bat", .formula));
     try std.testing.expectEqual(@as(usize, 1), sel.entries.items.len);
+}
+
+test "search selection remove deletes exactly the named pick and frees it" {
+    const alloc = std.testing.allocator; // a missed free shows up as a leak here
+    var sel: SearchSelection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "bat", .formula);
+    try sel.toggle(alloc, "redis", .formula);
+    sel.remove(alloc, "bat", .formula);
+    try std.testing.expect(!sel.contains("bat", .formula));
+    try std.testing.expect(sel.contains("redis", .formula)); // the other pick is untouched
+    try std.testing.expectEqual(@as(usize, 1), sel.entries.items.len);
+    sel.remove(alloc, "ghost", .cask); // an absent pick is a harmless no-op
+    try std.testing.expectEqual(@as(usize, 1), sel.entries.items.len);
+}
+
+test "search selection clear empties the basket and frees every pick" {
+    const alloc = std.testing.allocator; // a missed free shows up as a leak here
+    var sel: SearchSelection = .{};
+    defer sel.deinit(alloc);
+    try sel.toggle(alloc, "bat", .formula);
+    try sel.toggle(alloc, "redis", .cask);
+    sel.clear(alloc);
+    try std.testing.expectEqual(@as(usize, 0), sel.entries.items.len);
+    try std.testing.expect(!sel.contains("bat", .formula));
+}
+
+test "removing a basket pick re-projects its on-screen row to unchecked" {
+    const alloc = std.testing.allocator;
+    var store: Store = .{};
+    defer store.deinit(alloc);
+    store.search = try search_json.parse(alloc,
+        \\{"results":[{"name":"bat","type":"formula","installed":false}]}
+    );
+    store.search_checked = try alloc.alloc(bool, 1);
+    @memset(store.search_checked, false);
+    try store.search_selected.toggle(alloc, "bat", .formula);
+    projectSearchChecked(&store);
+    try std.testing.expect(store.search_checked[0]); // checked before the remove
+    store.search_selected.remove(alloc, "bat", .formula);
+    projectSearchChecked(&store);
+    try std.testing.expect(!store.search_checked[0]); // the row reflects the removal
+}
+
+test "the shell mirrors the basket entries onto the leaf for the basket view" {
+    const alloc = std.testing.allocator;
+    var a: App = .{ .active = .search };
+    var store: Store = .{};
+    defer store.deinit(alloc);
+    try store.search_selected.toggle(alloc, "bat", .formula);
+    syncSearchSelectedCount(&a, &store);
+    try std.testing.expectEqual(@as(usize, 1), a.states.search.basket.len);
+    try std.testing.expectEqualStrings("bat", a.states.search.basket[0].name);
+}
+
+test "removing a pick then installing builds an argv without the removed name" {
+    const alloc = std.testing.allocator;
+    var sel: SearchSelection = .{};
+    defer sel.deinit(alloc);
+    // Two picks gathered across queries (the cross-query basket); the user opens
+    // the basket view, removes bat, then installs — only redis reaches the argv.
+    try sel.toggle(alloc, "bat", .formula);
+    try sel.toggle(alloc, "redis", .formula);
+    sel.remove(alloc, "bat", .formula);
+    const st: search.State = .{ .items = &.{} };
+    const argv = (try installArgv(alloc, "/bin/mt", &sel, &st)).?;
+    defer alloc.free(argv);
+    try std.testing.expectEqual(@as(usize, 4), argv.len); // single → mt, install, --formula, name
+    try std.testing.expectEqualStrings("redis", argv[3]);
+    try std.testing.expect(std.mem.indexOf(u8, argv[3], "bat") == null);
+}
+
+test "the Search footer switches to the basket-view keys when the basket view is open" {
+    var a: App = .{ .active = .search };
+    a.states.search.view = .basket;
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 120, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "remove") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "l: results") != null);
 }
 
 test "projectChecked leaves every row unchecked for an empty selection" {
