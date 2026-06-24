@@ -83,7 +83,7 @@ curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh
 
 The script needs [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/) on your `PATH`. To bypass verification (not recommended), set `MALT_ALLOW_UNVERIFIED=1`. If no release matches your platform, the script falls back to building from source.
 
-To verify `install.sh` itself out of band, pin to a release tag and compare its SHA256 against the release notes:
+To verify `install.sh` itself out of band, pin to a release tag — the latest below, or any release you trust — and compare its SHA256 against that release's notes:
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.19.0/scripts/install.sh" -o install.sh
