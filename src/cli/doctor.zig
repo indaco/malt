@@ -451,6 +451,12 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             if (outcome.orphans_removed > 0) {
                 output.success("swept {d} orphaned store entry(s)", .{outcome.orphans_removed});
             }
+            if (outcome.orphans_blocked > 0) {
+                output.warn("could not sweep {d} orphaned store entry(s): {s}", .{
+                    outcome.orphans_blocked,
+                    outcome.orphans_block_reason orelse "unknown reason",
+                });
+            }
         }
 
         var mit = outcome.plan.manual.iterator();
