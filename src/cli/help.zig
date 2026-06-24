@@ -140,7 +140,7 @@ const uninstall_help =
 ;
 
 const upgrade_help =
-    \\Usage: malt upgrade [<package>] [flags]
+    \\Usage: malt upgrade [<package>...] [flags]
     \\
     \\Upgrade installed packages to latest versions. Pinned kegs and
     \\casks are skipped with a "pinned, skipped" line; pass --force to
