@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.19.2 - 2026-06-24
+
+### 🩹 Fixes
+
+- **upgrade:** upgrade every named package instead of only the first ([7e7c227](https://github.com/indaco/malt/commit/7e7c227)) ([#544](https://github.com/indaco/malt/pull/544))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.19.1 - 2026-06-24
 
 ### 🩹 Fixes
