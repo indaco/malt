@@ -9,7 +9,10 @@ const output = @import("../../ui/output.zig");
 const color = @import("../../ui/color.zig");
 const fix_mod = @import("fix.zig");
 
-pub const CheckStatus = enum { ok, warn_status, err_status };
+// `info_status` is the in-progress downgrade: a finding that would be a
+// warn/err is recast as informational while an operation holds the prefix
+// lock. It does not count toward the severity exit.
+pub const CheckStatus = enum { ok, warn_status, err_status, info_status };
 
 /// Safe-fix vocabulary shared with `--fix`. `mt doctor --json` reports a
 /// finding's class from this set (or `none`) so the dashboard and the
@@ -41,6 +44,7 @@ pub fn severityTag(status: CheckStatus) []const u8 {
         .ok => "ok",
         .warn_status => "warn",
         .err_status => "err",
+        .info_status => "info",
     };
 }
 
@@ -123,10 +127,12 @@ fn glyphFor(status: CheckStatus, emoji: bool) []const u8 {
         .ok => "✓",
         .warn_status => "⚠",
         .err_status => "✗",
+        .info_status => "ℹ",
     } else switch (status) {
         .ok => "*",
         .warn_status => "!",
         .err_status => "x",
+        .info_status => "i",
     };
 }
 
@@ -135,6 +141,7 @@ fn statusCode(status: CheckStatus) []const u8 {
         .ok => color.SemanticStyle.success.code(),
         .warn_status => color.SemanticStyle.warn.code(),
         .err_status => color.SemanticStyle.err.code(),
+        .info_status => color.SemanticStyle.info.code(),
     };
 }
 
@@ -196,6 +203,8 @@ test "severityTag maps every CheckStatus to its JSON token" {
     try testing.expectEqualStrings("ok", severityTag(.ok));
     try testing.expectEqualStrings("warn", severityTag(.warn_status));
     try testing.expectEqualStrings("err", severityTag(.err_status));
+    // `info` is the in-progress downgrade — a non-fault, JSON-visible state.
+    try testing.expectEqualStrings("info", severityTag(.info_status));
 }
 
 test "fixClassTag maps null to none and each FixKind to its tag" {
@@ -273,6 +282,23 @@ test "writeChecksJson: a fixable warn finding carries its fix_class" {
             "\"detail\":\"Stale lock from dead PID 42\",\"fixable\":true,\"fix_class\":\"stale_lock\"}]}\n",
         try checksToBuf(&findings, &buf),
     );
+}
+
+test "writeChecksJson: an in-progress finding serializes severity info, non-fixable" {
+    // The downgrade must be visible in the contract, not silently dropped —
+    // and never fixable (a transient is not actionable).
+    var buf: [256]u8 = undefined;
+    const findings = [_]Finding{
+        .{
+            .id = "missing_kegs",
+            .severity = .info_status,
+            .title = "Missing kegs",
+            .detail = "operation in progress — re-run after it completes",
+        },
+    };
+    const out = try checksToBuf(&findings, &buf);
+    try testing.expect(std.mem.indexOf(u8, out, "\"severity\":\"info\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"fixable\":false") != null);
 }
 
 test "writeChecksJson: comma-separates multiple findings" {

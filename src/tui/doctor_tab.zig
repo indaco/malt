@@ -55,7 +55,7 @@ pub fn matches(name: []const u8, filter: []const u8) bool {
 /// Display order: errors first, then warnings, then ok — the scan-ability sort.
 /// Both the selection mapping and the renderer walk findings in this order so a
 /// cursor lands on exactly the row painted at that screen position.
-const severity_order = [_]Severity{ .err, .warn, .ok };
+const severity_order = [_]Severity{ .err, .warn, .info, .ok };
 
 fn filteredCount(items: []const Row, filter: []const u8) usize {
     var n: usize = 0;
@@ -112,6 +112,7 @@ fn glyph(sev: Severity) []const u8 {
         .ok => "✓",
         .warn => "⚠",
         .err => "✗",
+        .info => "ℹ",
     };
 }
 
@@ -120,6 +121,8 @@ fn glyphStyle(sev: Severity) color.Role {
         .ok => .success,
         .warn => .warning,
         .err => .danger,
+        // No dedicated info role; accent reads as a neutral highlight.
+        .info => .accent,
     };
 }
 
@@ -128,6 +131,7 @@ fn severityLabel(sev: Severity) []const u8 {
         .ok => "ok",
         .warn => "warning",
         .err => "error",
+        .info => "in progress",
     };
 }
 
@@ -153,12 +157,14 @@ fn humanBytes(bytes: u64, buf: []u8) []const u8 {
 const Counts = struct {
     err: usize = 0,
     warn: usize = 0,
+    /// In-progress (informational) findings — never actionable, never attention.
+    info: usize = 0,
     ok: usize = 0,
-    /// Fixable findings within err+warn — `ok` findings are never "fixable" work.
+    /// Fixable findings within err+warn — `ok`/`info` findings are never "fixable" work.
     fixable: usize = 0,
 
     fn total(self: Counts) usize {
-        return self.err + self.warn + self.ok;
+        return self.err + self.warn + self.info + self.ok;
     }
     fn attention(self: Counts) usize {
         return self.err + self.warn;
@@ -174,9 +180,10 @@ fn tally(items: []const Row, filter: []const u8) Counts {
         switch (fnd.severity) {
             .err => c.err += 1,
             .warn => c.warn += 1,
+            .info => c.info += 1,
             .ok => c.ok += 1,
         }
-        if (fnd.severity != .ok and fnd.fixable) c.fixable += 1;
+        if ((fnd.severity == .err or fnd.severity == .warn) and fnd.fixable) c.fixable += 1;
     }
     return c;
 }
@@ -185,6 +192,9 @@ fn tally(items: []const Row, filter: []const u8) Counts {
 fn worst(c: Counts) Severity {
     if (c.err > 0) return .err;
     if (c.warn > 0) return .warn;
+    // In-progress outranks ok so the banner says "operation in progress"
+    // rather than falsely "all checks passed" while a transient is shown.
+    if (c.info > 0) return .info;
     return .ok;
 }
 
@@ -194,6 +204,7 @@ fn verdictLabel(sev: Severity) []const u8 {
         // covers both ("issues") while `warn` means warnings alone.
         .err => "issues found",
         .warn => "warnings found",
+        .info => "operation in progress",
         .ok => "all checks passed",
     };
 }
@@ -228,13 +239,15 @@ fn buildBanner(lb: *tab.Frame, c: Counts) void {
 /// rounding keeps the sum exact (the boundaries telescope, so they can't drift off
 /// the bar width); a present-but-tiny bucket is then guaranteed ≥1 cell — stolen
 /// from the largest segment — so it stays visible. Per-segment ceil scaling can't
-/// be reused here: three segments sharing one bar must partition it, not overshoot.
-fn compositionCells(c: Counts, bar: usize) [3]usize {
+/// be reused here: the segments sharing one bar must partition it, not overshoot.
+/// Order matches `severity_order`: err → warn → info → ok.
+fn compositionCells(c: Counts, bar: usize) [4]usize {
     const total = c.total(); // caller guards total > 0
     const b_err = (c.err * bar + total / 2) / total;
     const b_ew = ((c.err + c.warn) * bar + total / 2) / total;
-    var seg = [3]usize{ b_err, b_ew - b_err, bar - b_ew };
-    const counts = [3]usize{ c.err, c.warn, c.ok };
+    const b_ewi = ((c.err + c.warn + c.info) * bar + total / 2) / total;
+    var seg = [4]usize{ b_err, b_ew - b_err, b_ewi - b_ew, bar - b_ewi };
+    const counts = [4]usize{ c.err, c.warn, c.info, c.ok };
     for (counts, 0..) |n, i| {
         if (n > 0 and seg[i] == 0) {
             var max_i: usize = 0;
@@ -248,7 +261,7 @@ fn compositionCells(c: Counts, bar: usize) [3]usize {
     return seg;
 }
 
-/// Paint the stacked composition bar: err→warn→ok cells, each run in its severity
+/// Paint the stacked composition bar: err→warn→info→ok cells, each run in its severity
 /// colour, on the shared `total` scale. Empty segments emit no colour, so adjacent
 /// runs stay visually distinct.
 fn buildCompositionBar(lb: *tab.Frame, c: Counts, bar: usize) void {
@@ -305,6 +318,11 @@ fn buildPlainCounts(lb: *tab.Frame, c: Counts) void {
     buildPlainCount(lb, .err, c.err);
     lb.put("  ");
     buildPlainCount(lb, .warn, c.warn);
+    // Only while an operation is in flight, so the steady-state legend is unchanged.
+    if (c.info > 0) {
+        lb.put("  ");
+        buildPlainCount(lb, .info, c.info);
+    }
     lb.put("  ");
     buildPlainCount(lb, .ok, c.ok);
 }
@@ -564,11 +582,12 @@ pub fn render(s: *const State, f: *tab.Frame, r: tab.Rect) void {
 
     const reclaim = reclaimFrom(s.stats);
 
-    // An all-clear run (no filter, findings present, none needing attention) has
-    // no verdict to weigh: collapse the band to the calm summary line, plus the
-    // reclaimable section when there is disk to reclaim. No histogram, fixable
-    // line, or detail pane — nothing needs the user's attention.
-    if (filter.len == 0 and counts.total() > 0 and counts.attention() == 0) {
+    // An all-clear run (no filter, findings present, none needing attention and
+    // none in progress) has no verdict to weigh: collapse the band to the calm
+    // summary line, plus the reclaimable section when there is disk to reclaim.
+    // In-progress (info) findings keep the band so the "operation in progress"
+    // verdict still shows instead of a misleading all-clear.
+    if (filter.len == 0 and counts.total() > 0 and counts.attention() == 0 and counts.info == 0) {
         renderAllClear(f, r, counts);
         if (reclaim) |rc| {
             const max = r.height -| 1; // the summary line takes the top row
@@ -686,6 +705,10 @@ const warn_only = [_]Row{
 const all_ok = [_]Row{
     .{ .id = "malt_prefix", .severity = .ok, .title = "MALT_PREFIX", .detail = "/opt/malt", .fixable = false, .fix_class = .none },
 };
+const info_only = [_]Row{
+    .{ .id = "missing_kegs", .severity = .info, .title = "Missing kegs", .detail = "operation in progress", .fixable = false, .fix_class = .none },
+    .{ .id = "malt_prefix", .severity = .ok, .title = "MALT_PREFIX", .detail = "/opt/malt", .fixable = false, .fix_class = .none },
+};
 
 // A skewed store (0 err, 2 warn, 16 ok) for the total-scaled composition bar:
 // on a shared scale ok must dominate warn, not sit at near-parity.
@@ -735,6 +758,16 @@ test "selectedFinding maps the cursor through the filter" {
 test "selectedFinding on an empty list is null" {
     const s: State = .{ .items = &.{} };
     try testing.expect(selectedFinding(&s) == null);
+}
+
+test "an info finding is in-progress: its own glyph, never counted as attention" {
+    const items = [_]Row{
+        .{ .id = "missing_kegs", .severity = .info, .title = "Missing kegs", .detail = "operation in progress", .fixable = false, .fix_class = .none },
+    };
+    const c = tally(&items, "");
+    try testing.expectEqual(@as(usize, 1), c.info);
+    try testing.expectEqual(@as(usize, 0), c.attention());
+    try testing.expectEqualStrings("ℹ", glyph(.info));
 }
 
 test "f on a fixable finding requests a fix" {
@@ -958,6 +991,7 @@ test "the band's status banner reads the worst severity present" {
     const cases = [_]struct { items: []const Row, verdict: []const u8 }{
         .{ .items = &sample, .verdict = "issues found" }, // an err is present (may include warnings)
         .{ .items = &warn_only, .verdict = "warnings found" }, // warn is the worst, no errors
+        .{ .items = &info_only, .verdict = "operation in progress" }, // info outranks ok
     };
     for (cases) |c| {
         var buf: [4096]u8 = undefined;
