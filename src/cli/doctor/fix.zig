@@ -144,40 +144,62 @@ pub fn fixStaleLock(io: std.Io, prefix: []const u8) bool {
 /// doctor check and `purge --store-orphans` so all three report the same
 /// entries.
 pub fn probeOrphanedStoreCount(io: std.Io, prefix: []const u8) u32 {
-    return countOrphans(io, prefix, false);
+    return walkOrphans(io, prefix, false).count;
 }
+
+/// Outcome of an orphan walk. Probe (`do_remove = false`): `count` is the
+/// number of orphans detected, `blocked` is always 0. Reap (`do_remove =
+/// true`): `count` is the number removed, `blocked` is the number of orphans
+/// that could not be removed (undeletable dir — permissions, a held file, an
+/// immutable flag); `reason` names the blocker so `--fix` can explain a
+/// partial sweep rather than report a silent no-op.
+pub const OrphanSweep = struct {
+    count: u32 = 0,
+    blocked: u32 = 0,
+    reason: ?[]const u8 = null,
+};
 
 /// Sweep orphan store directories and clear their `store_refs` rows so
-/// repeated `--fix` runs converge to zero. Silent on partial failure —
-/// the next run will pick up whatever is left.
-pub fn fixOrphanedStore(io: std.Io, prefix: []const u8) u32 {
-    return countOrphans(io, prefix, true);
+/// repeated `--fix` runs converge to zero. An orphan that cannot be removed
+/// is surfaced via `blocked`/`reason`, not skipped silently — a blocked fix
+/// must never be mistaken for a clean prefix.
+pub fn fixOrphanedStore(io: std.Io, prefix: []const u8) OrphanSweep {
+    return walkOrphans(io, prefix, true);
 }
 
-fn countOrphans(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
+fn walkOrphans(io: std.Io, prefix: []const u8, do_remove: bool) OrphanSweep {
+    var result: OrphanSweep = .{};
     var db_path_buf: [512]u8 = undefined;
-    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return 0;
-    var db = sqlite.Database.open(db_path) catch return 0;
+    const db_path = std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0) catch return result;
+    var db = sqlite.Database.open(db_path) catch return result;
     defer db.close();
 
     var store_path_buf: [512]u8 = undefined;
-    const store_path = std.fmt.bufPrint(&store_path_buf, "{s}/store", .{prefix}) catch return 0;
-    var store_dir = std.Io.Dir.openDirAbsolute(io, store_path, .{ .iterate = true }) catch return 0;
+    const store_path = std.fmt.bufPrint(&store_path_buf, "{s}/store", .{prefix}) catch return result;
+    var store_dir = std.Io.Dir.openDirAbsolute(io, store_path, .{ .iterate = true }) catch return result;
     defer store_dir.close(io);
 
-    var count: u32 = 0;
     var iter = store_dir.iterate();
     while (iter.next(io) catch null) |entry| {
         if (!isOrphanRow(&db, entry.name)) continue;
-        if (do_remove) {
-            var entry_buf: [768]u8 = undefined;
-            const entry_path = std.fmt.bufPrint(&entry_buf, "{s}/store/{s}", .{ prefix, entry.name }) catch continue;
-            std.Io.Dir.cwd().deleteTree(io, entry_path) catch continue;
-            deleteRefRow(&db, entry.name);
+        if (do_remove and !removeEntry(io, prefix, &db, entry.name)) {
+            result.blocked += 1;
+            if (result.reason == null) result.reason = "could not remove store entry";
+            continue;
         }
-        count += 1;
+        result.count += 1;
     }
-    return count;
+    return result;
+}
+
+/// Remove one orphan's store dir and clear its ref row. Returns false when
+/// the directory could not be removed, so the caller can report it.
+fn removeEntry(io: std.Io, prefix: []const u8, db: *sqlite.Database, name: []const u8) bool {
+    var entry_buf: [768]u8 = undefined;
+    const entry_path = std.fmt.bufPrint(&entry_buf, "{s}/store/{s}", .{ prefix, name }) catch return false;
+    std.Io.Dir.cwd().deleteTree(io, entry_path) catch return false;
+    deleteRefRow(db, name);
+    return true;
 }
 
 /// A store entry is a purgeable orphan iff its `store_refs` row exists and
@@ -313,6 +335,10 @@ pub const FixOutcome = struct {
     plan: Plan,
     stale_lock_removed: bool = false,
     orphans_removed: u32 = 0,
+    /// Orphans detected but not removable, with the blocker's reason — so a
+    /// partial sweep is reported instead of read as "nothing to do".
+    orphans_blocked: u32 = 0,
+    orphans_block_reason: ?[]const u8 = null,
     broken_symlinks_removed: u32 = 0,
 
     pub fn fixesApplied(self: FixOutcome) u32 {
@@ -344,7 +370,10 @@ pub fn executeFix(ctx: FixCtx, dry_run: bool) FixOutcome {
         outcome.stale_lock_removed = fixStaleLock(ctx.io, ctx.prefix);
     }
     if (plan.safe.contains(.orphaned_store)) {
-        outcome.orphans_removed = fixOrphanedStore(ctx.io, ctx.prefix);
+        const sweep = fixOrphanedStore(ctx.io, ctx.prefix);
+        outcome.orphans_removed = sweep.count;
+        outcome.orphans_blocked = sweep.blocked;
+        outcome.orphans_block_reason = sweep.reason;
     }
     if (plan.safe.contains(.broken_symlinks)) {
         outcome.broken_symlinks_removed = fixBrokenSymlinks(ctx.io, ctx.prefix);
@@ -357,6 +386,22 @@ pub fn executeFix(ctx: FixCtx, dry_run: bool) FixOutcome {
 test "planFixes: clean conditions yield empty plan" {
     const plan = planFixes(.{});
     try std.testing.expect(plan.isEmpty());
+}
+
+test "FixOutcome: a blocked orphan is not an applied fix yet stays distinguishable from clean" {
+    const plan = planFixes(.{});
+    const clean: FixOutcome = .{ .plan = plan };
+    const blocked: FixOutcome = .{
+        .plan = plan,
+        .orphans_blocked = 1,
+        .orphans_block_reason = "could not remove store entry",
+    };
+    // A blocked entry was not removed, so it is not an applied fix.
+    try std.testing.expectEqual(@as(u32, 0), clean.fixesApplied());
+    try std.testing.expectEqual(@as(u32, 0), blocked.fixesApplied());
+    // But the blocked outcome is legible: it carries a reason the clean one lacks.
+    try std.testing.expect(clean.orphans_block_reason == null);
+    try std.testing.expect(blocked.orphans_block_reason != null);
 }
 
 test "planFixes: stale lock joins the safe-fix set" {
