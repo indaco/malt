@@ -904,11 +904,9 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
         defer stmt.finalize();
         stmt.bindText(1, entry.name) catch continue;
         const has_row = stmt.step() catch false;
-        if (has_row) {
-            if (stmt.columnInt(0) <= 0) orphan_count += 1;
-        } else {
-            orphan_count += 1;
-        }
+        const refcount: i64 = if (has_row) stmt.columnInt(0) else 0;
+        // No ref row ⇒ warm / in-flight commit purge cannot clear; not an orphan.
+        if (fix_mod.isPurgeableOrphan(has_row, refcount)) orphan_count += 1;
     }
 
     if (orphan_count == 0) {

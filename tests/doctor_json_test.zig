@@ -14,6 +14,7 @@ const testing = std.testing;
 const doctor = malt.doctor;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
+const store_mod = malt.store;
 const output = malt.output;
 
 const Scratch = struct {
@@ -137,14 +138,22 @@ test "an orphaned store entry serializes a fixable orphaned_store finding" {
     defer s.deinit(allocator);
     try s.initSchema();
 
-    // A store/<sha> dir with no matching store_refs row is an orphan.
-    const orphan = try std.fmt.allocPrint(
-        allocator,
-        "{s}/store/0000000000000000000000000000000000000000000000000000000000000000",
-        .{s.path},
-    );
+    // A store/<sha> dir whose store_refs refcount has dropped to 0 is a
+    // true orphan — the entry `purge --store-orphans` removes.
+    const sha = "0000000000000000000000000000000000000000000000000000000000000000";
+    const orphan = try std.fmt.allocPrint(allocator, "{s}/store/{s}", .{ s.path, sha });
     defer allocator.free(orphan);
     try test_io.cwd().createDirPath(std.Options.debug_io, orphan);
+
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        var store = store_mod.Store.init(std.Options.debug_io, allocator, &db, s.path);
+        try store.incrementRef(sha);
+        try store.decrementRef(sha);
+    }
 
     var result = walk(allocator, s.path);
     defer result.deinit();
