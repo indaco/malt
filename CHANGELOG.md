@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.19.1 - 2026-06-24
+
+### 🩹 Fixes
+
+- **doctor:** downgrade filesystem-vs-DB findings while an operation is in flight ([d64bdb1](https://github.com/indaco/malt/commit/d64bdb1)) ([#542](https://github.com/indaco/malt/pull/542))
+- **doctor:** explain why --fix could not sweep an orphan instead of a silent no-op ([76dc88e](https://github.com/indaco/malt/commit/76dc88e)) ([#541](https://github.com/indaco/malt/pull/541))
+- **doctor:** stop flagging warm store bytes as unpurgeable orphans ([b9db5bf](https://github.com/indaco/malt/commit/b9db5bf)) ([#539](https://github.com/indaco/malt/pull/539))
+
+### 📖 Documentation
+
+- present the install-verify pin as an example tag ([f73e3c7](https://github.com/indaco/malt/commit/f73e3c7)) ([#543](https://github.com/indaco/malt/pull/543))
+
+### 🏡 Chores
+
+- **pins:** resync manifest with committed core pin ([8f04587](https://github.com/indaco/malt/commit/8f04587)) ([#540](https://github.com/indaco/malt/pull/540))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.19.0 - 2026-06-22
 
 ### Highlights
