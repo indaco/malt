@@ -161,6 +161,65 @@ test "execute upgrades a single named keg, surfaces error.Aborted on cached-404 
     );
 }
 
+test "execute upgrades every named keg, not just the first positional" {
+    // Two kegs: the first is already at latest (cached JSON, no failure),
+    // the second 404s. Only a CLI that walks BOTH positionals reaches the
+    // second and surfaces error.Aborted. Pre-fix the loop kept only the
+    // first name, the up-to-date skip returned success, and the dropped
+    // second name's failure never showed — so this asserts Aborted to
+    // prove the second positional is honored.
+    var s = try Scratch.init(testing.allocator, "multi_named");
+    defer s.deinit(testing.allocator);
+
+    const cache_api = try std.fmt.allocPrint(testing.allocator, "{s}/cache/api", .{s.path});
+    defer testing.allocator.free(cache_api);
+    try test_io.cwd().createDirPath(std.Options.debug_io, cache_api);
+
+    // First name: cached formula JSON at the installed version → "already
+    // at latest", which returns cleanly without touching the network.
+    const up_to_date_json = try std.fmt.allocPrint(testing.allocator, "{s}/formula_wget.json", .{cache_api});
+    defer testing.allocator.free(up_to_date_json);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, up_to_date_json, .{ .truncate = true });
+        const body =
+            \\{"name":"wget","full_name":"wget","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.21"},"dependencies":[],"oldnames":[],"bottle":{}}
+        ;
+        try f.writeStreamingAll(std.Options.debug_io, body);
+        f.close(std.Options.debug_io);
+    }
+
+    // Second name: 404 marker → NotFound → error.Aborted, but only if the
+    // CLI actually processes it.
+    const marker = try std.fmt.allocPrint(testing.allocator, "{s}/formula_ffmpeg.404", .{cache_api});
+    defer testing.allocator.free(marker);
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, marker, .{ .truncate = true });
+        f.close(std.Options.debug_io);
+    }
+
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        var stmt = try db.prepare(
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path, install_reason)
+            \\VALUES ('wget', 'wget', '1.21', 0, '', '/c/wget/1.21', 'direct'),
+            \\       ('ffmpeg', 'ffmpeg', '6', 0, '', '/c/ffmpeg/6', 'direct');
+        );
+        defer stmt.finalize();
+        _ = try stmt.step();
+    }
+
+    quiet();
+    defer unquiet();
+    try testing.expectError(
+        error.Aborted,
+        upgrade.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "wget", "ffmpeg" }),
+    );
+}
+
 test "execute --pinned --dry-run audits without leaking the parsed Formula" {
     // Plant a cached formula JSON so the audit reaches parseFormula;
     // testing.allocator is the leak gate.
