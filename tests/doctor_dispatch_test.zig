@@ -14,6 +14,7 @@ const macho = std.macho;
 const doctor = malt.doctor;
 const sqlite = malt.sqlite;
 const schema = malt.schema;
+const store_mod = malt.store;
 const output = malt.output;
 
 const c = struct {
@@ -696,25 +697,25 @@ test "fix hint fires when a broken symlink is present and --fix is off" {
 }
 
 test "fix hint fires when an orphaned store entry is present" {
-    // Plant a store/<sha> directory with no matching store_refs row;
-    // checkOrphanedStore counts it and must arm the hint.
+    // Plant a store/<sha> directory whose store_refs refcount has dropped
+    // to 0 — a true orphan; checkOrphanedStore counts it and arms the hint.
     const allocator = testing.allocator;
     var s = try Scratch.init(allocator, "fix_hint_orphan");
     defer s.deinit(allocator);
 
+    const sha = "0000000000000000000000000000000000000000000000000000000000000000";
     {
         var db_path_buf: [512]u8 = undefined;
         const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
         var db = try sqlite.Database.open(db_path);
         defer db.close();
         try schema.initSchema(&db);
+        var store = store_mod.Store.init(std.Options.debug_io, allocator, &db, s.path);
+        try store.incrementRef(sha);
+        try store.decrementRef(sha);
     }
 
-    const orphan = try std.fmt.allocPrint(
-        allocator,
-        "{s}/store/0000000000000000000000000000000000000000000000000000000000000000",
-        .{s.path},
-    );
+    const orphan = try std.fmt.allocPrint(allocator, "{s}/store/{s}", .{ s.path, sha });
     defer allocator.free(orphan);
     try test_io.cwd().createDirPath(std.Options.debug_io, orphan);
 

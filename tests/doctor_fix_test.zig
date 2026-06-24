@@ -279,6 +279,53 @@ test "fixOrphanedStore: sweeps refcount-zero entries against a real DB" {
     try testing.expect(!pathExists(entry_dir));
 }
 
+test "orphan parity: a no-row store entry is invisible to both doctor and purge" {
+    // A store dir with no `store_refs` row is a warm / in-flight commit
+    // (`--download-only`, or an install interrupted before `incrementRef`).
+    // `purge --store-orphans` is DB-driven and cannot remove it; doctor must
+    // not flag it as one, or it routes the user to a command that no-ops.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "norow");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_dir_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+
+    var store_dir_buf: [256]u8 = undefined;
+    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
+
+    var db_path_buf: [256]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // On disk but never `incrementRef`-d: no `store_refs` row.
+    const sha = "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface";
+    var entry_dir_buf: [320]u8 = undefined;
+    const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, entry_dir);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Remediation side: purge enumerates nothing.
+    var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
+    var orphans = try store.orphans();
+    defer {
+        for (orphans.items) |item| testing.allocator.free(item);
+        orphans.deinit(testing.allocator);
+    }
+    try testing.expectEqual(@as(usize, 0), orphans.items.len);
+
+    // Detection side (shared by `--fix` and the inline doctor check) must agree.
+    try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(io, prefix));
+    try testing.expect(pathExists(entry_dir));
+}
+
 test "fixOrphanedStore: missing DB is a no-op (returns 0)" {
     var prefix_buf: [128]u8 = undefined;
     const prefix = try makePrefix(&prefix_buf, "no-db");
