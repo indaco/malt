@@ -15,6 +15,13 @@ const sqlite = malt.sqlite;
 const schema = malt.schema;
 const store_mod = malt.store;
 
+// macOS user-immutable flag: makes a directory undeletable (rmdir → EPERM)
+// even for root, so a blocked sweep is deterministic across environments.
+const c = struct {
+    extern "c" fn chflags(path: [*:0]const u8, flags: c_uint) c_int;
+};
+const UF_IMMUTABLE: c_uint = 0x00000002;
+
 fn randHex(buf: *[16]u8) void {
     var rand: [8]u8 = undefined;
     fs_compat.randomBytes(std.Options.debug_io, &rand);
@@ -274,9 +281,107 @@ test "fixOrphanedStore: sweeps refcount-zero entries against a real DB" {
     try store.decrementRef(sha);
 
     try testing.expectEqual(@as(u32, 1), fix.probeOrphanedStoreCount(io, prefix));
-    try testing.expectEqual(@as(u32, 1), fix.fixOrphanedStore(io, prefix));
+    const sweep = fix.fixOrphanedStore(io, prefix);
+    try testing.expectEqual(@as(u32, 1), sweep.count);
+    try testing.expectEqual(@as(u32, 0), sweep.blocked);
     try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(io, prefix));
     try testing.expect(!pathExists(entry_dir));
+}
+
+test "fixOrphanedStore: an undeletable orphan is reported as blocked, not silently skipped" {
+    // A refcount-0 orphan whose directory cannot be removed must surface as
+    // blocked with a reason — not a silent count of 0 that reads exactly like
+    // a clean prefix. Here the macOS immutable flag is the (root-proof) blocker.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "blocked");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_dir_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+
+    var store_dir_buf: [256]u8 = undefined;
+    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
+
+    var db_path_buf: [256]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    var entry_dir_buf: [320]u8 = undefined;
+    const entry_dir = try std.fmt.bufPrint(&entry_dir_buf, "{s}/store/{s}", .{ prefix, sha });
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, entry_dir);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
+    try store.incrementRef(sha);
+    try store.decrementRef(sha);
+
+    // Make the entry undeletable; clear the flag before the prefix teardown,
+    // or deleteTree of the prefix would itself be blocked.
+    var entry_z_buf: [320]u8 = undefined;
+    const entry_z = try std.fmt.bufPrintSentinel(&entry_z_buf, "{s}/store/{s}", .{ prefix, sha }, 0);
+    try testing.expectEqual(@as(c_int, 0), c.chflags(entry_z.ptr, UF_IMMUTABLE));
+    defer _ = c.chflags(entry_z.ptr, 0);
+
+    const sweep = fix.fixOrphanedStore(io, prefix);
+    try testing.expectEqual(@as(u32, 0), sweep.count); // nothing actually removed
+    try testing.expectEqual(@as(u32, 1), sweep.blocked); // the one orphan, blocked
+    try testing.expect(sweep.reason != null);
+    try testing.expect(pathExists(entry_dir)); // still on disk
+}
+
+test "fixOrphanedStore: a partial sweep removes what it can and reports the rest as blocked" {
+    // Two orphans, one removable and one immutable: the sweep must credit the
+    // removable one and still surface the blocked one — neither masking the
+    // other, so "swept 1" and "could not sweep 1" can both be reported.
+    var prefix_buf: [128]u8 = undefined;
+    const prefix = try makePrefix(&prefix_buf, "partial");
+    defer fs_compat.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+
+    var db_dir_buf: [256]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, db_dir);
+    var store_dir_buf: [256]u8 = undefined;
+    const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store", .{prefix});
+    try fs_compat.makeDirAbsolute(std.Options.debug_io, store_dir);
+
+    var db_path_buf: [256]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var store = store_mod.Store.init(io, testing.allocator, &db, prefix);
+    const removable = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const locked = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    inline for (.{ removable, locked }) |sha| {
+        var dir_buf: [320]u8 = undefined;
+        const dir = try std.fmt.bufPrint(&dir_buf, "{s}/store/{s}", .{ prefix, sha });
+        try fs_compat.makeDirAbsolute(std.Options.debug_io, dir);
+        try store.incrementRef(sha);
+        try store.decrementRef(sha);
+    }
+
+    var locked_z_buf: [320]u8 = undefined;
+    const locked_z = try std.fmt.bufPrintSentinel(&locked_z_buf, "{s}/store/{s}", .{ prefix, locked }, 0);
+    try testing.expectEqual(@as(c_int, 0), c.chflags(locked_z.ptr, UF_IMMUTABLE));
+    defer _ = c.chflags(locked_z.ptr, 0);
+
+    const sweep = fix.fixOrphanedStore(io, prefix);
+    try testing.expectEqual(@as(u32, 1), sweep.count); // the removable one
+    try testing.expectEqual(@as(u32, 1), sweep.blocked); // the immutable one
+    try testing.expect(sweep.reason != null);
 }
 
 test "orphan parity: a no-row store entry is invisible to both doctor and purge" {
@@ -336,7 +441,9 @@ test "fixOrphanedStore: missing DB is a no-op (returns 0)" {
     const io = threaded.io();
 
     try testing.expectEqual(@as(u32, 0), fix.probeOrphanedStoreCount(io, prefix));
-    try testing.expectEqual(@as(u32, 0), fix.fixOrphanedStore(io, prefix));
+    const sweep = fix.fixOrphanedStore(io, prefix);
+    try testing.expectEqual(@as(u32, 0), sweep.count);
+    try testing.expectEqual(@as(u32, 0), sweep.blocked);
 }
 
 test "executeFix: idempotent — second run finds nothing left to do" {
