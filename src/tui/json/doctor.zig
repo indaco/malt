@@ -17,9 +17,10 @@ const testing = std.testing;
 pub const Error = error{ BadJson, OutOfMemory };
 
 /// Finding severity, mirroring the CLI's `CheckStatus` wire tags `ok`/`warn`/
-/// `err`. Closed enum: a new severity must bump the schema, so parsing it is a
-/// deliberate change, not a tolerated unknown.
-pub const Severity = enum { ok, warn, err };
+/// `err`/`info`. `info` is the in-progress downgrade the CLI emits while an
+/// operation holds the prefix lock. Closed enum: a new severity must bump the
+/// schema, so parsing it is a deliberate change, not a tolerated unknown.
+pub const Severity = enum { ok, warn, err, info };
 
 /// Safe-fix class, mirroring the CLI `--fix` vocabulary. `none` is the wire tag
 /// for a non-fixable finding. The fixable findings' `f` action delegates to
@@ -191,7 +192,8 @@ test "parse decodes every severity tag" {
         \\{"checks":[
         \\{"id":"a","severity":"ok","title":"A"},
         \\{"id":"b","severity":"warn","title":"B"},
-        \\{"id":"c","severity":"err","title":"C"}
+        \\{"id":"c","severity":"err","title":"C"},
+        \\{"id":"d","severity":"info","title":"D"}
         \\]}
     ;
     var p = try parse(testing.allocator, bytes);
@@ -199,6 +201,9 @@ test "parse decodes every severity tag" {
     try testing.expectEqual(Severity.ok, p.items[0].severity);
     try testing.expectEqual(Severity.warn, p.items[1].severity);
     try testing.expectEqual(Severity.err, p.items[2].severity);
+    // `info` is the in-progress downgrade; the parser must accept it or the
+    // Doctor tab breaks whenever an operation is in flight.
+    try testing.expectEqual(Severity.info, p.items[3].severity);
 }
 
 test "parse decodes every fix_class tag" {
