@@ -22,6 +22,7 @@ pub const Fields = struct {
     prefix: []const u8,
     kegs: ?usize = null,
     outdated: ?usize = null,
+    outdated_spinner: ?[]const u8 = null,
 };
 
 /// Render the muted header into `buf`, truncated to `cols`. The right segment is
@@ -56,8 +57,10 @@ fn leftSegment(buf: []u8, fields: Fields) []const u8 {
 fn rightSegment(buf: []u8, fields: Fields) []const u8 {
     var kb: [20]u8 = undefined;
     var ob: [20]u8 = undefined;
+    // The spinner glyph stands in for the count while the launch audit runs.
+    const od = fields.outdated_spinner orelse countStr(&ob, fields.outdated);
     return std.fmt.bufPrint(buf, "{s} kegs{s}{s} outdated", .{
-        countStr(&kb, fields.kegs), sep, countStr(&ob, fields.outdated),
+        countStr(&kb, fields.kegs), sep, od,
     }) catch buf[0..0];
 }
 
@@ -128,6 +131,15 @@ test "render shows em-dashes for both counts before anything loads" {
     const out = render(&buf, .{ .version = "0.1.0", .prefix = "/opt/malt" }, 80);
     try std.testing.expect(std.mem.indexOf(u8, out, unknown ++ " kegs") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, unknown ++ " outdated") != null);
+}
+
+test "render shows the spinner glyph on the outdated slot while the launch audit runs" {
+    var buf: [256]u8 = undefined;
+    // Loading: the glyph replaces the count, so the slot reads as computing.
+    const out = render(&buf, .{ .version = "0.1.0", .prefix = "/opt/malt", .kegs = 192, .outdated_spinner = "⠋" }, 80);
+    try std.testing.expect(std.mem.indexOf(u8, out, "192 kegs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "⠋ outdated") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, unknown ++ " outdated") == null); // not a frozen em-dash
 }
 
 test "render drops the right segment before clipping the left on a narrow terminal" {
