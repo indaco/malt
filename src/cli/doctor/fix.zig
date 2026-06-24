@@ -139,9 +139,10 @@ pub fn fixStaleLock(io: std.Io, prefix: []const u8) bool {
     return true;
 }
 
-/// Count orphaned store directories (entry on disk with refcount <= 0
-/// or no `store_refs` row). Mirrors the doctor walker so `--fix` and
-/// the inline check report the same number.
+/// Count orphaned store directories (entry on disk whose `store_refs`
+/// refcount has dropped to <= 0). Shares one definition with the inline
+/// doctor check and `purge --store-orphans` so all three report the same
+/// entries.
 pub fn probeOrphanedStoreCount(io: std.Io, prefix: []const u8) u32 {
     return countOrphans(io, prefix, false);
 }
@@ -179,13 +180,23 @@ fn countOrphans(io: std.Io, prefix: []const u8, do_remove: bool) u32 {
     return count;
 }
 
+/// A store entry is a purgeable orphan iff its `store_refs` row exists and
+/// its refcount has dropped to <= 0 — the predicate `Store.orphans()` /
+/// `purge --store-orphans` use. A *missing* row is a warm / in-flight commit
+/// (`--download-only`, or an install interrupted before the ref is taken);
+/// purge cannot clear it, so it is not an orphan. Detection and remediation
+/// share this single definition.
+pub fn isPurgeableOrphan(has_row: bool, refcount: i64) bool {
+    return has_row and refcount <= 0;
+}
+
 fn isOrphanRow(db: *sqlite.Database, sha: []const u8) bool {
     var stmt = db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;") catch return false;
     defer stmt.finalize();
     stmt.bindText(1, sha) catch return false;
     const has_row = stmt.step() catch false;
-    if (!has_row) return true; // entry on disk with no ref-row is orphan by definition
-    return stmt.columnInt(0) <= 0;
+    const refcount: i64 = if (has_row) stmt.columnInt(0) else 0;
+    return isPurgeableOrphan(has_row, refcount);
 }
 
 fn deleteRefRow(db: *sqlite.Database, sha: []const u8) void {
@@ -568,4 +579,14 @@ test "fixStaleLock: missing lock file is a no-op" {
 
 test "probeStaleLock: missing prefix returns false" {
     try std.testing.expect(!probeStaleLock(std.Options.debug_io, "/nonexistent/malt/prefix"));
+}
+
+test "isPurgeableOrphan: only a refcount<=0 row is an orphan" {
+    // Matches `Store.orphans()` (WHERE refcount <= 0) so detection and
+    // remediation share one definition.
+    try std.testing.expect(isPurgeableOrphan(true, 0));
+    try std.testing.expect(isPurgeableOrphan(true, -1));
+    try std.testing.expect(!isPurgeableOrphan(true, 1));
+    // No ref row: a warm / in-flight commit purge cannot clear — not an orphan.
+    try std.testing.expect(!isPurgeableOrphan(false, 0));
 }
