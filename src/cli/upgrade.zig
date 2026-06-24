@@ -71,7 +71,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Applies only to deps newly introduced by this upgrade — existing
     // kegs replay their stored `bin_isolated` regardless of the flag.
     var isolate_deps = false;
-    var pkg_name: ?[]const u8 = null;
+    // Collect every positional, mirroring `install`: tokens borrow from
+    // `args` (process-lifetime), so no dup is needed.
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(allocator);
 
     // StaticStringMap + exhaustive switch: every flag routes to a handler.
     for (args) |arg| {
@@ -84,7 +87,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             .pinned => pinned_only = true,
             .isolate_deps => isolate_deps = true,
         } else if (arg.len > 0 and arg[0] != '-') {
-            if (pkg_name == null) pkg_name = arg;
+            names.append(allocator, arg) catch return error.OutOfMemory;
         }
     }
 
@@ -146,22 +149,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // and surface error.Aborted so main.zig maps it to a non-zero exit.
     var any_failed = false;
 
-    if (pkg_name) |name| {
-        // Upgrade a specific package — try formula first, then cask
-        if (!cask_only) {
-            if (isFormulaInstalled(&db, name)) {
-                upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps) catch {
-                    any_failed = true;
-                };
-                if (any_failed) return error.Aborted;
-                return;
-            }
-        }
-        // Not a formula (or --cask): try cask
-        upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only) catch {
-            any_failed = true;
-        };
-    } else {
+    if (names.items.len == 0) {
         // Upgrade all
         if (!cask_only) {
             upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps) catch {
@@ -170,6 +158,22 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         }
         if (!formula_only) {
             upgradeAllCasks(ctx, allocator, &db, &api, prefix, dry_run, force, pinned_only) catch {
+                any_failed = true;
+            };
+        }
+    } else {
+        // Upgrade each named package — formula first, then cask. A failed
+        // or aborted name aggregates into `any_failed` and the loop moves
+        // on, so one bad name never abandons the rest of the batch.
+        for (names.items) |name| {
+            if (!cask_only and isFormulaInstalled(&db, name)) {
+                upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps) catch {
+                    any_failed = true;
+                };
+                continue;
+            }
+            // Not a formula (or --cask): try cask
+            upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only) catch {
                 any_failed = true;
             };
         }
