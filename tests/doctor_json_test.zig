@@ -225,10 +225,10 @@ test "collect=false leaves the sink empty (human path pays nothing)" {
     try testing.expectEqual(@as(usize, 0), result.findings().len);
 }
 
-test "a lock held by a live PID warns but stays non-fixable" {
-    // The same Stale lock row is fixable for a dead PID and not for a
-    // live one. A live holder must report warn + fixable:false so a
-    // consumer never offers `--fix` against a legitimately held lock.
+test "a lock held by a live PID is reported in-progress, not a fixable warn" {
+    // A live holder is an operation in flight, not a stale lock: the row must
+    // be informational (info) and non-fixable, so a consumer never offers
+    // `--fix` against a legitimately held lock. (A dead PID → fixable stale_lock.)
     const allocator = testing.allocator;
     var s = try Scratch.init(allocator, "live_lock");
     defer s.deinit(allocator);
@@ -248,7 +248,7 @@ test "a lock held by a live PID warns but stays non-fixable" {
     defer result.deinit();
 
     const f = findById(result.findings(), "stale_lock") orelse return error.MissingLockFinding;
-    try testing.expectEqual(doctor.CheckStatus.warn_status, f.severity);
+    try testing.expectEqual(doctor.CheckStatus.info_status, f.severity);
     try testing.expect(!f.fixable);
     try testing.expect(f.fix_class == null);
 }

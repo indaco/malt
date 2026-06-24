@@ -69,7 +69,31 @@ pub const CheckCtx = struct {
     /// row and short-circuits the API-reachable probe so an air-gapped
     /// machine doesn't get a warn row for an expected network gap.
     offline: bool = false,
+    /// A live install/upgrade holds the prefix lock. The filesystem-vs-DB
+    /// checks observe its non-atomic intermediate states (a keg row before
+    /// its dir, a mid-swap symlink); when set they downgrade those findings
+    /// to an informational "operation in progress" note instead of a fault.
+    op_in_flight: bool = false,
 };
+
+/// The single in-progress note the lock-aware checks share.
+const op_in_flight_note = "operation in progress — re-run after it completes";
+
+/// True when the prefix lock is held by a *live* process. A dead-PID lock is
+/// a stale lock, not an in-flight operation, so it must read false here — else
+/// it would mask real findings until cleared. Mirrors `checkStaleLock`.
+pub fn operationInFlight(io: std.Io, prefix: []const u8) bool {
+    var lock_buf: [512]u8 = undefined;
+    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return false;
+    const pid = lock_mod.LockFile.holderPid(io, lock_path) orelse return false;
+    return pidAlive(pid);
+}
+
+/// kill(pid, 0): true when the process exists (and is signalable). Shared by
+/// `operationInFlight` and `checkStaleLock` so live-vs-dead stays one rule.
+fn pidAlive(pid: std.posix.pid_t) bool {
+    return std.c.kill(pid, @enumFromInt(0)) == 0;
+}
 
 /// One entry in the health walk. `run` prints its row(s) and returns
 /// the walker's tally tag.
@@ -117,6 +141,8 @@ pub fn runChecks(ctx: CheckCtx, table: []const Check) Tally {
             .ok => {},
             .warn_status => tally.warnings += 1,
             .err_status => tally.errors += 1,
+            // In-progress downgrade: informational, never a fault.
+            .info_status => {},
         }
     }
     return tally;
@@ -411,6 +437,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
         .environ = ctx.environ,
         .mirrors = ctx.mirrors,
         .offline = ctx.offline,
+        .op_in_flight = operationInFlight(ctx.io, prefix),
     }, &checks, want_checks_json);
     defer walk.deinit();
     const tally = walk.tally;
@@ -692,16 +719,16 @@ fn checkStaleLock(ctx: CheckCtx, name: []const u8) CheckResult {
     };
     const pid = lock_mod.LockFile.holderPid(ctx.io, lock_path);
     if (pid) |p| {
-        const is_alive = std.c.kill(p, @enumFromInt(0)) == 0;
-        var pid_buf: [256]u8 = undefined;
-        if (is_alive) {
-            const s = std.fmt.bufPrint(&pid_buf, "Lock held by active PID {d}", .{p}) catch "Lock held";
-            printCheck(name, .warn_status, s);
-        } else {
-            const s = std.fmt.bufPrint(&pid_buf, "Stale lock from dead PID {d}. Run: rm {s}", .{ p, lock_path }) catch "Stale lock detected";
-            printCheck(name, .warn_status, s);
-            armFixHint(.stale_lock);
+        // A live holder is an operation in flight, not a defect — report the
+        // shared in-progress note so a normal install doesn't read as a fault.
+        if (pidAlive(p)) {
+            printCheck(name, .info_status, op_in_flight_note);
+            return .info_status;
         }
+        var pid_buf: [256]u8 = undefined;
+        const s = std.fmt.bufPrint(&pid_buf, "Stale lock from dead PID {d}. Run: rm {s}", .{ p, lock_path }) catch "Stale lock detected";
+        printCheck(name, .warn_status, s);
+        armFixHint(.stale_lock);
         return .warn_status;
     }
     printCheck(name, .ok, null);
@@ -919,6 +946,10 @@ fn checkOrphanedStore(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     }
+    if (ctx.op_in_flight) {
+        printCheck(name, .info_status, op_in_flight_note);
+        return .info_status;
+    }
     var msg_buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &msg_buf,
@@ -971,6 +1002,10 @@ fn checkMissingKegs(ctx: CheckCtx, name: []const u8) CheckResult {
         printCheck(name, .ok, null);
         return .ok;
     }
+    if (ctx.op_in_flight) {
+        printCheck(name, .info_status, op_in_flight_note);
+        return .info_status;
+    }
     var msg_buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &msg_buf,
@@ -1012,6 +1047,10 @@ fn checkBrokenSymlinks(ctx: CheckCtx, name: []const u8) CheckResult {
     if (offenders.items.len == 0) {
         printCheck(name, .ok, null);
         return .ok;
+    }
+    if (ctx.op_in_flight) {
+        printCheck(name, .info_status, op_in_flight_note);
+        return .info_status;
     }
     var msg_buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(
@@ -1623,4 +1662,33 @@ test "writeDoctorJson stays one valid JSON object with schema_version on the emp
     try testing.expectEqual(@as(usize, 0), parsed.value.object.get("checks").?.array.items.len);
     try testing.expectEqual(@as(usize, 0), parsed.value.object.get("taps").?.array.items.len);
     try testing.expectEqual(@as(i64, 0), parsed.value.object.get("tap_cache").?.object.get("bytes").?.integer);
+}
+
+fn infoCheckForTest(ctx: CheckCtx, name: []const u8) CheckResult {
+    _ = ctx;
+    _ = name;
+    return .info_status;
+}
+
+test "runChecks: an info_status finding counts as neither warning nor error" {
+    // The in-progress downgrade must not trip the severity exit — otherwise
+    // a busy prefix still reads as a fault.
+    const table = [_]Check{.{ .name = "x", .run = infoCheckForTest }};
+    output.setQuiet(true);
+    defer output.setQuiet(false);
+    const tally = runChecks(.{
+        .allocator = testing.allocator,
+        .prefix = "/nonexistent",
+        .io = std.Options.debug_io,
+        .environ = .empty,
+    }, &table);
+    try testing.expectEqual(@as(u32, 0), tally.warnings);
+    try testing.expectEqual(@as(u32, 0), tally.errors);
+}
+
+test "pidAlive: true for our own PID, false for a dead one" {
+    // The downgrade gates on this: a live holder means an operation is in
+    // flight; a dead PID is a stale lock that must not mask real findings.
+    try testing.expect(pidAlive(std.c.getpid()));
+    try testing.expect(!pidAlive(999999));
 }
