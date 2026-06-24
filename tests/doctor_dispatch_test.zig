@@ -149,6 +149,112 @@ test "runChecks surfaces an error when a keg row points at a missing Cellar dir"
     try testing.expect(tally.errors >= 1);
 }
 
+// --- in-flight downgrade (lock-aware checks) ---------------------------
+
+fn severityOf(items: anytype, id: []const u8) ?doctor.CheckStatus {
+    for (items) |f| if (std.mem.eql(u8, f.id, id)) return f.severity;
+    return null;
+}
+
+test "operationInFlight: true only for a live lock holder" {
+    var s = try Scratch.init(testing.allocator, "opinflight");
+    defer s.deinit(testing.allocator);
+
+    var lock_buf: [512]u8 = undefined;
+    const lock_path = try std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{s.path});
+
+    // No lock file → nothing in flight.
+    try testing.expect(!doctor.operationInFlight(std.Options.debug_io, s.path));
+
+    // A dead PID is a stale lock — must not read as in-flight.
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, lock_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        try f.writeStreamingAll(std.Options.debug_io, "999999");
+    }
+    try testing.expect(!doctor.operationInFlight(std.Options.debug_io, s.path));
+
+    // Our own (live) PID → an operation is in flight.
+    {
+        const f = try test_io.createFileAbsolute(std.Options.debug_io, lock_path, .{ .truncate = true });
+        defer f.close(std.Options.debug_io);
+        var b: [16]u8 = undefined;
+        try f.writeStreamingAll(std.Options.debug_io, try std.fmt.bufPrint(&b, "{d}", .{std.c.getpid()}));
+    }
+    try testing.expect(doctor.operationInFlight(std.Options.debug_io, s.path));
+}
+
+test "in-flight downgrade: all three fs-vs-DB checks become info only while an op is live" {
+    var s = try Scratch.init(testing.allocator, "downgrade_all");
+    defer s.deinit(testing.allocator);
+
+    // missing keg: a kegs row whose cellar dir does not exist (err).
+    // orphaned store: a store/<sha> dir with a refcount-0 ref row (warn).
+    const orphan_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    {
+        var db_path_buf: [512]u8 = undefined;
+        const db_path = try std.fmt.bufPrintSentinel(&db_path_buf, "{s}/db/malt.db", .{s.path}, 0);
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        var stmt = try db.prepare(
+            \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+            \\VALUES ('phantom', 'phantom', '9.9', 0, '', '/tmp/malt_phantom_missing_inflight');
+        );
+        defer stmt.finalize();
+        _ = try stmt.step();
+
+        var store_dir_buf: [512]u8 = undefined;
+        const store_dir = try std.fmt.bufPrint(&store_dir_buf, "{s}/store/{s}", .{ s.path, orphan_sha });
+        try test_io.cwd().createDirPath(std.Options.debug_io, store_dir);
+        var store = store_mod.Store.init(std.Options.debug_io, testing.allocator, &db, s.path);
+        try store.incrementRef(orphan_sha);
+        try store.decrementRef(orphan_sha);
+    }
+    // broken symlink: a dangling link under bin/ (warn).
+    {
+        var bin_buf: [512]u8 = undefined;
+        const bin_dir = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{s.path});
+        var bin = try test_io.openDirAbsolute(std.Options.debug_io, bin_dir, .{ .iterate = true });
+        defer bin.close(std.Options.debug_io);
+        try bin.symLink(std.Options.debug_io, "/tmp/malt_inflight_vanished_target", "ghost", .{});
+    }
+
+    quiet();
+    defer unquiet();
+
+    // Not in flight: each finding shows its real severity.
+    {
+        var walk = doctor.collectFindings(testing.allocator, .{
+            .allocator = testing.allocator,
+            .prefix = s.path,
+            .io = std.Options.debug_io,
+            .environ = .empty,
+        }, &doctor.checks, true);
+        defer walk.deinit();
+        try testing.expectEqual(doctor.CheckStatus.err_status, severityOf(walk.findings(), "missing_kegs").?);
+        try testing.expectEqual(doctor.CheckStatus.warn_status, severityOf(walk.findings(), "orphaned_store_entries").?);
+        try testing.expectEqual(doctor.CheckStatus.warn_status, severityOf(walk.findings(), "broken_symlinks").?);
+        try testing.expect(walk.tally.errors >= 1);
+    }
+
+    // In flight: all three are expected transients → info, no fault.
+    {
+        var walk = doctor.collectFindings(testing.allocator, .{
+            .allocator = testing.allocator,
+            .prefix = s.path,
+            .io = std.Options.debug_io,
+            .environ = .empty,
+            .op_in_flight = true,
+        }, &doctor.checks, true);
+        defer walk.deinit();
+        try testing.expectEqual(doctor.CheckStatus.info_status, severityOf(walk.findings(), "missing_kegs").?);
+        try testing.expectEqual(doctor.CheckStatus.info_status, severityOf(walk.findings(), "orphaned_store_entries").?);
+        try testing.expectEqual(doctor.CheckStatus.info_status, severityOf(walk.findings(), "broken_symlinks").?);
+        try testing.expectEqual(@as(u32, 0), walk.tally.errors);
+    }
+}
+
 // --- execute pre-loop branches -----------------------------------------
 
 test "execute --help short-circuits before opening anything" {
