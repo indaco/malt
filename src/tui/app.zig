@@ -146,11 +146,11 @@ pub const App = struct {
     /// The polled read keeps it set across its poll loop and clears it after, so
     /// the spinner animates while the child runs and the result replaces it.
     loading: bool = false,
-    /// Set while the launch-time outdated count is fetched in the background, so
-    /// the header paints a working-indicator (spinner) on the `outdated` slot
-    /// instead of a frozen `—`. Distinct from `loading` (tab-scoped, footer):
-    /// the input loop stays live the whole time the audit runs.
-    outdated_loading: bool = false,
+    /// Tabs whose payload is being fetched in the background, so the input loop
+    /// stays live while a slow audit runs. Drives the working-indicator (spinner)
+    /// on the header `outdated` slot and on the active tab's footer, instead of a
+    /// frozen frame. Distinct from `loading` (a synchronous, blocking refetch).
+    tab_loading: std.EnumSet(Tab) = .initEmpty(),
     /// Spinner animation index, advanced one frame per poll tick while a lazy
     /// read is in flight (mirrors `progress.zig`). Lives on `App` so `renderFrame`
     /// stays a pure function of `(state, cols, rows)`: the glyph is
@@ -333,10 +333,11 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
                 .prefix = app.prefix,
                 .kegs = app.installed_count,
                 .outdated = app.outdated_count,
-                // While the launch audit runs, paint the current spinner frame on
-                // the outdated slot. Same glyph source as `loadingLine`, so the two
-                // working-indicators can never drift; deterministic per state.
-                .outdated_spinner = if (app.outdated_loading)
+                // While the outdated audit runs in the background, paint the
+                // current spinner frame on the outdated slot. Same glyph source as
+                // `loadingLine`, so the working-indicators can never drift;
+                // deterministic per state.
+                .outdated_spinner = if (app.tab_loading.contains(.outdated))
                     spinner_frames.frames[app.spinner_frame % spinner_frames.count]
                 else
                     null,
@@ -369,7 +370,10 @@ pub fn renderFrame(buf: []u8, app: *const App, cols: u16, rows: u16) []const u8 
             // long line keeps its tail on a narrow terminal instead of truncating.
             tab.renderSeparator(&f, r.footer, r.footer.row, false);
             const text_rows = r.footer.height -| 1;
-            if (app.loading) {
+            // The active tab's background fetch reads as Loading in the footer too,
+            // so a tab the user navigated *into* mid-audit shows it is still
+            // computing — not an empty list that looks done.
+            if (app.loading or app.tab_loading.contains(app.active)) {
                 var lb: [64]u8 = undefined;
                 renderFooterText(&f, loadingLine(&lb, app), color.roleCode(.accent), r.footer.row + 1, text_rows, cols);
             } else if (app.banner.isSet()) {
@@ -730,157 +734,216 @@ fn refreshInstalledCount(io: std.Io, allocator: std.mem.Allocator, app: *App) Ru
     app.installed_count = parsed.items.len;
 }
 
-/// Which fd a launch-loop wait found ready. `tty` wins over `child` when both
-/// are, so a queued keypress is serviced before the background audit drains —
-/// the responsiveness the synchronous launch count gave up.
-pub const PollEvent = enum { tty, child, timeout };
+// ── Background tab fetches ─────────────────────────────────────────────────
+// The slow tabs (Outdated/Services/Doctor) each run a network/audit
+// `mt … --json` that must not block the input loop. Each runs as a non-blocking
+// child whose stdout the loop multiplexes with the tty, so the dashboard stays
+// live and every tab fills in when its own fetch lands — navigation is never
+// trapped behind a cold-cache audit.
 
-/// One multiplexed wait over the controlling tty and the background outdated
-/// audit's stdout. Bounds the wait at `timeout` ms so a spinner tick / resize
-/// reflow lands even with neither fd ready. `std.posix.poll` retries `EINTR`
-/// internally, so a `SIGWINCH` mid-wait surfaces as the `timeout` branch, never
-/// an error — matching the blocking-read loop's resize handling.
-pub fn pollTtyChild(tty_fd: std.posix.fd_t, child_fd: std.posix.fd_t, timeout: i32) error{ReadFailed}!PollEvent {
-    var fds = [_]std.posix.pollfd{
-        .{ .fd = tty_fd, .events = std.posix.POLL.IN, .revents = 0 },
-        .{ .fd = child_fd, .events = std.posix.POLL.IN, .revents = 0 },
-    };
-    const ready = std.posix.poll(&fds, timeout) catch return error.ReadFailed;
+/// Poll timeout between spinner ticks while any background fetch runs — short
+/// enough to read as animation, long enough not to busy-spin.
+const fetch_tick_ms: i32 = 80;
+
+/// Cap on a background fetch's captured bytes, sized like the blocking drain's
+/// `--json` shape with headroom.
+const max_fetch_bytes: usize = 4 * 1024 * 1024;
+
+/// Which fd a multiplexed wait found ready. The tty wins over any fetch when
+/// both are ready, so a queued keypress is serviced before a fetch drains —
+/// input is never starved by a chatty audit.
+pub const MuxEvent = union(enum) { tty, fetch: usize, timeout };
+
+/// One multiplexed wait over the controlling tty and every active fetch's
+/// stdout. Bounds the wait at `timeout` ms so a spinner tick / resize reflow
+/// lands even with nothing ready. `std.posix.poll` retries `EINTR` internally,
+/// so a `SIGWINCH` mid-wait surfaces as `.timeout`, never an error. The `.fetch`
+/// index is into `fetch_fds`; the tty is checked first so it wins ties.
+pub fn pollMux(tty_fd: std.posix.fd_t, fetch_fds: []const std.posix.fd_t, timeout: i32) error{ReadFailed}!MuxEvent {
+    var pfds_buf: [1 + tab_bar.count]std.posix.pollfd = undefined;
+    const pfds = pfds_buf[0 .. 1 + fetch_fds.len];
+    pfds[0] = .{ .fd = tty_fd, .events = std.posix.POLL.IN, .revents = 0 };
+    for (fetch_fds, 0..) |fd, i| pfds[1 + i] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
+    const ready = std.posix.poll(pfds, timeout) catch return error.ReadFailed;
     if (ready == 0) return .timeout;
-    if (fds[0].revents != 0) return .tty; // input wins; a HUP/ERR on the tty also routes here to be read
-    return .child; // POLLIN or POLLHUP (EOF) on the audit's stdout
+    if (pfds[0].revents != 0) return .tty; // input wins; a HUP/ERR on the tty also reads here
+    for (0..fetch_fds.len) |i| if (pfds[1 + i].revents != 0) return .{ .fetch = i };
+    return .timeout; // defensive: poll reported ready but nothing matched
 }
 
-/// A completed background fetch's contribution to the header count: a known
-/// row count (an empty payload — a fresh prefix — is a *known* `0`), or a
-/// failure that stays unknown. The split keeps a failed fetch as `—`, never
-/// collapsed into `0` (which would read as "nothing outdated").
-pub const OutdatedResult = union(enum) { count: usize, failed: anyerror };
-
-/// Map a drained outdated payload to a header count. Empty (exit-0 no output,
-/// fresh prefix) is a known `0`; a parsed document is its row count; a parse
-/// failure is `.failed` (unknown). Pure over the bytes, so the unknown-vs-zero
-/// mapping is tested without a child.
-pub fn parseOutdatedBytes(allocator: std.mem.Allocator, bytes: []const u8) OutdatedResult {
-    if (bytes.len == 0) return .{ .count = 0 }; // fresh prefix: a known zero, not unknown
-    const parsed = outdated_json.parse(allocator, bytes) catch |e| return .{ .failed = e };
-    defer parsed.deinit(); // count only — the launch count owns no rows
-    return .{ .count = parsed.items.len };
-}
-
-/// The launch-time outdated count fetched in the background: a non-blocking
-/// `mt outdated --json` child whose stdout the launch loop drains via
-/// `pollTtyChild`, so a cold-cache network audit never blocks the input loop.
-const OutdatedFetch = struct {
+/// One in-flight background tab fetch: a non-blocking `mt <verb> --json` child
+/// whose stdout the loop drains. `tab` routes the drained bytes to the owning
+/// store; `max_ok_exit` tolerates Doctor's severity exits (≤2) where the others
+/// require a clean 0.
+const TabFetch = struct {
+    tab: Tab,
     child: std.process.Child,
     fd: std.posix.fd_t, // the child's stdout, polled alongside the tty
     buf: std.ArrayList(u8) = .empty,
+    max_ok_exit: u8,
 };
 
-/// Kick off the background outdated audit before the loop. A spawn fault leaves
-/// `outdated_count` unknown (`—`) with no banner — a launch-time failure is a
-/// quiet em-dash, not a nag; the count fills in (or stays `—`) once the Outdated
-/// tab is entered. Returns null when no background fetch is running.
-fn startOutdatedFetch(io: std.Io, allocator: std.mem.Allocator, app: *App) ?OutdatedFetch {
-    const argv = spawn.jsonArgv(allocator, app.mt_path, &.{"outdated"}) catch return null;
+/// At most one in-flight fetch per tab. Installed (a cheap DB read) and Search
+/// (synchronous by design) never background-fetch, so their slots stay null.
+const Fetches = std.EnumArray(Tab, ?TabFetch);
+
+/// The `mt` subcommand + exit tolerance for a slow tab's `--json` audit, or null
+/// for a tab that does not background-fetch. Doctor exits by severity while still
+/// emitting findings, so it tolerates ≤2 where the others require 0.
+fn fetchSpec(t: Tab) ?struct { verb: []const []const u8, max_ok_exit: u8 } {
+    return switch (t) {
+        .outdated => .{ .verb = &.{"outdated"}, .max_ok_exit = 0 },
+        .services => .{ .verb = &.{ "services", "list" }, .max_ok_exit = 0 },
+        .doctor => .{ .verb = &.{"doctor"}, .max_ok_exit = 2 },
+        else => null,
+    };
+}
+
+/// The banner op for a tab's failed background refresh — the same wording the
+/// synchronous reload uses, so a failure reads the same either way.
+fn tabRefreshOp(t: Tab) []const u8 {
+    return switch (t) {
+        .outdated => "outdated refresh failed",
+        .services => "services refresh failed",
+        .doctor => "doctor refresh failed",
+        else => "refresh failed",
+    };
+}
+
+/// True when any fetch is in flight — the loop only multiplexes then; with none
+/// active it falls back to the lone blocking tty read, so an idle dashboard has
+/// zero wakeups.
+fn anyFetchActive(fetches: *const Fetches) bool {
+    for (&fetches.values) |*v| if (v.* != null) return true;
+    return false;
+}
+
+/// Kick off `t`'s background audit, flag it loading, and store the fetch. A
+/// no-op when the tab has no fetch spec or one is already in flight. A spawn
+/// fault is quiet: the tab stays unflagged so the entry path can retry, never a
+/// nag banner.
+fn startTabFetch(io: std.Io, allocator: std.mem.Allocator, fetches: *Fetches, app: *App, t: Tab) void {
+    if (fetches.getPtr(t).* != null) return; // already auditing this tab
+    const spec = fetchSpec(t) orelse return;
+    const argv = spawn.jsonArgv(allocator, app.mt_path, spec.verb) catch return;
     defer allocator.free(argv);
-    var child = std.process.spawn(io, .{ .argv = argv, .stdout = .pipe, .stderr = .ignore }) catch return null;
+    var child = std.process.spawn(io, .{ .argv = argv, .stdout = .pipe, .stderr = .ignore }) catch return;
     const out = child.stdout orelse {
         child.kill(io);
         _ = child.wait(io) catch {};
-        return null;
+        return;
     };
-    app.outdated_loading = true;
-    return .{ .child = child, .fd = out.handle };
+    app.tab_loading.insert(t);
+    fetches.set(t, .{ .tab = t, .child = child, .fd = out.handle, .max_ok_exit = spec.max_ok_exit });
 }
 
-/// Poll timeout between header-spinner ticks while the launch audit runs — short
-/// enough to read as animation, long enough not to busy-spin. Mirrors the lazy
-/// polled read's cadence so the two working-indicators tick alike.
-const outdated_fetch_tick_ms: i32 = 80;
-
-/// Cap on the background audit's captured bytes, sized like the blocking drain's
-/// `mt outdated --json` shape with headroom.
-const max_outdated_fetch_bytes: usize = 4 * 1024 * 1024;
-
-/// Kill the child so it cannot outlive the TUI, then reap it (no zombie). The
-/// shared child-teardown step; callers own the buffer + state afterwards.
-fn killAndReap(io: std.Io, f: *OutdatedFetch) void {
+/// Kill the child so it cannot outlive the TUI; `kill` also reaps it (no zombie)
+/// and closes its stdout, so no separate `wait` — a second reap would abort on the
+/// already-cleared pid. The shared child-teardown step; callers own the buffer.
+fn killAndReap(io: std.Io, f: *TabFetch) void {
     f.child.kill(io);
-    _ = f.child.wait(io) catch {};
 }
 
 /// Tear an in-flight fetch down completely: reap the child and free its buffer.
 /// The teardown path when the user quit before the audit finished.
-fn reapOutdatedFetch(io: std.Io, allocator: std.mem.Allocator, f: *OutdatedFetch) void {
+fn reapTabFetch(io: std.Io, allocator: std.mem.Allocator, f: *TabFetch) void {
     killAndReap(io, f);
     f.buf.deinit(allocator);
 }
 
-/// Apply a completed fetch's result to the header, clear the loading flag, drop
-/// the fetch, and repaint. The child must already be reaped by the caller. A
-/// failure surfaces the same recoverable banner as the old synchronous refresh
-/// and leaves the count unknown (`—`) — never fatal, the loop keeps running.
-fn applyOutdatedResult(allocator: std.mem.Allocator, painter: Painter, fetch: *?OutdatedFetch, app: *App, result: OutdatedResult) void {
-    fetch.*.?.buf.deinit(allocator);
-    fetch.* = null;
-    app.outdated_loading = false;
-    switch (result) {
-        .count => |c| app.outdated_count = c,
-        .failed => |err| {
-            app.outdated_count = null; // unknown (`—`), never collapsed to 0
-            app.banner.set("outdated count refresh failed", @errorName(err));
-        },
+/// Reap every in-flight fetch at teardown so none outlives the TUI or zombies.
+fn reapAllFetches(io: std.Io, allocator: std.mem.Allocator, fetches: *Fetches) void {
+    var it = fetches.iterator();
+    while (it.next()) |e| if (e.value.*) |*f| reapTabFetch(io, allocator, f);
+}
+
+/// A drained fetch's outcome, kept three-way so a *failed* audit (bad exit, read
+/// fault) stays distinct from a *clean empty* one: empty clears the tab to a
+/// known-zero state, failure keeps the last-good data behind a banner.
+const FetchOutcome = union(enum) { bytes: []const u8, empty, failed: anyerror };
+
+/// Route a drained payload to the owning tab's store. Pure dispatch over `tab`;
+/// the per-tab `applyXBytes` own the empty-vs-document split and the swap.
+fn applyTabBytes(allocator: std.mem.Allocator, app: *App, store: *Store, t: Tab, bytes: ?[]const u8) RunError!void {
+    switch (t) {
+        .outdated => try applyOutdatedBytes(allocator, app, store, bytes),
+        .services => try applyServicesBytes(allocator, app, store, bytes),
+        .doctor => try applyDoctorBytes(allocator, app, store, bytes),
+        else => {},
     }
+}
+
+/// Land a completed fetch into its tab's store, then drop it and repaint. The
+/// child must already be reaped. The bytes are applied *before* the buffer is
+/// freed (the parse copies them); a parse/apply failure surfaces the same
+/// recoverable banner the synchronous reload uses and keeps the last-good data —
+/// never fatal, the loop keeps running.
+fn finishTabFetch(allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Store, t: Tab, outcome: FetchOutcome) void {
+    switch (outcome) {
+        .failed => |err| app.banner.set(tabRefreshOp(t), @errorName(err)),
+        .empty => applyTabBytes(allocator, app, store, t, null) catch |e| app.banner.set(tabRefreshOp(t), @errorName(e)),
+        .bytes => |b| applyTabBytes(allocator, app, store, t, b) catch |e| app.banner.set(tabRefreshOp(t), @errorName(e)),
+    }
+    if (fetches.getPtr(t).*) |*f| f.buf.deinit(allocator);
+    fetches.set(t, null);
+    app.tab_loading.remove(t);
     repaint(painter.fd, painter.frame, allocator, app) catch {};
 }
 
-/// Drain whatever the audit's stdout has ready. On EOF, gate the child's exit
-/// and parse the captured bytes into the count; on a read fault or an overflow,
-/// kill the still-running child first, then finish `.failed` (unknown count).
-/// Bounded like the blocking drain. The child is always reaped before the result
-/// is applied so none leaks.
-fn drainOutdatedFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetch: *?OutdatedFetch, app: *App) void {
-    const f = &fetch.*.?;
+/// Drain whatever a fetch's stdout has ready. On EOF, reap the child and route
+/// the captured bytes (a clean exit's empty payload is `.empty`, a bad exit is
+/// `.failed` — never parsed); on a read fault or overflow, kill the still-running
+/// child first, then finish `.failed`. Bounded like the blocking drain; the
+/// child is always reaped before the result lands so none leaks.
+fn drainTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Store, t: Tab) void {
+    const f = &fetches.getPtr(t).*.?;
     var chunk: [4096]u8 = undefined;
-    const n = std.posix.read(f.fd, &chunk) catch return failLiveOutdatedFetch(io, allocator, painter, fetch, app); // read fault
-    if (n == 0) { // EOF: the audit closed stdout — the child has it reaped here
-        const status = f.child.wait(io) catch return applyOutdatedResult(allocator, painter, fetch, app, .{ .failed = error.WaitFailed });
+    const n = std.posix.read(f.fd, &chunk) catch return failLiveTabFetch(io, allocator, painter, fetches, app, store, t);
+    if (n == 0) { // EOF: the audit closed stdout — reap the child here
+        const status = f.child.wait(io) catch return finishTabFetch(allocator, painter, fetches, app, store, t, .{ .failed = error.WaitFailed });
         const ok = switch (status) {
-            .exited => |code| code == 0,
-            else => false, // signal/stopped/unknown, or a non-zero exit: never parse a half-written doc
+            .exited => |code| code <= f.max_ok_exit,
+            else => false, // signal/stopped/unknown: never parse a half-written doc
         };
-        const result: OutdatedResult = if (ok) parseOutdatedBytes(allocator, f.buf.items) else .{ .failed = error.ChildFailed };
-        return applyOutdatedResult(allocator, painter, fetch, app, result);
+        const outcome: FetchOutcome = if (!ok) .{ .failed = error.ChildFailed } else if (f.buf.items.len == 0) .empty else .{ .bytes = f.buf.items };
+        return finishTabFetch(allocator, painter, fetches, app, store, t, outcome);
     }
-    if (f.buf.items.len + n > max_outdated_fetch_bytes) return failLiveOutdatedFetch(io, allocator, painter, fetch, app);
-    // An append OOM is a failed launch count (unknown `—`), not a TUI teardown.
-    f.buf.appendSlice(allocator, chunk[0..n]) catch return failLiveOutdatedFetch(io, allocator, painter, fetch, app);
+    if (f.buf.items.len + n > max_fetch_bytes) return failLiveTabFetch(io, allocator, painter, fetches, app, store, t);
+    // An append OOM is a failed refresh (last-good kept), not a TUI teardown.
+    f.buf.appendSlice(allocator, chunk[0..n]) catch return failLiveTabFetch(io, allocator, painter, fetches, app, store, t);
 }
 
 /// Abandon a fetch whose child is still running (read fault, overflow, OOM):
-/// kill+reap it, then finish `.failed`. The best-effort startup-count contract —
-/// unknown (`—`) with the recoverable banner, never a TUI teardown.
-fn failLiveOutdatedFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetch: *?OutdatedFetch, app: *App) void {
-    killAndReap(io, &fetch.*.?);
-    applyOutdatedResult(allocator, painter, fetch, app, .{ .failed = error.ReadFailed });
+/// kill+reap it, then finish `.failed`. The best-effort refresh contract —
+/// last-good data behind the recoverable banner, never a TUI teardown.
+fn failLiveTabFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Store, t: Tab) void {
+    killAndReap(io, &fetches.getPtr(t).*.?);
+    finishTabFetch(allocator, painter, fetches, app, store, t, .{ .failed = error.ReadFailed });
 }
 
-/// One launch-loop turn while the background audit runs: multiplex the tty with
-/// the audit's stdout. On a timeout, advance + repaint the header spinner (and
-/// absorb a resize) so the indicator animates; on child readiness, drain it;
+/// One loop turn while background fetches run: multiplex the tty with every
+/// active fetch's stdout. On a timeout, advance + repaint the spinner(s) (and
+/// absorb a resize) so the indicators animate; on a fetch ready, drain it;
 /// return true only when the tty has input the caller must read this turn.
-fn serviceOutdatedFetch(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetch: *?OutdatedFetch, app: *App) error{ReadFailed}!bool {
-    const f = &fetch.*.?;
-    switch (try pollTtyChild(painter.fd, f.fd, outdated_fetch_tick_ms)) {
+fn serviceFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Store) error{ReadFailed}!bool {
+    var fds: [tab_bar.count]std.posix.fd_t = undefined;
+    var tabs: [tab_bar.count]Tab = undefined;
+    var n: usize = 0;
+    var it = fetches.iterator();
+    while (it.next()) |e| if (e.value.*) |*f| {
+        fds[n] = f.fd;
+        tabs[n] = e.key;
+        n += 1;
+    };
+    switch (try pollMux(painter.fd, fds[0..n], fetch_tick_ms)) {
         .timeout => {
             app.spinner_frame +%= 1;
             _ = term.takeResized(); // a resize mid-fetch reflows here; consume so the loop top doesn't double it
             repaint(painter.fd, painter.frame, allocator, app) catch {};
             return false;
         },
-        .child => {
-            drainOutdatedFetch(io, allocator, painter, fetch, app);
+        .fetch => |i| {
+            drainTabFetch(io, allocator, painter, fetches, app, store, tabs[i]);
             return false;
         },
         .tty => return true,
@@ -959,8 +1022,19 @@ fn loadOutdated(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app:
     app.loading = true;
     defer app.loading = false;
     const ticker = LoadTicker{ .p = painter, .allocator = allocator, .app = app };
-    const bytes = (try spawn.readJsonPolled(io, allocator, argv, 0, ticker)) orelse {
-        // Fresh prefix: nothing outdated. Clear the rows and the checkbox buffer.
+    const bytes = try spawn.readJsonPolled(io, allocator, argv, 0, ticker);
+    defer if (bytes) |b| allocator.free(b);
+    try applyOutdatedBytes(allocator, app, store, bytes);
+}
+
+/// Repoint the Outdated tab and the header count at a drained `--json` payload.
+/// `null` (a fresh prefix's exit-0 no-output) clears to a known-zero tab; a parsed
+/// document swaps in the rows and a fresh, all-clear checkbox buffer. Shared by
+/// the synchronous reload and the background launch fetch, so both land the same
+/// state. The store is swapped only after a clean parse — a failure keeps the
+/// last-good rows for the caller's banner to explain.
+fn applyOutdatedBytes(allocator: std.mem.Allocator, app: *App, store: *Store, bytes: ?[]const u8) RunError!void {
+    const payload = bytes orelse {
         if (store.outdated) |old| old.deinit();
         if (store.outdated_checked.len != 0) allocator.free(store.outdated_checked);
         store.outdated = null;
@@ -970,9 +1044,7 @@ fn loadOutdated(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app:
         app.outdated_count = 0; // nothing outdated is a known zero, not "unknown"
         return;
     };
-    defer allocator.free(bytes);
-
-    const parsed = try outdated_json.parse(allocator, bytes);
+    const parsed = try outdated_json.parse(allocator, payload);
     errdefer parsed.deinit();
     // A fresh checkbox buffer, all clear: an upgrade removes the upgraded rows, so
     // carrying the old selection forward would point at the wrong packages.
@@ -1022,7 +1094,7 @@ fn doUpgrade(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: P
 
 /// Perform any effect the pure `step` requested on the Outdated tab, then clear
 /// it, and lazily (re)load on first entry or after a mutation marked it dirty.
-fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store) RunError!void {
+fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Store) RunError!void {
     const req = app.states.outdated.request;
     app.states.outdated.request = .none;
     switch (req) {
@@ -1031,8 +1103,10 @@ fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, pain
     }
     // Lazy per-tab load: first activation and post-mutation staleness both arrive
     // as the dirty flag (set at init and by `markStaleAfterMutation`).
+    // Background, non-blocking: spawn the audit and let the loop drain it so the
+    // input stays live — a cold-cache outdated audit never traps the tab.
     if (app.active == .outdated and takeDirty(app, .outdated)) {
-        try loadOutdated(io, allocator, painter, app, store);
+        startTabFetch(io, allocator, fetches, app, .outdated);
     }
 }
 
@@ -1050,17 +1124,24 @@ fn loadServices(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app:
     app.loading = true;
     defer app.loading = false;
     const ticker = LoadTicker{ .p = painter, .allocator = allocator, .app = app };
-    const bytes = (try spawn.readJsonPolled(io, allocator, argv, 0, ticker)) orelse {
-        // Fresh prefix: no services. Clear the rows.
+    const bytes = try spawn.readJsonPolled(io, allocator, argv, 0, ticker);
+    defer if (bytes) |b| allocator.free(b);
+    try applyServicesBytes(allocator, app, store, bytes);
+}
+
+/// Repoint the Services tab at a drained `--json` payload. `null` (a fresh prefix)
+/// clears to an empty list; a parsed document swaps in the rows. Shared by the
+/// synchronous reload and the background fetch; the store is swapped only after a
+/// clean parse, so a failure keeps the last-good rows.
+fn applyServicesBytes(allocator: std.mem.Allocator, app: *App, store: *Store, bytes: ?[]const u8) RunError!void {
+    const payload = bytes orelse {
         if (store.services) |old| old.deinit();
         store.services = null;
         app.states.services.items = &.{};
         app.states.services.detail = null; // the old detail borrowed the freed rows
         return;
     };
-    defer allocator.free(bytes);
-
-    const parsed = try services_json.parse(allocator, bytes);
+    const parsed = try services_json.parse(allocator, payload);
     if (store.services) |old| old.deinit();
     store.services = parsed;
     app.states.services.items = parsed.items;
@@ -1097,7 +1178,7 @@ fn doServiceAction(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, pain
 /// Perform any lifecycle effect the pure `step` requested on the Services tab,
 /// then clear it, and lazily (re)load on first entry or after a mutation marked
 /// it dirty.
-fn serviceServices(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store) RunError!void {
+fn serviceServices(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Store) RunError!void {
     const req = app.states.services.request;
     app.states.services.request = .none;
     switch (req) {
@@ -1108,8 +1189,9 @@ fn serviceServices(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, pain
     }
     // Lazy per-tab load: first activation and post-mutation staleness both arrive
     // as the dirty flag (set at init and by `markStaleAfterMutation`).
+    // Background, non-blocking — see `serviceOutdated`.
     if (app.active == .services and takeDirty(app, .services)) {
-        try loadServices(io, allocator, painter, app, store);
+        startTabFetch(io, allocator, fetches, app, .services);
     }
 }
 
@@ -1130,16 +1212,23 @@ fn loadDoctor(io: std.Io, allocator: std.mem.Allocator, painter: Painter, app: *
     // `mt doctor` exits non-zero by severity (1 warn / 2 err) while still emitting
     // its findings JSON — exactly when the tab is most useful — so the doctor read
     // tolerates exits up to 2 (`max_ok_exit`) where the generic read rejects them.
-    const bytes = (try spawn.readJsonPolled(io, allocator, argv, 2, ticker)) orelse {
-        // Fresh prefix: no findings. Clear the rows.
+    const bytes = try spawn.readJsonPolled(io, allocator, argv, 2, ticker);
+    defer if (bytes) |b| allocator.free(b);
+    try applyDoctorBytes(allocator, app, store, bytes);
+}
+
+/// Repoint the Doctor tab at a drained `--json` payload. `null` (a fresh prefix)
+/// clears to no findings; a parsed document swaps in the rows + reclaimable stats.
+/// Shared by the synchronous reload and the background fetch; the store is swapped
+/// only after a clean parse, so a failure keeps the last-good findings.
+fn applyDoctorBytes(allocator: std.mem.Allocator, app: *App, store: *Store, bytes: ?[]const u8) RunError!void {
+    const payload = bytes orelse {
         if (store.doctor) |old| old.deinit();
         store.doctor = null;
         app.states.doctor.items = &.{};
         return;
     };
-    defer allocator.free(bytes);
-
-    const parsed = try doctor_json.parse(allocator, bytes);
+    const parsed = try doctor_json.parse(allocator, payload);
     applyDoctorParse(app, store, parsed);
 }
 
@@ -1184,7 +1273,7 @@ fn doDoctorFix(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter:
 
 /// Perform any fix effect the pure `step` requested on the Doctor tab, then clear
 /// it, and lazily (re)load on first entry or after a mutation marked it dirty.
-fn serviceDoctor(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store) RunError!void {
+fn serviceDoctor(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Store) RunError!void {
     const req = app.states.doctor.request;
     app.states.doctor.request = .none;
     switch (req) {
@@ -1193,8 +1282,9 @@ fn serviceDoctor(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painte
     }
     // Lazy per-tab load: first activation and post-mutation staleness both arrive
     // as the dirty flag (set at init and by `markStaleAfterMutation`).
+    // Background, non-blocking — see `serviceOutdated`.
     if (app.active == .doctor and takeDirty(app, .doctor)) {
-        try loadDoctor(io, allocator, painter, app, store);
+        startTabFetch(io, allocator, fetches, app, .doctor);
     }
 }
 
@@ -1393,11 +1483,11 @@ fn openSearchInfo(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *S
 /// Drain the active tab's pending effects after a keypress. Each tab's service is
 /// a no-op unless that tab is active and has a request or is due a lazy refresh,
 /// so calling each one each loop is cheap and keeps the dispatch flat.
-fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store) RunError!void {
+fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Store) RunError!void {
     try serviceInstalled(io, allocator, t, app, store);
-    try serviceOutdated(io, allocator, t, painter, app, store);
-    try serviceServices(io, allocator, t, painter, app, store);
-    try serviceDoctor(io, allocator, t, painter, app, store);
+    try serviceOutdated(io, allocator, t, painter, fetches, app, store);
+    try serviceServices(io, allocator, t, painter, fetches, app, store);
+    try serviceDoctor(io, allocator, t, painter, fetches, app, store);
     try serviceSearch(io, allocator, t, app, store);
 }
 
@@ -1466,34 +1556,36 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
 
     // Paint the data-free chrome first so the alt-screen never flashes blank,
     // then prime the cheap installed count (a single-digit-ms SQLite read) and
-    // repaint — launch shows `<n> kegs` immediately while the full tab payloads
-    // still load lazily on entry. The outdated count is *not* a cheap DB read:
-    // on a cold cache it is a live, one-HTTP-round-trip-per-keg audit, so it runs
-    // in the background (`startOutdatedFetch`) and the input loop multiplexes its
-    // stdout — the header shows a spinner on the `outdated` slot while it runs,
-    // never a frozen frame. Best-effort: a failed installed count leaves an
-    // em-dash, never blocks the dashboard from opening.
+    // repaint — launch shows `<n> kegs` immediately. The outdated count is *not*
+    // cheap: on a cold cache it is a live per-keg network audit, so it runs in the
+    // background and the loop multiplexes its stdout (a header spinner, never a
+    // freeze). Best-effort: a failed installed count leaves an em-dash, never
+    // blocks the dashboard from opening.
     try repaint(fd, &frame, allocator, &app);
     refreshInstalledCount(io, allocator, &app) catch {};
     app.banner.clear(); // a failed startup installed count is an em-dash, not a nag
 
-    // Background outdated audit: kicked off non-blocking, drained by the loop.
-    // Reaped at teardown if the user quits before it finishes, so it cannot
-    // outlive the TUI or leave a zombie.
-    var fetch: ?OutdatedFetch = startOutdatedFetch(io, allocator, &app);
-    defer if (fetch) |*f| reapOutdatedFetch(io, allocator, f);
+    // Per-tab background fetches: the slow tabs' `--json` audits run as children
+    // the loop drains, so navigation is never trapped behind one. Reaped at
+    // teardown so none outlives the TUI or leaves a zombie.
+    var fetches: Fetches = .initFill(null);
+    defer reapAllFetches(io, allocator, &fetches);
+    // Outdated is fetched at launch so the header count fills in without entering
+    // the tab; its dirty flag is consumed once the fetch owns the load, so the
+    // first entry doesn't spawn a duplicate audit.
+    startTabFetch(io, allocator, &fetches, &app, .outdated);
+    if (app.tab_loading.contains(.outdated)) _ = takeDirty(&app, .outdated);
     try repaint(fd, &frame, allocator, &app); // first interactive frame: kegs + the outdated spinner
 
     var decoder: keys.Decoder = .{};
     var rbuf: [64]u8 = undefined;
     while (!app.quit) {
         if (term.takeResized()) try repaint(fd, &frame, allocator, &app);
-        // While the background audit runs, multiplex the tty with its stdout so a
-        // queued keypress is serviced live. Only a ready tty falls through to the
-        // blocking read below (which then won't block); otherwise the turn was a
-        // spinner tick or a drain, so loop. With no fetch in flight the read is
-        // the original lone blocking wait — zero idle wakeups.
-        if (fetch != null and !try serviceOutdatedFetch(io, allocator, painter, &fetch, &app)) continue;
+        // While any background fetch runs, multiplex the tty with the fetch fds so
+        // a keypress is serviced live; a ready tty falls through to the read below
+        // (now non-blocking), else the turn was a spinner tick or a drain — loop.
+        // With no fetch in flight this is the original lone blocking read.
+        if (anyFetchActive(&fetches) and !try serviceFetches(io, allocator, painter, &fetches, &app, &store)) continue;
         const rc = std.c.read(fd, &rbuf, rbuf.len);
         if (rc < 0) {
             if (std.posix.errno(rc) == .INTR) continue; // SIGWINCH woke the read; loop re-checks resize
@@ -1514,7 +1606,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stderr: std.Io.File, enviro
                     // A recoverable backend fault becomes the banner the failing
                     // op already set and the loop continues; only a fatal fault
                     // (terminal/OOM) propagates to the errdefer restore + exit.
-                    service(io, allocator, &t, painter, &app, &store) catch |err| switch (classify(err)) {
+                    service(io, allocator, &t, painter, &fetches, &app, &store) catch |err| switch (classify(err)) {
                         .recoverable => {},
                         .fatal => return err,
                     };
@@ -1843,10 +1935,11 @@ test "the loading glyph is deterministic per (state, cols, rows)" {
     try std.testing.expectEqualStrings(renderFrame(&b1, &a, 100, 24), renderFrame(&b2, &a, 100, 24));
 }
 
-test "the header paints a spinner on the outdated slot while the launch audit runs" {
-    // `outdated_loading` is launch-scoped and distinct from the footer `loading`:
-    // the header shows the audit is computing, not frozen, while input stays live.
-    var a: App = .{ .active = .search, .outdated_loading = true, .spinner_frame = 0, .installed_count = 7 };
+test "the header paints a spinner on the outdated slot while the background audit runs" {
+    // `tab_loading` is distinct from the footer `loading`: the header shows the
+    // audit is computing, not frozen, while the input loop stays live.
+    var a: App = .{ .active = .search, .spinner_frame = 0, .installed_count = 7 };
+    a.tab_loading.insert(.outdated);
     var buf: [8192]u8 = undefined;
     const out = renderFrame(&buf, &a, 100, 24);
     const glyph = spinner_frames.frames[0];
@@ -1854,15 +1947,35 @@ test "the header paints a spinner on the outdated slot while the launch audit ru
     try std.testing.expect(std.mem.indexOf(u8, out, "7 kegs") != null); // the cheap count is live at launch
 }
 
+test "a tab entered mid-fetch reads as Loading in the footer, not an empty list" {
+    // The freeze this whole feature removes: navigating *into* a slow tab while
+    // its audit runs must show it is still computing, not a done-looking blank.
+    var a: App = .{ .active = .doctor, .spinner_frame = 0 };
+    a.tab_loading.insert(.doctor);
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 100, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Loading Doctor") != null);
+}
+
+test "a background fetch on an inactive tab leaves the active footer alone" {
+    // Doctor audits in the background while the user sits on a loaded Installed:
+    // the footer must show Installed's help, not a spurious Loading.
+    var a: App = .{ .active = .installed };
+    a.tab_loading.insert(.doctor);
+    var buf: [8192]u8 = undefined;
+    const out = renderFrame(&buf, &a, 100, 24);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Loading") == null);
+}
+
 // A pipe stands in for an fd; a held-open write end is a "slow" source with no
-// EOF, a closed one is EOF — enough to drive the multiplexed launch wait.
+// EOF, a closed one is EOF — enough to drive the multiplexed wait.
 fn testPipe() ![2]std.c.fd_t {
     var fds: [2]std.c.fd_t = undefined;
     if (std.c.pipe(&fds) != 0) return error.PipeFailed;
     return fds;
 }
 
-test "pollTtyChild services a queued keypress before the audit child's EOF" {
+test "pollMux services a queued keypress before a fetch child's EOF" {
     const tty = try testPipe();
     defer _ = std.c.close(tty[0]);
     defer _ = std.c.close(tty[1]);
@@ -1874,10 +1987,10 @@ test "pollTtyChild services a queued keypress before the audit child's EOF" {
 
     // The freeze bug: a loop that waits on the child blocks here. The fixed loop
     // reports the tty ready and the keypress is serviced live.
-    try std.testing.expectEqual(PollEvent.tty, try pollTtyChild(tty[0], child[0], 1000));
+    try std.testing.expectEqual(MuxEvent.tty, try pollMux(tty[0], &.{child[0]}, 1000));
 }
 
-test "pollTtyChild lets the tty win when both fds are ready" {
+test "pollMux lets the tty win when both the tty and a fetch are ready" {
     const tty = try testPipe();
     defer _ = std.c.close(tty[0]);
     defer _ = std.c.close(tty[1]);
@@ -1887,80 +2000,91 @@ test "pollTtyChild lets the tty win when both fds are ready" {
 
     _ = std.c.write(tty[1], "x", 1);
     _ = std.c.write(child[1], "{}", 2);
-    try std.testing.expectEqual(PollEvent.tty, try pollTtyChild(tty[0], child[0], 1000)); // input never starved
+    try std.testing.expectEqual(MuxEvent.tty, try pollMux(tty[0], &.{child[0]}, 1000)); // input never starved
 }
 
-test "pollTtyChild reports the child ready on its EOF" {
+test "pollMux reports the ready fetch by index, even among several" {
     const tty = try testPipe();
     defer _ = std.c.close(tty[0]);
     defer _ = std.c.close(tty[1]);
-    const child = try testPipe();
-    defer _ = std.c.close(child[0]);
-    _ = std.c.close(child[1]); // child closed stdout == EOF
-    try std.testing.expectEqual(PollEvent.child, try pollTtyChild(tty[0], child[0], 1000));
+    const a = try testPipe(); // open: no EOF
+    defer _ = std.c.close(a[0]);
+    defer _ = std.c.close(a[1]);
+    const b = try testPipe();
+    defer _ = std.c.close(b[0]);
+    _ = std.c.close(b[1]); // EOF on the middle fetch
+    const c = try testPipe(); // open: no EOF
+    defer _ = std.c.close(c[0]);
+    defer _ = std.c.close(c[1]);
+    switch (try pollMux(tty[0], &.{ a[0], b[0], c[0] }, 1000)) {
+        .fetch => |i| try std.testing.expectEqual(@as(usize, 1), i), // the one at EOF, not the first slot
+        else => return error.UnexpectedEvent,
+    }
 }
 
-test "pollTtyChild times out when neither fd is ready, so the spinner can tick" {
+test "pollMux times out when nothing is ready, so the spinner can tick" {
     const tty = try testPipe();
     defer _ = std.c.close(tty[0]);
     defer _ = std.c.close(tty[1]);
     const child = try testPipe();
     defer _ = std.c.close(child[0]);
     defer _ = std.c.close(child[1]);
-    try std.testing.expectEqual(PollEvent.timeout, try pollTtyChild(tty[0], child[0], 1));
-}
-
-test "parseOutdatedBytes keeps the unknown-vs-zero distinction" {
-    // Empty payload (a fresh prefix's exit-0 no-output) is a *known* zero.
-    try std.testing.expectEqual(@as(usize, 0), parseOutdatedBytes(std.testing.allocator, "").count);
-    // A real document's row count.
-    const doc =
-        \\{"outdated":[
-        \\{"name":"wget","installed":"1.24.5","latest":"1.25.0","type":"formula","pinned":false},
-        \\{"name":"bat","installed":"0.24.0","latest":"0.25.0","type":"formula","pinned":false}
-        \\]}
-    ;
-    const r = parseOutdatedBytes(std.testing.allocator, doc);
-    try std.testing.expectEqual(@as(usize, 2), r.count);
-    // A failed parse stays unknown (`—`) — never collapsed to 0.
-    try std.testing.expect(parseOutdatedBytes(std.testing.allocator, "not json") == .failed);
+    try std.testing.expectEqual(MuxEvent.timeout, try pollMux(tty[0], &.{child[0]}, 1));
 }
 
 // Drive a started fetch to completion with no tty (fd −1 is ignored by `poll`),
 // so the lifecycle — drain → reap → apply → repaint — runs against a real child
-// exactly as the launch loop drives it, minus the keypress side.
-fn driveFetchToEnd(io: std.Io, allocator: std.mem.Allocator, app: *App, fetch: *?OutdatedFetch) !void {
+// exactly as the loop drives it, minus the keypress side.
+fn driveFetchToEnd(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *Store, fetches: *Fetches, t: Tab) !void {
     var frame: []u8 = try allocator.alloc(u8, 256);
     defer allocator.free(frame);
     const painter = testPainter(&frame); // repaint writes to fd −1 (a no-op); the buffer may grow
-    while (fetch.* != null) _ = try serviceOutdatedFetch(io, allocator, painter, fetch, app);
+    while (fetches.getPtr(t).* != null) _ = try serviceFetches(io, allocator, painter, fetches, app, store);
 }
 
-test "startOutdatedFetch kicks off the audit, flags loading, and lands a known count" {
+test "startTabFetch kicks off the outdated audit, flags loading, and lands a known zero" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/usr/bin/true" }; // exit 0, no output == fresh prefix
-    var fetch = startOutdatedFetch(t.io(), std.testing.allocator, &app);
-    try std.testing.expect(fetch != null);
-    try std.testing.expect(app.outdated_loading); // header shows the spinner from the first frame
-    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &fetch);
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    startTabFetch(t.io(), std.testing.allocator, &fetches, &app, .outdated);
+    try std.testing.expect(fetches.getPtr(.outdated).* != null);
+    try std.testing.expect(app.tab_loading.contains(.outdated)); // header spins from the first frame
+    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expectEqual(@as(?usize, 0), app.outdated_count); // empty payload is a known zero
-    try std.testing.expect(!app.outdated_loading); // cleared when the fetch lands
+    try std.testing.expect(!app.tab_loading.contains(.outdated)); // cleared when the fetch lands
     try std.testing.expect(!app.banner.isSet());
 }
 
-test "startOutdatedFetch returns null on a spawn fault, never flagging loading" {
+test "startTabFetch is a quiet no-op on a spawn fault, never flagging loading" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     var app: App = .{ .mt_path = "/nonexistent/malt_outdated_probe" };
-    const fetch = startOutdatedFetch(t.io(), std.testing.allocator, &app);
-    try std.testing.expect(fetch == null); // no background fetch to drive
-    try std.testing.expect(!app.outdated_loading); // a failed kickoff is a quiet em-dash
+    var fetches: Fetches = .initFill(null);
+    startTabFetch(t.io(), std.testing.allocator, &fetches, &app, .outdated);
+    try std.testing.expect(fetches.getPtr(.outdated).* == null); // nothing to drive
+    try std.testing.expect(!app.tab_loading.contains(.outdated)); // a failed kickoff stays unflagged
     try std.testing.expect(app.outdated_count == null);
     try std.testing.expect(!app.banner.isSet()); // launch-time, no nag
 }
 
-test "the background fetch parses a real child's outdated document into the count" {
+test "startTabFetch skips a tab whose audit is already in flight" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var app: App = .{ .mt_path = "/usr/bin/true" };
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    startTabFetch(t.io(), std.testing.allocator, &fetches, &app, .outdated);
+    const fd_before = fetches.getPtr(.outdated).*.?.fd;
+    startTabFetch(t.io(), std.testing.allocator, &fetches, &app, .outdated); // second call: no-op
+    try std.testing.expectEqual(fd_before, fetches.getPtr(.outdated).*.?.fd); // same child, not respawned
+    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
+}
+
+test "a background outdated fetch parses a real child's document into the tab" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     const child = try std.process.spawn(t.io(), .{
@@ -1968,33 +2092,123 @@ test "the background fetch parses a real child's outdated document into the coun
         .stdout = .pipe,
         .stderr = .ignore,
     });
-    var app: App = .{ .outdated_loading = true };
-    var fetch: ?OutdatedFetch = .{ .child = child, .fd = child.stdout.?.handle };
-    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &fetch);
-    try std.testing.expectEqual(@as(?usize, 1), app.outdated_count);
-    try std.testing.expect(!app.outdated_loading);
+    var app: App = .{};
+    app.tab_loading.insert(.outdated);
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
+    try std.testing.expectEqual(@as(?usize, 1), app.outdated_count); // header count
+    try std.testing.expectEqual(@as(usize, 1), app.states.outdated.items.len); // the tab body, too
+    try std.testing.expect(!app.tab_loading.contains(.outdated));
 }
 
-test "a malformed payload fails the fetch to unknown, never collapsing to zero" {
+test "a malformed payload banners and keeps the outdated count unknown, never zero" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/echo", "garbage" }, .stdout = .pipe, .stderr = .ignore });
-    var app: App = .{ .outdated_loading = true };
-    var fetch: ?OutdatedFetch = .{ .child = child, .fd = child.stdout.?.handle };
-    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &fetch);
+    var app: App = .{};
+    app.tab_loading.insert(.outdated);
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expect(app.outdated_count == null); // unknown (`—`), not 0
-    try std.testing.expectEqualStrings("outdated count refresh failed: BadJson", app.banner.slice());
+    try std.testing.expectEqualStrings("outdated refresh failed: BadJson", app.banner.slice());
 }
 
 test "a non-zero child exit fails the fetch without parsing a half-written doc" {
     var t = std.Io.Threaded.init(std.testing.allocator, .{});
     defer t.deinit();
     const child = try std.process.spawn(t.io(), .{ .argv = &.{"/usr/bin/false"}, .stdout = .pipe, .stderr = .ignore });
-    var app: App = .{ .outdated_loading = true };
-    var fetch: ?OutdatedFetch = .{ .child = child, .fd = child.stdout.?.handle };
-    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &fetch);
-    try std.testing.expect(app.outdated_count == null); // a bad exit is unknown, never 0
+    var app: App = .{ .outdated_count = 5 }; // a prior good count
+    app.tab_loading.insert(.outdated);
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
+    try std.testing.expectEqual(@as(?usize, 5), app.outdated_count); // a bad exit keeps the last-good, never 0
     try std.testing.expect(app.banner.isSet());
+}
+
+test "the doctor fetch tolerates a severity exit (≤2) as success" {
+    // `mt doctor` exits 1/2 by severity while still succeeding; a severity exit
+    // (here exit 1, via `false`) with no findings must land as a clean empty tab,
+    // not a failure banner — the same exit code that fails a max-0 tab. The fail
+    // direction (max-0, exit 1 → banner) is covered by the non-zero-exit test.
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    const child = try std.process.spawn(t.io(), .{ .argv = &.{"/usr/bin/false"}, .stdout = .pipe, .stderr = .ignore });
+    var app: App = .{};
+    app.tab_loading.insert(.doctor);
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    fetches.set(.doctor, .{ .tab = .doctor, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 2 });
+    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .doctor);
+    try std.testing.expect(!app.banner.isSet()); // exit 1 ≤ 2 is OK for doctor
+    try std.testing.expect(!app.tab_loading.contains(.doctor));
+}
+
+test "a background fetch accumulates a payload spanning multiple reads" {
+    // A real outdated list exceeds one 4096-byte read; the drain must accumulate
+    // across poll turns, not reset the buffer per read.
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(std.testing.allocator);
+    try doc.appendSlice(std.testing.allocator, "{\"outdated\":[");
+    const rows = 150;
+    for (0..rows) |i| {
+        if (i != 0) try doc.append(std.testing.allocator, ',');
+        var rb: [128]u8 = undefined;
+        const row = try std.fmt.bufPrint(&rb, "{{\"name\":\"pkg{d}\",\"installed\":\"1.0.0\",\"latest\":\"2.0.0\",\"type\":\"formula\",\"pinned\":false}}", .{i});
+        try doc.appendSlice(std.testing.allocator, row);
+    }
+    try doc.appendSlice(std.testing.allocator, "]}");
+    try std.testing.expect(doc.items.len > 4096); // genuinely spans more than one 4096-byte read
+    const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/echo", doc.items }, .stdout = .pipe, .stderr = .ignore });
+    var app: App = .{};
+    app.tab_loading.insert(.outdated);
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
+    try std.testing.expectEqual(@as(?usize, rows), app.outdated_count); // every row across every chunk
+}
+
+test "an overflowing fetch kills the live child and fails to last-good" {
+    // A child that never stops emitting (no EOF) must not grow the buffer without
+    // bound: past the cap, kill the still-running child and finish failed, keeping
+    // the last-good count rather than a partial parse.
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    const child = try std.process.spawn(t.io(), .{ .argv = &.{"/usr/bin/yes"}, .stdout = .pipe, .stderr = .ignore });
+    var app: App = .{ .outdated_count = 5 }; // a prior good count
+    app.tab_loading.insert(.outdated);
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
+    try std.testing.expectEqual(@as(?usize, 5), app.outdated_count); // last-good kept, not a partial
+    try std.testing.expect(app.banner.isSet());
+    try std.testing.expect(!app.tab_loading.contains(.outdated));
+}
+
+test "reapTabFetch tears down a still-running fetch without a hang or leak" {
+    // The user quit before the audit finished: kill+reap the live child and free
+    // the buffer. The value is no zombie + buf freed + no hang — the test
+    // allocator catches a leaked buffer.
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/sleep", "30" }, .stdout = .pipe, .stderr = .ignore });
+    var f: TabFetch = .{ .tab = .doctor, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 2 };
+    reapTabFetch(t.io(), std.testing.allocator, &f);
 }
 
 test "renderFrame uses cursor positioning and never emits a raw newline" {
