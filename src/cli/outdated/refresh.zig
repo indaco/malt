@@ -740,12 +740,31 @@ fn tapRawLatestVersion(
     defer http.deinit();
     http.offline = offline;
 
+    return tapVersionFromSubtrees(alloc, &http, environ, urls.forge, urls.raw_base, fresh_sha, name, subtrees, noun, tap_label);
+}
+
+/// Fetch the `.rb` from each `subtrees` layout in order (first 200 wins) and
+/// parse its `version`, else warn + null. Split out from `tapRawLatestVersion`
+/// so the per-layout fetch loop can be driven by a localhost server in tests,
+/// without the live HEAD resolve.
+fn tapVersionFromSubtrees(
+    alloc: std.mem.Allocator,
+    http: *client_mod.HttpClient,
+    environ: std.process.Environ,
+    forge_kind: forge.Forge,
+    raw_base: []const u8,
+    sha: []const u8,
+    name: []const u8,
+    subtrees: []const forge.RawKind,
+    noun: []const u8,
+    tap_label: []const u8,
+) ?[]u8 {
     var last_status: u16 = 0;
     for (subtrees) |subtree| {
         var rb_url_buf: [512]u8 = undefined;
-        const rb_url = forge.rawFileUrl(&rb_url_buf, urls.forge, urls.raw_base, fresh_sha, subtree, name) catch continue;
+        const rb_url = forge.rawFileUrl(&rb_url_buf, forge_kind, raw_base, sha, subtree, name) catch continue;
 
-        var rb_resp = tap_mod.getRawFile(&http, environ, urls.forge, rb_url) catch {
+        var rb_resp = tap_mod.getRawFile(http, environ, forge_kind, rb_url) catch {
             warnTapCaskFetchFailed(tap_label, name, "Network failure while reading the .rb");
             return null;
         };
@@ -1140,6 +1159,70 @@ test "isCorePathRow routes core rows to the map and third-party taps per-HEAD" {
     // Third-party tap → per-HEAD `.rb`, for formulae as well as casks.
     try std.testing.expect(!isCorePathRow(.{ .name = "x", .version = "1", .tap = "user/repo" }));
     try std.testing.expect(!isCorePathRow(.{ .name = "f", .version = "1", .tap = "user/repo" }));
+}
+
+// Serves 404 to the first request (the `Formula/<name>.rb` probe), then the
+// root-layout `.rb` to the second — exercising the `.formula_root` fallback.
+const RbFallbackServer = struct {
+    io: std.Io,
+    listener: *std.Io.net.Server,
+    root_rb: []const u8,
+    idx: std.atomic.Value(usize),
+
+    fn serve(self: *RbFallbackServer) void {
+        while (true) {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            var rbuf: [16 * 1024]u8 = undefined;
+            var wbuf: [16 * 1024]u8 = undefined;
+            var reader = stream.reader(self.io, &rbuf);
+            var writer = stream.writer(self.io, &wbuf);
+            var srv = std.http.Server.init(&reader.interface, &writer.interface);
+            var req = srv.receiveHead() catch return;
+            const first = self.idx.fetchAdd(1, .monotonic) == 0;
+            if (first) {
+                req.respond("", .{ .status = .not_found }) catch return; // Formula/ miss
+            } else {
+                req.respond(self.root_rb, .{ .status = .ok }) catch return; // root hit
+            }
+        }
+    }
+};
+
+test "tapVersionFromSubtrees falls back to the root layout and parses the version" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    // Root-layout formula; no literal `version`, so the version is derived from
+    // the url (the koekeishiya/felixkratz shape). url + sha256 are required.
+    const root_rb =
+        \\class Pkg < Formula
+        \\  url "https://x/releases/download/v1.2.3/pkg.tar.gz"
+        \\  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+        \\end
+    ;
+    var srv = RbFallbackServer{ .io = io, .listener = &listener, .root_rb = root_rb, .idx = std.atomic.Value(usize).init(0) };
+    const thread = try std.Thread.spawn(.{}, RbFallbackServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, "formula", "user/repo");
+    listener.deinit(io);
+    thread.join();
+
+    defer if (v) |vv| std.testing.allocator.free(vv);
+    try std.testing.expect(v != null);
+    try std.testing.expectEqualStrings("1.2.3", v.?); // resolved from the root `.rb`
 }
 
 test "buildVersionMap skips malformed lines without aborting" {
