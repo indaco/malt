@@ -20,6 +20,10 @@ const sqlite = @import("../../db/sqlite.zig");
 pub const KegRow = struct {
     name: []const u8,
     version: []const u8,
+    /// Homebrew revision of the installed keg (`kegs.revision`); 0 for
+    /// casks, which have no revision. Paired with `version` via
+    /// `formula.pkgVersion` to compare against upstream revision bumps.
+    revision: i64 = 0,
     tap: ?[]const u8 = null,
     /// True for `mt pin`-held rows. Surfaced so `mt outdated --json` can
     /// keep a pinned-but-outdated package visible with `pinned:true`.
@@ -47,10 +51,10 @@ pub fn loadFormulaRows(
     filter: KegFilter,
 ) ![]KegRow {
     const sql: [:0]const u8 = switch (filter) {
-        .all => "SELECT name, version, tap, pinned FROM kegs ORDER BY name;",
-        .pinned_only => "SELECT name, version, tap, pinned FROM kegs WHERE pinned = 1 ORDER BY name;",
+        .all => "SELECT name, version, revision, tap, pinned FROM kegs ORDER BY name;",
+        .pinned_only => "SELECT name, version, revision, tap, pinned FROM kegs WHERE pinned = 1 ORDER BY name;",
         // NOCASE so `--tap User/Repo` resolves a row stored lowercase.
-        .by_tap => "SELECT name, version, tap, pinned FROM kegs WHERE tap = ?1 COLLATE NOCASE ORDER BY name;",
+        .by_tap => "SELECT name, version, revision, tap, pinned FROM kegs WHERE tap = ?1 COLLATE NOCASE ORDER BY name;",
     };
     const bind: ?[]const u8 = switch (filter) {
         .by_tap => |label| label,
@@ -68,11 +72,13 @@ pub fn loadCaskRows(
     db: *sqlite.Database,
     filter: KegFilter,
 ) ![]KegRow {
+    // Casks have no revision; `0 AS revision` keeps the column layout
+    // uniform with the formula query so `loadKegRows` reads one shape.
     const sql: [:0]const u8 = switch (filter) {
-        .all => "SELECT token, version, tap, pinned FROM casks ORDER BY token;",
-        .pinned_only => "SELECT token, version, tap, pinned FROM casks WHERE pinned = 1 ORDER BY token;",
+        .all => "SELECT token, version, 0 AS revision, tap, pinned FROM casks ORDER BY token;",
+        .pinned_only => "SELECT token, version, 0 AS revision, tap, pinned FROM casks WHERE pinned = 1 ORDER BY token;",
         // NOCASE so `--tap User/Repo` resolves a row stored lowercase.
-        .by_tap => "SELECT token, version, tap, pinned FROM casks WHERE tap = ?1 COLLATE NOCASE ORDER BY token;",
+        .by_tap => "SELECT token, version, 0 AS revision, tap, pinned FROM casks WHERE tap = ?1 COLLATE NOCASE ORDER BY token;",
     };
     const bind: ?[]const u8 = switch (filter) {
         .by_tap => |label| label,
@@ -147,10 +153,11 @@ fn loadKegRows(
         errdefer allocator.free(name_dup);
         const ver_dup = try allocator.dupe(u8, ver_slice);
         errdefer allocator.free(ver_dup);
-        // Column 2 is `tap`: null for core-API rows and v5-era casks
-        // not yet backfilled. Column 3 is the `pinned` flag.
+        // Column layout (uniform across formula/cask): 0 name, 1 version,
+        // 2 revision, 3 tap (null for core-API rows / v5-era casks),
+        // 4 pinned.
         var tap_dup: ?[]u8 = null;
-        if (stmt.columnText(2)) |tap_ptr| {
+        if (stmt.columnText(3)) |tap_ptr| {
             const tap_slice = std.mem.sliceTo(tap_ptr, 0);
             tap_dup = try allocator.dupe(u8, tap_slice);
         }
@@ -158,8 +165,9 @@ fn loadKegRows(
         try rows.append(allocator, .{
             .name = name_dup,
             .version = ver_dup,
+            .revision = stmt.columnInt(2),
             .tap = tap_dup,
-            .pinned = stmt.columnBool(3),
+            .pinned = stmt.columnBool(4),
         });
     }
     return rows.toOwnedSlice(allocator);

@@ -100,12 +100,28 @@ fn openTestDb() !sqlite.Database {
     return db;
 }
 
+/// Append one `<name>\t<stable>\t0` record to a version side-car so the
+/// map path resolves the row. Read-modify-write keeps it simple for tests.
+fn appendVersionsLine(dir: *TempCacheDir, rel: []const u8, name: []const u8, stable: []const u8) !void {
+    var path_buf: [512]u8 = undefined;
+    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ dir.path, rel });
+    const prev = test_io.readFileAbsoluteAlloc(std.Options.debug_io, dir.allocator, full, 1 << 20) catch
+        try dir.allocator.dupe(u8, "");
+    defer dir.allocator.free(prev);
+    const combined = try std.fmt.allocPrint(dir.allocator, "{s}{s}\t{s}\t0\n", .{ prev, name, stable });
+    defer dir.allocator.free(combined);
+    try dir.writeCacheFile(rel, combined);
+}
+
 fn seedFormula(dir: *TempCacheDir, name: []const u8, latest: []const u8) !void {
     var key_buf: [128]u8 = undefined;
     const file = try std.fmt.bufPrint(&key_buf, "formula_{s}.json", .{name});
     var body_buf: [256]u8 = undefined;
     const body = try std.fmt.bufPrint(&body_buf, "{{\"name\":\"{s}\",\"versions\":{{\"stable\":\"{s}\"}}}}", .{ name, latest });
     try dir.writeCacheFile(file, body);
+    // Version side-car drives the map path; the JSON above stays as the
+    // per-keg fallback so both routes are exercised by the suite.
+    try appendVersionsLine(dir, "versions_formula.txt", name, latest);
 }
 
 fn seedCask(dir: *TempCacheDir, token: []const u8, latest: []const u8) !void {
@@ -119,6 +135,7 @@ fn seedCask(dir: *TempCacheDir, token: []const u8, latest: []const u8) !void {
         .{ token, token, latest, token },
     );
     try dir.writeCacheFile(file, body);
+    try appendVersionsLine(dir, "versions_cask.txt", token, latest);
 }
 
 test "collectOutdatedFormulas (small-N, single-client path) returns sorted outdated rows only" {
@@ -270,6 +287,98 @@ test "collectOutdatedCasks (large-N, pool path) preserves sorted order" {
         try testing.expectEqualStrings("1.0", entry.installed);
         try testing.expectEqualStrings("2.0", entry.latest);
     }
+}
+
+// --- version-map path: routing, revision bumps, fail-loud ---
+
+test "collectOutdated resolves core rows from the version map with no per-keg cache" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init(testing.allocator, "map_only");
+    defer dir.deinit();
+
+    // Side-car only — no formula_*.json. Under offline the per-keg path
+    // can't reach the network, so a resolved row proves the map was used.
+    try dir.writeCacheFile("versions_formula.txt", "alpha\t2.0\t0\nbravo\t1.0\t0\n");
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+
+    const kegs = [_]outdated_mod.KegRow{
+        .{ .name = "alpha", .version = "1.0" }, // outdated via map
+        .{ .name = "bravo", .version = "1.0" }, // up to date via map
+    };
+    var db = try openTestDb();
+    defer db.close();
+    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
+    defer freeEntries(testing.allocator, out);
+
+    try testing.expectEqual(@as(usize, 1), out.len);
+    try testing.expectEqualStrings("alpha", out[0].name);
+    try testing.expectEqualStrings("1.0", out[0].installed);
+    try testing.expectEqualStrings("2.0", out[0].latest);
+}
+
+test "collectOutdated detects an upstream revision bump" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init(testing.allocator, "rev_bump");
+    defer dir.deinit();
+
+    // Upstream is 1.2 revision 2 for both packages.
+    try dir.writeCacheFile("versions_formula.txt", "behind\t1.2\t2\ncurrent\t1.2\t2\n");
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+
+    const kegs = [_]outdated_mod.KegRow{
+        .{ .name = "behind", .version = "1.2", .revision = 1 }, // 1.2_1 < 1.2_2
+        .{ .name = "current", .version = "1.2", .revision = 2 }, // 1.2_2 == 1.2_2
+    };
+    var db = try openTestDb();
+    defer db.close();
+    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
+    defer freeEntries(testing.allocator, out);
+
+    // Only the revision-behind keg is outdated; `latest` carries the full
+    // <stable>_<rev>, `installed` shows the keg's own revision.
+    try testing.expectEqual(@as(usize, 1), out.len);
+    try testing.expectEqualStrings("behind", out[0].name);
+    try testing.expectEqualStrings("1.2_1", out[0].installed);
+    try testing.expectEqualStrings("1.2_2", out[0].latest);
+}
+
+test "collectOutdated warns and falls back to per-keg on an empty version map" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init(testing.allocator, "fail_loud");
+    defer dir.deinit();
+
+    // Empty side-car (schema shift) but a healthy per-keg cache. The audit
+    // must warn and fall back, never report the install as all up to date.
+    try dir.writeCacheFile("versions_formula.txt", "");
+    try dir.writeCacheFile("formula_alpha.json", "{\"name\":\"alpha\",\"versions\":{\"stable\":\"2.0\"}}");
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+
+    var warn_buf: std.ArrayList(u8) = .empty;
+    defer warn_buf.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &warn_buf);
+    defer malt.output.endStderrCapture();
+
+    const kegs = [_]outdated_mod.KegRow{
+        .{ .name = "alpha", .version = "1.0" },
+    };
+    var db = try openTestDb();
+    defer db.close();
+    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
+    defer freeEntries(testing.allocator, out);
+
+    try testing.expectEqual(@as(usize, 1), out.len);
+    try testing.expectEqualStrings("alpha", out[0].name);
+    try testing.expectEqualStrings("2.0", out[0].latest);
+    try testing.expect(std.mem.indexOf(u8, warn_buf.items, "falling back") != null);
 }
 
 // --- --pinned-only filter ---
@@ -424,6 +533,31 @@ test "loadCaskRows surfaces the owning tap when set" {
 
     try testing.expectEqualStrings("legacy-cask", rows[1].name);
     try testing.expect(rows[1].tap == null);
+}
+
+test "loadFormulaRows surfaces the keg revision; casks report 0" {
+    // The revision feeds the pkgVersion comparison; casks have no such
+    // column, so the query's `0 AS revision` must come back as 0.
+    var db = try openTestDb();
+    defer db.close();
+    try db.exec(
+        \\INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path)
+        \\VALUES ('rev', 'rev', '1.2', 3, 'sha', '/c/rev/1.2_3');
+    );
+    try db.exec(
+        \\INSERT INTO casks (token, name, version, url)
+        \\VALUES ('app', 'app', '4.0', 'https://example.invalid');
+    );
+
+    const frows = try outdated_mod.loadFormulaRows(testing.allocator, &db, .all);
+    defer outdated_mod.freeKegRows(testing.allocator, frows);
+    try testing.expectEqual(@as(usize, 1), frows.len);
+    try testing.expectEqual(@as(i64, 3), frows[0].revision);
+
+    const crows = try outdated_mod.loadCaskRows(testing.allocator, &db, .all);
+    defer outdated_mod.freeKegRows(testing.allocator, crows);
+    try testing.expectEqual(@as(usize, 1), crows.len);
+    try testing.expectEqual(@as(i64, 0), crows[0].revision);
 }
 
 test "loadFormulaRows .all surfaces the pinned flag and tap attribution" {

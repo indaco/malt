@@ -51,6 +51,9 @@ tui_pty_make_prefix() {
   TUI_PREFIX=$(mktemp -d /tmp/mt_tui_e2e.XXXXXX)
   export MALT_PREFIX="$TUI_PREFIX"
   export MALT_CACHE="$TUI_PREFIX/cache"
+  # Genuinely offline so the launch-time outdated audit never reaches the
+  # network — without this the bulk version-map fetch stalls the header.
+  export MALT_OFFLINE=1
   unset CI NO_COLOR
   # `mt list` initialises + migrates the schema only when db/ already exists.
   mkdir -p "$TUI_PREFIX/db"
