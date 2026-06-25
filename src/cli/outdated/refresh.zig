@@ -10,6 +10,7 @@ const std = @import("std");
 
 const AppCtx = @import("../../app_ctx.zig").AppCtx;
 const cask_mod = @import("../../core/cask.zig");
+const formula_mod = @import("../../core/formula.zig");
 const tap_mod = @import("../../core/tap.zig");
 const forge = @import("../../core/forge.zig");
 const sqlite = @import("../../db/sqlite.zig");
@@ -133,6 +134,107 @@ pub fn collectOutdatedCasks(
 
 const Kind = enum { formula, cask };
 
+/// One upstream version record parsed out of the cached version side-car.
+/// `stable` is borrowed from the index bytes the map was built from, so
+/// those bytes must outlive the map.
+const VersionEntry = struct { stable: []const u8, revision: i64 };
+
+/// Parse the `<name>\t<stable>\t<revision>` version side-car into a map
+/// keyed by name. Keys and `stable` borrow from `index_bytes`. Malformed
+/// lines (missing fields, empty name/version, non-integer revision) are
+/// skipped — a corrupt line must never abort the whole audit.
+fn buildVersionMap(
+    allocator: std.mem.Allocator,
+    index_bytes: []const u8,
+) std.mem.Allocator.Error!std.StringHashMap(VersionEntry) {
+    var map = std.StringHashMap(VersionEntry).init(allocator);
+    errdefer map.deinit();
+
+    var lines = std.mem.splitScalar(u8, index_bytes, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        var fields = std.mem.splitScalar(u8, line, '\t');
+        const name = fields.next() orelse continue;
+        const stable = fields.next() orelse continue;
+        const rev_str = fields.next() orelse continue;
+        if (name.len == 0 or stable.len == 0) continue;
+        const revision = std.fmt.parseInt(i64, rev_str, 10) catch continue;
+        try map.put(name, .{ .stable = stable, .revision = revision });
+    }
+    return map;
+}
+
+/// True when `row` resolves against the bulk version map: every formula,
+/// and any cask from the core tap (or with no tap). Non-core tap casks
+/// fall through to the per-HEAD `.rb` path the bulk dump can't cover.
+fn isCorePathRow(kind: Kind, row: KegRow) bool {
+    return switch (kind) {
+        .formula => true,
+        .cask => if (row.tap) |t| install_args_mod.isCoreTap(t) else true,
+    };
+}
+
+/// Resolve one keg against its version-map entry. Sets `found` to map
+/// membership (so the caller can tell "current" from "absent"), and
+/// returns a caller-owned `<stable>_<rev>` string when the row is
+/// outdated, null when it's up to date or absent.
+fn mapLatest(
+    allocator: std.mem.Allocator,
+    map: *const std.StringHashMap(VersionEntry),
+    row: KegRow,
+    found: *bool,
+) std.mem.Allocator.Error!?[]u8 {
+    const entry = map.get(row.name) orelse {
+        found.* = false;
+        return null;
+    };
+    found.* = true;
+
+    var latest_buf: [256]u8 = undefined;
+    var installed_buf: [256]u8 = undefined;
+    // pkgVersion only fails on buffer overflow — a version longer than any
+    // real keg. Treat as unresolvable rather than crash the audit.
+    const latest = formula_mod.pkgVersion(&latest_buf, entry.stable, entry.revision) catch return null;
+    const installed = formula_mod.pkgVersion(&installed_buf, row.version, row.revision) catch return null;
+    if (std.mem.eql(u8, installed, latest)) return null;
+    return try allocator.dupe(u8, latest);
+}
+
+/// Warn that the bulk version map matched none of the installed core
+/// packages — a likely upstream schema shift. Fail loud: the caller then
+/// falls back to per-package fetches rather than reporting everything up
+/// to date on an empty map.
+fn warnVersionMapDegraded(kind: Kind, core_rows: usize) void {
+    output.warn(
+        "{s} version map matched none of {d} installed package(s); falling back to per-package checks",
+        .{ @tagName(kind), core_rows },
+    );
+}
+
+/// Per-keg network resolution (serial below the pool threshold, pooled
+/// above) for the rows the map can't cover — tap casks, and every row
+/// when the map is unusable. Fills `latest_versions` by index.
+fn resolveViaFetch(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    head_cache: *TapHeadResolve,
+    db: *sqlite.Database,
+    api: *api_mod.BrewApi,
+    cache_dir: []const u8,
+    kegs: []const KegRow,
+    workers_override: ?usize,
+    kind: Kind,
+    latest_versions: []?[]u8,
+) std.mem.Allocator.Error!void {
+    if (!shouldUsePool(kegs.len)) {
+        for (kegs, 0..) |row, i| {
+            latest_versions[i] = try fetchLatest(allocator, head_cache, db, api, ctx.io, ctx.environ, kind, row);
+        }
+    } else {
+        try runPool(ctx, allocator, head_cache, db, cache_dir, kegs, workers_override, kind, latest_versions);
+    }
+}
+
 fn collectOutdated(
     ctx: *const AppCtx,
     allocator: std.mem.Allocator,
@@ -145,9 +247,9 @@ fn collectOutdated(
 ) std.mem.Allocator.Error![]OutdatedEntry {
     if (kegs.len == 0) return allocator.alloc(OutdatedEntry, 0);
 
-    // Per-row latest-version slot. Workers fill `latest_versions[i]`
-    // with a caller-allocator-owned string when row `i` is outdated;
-    // null otherwise. Indexed-write keeps the pool free of locks.
+    // Per-row latest-version slot: a caller-owned string when row `i` is
+    // outdated, null otherwise. Map lookups fill core rows here directly;
+    // `resolveViaFetch` fills the rest.
     const latest_versions = try allocator.alloc(?[]u8, kegs.len);
     defer allocator.free(latest_versions);
     @memset(latest_versions, null);
@@ -155,18 +257,103 @@ fn collectOutdated(
         if (maybe) |v| allocator.free(v);
     };
 
-    // One dedup cache per `collectOutdated` call shared by every row.
-    // Lifetime: scoped to this function — workers borrow shas back
-    // (cache outlives every worker's resolve usage).
+    // `needs_fetch[i]` = resolve row `i` via the per-keg network path:
+    // tap casks always; every row when the map is missing or degraded.
+    const needs_fetch = try allocator.alloc(bool, kegs.len);
+    defer allocator.free(needs_fetch);
+    @memset(needs_fetch, false);
+
+    // Phase 1 — the bulk version map. Only fetched when at least one row
+    // can use it; a fetch error (offline/down/schema) degrades to per-keg.
+    var has_core = false;
+    for (kegs) |row| {
+        if (isCorePathRow(kind, row)) {
+            has_core = true;
+            break;
+        }
+    }
+
+    const api_kind: api_mod.BrewApi.Kind = switch (kind) {
+        .formula => .formula,
+        .cask => .cask,
+    };
+
+    var have_map = false;
+    var map: std.StringHashMap(VersionEntry) = undefined;
+    var index_bytes: ?[]const u8 = null;
+    if (has_core) {
+        if (api.fetchVersionsIndex(api_kind)) |bytes| {
+            index_bytes = bytes;
+            map = try buildVersionMap(allocator, bytes);
+            have_map = true;
+        } else |_| {}
+    }
+    defer if (index_bytes) |b| allocator.free(b);
+    defer if (have_map) map.deinit();
+
+    if (have_map) {
+        var core_rows: usize = 0;
+        var matched: usize = 0;
+        for (kegs, 0..) |row, i| {
+            if (!isCorePathRow(kind, row)) {
+                needs_fetch[i] = true; // tap cask → per-HEAD
+                continue;
+            }
+            core_rows += 1;
+            var found = false;
+            const latest = try mapLatest(allocator, &map, row, &found);
+            if (found) {
+                matched += 1;
+                latest_versions[i] = latest; // null when up to date
+            }
+            // A miss on a healthy map means "no upstream info" — drop the
+            // row like a 404, no per-keg refetch.
+        }
+
+        // Fail loud: core rows present but none matched → bad map.
+        if (core_rows > 0 and matched == 0) {
+            warnVersionMapDegraded(kind, core_rows);
+            for (kegs, 0..) |row, i| {
+                if (isCorePathRow(kind, row)) needs_fetch[i] = true;
+            }
+        }
+    } else {
+        @memset(needs_fetch, true); // no map → every row via per-keg
+    }
+
+    // One dedup cache shared by every per-keg row (tap-HEAD coalescing).
     var head_cache = TapHeadResolve.init(allocator, ctx.io);
     defer head_cache.deinit();
 
-    if (!shouldUsePool(kegs.len)) {
+    // Phase 2 — gather the rows still needing a network resolve and run
+    // them through the (sub-)serial-or-pool path, then scatter results.
+    var n_fetch: usize = 0;
+    for (needs_fetch) |f| {
+        if (f) n_fetch += 1;
+    }
+    if (n_fetch > 0) {
+        const sub_kegs = try allocator.alloc(KegRow, n_fetch);
+        defer allocator.free(sub_kegs);
+        const sub_idx = try allocator.alloc(usize, n_fetch);
+        defer allocator.free(sub_idx);
+        const sub_latest = try allocator.alloc(?[]u8, n_fetch);
+        defer allocator.free(sub_latest);
+        @memset(sub_latest, null);
+        errdefer for (sub_latest) |maybe| {
+            if (maybe) |v| allocator.free(v);
+        };
+
+        var j: usize = 0;
         for (kegs, 0..) |row, i| {
-            latest_versions[i] = try fetchLatest(allocator, &head_cache, db, api, ctx.io, ctx.environ, kind, row);
+            if (needs_fetch[i]) {
+                sub_kegs[j] = row;
+                sub_idx[j] = i;
+                j += 1;
+            }
         }
-    } else {
-        try runPool(ctx, allocator, &head_cache, db, cache_dir, kegs, workers_override, kind, latest_versions);
+
+        try resolveViaFetch(ctx, allocator, &head_cache, db, api, cache_dir, sub_kegs, workers_override, kind, sub_latest);
+        for (sub_idx, 0..) |orig, k| latest_versions[orig] = sub_latest[k];
     }
 
     return assembleEntries(allocator, kegs, latest_versions);
@@ -196,7 +383,11 @@ fn assembleEntries(
 
         const name_dup = try allocator.dupe(u8, row.name);
         errdefer allocator.free(name_dup);
-        const installed_dup = try allocator.dupe(u8, row.version);
+        // Show the keg's revision-aware version so a `1.2_1 -> 1.2_2`
+        // bump reads correctly; revision 0 stays the bare `1.2`.
+        var installed_buf: [256]u8 = undefined;
+        const installed_str = formula_mod.pkgVersion(&installed_buf, row.version, row.revision) catch row.version;
+        const installed_dup = try allocator.dupe(u8, installed_str);
 
         try out.append(allocator, .{
             .name = name_dup,
@@ -881,6 +1072,39 @@ test "warnTapCaskFetchFailed names both the tap and the token" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "yuzeguitarist/deck") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "deckclip") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "404") != null);
+}
+
+test "buildVersionMap parses tab-delimited entries with stable and revision" {
+    const idx = "wget\t1.21.4\t0\nopenssl@3\t3.2.1\t2\n";
+    var map = try buildVersionMap(std.testing.allocator, idx);
+    defer map.deinit();
+    try std.testing.expectEqual(@as(usize, 2), map.count());
+    const w = map.get("wget") orelse return error.MissingEntry;
+    try std.testing.expectEqualStrings("1.21.4", w.stable);
+    try std.testing.expectEqual(@as(i64, 0), w.revision);
+    const o = map.get("openssl@3") orelse return error.MissingEntry;
+    try std.testing.expectEqualStrings("3.2.1", o.stable);
+    try std.testing.expectEqual(@as(i64, 2), o.revision);
+}
+
+test "isCorePathRow sends formulae and core casks to the map, tap casks per-HEAD" {
+    // Formulae always use the map, tap attribution notwithstanding.
+    try std.testing.expect(isCorePathRow(.formula, .{ .name = "wget", .version = "1" }));
+    try std.testing.expect(isCorePathRow(.formula, .{ .name = "x", .version = "1", .tap = "user/repo" }));
+    // Casks: no tap or the core tap → map; a third-party tap → per-HEAD.
+    try std.testing.expect(isCorePathRow(.cask, .{ .name = "firefox", .version = "1" }));
+    try std.testing.expect(isCorePathRow(.cask, .{ .name = "f", .version = "1", .tap = "homebrew/cask" }));
+    try std.testing.expect(!isCorePathRow(.cask, .{ .name = "f", .version = "1", .tap = "user/repo" }));
+}
+
+test "buildVersionMap skips malformed lines without aborting" {
+    // Missing fields, empty version, and a non-integer revision must each
+    // drop their line, not crash the parse.
+    const idx = "good\t1.0\t0\nbadline\nempty\t\t0\nrev\t2.0\tnotnum\n";
+    var map = try buildVersionMap(std.testing.allocator, idx);
+    defer map.deinit();
+    try std.testing.expectEqual(@as(usize, 1), map.count());
+    try std.testing.expect(map.get("good") != null);
 }
 
 test "parseFormulaLatest pulls versions.stable from a real-shape document" {
