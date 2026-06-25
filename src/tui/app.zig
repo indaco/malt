@@ -2258,6 +2258,30 @@ test "dropUpgradedRows drops only the upgraded kind when a formula and cask shar
     try std.testing.expectEqual(outdated_json.Kind.cask, store.outdated.?.items[0].kind);
 }
 
+test "dropUpgradedRows survives two sequential drops (the formula then cask passes)" {
+    var app: App = .{};
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    const json =
+        \\{"outdated":[
+        \\{"name":"wget","installed":"1","latest":"2","type":"formula","pinned":false},
+        \\{"name":"firefox","installed":"1","latest":"2","type":"cask","pinned":false}
+        \\]}
+    ;
+    try applyOutdatedBytes(std.testing.allocator, &app, &store, json);
+
+    // Formula pass drops wget; the cask ref (still borrowing the live parse
+    // arena) must survive the first drop's store mutation and rebuilt buffer.
+    try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "wget", .kind = .formula }});
+    try std.testing.expectEqual(@as(usize, 1), store.outdated.?.items.len);
+    try std.testing.expectEqual(outdated_json.Kind.cask, store.outdated.?.items[0].kind);
+
+    // Cask pass drops firefox → empty, no leak / use-after-free.
+    try dropUpgradedRows(std.testing.allocator, &app, &store, &.{.{ .name = "firefox", .kind = .cask }});
+    try std.testing.expectEqual(@as(usize, 0), store.outdated.?.items.len);
+    try std.testing.expectEqual(@as(?usize, 0), app.outdated_count);
+}
+
 test "dropUpgradedRows keeps every row when no upgraded ref matches" {
     var app: App = .{};
     var store: Store = .{};
