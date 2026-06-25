@@ -1044,6 +1044,9 @@ fn applyOutdatedBytes(allocator: std.mem.Allocator, app: *App, store: *Store, by
 /// index). `out` must be sized to `selectedCount`. Partitioning by kind lets
 /// `doUpgrade` issue one `--formula` pass and one `--cask` pass.
 fn collectUpgraded(st: *const outdated.State, out: []UpgradedRef) usize {
+    // The two item-order passes below cover exactly `{formula, cask}`; a new
+    // Kind variant would leave its rows uncollected. Lock it at compile time.
+    comptime std.debug.assert(@typeInfo(outdated_json.Kind).@"enum".fields.len == 2);
     var n: usize = 0;
     var split: usize = 0;
     // Two item-order passes so each kind's names stay in display order and the
