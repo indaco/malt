@@ -169,16 +169,28 @@ fn appendVersionLine(
     revision: i64,
 ) !void {
     if (name.len == 0 or stable.len == 0) return;
+    // Untrusted dump fields: a tab or newline would corrupt the line-
+    // delimited side-car the consumer splits on, so drop the whole entry
+    // rather than emit a record that mis-parses downstream.
+    if (containsDelimiter(name) or containsDelimiter(stable)) return;
     try out.appendSlice(allocator, name);
     try out.append(allocator, '\t');
     try out.appendSlice(allocator, stable);
     try out.append(allocator, '\t');
+    // Negative revision can't match an installed keg path; clamp to 0.
+    const rev = @max(revision, 0);
     // [24]u8 holds any i64 ("-9223372036854775808" is 20 chars), so the
     // bufPrint can't fail — unreachable is a provable bound, not a guess.
     var rbuf: [24]u8 = undefined;
-    const rstr = std.fmt.bufPrint(&rbuf, "{d}", .{revision}) catch unreachable;
+    const rstr = std.fmt.bufPrint(&rbuf, "{d}", .{rev}) catch unreachable;
     try out.appendSlice(allocator, rstr);
     try out.append(allocator, '\n');
+}
+
+/// True when `s` carries a tab or newline — the two bytes that delimit the
+/// version side-car. Such an entry can't be represented and is dropped.
+fn containsDelimiter(s: []const u8) bool {
+    return std.mem.indexOfAny(u8, s, "\t\n") != null;
 }
 
 /// Case-insensitive substring scan over a newline-delimited names index.
@@ -744,4 +756,29 @@ test "extractVersions reads a cask's top-level version with revision 0" {
     const out = try extractVersions(testing.allocator, .cask, body);
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("firefox\t125.0\t0\n", out);
+}
+
+test "extractVersions drops entries whose name or version embeds a delimiter" {
+    // Hostile / schema-shifted JSON: a tab or newline in a field would
+    // corrupt the line-delimited side-car the consumer splits on. `\t`/`\n`
+    // here are JSON escapes, so the parsed strings carry real control chars.
+    const body =
+        \\[{"name":"a\tb","versions":{"stable":"1.0"}},
+        \\ {"name":"nl","versions":{"stable":"2.0\n3.0"}},
+        \\ {"name":"ok","versions":{"stable":"4.0"}}]
+    ;
+    const out = try extractVersions(testing.allocator, .formula, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("ok\t4.0\t0\n", out);
+}
+
+test "extractVersions clamps a negative revision to 0" {
+    // A negative revision can't match any installed keg path; emit 0 so the
+    // side-car never carries a value the consumer would format oddly.
+    const body =
+        \\[{"name":"x","versions":{"stable":"1.0"},"revision":-3}]
+    ;
+    const out = try extractVersions(testing.allocator, .formula, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("x\t1.0\t0\n", out);
 }
