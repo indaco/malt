@@ -10,8 +10,27 @@ const test_io = @import("test_io");
 const testing = std.testing;
 const clonefile = @import("malt").clonefile;
 
-fn tmpRoot(comptime tag: []const u8) []const u8 {
-    return "/tmp/malt_clonefile_test_" ++ tag;
+const c = struct {
+    extern "c" fn getpid() c_int;
+};
+
+// Per-init counter; with the pid it makes every temp root unique across both
+// concurrent processes and repeated inits within one process, so overlapping
+// runs never race on setup/teardown of a shared tree.
+var temp_seq = std.atomic.Value(u32).init(0);
+
+fn tmpRoot(allocator: std.mem.Allocator, tag: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "/tmp/malt_clonefile_test_{s}_{d}_{d}", .{
+        tag, c.getpid(), temp_seq.fetchAdd(1, .monotonic),
+    });
+}
+
+test "tmpRoot yields a unique path per init even for the same tag" {
+    const a = try tmpRoot(testing.allocator, "uniq");
+    defer testing.allocator.free(a);
+    const b = try tmpRoot(testing.allocator, "uniq");
+    defer testing.allocator.free(b);
+    try testing.expect(!std.mem.eql(u8, a, b));
 }
 
 fn setupSourceTree(root: []const u8) !void {
@@ -54,7 +73,8 @@ test "isApfs returns true for a path that cannot be stat'd (fallback assumption)
 }
 
 test "cloneTree duplicates a small directory tree" {
-    const root = tmpRoot("basic");
+    const root = try tmpRoot(testing.allocator, "basic");
+    defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     try setupSourceTree(root);
 
@@ -85,7 +105,8 @@ test "cloneTree duplicates a small directory tree" {
 }
 
 test "cloneTree fails with AlreadyExists when dst already exists" {
-    const root = tmpRoot("exists");
+    const root = try tmpRoot(testing.allocator, "exists");
+    defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     try setupSourceTree(root);
 
@@ -111,11 +132,13 @@ test "cloneTree errors on a missing source when the fallback path is taken" {
     // Force the fallback branch by targeting a dst path whose parent does
     // not exist. clonefile(2) will fail with ENOENT → IoError. We also
     // cover the non-APFS fallback with a missing src below.
+    const dst = try tmpRoot(testing.allocator, "missing_dst");
+    defer testing.allocator.free(dst);
     const result = clonefile.cloneTree(
         std.Options.debug_io,
         testing.allocator,
         "/definitely/not/a/real/path",
-        "/tmp/malt_clonefile_test_missing_dst",
+        dst,
     );
     try testing.expectError(clonefile.CloneError.IoError, result);
 }
@@ -123,7 +146,8 @@ test "cloneTree errors on a missing source when the fallback path is taken" {
 // --- copyTreeFallback tests (exercise the non-APFS path explicitly) ---
 
 test "copyTreeFallback duplicates files, subdirs, and symlinks" {
-    const root = tmpRoot("fallback");
+    const root = try tmpRoot(testing.allocator, "fallback");
+    defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     try setupSourceTree(root);
 
@@ -156,7 +180,8 @@ test "copyTreeFallback duplicates files, subdirs, and symlinks" {
 }
 
 test "copyTreeFallback is idempotent when the destination already exists" {
-    const root = tmpRoot("fallback_idem");
+    const root = try tmpRoot(testing.allocator, "fallback_idem");
+    defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     try setupSourceTree(root);
 
@@ -182,7 +207,8 @@ test "copyTreeFallback is idempotent when the destination already exists" {
 // function now surfaces the first per-entry failure so callers can
 // treat partial copies as failure rather than silently proceeding.
 test "copyTreeFallback surfaces a per-entry failure as an error" {
-    const root = tmpRoot("fallback_partial");
+    const root = try tmpRoot(testing.allocator, "fallback_partial");
+    defer testing.allocator.free(root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
     try setupSourceTree(root);
 
@@ -215,9 +241,11 @@ test "copyTreeFallback surfaces a per-entry failure as an error" {
 }
 
 test "copyTreeFallback errors when source directory does not exist" {
+    const dst = try tmpRoot(testing.allocator, "nowhere");
+    defer testing.allocator.free(dst);
     try testing.expectError(
         error.FileNotFound,
-        clonefile.copyTreeFallback(std.Options.debug_io, testing.allocator, "/not/a/real/source/dir", "/tmp/malt_clonefile_nowhere"),
+        clonefile.copyTreeFallback(std.Options.debug_io, testing.allocator, "/not/a/real/source/dir", dst),
     );
 }
 
@@ -248,7 +276,8 @@ test "cloneTree falls back to copyTree on a non-APFS volume" {
 
     // Source on the repo tmp root (APFS in CI's macOS runner); dst on the
     // caller-provided non-APFS mount so clonefile(2) returns ENOTSUP.
-    const src_root = tmpRoot("nonapfs_src");
+    const src_root = try tmpRoot(testing.allocator, "nonapfs_src");
+    defer testing.allocator.free(src_root);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, src_root) catch {};
     try setupSourceTree(src_root);
 
