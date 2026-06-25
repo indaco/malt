@@ -1077,29 +1077,90 @@ fn upgradeArgv(allocator: std.mem.Allocator, mt_path: []const u8, st: *const out
 /// Delegate the checked upgrades to the real `mt` inline, then refresh. The argv
 /// names borrow from the current parse storage; the post-spawn reload frees that
 /// storage, so the names are not read afterwards.
-fn doUpgrade(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, app: *App, store: *Store) RunError!void {
+fn doUpgrade(allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Store) RunError!void {
     const argv = (try upgradeArgv(allocator, app.mt_path, &app.states.outdated)) orelse return; // empty selection: no-op
     defer allocator.free(argv);
+    // Snapshot the upgraded names while the selection is intact; they borrow the
+    // parse arena, which `dropUpgradedRows` keeps alive.
+    const upgraded = try allocator.alloc([]const u8, outdated.selectedCount(&app.states.outdated));
+    defer allocator.free(upgraded);
+    _ = outdated.selectedNames(&app.states.outdated, upgraded);
     {
         // A non-zero `mt upgrade` re-enters the dashboard (the user keeps malt's
         // real output in their scrollback) and surfaces as a recoverable banner;
-        // only a terminal fault is fatal. Scoped so the refresh below reports
-        // under its own op, not "upgrade".
+        // only a terminal fault is fatal. On failure the `try` below returns
+        // before the row drop, so the list is left intact.
         errdefer |err| app.banner.set("upgrade failed", @errorName(err));
         try spawn.runInlineReenter(t, argv);
     }
-    try loadOutdated(io, allocator, painter, app, store); // the upgraded rows are gone — refetch
+    // Upgrading X can't make Y outdated, so the new outdated set is the old set
+    // minus the upgraded tokens — drop them in place rather than re-walk.
+    try dropUpgradedRows(allocator, app, store, upgraded);
     markStaleAfterMutation(app); // Installed sizes/versions changed too
+}
+
+/// True when `name` appears in `list` (linear scan — an upgrade batch is small).
+fn nameInList(name: []const u8, list: []const []const u8) bool {
+    for (list) |n| {
+        if (std.mem.eql(u8, n, name)) return true;
+    }
+    return false;
+}
+
+/// Drop the just-upgraded rows from the Outdated tab in place: the post-upgrade
+/// outdated set is the pre-upgrade set minus the upgraded tokens, so a second
+/// `mt outdated` walk is unnecessary. The parsed storage is kept alive (rows
+/// borrow its arena) and `items` is re-pointed at the survivors within that
+/// arena; only the checkbox buffer is reallocated, preserving each kept row's
+/// checked state so a partial-selection upgrade survives.
+fn dropUpgradedRows(
+    allocator: std.mem.Allocator,
+    app: *App,
+    store: *Store,
+    upgraded: []const []const u8,
+) std.mem.Allocator.Error!void {
+    if (store.outdated == null) return; // nothing loaded → nothing to drop
+    const parsed = &store.outdated.?;
+    const old_items = parsed.items;
+    const old_checked = store.outdated_checked;
+
+    var keep: usize = 0;
+    for (old_items) |row| {
+        if (!nameInList(row.name, upgraded)) keep += 1;
+    }
+
+    // Survivors live in the parse arena alongside the strings they borrow, so
+    // they free together on the next full reload. The checkbox buffer is shell-
+    // owned, so it is reallocated and the old one freed.
+    const arena = parsed.doc.arena.allocator();
+    const new_items = try arena.alloc(outdated_json.OutdatedRow, keep);
+    const new_checked = try allocator.alloc(bool, keep);
+    errdefer allocator.free(new_checked);
+
+    var j: usize = 0;
+    for (old_items, 0..) |row, i| {
+        if (nameInList(row.name, upgraded)) continue;
+        new_items[j] = row;
+        new_checked[j] = i < old_checked.len and old_checked[i];
+        j += 1;
+    }
+
+    if (old_checked.len != 0) allocator.free(old_checked);
+    parsed.items = new_items;
+    store.outdated_checked = new_checked;
+    app.states.outdated.items = new_items;
+    app.states.outdated.checked = new_checked;
+    app.outdated_count = new_items.len;
 }
 
 /// Perform any effect the pure `step` requested on the Outdated tab, then clear
 /// it, and lazily (re)load on first entry or after a mutation marked it dirty.
-fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Store) RunError!void {
+fn serviceOutdated(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, fetches: *Fetches, app: *App, store: *Store) RunError!void {
     const req = app.states.outdated.request;
     app.states.outdated.request = .none;
     switch (req) {
         .none => {},
-        .upgrade => try doUpgrade(io, allocator, t, painter, app, store),
+        .upgrade => try doUpgrade(allocator, t, app, store),
     }
     // Lazy per-tab load: first activation and post-mutation staleness both arrive
     // as the dirty flag (set at init and by `markStaleAfterMutation`).
@@ -1485,7 +1546,7 @@ fn openSearchInfo(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *S
 /// so calling each one each loop is cheap and keeps the dispatch flat.
 fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Store) RunError!void {
     try serviceInstalled(io, allocator, t, app, store);
-    try serviceOutdated(io, allocator, t, painter, fetches, app, store);
+    try serviceOutdated(io, allocator, t, fetches, app, store);
     try serviceServices(io, allocator, t, painter, fetches, app, store);
     try serviceDoctor(io, allocator, t, painter, fetches, app, store);
     try serviceSearch(io, allocator, t, app, store);
@@ -2117,6 +2178,58 @@ test "a malformed payload banners and keeps the outdated count unknown, never ze
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expect(app.outdated_count == null); // unknown (`—`), not 0
     try std.testing.expectEqualStrings("outdated refresh failed: BadJson", app.banner.slice());
+}
+
+test "dropUpgradedRows removes upgraded rows in place and preserves kept checked state" {
+    var app: App = .{};
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    const json =
+        \\{"outdated":[
+        \\{"name":"a","installed":"1","latest":"2","type":"formula","pinned":false},
+        \\{"name":"b","installed":"1","latest":"2","type":"formula","pinned":false},
+        \\{"name":"c","installed":"1","latest":"2","type":"formula","pinned":false}
+        \\]}
+    ;
+    try applyOutdatedBytes(std.testing.allocator, &app, &store, json);
+    // Check a and c (b is the one being upgraded); the kept rows must stay checked.
+    store.outdated_checked[0] = true;
+    store.outdated_checked[2] = true;
+
+    try dropUpgradedRows(std.testing.allocator, &app, &store, &.{"b"});
+
+    try std.testing.expectEqual(@as(usize, 2), store.outdated.?.items.len);
+    try std.testing.expectEqualStrings("a", store.outdated.?.items[0].name);
+    try std.testing.expectEqualStrings("c", store.outdated.?.items[1].name);
+    try std.testing.expectEqual(@as(?usize, 2), app.outdated_count);
+    try std.testing.expectEqual(@as(usize, 2), app.states.outdated.items.len);
+    // a and c stay checked in the rebuilt lockstep buffer.
+    try std.testing.expect(app.states.outdated.checked[0]);
+    try std.testing.expect(app.states.outdated.checked[1]);
+}
+
+test "dropUpgradedRows on an unloaded store is a no-op" {
+    var app: App = .{};
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    try dropUpgradedRows(std.testing.allocator, &app, &store, &.{"anything"});
+    try std.testing.expect(store.outdated == null);
+}
+
+test "dropUpgradedRows clears the list when every row was upgraded" {
+    var app: App = .{};
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    const json =
+        \\{"outdated":[
+        \\{"name":"a","installed":"1","latest":"2","type":"formula","pinned":false},
+        \\{"name":"b","installed":"1","latest":"2","type":"formula","pinned":false}
+        \\]}
+    ;
+    try applyOutdatedBytes(std.testing.allocator, &app, &store, json);
+    try dropUpgradedRows(std.testing.allocator, &app, &store, &.{ "a", "b" });
+    try std.testing.expectEqual(@as(usize, 0), store.outdated.?.items.len);
+    try std.testing.expectEqual(@as(?usize, 0), app.outdated_count);
 }
 
 test "a non-zero child exit fails the fetch without parsing a half-written doc" {
