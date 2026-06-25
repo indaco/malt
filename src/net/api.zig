@@ -13,6 +13,12 @@ const cache_ttl_secs: i64 = 300; // 5 minutes
 /// ~40 MiB of fetch per search while still picking up changes within a day.
 pub const index_ttl_secs: i64 = 24 * 60 * 60;
 
+/// Versions-index TTL. The outdated report needs fresher upstream data
+/// than search's 24 h name list, so this matches the per-formula cache
+/// (`cache_ttl_secs`) and the snapshot's max age. Invariant:
+/// `versions_ttl_secs <= snapshot_default_max_age_minutes * 60`.
+pub const versions_ttl_secs: i64 = 5 * 60;
+
 pub const ApiError = error{
     NotFound,
     ApiUnreachable,
@@ -89,6 +95,102 @@ pub fn extractNames(
     }
 
     return out.toOwnedSlice(allocator);
+}
+
+/// Parse the same bulk dump as `extractNames`, but keep the data the
+/// outdated check needs: `<name>\t<versions.stable>\t<revision>` per line.
+/// Formulae carry `versions.stable` + integer `revision` (missing → 0);
+/// casks carry their top-level `version` (no revision, emitted as 0).
+/// Entries without a usable version string are skipped — an empty version
+/// can't be compared, so it never reaches the map. `ignore_unknown_fields`
+/// drops the megabytes we don't need; caller owns the returned bytes.
+pub fn extractVersions(
+    allocator: std.mem.Allocator,
+    kind: BrewApi.Kind,
+    json_body: []const u8,
+) ![]const u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    switch (kind) {
+        .formula => {
+            // Defaults make missing `versions`/`revision` non-fatal; the
+            // optional `stable` lets us drop unversioned entries.
+            const Versions = struct { stable: ?[]const u8 = null };
+            const Entry = struct {
+                name: []const u8 = "",
+                versions: Versions = .{},
+                revision: i64 = 0,
+            };
+            const parsed = try std.json.parseFromSliceLeaky(
+                []Entry,
+                a,
+                json_body,
+                .{ .ignore_unknown_fields = true },
+            );
+            for (parsed) |e| {
+                const stable = e.versions.stable orelse continue;
+                try appendVersionLine(allocator, &out, e.name, stable, e.revision);
+            }
+        },
+        .cask => {
+            // Casks use a flat `version`; the dump carries no revision.
+            const Entry = struct {
+                token: []const u8 = "",
+                version: ?[]const u8 = null,
+            };
+            const parsed = try std.json.parseFromSliceLeaky(
+                []Entry,
+                a,
+                json_body,
+                .{ .ignore_unknown_fields = true },
+            );
+            for (parsed) |e| {
+                const ver = e.version orelse continue;
+                try appendVersionLine(allocator, &out, e.token, ver, 0);
+            }
+        },
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+/// Append one `<name>\t<stable>\t<revision>\n` record, skipping entries
+/// with an empty name or version (nothing the consumer can key or compare).
+fn appendVersionLine(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    name: []const u8,
+    stable: []const u8,
+    revision: i64,
+) !void {
+    if (name.len == 0 or stable.len == 0) return;
+    // Untrusted dump fields: a tab or newline would corrupt the line-
+    // delimited side-car the consumer splits on, so drop the whole entry
+    // rather than emit a record that mis-parses downstream.
+    if (containsDelimiter(name) or containsDelimiter(stable)) return;
+    try out.appendSlice(allocator, name);
+    try out.append(allocator, '\t');
+    try out.appendSlice(allocator, stable);
+    try out.append(allocator, '\t');
+    // Negative revision can't match an installed keg path; clamp to 0.
+    const rev = @max(revision, 0);
+    // [24]u8 holds any i64 ("-9223372036854775808" is 20 chars), so the
+    // bufPrint can't fail — unreachable is a provable bound, not a guess.
+    var rbuf: [24]u8 = undefined;
+    const rstr = std.fmt.bufPrint(&rbuf, "{d}", .{rev}) catch unreachable;
+    try out.appendSlice(allocator, rstr);
+    try out.append(allocator, '\n');
+}
+
+/// True when `s` carries a tab or newline — the two bytes that delimit the
+/// version side-car. Such an entry can't be represented and is dropped.
+fn containsDelimiter(s: []const u8) bool {
+    return std.mem.indexOfAny(u8, s, "\t\n") != null;
 }
 
 /// Case-insensitive substring scan over a newline-delimited names index.
@@ -244,48 +346,101 @@ pub const BrewApi = struct {
         return now - mtime_secs <= cache_ttl_secs;
     }
 
+    /// Cache key infix for each `Kind`, shared by both side-cars.
+    fn indexKey(kind: Kind) []const u8 {
+        return switch (kind) {
+            .formula => "formula",
+            .cask => "cask",
+        };
+    }
+
+    /// Both side-cars from one bulk parse; caller owns both slices.
+    const IndexPair = struct { names: []const u8, versions: []const u8 };
+
     /// Fetch the newline-delimited names index for all formulae or casks.
     /// Caller-owned bytes. Backed by a 24 h on-disk cache: the one-time
     /// parse of the ~28 MiB / ~14 MiB Homebrew JSON dump produces a
     /// ~130 KiB / ~70 KiB plain-text list, which substring search can
     /// then linear-scan in well under 1 ms.
     pub fn fetchNamesIndex(self: *BrewApi, kind: Kind) ApiError![]const u8 {
-        const key: []const u8 = switch (kind) {
-            .formula => "formula",
-            .cask => "cask",
-        };
-        if (self.readNamesIndex(key)) |cached| return cached;
+        const key = indexKey(kind);
+        if (self.readIndexFile("names_", key, index_ttl_secs)) |cached| return cached;
 
         if (self.offline) {
             // Names index has no 404 form — a miss in offline mode means
             // the user never warmed the index, so search can't run at all.
-            if (self.readNamesIndexUnchecked(key)) |cached| return cached;
+            if (self.readIndexFile("names_", key, null)) |cached| return cached;
             return ApiError.OfflineRequired;
         }
 
+        const pair = try self.fetchAndWriteIndex(kind, key);
+        self.allocator.free(pair.versions);
+        return pair.names;
+    }
+
+    /// Fetch the `<name>\t<stable>\t<revision>` version side-car for all
+    /// formulae or casks. Caller-owned bytes. Shares the names fetch's
+    /// single bulk download — a cold call here serves whichever side-car
+    /// the other already wrote rather than re-pulling the dump. Pinned to
+    /// a tighter TTL (`versions_ttl_secs`) than the names list because an
+    /// outdated report must reflect releases the search list can lag.
+    pub fn fetchVersionsIndex(self: *BrewApi, kind: Kind) ApiError![]const u8 {
+        const key = indexKey(kind);
+        if (self.readIndexFile("versions_", key, versions_ttl_secs)) |cached| return cached;
+
+        if (self.offline) {
+            // Mirror names: serve a stale-but-present map rather than fail —
+            // an offline user wants their last warmed versions, not an error.
+            if (self.readIndexFile("versions_", key, null)) |cached| return cached;
+            return ApiError.OfflineRequired;
+        }
+
+        const pair = try self.fetchAndWriteIndex(kind, key);
+        self.allocator.free(pair.names);
+        return pair.versions;
+    }
+
+    /// Download the bulk dump once, extract both side-cars, write both.
+    /// Folding the two extractors into one fetch is a requirement, not an
+    /// optimisation: it stops a cold versions fetch from re-pulling a dump
+    /// the names fetch already has on disk. Caller owns both slices.
+    fn fetchAndWriteIndex(self: *BrewApi, kind: Kind, key: []const u8) ApiError!IndexPair {
         var url_buf: [512]u8 = undefined;
         const url = try buildNamesIndexUrl(&url_buf, self.base_url, kind);
         var resp = self.http.get(url) catch return ApiError.ApiUnreachable;
         defer resp.deinit();
         if (resp.status != 200) return ApiError.ApiUnreachable;
 
-        const index = extractNames(self.allocator, kind, resp.body) catch |e| switch (e) {
+        const names = extractNames(self.allocator, kind, resp.body) catch |e| switch (e) {
             error.OutOfMemory => return ApiError.OutOfMemory,
             else => return ApiError.InvalidResponse,
         };
-        self.writeNamesIndex(key, index);
-        return index;
+        errdefer self.allocator.free(names);
+        const versions = extractVersions(self.allocator, kind, resp.body) catch |e| switch (e) {
+            error.OutOfMemory => return ApiError.OutOfMemory,
+            else => return ApiError.InvalidResponse,
+        };
+        errdefer self.allocator.free(versions);
+
+        self.writeIndexFile("names_", key, names);
+        self.writeIndexFile("versions_", key, versions);
+        return .{ .names = names, .versions = versions };
     }
 
-    /// Return the cached names index for `key` if fresh, else null.
-    fn readNamesIndex(self: *BrewApi, key: []const u8) ?[]const u8 {
+    /// Read an index side-car (`names_` / `versions_`) for `key`. `ttl`
+    /// gates freshness; null bypasses the gate so offline mode can serve a
+    /// stale-but-present file. Returns caller-owned bytes, or null on any
+    /// miss / read error.
+    fn readIndexFile(self: *BrewApi, infix: []const u8, key: []const u8, ttl: ?i64) ?[]const u8 {
         var path_buf: [512]u8 = undefined;
-        const p = std.fmt.bufPrint(&path_buf, "{s}/api/names_{s}.txt", .{ self.cache_dir, key }) catch return null;
+        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return null;
 
-        const stat = std.Io.Dir.cwd().statFile(self.io, p, .{}) catch return null;
-        const now = std.Io.Clock.real.now(self.io).toSeconds();
-        const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
-        if (now - mtime_secs > index_ttl_secs) return null;
+        if (ttl) |limit| {
+            const stat = std.Io.Dir.cwd().statFile(self.io, p, .{}) catch return null;
+            const now = std.Io.Clock.real.now(self.io).toSeconds();
+            const mtime_secs: i64 = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s));
+            if (now - mtime_secs > limit) return null;
+        }
 
         const file = std.Io.Dir.cwd().openFile(self.io, p, .{}) catch return null;
         defer file.close(self.io);
@@ -302,30 +457,7 @@ pub const BrewApi = struct {
         return buf;
     }
 
-    /// TTL-bypass names-index read. Offline mode falls through here when
-    /// the freshness-gated `readNamesIndex` rejects a stale snapshot —
-    /// stale-but-present beats OfflineRequired when the user just wants
-    /// to grep their last warmed list.
-    fn readNamesIndexUnchecked(self: *BrewApi, key: []const u8) ?[]const u8 {
-        var path_buf: [512]u8 = undefined;
-        const p = std.fmt.bufPrint(&path_buf, "{s}/api/names_{s}.txt", .{ self.cache_dir, key }) catch return null;
-
-        const file = std.Io.Dir.cwd().openFile(self.io, p, .{}) catch return null;
-        defer file.close(self.io);
-        const s = file.stat(self.io) catch return null;
-        const buf = self.allocator.alloc(u8, s.size) catch return null;
-        const n = file.readPositionalAll(self.io, buf, 0) catch {
-            self.allocator.free(buf);
-            return null;
-        };
-        if (n < buf.len) {
-            self.allocator.free(buf);
-            return null;
-        }
-        return buf;
-    }
-
-    fn writeNamesIndex(self: *const BrewApi, key: []const u8, data: []const u8) void {
+    fn writeIndexFile(self: *const BrewApi, infix: []const u8, key: []const u8, data: []const u8) void {
         var dir_buf: [512]u8 = undefined;
         const dir = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
         std.Io.Dir.createDirAbsolute(self.io, dir, .default_dir) catch |e| switch (e) {
@@ -334,7 +466,7 @@ pub const BrewApi = struct {
         };
 
         var path_buf: [512]u8 = undefined;
-        const p = std.fmt.bufPrint(&path_buf, "{s}/api/names_{s}.txt", .{ self.cache_dir, key }) catch return;
+        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return;
 
         const f = std.Io.Dir.cwd().createFile(self.io, p, .{}) catch return;
         defer f.close(self.io);
@@ -582,4 +714,71 @@ test "buildNamesIndexUrl emits formula vs cask paths against the override" {
 test "buildFormulaUrl returns OutOfMemory when the buffer can't hold the URL" {
     var tiny: [4]u8 = undefined;
     try testing.expectError(ApiError.OutOfMemory, BrewApi.buildFormulaUrl(&tiny, "https://example.com", "wget"));
+}
+
+// ── extractVersions: the outdated-check producer ──────────────────────
+
+test "extractVersions emits name<TAB>stable<TAB>revision per formula entry" {
+    const body =
+        \\[{"name":"wget","versions":{"stable":"1.21.4"},"revision":0},
+        \\ {"name":"openssl@3","versions":{"stable":"3.2.1"},"revision":2}]
+    ;
+    const out = try extractVersions(testing.allocator, .formula, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("wget\t1.21.4\t0\nopenssl@3\t3.2.1\t2\n", out);
+}
+
+test "extractVersions defaults a missing revision to 0" {
+    const body =
+        \\[{"name":"jq","versions":{"stable":"1.7"}}]
+    ;
+    const out = try extractVersions(testing.allocator, .formula, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("jq\t1.7\t0\n", out);
+}
+
+test "extractVersions skips entries with no stable version and tolerates unknown fields" {
+    // Third-party JSON: a renamed/absent field must not crash the parse,
+    // and an unversioned entry is dropped rather than emitted empty.
+    const body =
+        \\[{"name":"nostable","desc":"x","revision":0},
+        \\ {"name":"good","versions":{"stable":"2.0"},"extra":true}]
+    ;
+    const out = try extractVersions(testing.allocator, .formula, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("good\t2.0\t0\n", out);
+}
+
+test "extractVersions reads a cask's top-level version with revision 0" {
+    const body =
+        \\[{"token":"firefox","version":"125.0"}]
+    ;
+    const out = try extractVersions(testing.allocator, .cask, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("firefox\t125.0\t0\n", out);
+}
+
+test "extractVersions drops entries whose name or version embeds a delimiter" {
+    // Hostile / schema-shifted JSON: a tab or newline in a field would
+    // corrupt the line-delimited side-car the consumer splits on. `\t`/`\n`
+    // here are JSON escapes, so the parsed strings carry real control chars.
+    const body =
+        \\[{"name":"a\tb","versions":{"stable":"1.0"}},
+        \\ {"name":"nl","versions":{"stable":"2.0\n3.0"}},
+        \\ {"name":"ok","versions":{"stable":"4.0"}}]
+    ;
+    const out = try extractVersions(testing.allocator, .formula, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("ok\t4.0\t0\n", out);
+}
+
+test "extractVersions clamps a negative revision to 0" {
+    // A negative revision can't match any installed keg path; emit 0 so the
+    // side-car never carries a value the consumer would format oddly.
+    const body =
+        \\[{"name":"x","versions":{"stable":"1.0"},"revision":-3}]
+    ;
+    const out = try extractVersions(testing.allocator, .formula, body);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("x\t1.0\t0\n", out);
 }
