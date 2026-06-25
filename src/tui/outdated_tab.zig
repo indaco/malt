@@ -84,9 +84,9 @@ pub fn selectedCount(s: *const State) usize {
 }
 
 /// Write the checked, non-pinned package names into `out` (caller sizes it to at
-/// least `selectedCount`) in item order; returns the count written. The shell
-/// turns this into `mt upgrade <names...>`. Pinned rows are excluded even if a
-/// stray bit is set, so a held-back package can never reach the upgrade.
+/// least `selectedCount`) in item order; returns the count written. Pinned rows
+/// are excluded even if a stray bit is set, so a held-back package can never
+/// reach an upgrade.
 pub fn selectedNames(s: *const State, out: [][]const u8) usize {
     var n: usize = 0;
     for (s.items, 0..) |p, i| {
