@@ -167,11 +167,11 @@ fn buildVersionMap(
 /// True when `row` resolves against the bulk version map: every formula,
 /// and any cask from the core tap (or with no tap). Non-core tap casks
 /// fall through to the per-HEAD `.rb` path the bulk dump can't cover.
-fn isCorePathRow(kind: Kind, row: KegRow) bool {
-    return switch (kind) {
-        .formula => true,
-        .cask => if (row.tap) |t| install_args_mod.isCoreTap(t) else true,
-    };
+/// Core rows (no tap or the homebrew core tap) resolve from the bulk version
+/// map; third-party-tap rows fall through to the per-HEAD `.rb` path. Only the
+/// tap decides — kind-independent.
+fn isCorePathRow(row: KegRow) bool {
+    return if (row.tap) |t| install_args_mod.isCoreTap(t) else true;
 }
 
 /// Resolve one keg against its version-map entry. Sets `found` to map
@@ -267,7 +267,7 @@ fn collectOutdated(
     // can use it; a fetch error (offline/down/schema) degrades to per-keg.
     var has_core = false;
     for (kegs) |row| {
-        if (isCorePathRow(kind, row)) {
+        if (isCorePathRow(row)) {
             has_core = true;
             break;
         }
@@ -295,7 +295,7 @@ fn collectOutdated(
         var core_rows: usize = 0;
         var matched: usize = 0;
         for (kegs, 0..) |row, i| {
-            if (!isCorePathRow(kind, row)) {
+            if (!isCorePathRow(row)) {
                 needs_fetch[i] = true; // tap cask → per-HEAD
                 continue;
             }
@@ -314,7 +314,7 @@ fn collectOutdated(
         if (core_rows > 0 and matched == 0) {
             warnVersionMapDegraded(kind, core_rows);
             for (kegs, 0..) |row, i| {
-                if (isCorePathRow(kind, row)) needs_fetch[i] = true;
+                if (isCorePathRow(row)) needs_fetch[i] = true;
             }
         }
     } else {
@@ -417,6 +417,14 @@ fn upstreamLatest(
 ) ?[]u8 {
     return switch (kind) {
         .formula => blk: {
+            // Pre-route third-party-tap formulae to the tap HEAD: the core API
+            // 404s for them, same as tap casks, so the API path would silently
+            // drop the row from the audit.
+            if (row.tap) |tap_label| {
+                if (!install_args_mod.isCoreTap(tap_label)) {
+                    break :blk tapFormulaLatestVersion(alloc, head_cache, db, io, environ, tap_label, row.name, api.offline);
+                }
+            }
             const json = api.fetchFormula(row.name) catch break :blk null;
             defer alloc.free(json);
             break :blk parseFormulaLatest(alloc, json);
@@ -695,21 +703,22 @@ const HeadResolverCtx = struct {
     }
 };
 
-/// Resolve a tap cask's upstream version by fetching the owning tap's
-/// `Casks/<token>.rb` at fresh HEAD and reading the `version` field.
-/// Returns null on any failure so the caller leaves the row alone, but
-/// emits a one-line warning describing what went wrong — users (and
-/// the regression-script skip-guards) can tell "really up to date" from
-/// "couldn't reach the tap".
-fn tapCaskLatestVersion(
+/// Resolve a tap package's upstream version from its `.rb` at the tap HEAD.
+/// `subtrees` are tried in order (e.g. `Formula/` then a root `<name>.rb`); the
+/// first 200 wins. Null on any failure, with a one-line warning so the user
+/// (and the regression skip-guards) can tell "up to date" from "couldn't reach
+/// the tap". `noun` only colours the unsupported-DSL warning.
+fn tapRawLatestVersion(
     alloc: std.mem.Allocator,
     head_cache: *TapHeadResolve,
     db: *sqlite.Database,
     io: std.Io,
     environ: std.process.Environ,
     tap_label: []const u8,
-    token: []const u8,
+    name: []const u8,
     offline: bool,
+    subtrees: []const forge.RawKind,
+    noun: []const u8,
 ) ?[]u8 {
     const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse return null;
     if (slash == 0 or slash == tap_label.len - 1) return null;
@@ -722,7 +731,7 @@ fn tapCaskLatestVersion(
         .resolve = HeadResolverCtx.resolve,
     }) orelse return null;
 
-    // The .rb fetch is per-cask (different token per row), so it stays
+    // The .rb fetch is per-package (different name per row), so it stays
     // out of the cache — only the tap-HEAD resolve dedups.
     const urls = tap_mod.resolveTapBaseUrls(alloc, db, tap_label) catch return null;
     defer urls.deinit(alloc);
@@ -731,26 +740,80 @@ fn tapCaskLatestVersion(
     defer http.deinit();
     http.offline = offline;
 
-    var rb_url_buf: [512]u8 = undefined;
-    const rb_url = forge.rawFileUrl(&rb_url_buf, urls.forge, urls.raw_base, fresh_sha, .cask, token) catch return null;
+    return tapVersionFromSubtrees(alloc, &http, environ, urls.forge, urls.raw_base, fresh_sha, name, subtrees, noun, tap_label);
+}
 
-    var rb_resp = tap_mod.getRawFile(&http, environ, urls.forge, rb_url) catch {
-        warnTapCaskFetchFailed(tap_label, token, "Network failure while reading the .rb");
-        return null;
-    };
-    defer rb_resp.deinit();
-    if (rb_resp.status != 200) {
-        var status_buf: [64]u8 = undefined;
-        const reason = std.fmt.bufPrint(&status_buf, "GitHub returned status {d} for the .rb", .{rb_resp.status}) catch "GitHub returned a non-200 status for the .rb";
-        warnTapCaskFetchFailed(tap_label, token, reason);
-        return null;
+/// Fetch the `.rb` from each `subtrees` layout in order (first 200 wins) and
+/// parse its `version`, else warn + null. Split out from `tapRawLatestVersion`
+/// so the per-layout fetch loop can be driven by a localhost server in tests,
+/// without the live HEAD resolve.
+fn tapVersionFromSubtrees(
+    alloc: std.mem.Allocator,
+    http: *client_mod.HttpClient,
+    environ: std.process.Environ,
+    forge_kind: forge.Forge,
+    raw_base: []const u8,
+    sha: []const u8,
+    name: []const u8,
+    subtrees: []const forge.RawKind,
+    noun: []const u8,
+    tap_label: []const u8,
+) ?[]u8 {
+    var last_status: u16 = 0;
+    for (subtrees) |subtree| {
+        var rb_url_buf: [512]u8 = undefined;
+        const rb_url = forge.rawFileUrl(&rb_url_buf, forge_kind, raw_base, sha, subtree, name) catch continue;
+
+        var rb_resp = tap_mod.getRawFile(http, environ, forge_kind, rb_url) catch {
+            warnTapCaskFetchFailed(tap_label, name, "Network failure while reading the .rb");
+            return null;
+        };
+        defer rb_resp.deinit();
+        if (rb_resp.status == 200) {
+            const rb_info = install_rb_parse_mod.parseRubyFormula(rb_resp.body) orelse {
+                var dsl_buf: [96]u8 = undefined;
+                const reason = std.fmt.bufPrint(&dsl_buf, "unsupported Ruby DSL shape — use `brew upgrade` for this {s}", .{noun}) catch "unsupported Ruby DSL shape";
+                warnTapCaskFetchFailed(tap_label, name, reason);
+                return null;
+            };
+            return alloc.dupe(u8, rb_info.version) catch null;
+        }
+        // Non-200 (likely a 404 for this layout) — try the next subtree.
+        last_status = rb_resp.status;
     }
 
-    const rb_info = install_rb_parse_mod.parseRubyFormula(rb_resp.body) orelse {
-        warnTapCaskFetchFailed(tap_label, token, "unsupported Ruby DSL shape — use `brew upgrade` for this cask");
-        return null;
-    };
-    return alloc.dupe(u8, rb_info.version) catch null;
+    var status_buf: [64]u8 = undefined;
+    const reason = std.fmt.bufPrint(&status_buf, "GitHub returned status {d} for the .rb", .{last_status}) catch "GitHub returned a non-200 status for the .rb";
+    warnTapCaskFetchFailed(tap_label, name, reason);
+    return null;
+}
+
+/// Tap cask: `Casks/<token>.rb` at the tap HEAD.
+fn tapCaskLatestVersion(
+    alloc: std.mem.Allocator,
+    head_cache: *TapHeadResolve,
+    db: *sqlite.Database,
+    io: std.Io,
+    environ: std.process.Environ,
+    tap_label: []const u8,
+    token: []const u8,
+    offline: bool,
+) ?[]u8 {
+    return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, token, offline, &.{.cask}, "cask");
+}
+
+/// Tap formula: `Formula/<name>.rb`, falling back to a root-layout `<name>.rb`.
+fn tapFormulaLatestVersion(
+    alloc: std.mem.Allocator,
+    head_cache: *TapHeadResolve,
+    db: *sqlite.Database,
+    io: std.Io,
+    environ: std.process.Environ,
+    tap_label: []const u8,
+    name: []const u8,
+    offline: bool,
+) ?[]u8 {
+    return tapRawLatestVersion(alloc, head_cache, db, io, environ, tap_label, name, offline, &.{ .formula, .formula_root }, "formula");
 }
 
 /// Serial-path single-row check. Returns a caller-owned latest-version
@@ -1087,14 +1150,79 @@ test "buildVersionMap parses tab-delimited entries with stable and revision" {
     try std.testing.expectEqual(@as(i64, 2), o.revision);
 }
 
-test "isCorePathRow sends formulae and core casks to the map, tap casks per-HEAD" {
-    // Formulae always use the map, tap attribution notwithstanding.
-    try std.testing.expect(isCorePathRow(.formula, .{ .name = "wget", .version = "1" }));
-    try std.testing.expect(isCorePathRow(.formula, .{ .name = "x", .version = "1", .tap = "user/repo" }));
-    // Casks: no tap or the core tap → map; a third-party tap → per-HEAD.
-    try std.testing.expect(isCorePathRow(.cask, .{ .name = "firefox", .version = "1" }));
-    try std.testing.expect(isCorePathRow(.cask, .{ .name = "f", .version = "1", .tap = "homebrew/cask" }));
-    try std.testing.expect(!isCorePathRow(.cask, .{ .name = "f", .version = "1", .tap = "user/repo" }));
+test "isCorePathRow routes core rows to the map and third-party taps per-HEAD" {
+    // No tap or the homebrew core tap → bulk version map (formula and cask alike).
+    try std.testing.expect(isCorePathRow(.{ .name = "wget", .version = "1" }));
+    try std.testing.expect(isCorePathRow(.{ .name = "x", .version = "1", .tap = "homebrew/core" }));
+    try std.testing.expect(isCorePathRow(.{ .name = "firefox", .version = "1" }));
+    try std.testing.expect(isCorePathRow(.{ .name = "f", .version = "1", .tap = "homebrew/cask" }));
+    // Third-party tap → per-HEAD `.rb`, for formulae as well as casks.
+    try std.testing.expect(!isCorePathRow(.{ .name = "x", .version = "1", .tap = "user/repo" }));
+    try std.testing.expect(!isCorePathRow(.{ .name = "f", .version = "1", .tap = "user/repo" }));
+}
+
+// Serves 404 to the first request (the `Formula/<name>.rb` probe), then the
+// root-layout `.rb` to the second — exercising the `.formula_root` fallback.
+const RbFallbackServer = struct {
+    io: std.Io,
+    listener: *std.Io.net.Server,
+    root_rb: []const u8,
+    idx: std.atomic.Value(usize),
+
+    fn serve(self: *RbFallbackServer) void {
+        while (true) {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            var rbuf: [16 * 1024]u8 = undefined;
+            var wbuf: [16 * 1024]u8 = undefined;
+            var reader = stream.reader(self.io, &rbuf);
+            var writer = stream.writer(self.io, &wbuf);
+            var srv = std.http.Server.init(&reader.interface, &writer.interface);
+            var req = srv.receiveHead() catch return;
+            const first = self.idx.fetchAdd(1, .monotonic) == 0;
+            if (first) {
+                req.respond("", .{ .status = .not_found }) catch return; // Formula/ miss
+            } else {
+                req.respond(self.root_rb, .{ .status = .ok }) catch return; // root hit
+            }
+        }
+    }
+};
+
+test "tapVersionFromSubtrees falls back to the root layout and parses the version" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    // Root-layout formula; no literal `version`, so the version is derived from
+    // the url (the koekeishiya/felixkratz shape). url + sha256 are required.
+    const root_rb =
+        \\class Pkg < Formula
+        \\  url "https://x/releases/download/v1.2.3/pkg.tar.gz"
+        \\  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+        \\end
+    ;
+    var srv = RbFallbackServer{ .io = io, .listener = &listener, .root_rb = root_rb, .idx = std.atomic.Value(usize).init(0) };
+    const thread = try std.Thread.spawn(.{}, RbFallbackServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, "formula", "user/repo");
+    listener.deinit(io);
+    thread.join();
+
+    defer if (v) |vv| std.testing.allocator.free(vv);
+    try std.testing.expect(v != null);
+    try std.testing.expectEqualStrings("1.2.3", v.?); // resolved from the root `.rb`
 }
 
 test "buildVersionMap skips malformed lines without aborting" {
