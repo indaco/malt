@@ -60,6 +60,47 @@ pub fn pinSkip(db: *sqlite.Database, name: []const u8, force: bool, audit_mode: 
     return pin_mod.isPinned(db, name);
 }
 
+/// Aggregate outcome counters for a bulk `mt upgrade` run. The *presence*
+/// of a `*Tally` (vs `null`) threaded into the per-package functions is
+/// also the bulk-mode signal: it suppresses the per-package "already
+/// current" line so a mostly-current machine summarises instead of
+/// narrating every row. The named path passes `null` and keeps its lines.
+const Tally = struct {
+    upgraded: usize = 0,
+    would_upgrade: usize = 0,
+    up_to_date: usize = 0,
+    pinned: usize = 0,
+    failed: usize = 0,
+
+    fn checked(self: Tally) usize {
+        return self.upgraded + self.would_upgrade + self.up_to_date + self.pinned + self.failed;
+    }
+
+    /// Render the one-line footer into `buf`. Dry-run swaps "upgraded" for
+    /// "would upgrade"; the failed clause appears only when something failed.
+    /// `·` (U+00B7) separators match the dim-detail style and render under
+    /// both `NO_COLOR` and `MALT_NO_EMOJI`.
+    fn summaryLine(self: Tally, buf: []u8, dry_run: bool) []const u8 {
+        const action_count = if (dry_run) self.would_upgrade else self.upgraded;
+        const action_word = if (dry_run) "would upgrade" else "upgraded";
+        const head = std.fmt.bufPrint(buf, "{d} checked · {d} {s} · {d} up to date · {d} pinned", .{
+            self.checked(), action_count, action_word, self.up_to_date, self.pinned,
+        }) catch return buf[0..0];
+        if (self.failed == 0) return head;
+        const tail = std.fmt.bufPrint(buf[head.len..], " · {d} failed", .{self.failed}) catch return head;
+        return buf[0 .. head.len + tail.len];
+    }
+};
+
+/// Print the bulk-run footer once, after both the formula and cask passes.
+/// Silent when nothing was checked (empty prefix) so it never prints a
+/// `0 checked …` line under the existing "No formulas installed." message.
+fn printSummary(tally: Tally, dry_run: bool) void {
+    if (tally.checked() == 0) return;
+    var buf: [160]u8 = undefined;
+    output.notice("{s}", .{tally.summaryLine(&buf, dry_run)});
+}
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "upgrade")) return;
 
@@ -150,30 +191,35 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     var any_failed = false;
 
     if (names.items.len == 0) {
-        // Upgrade all
+        // Upgrade all. A live `*Tally` threaded down both passes is also
+        // the bulk-mode signal: per-package "already current" lines are
+        // suppressed in favour of one summary footer printed below.
+        var tally: Tally = .{};
         if (!cask_only) {
-            upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps) catch {
+            upgradeAllFormulas(ctx, allocator, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, &tally) catch {
                 any_failed = true;
             };
         }
         if (!formula_only) {
-            upgradeAllCasks(ctx, allocator, &db, &api, prefix, dry_run, force, pinned_only) catch {
+            upgradeAllCasks(ctx, allocator, &db, &api, prefix, dry_run, force, pinned_only, &tally) catch {
                 any_failed = true;
             };
         }
+        printSummary(tally, dry_run);
     } else {
         // Upgrade each named package — formula first, then cask. A failed
         // or aborted name aggregates into `any_failed` and the loop moves
-        // on, so one bad name never abandons the rest of the batch.
+        // on, so one bad name never abandons the rest of the batch. `null`
+        // tally keeps each named package's per-package line and no footer.
         for (names.items) |name| {
             if (!cask_only and isFormulaInstalled(&db, name)) {
-                upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps) catch {
+                upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, null) catch {
                     any_failed = true;
                 };
                 continue;
             }
             // Not a formula (or --cask): try cask
-            upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only) catch {
+            upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only, null) catch {
                 any_failed = true;
             };
         }
@@ -207,15 +253,19 @@ fn upgradeFormula(
     force: bool,
     audit_mode: bool,
     isolate_deps: bool,
+    tally: ?*Tally,
 ) !void {
     // Honor pins before any network or filesystem work — the whole
     // point is that a pinned keg never gets touched. Audit mode
     // (`--pinned --dry-run`) walks pinned kegs end-to-end so the user
     // sees the drift, but the dry-run gate still blocks any mutation.
     if (pinSkip(db, name, force, audit_mode)) {
-        output.dim("{s} is pinned, skipped", .{name});
+        // `skip` (not `dim`) so the held-back pin shares the `·` glyph of
+        // the up-to-date family instead of the `▸` upgrade glyph.
+        output.skip("{s} is pinned, skipped", .{name});
         // Distinguishes "skipped by policy" from "command never ran".
         output.emitNdjsonEvent(.pinned, name, null);
+        if (tally) |t| t.pinned += 1;
         return;
     }
 
@@ -253,7 +303,7 @@ fn upgradeFormula(
     if (!install_args_mod.isCoreTap(tap_label)) {
         const tap_owned = allocator.dupe(u8, tap_label) catch return error.Aborted;
         defer allocator.free(tap_owned);
-        return upgradeTapFormula(ctx, allocator, name, tap_owned, db, prefix, dry_run, force, audit_mode);
+        return upgradeTapFormula(ctx, allocator, name, tap_owned, db, prefix, dry_run, force, audit_mode, tally);
     }
 
     // Reconstruct the revision-aware path label for the old keg so
@@ -274,14 +324,17 @@ fn upgradeFormula(
     };
     defer formula.deinit();
 
-    // Compare versions
+    // Compare versions. On the bulk path (tally present) the "already
+    // current" line is suppressed — the footer tallies it instead — but the
+    // NDJSON event is always emitted so the machine stream is unchanged.
     if (std.mem.eql(u8, old_pkg_version, formula.pkg_version)) {
-        output.skip("{s} is already at latest version {s}", .{ name, formula.pkg_version });
+        if (tally) |t| t.up_to_date += 1 else output.skip("{s} is already at latest version {s}", .{ name, formula.pkg_version });
         output.emitNdjsonEvent(.up_to_date, name, null);
         return;
     }
 
     if (dry_run) {
+        if (tally) |t| t.would_upgrade += 1;
         output.info("Dry run: would upgrade {s} {s} -> {s}", .{ name, old_version, formula.pkg_version });
         // Same vocabulary across install/upgrade/migrate — one parser fits all.
         output.emitNdjsonEvent(.would_install, name, null);
@@ -437,6 +490,7 @@ fn upgradeFormula(
     }
 
     output.success("{s} upgraded to {s}", .{ name, formula.pkg_version });
+    if (tally) |t| t.upgraded += 1;
 }
 
 /// Upgrade a tap-installed formula. The reported `tap_label` is
@@ -456,10 +510,12 @@ fn upgradeTapFormula(
     dry_run: bool,
     force: bool,
     audit_mode: bool,
+    tally: ?*Tally,
 ) !void {
     if (pinSkip(db, name, force, audit_mode)) {
-        output.dim("{s} is pinned, skipped", .{name});
+        output.skip("{s} is pinned, skipped", .{name});
         output.emitNdjsonEvent(.pinned, name, null);
+        if (tally) |t| t.pinned += 1;
         return;
     }
 
@@ -506,12 +562,13 @@ fn upgradeTapFormula(
     const same_commit = if (cached_sha_opt) |c| std.mem.eql(u8, c, fresh_sha) else false;
 
     if (!force and same_commit) {
-        output.skip("{s} is already at latest tap commit", .{name});
+        if (tally) |t| t.up_to_date += 1 else output.skip("{s} is already at latest tap commit", .{name});
         output.emitNdjsonEvent(.up_to_date, name, null);
         return;
     }
 
     if (dry_run) {
+        if (tally) |t| t.would_upgrade += 1;
         const short_len = @min(@as(usize, 8), fresh_sha.len);
         output.info("Dry run: would refresh tap {s} to {s} for {s}", .{ tap_label, fresh_sha[0..short_len], name });
         output.emitNdjsonEvent(.would_install, name, null);
@@ -547,6 +604,7 @@ fn upgradeTapFormula(
         output.err("Failed to upgrade tap formula {s}", .{full_name});
         return error.Aborted;
     };
+    if (tally) |t| t.upgraded += 1;
 }
 
 /// Distinguishes "this tap doesn't own the cask" from "the upgrade
@@ -571,6 +629,7 @@ fn upgradeRoutedTapCask(
     prefix: [:0]const u8,
     dry_run: bool,
     force: bool,
+    tally: ?*Tally,
 ) TapRouteError!void {
     const slash = std.mem.indexOfScalar(u8, tap_label, '/') orelse return error.Aborted;
     if (slash == 0 or slash == tap_label.len - 1) return error.Aborted;
@@ -614,12 +673,13 @@ fn upgradeRoutedTapCask(
     const rb_info = install_rb_parse_mod.parseRubyFormula(rb_resp.body) orelse return error.NotInTap;
 
     if (!force and std.mem.eql(u8, installed_version, rb_info.version)) {
-        output.skip("{s} is already at latest version {s}", .{ token, rb_info.version });
+        if (tally) |t| t.up_to_date += 1 else output.skip("{s} is already at latest version {s}", .{ token, rb_info.version });
         output.emitNdjsonEvent(.up_to_date, token, null);
         return;
     }
 
     if (dry_run) {
+        if (tally) |t| t.would_upgrade += 1;
         output.info("Dry run: would upgrade cask {s} {s} -> {s}", .{ token, installed_version, rb_info.version });
         output.emitNdjsonEvent(.would_install, token, null);
         return;
@@ -688,6 +748,7 @@ fn upgradeRoutedTapCask(
     };
 
     if (was_pinned) _ = pin_mod.setPinned(db, token, true) catch {};
+    if (tally) |t| t.upgraded += 1;
 }
 
 /// Backfill the `casks.tap` column once we've discovered the owning tap
@@ -717,6 +778,7 @@ fn upgradeTapCaskFallback(
     prefix: [:0]const u8,
     dry_run: bool,
     force: bool,
+    tally: ?*Tally,
 ) bool {
     const taps = tap_mod.list(allocator, db) catch return false;
     defer {
@@ -732,7 +794,7 @@ fn upgradeTapCaskFallback(
     for (taps) |t| {
         if (install_args_mod.isCoreTap(t.name)) continue;
 
-        upgradeRoutedTapCask(ctx, allocator, token, t.name, installed_version, db, prefix, dry_run, force) catch |e| switch (e) {
+        upgradeRoutedTapCask(ctx, allocator, token, t.name, installed_version, db, prefix, dry_run, force, tally) catch |e| switch (e) {
             // Either "tap doesn't own this token" or "something went
             // wrong with this tap" — neither is fatal to the probe.
             error.NotInTap, error.Aborted => continue,
@@ -837,6 +899,7 @@ fn upgradeAllFormulas(
     force: bool,
     pinned_only: bool,
     isolate_deps: bool,
+    tally: *Tally,
 ) !void {
     const sql: [:0]const u8 = if (pinned_only)
         "SELECT name, version FROM kegs WHERE pinned = 1 ORDER BY name;"
@@ -875,8 +938,9 @@ fn upgradeAllFormulas(
     defer failed_names.deinit(allocator);
 
     for (names.items) |name| {
-        upgradeFormula(ctx, allocator, name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps) catch {
+        upgradeFormula(ctx, allocator, name, db, api, http, prefix, dry_run, force, pinned_only, isolate_deps, tally) catch {
             failed_count += 1;
+            tally.failed += 1;
             // failed_count is the authoritative counter; list is for UX only.
             failed_names.append(allocator, name) catch {};
         };
@@ -894,10 +958,11 @@ fn upgradeAllFormulas(
 // Cask upgrade
 // ---------------------------------------------------------------------------
 
-fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, audit_mode: bool) !void {
+fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const u8, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, audit_mode: bool, tally: ?*Tally) !void {
     if (pinSkip(db, token, force, audit_mode)) {
-        output.dim("{s} is pinned, skipped", .{token});
+        output.skip("{s} is pinned, skipped", .{token});
         output.emitNdjsonEvent(.pinned, token, null);
+        if (tally) |t| t.pinned += 1;
         return;
     }
 
@@ -913,7 +978,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // core-API casks fall through to the API path below.
     if (installed.tap()) |tap_label| {
         if (!install_args_mod.isCoreTap(tap_label)) {
-            upgradeRoutedTapCask(ctx, allocator, token, tap_label, installed.version(), db, prefix, dry_run, force) catch |e| switch (e) {
+            upgradeRoutedTapCask(ctx, allocator, token, tap_label, installed.version(), db, prefix, dry_run, force, tally) catch |e| switch (e) {
                 error.NotInTap => {
                     output.err("Cask {s} is no longer in tap {s}", .{ token, tap_label });
                     return error.Aborted;
@@ -929,7 +994,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // third-party tap if the core API 404s — the probe also backfills
     // `casks.tap` for the next invocation.
     const cask_json = api.fetchCask(token) catch {
-        if (upgradeTapCaskFallback(ctx, allocator, token, installed.version(), db, prefix, dry_run, force)) return;
+        if (upgradeTapCaskFallback(ctx, allocator, token, installed.version(), db, prefix, dry_run, force, tally)) return;
         output.err("Could not fetch cask info for {s}", .{token});
         return error.Aborted;
     };
@@ -943,12 +1008,13 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
 
     const installed_version = installed.version();
     if (std.mem.eql(u8, installed_version, parsed_cask.version)) {
-        output.skip("{s} is already at latest version {s}", .{ token, parsed_cask.version });
+        if (tally) |t| t.up_to_date += 1 else output.skip("{s} is already at latest version {s}", .{ token, parsed_cask.version });
         output.emitNdjsonEvent(.up_to_date, token, null);
         return;
     }
 
     if (dry_run) {
+        if (tally) |t| t.would_upgrade += 1;
         output.info("Dry run: would upgrade cask {s} {s} -> {s}", .{ token, installed_version, parsed_cask.version });
         output.emitNdjsonEvent(.would_install, token, null);
         return;
@@ -1023,9 +1089,10 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     }
 
     output.success("{s} upgraded to {s}", .{ token, parsed_cask.version });
+    if (tally) |t| t.upgraded += 1;
 }
 
-fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, pinned_only: bool) !void {
+fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite.Database, api: *api_mod.BrewApi, prefix: [:0]const u8, dry_run: bool, force: bool, pinned_only: bool, tally: *Tally) !void {
     const sql: [:0]const u8 = if (pinned_only)
         "SELECT token, version FROM casks WHERE pinned = 1 ORDER BY token;"
     else
@@ -1062,8 +1129,9 @@ fn upgradeAllCasks(ctx: *const AppCtx, allocator: std.mem.Allocator, db: *sqlite
     defer failed_tokens.deinit(allocator);
 
     for (tokens.items) |token| {
-        upgradeCask(ctx, allocator, token, db, api, prefix, dry_run, force, pinned_only) catch {
+        upgradeCask(ctx, allocator, token, db, api, prefix, dry_run, force, pinned_only, tally) catch {
             failed_count += 1;
+            tally.failed += 1;
             // failed_count is authoritative; list is for UX only.
             failed_tokens.append(allocator, token) catch {};
         };
@@ -1106,3 +1174,95 @@ pub fn collectMissingDepNames(
 // `collectMissingDepNames` now consults the filesystem (cellar_path +
 // opt symlink), so coverage lives in `tests/upgrade_test.zig` where a
 // real MALT_PREFIX fixture is available.
+
+const color = @import("../ui/color.zig");
+
+test "Tally.checked sums every outcome bucket" {
+    const t: Tally = .{ .upgraded = 1, .would_upgrade = 2, .up_to_date = 45, .pinned = 1, .failed = 3 };
+    try std.testing.expectEqual(@as(usize, 52), t.checked());
+}
+
+test "summaryLine renders a real run with no failures" {
+    var buf: [128]u8 = undefined;
+    const t: Tally = .{ .upgraded = 1, .up_to_date = 45, .pinned = 1 };
+    try std.testing.expectEqualStrings(
+        "47 checked · 1 upgraded · 45 up to date · 1 pinned",
+        t.summaryLine(&buf, false),
+    );
+}
+
+test "summaryLine swaps in 'would upgrade' under dry-run" {
+    var buf: [128]u8 = undefined;
+    const t: Tally = .{ .would_upgrade = 1, .up_to_date = 45, .pinned = 1 };
+    try std.testing.expectEqualStrings(
+        "47 checked · 1 would upgrade · 45 up to date · 1 pinned",
+        t.summaryLine(&buf, true),
+    );
+}
+
+test "summaryLine appends a failed clause only when something failed" {
+    var buf: [128]u8 = undefined;
+    const t: Tally = .{ .upgraded = 1, .up_to_date = 44, .pinned = 1, .failed = 1 };
+    try std.testing.expectEqualStrings(
+        "47 checked · 1 upgraded · 44 up to date · 1 pinned · 1 failed",
+        t.summaryLine(&buf, false),
+    );
+}
+
+test "summaryLine renders an all-failed run" {
+    var buf: [128]u8 = undefined;
+    const t: Tally = .{ .failed = 3 };
+    try std.testing.expectEqualStrings(
+        "3 checked · 0 upgraded · 0 up to date · 0 pinned · 3 failed",
+        t.summaryLine(&buf, false),
+    );
+}
+
+test "printSummary stays silent when nothing was checked" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(false);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer {
+        output.endStderrCapture();
+        output.setQuiet(prior_quiet);
+    }
+
+    printSummary(.{}, false);
+    try std.testing.expectEqualStrings("", buf.items);
+}
+
+test "printSummary emits one notice footer for a non-empty run" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const prior_quiet = output.isQuiet();
+    color.setForTest(false, false);
+    output.setQuiet(false);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer {
+        output.endStderrCapture();
+        color.setForTest(null, null);
+        output.setQuiet(prior_quiet);
+    }
+
+    printSummary(.{ .upgraded = 1, .up_to_date = 45, .pinned = 1 }, false);
+    try std.testing.expectEqualStrings("  i 47 checked · 1 upgraded · 45 up to date · 1 pinned\n", buf.items);
+}
+
+// `--quiet` predates this footer and stays the one knob that silences
+// success/notice lines — the summary must vanish under it too.
+test "printSummary respects --quiet" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const prior_quiet = output.isQuiet();
+    output.setQuiet(true);
+    output.beginStderrCapture(std.testing.allocator, &buf);
+    defer {
+        output.endStderrCapture();
+        output.setQuiet(prior_quiet);
+    }
+
+    printSummary(.{ .upgraded = 1, .up_to_date = 2 }, false);
+    try std.testing.expectEqualStrings("", buf.items);
+}
