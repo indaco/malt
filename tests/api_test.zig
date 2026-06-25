@@ -11,6 +11,7 @@ const malt = @import("malt");
 const test_io = @import("test_io");
 const api_mod = malt.api;
 const client_mod = malt.client;
+const net = std.Io.net;
 
 test "validateName accepts a simple formula" {
     try api_mod.validateName("wget");
@@ -477,6 +478,149 @@ test "BrewApi.offline defaults to false" {
 
     const api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
     try testing.expect(!api.offline);
+}
+
+// --- versions index (the outdated-check side-car) ---
+
+// Serves its fixture body to every request and counts how many it answered.
+// The loop exits when the listener is closed from the test thread, which
+// unblocks the pending `accept`.
+const CountingServer = struct {
+    io: std.Io,
+    listener: *net.Server,
+    body: []const u8,
+    count: std.atomic.Value(u32),
+
+    fn serve(self: *CountingServer) void {
+        while (true) {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            var rbuf: [16 * 1024]u8 = undefined;
+            var wbuf: [16 * 1024]u8 = undefined;
+            var reader = stream.reader(self.io, &rbuf);
+            var writer = stream.writer(self.io, &wbuf);
+            var srv = std.http.Server.init(&reader.interface, &writer.interface);
+            var req = srv.receiveHead() catch return;
+            req.respond(self.body, .{}) catch return;
+            _ = self.count.fetchAdd(1, .monotonic);
+        }
+    }
+};
+
+test "fetchVersionsIndex returns a fresh pre-seeded side-car without touching the network" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("versions_fresh_hit");
+    defer dir.deinit();
+
+    const seeded = "wget\t1.21.4\t0\njq\t1.7\t0\n";
+    try dir.writeCacheFile("versions_formula.txt", seeded);
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    const out = try api.fetchVersionsIndex(.formula);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(seeded, out);
+}
+
+test "fetchVersionsIndex under offline serves a stale side-car (no TTL gate)" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("versions_offline_stale");
+    defer dir.deinit();
+
+    const seeded = "wget\t1.21.4\t0\n";
+    try dir.writeCacheFile("versions_formula.txt", seeded);
+
+    // Backdate mtime so the freshness gate would reject it.
+    var path_buf: [512]u8 = undefined;
+    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/versions_formula.txt", .{dir.path});
+    const file = try test_io.cwd().openFile(std.Options.debug_io, full, .{ .mode = .write_only });
+    defer file.close(std.Options.debug_io);
+    try file.setTimestamps(std.Options.debug_io, .{
+        .access_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+        .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+    });
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+    const out = try api.fetchVersionsIndex(.formula);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(seeded, out);
+}
+
+test "fetchVersionsIndex under offline returns OfflineRequired on miss" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init("versions_offline_miss");
+    defer dir.deinit();
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+    try testing.expectError(api_mod.ApiError.OfflineRequired, api.fetchVersionsIndex(.formula));
+}
+
+test "a cold names+versions cycle downloads the bulk dump exactly once" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const fixture =
+        \\[{"name":"wget","versions":{"stable":"1.21.4"},"revision":0},
+        \\ {"name":"openssl@3","versions":{"stable":"3.2.1"},"revision":2},
+        \\ {"name":"nostable","revision":0}]
+    ;
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    var srv = CountingServer{
+        .io = io,
+        .listener = &listener,
+        .body = fixture,
+        .count = std.atomic.Value(u32).init(0),
+    };
+    const thread = try std.Thread.spawn(.{}, CountingServer.serve, .{&srv});
+
+    var dir = try TempCacheDir.init("versions_consolidate");
+    defer dir.deinit();
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
+    var base_buf: [64]u8 = undefined;
+    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    // Names first (search's path), then versions. The second call must
+    // read the side-car the first download already wrote — no re-fetch.
+    const names = try api.fetchNamesIndex(.formula);
+    defer testing.allocator.free(names);
+    const versions = try api.fetchVersionsIndex(.formula);
+    defer testing.allocator.free(versions);
+
+    // Stop the server before asserting so a hung join can't mask a result.
+    listener.deinit(io);
+    thread.join();
+
+    try testing.expectEqual(@as(u32, 1), srv.count.load(.monotonic));
+
+    const want_versions = try api_mod.extractVersions(testing.allocator, .formula, fixture);
+    defer testing.allocator.free(want_versions);
+    try testing.expectEqualStrings(want_versions, versions);
+
+    // The search path stays byte-for-byte what extractNames produced.
+    const want_names = try api_mod.extractNames(testing.allocator, .formula, fixture);
+    defer testing.allocator.free(want_names);
+    try testing.expectEqualStrings(want_names, names);
+
+    // invalidateCache wipes api/ wholesale → the versions side-car too.
+    var vpath_buf: [512]u8 = undefined;
+    const vpath = try std.fmt.bufPrint(&vpath_buf, "{s}/api/versions_formula.txt", .{dir.path});
+    try test_io.accessAbsolute(io, vpath, .{});
+    api.invalidateCache();
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, vpath, .{}));
 }
 
 test "readNotFoundCache returns false for stale marker" {
