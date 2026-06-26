@@ -111,32 +111,119 @@ pub fn fenceArgv(
     return wrapped;
 }
 
-/// Resolve a path to its canonical form (resolving symlinks)
-/// and then validate it.
-pub fn validateResolved(
+/// Resolve `path` to its canonical form, or return `fallback` when it can't be
+/// resolved (e.g. it doesn't exist). Used to compare against the *resolved*
+/// keg/prefix so a legitimately symlinked root (macOS `/tmp` → `/private/tmp`)
+/// is not mistaken for an escape.
+fn realPathOr(io: std.Io, path: []const u8, buf: []u8, fallback: []const u8) []const u8 {
+    const n = std.Io.Dir.cwd().realPathFile(io, path, buf) catch return fallback;
+    return buf[0..n];
+}
+
+/// Resolve the nearest existing directory at or above `start` and require it to
+/// stay within the *resolved* keg/prefix. `start == null` (root reached) or a
+/// fully unresolvable chain means nothing exists yet to escape through, so it
+/// passes — the subsequent open/copy simply fails if the path is unusable.
+fn resolvedDirWithinBoundary(
+    io: std.Io,
+    start: ?[]const u8,
+    cellar_path: []const u8,
+    malt_prefix: []const u8,
+) SandboxError!void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var probe: ?[]const u8 = start;
+    const dir_real = while (probe) |p| {
+        // Stop once the walk leaves the literal keg/prefix: nothing inside the
+        // boundary exists yet, so there is no symlink there to redirect us, and
+        // an existing ancestor *above* the boundary (e.g. `/opt`) is not ours to
+        // judge. `validatePath` already confirmed the target itself is in bounds.
+        if (!pathHasPrefix(p, cellar_path) and !pathHasPrefix(p, malt_prefix)) return;
+        const n = std.Io.Dir.cwd().realPathFile(io, p, &buf) catch {
+            probe = std.fs.path.dirname(p);
+            continue;
+        };
+        break buf[0..n];
+    } else return;
+
+    if (containsDotDot(dir_real)) return SandboxError.PathSandboxViolation;
+
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var xbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cellar_real = realPathOr(io, cellar_path, &cbuf, cellar_path);
+    const prefix_real = realPathOr(io, malt_prefix, &xbuf, malt_prefix);
+
+    if (pathHasPrefix(dir_real, cellar_real)) return;
+    if (pathHasPrefix(dir_real, prefix_real)) return;
+    return SandboxError.PathSandboxViolation;
+}
+
+/// Validate a write target whose final component is a *file*: the literal
+/// `validatePath` checks plus a resolved-boundary check on its parent directory.
+/// This closes the intermediate-directory symlink escape (`ln_s "/etc", keg/d`
+/// then a write under `keg/d/...`). The final component itself is left to the
+/// open — an atomic copy replaces it, and `openTargetNoFollow` refuses it via
+/// `O_NOFOLLOW` — so a legitimate in-keg symlink leaf is not falsely rejected
+/// here.
+pub fn validateWriteDir(
     io: std.Io,
     target_path: []const u8,
     cellar_path: []const u8,
     malt_prefix: []const u8,
 ) SandboxError!void {
-    // First validate the literal path
     try validatePath(target_path, cellar_path, malt_prefix);
+    try resolvedDirWithinBoundary(io, std.fs.path.dirname(target_path), cellar_path, malt_prefix);
+}
 
-    // Try to resolve symlinks. If the path doesn't exist yet,
-    // that's fine — just validate the literal path.
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = std.Io.Dir.cwd().realPathFile(io, target_path, &buf) catch {
-        return; // Path doesn't exist yet — literal validation passed
+/// Validate a *directory* that will be written into (cp / cp_r dest). Unlike
+/// `validateWriteDir`, the directory itself is resolved: when copying into `D`, a
+/// symlinked `D` pointing out of the keg is the escape, not a safe replace
+/// target. Used per recursion level so a planted symlink anywhere in the dest
+/// subtree is caught.
+pub fn validateDirTarget(
+    io: std.Io,
+    dir_path: []const u8,
+    cellar_path: []const u8,
+    malt_prefix: []const u8,
+) SandboxError!void {
+    try validatePath(dir_path, cellar_path, malt_prefix);
+    try resolvedDirWithinBoundary(io, dir_path, cellar_path, malt_prefix);
+}
+
+/// How `openTargetNoFollow` opens the leaf. `write` toggles WRONLY vs RDONLY
+/// (chmod only needs a handle to `fchmod`); `create`/`truncate` map to
+/// `O_CREAT`/`O_TRUNC`.
+pub const OpenIntent = struct {
+    write: bool = true,
+    create: bool = false,
+    truncate: bool = false,
+};
+
+/// Open `target_path` without following a final-component symlink, after
+/// `validateWriteDir` confirms the containing directory stays in the keg/prefix.
+/// `O_NOFOLLOW` makes the refusal atomic at the kernel (no lstat→open race);
+/// both an out-of-keg directory and a symlinked leaf map to
+/// `PathSandboxViolation`. Other open failures surface as `OpenError` so callers
+/// keep their swallow-on-IO contract.
+pub fn openTargetNoFollow(
+    io: std.Io,
+    target_path: []const u8,
+    cellar_path: []const u8,
+    malt_prefix: []const u8,
+    intent: OpenIntent,
+) (SandboxError || std.posix.OpenError)!std.Io.File {
+    try validateWriteDir(io, target_path, cellar_path, malt_prefix);
+    const fd = std.posix.openat(std.posix.AT.FDCWD, target_path, .{
+        .ACCMODE = if (intent.write) .WRONLY else .RDONLY,
+        .CREAT = intent.create,
+        .TRUNC = intent.truncate,
+        .CLOEXEC = true,
+        .NOFOLLOW = true,
+    }, 0o666) catch |e| switch (e) { // 0o666 & umask, matching the prior createFileAbsolute default
+        // O_NOFOLLOW yields ELOOP (SymLinkLoop) when the leaf is a symlink.
+        error.SymLinkLoop => return SandboxError.PathSandboxViolation,
+        else => return e,
     };
-    const resolved = buf[0..n];
-
-    // Re-validate the resolved path with the same boundary rules.
-    if (containsDotDot(resolved)) return SandboxError.PathSandboxViolation;
-    if (!pathHasPrefix(resolved, cellar_path) and
-        !pathHasPrefix(resolved, malt_prefix))
-    {
-        return SandboxError.PathSandboxViolation;
-    }
+    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
 test "validateArgv accepts bare command names" {
@@ -210,6 +297,94 @@ test "fenceArgv maps a profile allocation failure to OutOfMemory" {
     try std.testing.expectError(
         FenceError.OutOfMemory,
         fenceArgv(std.testing.failing_allocator, &.{"make"}, "/opt/malt/Cellar/foo/1.0", "/opt/malt"),
+    );
+}
+
+test "openTargetNoFollow writes a normal in-keg file" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bb: [std.fs.max_path_bytes]u8 = undefined;
+    // Resolved root exercises the /tmp → /private/tmp case: a symlinked prefix
+    // must not read as an escape.
+    const keg = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+
+    const target = try std.fs.path.join(alloc, &.{ keg, "out.txt" });
+    defer alloc.free(target);
+
+    const f = try openTargetNoFollow(io, target, keg, keg, .{ .create = true, .truncate = true });
+    {
+        defer f.close(io);
+        try f.writeStreamingAll(io, "ok");
+    }
+    var rb: [8]u8 = undefined;
+    const rf = try std.Io.Dir.openFileAbsolute(io, target, .{});
+    defer rf.close(io);
+    try std.testing.expectEqualStrings("ok", rb[0..try rf.readPositionalAll(io, &rb, 0)]);
+}
+
+test "openTargetNoFollow refuses a final-component symlink out of the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bb: [std.fs.max_path_bytes]u8 = undefined;
+    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    defer alloc.free(keg);
+    const victim = try std.fs.path.join(alloc, &.{ base, "victim" });
+    defer alloc.free(victim);
+    const link = try std.fs.path.join(alloc, &.{ keg, "pwn" });
+    defer alloc.free(link);
+
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    {
+        const vf = try std.Io.Dir.createFileAbsolute(io, victim, .{});
+        defer vf.close(io);
+        try vf.writeStreamingAll(io, "PRECIOUS");
+    }
+    try std.Io.Dir.symLinkAbsolute(io, victim, link, .{});
+
+    try std.testing.expectError(
+        SandboxError.PathSandboxViolation,
+        openTargetNoFollow(io, link, keg, base, .{ .create = true, .truncate = true }),
+    );
+
+    var rb: [16]u8 = undefined;
+    const vf = try std.Io.Dir.openFileAbsolute(io, victim, .{});
+    defer vf.close(io);
+    try std.testing.expectEqualStrings("PRECIOUS", rb[0..try vf.readPositionalAll(io, &rb, 0)]);
+}
+
+test "validateDirTarget accepts a real in-keg dir and rejects a symlinked one" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bb: [std.fs.max_path_bytes]u8 = undefined;
+    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    defer alloc.free(keg);
+    const realdir = try std.fs.path.join(alloc, &.{ keg, "real" });
+    defer alloc.free(realdir);
+    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    defer alloc.free(outside);
+    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" });
+    defer alloc.free(dirlink);
+
+    try std.Io.Dir.cwd().createDirPath(io, realdir);
+    try std.Io.Dir.cwd().createDirPath(io, outside);
+    try std.Io.Dir.symLinkAbsolute(io, outside, dirlink, .{});
+
+    // A genuine directory inside the keg is fine to write into.
+    try validateDirTarget(io, realdir, keg, keg);
+    // A directory that is itself a symlink out of the keg is not.
+    try std.testing.expectError(
+        SandboxError.PathSandboxViolation,
+        validateDirTarget(io, dirlink, keg, keg),
     );
 }
 

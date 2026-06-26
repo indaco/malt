@@ -130,12 +130,13 @@ test "sandbox: dotdot in middle" {
 }
 
 // ---------------------------------------------------------------------------
-// validateResolved
+// validateWriteDir
 // ---------------------------------------------------------------------------
 
-test "sandbox: validateResolved accepts valid literal path" {
-    // Path does not exist on disk, so only literal validation runs
-    try sandbox.validateResolved(
+test "sandbox: validateWriteDir accepts a valid path whose dirs don't exist yet" {
+    // None of these dirs exist on disk, so the resolve walks to root and the
+    // literal validation is what stands — a missing parent can't escape.
+    try sandbox.validateWriteDir(
         std.Options.debug_io,
         "/opt/malt/Cellar/foo/1.0/bin/mybin",
         cellar,
@@ -143,8 +144,8 @@ test "sandbox: validateResolved accepts valid literal path" {
     );
 }
 
-test "sandbox: validateResolved rejects dotdot" {
-    const result = sandbox.validateResolved(
+test "sandbox: validateWriteDir rejects dotdot" {
+    const result = sandbox.validateWriteDir(
         std.Options.debug_io,
         "/opt/malt/Cellar/foo/1.0/../../evil",
         cellar,
@@ -153,8 +154,8 @@ test "sandbox: validateResolved rejects dotdot" {
     try testing.expectError(SandboxError.PathSandboxViolation, result);
 }
 
-test "sandbox: validateResolved rejects outside prefix" {
-    const result = sandbox.validateResolved(
+test "sandbox: validateWriteDir rejects outside prefix" {
+    const result = sandbox.validateWriteDir(
         std.Options.debug_io,
         "/etc/passwd",
         cellar,
@@ -163,48 +164,52 @@ test "sandbox: validateResolved rejects outside prefix" {
     try testing.expectError(SandboxError.PathSandboxViolation, result);
 }
 
+test "sandbox: validateWriteDir is lenient when the whole prefix subtree is absent" {
+    // Regression: when no part of the keg/prefix exists on disk, the resolve
+    // walk must stop at the boundary and pass — not climb to an existing
+    // ancestor (the tmp root, `/opt`, …) and reject. This is environment-
+    // independent: the prefix dir below deliberately does not exist.
+    const io = std.Options.debug_io;
+    const tmp = std.testing.tmpDir(.{});
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = buf[0..try std.Io.Dir.realPath(tmp.dir, io, &buf)];
+
+    const absent_prefix = try std.fs.path.join(testing.allocator, &.{ base, "no_such_prefix" });
+    defer testing.allocator.free(absent_prefix);
+    const target = try std.fs.path.join(testing.allocator, &.{ absent_prefix, "bin", "mybin" });
+    defer testing.allocator.free(target);
+
+    try sandbox.validateWriteDir(io, target, absent_prefix, absent_prefix);
+}
+
 // ---------------------------------------------------------------------------
 // Extended sandbox tests
 // ---------------------------------------------------------------------------
 
-test "sandbox: symlink escape detected by validateResolved" {
-    // Create a temp directory and a symlink pointing outside the sandbox
+test "sandbox: validateWriteDir catches an intermediate-directory symlink escape" {
+    const io = std.Options.debug_io;
     const tmp = std.testing.tmpDir(.{});
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = blk: {
-        const n = try std.Io.Dir.realPath(tmp.dir, std.Options.debug_io, &buf);
-        break :blk buf[0..n];
-    };
+    const tmp_path = buf[0..try std.Io.Dir.realPath(tmp.dir, io, &buf)];
 
-    // Create a "cellar" subdir
-    try std.Io.Dir.createDirPath(tmp.dir, std.Options.debug_io, "cellar/pkg/1.0/bin");
+    try std.Io.Dir.createDirPath(tmp.dir, io, "cellar/pkg/1.0/bin");
 
-    // Create a symlink from cellar/pkg/1.0/bin/escape -> /tmp
-    const symlink_dir = try std.fs.path.join(
-        testing.allocator,
-        &.{ tmp_path, "cellar", "pkg", "1.0", "bin", "escape" },
-    );
-    defer testing.allocator.free(symlink_dir);
-
-    const cellar_dir = try std.fs.path.join(
-        testing.allocator,
-        &.{ tmp_path, "cellar", "pkg", "1.0" },
-    );
+    // bin/escape is a directory symlink pointing out of the keg.
+    const link_dir = try std.fs.path.join(testing.allocator, &.{ tmp_path, "cellar", "pkg", "1.0", "bin", "escape" });
+    defer testing.allocator.free(link_dir);
+    const cellar_dir = try std.fs.path.join(testing.allocator, &.{ tmp_path, "cellar", "pkg", "1.0" });
     defer testing.allocator.free(cellar_dir);
+    // A would-be write target *under* the symlinked directory.
+    const target = try std.fs.path.join(testing.allocator, &.{ link_dir, "x" });
+    defer testing.allocator.free(target);
 
-    test_io.cwd().symLink(std.Options.debug_io, "/tmp", symlink_dir, .{}) catch {
-        // If we can't create symlinks (permissions), skip the test
-        return;
-    };
+    test_io.cwd().symLink(io, "/tmp", link_dir, .{}) catch return; // skip if symlinks unavailable
 
-    // validateResolved should catch the escape because resolved path is /tmp
-    const result = sandbox.validateResolved(
-        std.Options.debug_io,
-        symlink_dir,
-        cellar_dir,
-        tmp_path,
+    // The literal path is inside the keg, but its resolved parent is /tmp.
+    try testing.expectError(
+        SandboxError.PathSandboxViolation,
+        sandbox.validateWriteDir(io, target, cellar_dir, tmp_path),
     );
-    try testing.expectError(SandboxError.PathSandboxViolation, result);
 }
 
 test "sandbox: deep nesting valid path" {
