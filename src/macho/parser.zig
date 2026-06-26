@@ -113,8 +113,11 @@ fn parseFat(allocator: std.mem.Allocator, data: []const u8) ParseError!MachO {
         if (offset + 20 > data.len) return ParseError.TruncatedFile;
 
         // fat_arch layout: cputype(4), cpusubtype(4), offset(4), size(4), align(4).
-        const slice_offset = std.mem.readInt(u32, data[offset + 8 ..][0..4], .big);
-        const slice_size = std.mem.readInt(u32, data[offset + 12 ..][0..4], .big);
+        // Widen to usize: both fields are ≤ 2³², so their sum can't overflow a
+        // 64-bit usize and the bounds check below stays honest. In u32 a crafted
+        // offset+size wraps and bypasses the guard.
+        const slice_offset: usize = std.mem.readInt(u32, data[offset + 8 ..][0..4], .big);
+        const slice_size: usize = std.mem.readInt(u32, data[offset + 12 ..][0..4], .big);
 
         offset += 20;
 

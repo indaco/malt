@@ -190,6 +190,19 @@ test "parse rejects a fat archive whose slice extends beyond data" {
     try testing.expectError(parser.ParseError.TruncatedFile, parser.parse(testing.allocator, &buf));
 }
 
+test "parse rejects a fat slice whose offset+size overflows 32 bits" {
+    // offset + size wraps past 0xFFFFFFFF: a u32 bounds check sees a small
+    // sum and either panics on overflow (safe builds) or admits an illegal
+    // start>end slice (ReleaseFast). Must surface as a clean TruncatedFile.
+    var buf: [28]u8 = undefined;
+    @memset(&buf, 0);
+    std.mem.writeInt(u32, buf[0..4], macho.FAT_MAGIC, .big);
+    std.mem.writeInt(u32, buf[4..8], 1, .big); // nfat_arch = 1
+    std.mem.writeInt(u32, buf[16..20], 0xFFFFFF00, .big); // slice offset
+    std.mem.writeInt(u32, buf[20..24], 0x200, .big); // slice size
+    try testing.expectError(parser.ParseError.TruncatedFile, parser.parse(testing.allocator, &buf));
+}
+
 test "parse bubbles InvalidLoadCommand from a corrupt fat slice" {
     // A fat archive whose only slice is a Mach-O 64 with a bogus load
     // command (cmdsize < sizeof(load_command)). The parser must surface
