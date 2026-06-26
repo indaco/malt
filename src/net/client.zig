@@ -347,6 +347,46 @@ pub const HttpClient = struct {
         return false;
     }
 
+    /// http(s) scheme of a malt URL, or null for non-http(s). Used to gate
+    /// whether a credential may follow a redirect — the scheme must match.
+    fn urlScheme(url: []const u8) ?[]const u8 {
+        if (std.mem.startsWith(u8, url, "https://")) return "https";
+        if (std.mem.startsWith(u8, url, "http://")) return "http";
+        return null;
+    }
+
+    /// Mirrors std `HostName.sameParentDomain`: true iff `child` is `parent`
+    /// or a dot-boundary subdomain of it (case-insensitive). A shared suffix
+    /// without a dot boundary (`evilgithub.com` vs `github.com`) is not a match.
+    fn hostIsSameOrSubdomain(parent: []const u8, child: []const u8) bool {
+        if (!std.ascii.endsWithIgnoreCase(child, parent)) return false;
+        if (child.len == parent.len) return true;
+        if (parent.len > child.len) return false;
+        return child[child.len - parent.len - 1] == '.';
+    }
+
+    /// Whether caller credentials/validators may survive a redirect `from`→`to`.
+    /// Faithful to stdlib's `keep_privileged_headers`: same scheme AND the new
+    /// host is the old host or a subdomain of it. Anything else drops the
+    /// headers so a GitHub PAT / GHCR bearer never reaches an off-domain CDN or
+    /// object store.
+    /// HTTP status codes malt follows as a redirect. Deliberately an explicit
+    /// set, not a `301..308` range: 304 (Not Modified) and 306 (unused) sit in
+    /// that range but are NOT redirects — treating 304 as one breaks every
+    /// conditional GET.
+    fn isFollowableRedirect(status: u16) bool {
+        return status == 301 or status == 302 or status == 303 or status == 307 or status == 308;
+    }
+
+    fn credsSurviveRedirect(from: []const u8, to: []const u8) bool {
+        const fs = urlScheme(from) orelse return false;
+        const ts = urlScheme(to) orelse return false;
+        if (!std.ascii.eqlIgnoreCase(fs, ts)) return false;
+        const fh = urlHost(from) orelse return false;
+        const th = urlHost(to) orelse return false;
+        return hostIsSameOrSubdomain(fh, th);
+    }
+
     /// GET request; auto-injects HOMEBREW_GITHUB_API_TOKEN as Authorization
     /// for GitHub/Homebrew hosts. Caller owns the returned `Response`.
     pub fn get(self: *HttpClient, url: []const u8) !Response {
@@ -696,52 +736,133 @@ pub const HttpClient = struct {
         url: []const u8,
         extra_headers: []const std.http.Header,
     ) !ConditionalResponse {
-        const uri = try std.Uri.parse(url);
-        const https_origin = schemeIsHttps(uri.scheme);
-
-        var req = try self.client.request(.GET, uri, .{ .extra_headers = extra_headers });
-        defer req.deinit();
-
-        try req.sendBodiless();
-
-        var redirect_buf: [32 * 1024]u8 = undefined;
-        var response = try req.receiveHead(&redirect_buf);
-
-        if (https_origin and !schemeIsHttps(req.uri.scheme))
-            return error.TlsDowngradeRefused;
-
-        const status: u16 = @intFromEnum(response.head.status);
-        // Etag is borrowed from response.head.bytes; dupe before the head
-        // buffer is dropped on function exit.
-        const etag_owned: ?[]const u8 = if (extractEtagFromHead(response.head.bytes)) |e|
-            try self.allocator.dupe(u8, e)
-        else
-            null;
-        errdefer if (etag_owned) |e| self.allocator.free(e);
-
-        // 304 has no body per HTTP spec — return immediately with an
-        // empty owned slice so deinit's `free(body)` stays uniform.
-        if (status == 304) {
-            const empty = try self.allocator.alloc(u8, 0);
-            return .{
-                .status = status,
-                .not_modified = true,
-                .body = empty,
-                .etag = etag_owned,
-                .allocator = self.allocator,
-            };
-        }
-
-        // Conditional GETs target tiny JSON, never blobs — pin both
-        // size cap and total timeout to the metadata constants.
-        const body = try self.readResponseBody(&req, &response, max_metadata_bytes, null, self.timeout_ns);
+        // Conditional GETs target tiny JSON, never blobs — the metadata cap
+        // and timeout follow from `max_metadata_bytes` inside `followGet`.
+        const out = try self.followGet(url, extra_headers, max_metadata_bytes, null, true);
         return .{
-            .status = status,
-            .not_modified = false,
-            .body = body,
-            .etag = etag_owned,
+            .status = out.status,
+            .not_modified = out.not_modified,
+            .body = out.body,
+            .etag = out.etag,
             .allocator = self.allocator,
         };
+    }
+
+    /// Max redirects followed on a credentialed GET — matches stdlib's default
+    /// so download depth is unchanged by taking over redirect handling.
+    const max_get_redirects: usize = 3;
+
+    const GetOutcome = struct {
+        status: u16,
+        body: []const u8,
+        etag: ?[]const u8,
+        not_modified: bool,
+    };
+
+    /// Resolve a redirect `Location` (absolute or relative) against `base`
+    /// into an owned absolute URL, dropping any userinfo. Uses std's own
+    /// resolver so relative targets behave exactly as stdlib's auto-follow did.
+    fn resolveRedirectUrl(self: *HttpClient, base: std.Uri, location: []const u8) ![]const u8 {
+        var buf: [8 * 1024]u8 = undefined;
+        if (location.len > buf.len) return error.HttpRedirectLocationOversize;
+        @memcpy(buf[0..location.len], location);
+        var aux: []u8 = buf[0..];
+        const resolved = base.resolveInPlace(location.len, &aux) catch
+            return error.HttpRedirectLocationInvalid;
+
+        var out: std.Io.Writer.Allocating = .init(self.allocator);
+        errdefer out.deinit();
+        resolved.writeToStream(&out.writer, .{
+            .scheme = true,
+            .authority = true,
+            .port = true,
+            .path = true,
+            .query = true,
+        }) catch return error.HttpRedirectLocationInvalid;
+        return try out.toOwnedSlice();
+    }
+
+    /// GET that follows redirects manually so credential/validator headers are
+    /// stripped before leaving the origin's scope. In Zig 0.16 stdlib,
+    /// `extra_headers` ride every redirect and `privileged_headers` are never
+    /// sent at all — neither slot both authenticates the origin and drops on a
+    /// cross-domain hop, so we own the loop. Credentials survive a hop only
+    /// when scheme and parent domain are preserved; an https→http downgrade is
+    /// refused outright (the secret would otherwise hit a cleartext socket and
+    /// the plaintext body could be substituted).
+    fn followGet(
+        self: *HttpClient,
+        url: []const u8,
+        creds: []const std.http.Header,
+        max_bytes: usize,
+        progress: ?ProgressCallback,
+        capture_etag: bool,
+    ) !GetOutcome {
+        var current: []const u8 = try self.allocator.dupe(u8, url);
+        defer self.allocator.free(current);
+        var live_creds = creds;
+        var hops: usize = 0;
+
+        while (true) : (hops += 1) {
+            const uri = try std.Uri.parse(current);
+            const https_origin = schemeIsHttps(uri.scheme);
+
+            var req = try self.client.request(.GET, uri, .{
+                .extra_headers = live_creds,
+                .redirect_behavior = .unhandled,
+            });
+            errdefer req.deinit();
+
+            try req.sendBodiless();
+            var redirect_buf: [32 * 1024]u8 = undefined;
+            var response = try req.receiveHead(&redirect_buf);
+            const status: u16 = @intFromEnum(response.head.status);
+
+            if (isFollowableRedirect(status)) {
+                // A redirect without a Location is malformed — fail loud rather
+                // than hand the redirect's body back to the caller as a "success".
+                const loc = response.head.location orelse return error.HttpRedirectLocationMissing;
+                if (hops >= max_get_redirects) return error.TooManyHttpRedirects;
+                const next = try self.resolveRedirectUrl(uri, loc);
+                errdefer self.allocator.free(next);
+                const next_uri = std.Uri.parse(next) catch return error.HttpRedirectLocationInvalid;
+                if (https_origin and !schemeIsHttps(next_uri.scheme))
+                    return error.TlsDowngradeRefused;
+                if (!credsSurviveRedirect(current, next)) live_creds = &.{};
+                // Hop committed: no fallible op past here, so the errdefers
+                // stay dormant while we hand `req`/`current` off cleanly.
+                req.deinit();
+                self.allocator.free(current);
+                current = next;
+                continue;
+            }
+
+            // Terminal response. Etag is borrowed from the head buffer; dupe it
+            // before the body read drops that buffer. `req`'s errdefer covers
+            // every error path below; on a value return we deinit explicitly.
+            var etag_owned: ?[]const u8 = null;
+            errdefer if (etag_owned) |e| self.allocator.free(e);
+            if (capture_etag) {
+                if (extractEtagFromHead(response.head.bytes)) |e|
+                    etag_owned = try self.allocator.dupe(u8, e);
+            }
+
+            // 304 has no body per HTTP spec — empty owned slice keeps deinit's
+            // `free(body)` uniform.
+            if (status == 304) {
+                const empty = try self.allocator.alloc(u8, 0);
+                req.deinit();
+                return .{ .status = status, .body = empty, .etag = etag_owned, .not_modified = true };
+            }
+
+            const total_timeout = if (max_bytes > max_metadata_bytes)
+                @max(blob_timeout_ns, scaledTimeoutNs(response.head.content_length))
+            else
+                self.timeout_ns;
+            const body = try self.readResponseBody(&req, &response, max_bytes, progress, total_timeout);
+            req.deinit();
+            return .{ .status = status, .body = body, .etag = etag_owned, .not_modified = false };
+        }
     }
 
     fn doGetWithRetry(
@@ -790,39 +911,10 @@ pub const HttpClient = struct {
         max_bytes: usize,
         progress: ?ProgressCallback,
     ) !Response {
-        const uri = try std.Uri.parse(url);
-        const https_origin = schemeIsHttps(uri.scheme);
-
-        var req = try self.client.request(.GET, uri, .{
-            .extra_headers = extra_headers,
-        });
-        defer req.deinit();
-
-        try req.sendBodiless();
-
-        // 32 KiB header buffer — see `head()`.
-        var redirect_buf: [32 * 1024]u8 = undefined;
-        var response = try req.receiveHead(&redirect_buf);
-
-        // Refuse https → http downgrade across 3xx — plaintext bodies are
-        // a metadata-substitution vector even with stdlib header stripping.
-        if (https_origin and !schemeIsHttps(req.uri.scheme))
-            return error.TlsDowngradeRefused;
-
-        const status: u16 = @intFromEnum(response.head.status);
-
-        // Blob downloads scale the total deadline from the projected
-        // transfer time; metadata reads keep the per-request constant.
-        // Idle-timeout backstop lives inside `readResponseBody`.
-        const total_timeout = if (max_bytes > max_metadata_bytes)
-            @max(blob_timeout_ns, scaledTimeoutNs(response.head.content_length))
-        else
-            self.timeout_ns;
-        const body = try self.readResponseBody(&req, &response, max_bytes, progress, total_timeout);
-
+        const out = try self.followGet(url, extra_headers, max_bytes, progress, false);
         return .{
-            .status = status,
-            .body = body,
+            .status = out.status,
+            .body = out.body,
             .allocator = self.allocator,
         };
     }
@@ -1270,4 +1362,47 @@ test "watchdogLoop: fires on cancellation predicate" {
     };
     const fired = watchdogLoop(io, wake.read_fd, &bytes, 10 * std.time.ns_per_s, 10 * std.time.ns_per_s, &Stub.cancel);
     try std.testing.expect(fired);
+}
+
+// --- credential strip across redirects (keep_privileged_headers parity) ---
+
+test "credsSurviveRedirect: kept on the same host and scheme" {
+    try std.testing.expect(HttpClient.credsSurviveRedirect("https://github.com/a", "https://github.com/b"));
+}
+
+test "credsSurviveRedirect: kept descending to a subdomain of the origin" {
+    try std.testing.expect(HttpClient.credsSurviveRedirect("https://github.com/a", "https://api.github.com/b"));
+}
+
+test "credsSurviveRedirect: dropped on a cross parent-domain hop" {
+    try std.testing.expect(!HttpClient.credsSurviveRedirect("https://github.com/x", "https://objects.githubusercontent.com/y"));
+}
+
+test "credsSurviveRedirect: dropped when ascending to a broader host" {
+    try std.testing.expect(!HttpClient.credsSurviveRedirect("https://api.github.com/x", "https://github.com/y"));
+}
+
+test "credsSurviveRedirect: dropped on https to http downgrade" {
+    try std.testing.expect(!HttpClient.credsSurviveRedirect("https://github.com/x", "http://github.com/y"));
+}
+
+test "credsSurviveRedirect: dropped for a look-alike suffix without a dot boundary" {
+    try std.testing.expect(!HttpClient.credsSurviveRedirect("https://github.com/x", "https://evilgithub.com/y"));
+}
+
+test "isFollowableRedirect: follows 301/302/303/307/308" {
+    for ([_]u16{ 301, 302, 303, 307, 308 }) |s|
+        try std.testing.expect(HttpClient.isFollowableRedirect(s));
+}
+
+test "isFollowableRedirect: never follows 304 Not Modified or 306" {
+    // 304 sits inside 301..308 but must fall through to the conditional-GET
+    // handler, not the redirect path.
+    try std.testing.expect(!HttpClient.isFollowableRedirect(304));
+    try std.testing.expect(!HttpClient.isFollowableRedirect(306));
+}
+
+test "isFollowableRedirect: ignores 2xx/300/305 and other statuses" {
+    for ([_]u16{ 200, 204, 300, 305, 400, 404, 500 }) |s|
+        try std.testing.expect(!HttpClient.isFollowableRedirect(s));
 }
