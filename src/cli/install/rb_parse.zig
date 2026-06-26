@@ -215,7 +215,49 @@ fn deriveVersionFromUrl(url: []const u8) ?[]const u8 {
         return stripArchiveSuffixThenValidate(after);
     }
 
-    return null;
+    // No path marker carried the tag: fall back to the bare filename.
+    return versionFromFilename(url);
+}
+
+/// Last-resort derivation for a self-hosted release whose version lives only
+/// in the filename (`…/tool-1.2.3.tar.gz`, `…/tool_1.2.3_amd64.zip`) with no
+/// `/archive/` or `/releases/` marker. Strip a known archive suffix, split
+/// the stem on `-`/`_`, and accept a version only when EXACTLY one token is
+/// an unambiguous dotted version. Zero or several such tokens → null, so a
+/// digit-led name (`7zip`) or a multi-version filename never mis-derives —
+/// a wrong version is worse than none (it fakes an "outdated").
+fn versionFromFilename(url: []const u8) ?[]const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, url, '/') orelse return null;
+    const filename = url[slash + 1 ..];
+
+    const stem = for (tap_archive_suffixes) |suffix| {
+        if (std.mem.endsWith(u8, filename, suffix))
+            break filename[0 .. filename.len - suffix.len];
+    } else return null;
+
+    var found: ?[]const u8 = null;
+    var it = std.mem.tokenizeAny(u8, stem, "-_");
+    while (it.next()) |tok| {
+        const ver = strictVersionToken(tok) orelse continue;
+        if (found != null) return null; // >1 version-like token → ambiguous
+        found = ver;
+    }
+    return found;
+}
+
+/// Stricter than `validateVersionToken`: the *whole* token must read as a
+/// dotted version (`v?` then only digits and dots). Used when guessing a
+/// version out of a bare filename, where the loose first-byte check would
+/// misread a name segment like `7zip` as a version. Returns the v-stripped
+/// token or null.
+fn strictVersionToken(s: []const u8) ?[]const u8 {
+    var body = s;
+    if (body.len > 0 and (body[0] == 'v' or body[0] == 'V')) body = body[1..];
+    if (body.len == 0 or !std.ascii.isDigit(body[0])) return null;
+    for (body) |c| {
+        if (!std.ascii.isDigit(c) and c != '.') return null;
+    }
+    return body;
 }
 
 /// Validate the path segment up to the next `/` as a version token.
@@ -422,6 +464,45 @@ test "deriveVersionFromUrl: GitLab floating release tag is rejected" {
     try std.testing.expect(deriveVersionFromUrl(
         "https://gitlab.com/foo/bar/-/releases/latest/downloads/bar.tar.gz",
     ) == null);
+}
+
+test "deriveVersionFromUrl: derives from a bare versioned filename, null when ambiguous" {
+    const cases = [_]struct { url: []const u8, want: ?[]const u8 }{
+        // The headline shape: a self-hosted release with the version only
+        // in the filename, no `/archive/` or `/releases/` path marker.
+        .{ .url = "https://host.example.com/dl/tool-1.2.3.tar.gz", .want = "1.2.3" },
+        // Underscore-delimited, version in the middle (`_<version>_`).
+        .{ .url = "https://host.example.com/dl/tool_1.2.3_amd64.zip", .want = "1.2.3" },
+        // A leading `v` is stripped just like the path-marker shapes.
+        .{ .url = "https://host.example.com/dl/tool-v2.4.0.tgz", .want = "2.4.0" },
+        // A name with leading digits must not be mistaken for the version.
+        .{ .url = "https://host.example.com/dl/7zip-22.01.tar.xz", .want = "22.01" },
+        // No version-like token → graceful skip, never a guess.
+        .{ .url = "https://host.example.com/dl/tool.tar.gz", .want = null },
+        // Two version-like tokens are ambiguous → null, not a wrong pick.
+        .{ .url = "https://host.example.com/dl/tool-1.2-3.4.tar.gz", .want = null },
+        // Unrecognised archive suffix → no stem to read → null.
+        .{ .url = "https://host.example.com/dl/tool-1.2.3.bin", .want = null },
+    };
+    for (cases) |c| {
+        const got = deriveVersionFromUrl(c.url);
+        if (c.want) |w| {
+            try std.testing.expectEqualStrings(w, got orelse return error.TestUnexpectedNull);
+        } else {
+            try std.testing.expect(got == null);
+        }
+    }
+}
+
+test "parseRubyFormula: derives version from a bare versioned filename" {
+    const src =
+        \\class Foo < Formula
+        \\  url "https://downloads.example.com/foo-1.2.3.tar.gz"
+        \\  sha256 "deadbeef"
+        \\end
+    ;
+    const got = parseRubyFormula(src) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("1.2.3", got.version);
 }
 
 test "extractQuoted: extracts between prefix and the next quote" {
