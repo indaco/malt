@@ -490,11 +490,13 @@ const CountingServer = struct {
     listener: *net.Server,
     body: []const u8,
     count: std.atomic.Value(u32),
+    stop: std.atomic.Value(bool) = .init(false),
 
     fn serve(self: *CountingServer) void {
         while (true) {
             const stream = self.listener.accept(self.io) catch return;
             defer stream.close(self.io);
+            if (self.stop.load(.acquire)) return;
             var rbuf: [16 * 1024]u8 = undefined;
             var wbuf: [16 * 1024]u8 = undefined;
             var reader = stream.reader(self.io, &rbuf);
@@ -522,11 +524,13 @@ const EtagServer = struct {
     // How many answered requests carried an `If-None-Match` — lets a test
     // prove the refresh went out conditional (or, when 0, unconditional).
     conditional_count: std.atomic.Value(u32),
+    stop: std.atomic.Value(bool) = .init(false),
 
     fn serve(self: *EtagServer) void {
         while (true) {
             const stream = self.listener.accept(self.io) catch return;
             defer stream.close(self.io);
+            if (self.stop.load(.acquire)) return;
             var rbuf: [16 * 1024]u8 = undefined;
             var wbuf: [16 * 1024]u8 = undefined;
             var reader = stream.reader(self.io, &rbuf);
@@ -561,6 +565,20 @@ const EtagServer = struct {
         }
     }
 };
+
+/// Tear down a test HTTP server without racing its accept loop: flag it to
+/// stop, wake the blocked `accept` with a throwaway connection so the server
+/// thread returns on its own, join it, and only then close the listener — so
+/// the listener fd is never closed while the server thread still holds it
+/// (which `std.Io.Threaded` flags as a use-after-close `BADF` panic).
+fn stopServer(io: std.Io, listener: *net.Server, stop: *std.atomic.Value(bool), thread: std.Thread) void {
+    stop.store(true, .release);
+    if (listener.socket.address.connect(io, .{ .mode = .stream })) |waker| {
+        waker.close(io);
+    } else |_| {}
+    thread.join();
+    listener.deinit(io);
+}
 
 /// Backdate an index side-car's mtime to 1970 so the freshness gate treats
 /// it as stale and the next fetch takes the refresh path.
@@ -682,8 +700,7 @@ test "a cold names+versions cycle downloads the bulk dump exactly once" {
     defer testing.allocator.free(versions);
 
     // Stop the server before asserting so a hung join can't mask a result.
-    listener.deinit(io);
-    thread.join();
+    stopServer(io, &listener, &srv.stop, thread);
 
     try testing.expectEqual(@as(u32, 1), srv.count.load(.monotonic));
 
@@ -761,8 +778,7 @@ test "a stale side-car with an unchanged dump refreshes via 304, no re-download"
     defer testing.allocator.free(names);
     try testing.expectEqualStrings(seeded_names, names);
 
-    listener.deinit(io);
-    thread.join();
+    stopServer(io, &listener, &srv.stop, thread);
 
     // Exactly one conditional request; the warm names read hit no network.
     try testing.expectEqual(@as(u32, 1), srv.count.load(.monotonic));
@@ -819,8 +835,7 @@ test "a changed dump (new ETag) re-extracts both side-cars and stores the new ET
     const versions = try api.fetchVersionsIndex(.formula);
     defer testing.allocator.free(versions);
 
-    listener.deinit(io);
-    thread.join();
+    stopServer(io, &listener, &srv.stop, thread);
 
     // 200 path re-extracted from the fresh body, replacing the stale seed.
     const want_versions = try api_mod.extractVersions(testing.allocator, .formula, fixture);
@@ -869,8 +884,7 @@ test "a first-ever fetch (no stored ETag) does an unconditional GET and stores t
     const versions = try api.fetchVersionsIndex(.formula);
     defer testing.allocator.free(versions);
 
-    listener.deinit(io);
-    thread.join();
+    stopServer(io, &listener, &srv.stop, thread);
 
     const want_versions = try api_mod.extractVersions(testing.allocator, .formula, fixture);
     defer testing.allocator.free(want_versions);
@@ -925,8 +939,7 @@ test "a 200 without an ETag header clears a previously stored ETag" {
     const versions = try api.fetchVersionsIndex(.formula);
     defer testing.allocator.free(versions);
 
-    listener.deinit(io);
-    thread.join();
+    stopServer(io, &listener, &srv.stop, thread);
 
     // The stale token is gone, so the next refresh starts unconditional.
     try testing.expect(try readCacheFileAlloc(testing.allocator, dir.path, "formula.etag") == null);
@@ -974,8 +987,7 @@ test "an implausibly large stored ETag is ignored and the GET goes out unconditi
     const versions = try api.fetchVersionsIndex(.formula);
     defer testing.allocator.free(versions);
 
-    listener.deinit(io);
-    thread.join();
+    stopServer(io, &listener, &srv.stop, thread);
 
     // The bad token was dropped, so the request was unconditional...
     try testing.expectEqual(@as(u32, 0), srv.conditional_count.load(.monotonic));
@@ -1026,8 +1038,7 @@ test "a 304 with a missing side-car drops the ETag and surfaces ApiUnreachable" 
 
     try testing.expectError(api_mod.ApiError.ApiUnreachable, api.fetchVersionsIndex(.formula));
 
-    listener.deinit(io);
-    thread.join();
+    stopServer(io, &listener, &srv.stop, thread);
 
     // The orphaned ETag is dropped so the next run re-downloads cleanly.
     try testing.expect(try readCacheFileAlloc(testing.allocator, dir.path, "formula.etag") == null);
@@ -1072,8 +1083,7 @@ test "the conditional refresh is kind-agnostic: a cask 304 refreshes and keeps c
     const versions = try api.fetchVersionsIndex(.cask);
     defer testing.allocator.free(versions);
 
-    listener.deinit(io);
-    thread.join();
+    stopServer(io, &listener, &srv.stop, thread);
 
     // Same 304 short-circuit as formula, keyed on the cask sidecars.
     try testing.expectEqualStrings(seeded, versions);
@@ -1089,11 +1099,13 @@ const StatusServer = struct {
     io: std.Io,
     listener: *net.Server,
     status: std.http.Status,
+    stop: std.atomic.Value(bool) = .init(false),
 
     fn serve(self: *StatusServer) void {
         while (true) {
             const stream = self.listener.accept(self.io) catch return;
             defer stream.close(self.io);
+            if (self.stop.load(.acquire)) return;
             var rbuf: [16 * 1024]u8 = undefined;
             var wbuf: [16 * 1024]u8 = undefined;
             var reader = stream.reader(self.io, &rbuf);
@@ -1129,8 +1141,7 @@ test "a refresh that is neither 200 nor 304 surfaces ApiUnreachable" {
 
     try testing.expectError(api_mod.ApiError.ApiUnreachable, api.fetchVersionsIndex(.formula));
 
-    listener.deinit(io);
-    thread.join();
+    stopServer(io, &listener, &srv.stop, thread);
 }
 
 test "readNotFoundCache returns false for stale marker" {
