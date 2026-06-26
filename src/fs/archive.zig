@@ -823,3 +823,23 @@ test "rejectEscapingSymlinks accepts in-tree symlinks" {
     // The tree is left intact when nothing escapes.
     try std.Io.Dir.accessAbsolute(io, dst, .{});
 }
+
+test "rejectEscapingSymlinks does not follow symlinks while walking" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest/realdir");
+    try tmp.dir.writeFile(io, .{ .sub_path = "dest/realdir/f", .data = "x" });
+    // A symlink to an in-tree dir and a self-referential symlink: if the
+    // walker followed either, this would recurse forever instead of
+    // terminating. Both targets are in-tree, so the guard must accept them.
+    try tmp.dir.symLink(io, "realdir", "dest/dirlink", .{});
+    try tmp.dir.symLink(io, ".", "dest/self", .{});
+
+    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dst = try testDestAbs(&tmp, io, &dst_buf);
+    try rejectEscapingSymlinks(io, dst);
+}
