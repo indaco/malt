@@ -113,8 +113,8 @@ pub fn extractTarGz(io: std.Io, archive_path: []const u8, dest_dir: []const u8) 
     var file_reader = file.reader(io, &file_buf);
     const input: *std.Io.Reader = &file_reader.interface;
 
-    // flate.max_window_len is 64 KiB — fine on the stack here, same
-    // shape `extractTarZst` uses for the zstd decompressor.
+    // flate.max_window_len is 64 KiB — fine on the stack for a per-extract
+    // decompressor window.
     var window: [std.compress.flate.max_window_len]u8 = undefined;
     var decompress = std.compress.flate.Decompress.init(input, .gzip, &window);
 
@@ -163,9 +163,11 @@ fn applyHardLinks(dest_dir: []const u8, links: []const HardLink) !void {
 
 /// Walk the tar archive at raw 512-byte blocks to enforce path safety
 /// AND recover hard-link pairs the std iterator silently drops.
-/// Pax/GNU long-name extensions are uninterpreted: a hardlink whose
-/// name lives in a pax header is not found here. Homebrew bottles use
-/// plain ustar paths, so the gap is acceptable for the current scope.
+/// Pax extended headers ('x') are interpreted for `linkpath=`/`path=` so
+/// the pre-scan validates the *effective* symlink target the extractor
+/// will use, not the stale ustar field. GNU long-name extensions remain
+/// uninterpreted: a hardlink whose name lives in a GNU header is not found
+/// here. Homebrew bottles use plain ustar paths, so that gap is acceptable.
 fn preScanTarGz(
     io: std.Io,
     arena: std.mem.Allocator,
@@ -184,6 +186,12 @@ fn preScanTarGz(
 
     var hardlinks: std.ArrayList(HardLink) = .empty;
 
+    // Pax overrides apply to the single entry that follows the 'x' header,
+    // mirroring std.tar: `path=` replaces the name, `linkpath=` the target.
+    // Both reset once consumed (or when a new 'x' supersedes them).
+    var pax_name: ?[]const u8 = null;
+    var pax_link: ?[]const u8 = null;
+
     while (true) {
         var header: [512]u8 = undefined;
         const got = r.readSliceShort(&header) catch return error.ExtractionFailed;
@@ -198,20 +206,46 @@ fn preScanTarGz(
         const kind_byte = header[156];
         const size = parseHeaderOctal(header[124..136]) catch return error.ExtractionFailed;
 
+        // Pax extended header: its payload can override the *next* entry's
+        // link target (and name). std.tar applies these over the ustar
+        // fields, so validating the raw ustar field here would check bytes
+        // the extractor never uses. Each 'x' supersedes the previous one.
+        if (kind_byte == 'x') {
+            pax_name = null;
+            pax_link = null;
+            try parsePaxOverrides(r, arena, size, &pax_name, &pax_link);
+            // The parse consumed exactly `size` bytes; skip only the block pad.
+            const pad: u64 = (512 - (size % 512)) % 512;
+            if (pad > 0) r.discardAll64(pad) catch return error.ExtractionFailed;
+            continue;
+        }
+        // Global pax header is never applied to later entries (std.tar
+        // discards it); skip its payload and keep any pending overrides.
+        if (kind_byte == 'g') {
+            const skip_g: u64 = (size + 511) / 512 * 512;
+            if (skip_g > 0) r.discardAll64(skip_g) catch return error.ExtractionFailed;
+            continue;
+        }
+
         // ustar combines bytes[345..500] (prefix) + '/' + bytes[0..100] (name).
         const ustar = std.mem.eql(u8, header[257..262], "ustar");
         const raw_name = nullSlice(header[0..100]);
         const raw_prefix = if (ustar) nullSlice(header[345..500]) else "";
         var name_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const name = composePath(&name_buf, raw_prefix, raw_name) catch return error.ExtractionFailed;
+        const ustar_name = composePath(&name_buf, raw_prefix, raw_name) catch return error.ExtractionFailed;
 
-        if (!isSafeEntryPath(name)) return error.ExtractionFailed;
+        if (!isSafeEntryPath(ustar_name)) return error.ExtractionFailed;
+        // A pax `path=` override must clear the same bar; std.tar sanitises
+        // names regardless, but the pre-scan should not silently diverge.
+        if (pax_name) |pn| if (!isSafeEntryPath(pn)) return error.ExtractionFailed;
+        const name = pax_name orelse ustar_name;
 
-        const link_name = nullSlice(header[157..257]);
+        const ustar_link = nullSlice(header[157..257]);
+        const link_name = pax_link orelse ustar_link;
         switch (kind_byte) {
             // Symbolic link: link target is interpreted relative to the
             // entry's parent directory (POSIX). Reuse the existing
-            // bottle-aware target check.
+            // bottle-aware target check against the effective target.
             '2' => if (!isSafeSymlinkTarget(name, link_name)) return error.ExtractionFailed,
             // Hard link: target is a tar-relative path identical in
             // shape to a regular entry name.
@@ -224,10 +258,14 @@ fn preScanTarGz(
             },
             else => {},
         }
+        // Pending overrides are consumed by this entry whatever its kind;
+        // reset so they can never leak forward to an unrelated entry.
+        pax_name = null;
+        pax_link = null;
 
         // Advance past the data payload (rounded up to the next 512-byte
         // boundary). Symlinks/hardlinks/dirs report size 0 so this is a
-        // no-op for them, but pax/gnu extension blocks DO carry data.
+        // no-op for them, but regular-file blocks DO carry data.
         const skip_bytes: u64 = (size + 511) / 512 * 512;
         if (skip_bytes > 0) {
             r.discardAll64(skip_bytes) catch return error.ExtractionFailed;
@@ -235,6 +273,43 @@ fn preScanTarGz(
     }
 
     return hardlinks.toOwnedSlice(arena);
+}
+
+/// Parse a pax extended-header payload (`size` bytes from the current block)
+/// for `path=`/`linkpath=`, returning the last value seen for each — std.tar
+/// applies these over the ustar fields of the following entry. The returned
+/// slices are arena-owned and outlive the scan. Reads exactly `size` bytes.
+fn parsePaxOverrides(
+    r: *std.Io.Reader,
+    arena: std.mem.Allocator,
+    size: u64,
+    out_name: *?[]const u8,
+    out_link: *?[]const u8,
+) !void {
+    // Real pax headers are tens of bytes; bound the buffer against a hostile
+    // size before allocating or reading.
+    if (size > 64 * 1024) return error.ExtractionFailed;
+    const payload = arena.alloc(u8, @intCast(size)) catch return error.ExtractionFailed;
+    r.readSliceAll(payload) catch return error.ExtractionFailed;
+
+    // Each record is `"<len> KEY=VALUE\n"`; <len> counts the whole record.
+    var rest: []const u8 = payload;
+    while (rest.len > 0) {
+        const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse return error.ExtractionFailed;
+        const rec_len = std.fmt.parseInt(usize, rest[0..sp], 10) catch return error.ExtractionFailed;
+        if (rec_len < sp + 2 or rec_len > rest.len or rest[rec_len - 1] != '\n') return error.ExtractionFailed;
+        const kv = rest[sp + 1 .. rec_len - 1];
+        if (std.mem.indexOfScalar(u8, kv, '=')) |eq| {
+            const key = kv[0..eq];
+            const value = kv[eq + 1 ..];
+            if (std.mem.eql(u8, key, "linkpath")) {
+                out_link.* = value;
+            } else if (std.mem.eql(u8, key, "path")) {
+                out_name.* = value;
+            }
+        }
+        rest = rest[rec_len..];
+    }
 }
 
 /// `nullStr` from std.tar - first NUL terminates, full slice otherwise.
@@ -277,13 +352,6 @@ fn validChksum(header: *const [512]u8) bool {
         sum += if (i >= 148 and i < 156) ' ' else b;
     }
     return sum == stored;
-}
-
-/// Extracts a tar.zst archive from the given input reader into output_dir.
-pub fn extractTarZst(io: std.Io, input: *std.Io.Reader, output_dir: std.Io.Dir) !void {
-    var window_buf: [std.compress.zstd.default_window_len]u8 = undefined;
-    var decompressor = std.compress.zstd.Decompress.init(input, &window_buf, .{});
-    try std.tar.pipeToFileSystem(io, output_dir, &decompressor.reader, .{});
 }
 
 /// Extract a .zip archive to `dest_dir`. Used by the tap-install path
@@ -387,4 +455,203 @@ fn validateSubprocessListing(io: std.Io, argv: []const []const u8) !void {
         if (line.len == 0) continue;
         if (!isSafeEntryPath(line)) return error.ExtractionFailed;
     }
+}
+
+// --- pax symlink-target test helpers --------------------------------------
+
+/// Build a minimal 512-byte ustar header with a valid checksum. Only the
+/// fields the pre-scan reads (name, size, typeflag, linkname, magic) are
+/// populated; everything else stays zero.
+fn testTarHeader(name: []const u8, typeflag: u8, link: []const u8, size: u64) [512]u8 {
+    var h: [512]u8 = @splat(0);
+    @memcpy(h[0..name.len], name);
+    _ = std.fmt.bufPrint(h[124..135], "{o:0>11}", .{size}) catch unreachable;
+    h[156] = typeflag;
+    @memcpy(h[157..][0..link.len], link);
+    @memcpy(h[257..262], "ustar");
+    h[263] = '0';
+    h[264] = '0';
+    // Checksum: sum the whole header with the chksum field read as spaces.
+    @memset(h[148..156], ' ');
+    var sum: u64 = 0;
+    for (h) |b| sum += b;
+    _ = std.fmt.bufPrint(h[148..154], "{o:0>6}", .{sum}) catch unreachable;
+    h[154] = 0;
+    h[155] = ' ';
+    return h;
+}
+
+/// Format a pax record `"<len> KEY=VALUE\n"` where `<len>` counts the whole
+/// record including its own digits.
+fn testPaxRecord(out: []u8, key: []const u8, value: []const u8) []const u8 {
+    const fixed = 1 + key.len + 1 + value.len + 1; // space, '=', '\n'
+    var digits: usize = 1;
+    var total = fixed + digits;
+    while (std.fmt.count("{d}", .{total}) != digits) {
+        digits = std.fmt.count("{d}", .{total});
+        total = fixed + digits;
+    }
+    return std.fmt.bufPrint(out, "{d} {s}={s}\n", .{ total, key, value }) catch unreachable;
+}
+
+/// gzip-compress `raw` into `out`, returning the written gzip stream.
+fn testGzip(out: []u8, raw: []const u8) []const u8 {
+    var out_w = std.Io.Writer.fixed(out);
+    var win: [std.compress.flate.max_window_len]u8 = undefined;
+    var comp = std.compress.flate.Compress.init(&out_w, &win, .gzip, std.compress.flate.Compress.Options.level_4) catch unreachable;
+    comp.writer.writeAll(raw) catch unreachable;
+    comp.finish() catch unreachable;
+    return out_w.buffered();
+}
+
+/// Assembles raw tar blocks into a caller-owned buffer. Trailing zero blocks
+/// (the buffer is zeroed up front) terminate the archive after `len`.
+const TestTar = struct {
+    buf: []u8,
+    len: usize = 0,
+
+    fn init(buf: []u8) TestTar {
+        @memset(buf, 0);
+        return .{ .buf = buf };
+    }
+
+    /// Append a single 512-byte entry header (size 0 — links/dirs only).
+    fn entry(self: *TestTar, name: []const u8, typeflag: u8, link: []const u8) void {
+        const h = testTarHeader(name, typeflag, link, 0);
+        @memcpy(self.buf[self.len..][0..512], h[0..]);
+        self.len += 512;
+    }
+
+    /// Append a pax header ('x' extended or 'g' global) with one record.
+    fn pax(self: *TestTar, typeflag: u8, key: []const u8, value: []const u8) void {
+        var rec_buf: [512]u8 = undefined;
+        const rec = testPaxRecord(&rec_buf, key, value);
+        const h = testTarHeader("PaxHeaders/0", typeflag, "", rec.len);
+        @memcpy(self.buf[self.len..][0..512], h[0..]);
+        self.len += 512;
+        @memcpy(self.buf[self.len..][0..rec.len], rec);
+        self.len += 512; // record fits one padded block
+    }
+
+    fn bytes(self: *const TestTar) []const u8 {
+        return self.buf[0 .. self.len + 1024]; // + EOF marker blocks
+    }
+};
+
+/// gzip `raw`, write it under `tmp`, and run `extractTarGz` into `tmp/dest`,
+/// returning whatever the extract returns. `tmp/dest` must already exist.
+fn testExtract(io: std.Io, tmp: *std.testing.TmpDir, raw: []const u8) !void {
+    var gz_buf: [8192]u8 = undefined;
+    const gz = testGzip(&gz_buf, raw);
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.tar.gz", .data = gz });
+
+    var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+    var arc_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const arc = try std.fmt.bufPrint(&arc_buf, "{s}/a.tar.gz", .{base});
+    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dest", .{base});
+    return extractTarGz(io, arc, dst);
+}
+
+test "extractTarGz rejects a pax linkpath that escapes the destination" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest");
+
+    // Benign ustar linkname passes the pre-scan, but the pax override climbs
+    // out of dest — the extract must refuse it, not materialise it.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.pax('x', "linkpath", "../../../../../../tmp/evil");
+    t.entry("placeholder", '2', "benign");
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &tmp, t.bytes()));
+}
+
+test "extractTarGz accepts a pax linkpath within the destination" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest");
+
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.pax('x', "linkpath", "legit-target");
+    t.entry("link", '2', "benign");
+    try testExtract(io, &tmp, t.bytes());
+
+    // The pax linkpath, not the ustar linkname, must be what landed on disk —
+    // proving the pre-scan validated (and the extractor used) the same bytes.
+    var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dest", .{base});
+    var dest_dir = try std.Io.Dir.openDirAbsolute(io, dst, .{});
+    defer dest_dir.close(io);
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = link_buf[0..try dest_dir.readLink(io, "link", &link_buf)];
+    try std.testing.expectEqualStrings("legit-target", target);
+}
+
+test "extractTarGz ignores a global pax linkpath (no leak to the next entry)" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest");
+
+    // A 'g' global header must not be applied to following entries; the
+    // benign ustar target stands, so this extracts cleanly.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.pax('g', "linkpath", "../../../../../../tmp/evil");
+    t.entry("link", '2', "benign");
+    try testExtract(io, &tmp, t.bytes());
+}
+
+test "extractTarGz applies only the last pax header before an entry" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest");
+
+    // The first 'x' escapes, but a second 'x' supersedes it with a safe
+    // target — matching std.tar's reset. Over-carrying the first would
+    // wrongly reject this archive.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.pax('x', "linkpath", "../../../../../../tmp/evil");
+    t.pax('x', "linkpath", "safe-target");
+    t.entry("link", '2', "benign");
+    try testExtract(io, &tmp, t.bytes());
+}
+
+test "extractTarGz rejects a pax path override that escapes by name" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest");
+
+    // A pax `path=` override re-runs the entry-name guard; a climbing name
+    // is rejected even though the ustar name is benign.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.pax('x', "path", "../escape-name");
+    t.entry("placeholder", '2', "benign");
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &tmp, t.bytes()));
 }
