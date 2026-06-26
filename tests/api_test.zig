@@ -507,6 +507,87 @@ const CountingServer = struct {
     }
 };
 
+// Conditional-GET server: returns `body` + `ETag: etag` on 200, or an
+// empty 304 when the request's `If-None-Match` matches `etag`. Counts
+// answered requests so a test can assert the refresh hit the network
+// exactly once. Loop exits when the listener is closed from the test.
+const EtagServer = struct {
+    io: std.Io,
+    listener: *net.Server,
+    body: []const u8,
+    // When null, the 200 reply carries no ETag header — models an upstream
+    // that stops advertising one, exercising the stale-token-clear path.
+    etag: ?[]const u8,
+    count: std.atomic.Value(u32),
+    // How many answered requests carried an `If-None-Match` — lets a test
+    // prove the refresh went out conditional (or, when 0, unconditional).
+    conditional_count: std.atomic.Value(u32),
+
+    fn serve(self: *EtagServer) void {
+        while (true) {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            var rbuf: [16 * 1024]u8 = undefined;
+            var wbuf: [16 * 1024]u8 = undefined;
+            var reader = stream.reader(self.io, &rbuf);
+            var writer = stream.writer(self.io, &wbuf);
+            var srv = std.http.Server.init(&reader.interface, &writer.interface);
+            var req = srv.receiveHead() catch return;
+
+            var if_none_match: ?[]const u8 = null;
+            var it = req.iterateHeaders();
+            while (it.next()) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, "if-none-match")) if_none_match = h.value;
+            }
+            if (if_none_match != null) _ = self.conditional_count.fetchAdd(1, .monotonic);
+
+            var headers: [1]std.http.Header = undefined;
+            const extra: []const std.http.Header = if (self.etag) |e| blk: {
+                headers[0] = .{ .name = "ETag", .value = e };
+                break :blk headers[0..1];
+            } else &.{};
+
+            if (self.etag) |e| {
+                if (if_none_match) |inm| {
+                    if (std.mem.eql(u8, inm, e)) {
+                        req.respond("", .{ .status = .not_modified, .extra_headers = extra }) catch return;
+                        _ = self.count.fetchAdd(1, .monotonic);
+                        continue;
+                    }
+                }
+            }
+            req.respond(self.body, .{ .extra_headers = extra }) catch return;
+            _ = self.count.fetchAdd(1, .monotonic);
+        }
+    }
+};
+
+/// Backdate an index side-car's mtime to 1970 so the freshness gate treats
+/// it as stale and the next fetch takes the refresh path.
+fn backdateIndex(dir_path: []const u8, rel: []const u8) !void {
+    var path_buf: [512]u8 = undefined;
+    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ dir_path, rel });
+    const file = try test_io.cwd().openFile(std.Options.debug_io, full, .{ .mode = .write_only });
+    defer file.close(std.Options.debug_io);
+    try file.setTimestamps(std.Options.debug_io, .{
+        .access_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+        .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } },
+    });
+}
+
+/// Read an `api/<rel>` cache file into caller-owned bytes, or null if absent.
+fn readCacheFileAlloc(allocator: std.mem.Allocator, dir_path: []const u8, rel: []const u8) !?[]const u8 {
+    var path_buf: [512]u8 = undefined;
+    const full = try std.fmt.bufPrint(&path_buf, "{s}/api/{s}", .{ dir_path, rel });
+    const file = test_io.cwd().openFile(std.Options.debug_io, full, .{}) catch return null;
+    defer file.close(std.Options.debug_io);
+    const s = try file.stat(std.Options.debug_io);
+    const buf = try allocator.alloc(u8, s.size);
+    errdefer allocator.free(buf);
+    const n = try file.readPositionalAll(std.Options.debug_io, buf, 0);
+    return buf[0..n];
+}
+
 test "fetchVersionsIndex returns a fresh pre-seeded side-car without touching the network" {
     var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
     defer http.deinit();
@@ -621,6 +702,435 @@ test "a cold names+versions cycle downloads the bulk dump exactly once" {
     try test_io.accessAbsolute(io, vpath, .{});
     api.invalidateCache();
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, vpath, .{}));
+}
+
+// --- conditional GET: ETag/304 refresh of the bulk dump ---
+
+test "a stale side-car with an unchanged dump refreshes via 304, no re-download" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const etag = "W/\"unchanged\"";
+    // Server body differs from the seeded side-cars on purpose: a 304 must
+    // return the cached bytes, never re-extract the body.
+    const fixture =
+        \\[{"name":"server","versions":{"stable":"0.0.0"}}]
+    ;
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = EtagServer{
+        .io = io,
+        .listener = &listener,
+        .body = fixture,
+        .etag = etag,
+        .count = std.atomic.Value(u32).init(0),
+        .conditional_count = std.atomic.Value(u32).init(0),
+    };
+    const thread = try std.Thread.spawn(.{}, EtagServer.serve, .{&srv});
+
+    var dir = try TempCacheDir.init("etag_304_refresh");
+    defer dir.deinit();
+
+    const seeded_versions = "wget\t9.9.9\t0\n";
+    const seeded_names = "wget\njq\n";
+    try dir.writeCacheFile("versions_formula.txt", seeded_versions);
+    try dir.writeCacheFile("names_formula.txt", seeded_names);
+    try dir.writeCacheFile("formula.etag", etag);
+    // Both side-cars are stale so the versions fetch takes the refresh path.
+    try backdateIndex(dir.path, "versions_formula.txt");
+    try backdateIndex(dir.path, "names_formula.txt");
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
+    var base_buf: [64]u8 = undefined;
+    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const versions = try api.fetchVersionsIndex(.formula);
+    defer testing.allocator.free(versions);
+    // The 304 path serves the seeded bytes verbatim — proof no body was read.
+    try testing.expectEqualStrings(seeded_versions, versions);
+
+    // The 304 also refreshed the names side-car, so search stays warm with
+    // no second download.
+    const names = try api.fetchNamesIndex(.formula);
+    defer testing.allocator.free(names);
+    try testing.expectEqualStrings(seeded_names, names);
+
+    listener.deinit(io);
+    thread.join();
+
+    // Exactly one conditional request; the warm names read hit no network.
+    try testing.expectEqual(@as(u32, 1), srv.count.load(.monotonic));
+    // That request carried If-None-Match — the stored ETag rode out.
+    try testing.expectEqual(@as(u32, 1), srv.conditional_count.load(.monotonic));
+
+    // The stored ETag is unchanged after a 304.
+    const stored = (try readCacheFileAlloc(testing.allocator, dir.path, "formula.etag")).?;
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(etag, stored);
+}
+
+test "a changed dump (new ETag) re-extracts both side-cars and stores the new ETag" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const old_etag = "W/\"old\"";
+    const new_etag = "W/\"new\"";
+    const fixture =
+        \\[{"name":"wget","versions":{"stable":"1.21.4"},"revision":0}]
+    ;
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = EtagServer{
+        .io = io,
+        .listener = &listener,
+        .body = fixture,
+        .etag = new_etag,
+        .count = std.atomic.Value(u32).init(0),
+        .conditional_count = std.atomic.Value(u32).init(0),
+    };
+    const thread = try std.Thread.spawn(.{}, EtagServer.serve, .{&srv});
+
+    var dir = try TempCacheDir.init("etag_200_changed");
+    defer dir.deinit();
+
+    // Seed a stale cache pinned to the old ETag — the dump has since moved on.
+    try dir.writeCacheFile("versions_formula.txt", "stale\t0.0.0\t0\n");
+    try dir.writeCacheFile("names_formula.txt", "stale\n");
+    try dir.writeCacheFile("formula.etag", old_etag);
+    try backdateIndex(dir.path, "versions_formula.txt");
+    try backdateIndex(dir.path, "names_formula.txt");
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
+    var base_buf: [64]u8 = undefined;
+    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const versions = try api.fetchVersionsIndex(.formula);
+    defer testing.allocator.free(versions);
+
+    listener.deinit(io);
+    thread.join();
+
+    // 200 path re-extracted from the fresh body, replacing the stale seed.
+    const want_versions = try api_mod.extractVersions(testing.allocator, .formula, fixture);
+    defer testing.allocator.free(want_versions);
+    try testing.expectEqualStrings(want_versions, versions);
+
+    // The new ETag is now persisted for the next round's conditional GET.
+    const stored = (try readCacheFileAlloc(testing.allocator, dir.path, "formula.etag")).?;
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(new_etag, stored);
+}
+
+test "a first-ever fetch (no stored ETag) does an unconditional GET and stores the ETag" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const etag = "W/\"v1\"";
+    const fixture =
+        \\[{"name":"jq","versions":{"stable":"1.7"}}]
+    ;
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = EtagServer{
+        .io = io,
+        .listener = &listener,
+        .body = fixture,
+        .etag = etag,
+        .count = std.atomic.Value(u32).init(0),
+        .conditional_count = std.atomic.Value(u32).init(0),
+    };
+    const thread = try std.Thread.spawn(.{}, EtagServer.serve, .{&srv});
+
+    var dir = try TempCacheDir.init("etag_cold_store");
+    defer dir.deinit();
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
+    var base_buf: [64]u8 = undefined;
+    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const versions = try api.fetchVersionsIndex(.formula);
+    defer testing.allocator.free(versions);
+
+    listener.deinit(io);
+    thread.join();
+
+    const want_versions = try api_mod.extractVersions(testing.allocator, .formula, fixture);
+    defer testing.allocator.free(want_versions);
+    try testing.expectEqualStrings(want_versions, versions);
+    try testing.expectEqual(@as(u32, 1), srv.count.load(.monotonic));
+    // No stored ETag yet, so the GET went out unconditional.
+    try testing.expectEqual(@as(u32, 0), srv.conditional_count.load(.monotonic));
+
+    // Cold fetch stored the server's ETag so the next refresh can 304.
+    const stored = (try readCacheFileAlloc(testing.allocator, dir.path, "formula.etag")).?;
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(etag, stored);
+}
+
+test "a 200 without an ETag header clears a previously stored ETag" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const fixture =
+        \\[{"name":"wget","versions":{"stable":"1.21.4"}}]
+    ;
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = EtagServer{
+        .io = io,
+        .listener = &listener,
+        .body = fixture,
+        .etag = null, // upstream stops advertising an ETag
+        .count = std.atomic.Value(u32).init(0),
+        .conditional_count = std.atomic.Value(u32).init(0),
+    };
+    const thread = try std.Thread.spawn(.{}, EtagServer.serve, .{&srv});
+
+    var dir = try TempCacheDir.init("etag_cleared");
+    defer dir.deinit();
+
+    try dir.writeCacheFile("versions_formula.txt", "stale\t0.0.0\t0\n");
+    try dir.writeCacheFile("names_formula.txt", "stale\n");
+    try dir.writeCacheFile("formula.etag", "W/\"gone\"");
+    try backdateIndex(dir.path, "versions_formula.txt");
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
+    var base_buf: [64]u8 = undefined;
+    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const versions = try api.fetchVersionsIndex(.formula);
+    defer testing.allocator.free(versions);
+
+    listener.deinit(io);
+    thread.join();
+
+    // The stale token is gone, so the next refresh starts unconditional.
+    try testing.expect(try readCacheFileAlloc(testing.allocator, dir.path, "formula.etag") == null);
+}
+
+test "an implausibly large stored ETag is ignored and the GET goes out unconditional" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const new_etag = "W/\"sane\"";
+    const fixture =
+        \\[{"name":"jq","versions":{"stable":"1.7"}}]
+    ;
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = EtagServer{
+        .io = io,
+        .listener = &listener,
+        .body = fixture,
+        .etag = new_etag,
+        .count = std.atomic.Value(u32).init(0),
+        .conditional_count = std.atomic.Value(u32).init(0),
+    };
+    const thread = try std.Thread.spawn(.{}, EtagServer.serve, .{&srv});
+
+    var dir = try TempCacheDir.init("etag_oversized");
+    defer dir.deinit();
+
+    // A corrupt, multi-KiB ETag must never ride out as If-None-Match.
+    const huge = "x" ** 4096;
+    try dir.writeCacheFile("versions_formula.txt", "stale\t0.0.0\t0\n");
+    try dir.writeCacheFile("formula.etag", huge);
+    try backdateIndex(dir.path, "versions_formula.txt");
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
+    var base_buf: [64]u8 = undefined;
+    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const versions = try api.fetchVersionsIndex(.formula);
+    defer testing.allocator.free(versions);
+
+    listener.deinit(io);
+    thread.join();
+
+    // The bad token was dropped, so the request was unconditional...
+    try testing.expectEqual(@as(u32, 0), srv.conditional_count.load(.monotonic));
+    // ...and the freshly extracted bytes plus a sane ETag now replace it.
+    const want = try api_mod.extractVersions(testing.allocator, .formula, fixture);
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, versions);
+    const stored = (try readCacheFileAlloc(testing.allocator, dir.path, "formula.etag")).?;
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(new_etag, stored);
+}
+
+test "a 304 with a missing side-car drops the ETag and surfaces ApiUnreachable" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const etag = "W/\"orphan\"";
+
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = EtagServer{
+        .io = io,
+        .listener = &listener,
+        .body = "[]",
+        .etag = etag,
+        .count = std.atomic.Value(u32).init(0),
+        .conditional_count = std.atomic.Value(u32).init(0),
+    };
+    const thread = try std.Thread.spawn(.{}, EtagServer.serve, .{&srv});
+
+    var dir = try TempCacheDir.init("etag_orphan");
+    defer dir.deinit();
+
+    // ETag present but only one side-car on disk: the versions read-back
+    // after the 304 fails, so the cache is inconsistent.
+    try dir.writeCacheFile("names_formula.txt", "wget\n");
+    try dir.writeCacheFile("formula.etag", etag);
+    try backdateIndex(dir.path, "names_formula.txt");
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
+    var base_buf: [64]u8 = undefined;
+    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    try testing.expectError(api_mod.ApiError.ApiUnreachable, api.fetchVersionsIndex(.formula));
+
+    listener.deinit(io);
+    thread.join();
+
+    // The orphaned ETag is dropped so the next run re-downloads cleanly.
+    try testing.expect(try readCacheFileAlloc(testing.allocator, dir.path, "formula.etag") == null);
+}
+
+test "the conditional refresh is kind-agnostic: a cask 304 refreshes and keeps cask.etag" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const etag = "W/\"cask-unchanged\"";
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = EtagServer{
+        .io = io,
+        .listener = &listener,
+        .body = "[]",
+        .etag = etag,
+        .count = std.atomic.Value(u32).init(0),
+        .conditional_count = std.atomic.Value(u32).init(0),
+    };
+    const thread = try std.Thread.spawn(.{}, EtagServer.serve, .{&srv});
+
+    var dir = try TempCacheDir.init("etag_304_cask");
+    defer dir.deinit();
+
+    const seeded = "firefox\t125.0\t0\n";
+    try dir.writeCacheFile("versions_cask.txt", seeded);
+    try dir.writeCacheFile("names_cask.txt", "firefox\n");
+    try dir.writeCacheFile("cask.etag", etag);
+    try backdateIndex(dir.path, "versions_cask.txt");
+    try backdateIndex(dir.path, "names_cask.txt");
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
+    var base_buf: [64]u8 = undefined;
+    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const versions = try api.fetchVersionsIndex(.cask);
+    defer testing.allocator.free(versions);
+
+    listener.deinit(io);
+    thread.join();
+
+    // Same 304 short-circuit as formula, keyed on the cask sidecars.
+    try testing.expectEqualStrings(seeded, versions);
+    try testing.expectEqual(@as(u32, 1), srv.conditional_count.load(.monotonic));
+    const stored = (try readCacheFileAlloc(testing.allocator, dir.path, "cask.etag")).?;
+    defer testing.allocator.free(stored);
+    try testing.expectEqualStrings(etag, stored);
+}
+
+// Answers every request with a fixed non-2xx status — used to pin the
+// "neither 200 nor 304" mapping to ApiUnreachable.
+const StatusServer = struct {
+    io: std.Io,
+    listener: *net.Server,
+    status: std.http.Status,
+
+    fn serve(self: *StatusServer) void {
+        while (true) {
+            const stream = self.listener.accept(self.io) catch return;
+            defer stream.close(self.io);
+            var rbuf: [16 * 1024]u8 = undefined;
+            var wbuf: [16 * 1024]u8 = undefined;
+            var reader = stream.reader(self.io, &rbuf);
+            var writer = stream.writer(self.io, &wbuf);
+            var srv = std.http.Server.init(&reader.interface, &writer.interface);
+            var req = srv.receiveHead() catch return;
+            req.respond("", .{ .status = self.status }) catch return;
+        }
+    }
+};
+
+test "a refresh that is neither 200 nor 304 surfaces ApiUnreachable" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // 404 is non-transient, so getConditional returns it without retrying.
+    var addr = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+    var srv = StatusServer{ .io = io, .listener = &listener, .status = .not_found };
+    const thread = try std.Thread.spawn(.{}, StatusServer.serve, .{&srv});
+
+    var dir = try TempCacheDir.init("etag_bad_status");
+    defer dir.deinit();
+
+    var inner: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, dir.path);
+    var base_buf: [64]u8 = undefined;
+    api.base_url = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    try testing.expectError(api_mod.ApiError.ApiUnreachable, api.fetchVersionsIndex(.formula));
+
+    listener.deinit(io);
+    thread.join();
 }
 
 test "readNotFoundCache returns false for stale marker" {
