@@ -655,3 +655,54 @@ test "extractTarGz rejects a pax path override that escapes by name" {
     t.entry("placeholder", '2', "benign");
     try std.testing.expectError(error.ExtractionFailed, testExtract(io, &tmp, t.bytes()));
 }
+
+test "extractTarGz rejects a pax linkpath that escapes via a hard link" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest");
+
+    // std.tar applies pax `linkpath` to hard-link targets too; the pre-scan
+    // recovers hard links itself, so the effective target must clear the
+    // same entry-path guard rather than the stale ustar field.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.pax('x', "linkpath", "../escape");
+    t.entry("placeholder", '1', "benign");
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &tmp, t.bytes()));
+}
+
+test "extractTarGz does not leak a pax override to a later entry" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest");
+
+    // The 'x' override applies to entry "a" only; "b" must fall back to its
+    // own ustar target, never inherit "a"'s pax linkpath.
+    var raw: [4096]u8 = undefined;
+    var t = TestTar.init(&raw);
+    t.pax('x', "linkpath", "target-a");
+    t.entry("a", '2', "ustar-a");
+    t.entry("b", '2', "target-b");
+    try testExtract(io, &tmp, t.bytes());
+
+    var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dest", .{base});
+    var dest_dir = try std.Io.Dir.openDirAbsolute(io, dst, .{});
+    defer dest_dir.close(io);
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const a = link_buf[0..try dest_dir.readLink(io, "a", &link_buf)];
+    try std.testing.expectEqualStrings("target-a", a);
+    var link_buf2: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const b = link_buf2[0..try dest_dir.readLink(io, "b", &link_buf2)];
+    try std.testing.expectEqualStrings("target-b", b);
+}
