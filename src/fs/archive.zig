@@ -383,6 +383,10 @@ pub fn extractZip(io: std.Io, archive_path: []const u8, dest_dir: []const u8) !v
         },
         else => return error.ExtractionFailed,
     }
+
+    // The `-Z1` listing only surfaces entry names; symlink targets are not
+    // checked until the tree exists on disk.
+    try rejectEscapingSymlinks(io, dest_dir);
 }
 
 fn validateZip(io: std.Io, archive_path: []const u8) !void {
@@ -412,6 +416,10 @@ pub fn extractTarXzFile(io: std.Io, archive_path: []const u8, dest_dir: []const 
         },
         else => return error.ExtractionFailed,
     }
+
+    // `tar tf` validated entry names, not symlink targets; check those on
+    // the materialised tree.
+    try rejectEscapingSymlinks(io, dest_dir);
 }
 
 fn validateTarListing(io: std.Io, archive_path: []const u8) !void {
@@ -454,6 +462,39 @@ fn validateSubprocessListing(io: std.Io, argv: []const []const u8) !void {
         const line = std.mem.trimEnd(u8, raw, "\r");
         if (line.len == 0) continue;
         if (!isSafeEntryPath(line)) return error.ExtractionFailed;
+    }
+}
+
+/// Walk a freshly-extracted tree and reject any symlink whose target escapes
+/// `dest_dir`. The `tar tf`/`unzip -Z1` pre-scan validates entry names but
+/// not symlink *targets*; macOS `tar`/`unzip` refuse to write *through* a
+/// symlink, so a dangling escaping link is the only residue — this catches it.
+/// The whole tree is wiped on rejection so a failed extract leaves nothing
+/// behind, matching the in-process tar.gz contract. The walker descends real
+/// directories only (symlink entries are never followed), so it cannot loop.
+fn rejectEscapingSymlinks(io: std.Io, dest_dir: []const u8) !void {
+    var escaped = false;
+    {
+        var dir = std.Io.Dir.openDirAbsolute(io, dest_dir, .{ .iterate = true }) catch
+            return error.ExtractionFailed;
+        defer dir.close(io);
+        var walker = dir.walk(child_allocator) catch return error.ExtractionFailed;
+        defer walker.deinit();
+        while (walker.next(io) catch return error.ExtractionFailed) |entry| {
+            if (entry.kind != .sym_link) continue;
+            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const len = entry.dir.readLink(io, entry.basename, &buf) catch return error.ExtractionFailed;
+            // `entry.path` is relative to dest_dir — the same shape the tar.gz
+            // pre-scan feeds `isSafeSymlinkTarget`, so the policy stays uniform.
+            if (!isSafeSymlinkTarget(entry.path, buf[0..len])) {
+                escaped = true;
+                break;
+            }
+        }
+    }
+    if (escaped) {
+        std.Io.Dir.cwd().deleteTree(io, dest_dir) catch {};
+        return error.ExtractionFailed;
     }
 }
 
@@ -705,4 +746,80 @@ test "extractTarGz does not leak a pax override to a later entry" {
     var link_buf2: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const b = link_buf2[0..try dest_dir.readLink(io, "b", &link_buf2)];
     try std.testing.expectEqualStrings("target-b", b);
+}
+
+// --- subprocess-extractor symlink-target guard (xz/zip) -------------------
+
+fn testDestAbs(tmp: *std.testing.TmpDir, io: std.Io, buf: []u8) ![]const u8 {
+    var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+    return std.fmt.bufPrint(buf, "{s}/dest", .{base});
+}
+
+test "rejectEscapingSymlinks rejects a climbing target and wipes the tree" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest");
+    // A symlink at the root climbing several levels escapes dest.
+    try tmp.dir.symLink(io, "../../../../etc/evil", "dest/escape", .{});
+
+    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dst = try testDestAbs(&tmp, io, &dst_buf);
+    try std.testing.expectError(error.ExtractionFailed, rejectEscapingSymlinks(io, dst));
+    // Rejection wipes the tree so nothing dangerous is left behind.
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, dst, .{}));
+}
+
+test "rejectEscapingSymlinks rejects an absolute target" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest");
+    try tmp.dir.symLink(io, "/etc/passwd", "dest/abs", .{});
+
+    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dst = try testDestAbs(&tmp, io, &dst_buf);
+    try std.testing.expectError(error.ExtractionFailed, rejectEscapingSymlinks(io, dst));
+}
+
+test "rejectEscapingSymlinks rejects a nested climbing target" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest/sub");
+    // From dest/sub, three climbs reach above dest.
+    try tmp.dir.symLink(io, "../../../etc/evil", "dest/sub/escape", .{});
+
+    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dst = try testDestAbs(&tmp, io, &dst_buf);
+    try std.testing.expectError(error.ExtractionFailed, rejectEscapingSymlinks(io, dst));
+}
+
+test "rejectEscapingSymlinks accepts in-tree symlinks" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest/bin");
+    // A sibling-relative link and a one-level climb that stays in-tree.
+    try tmp.dir.symLink(io, "sibling", "dest/ok", .{});
+    try tmp.dir.symLink(io, "../lib/real", "dest/bin/link", .{});
+
+    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dst = try testDestAbs(&tmp, io, &dst_buf);
+    try rejectEscapingSymlinks(io, dst);
+    // The tree is left intact when nothing escapes.
+    try std.Io.Dir.accessAbsolute(io, dst, .{});
 }
