@@ -110,3 +110,35 @@ test "extractZip still extracts a benign archive" {
     const hello = try std.fmt.bufPrint(&hello_buf, "{s}/hello", .{dst});
     try std.Io.Dir.accessAbsolute(io, hello, .{});
 }
+
+test "extractTarXzFile still extracts a benign archive with an in-tree symlink" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "src");
+    try tmp.dir.createDirPath(io, "dest");
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/hello", .data = "hi" });
+    var src = try tmp.dir.openDir(io, "src", .{});
+    defer src.close(io);
+    // A relative in-tree symlink must survive — the guard rejects only escapes.
+    try src.symLink(io, "hello", "alias", .{});
+
+    var arc_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const arc = try archiveAbs(&tmp, io, "ok.tar.xz", &arc_buf);
+    try run(io, &.{ "tar", "-cJf", arc, "-C", "src", "hello", "alias" }, .{ .dir = tmp.dir });
+
+    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dst = try destAbs(&tmp, io, &dst_buf);
+    try archive.extractTarXzFile(io, arc, dst);
+
+    // Both the regular file and the in-tree symlink land.
+    var dest_dir = try std.Io.Dir.openDirAbsolute(io, dst, .{});
+    defer dest_dir.close(io);
+    try dest_dir.access(io, "hello", .{});
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = link_buf[0..try dest_dir.readLink(io, "alias", &link_buf)];
+    try testing.expectEqualStrings("hello", target);
+}
