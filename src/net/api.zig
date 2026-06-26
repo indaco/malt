@@ -404,11 +404,40 @@ pub const BrewApi = struct {
     /// Folding the two extractors into one fetch is a requirement, not an
     /// optimisation: it stops a cold versions fetch from re-pulling a dump
     /// the names fetch already has on disk. Caller owns both slices.
+    ///
+    /// The GET is conditional: a stored ETag rides as `If-None-Match`, so an
+    /// unchanged dump answers 304 with no body and both side-cars are merely
+    /// marked fresh. A 200 (changed dump, or first-ever fetch) re-extracts
+    /// both and persists the new ETag. The public dump needs no auth header,
+    /// so none is sent — formulae.brew.sh is a CDN that ignores it.
     fn fetchAndWriteIndex(self: *BrewApi, kind: Kind, key: []const u8) ApiError!IndexPair {
         var url_buf: [512]u8 = undefined;
         const url = try buildNamesIndexUrl(&url_buf, self.base_url, kind);
-        var resp = self.http.get(url) catch return ApiError.ApiUnreachable;
+
+        const stored_etag = self.readIndexEtag(key);
+        defer if (stored_etag) |e| self.allocator.free(e);
+
+        var resp = self.http.getConditional(url, stored_etag, &.{}) catch return ApiError.ApiUnreachable;
         defer resp.deinit();
+
+        if (resp.not_modified) {
+            // Unchanged upstream: restart both side-cars' TTL without a
+            // rewrite and serve the bytes already on disk.
+            self.touchIndex("names_", key);
+            self.touchIndex("versions_", key);
+            if (self.readIndexFile("names_", key, null)) |names| {
+                if (self.readIndexFile("versions_", key, null)) |versions| {
+                    return .{ .names = names, .versions = versions };
+                }
+                self.allocator.free(names);
+            }
+            // ETag present but a side-car is gone (evicted / wiped): drop the
+            // ETag so the next refresh re-downloads unconditionally rather
+            // than looping on a 304 it can no longer satisfy.
+            self.deleteIndexEtag(key);
+            return ApiError.ApiUnreachable;
+        }
+
         if (resp.status != 200) return ApiError.ApiUnreachable;
 
         const names = extractNames(self.allocator, kind, resp.body) catch |e| switch (e) {
@@ -424,6 +453,7 @@ pub const BrewApi = struct {
 
         self.writeIndexFile("names_", key, names);
         self.writeIndexFile("versions_", key, versions);
+        self.writeIndexEtag(key, resp.etag);
         return .{ .names = names, .versions = versions };
     }
 
@@ -472,6 +502,71 @@ pub const BrewApi = struct {
         defer f.close(self.io);
         // Partial index is discarded on next miss; next fetch re-populates from network.
         f.writeStreamingAll(self.io, data) catch {};
+    }
+
+    /// Real ETags are tens of bytes; anything larger is corrupt and ignored
+    /// so a garbage `If-None-Match` never rides out to upstream.
+    const max_etag_bytes: u64 = 256;
+
+    /// Read the stored bulk-dump ETag for `key` (`api/<key>.etag`), or null
+    /// if absent / unreadable / implausibly large. Caller owns the bytes.
+    fn readIndexEtag(self: *BrewApi, key: []const u8) ?[]const u8 {
+        var path_buf: [512]u8 = undefined;
+        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}.etag", .{ self.cache_dir, key }) catch return null;
+        const file = std.Io.Dir.cwd().openFile(self.io, p, .{}) catch return null;
+        defer file.close(self.io);
+        const s = file.stat(self.io) catch return null;
+        if (s.size == 0 or s.size > max_etag_bytes) return null;
+        const buf = self.allocator.alloc(u8, s.size) catch return null;
+        const n = file.readPositionalAll(self.io, buf, 0) catch {
+            self.allocator.free(buf);
+            return null;
+        };
+        if (n < buf.len) {
+            self.allocator.free(buf);
+            return null;
+        }
+        return buf;
+    }
+
+    /// Persist the bulk-dump ETag for `key` atomically so a crash mid-write
+    /// can't leave a torn token that forces a needless full re-download. A
+    /// null `etag` (server omitted the header) clears any stored value so
+    /// the next fetch is unconditional rather than replaying a stale token.
+    fn writeIndexEtag(self: *const BrewApi, key: []const u8, etag: ?[]const u8) void {
+        const e = etag orelse return self.deleteIndexEtag(key);
+        var dir_buf: [512]u8 = undefined;
+        const dir = std.fmt.bufPrint(&dir_buf, "{s}/api", .{self.cache_dir}) catch return;
+        std.Io.Dir.createDirAbsolute(self.io, dir, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return,
+        };
+        var path_buf: [512]u8 = undefined;
+        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}.etag", .{ self.cache_dir, key }) catch return;
+        // Best-effort: a failed write just means the next fetch is
+        // unconditional, never wrong — the side-cars are already on disk.
+        atomic.atomicWriteFile(self.io, p, e) catch {};
+    }
+
+    /// Remove the stored ETag for `key`; best-effort.
+    fn deleteIndexEtag(self: *const BrewApi, key: []const u8) void {
+        var path_buf: [512]u8 = undefined;
+        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}.etag", .{ self.cache_dir, key }) catch return;
+        // A leftover ETag at worst triggers one needless conditional GET;
+        // a delete failure is harmless, so swallow it.
+        std.Io.Dir.cwd().deleteFile(self.io, p) catch {};
+    }
+
+    /// Reset a side-car's mtime to now so a 304 restarts its TTL window
+    /// without rewriting the bytes already on disk.
+    fn touchIndex(self: *const BrewApi, infix: []const u8, key: []const u8) void {
+        var path_buf: [512]u8 = undefined;
+        const p = std.fmt.bufPrint(&path_buf, "{s}/api/{s}{s}.txt", .{ self.cache_dir, infix, key }) catch return;
+        const file = std.Io.Dir.cwd().openFile(self.io, p, .{ .mode = .write_only }) catch return;
+        defer file.close(self.io);
+        // If the touch fails the side-car just looks stale next time and we
+        // re-issue the (cheap) conditional GET — correctness is unaffected.
+        file.setTimestampsNow(self.io) catch {};
     }
 
     /// Invalidate all cached API responses.
