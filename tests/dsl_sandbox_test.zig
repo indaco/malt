@@ -164,6 +164,24 @@ test "sandbox: validateWriteDir rejects outside prefix" {
     try testing.expectError(SandboxError.PathSandboxViolation, result);
 }
 
+test "sandbox: validateWriteDir is lenient when the whole prefix subtree is absent" {
+    // Regression: when no part of the keg/prefix exists on disk, the resolve
+    // walk must stop at the boundary and pass — not climb to an existing
+    // ancestor (the tmp root, `/opt`, …) and reject. This is environment-
+    // independent: the prefix dir below deliberately does not exist.
+    const io = std.Options.debug_io;
+    const tmp = std.testing.tmpDir(.{});
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = buf[0..try std.Io.Dir.realPath(tmp.dir, io, &buf)];
+
+    const absent_prefix = try std.fs.path.join(testing.allocator, &.{ base, "no_such_prefix" });
+    defer testing.allocator.free(absent_prefix);
+    const target = try std.fs.path.join(testing.allocator, &.{ absent_prefix, "bin", "mybin" });
+    defer testing.allocator.free(target);
+
+    try sandbox.validateWriteDir(io, target, absent_prefix, absent_prefix);
+}
+
 // ---------------------------------------------------------------------------
 // Extended sandbox tests
 // ---------------------------------------------------------------------------

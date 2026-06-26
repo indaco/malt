@@ -121,7 +121,7 @@ fn formatAtomicWriteFailureMessage(buf: []u8, kind: AtomicWriteError, underlying
 /// Fallback: direct overwrite (no atomicity guarantee). Still refuses to follow
 /// a symlink out of the keg — a best-effort fallback must not become an escape.
 fn writeDirectly(ctx: ExecCtx, path: []const u8, content: []const u8) void {
-    const out = sandbox.openWriteTargetNoFollow(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch return;
+    const out = sandbox.openTargetNoFollow(ctx.io, path, ctx.cellar_path, ctx.malt_prefix, .{ .create = true, .truncate = true }) catch return;
     defer out.close(ctx.io);
     // Fallback path already logged a warning; no error channel left to surface.
     out.writeStreamingAll(ctx.io, content) catch {};

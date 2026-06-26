@@ -86,7 +86,7 @@ pub fn write(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!V
 
     // O_NOFOLLOW + parent-dir resolve: a keg-confined path must not write
     // through a symlink to a target outside the keg.
-    const file = sandbox.openWriteTargetNoFollow(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch |e| switch (e) {
+    const file = sandbox.openTargetNoFollow(ctx.io, path, ctx.cellar_path, ctx.malt_prefix, .{ .create = true, .truncate = true }) catch |e| switch (e) {
         error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
         else => return Value{ .nil = {} },
     };
