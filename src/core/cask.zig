@@ -57,10 +57,18 @@ pub fn parseCask(allocator: std.mem.Allocator, json_bytes: []const u8) !Cask {
 
     const obj = parsed.value.object;
 
+    const token = getStr(obj, "token") orelse return CaskError.ParseFailed;
+    const version = getStr(obj, "version") orelse "unknown";
+    // `token` and `version` are interpolated verbatim into Caskroom,
+    // cache, and mount paths, so a value that escapes its own path
+    // component must be rejected here — the one ingestion choke point —
+    // before any sink sees it. A compromised tap is the threat.
+    if (!isPathComponent(token) or !isPathComponent(version)) return CaskError.ParseFailed;
+
     return .{
-        .token = getStr(obj, "token") orelse return CaskError.ParseFailed,
-        .name = getFirstName(obj) orelse getStr(obj, "token") orelse return CaskError.ParseFailed,
-        .version = getStr(obj, "version") orelse "unknown",
+        .token = token,
+        .name = getFirstName(obj) orelse token,
+        .version = version,
         .desc = getStr(obj, "desc") orelse "",
         .homepage = getStr(obj, "homepage") orelse "",
         .url = getStr(obj, "url") orelse return CaskError.ParseFailed,
@@ -1404,6 +1412,20 @@ pub fn isInstalled(db: *sqlite.Database, token: []const u8) bool {
 
 // --- JSON helpers ---
 
+/// True when `s` is a single, safe path segment. Charset-agnostic on
+/// purpose: real cask versions carry uppercase, commas, and colons that
+/// an allowlist would wrongly reject, so this only bars the shapes that
+/// hop out of a path component — empty, `.`/`..`, an embedded `/` or
+/// `..`, or a NUL the kernel reads as a string terminator.
+fn isPathComponent(s: []const u8) bool {
+    if (s.len == 0) return false;
+    if (std.mem.eql(u8, s, ".") or std.mem.eql(u8, s, "..")) return false;
+    if (std.mem.indexOfScalar(u8, s, '/') != null) return false;
+    if (std.mem.indexOf(u8, s, "..") != null) return false;
+    if (std.mem.indexOfScalar(u8, s, 0) != null) return false;
+    return true;
+}
+
 fn getStr(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const val = obj.get(key) orelse return null;
     return switch (val) {
@@ -1435,4 +1457,75 @@ fn getFirstName(obj: std.json.ObjectMap) ?[]const u8 {
         .string => |s| return s,
         else => return null,
     }
+}
+
+test "parseCask rejects path-traversal in token or version" {
+    const a = std.testing.allocator;
+    // Each carries a `/`, `..`, lone `.`, or NUL in `token` or `version` —
+    // all of which become raw path segments downstream. The `\u0000`
+    // sequences are JSON escapes the parser turns into real NUL bytes.
+    const bad = [_][]const u8{
+        \\{"token":"ev/../x","version":"1.0","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"a/b","version":"1.0","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"..","version":"1.0","url":"https://e/x.dmg"}
+        ,
+        \\{"token":".","version":"1.0","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"","version":"1.0","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"ok","version":"","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"ok","version":"1.0/../../../../tmp/x","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"a..b","version":"1.0","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"ok","version":"a..b","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"ok\u0000x","version":"1.0","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"ok","version":"1.0\u0000","url":"https://e/x.dmg"}
+        ,
+    };
+    for (bad) |json| {
+        try std.testing.expectError(error.ParseFailed, parseCask(a, json));
+    }
+}
+
+test "parseCask accepts legitimate token and version" {
+    const a = std.testing.allocator;
+    // The guard is charset-agnostic, so real versions an allowlist would
+    // reject — uppercase, comma, colon, space — must survive, and the
+    // absent-version `"unknown"` default must too.
+    const ok = [_][]const u8{
+        \\{"token":"google-chrome","version":"1.2.3,400","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"firefox","version":"2.0:1 (Beta)","url":"https://e/x.dmg"}
+        ,
+        \\{"token":"firefox","url":"https://e/x.dmg"}
+        ,
+    };
+    for (ok) |json| {
+        var cask = try parseCask(a, json);
+        cask.deinit();
+    }
+}
+
+test "parseCask does not length-cap a clean version" {
+    const a = std.testing.allocator;
+    // Versions have no length convention, so the guard must stay length-
+    // agnostic — this locks out a future regression that grows an
+    // over-eager cap and rejects a long but otherwise-clean version.
+    var ver: [200]u8 = undefined;
+    @memset(&ver, '9');
+    const json = try std.fmt.allocPrint(
+        a,
+        \\{{"token":"firefox","version":"{s}","url":"https://e/x.dmg"}}
+    ,
+        .{ver},
+    );
+    defer a.free(json);
+    var cask = try parseCask(a, json);
+    cask.deinit();
 }
