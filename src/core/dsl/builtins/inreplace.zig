@@ -32,8 +32,9 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
     const from = try args[1].asString(ctx.allocator);
     const to = try args[2].asString(ctx.allocator);
 
-    // Sandbox validation — inreplace is a mutating operation
-    sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch
+    // Sandbox validation — inreplace is a mutating operation. The parent-dir
+    // resolve also blocks an intermediate-directory symlink escape.
+    sandbox.validateWriteDir(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
 
     // Read file contents
@@ -59,7 +60,7 @@ pub fn inreplace(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Valu
         // Record the warning; the post_install caller renders notes. Keeps
         // this builtin free of ui/output.
         if (ctx.fallback_log) |flog| flog.note(msg);
-        writeDirectly(ctx.io, path, new_content);
+        writeDirectly(ctx, path, new_content);
     };
 
     return Value{ .nil = {} };
@@ -117,12 +118,13 @@ fn formatAtomicWriteFailureMessage(buf: []u8, kind: AtomicWriteError, underlying
     );
 }
 
-/// Fallback: direct overwrite (no atomicity guarantee).
-fn writeDirectly(io: std.Io, path: []const u8, content: []const u8) void {
-    const out = std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true }) catch return;
-    defer out.close(io);
+/// Fallback: direct overwrite (no atomicity guarantee). Still refuses to follow
+/// a symlink out of the keg — a best-effort fallback must not become an escape.
+fn writeDirectly(ctx: ExecCtx, path: []const u8, content: []const u8) void {
+    const out = sandbox.openWriteTargetNoFollow(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch return;
+    defer out.close(ctx.io);
     // Fallback path already logged a warning; no error channel left to surface.
-    out.writeStreamingAll(io, content) catch {};
+    out.writeStreamingAll(ctx.io, content) catch {};
 }
 
 /// Read the entire contents of an absolute file path into a caller-owned slice.

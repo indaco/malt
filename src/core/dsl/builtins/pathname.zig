@@ -81,13 +81,14 @@ pub fn symlinkQ(ctx: ExecCtx, receiver: ?Value, _: []const Value) BuiltinError!V
 pub fn write(ctx: ExecCtx, receiver: ?Value, args: []const Value) BuiltinError!Value {
     const path = try receiverPath(ctx.allocator, receiver);
     if (path.len == 0) return Value{ .nil = {} };
-    sandbox.validatePath(path, ctx.cellar_path, ctx.malt_prefix) catch
-        return BuiltinError.PathSandboxViolation;
 
     const content = if (args.len > 0) try args[0].asString(ctx.allocator) else "";
 
-    const file = std.Io.Dir.createFileAbsolute(ctx.io, path, .{}) catch {
-        return Value{ .nil = {} };
+    // O_NOFOLLOW + parent-dir resolve: a keg-confined path must not write
+    // through a symlink to a target outside the keg.
+    const file = sandbox.openWriteTargetNoFollow(ctx.io, path, ctx.cellar_path, ctx.malt_prefix) catch |e| switch (e) {
+        error.PathSandboxViolation => return BuiltinError.PathSandboxViolation,
+        else => return Value{ .nil = {} },
     };
     defer file.close(ctx.io);
     file.writeStreamingAll(ctx.io, content) catch {};
@@ -438,4 +439,51 @@ test "pkgetc keeps an @-versioned formula name intact" {
     const etc = try pkgetc(ctx, Value{ .pathname = "/opt/malt/opt/openssl@3" }, &.{});
     defer std.testing.allocator.free(etc.pathname);
     try std.testing.expectEqualStrings("/opt/malt/etc/openssl@3", etc.pathname);
+}
+
+test "write refuses to follow a symlink out of the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "Cellar", "foo", "1.0" });
+    defer alloc.free(keg);
+    const victim = try std.fs.path.join(alloc, &.{ base, "victim" });
+    defer alloc.free(victim);
+    const link = try std.fs.path.join(alloc, &.{ keg, "pwn" });
+    defer alloc.free(link);
+
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    {
+        const vf = try std.Io.Dir.createFileAbsolute(io, victim, .{});
+        defer vf.close(io);
+        try vf.writeStreamingAll(io, "PRECIOUS");
+    }
+    // keg/pwn -> outside victim: a keg-confined link name pointing out of the keg.
+    try std.Io.Dir.symLinkAbsolute(io, victim, link, .{});
+
+    const ctx: ExecCtx = .{
+        .allocator = alloc,
+        .io = io,
+        .environ = undefined,
+        .cellar_path = keg,
+        .malt_prefix = base,
+    };
+
+    // Writing through the link must be refused, not followed.
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        write(ctx, Value{ .pathname = link }, &.{Value{ .string = "owned" }}),
+    );
+
+    // And the out-of-keg target must be byte-for-byte untouched.
+    var rb: [32]u8 = undefined;
+    const vf = try std.Io.Dir.openFileAbsolute(io, victim, .{});
+    defer vf.close(io);
+    const n = try vf.readPositionalAll(io, &rb, 0);
+    try std.testing.expectEqualStrings("PRECIOUS", rb[0..n]);
 }

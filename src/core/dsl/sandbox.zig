@@ -111,32 +111,77 @@ pub fn fenceArgv(
     return wrapped;
 }
 
-/// Resolve a path to its canonical form (resolving symlinks)
-/// and then validate it.
-pub fn validateResolved(
+/// Resolve `path` to its canonical form, or return `fallback` when it can't be
+/// resolved (e.g. it doesn't exist). Used to compare against the *resolved*
+/// keg/prefix so a legitimately symlinked root (macOS `/tmp` → `/private/tmp`)
+/// is not mistaken for an escape.
+fn realPathOr(io: std.Io, path: []const u8, buf: []u8, fallback: []const u8) []const u8 {
+    const n = std.Io.Dir.cwd().realPathFile(io, path, buf) catch return fallback;
+    return buf[0..n];
+}
+
+/// Validate a create/copy write target: the literal `validatePath` checks plus a
+/// resolved-boundary check on the nearest existing ancestor *directory*. This
+/// closes the intermediate-directory symlink escape (`ln_s "/etc", keg/d` then a
+/// write under `keg/d/...`). A final-component symlink is deliberately left to
+/// the open — an atomic copy replaces it, and `openWriteTargetNoFollow` refuses
+/// it via `O_NOFOLLOW`. A target whose parents don't exist yet can't escape (the
+/// open just fails), so a resolve miss up to the root is allowed.
+pub fn validateWriteDir(
     io: std.Io,
     target_path: []const u8,
     cellar_path: []const u8,
     malt_prefix: []const u8,
 ) SandboxError!void {
-    // First validate the literal path
     try validatePath(target_path, cellar_path, malt_prefix);
 
-    // Try to resolve symlinks. If the path doesn't exist yet,
-    // that's fine — just validate the literal path.
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const n = std.Io.Dir.cwd().realPathFile(io, target_path, &buf) catch {
-        return; // Path doesn't exist yet — literal validation passed
-    };
-    const resolved = buf[0..n];
+    var probe: []const u8 = target_path;
+    const dir_real = while (std.fs.path.dirname(probe)) |parent| {
+        const n = std.Io.Dir.cwd().realPathFile(io, parent, &buf) catch {
+            probe = parent;
+            continue;
+        };
+        break buf[0..n];
+    } else return;
 
-    // Re-validate the resolved path with the same boundary rules.
-    if (containsDotDot(resolved)) return SandboxError.PathSandboxViolation;
-    if (!pathHasPrefix(resolved, cellar_path) and
-        !pathHasPrefix(resolved, malt_prefix))
-    {
-        return SandboxError.PathSandboxViolation;
-    }
+    if (containsDotDot(dir_real)) return SandboxError.PathSandboxViolation;
+
+    var cbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var xbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const cellar_real = realPathOr(io, cellar_path, &cbuf, cellar_path);
+    const prefix_real = realPathOr(io, malt_prefix, &xbuf, malt_prefix);
+
+    if (pathHasPrefix(dir_real, cellar_real)) return;
+    if (pathHasPrefix(dir_real, prefix_real)) return;
+    return SandboxError.PathSandboxViolation;
+}
+
+/// Open a create/truncate write target without following a final-component
+/// symlink, after `validateWriteDir` confirms the containing directory stays in
+/// the keg/prefix. `O_NOFOLLOW` makes the refusal atomic at the kernel (no
+/// lstat→open race); both an out-of-keg directory and a symlinked leaf map to
+/// `PathSandboxViolation`. Other open failures surface as `OpenError` so callers
+/// keep their swallow-on-IO contract.
+pub fn openWriteTargetNoFollow(
+    io: std.Io,
+    target_path: []const u8,
+    cellar_path: []const u8,
+    malt_prefix: []const u8,
+) (SandboxError || std.posix.OpenError)!std.Io.File {
+    try validateWriteDir(io, target_path, cellar_path, malt_prefix);
+    const fd = std.posix.openat(std.posix.AT.FDCWD, target_path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .TRUNC = true,
+        .CLOEXEC = true,
+        .NOFOLLOW = true,
+    }, 0o644) catch |e| switch (e) {
+        // O_NOFOLLOW yields ELOOP (SymLinkLoop) when the leaf is a symlink.
+        error.SymLinkLoop => return SandboxError.PathSandboxViolation,
+        else => return e,
+    };
+    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
 test "validateArgv accepts bare command names" {
@@ -211,6 +256,64 @@ test "fenceArgv maps a profile allocation failure to OutOfMemory" {
         FenceError.OutOfMemory,
         fenceArgv(std.testing.failing_allocator, &.{"make"}, "/opt/malt/Cellar/foo/1.0", "/opt/malt"),
     );
+}
+
+test "openWriteTargetNoFollow writes a normal in-keg file" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bb: [std.fs.max_path_bytes]u8 = undefined;
+    // Resolved root exercises the /tmp → /private/tmp case: a symlinked prefix
+    // must not read as an escape.
+    const keg = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+
+    const target = try std.fs.path.join(alloc, &.{ keg, "out.txt" });
+    defer alloc.free(target);
+
+    const f = try openWriteTargetNoFollow(io, target, keg, keg);
+    {
+        defer f.close(io);
+        try f.writeStreamingAll(io, "ok");
+    }
+    var rb: [8]u8 = undefined;
+    const rf = try std.Io.Dir.openFileAbsolute(io, target, .{});
+    defer rf.close(io);
+    try std.testing.expectEqualStrings("ok", rb[0..try rf.readPositionalAll(io, &rb, 0)]);
+}
+
+test "openWriteTargetNoFollow refuses a final-component symlink out of the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bb: [std.fs.max_path_bytes]u8 = undefined;
+    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    defer alloc.free(keg);
+    const victim = try std.fs.path.join(alloc, &.{ base, "victim" });
+    defer alloc.free(victim);
+    const link = try std.fs.path.join(alloc, &.{ keg, "pwn" });
+    defer alloc.free(link);
+
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    {
+        const vf = try std.Io.Dir.createFileAbsolute(io, victim, .{});
+        defer vf.close(io);
+        try vf.writeStreamingAll(io, "PRECIOUS");
+    }
+    try std.Io.Dir.symLinkAbsolute(io, victim, link, .{});
+
+    try std.testing.expectError(
+        SandboxError.PathSandboxViolation,
+        openWriteTargetNoFollow(io, link, keg, base),
+    );
+
+    var rb: [16]u8 = undefined;
+    const vf = try std.Io.Dir.openFileAbsolute(io, victim, .{});
+    defer vf.close(io);
+    try std.testing.expectEqualStrings("PRECIOUS", rb[0..try vf.readPositionalAll(io, &rb, 0)]);
 }
 
 fn containsDotDot(path: []const u8) bool {

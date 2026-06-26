@@ -70,7 +70,9 @@ pub fn mkdirP(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
 pub fn cp(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len < 2) return Value{ .nil = {} };
     const dst = try args[1].asString(ctx.allocator);
-    sandbox.validatePath(dst, ctx.cellar_path, ctx.malt_prefix) catch
+    // Resolve the dest's parent so an intermediate-directory symlink can't pull
+    // the copy out of the keg; the final component is replaced atomically.
+    sandbox.validateWriteDir(ctx.io, dst, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
 
     // If first arg is an array, copy each file into dst directory
@@ -81,6 +83,8 @@ pub fn cp(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
                 const src = item.asString(ctx.allocator) catch continue;
                 const base = std.fs.path.basename(src);
                 const dest_path = std.fs.path.join(ctx.allocator, &.{ dst, base }) catch continue;
+                // dst itself may be a planted symlink; re-resolve per entry.
+                sandbox.validateWriteDir(ctx.io, dest_path, ctx.cellar_path, ctx.malt_prefix) catch continue;
                 std.Io.Dir.copyFileAbsolute(src, dest_path, ctx.io, .{}) catch {};
             }
         },
@@ -97,7 +101,7 @@ pub fn cpR(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
     if (args.len < 2) return Value{ .nil = {} };
     const src = try args[0].asString(ctx.allocator);
     const dst = try args[1].asString(ctx.allocator);
-    sandbox.validatePath(dst, ctx.cellar_path, ctx.malt_prefix) catch
+    sandbox.validateWriteDir(ctx.io, dst, ctx.cellar_path, ctx.malt_prefix) catch
         return BuiltinError.PathSandboxViolation;
 
     // Try as single file first
@@ -217,6 +221,46 @@ pub fn lnSf(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
         },
     }
     return Value{ .nil = {} };
+}
+
+test "cp refuses to copy through an intermediate-directory symlink out of the keg" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var bb: [std.fs.max_path_bytes]u8 = undefined;
+    const base = bb[0..try std.Io.Dir.realPath(tmp.dir, io, &bb)];
+
+    const keg = try std.fs.path.join(alloc, &.{ base, "keg" });
+    defer alloc.free(keg);
+    const outside = try std.fs.path.join(alloc, &.{ base, "outside" });
+    defer alloc.free(outside);
+    const dirlink = try std.fs.path.join(alloc, &.{ keg, "d" });
+    defer alloc.free(dirlink);
+    const src = try std.fs.path.join(alloc, &.{ keg, "src.txt" });
+    defer alloc.free(src);
+    const dst = try std.fs.path.join(alloc, &.{ dirlink, "x" }); // keg/d/x, d -> outside
+    defer alloc.free(dst);
+    const escaped = try std.fs.path.join(alloc, &.{ outside, "x" });
+    defer alloc.free(escaped);
+
+    try std.Io.Dir.cwd().createDirPath(io, keg);
+    try std.Io.Dir.cwd().createDirPath(io, outside);
+    {
+        const sf = try std.Io.Dir.createFileAbsolute(io, src, .{});
+        defer sf.close(io);
+        try sf.writeStreamingAll(io, "data");
+    }
+    try std.Io.Dir.symLinkAbsolute(io, outside, dirlink, .{});
+
+    // keg is the only writable boundary, so base/outside is genuinely out of bounds.
+    const ctx: ExecCtx = .{ .allocator = alloc, .io = io, .environ = undefined, .cellar_path = keg, .malt_prefix = keg };
+    try std.testing.expectError(
+        BuiltinError.PathSandboxViolation,
+        cp(ctx, null, &.{ Value{ .string = src }, Value{ .string = dst } }),
+    );
+    // Nothing landed outside the keg.
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, escaped, .{}));
 }
 
 fn copyDirRecursive(io: std.Io, allocator: std.mem.Allocator, src: []const u8, dst: []const u8) !void {
