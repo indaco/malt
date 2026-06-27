@@ -320,20 +320,21 @@ fn promoteIsolatedDepIfAny(
     name: []const u8,
 ) bool {
     var sel = db.prepare(
-        "SELECT id, version, cellar_path FROM kegs WHERE name=?1 AND install_reason='dependency' AND bin_isolated=1 LIMIT 1;",
+        "SELECT id, cellar_path FROM kegs WHERE name=?1 AND install_reason='dependency' AND bin_isolated=1 LIMIT 1;",
     ) catch return false;
     defer sel.finalize();
     sel.bindText(1, name) catch return false;
     const ok = sel.step() catch false;
     if (!ok) return false;
     const keg_id = sel.columnInt(0);
-    const ver_ptr = sel.columnText(1) orelse return false;
-    const cellar_ptr = sel.columnText(2) orelse return false;
-    const version = std.mem.sliceTo(ver_ptr, 0);
+    const cellar_ptr = sel.columnText(1) orelse return false;
     const cellar = std.mem.sliceTo(cellar_ptr, 0);
 
     linker.link(cellar, name, keg_id, false) catch return false;
-    linker.linkOpt(name, version) catch {}; // opt link already present on a promoted dep; best-effort refresh.
+    // opt link already present on a promoted dep; best-effort refresh. The
+    // dir is named by pkg_version (`<version>_<revision>`), so derive the
+    // leaf from cellar_path — raw `version` would dangle for a revisioned dep.
+    linker.linkOpt(name, std.fs.path.basename(cellar)) catch {};
 
     var upd = db.prepare(
         "UPDATE kegs SET install_reason='direct', bin_isolated=0 WHERE id=?1;",
@@ -1486,6 +1487,62 @@ fn formatMaterializeFailure(buf: []u8, name: []const u8, err: cellar_mod.CellarE
     // Overflow only fires on pathologically long names; fall back to a
     // truncated form rather than swallowing the failure silently.
     return result catch "Failed to materialize <truncated>";
+}
+
+test "promoteIsolatedDepIfAny opt-links the revisioned dir, not the raw version" {
+    // Isolated dep at version 1.3 revision 1 lives on disk as
+    // Cellar/zlib/1.3_1. Promotion must point opt/zlib at that dir; a
+    // raw-version opt link (Cellar/zlib/1.3) would dangle.
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ts = std.Io.Clock.real.now(io).toNanoseconds();
+    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_promote_rev_{d}", .{ts});
+    std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, prefix) catch {};
+
+    var mk_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const keg_lib = try std.fmt.bufPrint(&mk_buf, "{s}/Cellar/zlib/1.3_1/lib", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, keg_lib);
+    var db_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db_dir = try std.fmt.bufPrint(&db_dir_buf, "{s}/db", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(io, db_dir);
+
+    var dbp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const db_path = try std.fmt.bufPrintSentinel(&dbp_buf, "{s}/db/malt.db", .{prefix}, 0);
+    var db = try sqlite.Database.open(db_path);
+    defer db.close();
+    try schema.initSchema(&db);
+    var ins_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
+    const insert = try std.fmt.bufPrintSentinel(
+        &ins_buf,
+        "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason,bin_isolated) " ++
+            "VALUES('zlib','zlib','1.3',1,'sha','{s}/Cellar/zlib/1.3_1','dependency',1);",
+        .{prefix},
+        0,
+    );
+    try db.exec(insert);
+
+    var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
+    try testing.expect(promoteIsolatedDepIfAny(&db, &linker, "zlib"));
+
+    // opt/zlib must resolve (accessAbsolute follows the symlink; a
+    // dangling link would surface FileNotFound).
+    var opt_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const opt = try std.fmt.bufPrint(&opt_buf, "{s}/opt/zlib", .{prefix});
+    try std.Io.Dir.accessAbsolute(io, opt, .{});
+
+    // …and the row is promoted: direct + no longer bin-isolated.
+    var row = try db.prepare("SELECT install_reason, bin_isolated FROM kegs WHERE name='zlib';");
+    defer row.finalize();
+    try testing.expect(try row.step());
+    try testing.expectEqualStrings("direct", std.mem.sliceTo(row.columnText(0).?, 0));
+    try testing.expectEqual(@as(i64, 0), row.columnInt(1));
 }
 
 test "mapApiFetchError surfaces ApiUnreachable as NetworkError" {

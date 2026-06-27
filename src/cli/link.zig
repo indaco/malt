@@ -53,7 +53,7 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
     schema.initSchema(&db) catch {};
 
     // Look up the keg
-    var stmt = db.prepare("SELECT id, version, cellar_path FROM kegs WHERE name = ?1 LIMIT 1;") catch {
+    var stmt = db.prepare("SELECT id, cellar_path FROM kegs WHERE name = ?1 LIMIT 1;") catch {
         output.err("Database query failed", .{});
         return error.Aborted;
     };
@@ -67,7 +67,7 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
     }
 
     const keg_id = stmt.columnInt(0);
-    const cellar_path_raw = stmt.columnText(2) orelse {
+    const cellar_path_raw = stmt.columnText(1) orelse {
         output.err("No cellar path recorded for {s}", .{target_name});
         return error.Aborted;
     };
@@ -103,16 +103,10 @@ pub fn executeLink(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []con
         return error.Aborted;
     };
 
-    // Also create the version from DB for opt link
-    var ver_stmt = db.prepare("SELECT version FROM kegs WHERE id = ?1;") catch return;
-    defer ver_stmt.finalize();
-    ver_stmt.bindInt(1, keg_id) catch return;
-    if (ver_stmt.step() catch false) {
-        if (ver_stmt.columnText(0)) |v| {
-            // opt/ link is a convenience pointer; primary link.link already succeeded.
-            linker.linkOpt(target_name, std.mem.sliceTo(v, 0)) catch {};
-        }
-    }
+    // opt/ link is a convenience pointer; primary link.link already
+    // succeeded. The dir is named by pkg_version (`<version>_<revision>`),
+    // so derive the leaf from cellar_path — raw `version` would dangle.
+    linker.linkOpt(target_name, std.fs.path.basename(cellar_path)) catch {};
 
     // A full link materialises bin/sbin, so the row's `bin_isolated`
     // must agree with the filesystem; clear it unconditionally. Best-
