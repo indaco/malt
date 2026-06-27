@@ -81,6 +81,15 @@ pub fn pruneCellarForReinstall(ctx: *const AppCtx, prefix: []const u8, name: []c
     std.Io.Dir.cwd().deleteTree(ctx.io, cellar_path) catch {};
 }
 
+/// Whether the `--force` pre-materialize prune should run. `--download-only`
+/// stops before the materialize phase, so pruning then would deleteTree an
+/// installed keg with nothing to re-populate it — download-only must never
+/// mutate the installed cellar. Mirrors the tap/local path, which already
+/// returns on download-only before its own force prune.
+pub fn shouldPruneForReinstall(force: bool, download_only: bool) bool {
+    return force and !download_only;
+}
+
 /// Unlink the on-disk symlinks AND drop the `links` rows for every
 /// `kegs` row of `name` whose `cellar_path` differs from
 /// `keep_cellar_path` — i.e. the prior install at an other
@@ -874,7 +883,7 @@ fn executeWithOpts(
     // crash leaves the user's prior keg + row intact for the revision-bump
     // case. Pin survives because `recordKeg` inherits via COALESCE-MAX on
     // `pinned` by name.
-    if (force) {
+    if (shouldPruneForReinstall(force, download_only)) {
         for (all_jobs.items) |job| {
             pruneCellarForReinstall(ctx, prefix, job.name, job.version_str);
         }
@@ -1534,6 +1543,46 @@ test "kegPresent returns true only when <prefix>/Cellar/<name> exists" {
 
     try testing.expect(kegPresent(&ctx, prefix, "ghost"));
     try testing.expect(!kegPresent(&ctx, prefix, "other"));
+}
+
+// `--download-only` must never mutate the installed cellar. The bottle
+// path ran the `--force` prune ahead of its download-only early return,
+// so `mt install --download-only --force <same-version>` deleteTree'd an
+// installed keg and never re-materialized it. The prune is now gated on
+// `shouldPruneForReinstall`, which vetoes the prune under download-only.
+// (The prune loops all jobs, so a multi-dep target would wipe every
+// dependency's cellar; one assertion on the primary keg suffices.)
+test "install: --download-only suppresses the --force reinstall prune" {
+    const testing = std.testing;
+
+    // Pure decision: only a plain `--force` (no download-only) prunes.
+    try testing.expect(shouldPruneForReinstall(true, false));
+    try testing.expect(!shouldPruneForReinstall(true, true));
+    try testing.expect(!shouldPruneForReinstall(false, false));
+    try testing.expect(!shouldPruneForReinstall(false, true));
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const ctx: AppCtx = .{ .io = threaded.io(), .environ = .empty };
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ts = std.Io.Clock.real.now(ctx.io).toNanoseconds();
+    const prefix = try std.fmt.bufPrint(&path_buf, "/tmp/malt_dlonly_force_{d}", .{ts});
+    std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(ctx.io, prefix);
+    defer std.Io.Dir.cwd().deleteTree(ctx.io, prefix) catch {};
+
+    var keg_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const keg = try std.fmt.bufPrint(&keg_buf, "{s}/Cellar/wget/1.21", .{prefix});
+    try std.Io.Dir.cwd().createDirPath(ctx.io, keg);
+
+    // download-only gate is false → prune skipped → keg survives.
+    if (shouldPruneForReinstall(true, true)) pruneCellarForReinstall(&ctx, prefix, "wget", "1.21");
+    try std.Io.Dir.accessAbsolute(ctx.io, keg, .{});
+
+    // plain --force gate is true → prune runs → keg gone.
+    if (shouldPruneForReinstall(true, false)) pruneCellarForReinstall(&ctx, prefix, "wget", "1.21");
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(ctx.io, keg, .{}));
 }
 
 // `--force` that resolves to a new revision (e.g. 10.47 → 10.47_1)
