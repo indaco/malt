@@ -1530,3 +1530,26 @@ test "parser: dangling #{ in a string is a literal, not an out-of-bounds slice" 
     try std.testing.expectEqualStrings("a", prefixed[0].literal);
     try std.testing.expectEqualStrings("#{", prefixed[1].literal);
 }
+
+// The `\` escape arm runs before `#{` detection, so a backslash-escaped `\#{`
+// never opens an interpolation segment — it can't reach the slice at all.
+// Lock that: escaped `#{` stays literal whether dangling or "closed".
+test "parser: an escaped \\#{ stays literal and never interpolates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const loc: SourceLoc = .{ .line = 1, .col = 1 };
+
+    var lex = Lexer.init("");
+    var p = Parser.init(alloc, &lex);
+
+    // Escaped + dangling: a single literal, no panic.
+    const dangling = try p.parseStringInterpolation("\\#{", loc);
+    try std.testing.expectEqual(@as(usize, 1), dangling.len);
+    try std.testing.expectEqualStrings("\\#{", dangling[0].literal);
+
+    // Escaped over a would-be interpolation: still suppressed to a literal.
+    const closed = try p.parseStringInterpolation("\\#{x}", loc);
+    try std.testing.expectEqual(@as(usize, 1), closed.len);
+    try std.testing.expectEqualStrings("\\#{x}", closed[0].literal);
+}
