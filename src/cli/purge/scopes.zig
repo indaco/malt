@@ -164,26 +164,31 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     // the DB `DELETE` as the authoritative removal signal; filesystem and
     // refcount side-effects converge on subsequent runs.
     for (removable.items) |name| {
-        var stmt = db.prepare("SELECT id, version, store_sha256 FROM kegs WHERE name = ?1;") catch continue;
+        var stmt = db.prepare("SELECT id, store_sha256, cellar_path FROM kegs WHERE name = ?1;") catch continue;
         defer stmt.finalize();
         stmt.bindText(1, name) catch continue;
 
         if (stmt.step() catch false) {
             const keg_id = stmt.columnInt(0);
-            const version_ptr = stmt.columnText(1);
-            const sha_ptr = stmt.columnText(2);
+            const sha_ptr = stmt.columnText(1);
+            const cellar_ptr = stmt.columnText(2);
+
+            // The on-disk dir is named by pkg_version (`<version>_<revision>`),
+            // so derive the leaf from cellar_path — raw `version` would miss a
+            // revisioned keg's dir and leave it orphaned.
+            const pkg_version = if (cellar_ptr) |c| std.fs.path.basename(std.mem.sliceTo(c, 0)) else "";
 
             // Credit cellar bytes before unlink: removing the keg deletes
             // the directory we'd otherwise stat.
-            if (version_ptr) |v| {
+            if (pkg_version.len > 0) {
                 var path_buf: [512]u8 = undefined;
-                const cellar_path = std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, std.mem.sliceTo(v, 0) }) catch "";
+                const cellar_path = std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, name, pkg_version }) catch "";
                 if (cellar_path.len > 0) result.bytes += util.pathSize(io, allocator, cellar_path);
             }
 
             linker.unlink(keg_id) catch {};
-            if (version_ptr) |v| {
-                cellar_mod.remove(io, prefix, name, std.mem.sliceTo(v, 0)) catch {};
+            if (pkg_version.len > 0) {
+                cellar_mod.remove(io, prefix, name, pkg_version) catch {};
             }
             {
                 var parent_buf: [512]u8 = undefined;
@@ -1425,4 +1430,48 @@ test "runUnusedDeps keeps a dependency a still-installed keg's Mach-O links desp
     defer stmt.finalize();
     _ = try stmt.step();
     try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
+}
+
+test "runUnusedDeps removes a revisioned orphan's Cellar dir named with the _<revision> suffix" {
+    // Orphan dependency keg at version 0.22 revision 1 lives on disk as
+    // Cellar/gettext/0.22_1. Autoremove must hit that dir, not the
+    // suffix-less raw-version path, or it orphans the keg on disk.
+    const allocator = testing.allocator;
+
+    const prefix = try uniqueCellarPrefix(allocator, "unuseddeps_revision");
+    defer allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+
+    const db_dir = try joinZ(allocator, prefix, "/db");
+    defer allocator.free(db_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, db_dir);
+    const keg_lib = try joinZ(allocator, prefix, "/Cellar/gettext/0.22_1/lib");
+    defer allocator.free(keg_lib);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, keg_lib);
+
+    const db_path = try joinZ(allocator, prefix, "/db/malt.db");
+    defer allocator.free(db_path);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        const insert = try std.fmt.allocPrintSentinel(
+            allocator,
+            "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path,install_reason) " ++
+                "VALUES('gettext','gettext','0.22',1,'sha','{s}/Cellar/gettext/0.22_1','dependency');",
+            .{prefix},
+            0,
+        );
+        defer allocator.free(insert);
+        try db.exec(insert);
+    }
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runUnusedDeps(&ctx, allocator, prefix, false);
+
+    try testing.expectEqual(util.ScopeStatus.ok, result.status);
+    try testing.expectEqual(@as(u32, 1), result.removed);
+    const ver_dir = try joinZ(allocator, prefix, "/Cellar/gettext/0.22_1");
+    defer allocator.free(ver_dir);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, ver_dir, .{}));
 }
