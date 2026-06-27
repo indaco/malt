@@ -149,9 +149,9 @@ pub fn migrateKeg(
         output.emitNdjsonEvent(.stored, keg_name, "ok");
     }
 
-    deps.store.incrementRef(bottle.sha256) catch |e| {
-        std.log.warn("refcount increment failed for {s}: {s}", .{ keg_name, @errorName(e) });
-    };
+    // Serialise the refcount bump on the shared connection's write lock
+    // before materialise (the expensive step stays parallel, lock-free).
+    incrementRefLocked(ctx.io, deps.store, deps.db_mu, bottle.sha256, keg_name);
 
     const keg = cellar_mod.materialize(
         ctx.io,
@@ -606,6 +606,28 @@ fn releaseDbMuForOomFallback(io: std.Io, db_mu: ?*std.Io.Mutex) bool {
     return false;
 }
 
+/// Bump the store refcount under `db_mu`. `incrementRef`'s autocommit
+/// `INSERT INTO store_refs` shares the migrate connection with every
+/// worker's keg transaction; guarded only by its own `store.mutex` it
+/// can land between a peer worker's `INSERT INTO kegs` and that
+/// worker's connection-global `last_insert_rowid()` read, handing the
+/// peer a foreign rowid. Taking `db_mu` makes it the single
+/// connection-wide write lock so no insert escapes it. Serial callers
+/// pass `db_mu == null` and pay no lock cost.
+fn incrementRefLocked(
+    io: std.Io,
+    store: *store_mod.Store,
+    db_mu: ?*std.Io.Mutex,
+    sha256: []const u8,
+    keg_name: []const u8,
+) void {
+    if (db_mu) |m| m.lockUncancelable(io);
+    defer if (db_mu) |m| m.unlock(io);
+    store.incrementRef(sha256) catch |e| {
+        std.log.warn("refcount increment failed for {s}: {s}", .{ keg_name, @errorName(e) });
+    };
+}
+
 // ── DB helpers (same pattern as install.zig) ────────────────────────
 
 /// Field bundle accepted by both the formula path (extracted from
@@ -937,4 +959,115 @@ test "releaseDbMuForOomFallback hands db_mu back so peers don't stall on the inl
 
 test "releaseDbMuForOomFallback is a no-op on the serial path (db_mu null)" {
     try std.testing.expect(!releaseDbMuForOomFallback(std.Options.debug_io, null));
+}
+
+// Reproduces the migrate --parallel shared-connection race: peer workers
+// hammer `incrementRef` while one worker records kegs. Because
+// `last_insert_rowid()` is connection-global, an unguarded refcount
+// insert landing between a worker's `INSERT INTO kegs` and its rowid read
+// hands the worker a foreign keg_id. The fix routes the bump through
+// `incrementRefLocked` so it serialises on `db_mu`; with that lock no
+// connection write escapes and every keg_id resolves to its own row.
+test "incrementRef under db_mu keeps each worker's keg_id bound to its own kegs row" {
+    const schema = @import("../../db/schema.zig");
+
+    // Sharing one connection across threads is only sound in SQLite's
+    // serialized mode — the same contract migrate --parallel enforces.
+    if (sqlite.threadsafeMode() != 1) return error.SkipZigTest;
+
+    const io = std.Options.debug_io;
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var store = store_mod.Store.init(io, std.testing.allocator, &db, "");
+    var db_mu: std.Io.Mutex = .init;
+
+    const Ctx = struct {
+        io: std.Io,
+        db: *sqlite.Database,
+        store: *store_mod.Store,
+        db_mu: *std.Io.Mutex,
+        keg_seq: std.atomic.Value(u64) = .init(0),
+        ref_seq: std.atomic.Value(u64) = .init(0),
+        done: std.atomic.Value(bool) = .init(false),
+        leaked: std.atomic.Value(bool) = .init(false),
+
+        fn nameMatches(d: *sqlite.Database, keg_id: i64, name: []const u8) bool {
+            var stmt = d.prepare("SELECT name FROM kegs WHERE id = ?1;") catch return false;
+            defer stmt.finalize();
+            stmt.bindInt(1, keg_id) catch return false;
+            if (!(stmt.step() catch false)) return false; // id points at no keg row
+            const got = stmt.columnText(0) orelse return false;
+            return std.mem.eql(u8, std.mem.sliceTo(got, 0), name);
+        }
+
+        fn record(c: *@This(), iters: usize) void {
+            var i: usize = 0;
+            while (i < iters) : (i += 1) {
+                const n = c.keg_seq.fetchAdd(1, .monotonic);
+                var name_buf: [32]u8 = undefined;
+                const name = std.fmt.bufPrint(&name_buf, "keg-{d}", .{n}) catch unreachable;
+                c.db_mu.lockUncancelable(c.io);
+                if (recordKegFields(c.db, .{
+                    .name = name,
+                    .full_name = name,
+                    .version = "1",
+                    .revision = 0,
+                    .tap = "",
+                    .store_sha256 = "",
+                    .cellar_path = "",
+                    .install_reason = "direct",
+                })) |keg_id| {
+                    recordDepsFromList(c.db, keg_id, &.{"libdep"});
+                    if (!nameMatches(c.db, keg_id, name)) c.leaked.store(true, .monotonic);
+                } else |_| {}
+                c.db_mu.unlock(c.io);
+            }
+            c.done.store(true, .release);
+        }
+
+        fn hammer(c: *@This()) void {
+            // Spin until the recorder is done so the overlap covers the
+            // whole record loop. Each sha is unique so the bump is a fresh
+            // INSERT (an ON CONFLICT UPDATE leaves last_insert_rowid alone
+            // and would hide the race). Capped so a missed `done` can't run
+            // the table away with memory.
+            var i: usize = 0;
+            while (i < 2_000_000 and !c.done.load(.acquire)) : (i += 1) {
+                const n = c.ref_seq.fetchAdd(1, .monotonic);
+                var sha_buf: [32]u8 = undefined;
+                const sha = std.fmt.bufPrint(&sha_buf, "ref-{d}", .{n}) catch unreachable;
+                incrementRefLocked(c.io, c.store, c.db_mu, sha, "race");
+            }
+        }
+    };
+
+    var ctx = Ctx{ .io = io, .db = &db, .store = &store, .db_mu = &db_mu };
+
+    const h1 = try std.Thread.spawn(.{}, Ctx.hammer, .{&ctx});
+    const h2 = try std.Thread.spawn(.{}, Ctx.hammer, .{&ctx});
+    Ctx.record(&ctx, 4000);
+    h1.join();
+    h2.join();
+
+    try std.testing.expect(!ctx.leaked.load(.monotonic));
+}
+
+test "incrementRefLocked on the serial path (db_mu null) still bumps the refcount" {
+    const schema = @import("../../db/schema.zig");
+    const io = std.Options.debug_io;
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    var store = store_mod.Store.init(io, std.testing.allocator, &db, "");
+    // Serial callers pass db_mu == null: no lock, no deadlock, ref still lands.
+    incrementRefLocked(io, &store, null, "deadbeef", "solo");
+
+    var stmt = try db.prepare("SELECT refcount FROM store_refs WHERE store_sha256 = ?1;");
+    defer stmt.finalize();
+    try stmt.bindText(1, "deadbeef");
+    try std.testing.expect(try stmt.step());
+    try std.testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
 }
