@@ -27,8 +27,22 @@ if ! command -v brew >/dev/null 2>&1; then
   echo "migrate-check: brew not on PATH — nothing to compare against" >&2
   exit 2
 fi
-if ! command -v jq >/dev/null 2>&1; then
-  echo "migrate-check: jq is required to parse --json output" >&2
+# A malt/brew-installed jq can sit on PATH yet fail to run when a removed
+# dependency leaves its dylib dangling. A crashing jq emits no kegs, which
+# would otherwise read as a keg mismatch instead of a broken tool. Pick the
+# first jq that actually executes; fall back to the system one.
+# Probe via command substitution so a jq that dies on a signal (SIGABRT
+# from a missing dylib) doesn't leak an "Abort trap" notice to stderr.
+JQ=""
+for cand in jq /usr/bin/jq; do
+  command -v "$cand" >/dev/null 2>&1 || continue
+  _v=$("$cand" --version 2>/dev/null) || continue
+  JQ="$cand"
+  break
+done
+unset _v
+if [[ -z "$JQ" ]]; then
+  echo "migrate-check: no runnable jq found (a PATH jq may be failing to load a dylib)" >&2
   exit 2
 fi
 
@@ -40,7 +54,7 @@ brew list --formulae | sort -u >"$TMP/brew.txt"
 
 # 2. What `mt migrate --dry-run` discovers in the same Cellar. JSON
 #    output is stable + parseable; the keg list lives at `.kegs`.
-"$MT_BIN" migrate --dry-run --json | jq -r '.kegs[]' | sort -u >"$TMP/mt.txt"
+"$MT_BIN" migrate --dry-run --json | "$JQ" -r '.kegs[]' | sort -u >"$TMP/mt.txt"
 
 BREW_N=$(wc -l <"$TMP/brew.txt" | tr -d ' ')
 MT_N=$(wc -l <"$TMP/mt.txt" | tr -d ' ')
