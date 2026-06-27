@@ -1719,6 +1719,104 @@ test "parse_error: malformed source populates fallback log with location" {
     try testing.expect(saw_parse_error);
 }
 
+// A formula whose post_install nests expressions pathologically deep must
+// degrade through the full pipeline (catchable ParseError + logged diagnostic)
+// instead of overflowing the native stack and aborting `malt install`.
+test "depth guard: deeply nested expression degrades through the post_install path" {
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    const json = try minimalJson(alloc, "testpkg", "1.0");
+    var f = try formula_mod.parseFormula(alloc, json);
+    defer f.deinit();
+
+    var flog = dsl.FallbackLog.init(alloc);
+    defer flog.deinit();
+
+    // Balanced nesting well past the cap; the guard must fire mid-descent.
+    const n: usize = 4000;
+    const body = try alloc.alloc(u8, n * 2 + 2);
+    @memset(body[0..n], '(');
+    body[n] = '1';
+    @memset(body[n + 1 .. n * 2 + 1], ')');
+    body[n * 2 + 1] = '\n';
+
+    const result = dsl.executePostInstall(std.Options.debug_io, malt.app_ctx.processEnviron(), alloc, .{
+        .name = f.name,
+        .version = f.version,
+        .pkg_version = f.pkg_version,
+    }, body, prefix, &flog);
+    try testing.expectError(dsl.DslError.ParseError, result);
+
+    // Non-fatal: routes to a partial skip, not an abort.
+    try testing.expect(!flog.hasFatal());
+    var saw_depth_diag = false;
+    for (flog.entries()) |entry| {
+        if (entry.reason == .parse_error and
+            std.mem.indexOf(u8, entry.detail, "nesting too deep") != null) saw_depth_diag = true;
+    }
+    try testing.expect(saw_depth_diag);
+}
+
+// A self-recursive helper must hit the interpreter's call-depth cap and
+// degrade with a logged diagnostic, never recurse into a stack overflow.
+test "depth guard: self-recursive method degrades through the post_install path" {
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    var flog = dsl.FallbackLog.init(alloc);
+    defer flog.deinit();
+
+    // The error is swallowed at the CLI seam; the router degrades off `flog`,
+    // so the test asserts on the logged entry rather than the return value.
+    try runSnippetInto(&arena, "def f; f; end\nf\n", prefix, &flog);
+
+    try testing.expect(!flog.hasFatal());
+    var saw_recursion_diag = false;
+    for (flog.entries()) |entry| {
+        if (entry.reason == .parse_error and
+            std.mem.indexOf(u8, entry.detail, "recursion limit") != null) saw_recursion_diag = true;
+    }
+    try testing.expect(saw_recursion_diag);
+}
+
+// Anti-regression: the call-depth counter must decrement on return, so many
+// *sequential* (non-nested) calls far exceeding the cap never trip the guard.
+// A missing decrement would falsely flag ordinary formulas with helper loops.
+test "depth guard: sequential method calls past the cap do not trip the guard" {
+    var arena = testArena();
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const prefix = try makeTempPrefix();
+    defer testing.allocator.free(prefix);
+
+    var flog = dsl.FallbackLog.init(alloc);
+    defer flog.deinit();
+
+    // One trivial helper invoked far more times than max_call_depth, but each
+    // call returns before the next — depth peaks at 1, never accumulates.
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(alloc);
+    try body.appendSlice(alloc, "def g; 1; end\n");
+    var i: usize = 0;
+    while (i < 600) : (i += 1) try body.appendSlice(alloc, "g\n");
+
+    try runSnippetInto(&arena, body.items, prefix, &flog);
+
+    for (flog.entries()) |entry| {
+        try testing.expect(std.mem.indexOf(u8, entry.detail, "recursion limit") == null);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // User-defined methods (`def ... end`) and `return` semantics.
 //

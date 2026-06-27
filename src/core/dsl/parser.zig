@@ -30,6 +30,19 @@ pub const Parser = struct {
     /// Use `diagnostics()` from outside; the list is append-only internal state.
     _diagnostics: std.ArrayList(Diagnostic),
     current: Token,
+    /// Recursive-descent nesting depth, bumped at every genuine recursion
+    /// re-entry: parseExpression (brackets), parseUnaryNot (`!` chains), and
+    /// parseBlock (statement blocks). One shared counter caps adversarial
+    /// `(((…)))` / `!!!…` / nested `if…end` input before it exhausts the native
+    /// stack (an uncatchable SIGSEGV), turning the abort into a catchable
+    /// `ParseError` the caller can degrade on.
+    depth: u32 = 0,
+
+    /// Max nesting before a `ParseError`. No real homebrew-core formula nests
+    /// anywhere near this. Kept conservative because the heaviest axis —
+    /// `#{…}` interpolation — spawns a sub-parser and allocates per level, so
+    /// the cap must leave ample margin under the multi-MB thread stack.
+    pub const max_depth: u32 = 512;
 
     pub fn init(allocator: std.mem.Allocator, lex: *Lexer) Parser {
         const first = lex.next();
@@ -48,6 +61,12 @@ pub const Parser = struct {
 
     /// Parse a complete post_install block body (sequence of statements).
     pub fn parseBlock(self: *Parser) DslError![]const *const Node {
+        // Nested if/unless/begin/each/def bodies recurse through here without
+        // re-entering parseExpression, so cap block nesting on the same counter.
+        self.depth += 1;
+        defer self.depth -= 1;
+        if (self.depth > max_depth) return self.emitError("block nesting too deep");
+
         var stmts: std.ArrayList(*const Node) = .empty;
 
         while (self.current.kind != .eof and
@@ -117,6 +136,13 @@ pub const Parser = struct {
     }
 
     fn parseExpression(self: *Parser) DslError!*const Node {
+        // One of three depth choke points (with parseUnaryNot and parseBlock)
+        // feeding a shared counter. This one caps bracket nesting — `()`, `[]`,
+        // hash/array elements, call args all re-enter here.
+        self.depth += 1;
+        defer self.depth -= 1;
+        if (self.depth > max_depth) return self.emitError("expression nesting too deep");
+
         // Expression-form `if`/`unless` on RHS of assignment — lets
         // `x = if cond then a else b end` round-trip without call-site hacks.
         if (self.current.kind == .kw_if) return self.parseIf();
@@ -188,6 +214,12 @@ pub const Parser = struct {
 
     fn parseUnaryNot(self: *Parser) DslError!*const Node {
         if (self.current.kind == .bang) {
+            // `!` self-recurses without re-entering parseExpression, so cap
+            // `!!!…` chains on the shared counter or they overflow unchecked.
+            self.depth += 1;
+            defer self.depth -= 1;
+            if (self.depth > max_depth) return self.emitError("expression nesting too deep");
+
             const loc = self.currentLoc();
             self.advanceToken();
             const operand = try self.parseUnaryNot();
@@ -1131,6 +1163,10 @@ pub const Parser = struct {
                 // Parse the expression inside #{...}
                 var inner_lexer = lexer_mod.Lexer.init(expr_src);
                 var inner_parser = Parser.init(self.allocator, &inner_lexer);
+                // Carry the depth budget so nested `#{…}` interpolation can't
+                // reset it — a fresh sub-parser would otherwise start at 0 and
+                // let deeply nested interpolation recurse past the cap.
+                inner_parser.depth = self.depth;
                 const expr_node = inner_parser.parseExpression() catch {
                     // If parsing fails, treat as literal
                     parts_list.append(self.allocator, .{ .literal = content[i..j] }) catch return DslError.OutOfMemory;
@@ -1293,4 +1329,153 @@ fn parseIntValue(lexeme: []const u8) i64 {
         }
     }
     return std.fmt.parseInt(i64, lexeme, 10) catch 0;
+}
+
+// Adversarial deeply-nested input must hit the depth cap and surface a
+// bounded `ParseError` with a diagnostic — never recurse into a native
+// stack overflow. Balanced parens so that, without the guard, the body
+// would parse cleanly; the guard is what converts it into an error.
+test "parser: expression nesting beyond the depth limit is a bounded ParseError" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const n = Parser.max_depth + 50;
+    const src = try alloc.alloc(u8, n * 2 + 1);
+    @memset(src[0..n], '(');
+    src[n] = '1';
+    @memset(src[n + 1 ..], ')');
+
+    var lex = Lexer.init(src);
+    var p = Parser.init(alloc, &lex);
+    try std.testing.expectError(DslError.ParseError, p.parseBlock());
+
+    var found = false;
+    for (p.diagnostics()) |d| {
+        if (std.mem.indexOf(u8, d.message, "nesting too deep") != null) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+// `!` self-recurses in parseUnaryNot without re-entering parseExpression, so a
+// `!!!…` chain bypasses the bracket guard. It must hit the shared cap instead
+// of overflowing the native stack.
+test "parser: unary-not chain beyond the depth limit is a bounded ParseError" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const n = Parser.max_depth + 50;
+    const src = try alloc.alloc(u8, n + 1);
+    @memset(src[0..n], '!');
+    src[n] = '1';
+
+    var lex = Lexer.init(src);
+    var p = Parser.init(alloc, &lex);
+    try std.testing.expectError(DslError.ParseError, p.parseBlock());
+
+    var found = false;
+    for (p.diagnostics()) |d| {
+        if (std.mem.indexOf(u8, d.message, "nesting too deep") != null) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+// Nested if/unless/begin/each/def bodies recurse through parseBlock, not
+// parseExpression — the condition's expression returns before the body
+// descends. Deeply nested `if … end` must hit the shared cap, not overflow.
+test "parser: block nesting beyond the depth limit is a bounded ParseError" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // `if 1\n` repeated — the guard fires mid-descent, before any matching end.
+    const n = Parser.max_depth + 50;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    var i: usize = 0;
+    while (i < n) : (i += 1) try buf.appendSlice(alloc, "if 1\n");
+
+    var lex = Lexer.init(buf.items);
+    var p = Parser.init(alloc, &lex);
+    try std.testing.expectError(DslError.ParseError, p.parseBlock());
+
+    var found = false;
+    for (p.diagnostics()) |d| {
+        if (std.mem.indexOf(u8, d.message, "nesting too deep") != null) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+// No false positives: nesting at a depth no real formula approaches — across
+// all three axes combined — must parse cleanly with no diagnostics.
+test "parser: legitimate moderate nesting parses without tripping the guard" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // 100 nested parens + a `!` + an if/end block: far deeper than any real
+    // post_install, yet well under the cap.
+    const k = 100;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "if !");
+    try buf.appendNTimes(alloc, '(', k);
+    try buf.appendSlice(alloc, "1");
+    try buf.appendNTimes(alloc, ')', k);
+    try buf.appendSlice(alloc, "\nohai \"ok\"\nend\n");
+
+    var lex = Lexer.init(buf.items);
+    var p = Parser.init(alloc, &lex);
+    const nodes = try p.parseBlock();
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    try std.testing.expectEqual(@as(usize, 0), p.diagnostics().len);
+}
+
+// Anti-regression: the counter must decrement on return, so many *sequential*
+// (closed, non-nested) blocks far exceeding the cap never trip the guard — a
+// missing decrement would falsely reject ordinary multi-statement formulas.
+test "parser: sequential blocks past the cap do not trip the guard" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const n = Parser.max_depth + 200;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    var i: usize = 0;
+    while (i < n) : (i += 1) try buf.appendSlice(alloc, "if 1\nohai \"x\"\nend\n");
+
+    var lex = Lexer.init(buf.items);
+    var p = Parser.init(alloc, &lex);
+    const nodes = try p.parseBlock();
+    try std.testing.expectEqual(@as(usize, n), nodes.len);
+    try std.testing.expectEqual(@as(usize, 0), p.diagnostics().len);
+}
+
+// `#{…}` interpolation parses its inner expression with a fresh sub-parser; the
+// depth budget is carried into it so deeply nested interpolation can't reset
+// the counter and recurse unbounded. Running this without that carry overflows
+// the native stack and aborts the runner, so completion *is* the proof.
+test "parser: deeply nested interpolation stays bounded and does not overflow" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // N levels of `"#{ … }"` nested inside each other, past the cap.
+    const n = Parser.max_depth + 200;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    var i: usize = 0;
+    while (i < n) : (i += 1) try buf.appendSlice(alloc, "\"#{");
+    try buf.appendSlice(alloc, "1");
+    i = 0;
+    while (i < n) : (i += 1) try buf.appendSlice(alloc, "}\"");
+
+    var lex = Lexer.init(buf.items);
+    var p = Parser.init(alloc, &lex);
+    // The guard fires deep inside, is caught at the interpolation boundary and
+    // collapses to a literal, so the top-level parse completes — no crash.
+    const nodes = try p.parseBlock();
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
 }

@@ -231,15 +231,26 @@ pub const Lexer = struct {
         const start_col = self.col;
         self.advance(); // skip opening "
 
-        // Find the end of the string, handling escapes
-        while (self.pos < self.source.len and self.source[self.pos] != '"') {
-            if (self.source[self.pos] == '\\') {
+        // Scan to the closing quote, but stay inside `#{...}` interpolation so
+        // an inner `"` doesn't end the string early. brace_depth tracks open
+        // `#{`/`{`; a `"` only terminates the string at brace_depth 0.
+        var brace_depth: u32 = 0;
+        while (self.pos < self.source.len) {
+            const c = self.source[self.pos];
+            if (c == '\\') {
                 self.advance(); // skip escape char
                 if (self.pos < self.source.len) self.advance();
                 continue;
             }
-            // For Phase 1 we treat #{} as part of the string literal.
-            // Phase 2 will add interpolation splitting.
+            if (brace_depth == 0 and c == '"') break;
+            if (c == '#' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
+                brace_depth += 1;
+                self.advance();
+                self.advance();
+                continue;
+            }
+            if (brace_depth > 0 and c == '{') brace_depth += 1;
+            if (brace_depth > 0 and c == '}') brace_depth -= 1;
             self.advance();
         }
 
