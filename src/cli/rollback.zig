@@ -6,6 +6,7 @@ const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
+const lock_report = @import("lock_report.zig");
 const cellar = @import("../core/cellar.zig");
 const cask_mod = @import("../core/cask.zig");
 const linker_mod = @import("../core/linker.zig");
@@ -159,9 +160,15 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Acquire lock
     var lock_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return error.Aborted;
-    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch {
-        output.err("Another mt process is running", .{});
-        return error.Aborted;
+    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch |e| switch (e) {
+        // The DB is already open here, so db/ exists — DirMissing can't occur.
+        error.DirMissing => return error.Aborted,
+        // Every other failure gets an accurate, actionable diagnostic
+        // (permissions, contention, …) instead of a blanket message.
+        else => {
+            lock_report.reportAcquireFailure(e, prefix);
+            return error.Aborted;
+        },
     };
     defer lk.release(ctx.io);
 
@@ -280,6 +287,24 @@ fn dispatchCask(
     }
 
     const prefix = atomic.maltPrefixOrAbort();
+
+    // Serialize the uninstall+reinstall on the prefix lock, exactly like the
+    // keg path — acquired only after the read-only early returns so --list and
+    // --dry-run stay lock-free.
+    var lock_buf: [512]u8 = undefined;
+    const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return error.Aborted;
+    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch |e| switch (e) {
+        // The DB is already open here, so db/ exists — DirMissing can't occur.
+        error.DirMissing => return error.Aborted,
+        // Every other failure gets an accurate, actionable diagnostic
+        // (permissions, contention, …) instead of a blanket message.
+        else => {
+            lock_report.reportAcquireFailure(e, prefix);
+            return error.Aborted;
+        },
+    };
+    defer lk.release(ctx.io);
+
     var installer = cask_mod.CaskInstaller.init(ctx.io, ctx.environ, allocator, db, prefix);
     installer.offline = ctx.offline;
     installer.reinstallFromHistory(token, target_pkg_version) catch |e| {
@@ -1250,4 +1275,48 @@ test "removeCurrentCellarDir wipes a plain version dir when revision is zero" {
     try removeCurrentCellarDir(io, prefix, name, version, 0);
 
     try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(io, keg_dir, .{}));
+}
+
+test "dispatchCask acquires malt.lock before the reinstall mutation" {
+    // dispatchCask drives a real CaskInstaller against a live prefix, so it
+    // can't be exercised in isolation. The invariant that matters — the
+    // uninstall+reinstall must serialize on the prefix lock, like every other
+    // mutating command — is pinned at the source level: `LockFile.acquire`
+    // must precede `reinstallFromHistory` inside the function body.
+    const src = @embedFile("rollback.zig");
+    const marker = "fn dispatchCask(";
+    const start = std.mem.indexOf(u8, src, marker) orelse return error.DispatchCaskFnNotFound;
+
+    var depth: usize = 0;
+    var seen_open = false;
+    var body_end: usize = 0;
+    var i: usize = start + marker.len;
+    while (i < src.len) : (i += 1) {
+        switch (src[i]) {
+            '{' => {
+                depth += 1;
+                seen_open = true;
+            },
+            '}' => {
+                depth -= 1;
+                if (seen_open and depth == 0) {
+                    body_end = i;
+                    break;
+                }
+            },
+            else => {},
+        }
+    }
+    try testing.expect(body_end > start);
+    const body = src[start..body_end];
+
+    const acquire_pos = std.mem.indexOf(u8, body, "LockFile.acquire") orelse
+        return error.LockAcquireMissing;
+    const mutate_pos = std.mem.indexOf(u8, body, "reinstallFromHistory") orelse
+        return error.ReinstallCallMissing;
+    try testing.expect(acquire_pos < mutate_pos);
+
+    // Acquire failures must surface accurate per-error diagnostics via the
+    // shared reporter, not a blanket "another process" message.
+    try testing.expect(std.mem.indexOf(u8, body, "reportAcquireFailure") != null);
 }

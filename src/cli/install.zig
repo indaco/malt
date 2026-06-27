@@ -21,6 +21,7 @@ const supervisor_mod = @import("../core/services/supervisor.zig");
 const signals = @import("../core/signals.zig");
 const store_mod = @import("../core/store.zig");
 const lock_mod = @import("../db/lock.zig");
+const lock_report = @import("lock_report.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -634,9 +635,16 @@ fn executeWithOpts(
         var lock_path_buf: [512]u8 = undefined;
         const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch
             return InstallError.LockError;
-        lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch {
-            sink.err("Another mt process is running. Wait or run mt doctor.", .{});
-            return InstallError.LockError;
+        lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch |e| switch (e) {
+            // The DB is already open here, so db/ exists — DirMissing can't occur.
+            error.DirMissing => return InstallError.LockError,
+            // Emit via the sink so bundle mode stays quiet, with the same
+            // per-error diagnostic the other commands surface.
+            else => {
+                var msg_buf: [512]u8 = undefined;
+                sink.err("{s}", .{lock_report.acquireFailureMessage(&msg_buf, e, prefix)});
+                return InstallError.LockError;
+            },
         };
         output.emitNdjsonEvent(.lock_acquired, "", null);
     }

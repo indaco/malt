@@ -11,6 +11,7 @@ const linker_mod = @import("../core/linker.zig");
 const signals = @import("../core/signals.zig");
 const store_mod = @import("../core/store.zig");
 const lock_mod = @import("../db/lock.zig");
+const lock_report = @import("lock_report.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -224,9 +225,13 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Acquire lock; `MALT_LOCK_TIMEOUT_MS` tunes the 30 s default.
     var lock_path_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_path_buf, "{s}/db/malt.lock", .{prefix}) catch return;
-    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, lockTimeoutMs(ctx)) catch {
-        output.err("Another mt process is running. Wait or run mt doctor.", .{});
-        return error.Aborted;
+    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, lockTimeoutMs(ctx)) catch |e| switch (e) {
+        // The DB is already open here, so db/ exists — DirMissing can't occur.
+        error.DirMissing => return error.Aborted,
+        else => {
+            lock_report.reportAcquireFailure(e, prefix);
+            return error.Aborted;
+        },
     };
     defer lk.release(ctx.io);
     // LIFO: install_complete fires before lk.release. Inline gate keeps
