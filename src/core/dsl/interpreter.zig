@@ -46,6 +46,14 @@ pub const Interpreter = struct {
     ctx: *ExecContext,
     /// Mirror of `ctx.arena` — held for brevity in hot eval paths.
     allocator: std.mem.Allocator,
+    /// User-method call depth. Caps self-recursive `def f; f; end` before it
+    /// exhausts the native stack (an uncatchable SIGSEGV) and converts the
+    /// abort into a catchable `ParseError` the post_install router degrades on.
+    call_depth: u32 = 0,
+
+    /// Max user-method nesting before degrading. Deep enough for any real
+    /// helper, shallow enough to fire well below the native stack limit.
+    pub const max_call_depth: u32 = 512;
 
     pub fn init(ctx: *ExecContext) Interpreter {
         return .{
@@ -153,6 +161,21 @@ pub const Interpreter = struct {
         md: ast.MethodDef,
         args: []const Value,
     ) DslError!Value {
+        self.call_depth += 1;
+        defer self.call_depth -= 1;
+        if (self.call_depth > max_call_depth) {
+            // The CLI swallows the returned error and routes purely off `flog`,
+            // so log an entry or the skip is silent in verbose/debug output.
+            // `parse_error` degrades to a partial skip, not a fatal abort.
+            self.ctx.fallback_log_writer.log(.{
+                .formula = self.ctx.formula_name,
+                .reason = .parse_error,
+                .detail = "recursion limit exceeded",
+                .loc = null,
+            });
+            return DslError.ParseError;
+        }
+
         try self.ctx.pushMethodScope();
         defer self.ctx.popScope();
 
@@ -972,4 +995,36 @@ pub fn executePostInstallWithOpts(
     ctx.suppress_child_stdout = opts.suppress_child_stdout;
     var interp = Interpreter.init(&ctx);
     try interp.execute(nodes);
+}
+
+// A self-recursive method must hit the call-depth cap and degrade to a logged
+// `parse_error` (a partial skip), never recurse into a native stack overflow.
+// Running this unguarded would abort the test runner, so the cap *is* the test.
+test "interpreter: self-recursive method hits the call-depth guard and degrades" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var flog = FallbackLog.init(alloc);
+    defer flog.deinit();
+
+    var ctx = try ExecContext.init(alloc, std.Options.debug_io, .empty, .{
+        .name = "t",
+        .version = "1",
+        .pkg_version = "1",
+    }, "/tmp/malt-recursion-guard", &flog);
+    defer ctx.deinit();
+
+    var lex = lexer_mod.Lexer.init("def f; f; end\nf\n");
+    var p = parser_mod.Parser.init(alloc, &lex);
+    const nodes = try p.parseBlock();
+
+    var interp = Interpreter.init(&ctx);
+    interp.execute(nodes) catch {};
+
+    var found = false;
+    for (flog.entries()) |e| {
+        if (std.mem.indexOf(u8, e.detail, "recursion limit") != null) found = true;
+    }
+    try std.testing.expect(found);
 }

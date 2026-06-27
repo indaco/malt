@@ -404,9 +404,25 @@ test "lexer: percent_w with parens" {
 }
 
 test "lexer: string with interpolation syntax" {
-    // Lexer Phase 1 treats #{} as part of the string_double token
+    // `#{...}` is kept inside the string_double token; the parser splits it.
     var lex = Lexer.init("\"hello #{name}\"");
     try expectToken(&lex, .string_double, "\"hello #{name}\"");
+    try expectKind(&lex, .eof);
+}
+
+test "lexer: interpolation with an inner string is one token" {
+    // A `"` inside `#{...}` must not end the string early — brace-aware
+    // scanning keeps the interpolated string literal in the same token.
+    var lex = Lexer.init("\"a #{b(\"c\")} d\"");
+    try expectToken(&lex, .string_double, "\"a #{b(\"c\")} d\"");
+    try expectKind(&lex, .eof);
+}
+
+test "lexer: nested interpolation is one token" {
+    // `"#{"#{1}"}"` — interpolation nested inside interpolation, with inner
+    // quoted strings. The whole thing is a single string_double token.
+    var lex = Lexer.init("\"#{\"#{1}\"}\"");
+    try expectToken(&lex, .string_double, "\"#{\"#{1}\"}\"");
     try expectKind(&lex, .eof);
 }
 
