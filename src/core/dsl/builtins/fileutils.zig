@@ -147,7 +147,9 @@ pub fn chmod(ctx: ExecCtx, _: ?Value, args: []const Value) BuiltinError!Value {
         .int => |i| i,
         else => return Value{ .nil = {} },
     };
-    const mode: std.posix.mode_t = @intCast(@as(u32, @bitCast(@as(i32, @intCast(mode_val)))));
+    // chmod(2) only consults the low permission bits; mask so any i64 formula
+    // mode fits mode_t without a checked-cast panic on out-of-range input.
+    const mode: std.posix.mode_t = @intCast(mode_val & 0o7777);
 
     switch (args[1]) {
         .array => |items| {
