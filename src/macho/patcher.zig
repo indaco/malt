@@ -483,4 +483,78 @@ fn hasPrefix(path: []const u8, prefix: []const u8) bool {
     return std.mem.eql(u8, path[0..prefix.len], prefix);
 }
 
+/// Read-only probe: true iff `file_path` is a Mach-O that *links* a dylib
+/// whose path contains `needle` (LC_LOAD_DYLIB and its weak/reexport
+/// siblings). `LC_ID_DYLIB` (a dylib's own install name) and search-path
+/// commands like `LC_RPATH` are excluded — only a hard link to the dylib
+/// counts. Best-effort: an unreadable, non-Mach-O, or unparseable file
+/// reads as "no". Opens read-only and never mutates.
+pub fn fileLinksPath(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8, needle: []const u8) bool {
+    const file = std.Io.Dir.cwd().openFile(io, file_path, .{}) catch return false;
+    defer file.close(io);
+
+    const stat = file.stat(io) catch return false;
+    if (stat.size == 0) return false;
+    const data = allocator.alloc(u8, stat.size) catch return false;
+    defer allocator.free(data);
+    const n = file.readPositionalAll(io, data, 0) catch return false;
+    if (n < data.len) return false;
+
+    if (!parser.isMachO(data)) return false;
+    var macho = parser.parse(allocator, data) catch return false;
+    defer macho.deinit();
+
+    for (macho.paths) |p| {
+        switch (p.cmd) {
+            @intFromEnum(std.macho.LC.LOAD_DYLIB),
+            @intFromEnum(std.macho.LC.LOAD_WEAK_DYLIB),
+            @intFromEnum(std.macho.LC.REEXPORT_DYLIB),
+            => if (std.mem.indexOf(u8, p.path, needle) != null) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
 const replaceAll = text_replace.replaceAll;
+
+test "fileLinksPath detects a needle in an LC_LOAD_DYLIB and ignores misses" {
+    const testing = std.testing;
+    const macho = std.macho;
+
+    // Minimal Mach-O: header + one LC_LOAD_DYLIB naming an opt path.
+    const lc_size = @sizeOf(macho.dylib_command);
+    const path_str = "/opt/malt/opt/oniguruma/lib/libonig.5.dylib\x00";
+    const name_offset: u32 = @intCast(lc_size);
+    const cmdsize: u32 = @intCast(lc_size + path_str.len);
+    const cmdsize_aligned: u32 = (cmdsize + 7) & ~@as(u32, 7);
+    const header_size = @sizeOf(macho.mach_header_64);
+    const total_len = header_size + cmdsize_aligned;
+
+    const buf = try testing.allocator.alloc(u8, total_len);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+
+    const header = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    header.* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 1, .sizeofcmds = cmdsize_aligned };
+    const dy = std.mem.bytesAsValue(macho.dylib_command, buf[header_size..][0..lc_size]);
+    dy.* = .{
+        .cmd = .LOAD_DYLIB,
+        .cmdsize = cmdsize_aligned,
+        .dylib = .{ .name = name_offset, .timestamp = 0, .current_version = 0, .compatibility_version = 0 },
+    };
+    @memcpy(buf[header_size + lc_size ..][0..path_str.len], path_str);
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.Options.debug_io;
+    try tmp.dir.writeFile(io, .{ .sub_path = "dependent", .data = buf });
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_abs = dir_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &dir_buf)];
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = try std.fmt.bufPrint(&path_buf, "{s}/dependent", .{dir_abs});
+
+    try testing.expect(fileLinksPath(io, testing.allocator, abs, "/opt/oniguruma/"));
+    try testing.expect(!fileLinksPath(io, testing.allocator, abs, "/opt/missing/"));
+}

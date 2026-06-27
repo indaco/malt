@@ -26,6 +26,9 @@ pub const patchPathsCollecting = backend.patchPathsCollecting;
 pub const patchTextFiles = backend.patchTextFiles;
 pub const flushOverflow = backend.flushOverflow;
 pub const external_tool_name = backend.external_tool_name;
+/// Read-only "does this binary link a path containing `needle`" probe.
+/// The ELF backend supplies a `DT_NEEDED`/`RUNPATH` equivalent.
+pub const fileLinksPath = backend.fileLinksPath;
 
 test "facade re-exports the patcher surface cellar / doctor rely on" {
     _ = Replacement;
@@ -37,6 +40,7 @@ test "facade re-exports the patcher surface cellar / doctor rely on" {
     _ = patchTextFiles;
     _ = flushOverflow;
     _ = external_tool_name;
+    _ = fileLinksPath;
 }
 
 test "facade external_tool_name matches the macOS backend" {
