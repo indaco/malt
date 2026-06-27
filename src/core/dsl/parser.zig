@@ -1159,6 +1159,16 @@ pub const Parser = struct {
                     if (content[j] == '{') depth += 1;
                     if (content[j] == '}') depth -= 1;
                 }
+                // No matching `}`: `j == content.len`, so `j - 1` would slice
+                // start > end (panic) or drop a real byte. Treat the dangling
+                // `#{…` to end-of-content as a literal, like the parse-failure
+                // fallback below.
+                if (depth != 0) {
+                    parts_list.append(self.allocator, .{ .literal = content[i..] }) catch return DslError.OutOfMemory;
+                    i = content.len;
+                    literal_start = i;
+                    continue;
+                }
                 const expr_src = content[i + 2 .. j - 1];
                 // Parse the expression inside #{...}
                 var inner_lexer = lexer_mod.Lexer.init(expr_src);
@@ -1478,4 +1488,68 @@ test "parser: deeply nested interpolation stays bounded and does not overflow" {
     // collapses to a literal, so the top-level parse completes — no crash.
     const nodes = try p.parseBlock();
     try std.testing.expectEqual(@as(usize, 1), nodes.len);
+}
+
+// A `#{` with no matching `}` must not slice `content[i + 2 .. j - 1]` with
+// start > end. Trailing `#{` (j == content.len, depth stays 1) is the panic;
+// unclosed `#{foo` is its silent truncation sibling. Both collapse to a
+// single literal; a genuine `#{x}` still yields one interpolation part.
+test "parser: dangling #{ in a string is a literal, not an out-of-bounds slice" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const loc: SourceLoc = .{ .line = 1, .col = 1 };
+
+    var lex = Lexer.init("");
+    var p = Parser.init(alloc, &lex);
+
+    // Trailing `#{` — the panic case: one literal holding the raw bytes.
+    const trailing = try p.parseStringInterpolation("#{", loc);
+    try std.testing.expectEqual(@as(usize, 1), trailing.len);
+    try std.testing.expectEqualStrings("#{", trailing[0].literal);
+
+    // Unclosed non-empty `#{foo` — no `j - 1` truncation to "fo".
+    const unclosed = try p.parseStringInterpolation("#{foo", loc);
+    try std.testing.expectEqual(@as(usize, 1), unclosed.len);
+    try std.testing.expectEqualStrings("#{foo", unclosed[0].literal);
+
+    // Control: a real `#{x}` still parses to one interpolation part.
+    const closed = try p.parseStringInterpolation("#{x}", loc);
+    try std.testing.expectEqual(@as(usize, 1), closed.len);
+    try std.testing.expect(closed[0] == .interpolation);
+
+    // Anti-regression: empty-but-closed `#{}` stays a literal via the inner
+    // parse-failure fallback — the dangling branch must not steal this case.
+    const empty = try p.parseStringInterpolation("#{}", loc);
+    try std.testing.expectEqual(@as(usize, 1), empty.len);
+    try std.testing.expectEqualStrings("#{}", empty[0].literal);
+
+    // A preceding literal is still flushed before the dangling tail.
+    const prefixed = try p.parseStringInterpolation("a#{", loc);
+    try std.testing.expectEqual(@as(usize, 2), prefixed.len);
+    try std.testing.expectEqualStrings("a", prefixed[0].literal);
+    try std.testing.expectEqualStrings("#{", prefixed[1].literal);
+}
+
+// The `\` escape arm runs before `#{` detection, so a backslash-escaped `\#{`
+// never opens an interpolation segment — it can't reach the slice at all.
+// Lock that: escaped `#{` stays literal whether dangling or "closed".
+test "parser: an escaped \\#{ stays literal and never interpolates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const loc: SourceLoc = .{ .line = 1, .col = 1 };
+
+    var lex = Lexer.init("");
+    var p = Parser.init(alloc, &lex);
+
+    // Escaped + dangling: a single literal, no panic.
+    const dangling = try p.parseStringInterpolation("\\#{", loc);
+    try std.testing.expectEqual(@as(usize, 1), dangling.len);
+    try std.testing.expectEqualStrings("\\#{", dangling[0].literal);
+
+    // Escaped over a would-be interpolation: still suppressed to a literal.
+    const closed = try p.parseStringInterpolation("\\#{x}", loc);
+    try std.testing.expectEqual(@as(usize, 1), closed.len);
+    try std.testing.expectEqualStrings("\\#{x}", closed[0].literal);
 }
