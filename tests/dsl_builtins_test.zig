@@ -730,6 +730,47 @@ test "FileUtils.chmod returns nil for a non-int mode and is a no-op" {
     try testing.expect(v == .nil);
 }
 
+// A formula carries its mode as an i64; chmod must mask to the permission bits
+// rather than narrow through i32/u16, where any of three windows aborts the
+// process: out of i32 range, negative, or in-i32 but past mode_t (u16).
+test "FileUtils.chmod masks an out-of-i32-range mode instead of aborting" {
+    const root = try uniqueSandbox("fileutils_chmod_overflow");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/f", .{root});
+    defer testing.allocator.free(path);
+    (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
+    const v = try fileutils.chmod(ctx, null, &.{ .{ .int = 9999999999 }, .{ .string = path } });
+    try testing.expect(v == .nil);
+}
+
+test "FileUtils.chmod masks a negative mode instead of aborting" {
+    const root = try uniqueSandbox("fileutils_chmod_negative");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/f", .{root});
+    defer testing.allocator.free(path);
+    (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
+    const v = try fileutils.chmod(ctx, null, &.{ .{ .int = -1 }, .{ .string = path } });
+    try testing.expect(v == .nil);
+}
+
+test "FileUtils.chmod masks high non-permission bits down to 0o7777" {
+    const root = try uniqueSandbox("fileutils_chmod_mask");
+    defer testing.allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const ctx = mkCtx(root);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/f", .{root});
+    defer testing.allocator.free(path);
+    (try test_io.createFileAbsolute(std.Options.debug_io, path, .{})).close(std.Options.debug_io);
+    // 70000 fits i32 but exceeds mode_t; 70000 & 0o7777 == 0o560.
+    _ = try fileutils.chmod(ctx, null, &.{ .{ .int = 70000 }, .{ .string = path } });
+    const got = (try std.Io.Dir.cwd().statFile(std.Options.debug_io, path, .{})).permissions.toMode();
+    try testing.expectEqual(@as(std.posix.mode_t, 0o560), got & 0o7777);
+}
+
 // ---------------------------------------------------------------------------
 // Process builtins
 //
