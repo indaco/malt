@@ -6,6 +6,7 @@ const AppCtx = @import("../app_ctx.zig").AppCtx;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
 const lock_mod = @import("../db/lock.zig");
+const lock_report = @import("lock_report.zig");
 const cellar = @import("../core/cellar.zig");
 const cask_mod = @import("../core/cask.zig");
 const linker_mod = @import("../core/linker.zig");
@@ -159,9 +160,15 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // Acquire lock
     var lock_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return error.Aborted;
-    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch {
-        output.err("Another mt process is running", .{});
-        return error.Aborted;
+    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch |e| switch (e) {
+        // The DB is already open here, so db/ exists — DirMissing can't occur.
+        error.DirMissing => return error.Aborted,
+        // Every other failure gets an accurate, actionable diagnostic
+        // (permissions, contention, …) instead of a blanket message.
+        else => {
+            lock_report.reportAcquireFailure(e, prefix);
+            return error.Aborted;
+        },
     };
     defer lk.release(ctx.io);
 
@@ -286,9 +293,15 @@ fn dispatchCask(
     // --dry-run stay lock-free.
     var lock_buf: [512]u8 = undefined;
     const lock_path = std.fmt.bufPrint(&lock_buf, "{s}/db/malt.lock", .{prefix}) catch return error.Aborted;
-    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch {
-        output.err("Another mt process is running", .{});
-        return error.Aborted;
+    var lk = lock_mod.LockFile.acquire(ctx.io, lock_path, 30000) catch |e| switch (e) {
+        // The DB is already open here, so db/ exists — DirMissing can't occur.
+        error.DirMissing => return error.Aborted,
+        // Every other failure gets an accurate, actionable diagnostic
+        // (permissions, contention, …) instead of a blanket message.
+        else => {
+            lock_report.reportAcquireFailure(e, prefix);
+            return error.Aborted;
+        },
     };
     defer lk.release(ctx.io);
 
@@ -1302,4 +1315,8 @@ test "dispatchCask acquires malt.lock before the reinstall mutation" {
     const mutate_pos = std.mem.indexOf(u8, body, "reinstallFromHistory") orelse
         return error.ReinstallCallMissing;
     try testing.expect(acquire_pos < mutate_pos);
+
+    // Acquire failures must surface accurate per-error diagnostics via the
+    // shared reporter, not a blanket "another process" message.
+    try testing.expect(std.mem.indexOf(u8, body, "reportAcquireFailure") != null);
 }
