@@ -38,3 +38,35 @@ test "run on a successful child still returns the captured stdout" {
     try std.testing.expectEqual(@as(u8, 0), report.code);
     try std.testing.expect(std.mem.indexOf(u8, report.stdout, "silent-but-recorded") != null);
 }
+
+test "run drains a stream that overflows the pipe buffer while the other stays open" {
+    // Two-pipe deadlock guard: a child that floods one stream past the
+    // kernel pipe buffer (~64 KiB on Darwin) blocks in write until that
+    // pipe is read. Draining the streams sequentially never reads the
+    // flooded one until the child exits, but the child cannot exit until
+    // it is drained — so run must drain both concurrently. 200000 bytes
+    // to stderr (well past one buffer) with stdout held open until exit.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const argv = [_][]const u8{ "/bin/sh", "-c", "yes | head -c 200000 1>&2" };
+    var report = try child.run(threaded.io(), std.testing.allocator, &argv);
+    defer report.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u8, 0), report.code);
+    try std.testing.expectEqual(@as(usize, 200000), report.stderr.len);
+    try std.testing.expectEqual(@as(usize, 0), report.stdout.len);
+}
+
+test "run truncates an over-cap stream to the cap without hanging" {
+    // A stream larger than the 256 KiB capture cap plus a pipe buffer would
+    // deadlock if the drain stopped reading at the cap while the child kept
+    // writing. The drain must keep consuming past the cap to EOF, retaining
+    // only the first 256 KiB. 400000 bytes to stderr exceeds cap + buffer.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const argv = [_][]const u8{ "/bin/sh", "-c", "yes | head -c 400000 1>&2" };
+    var report = try child.run(threaded.io(), std.testing.allocator, &argv);
+    defer report.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u8, 0), report.code);
+    try std.testing.expectEqual(@as(usize, 256 * 1024), report.stderr.len);
+    try std.testing.expectEqual(@as(usize, 0), report.stdout.len);
+}
