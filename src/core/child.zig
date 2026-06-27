@@ -35,10 +35,23 @@ pub const RunReport = struct {
     }
 };
 
+/// Carries one stream's drain result across the worker-thread boundary.
+const DrainCtx = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    pipe: ?std.Io.File,
+    result: ChildError![]u8 = undefined,
+};
+
+fn drainWorker(ctx: *DrainCtx) void {
+    ctx.result = drainPipe(ctx.io, ctx.allocator, ctx.pipe);
+}
+
 /// Spawn `argv` with stdout + stderr piped, wait, and return the
 /// captured output alongside the exit code. Caller frees the buffers
-/// via `RunReport.deinit`. Reads stdout then stderr; both pipes are
-/// drained before `wait` so the child can't block on a full pipe.
+/// via `RunReport.deinit`. Both pipes are drained concurrently (a worker
+/// thread per stream) so a child that overflows one pipe buffer can't
+/// block the drain of the other.
 pub fn run(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -50,15 +63,31 @@ pub fn run(
         .stderr = .pipe,
     }) catch return error.SpawnFailed;
 
-    const stdout_bytes = drainPipe(io, allocator, child.stdout) catch |e| {
-        // Best-effort cleanup — kill the child so wait doesn't hang on
-        // a half-drained pipe, then surface the read failure.
+    // Drain stderr on a worker thread while the calling thread drains
+    // stdout — sequential drains deadlock when the not-yet-read stream
+    // fills its pipe buffer and the child blocks in write before exit.
+    var err_ctx: DrainCtx = .{ .io = io, .allocator = allocator, .pipe = child.stderr };
+    const err_thread = std.Thread.spawn(.{}, drainWorker, .{&err_ctx}) catch {
         child.kill(io);
+        return error.IoError;
+    };
+
+    const stdout_res = drainPipe(io, allocator, child.stdout);
+
+    // Either drain failing means the child may still hold a pipe open;
+    // kill it so the worker's read returns EOF before we join.
+    if (stdout_res) |_| {} else |_| child.kill(io);
+    err_thread.join();
+    const stderr_res = err_ctx.result;
+
+    const stdout_bytes = stdout_res catch |e| {
+        // Child already killed above; free whatever the worker collected.
+        if (stderr_res) |b| allocator.free(b) else |_| {}
         return e;
     };
     errdefer allocator.free(stdout_bytes);
 
-    const stderr_bytes = drainPipe(io, allocator, child.stderr) catch |e| {
+    const stderr_bytes = stderr_res catch |e| {
         child.kill(io);
         return e;
     };
@@ -100,10 +129,26 @@ fn drainPipe(
     const file = pipe orelse return allocator.alloc(u8, 0) catch error.OutOfMemory;
     var read_buf: [4096]u8 = undefined;
     var reader = file.readerStreaming(io, &read_buf);
-    return reader.interface.allocRemaining(allocator, std.Io.Limit.limited(max_capture_bytes)) catch |e| switch (e) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.IoError,
-    };
+    const r = &reader.interface;
+
+    var captured: std.Io.Writer.Allocating = .init(allocator);
+    errdefer captured.deinit();
+
+    // Capture up to the cap. The allocating writer only fails on OOM.
+    var room: usize = max_capture_bytes;
+    while (room > 0) {
+        const n = r.stream(&captured.writer, std.Io.Limit.limited(room)) catch |e| switch (e) {
+            error.EndOfStream => break,
+            error.WriteFailed => return error.OutOfMemory,
+            error.ReadFailed => return error.IoError,
+        };
+        room -= n;
+    }
+    // Drain the overflow to EOF so the child can't block in write on a full
+    // pipe once the cap is reached — that is the deadlock this guards.
+    _ = r.discardRemaining() catch return error.IoError;
+
+    return captured.toOwnedSlice() catch error.OutOfMemory;
 }
 
 test "runOrFail returns void on exit code 0" {
