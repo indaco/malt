@@ -856,6 +856,11 @@ pub fn upgradeDbAtomic(
         bin_isolated,
         .{ .in_transaction = true },
     );
+    // Re-record the upgraded keg's runtime deps on the new id: deleteKeg
+    // wipes the old keg's `dependencies` rows, and without rebuilding them
+    // the keg ends up edge-less — `cleanup`'s orphan scan would then reap
+    // a still-live dependency. Same call the install/migrate paths make.
+    install_record_mod.recordDeps(db, new_keg_id, formula);
     try linker.link(new_cellar_path, formula.name, new_keg_id, bin_isolated);
     install_record_mod.deleteKeg(db, old_keg_id);
     return new_keg_id;
@@ -1265,4 +1270,64 @@ test "printSummary respects --quiet" {
 
     printSummary(.{ .upgraded = 1, .up_to_date = 2 }, false);
     try std.testing.expectEqualStrings("", buf.items);
+}
+
+// `upgradeDbAtomic` records the new keg and deletes the old one, whose
+// `dependencies` rows go with it. Without re-recording the edges on the
+// new keg id, the upgraded keg ends up with zero deps — and the next
+// `cleanup` (which trusts the `dependencies` table) reaps a still-live
+// runtime dependency as an orphan. Pin both halves: the surviving edge
+// and `findOrphans` excluding the dep it points at.
+test "upgradeDbAtomic re-records dependency edges so cleanup keeps live runtime deps" {
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // direct keg (jq) → dependency keg (oniguruma), plus the edge.
+    try db.exec(
+        \\INSERT INTO kegs (id, name, full_name, version, store_sha256, cellar_path, install_reason)
+        \\VALUES (1, 'jq', 'jq', '1.7', 'sha-jq-old', '/c/jq/1.7', 'direct'),
+        \\       (2, 'oniguruma', 'oniguruma', '6.9', 'sha-onig', '/c/oniguruma/6.9', 'dependency');
+    );
+    try db.exec("INSERT INTO dependencies (keg_id, dep_name) VALUES (1, 'oniguruma');");
+
+    // New jq formula (version bump) still declaring oniguruma as a dep.
+    const json =
+        \\{"name":"jq","full_name":"jq","tap":"homebrew/core","desc":"","homepage":"","license":null,"revision":0,"keg_only":false,"post_install_defined":false,"versions":{"stable":"1.7.1"},"dependencies":["oniguruma"]}
+    ;
+    var formula = try formula_mod.parseFormula(std.testing.allocator, json);
+    defer formula.deinit();
+
+    // link/unlink no-op against a non-existent prefix/cellar — this test
+    // exercises the DB transaction, not the filesystem.
+    var linker = linker_mod.Linker.init(std.Options.debug_io, std.testing.allocator, &db, "/nonexistent/malt-prefix");
+
+    try db.beginTransaction();
+    errdefer db.rollback();
+    const new_keg_id = try upgradeDbAtomic(&db, &linker, 1, &formula, "sha-jq-new", "/nonexistent/Cellar/jq/1.7.1", false);
+    try db.commit();
+
+    // The edge must survive on the new keg id.
+    {
+        var stmt = try db.prepare(
+            \\SELECT d.dep_name FROM dependencies d
+            \\JOIN kegs k ON k.id = d.keg_id
+            \\WHERE k.name = 'jq';
+        );
+        defer stmt.finalize();
+        try std.testing.expect(try stmt.step());
+        const dep = stmt.columnText(0) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("oniguruma", std.mem.sliceTo(dep, 0));
+    }
+    try std.testing.expect(new_keg_id != 1);
+
+    // …so cleanup's orphan scan must not classify oniguruma as unused.
+    const orphans = try deps_mod.findOrphans(std.testing.allocator, &db);
+    defer {
+        for (orphans) |o| std.testing.allocator.free(o);
+        std.testing.allocator.free(orphans);
+    }
+    for (orphans) |o| {
+        try std.testing.expect(!std.mem.eql(u8, o, "oniguruma"));
+    }
 }

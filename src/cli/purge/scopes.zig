@@ -128,16 +128,33 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
         return result;
     }
 
-    rep.header(orphans.len, "package", "packages");
+    const io = ctx.io;
+
+    // Defense-in-depth: never reap a dep that a still-installed keg's
+    // Mach-O actually links. Its `dependencies` edge may have been lost
+    // (e.g. an upgrade that predated edge re-recording), so the DB calls
+    // it an orphan while the binary still needs it — the binary wins.
+    var removable: std.ArrayList([]const u8) = .empty;
+    defer removable.deinit(allocator);
+    for (orphans) |name| {
+        if (orphanStillLinked(io, allocator, &db, name)) {
+            rep.note("keeping {s} — still linked by an installed package", .{name});
+        } else {
+            removable.append(allocator, name) catch {};
+        }
+    }
+
+    if (removable.items.len == 0) return result;
+
+    rep.header(removable.items.len, "package", "packages");
 
     if (dry_run) {
-        for (orphans) |name| rep.item(name);
-        rep.done(orphans.len);
-        result.removed = @intCast(orphans.len);
+        for (removable.items) |name| rep.item(name);
+        rep.done(removable.items.len);
+        result.removed = @intCast(removable.items.len);
         return result;
     }
 
-    const io = ctx.io;
     var linker = linker_mod.Linker.init(io, allocator, &db, prefix);
     var store = store_mod.Store.init(io, allocator, &db, prefix);
 
@@ -145,7 +162,7 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
     // or partially-materialized keg must still be cleanable. Callers rely on
     // the DB `DELETE` as the authoritative removal signal; filesystem and
     // refcount side-effects converge on subsequent runs.
-    for (orphans) |name| {
+    for (removable.items) |name| {
         var stmt = db.prepare("SELECT id, version, store_sha256 FROM kegs WHERE name = ?1;") catch continue;
         defer stmt.finalize();
         stmt.bindText(1, name) catch continue;
@@ -185,8 +202,32 @@ pub fn runUnusedDeps(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: [
             result.removed += 1;
         }
     }
-    rep.done(orphans.len);
+    rep.done(removable.items.len);
     return result;
+}
+
+/// True iff some installed keg other than `name` carries a Mach-O hard
+/// link into `opt/<name>/`. The orphan scan trusts the `dependencies`
+/// table; this read-only fallback trusts the binaries, so a dropped edge
+/// can't get a still-linked dependency deleted. Best-effort: any DB or
+/// I/O failure reads as "not linked" so cleanup keeps working.
+///
+/// ponytail: O(orphans × installed-kegs) with first-match short-circuit.
+/// Only runs when orphans exist (rare) so it's fine; if cleanup ever gets
+/// slow on huge prefixes, hoist to a single pass collecting the linked
+/// opt-name set once.
+fn orphanStillLinked(io: std.Io, allocator: std.mem.Allocator, db: *sqlite.Database, name: []const u8) bool {
+    var needle_buf: [256]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "/opt/{s}/", .{name}) catch return false;
+
+    var stmt = db.prepare("SELECT cellar_path FROM kegs WHERE name != ?1;") catch return false;
+    defer stmt.finalize();
+    stmt.bindText(1, name) catch return false;
+    while (stmt.step() catch false) {
+        const cp = stmt.columnText(0) orelse continue;
+        if (cellar_mod.cellarLinksPath(io, allocator, std.mem.sliceTo(cp, 0), needle)) return true;
+    }
+    return false;
 }
 
 // ── Tier: --cache[=DAYS] (was `cleanup --prune=`) ───────────────────────────
@@ -997,4 +1038,80 @@ test "runOldVersions ignores pin status when sweeping old cask versions" {
         error.FileNotFound,
         std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg", .{}),
     );
+}
+
+// Build a minimal Mach-O carrying one LC_LOAD_DYLIB that names `dylib`,
+// and write it at `path`. Lets the linkage-guard test stand in for a
+// relocated bottle binary without shipping a real one.
+fn writeFakeDylibLinker(io: std.Io, path: []const u8, dylib: [:0]const u8) !void {
+    const macho = std.macho;
+    const lc_size = @sizeOf(macho.dylib_command);
+    const name_offset: u32 = @intCast(lc_size);
+    const cmdsize: u32 = @intCast(lc_size + dylib.len + 1);
+    const cmdsize_aligned: u32 = (cmdsize + 7) & ~@as(u32, 7);
+    const header_size = @sizeOf(macho.mach_header_64);
+    const total_len = header_size + cmdsize_aligned;
+
+    const buf = try testing.allocator.alloc(u8, total_len);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+
+    const header = std.mem.bytesAsValue(macho.mach_header_64, buf[0..header_size]);
+    header.* = .{ .magic = macho.MH_MAGIC_64, .ncmds = 1, .sizeofcmds = cmdsize_aligned };
+    const dy = std.mem.bytesAsValue(macho.dylib_command, buf[header_size..][0..lc_size]);
+    dy.* = .{
+        .cmd = .LOAD_DYLIB,
+        .cmdsize = cmdsize_aligned,
+        .dylib = .{ .name = name_offset, .timestamp = 0, .current_version = 0, .compatibility_version = 0 },
+    };
+    @memcpy(buf[header_size + lc_size ..][0..dylib.len], dylib);
+
+    const f = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
+    defer f.close(io);
+    try f.writeStreamingAll(io, buf);
+}
+
+test "runUnusedDeps keeps a dependency a still-installed keg's Mach-O links despite a missing edge" {
+    const allocator = testing.allocator;
+
+    const prefix = "/tmp/malt_unuseddeps_linkguard";
+    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/db");
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, prefix ++ "/Cellar/jq/1.0/bin");
+
+    // jq (direct) + oniguruma (dependency) installed, but NO dependency
+    // edge — the corrupted-table state a pre-fix upgrade left behind.
+    {
+        var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+        defer db.close();
+        try schema.initSchema(&db);
+        try db.exec(
+            \\INSERT INTO kegs (name, full_name, version, store_sha256, cellar_path, install_reason)
+            \\VALUES ('jq', 'jq', '1.0', 'sha-jq', '/tmp/malt_unuseddeps_linkguard/Cellar/jq/1.0', 'direct'),
+            \\       ('oniguruma', 'oniguruma', '6.9', 'sha-onig', '/tmp/malt_unuseddeps_linkguard/Cellar/oniguruma/6.9', 'dependency');
+        );
+    }
+
+    // jq's binary hard-links opt/oniguruma — the linkage the DB table lost.
+    try writeFakeDylibLinker(fs_test_io, prefix ++ "/Cellar/jq/1.0/bin/jq", "/opt/oniguruma/lib/libonig.5.dylib");
+
+    var stderr_buf: std.ArrayList(u8) = .empty;
+    defer stderr_buf.deinit(allocator);
+    output.beginStderrCapture(allocator, &stderr_buf);
+    defer output.endStderrCapture();
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runUnusedDeps(&ctx, allocator, prefix, false);
+
+    try testing.expectEqual(util.ScopeStatus.ok, result.status);
+    // Nothing reaped: the only orphan is still linked by jq's binary.
+    try testing.expectEqual(@as(u32, 0), result.removed);
+
+    var db = try sqlite.Database.open(prefix ++ "/db/malt.db");
+    defer db.close();
+    var stmt = try db.prepare("SELECT COUNT(*) FROM kegs WHERE name = 'oniguruma';");
+    defer stmt.finalize();
+    _ = try stmt.step();
+    try testing.expectEqual(@as(i64, 1), stmt.columnInt(0));
 }

@@ -279,6 +279,27 @@ fn walkMachOAndPatch(
     }
 }
 
+/// Read-only: does any binary under `cellar_path` link a path containing
+/// `needle` (e.g. `/opt/<dep>/`)? Lets cleanup keep a dependency a
+/// still-installed keg actually links even if its `dependencies` edge was
+/// lost. Best-effort over the relocation facade so the ELF backend slots
+/// in unchanged; an unreadable keg dir or file is simply "no link found".
+pub fn cellarLinksPath(io: std.Io, allocator: std.mem.Allocator, cellar_path: []const u8, needle: []const u8) bool {
+    var dir = std.Io.Dir.openDirAbsolute(io, cellar_path, .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+
+    var walker = dir.walk(allocator) catch return false;
+    defer walker.deinit();
+
+    while (walker.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const full_path = std.fs.path.join(allocator, &.{ cellar_path, entry.path }) catch continue;
+        defer allocator.free(full_path);
+        if (patch.fileLinksPath(io, allocator, full_path, needle)) return true;
+    }
+    return false;
+}
+
 /// Write a brew-compatible INSTALL_RECEIPT.json to the keg directory.
 /// This allows Homebrew to recognize malt-installed packages.
 /// Relocate a freshly-cloned keg tree at `cellar_path` so its embedded
