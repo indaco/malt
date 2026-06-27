@@ -13,6 +13,7 @@ const store_mod = @import("../../core/store.zig");
 const deps_mod = @import("../../core/deps.zig");
 const linker_mod = @import("../../core/linker.zig");
 const cellar_mod = @import("../../core/cellar.zig");
+const formula_mod = @import("../../core/formula.zig");
 const cask_mod = @import("../../core/cask.zig");
 const util = @import("util.zig");
 const report = @import("report.zig");
@@ -556,6 +557,73 @@ pub fn runOldVersions(ctx: *const AppCtx, allocator: std.mem.Allocator, prefix: 
     return result;
 }
 
+// Live cellar versions per formula, sourced from `kegs`. mtime is no
+// proxy for "linked": link state lives in the DB, so a stale dir whose
+// mtime got bumped (touch, backup restore, in-place rebuild) must not
+// shadow the keg the DB actually links. A formula can carry more than
+// one keg row (versioned/keg-only), hence a set of versions per name.
+const CellarLiveVersions = struct {
+    map: std.StringHashMapUnmanaged(std.StringHashMapUnmanaged(void)) = .empty,
+
+    fn deinit(self: *CellarLiveVersions, allocator: std.mem.Allocator) void {
+        var it = self.map.iterator();
+        while (it.next()) |e| {
+            var vset = e.value_ptr.*;
+            var vit = vset.keyIterator();
+            while (vit.next()) |k| allocator.free(k.*);
+            vset.deinit(allocator);
+            allocator.free(e.key_ptr.*);
+        }
+        self.map.deinit(allocator);
+    }
+
+    fn add(self: *CellarLiveVersions, allocator: std.mem.Allocator, name: []const u8, version: []const u8) !void {
+        const gop = try self.map.getOrPut(allocator, name);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try allocator.dupe(u8, name);
+            gop.value_ptr.* = .empty;
+        }
+        const vgop = try gop.value_ptr.getOrPut(allocator, version);
+        if (!vgop.found_existing) vgop.key_ptr.* = try allocator.dupe(u8, version);
+    }
+
+    fn contains(self: *const CellarLiveVersions, name: []const u8, version: []const u8) bool {
+        const vset = self.map.getPtr(name) orelse return false;
+        return vset.contains(version);
+    }
+};
+
+// Best-effort load of `kegs` (name, version) into `live`. Returns false
+// when the DB is absent/unreadable so the caller can fall back to the
+// mtime heuristic; a single pass avoids one prepared statement per
+// formula dir.
+fn collectLiveCellarVersions(io: std.Io, allocator: std.mem.Allocator, prefix: []const u8, live: *CellarLiveVersions) bool {
+    var db = switch (util.openDbTri(io, prefix)) {
+        .absent => return false,
+        .unreadable => |e| {
+            output.warn("old-versions: cannot read kegs for cellar link check, falling back to mtime ({s})", .{@errorName(e)});
+            return false;
+        },
+        .opened => |db_val| db_val,
+    };
+    defer db.close();
+    schema.initSchema(&db) catch return false;
+
+    var stmt = db.prepare("SELECT name, version, revision FROM kegs;") catch return false;
+    defer stmt.finalize();
+    while (stmt.step() catch false) {
+        const name_ptr = stmt.columnText(0) orelse continue;
+        const version_ptr = stmt.columnText(1) orelse continue;
+        // Cellar dirs are named by pkg_version (`<version>_<revision>` when
+        // revision > 0), not raw version — key the live set on that so a
+        // revisioned linked keg matches its on-disk dir.
+        var ver_buf: [256]u8 = undefined;
+        const dir_name = formula_mod.pkgVersion(&ver_buf, std.mem.sliceTo(version_ptr, 0), stmt.columnInt(2)) catch continue;
+        live.add(allocator, std.mem.sliceTo(name_ptr, 0), dir_name) catch return false;
+    }
+    return true;
+}
+
 fn collectCellarOldVersions(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -567,6 +635,10 @@ fn collectCellarOldVersions(
 
     var cellar_dir = std.Io.Dir.openDirAbsolute(io, cellar_path, .{ .iterate = true }) catch return;
     defer cellar_dir.close(io);
+
+    var live: CellarLiveVersions = .{};
+    defer live.deinit(allocator);
+    const have_db = collectLiveCellarVersions(io, allocator, prefix, &live);
 
     var iter = cellar_dir.iterate();
     while (iter.next(io) catch null) |formula_entry| {
@@ -595,15 +667,31 @@ fn collectCellarOldVersions(
 
         if (versions.items.len <= 1) continue;
 
-        // Newest mtime wins — semver sort would be more correct but brittle
-        // across upstream version strings.
+        // Prefer the DB: keep every on-disk dir whose version a keg row
+        // links, sweep the rest. Only trust this once the linked keg is
+        // actually present on disk — a DB/disk mismatch must not delete
+        // the last surviving copy, so fall back to mtime there too.
+        const live_on_disk = have_db and blk: {
+            for (versions.items) |v| if (live.contains(formula_entry.name, v.name)) break :blk true;
+            break :blk false;
+        };
+
+        // Fallback only: newest mtime wins — semver sort would be more
+        // correct but brittle across upstream version strings.
         var newest_idx: usize = 0;
-        for (versions.items, 0..) |v, idx| {
-            if (v.mtime > versions.items[newest_idx].mtime) newest_idx = idx;
+        if (!live_on_disk) {
+            for (versions.items, 0..) |v, idx| {
+                if (v.mtime > versions.items[newest_idx].mtime) newest_idx = idx;
+            }
         }
 
         for (versions.items, 0..) |v, idx| {
-            if (idx == newest_idx) continue;
+            const keep = if (live_on_disk)
+                live.contains(formula_entry.name, v.name)
+            else
+                idx == newest_idx;
+            if (keep) continue;
+
             var path_buf: [512]u8 = undefined;
             const full = std.fmt.bufPrint(&path_buf, "{s}/Cellar/{s}/{s}", .{ prefix, formula_entry.name, v.name }) catch continue;
             const sz = util.pathSize(io, allocator, full);
@@ -1038,6 +1126,229 @@ test "runOldVersions ignores pin status when sweeping old cask versions" {
         error.FileNotFound,
         std.Io.Dir.accessAbsolute(fs_test_io, prefix ++ "/cache/Cask/flux-1.0.dmg", .{}),
     );
+}
+
+// Per-run unique cellar fixture root; mirrors the per-PID/random tmp
+// pattern used elsewhere so concurrent test processes never share a path.
+fn uniqueCellarPrefix(allocator: std.mem.Allocator, comptime tag: []const u8) ![]const u8 {
+    var rand_bytes: [8]u8 = undefined;
+    fs_test_io.random(&rand_bytes);
+    const prefix = try std.fmt.allocPrint(
+        allocator,
+        "/tmp/malt_runOldVersions_cellar_" ++ tag ++ "_{x}",
+        .{std.mem.bytesToValue(u64, &rand_bytes)},
+    );
+    std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+    return prefix;
+}
+
+fn joinZ(allocator: std.mem.Allocator, base: []const u8, rest: []const u8) ![:0]u8 {
+    return std.fmt.allocPrintSentinel(allocator, "{s}{s}", .{ base, rest }, 0);
+}
+
+fn setMtimeSeconds(path: []const u8, secs: i96) !void {
+    try std.Io.Dir.cwd().setTimestamps(fs_test_io, path, .{
+        .modify_timestamp = .{ .new = std.Io.Timestamp.fromNanoseconds(secs * std.time.ns_per_s) },
+    });
+}
+
+test "runOldVersions keeps the DB-linked cellar keg even when a stale sibling has a newer mtime" {
+    // Cellar/foo/{1,2} with bin/foo -> v2 and a kegs row pinning v2 as
+    // live, but v1's mtime is forced newer. The mtime heuristic would
+    // keep v1 and delete the linked v2; the DB cross-check must keep v2.
+    const allocator = testing.allocator;
+
+    const prefix = try uniqueCellarPrefix(allocator, "keep_linked");
+    defer allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+
+    const db_dir = try joinZ(allocator, prefix, "/db");
+    defer allocator.free(db_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, db_dir);
+    const v1_dir = try joinZ(allocator, prefix, "/Cellar/foo/1");
+    defer allocator.free(v1_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, v1_dir);
+    const v2_bin = try joinZ(allocator, prefix, "/Cellar/foo/2/bin");
+    defer allocator.free(v2_bin);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, v2_bin);
+
+    const db_path = try joinZ(allocator, prefix, "/db/malt.db");
+    defer allocator.free(db_path);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        const insert = try std.fmt.allocPrintSentinel(
+            allocator,
+            "INSERT INTO kegs(name,full_name,version,store_sha256,cellar_path) " ++
+                "VALUES('foo','foo','2','sha','{s}/Cellar/foo/2');",
+            .{prefix},
+            0,
+        );
+        defer allocator.free(insert);
+        try db.exec(insert);
+    }
+
+    // Force v1's mtime above v2's so the old heuristic would pick v1.
+    const v2_dir = try joinZ(allocator, prefix, "/Cellar/foo/2");
+    defer allocator.free(v2_dir);
+    try setMtimeSeconds(v2_dir, 1_000);
+    try setMtimeSeconds(v1_dir, 2_000_000_000);
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    const result = try runOldVersions(&ctx, allocator, prefix, false);
+
+    try testing.expectEqual(util.ScopeStatus.ok, result.status);
+    try std.Io.Dir.accessAbsolute(fs_test_io, v2_dir, .{}); // linked v2 survives
+    try testing.expectError( // stale v1 swept
+        error.FileNotFound,
+        std.Io.Dir.accessAbsolute(fs_test_io, v1_dir, .{}),
+    );
+}
+
+test "runOldVersions keeps every live version of a multi-keg formula" {
+    // Versioned/keg-only formulae carry more than one keg row. Both
+    // linked versions must survive; only the unlinked one is swept.
+    const allocator = testing.allocator;
+
+    const prefix = try uniqueCellarPrefix(allocator, "multi_keg");
+    defer allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+
+    const db_dir = try joinZ(allocator, prefix, "/db");
+    defer allocator.free(db_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, db_dir);
+    for ([_][]const u8{ "/Cellar/openssl/1", "/Cellar/openssl/2", "/Cellar/openssl/3" }) |rel| {
+        const d = try joinZ(allocator, prefix, rel);
+        defer allocator.free(d);
+        try std.Io.Dir.cwd().createDirPath(fs_test_io, d);
+    }
+
+    const db_path = try joinZ(allocator, prefix, "/db/malt.db");
+    defer allocator.free(db_path);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        const insert = try std.fmt.allocPrintSentinel(
+            allocator,
+            "INSERT INTO kegs(name,full_name,version,store_sha256,cellar_path) VALUES" ++
+                "('openssl','openssl','2','s2','{s}/Cellar/openssl/2')," ++
+                "('openssl','openssl','3','s3','{s}/Cellar/openssl/3');",
+            .{ prefix, prefix },
+            0,
+        );
+        defer allocator.free(insert);
+        try db.exec(insert);
+    }
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    _ = try runOldVersions(&ctx, allocator, prefix, false);
+
+    const v2 = try joinZ(allocator, prefix, "/Cellar/openssl/2");
+    defer allocator.free(v2);
+    const v3 = try joinZ(allocator, prefix, "/Cellar/openssl/3");
+    defer allocator.free(v3);
+    const v1 = try joinZ(allocator, prefix, "/Cellar/openssl/1");
+    defer allocator.free(v1);
+    try std.Io.Dir.accessAbsolute(fs_test_io, v2, .{});
+    try std.Io.Dir.accessAbsolute(fs_test_io, v3, .{});
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, v1, .{}));
+}
+
+test "runOldVersions keeps a revisioned linked keg whose dir name carries the revision suffix" {
+    // kegs row version=1.2.3 revision=1 lives on disk as Cellar/foo/1.2.3_1.
+    // A stale 1.0 sibling with a newer mtime must not evict it — the live
+    // set must key on pkg_version, not the raw version column.
+    const allocator = testing.allocator;
+
+    const prefix = try uniqueCellarPrefix(allocator, "revisioned");
+    defer allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+
+    const db_dir = try joinZ(allocator, prefix, "/db");
+    defer allocator.free(db_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, db_dir);
+    const stale_dir = try joinZ(allocator, prefix, "/Cellar/foo/1.0");
+    defer allocator.free(stale_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, stale_dir);
+    const live_dir = try joinZ(allocator, prefix, "/Cellar/foo/1.2.3_1");
+    defer allocator.free(live_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, live_dir);
+
+    const db_path = try joinZ(allocator, prefix, "/db/malt.db");
+    defer allocator.free(db_path);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        const insert = try std.fmt.allocPrintSentinel(
+            allocator,
+            "INSERT INTO kegs(name,full_name,version,revision,store_sha256,cellar_path) " ++
+                "VALUES('foo','foo','1.2.3',1,'sha','{s}/Cellar/foo/1.2.3_1');",
+            .{prefix},
+            0,
+        );
+        defer allocator.free(insert);
+        try db.exec(insert);
+    }
+
+    try setMtimeSeconds(live_dir, 1_000);
+    try setMtimeSeconds(stale_dir, 2_000_000_000); // stale looks newer
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    _ = try runOldVersions(&ctx, allocator, prefix, false);
+
+    try std.Io.Dir.accessAbsolute(fs_test_io, live_dir, .{}); // revisioned live keg survives
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, stale_dir, .{}));
+}
+
+test "runOldVersions falls back to newest mtime when the live keg is absent on disk" {
+    // DB available but no on-disk dir matches a live version (mismatch /
+    // corrupted state). The fix must not wipe both dirs; it keeps the
+    // newest by mtime, preserving the pre-fix safety net.
+    const allocator = testing.allocator;
+
+    const prefix = try uniqueCellarPrefix(allocator, "db_disk_mismatch");
+    defer allocator.free(prefix);
+    defer std.Io.Dir.cwd().deleteTree(fs_test_io, prefix) catch {};
+
+    const db_dir = try joinZ(allocator, prefix, "/db");
+    defer allocator.free(db_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, db_dir);
+    const v1_dir = try joinZ(allocator, prefix, "/Cellar/foo/1");
+    defer allocator.free(v1_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, v1_dir);
+    const v2_dir = try joinZ(allocator, prefix, "/Cellar/foo/2");
+    defer allocator.free(v2_dir);
+    try std.Io.Dir.cwd().createDirPath(fs_test_io, v2_dir);
+
+    const db_path = try joinZ(allocator, prefix, "/db/malt.db");
+    defer allocator.free(db_path);
+    {
+        var db = try sqlite.Database.open(db_path);
+        defer db.close();
+        try schema.initSchema(&db);
+        // Live version 9 has no dir on disk.
+        const insert = try std.fmt.allocPrintSentinel(
+            allocator,
+            "INSERT INTO kegs(name,full_name,version,store_sha256,cellar_path) " ++
+                "VALUES('foo','foo','9','sha','{s}/Cellar/foo/9');",
+            .{prefix},
+            0,
+        );
+        defer allocator.free(insert);
+        try db.exec(insert);
+    }
+
+    try setMtimeSeconds(v1_dir, 1_000);
+    try setMtimeSeconds(v2_dir, 2_000); // v2 newest
+
+    const ctx = AppCtx{ .io = fs_test_io, .environ = .empty };
+    _ = try runOldVersions(&ctx, allocator, prefix, false);
+
+    try std.Io.Dir.accessAbsolute(fs_test_io, v2_dir, .{}); // newest kept
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(fs_test_io, v1_dir, .{}));
 }
 
 // Build a minimal Mach-O carrying one LC_LOAD_DYLIB that names `dylib`,
