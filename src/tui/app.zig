@@ -1566,10 +1566,58 @@ fn openSearchInfo(io: std.Io, allocator: std.mem.Allocator, app: *App, store: *S
     app.states.search.detail = parsed.info;
 }
 
+/// True when a tab has a pending request that will spawn a DB-mutating inline
+/// child (uninstall, upgrade, service action, doctor --fix, install). Read-only
+/// requests (detail/info/search/basket toggles) never take the WAL writer, so
+/// they do not gate the pre-mutation drain.
+fn mutationPending(app: *const App) bool {
+    return app.states.installed.request == .uninstall or
+        app.states.outdated.request == .upgrade or
+        app.states.services.request != .none or
+        app.states.doctor.request == .fix or
+        app.states.search.request == .install;
+}
+
+/// Quiesce every in-flight background audit before an inline mutator opens the
+/// DB. The TUI is the sole DB orchestrator: a live `mt … --json` child still
+/// holds the WAL writer on each open (`initSchema` writes on every connect), so
+/// a mutating child spawned alongside it races the single writer and fails with
+/// `Busy`. Polls only the fetch fds — never the tty — so a queued keystroke
+/// cannot starve the drain into a spin; the spinner still ticks so a cold-cache
+/// audit reads as progress, not a freeze. Best-effort like the teardown reap:
+/// a poll fault reaps the lot rather than leaving a child to outlive the mutation.
+fn drainActiveFetches(io: std.Io, allocator: std.mem.Allocator, painter: Painter, fetches: *Fetches, app: *App, store: *Store) void {
+    while (anyFetchActive(fetches)) {
+        var fds: [tab_bar.count]std.posix.fd_t = undefined;
+        var tabs: [tab_bar.count]Tab = undefined;
+        var n: usize = 0;
+        var it = fetches.iterator();
+        while (it.next()) |e| if (e.value.*) |*f| {
+            fds[n] = f.fd;
+            tabs[n] = e.key;
+            n += 1;
+        };
+        var pfds_buf: [tab_bar.count]std.posix.pollfd = undefined;
+        const pfds = pfds_buf[0..n];
+        for (fds[0..n], 0..) |fd, i| pfds[i] = .{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 };
+        const ready = std.posix.poll(pfds, fetch_tick_ms) catch return reapAllFetches(io, allocator, fetches);
+        if (ready == 0) { // tick: animate the spinner so the wait isn't a freeze
+            app.spinner_frame +%= 1;
+            repaint(painter.fd, painter.frame, allocator, app) catch {};
+            continue;
+        }
+        for (0..n) |i| if (pfds[i].revents != 0) drainTabFetch(io, allocator, painter, fetches, app, store, tabs[i]);
+    }
+}
+
 /// Drain the active tab's pending effects after a keypress. Each tab's service is
 /// a no-op unless that tab is active and has a request or is due a lazy refresh,
 /// so calling each one each loop is cheap and keeps the dispatch flat.
 fn service(io: std.Io, allocator: std.mem.Allocator, t: *term.Term, painter: Painter, fetches: *Fetches, app: *App, store: *Store) RunError!void {
+    // Sole-orchestrator invariant: quiesce any in-flight audit before an inline
+    // mutator opens the DB, else the two opens race the single WAL writer and the
+    // mutation fails with `Busy`. Read-only turns never drain — navigation stays live.
+    if (anyFetchActive(fetches) and mutationPending(app)) drainActiveFetches(io, allocator, painter, fetches, app, store);
     try serviceInstalled(io, allocator, t, app, store);
     try serviceOutdated(io, allocator, t, fetches, app, store);
     try serviceServices(io, allocator, t, painter, fetches, app, store);
@@ -2203,6 +2251,107 @@ test "a malformed payload banners and keeps the outdated count unknown, never ze
     try driveFetchToEnd(t.io(), std.testing.allocator, &app, &store, &fetches, .outdated);
     try std.testing.expect(app.outdated_count == null); // unknown (`—`), not 0
     try std.testing.expectEqualStrings("outdated refresh failed: BadJson", app.banner.slice());
+}
+
+test "mutationPending gates only on requests that spawn a DB-mutating child" {
+    var app: App = .{};
+    try std.testing.expect(!mutationPending(&app)); // all .none
+
+    // Read-only requests never take the WAL writer, so they must not gate.
+    app.states.installed.request = .open_detail;
+    app.states.search.request = .info;
+    try std.testing.expect(!mutationPending(&app));
+
+    // Each mutating request, in isolation, gates the drain.
+    app = .{};
+    app.states.installed.request = .uninstall;
+    try std.testing.expect(mutationPending(&app));
+    app = .{};
+    app.states.outdated.request = .upgrade;
+    try std.testing.expect(mutationPending(&app));
+    app = .{};
+    app.states.services.request = .restart;
+    try std.testing.expect(mutationPending(&app));
+    app = .{};
+    app.states.doctor.request = .fix;
+    try std.testing.expect(mutationPending(&app));
+    app = .{};
+    app.states.search.request = .install;
+    try std.testing.expect(mutationPending(&app));
+}
+
+test "drainActiveFetches reaps every in-flight audit and lands its payload" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    const child = try std.process.spawn(t.io(), .{
+        .argv = &.{ "/bin/echo", "{\"outdated\":[{\"name\":\"wget\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false}]}" },
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
+    var app: App = .{};
+    app.tab_loading.insert(.outdated);
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    var frame: []u8 = try std.testing.allocator.alloc(u8, 256);
+    defer std.testing.allocator.free(frame);
+
+    drainActiveFetches(t.io(), std.testing.allocator, testPainter(&frame), &fetches, &app, &store);
+
+    try std.testing.expect(!anyFetchActive(&fetches)); // the audit closed its DB connection
+    try std.testing.expectEqual(@as(?usize, 1), app.outdated_count); // payload still landed
+}
+
+// The sole-orchestrator guard: with an audit in flight, a mutating dispatch must
+// drain it first so the inline child never opens the DB beside a live writer.
+// The mutation no-ops on an empty selection, so no child is spawned — the test
+// asserts only the quiescing, which is the falsifiable invariant.
+test "service quiesces an in-flight audit before a mutating dispatch" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    const child = try std.process.spawn(t.io(), .{
+        .argv = &.{ "/bin/echo", "{\"outdated\":[{\"name\":\"wget\",\"installed\":\"1\",\"latest\":\"2\",\"type\":\"formula\",\"pinned\":false}]}" },
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
+    var app: App = .{};
+    app.tab_loading.insert(.outdated);
+    app.states.outdated.request = .upgrade; // a mutating request, but nothing is checked → no spawn
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    var frame: []u8 = try std.testing.allocator.alloc(u8, 256);
+    defer std.testing.allocator.free(frame);
+    var tm = term.Term.init(t.io(), -1);
+
+    try service(t.io(), std.testing.allocator, &tm, testPainter(&frame), &fetches, &app, &store);
+
+    try std.testing.expect(!anyFetchActive(&fetches)); // drained before the dispatch
+    try std.testing.expect(!app.banner.isSet()); // a clean drain, no upgrade failure
+}
+
+test "service leaves an in-flight audit running when no mutation is pending" {
+    var t = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer t.deinit();
+    // `sleep` keeps the fetch genuinely in flight across the call; a read-only
+    // turn must not block on it.
+    const child = try std.process.spawn(t.io(), .{ .argv = &.{ "/bin/sleep", "5" }, .stdout = .pipe, .stderr = .ignore });
+    var app: App = .{};
+    app.tab_loading.insert(.outdated); // no request set → nothing mutating
+    var store: Store = .{};
+    defer store.deinit(std.testing.allocator);
+    var fetches: Fetches = .initFill(null);
+    fetches.set(.outdated, .{ .tab = .outdated, .child = child, .fd = child.stdout.?.handle, .max_ok_exit = 0 });
+    var frame: []u8 = try std.testing.allocator.alloc(u8, 256);
+    defer std.testing.allocator.free(frame);
+    var tm = term.Term.init(t.io(), -1);
+
+    try service(t.io(), std.testing.allocator, &tm, testPainter(&frame), &fetches, &app, &store);
+
+    try std.testing.expect(anyFetchActive(&fetches)); // untouched: navigation never blocks on an audit
+    reapAllFetches(t.io(), std.testing.allocator, &fetches); // tidy the still-running child
 }
 
 test "dropUpgradedRows removes upgraded rows in place and preserves kept checked state" {
