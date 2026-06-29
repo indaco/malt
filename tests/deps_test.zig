@@ -329,7 +329,7 @@ test "resolve marks already-installed kegs and skips their sub-deps" {
     try testing.expect(result[0].already_installed);
 }
 
-test "resolve returns empty when root formula JSON is missing from cache" {
+test "resolve fails loudly when the root formula JSON is missing" {
     const alloc = testing.allocator;
 
     var dir = try TempCacheDir.init("resolve_missing_root");
@@ -352,25 +352,26 @@ test "resolve returns empty when root formula JSON is missing from cache" {
     var tdb = try TempDb.init("resolve_missing_root");
     defer tdb.deinit();
 
-    // resolve's getDeps catches errors and returns &.{}, so resolve returns
-    // an empty list (no deps to walk).
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "nope", &api, &tdb.db, &cache);
-    defer freeResolved(alloc, result);
-    try testing.expectEqual(@as(usize, 0), result.len);
+    // A 404 on the root's own formula is an anomaly, not "zero deps": resolve
+    // must surface it instead of returning an empty graph as success.
+    try testing.expectError(
+        error.ResolutionFailed,
+        deps_mod.resolve(std.Options.debug_io, alloc, "nope", &api, &tdb.db, &cache),
+    );
 }
 
-test "resolve handles a dep whose sub-fetch fails by falling through" {
+test "resolve fails the resolve when a dep's sub-fetch fails" {
     const alloc = testing.allocator;
 
     var dir = try TempCacheDir.init("resolve_dep_missing");
     defer dir.deinit();
 
     // alpha → [missing]. missing has no cache file AND we mark it 404 so the
-    // sub-getDeps fails. The BFS loop should still append `missing` as a
-    // dep before trying to recurse.
+    // sub-getDeps fails. A missing transitive dep must abort the resolve, not
+    // leave its closure silently truncated.
     try dir.writeFormula("alpha", "{\"name\":\"alpha\",\"dependencies\":[\"missing\"]}");
     var marker_buf: [512]u8 = undefined;
     const marker = try std.fmt.bufPrint(&marker_buf, "{s}/api/formula_missing.404", .{dir.path});
@@ -387,11 +388,10 @@ test "resolve handles a dep whose sub-fetch fails by falling through" {
     var cache = deps_mod.FormulaCache.init(alloc);
     defer cache.deinit();
 
-    const result = try deps_mod.resolve(std.Options.debug_io, alloc, "alpha", &api, &tdb.db, &cache);
-    defer freeResolved(alloc, result);
-
-    try testing.expectEqual(@as(usize, 1), result.len);
-    try testing.expectEqualStrings("missing", result[0].name);
+    try testing.expectError(
+        error.ResolutionFailed,
+        deps_mod.resolve(std.Options.debug_io, alloc, "alpha", &api, &tdb.db, &cache),
+    );
 }
 
 // --- ensureOptLink / stale-cellar heal coverage ---------------------------
