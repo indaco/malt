@@ -112,11 +112,11 @@ pub fn resolve(
         queue.deinit(allocator);
     }
 
+    // A fetch failure on the root's own formula aborts the resolve loudly;
+    // never fold it into an empty graph the caller would treat as success.
     const root_deps = getDeps(allocator, root_name, api, cache) catch {
-        return result.toOwnedSlice(allocator) catch blk: {
-            result.deinit(allocator);
-            break :blk &.{};
-        };
+        result.deinit(allocator);
+        return error.ResolutionFailed;
     };
     defer allocator.free(root_deps);
 
@@ -154,7 +154,15 @@ pub fn resolve(
 
         // Fan out into this dep's own dependencies.
         if (!installed) {
-            const sub_deps = getDeps(allocator, dep_name, api, cache) catch continue;
+            // A dep whose own formula can't be fetched would leave its
+            // transitive closure silently missing — abort instead of folding
+            // a truncated graph into success. `dep_name` is already owned by
+            // `result`, so freeing `result`'s names covers it.
+            const sub_deps = getDeps(allocator, dep_name, api, cache) catch {
+                for (result.items) |r| allocator.free(r.name);
+                result.deinit(allocator);
+                return error.ResolutionFailed;
+            };
             defer allocator.free(sub_deps);
 
             for (sub_deps) |sub_dep| {
@@ -292,7 +300,10 @@ fn getDeps(
 ) ![][]const u8 {
     if (cache.get(name)) |formula| return dupeDepNames(allocator, formula.dependencies);
 
-    const json_bytes = api.fetchFormula(name) catch return &.{};
+    // Propagate the fetch failure — a missing/unreachable formula JSON must
+    // not masquerade as "zero deps". The Value-walk fallback below stays
+    // reachable only for bytes that fetched but failed `parseFormula`.
+    const json_bytes = try api.fetchFormula(name);
     defer allocator.free(json_bytes);
 
     if (cache.getOrParse(name, json_bytes)) |formula| {
@@ -501,4 +512,100 @@ test "isInstalled returns true when both cellar and opt link resolve" {
     try parent_dir.symLink(io, cellar_path, "beta", .{});
 
     try testing.expect(isInstalled(io, &db, "beta"));
+}
+
+// --- resolve fail-loud on dependency-fetch failure ------------------------
+
+test "resolve surfaces a dependency-fetch failure as ResolutionFailed, not an empty graph" {
+    const client_mod = @import("../net/client.zig");
+    const schema_mod = @import("../db/schema.zig");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+
+    // Refused loopback port → fetchFormula returns ApiUnreachable. Loopback
+    // only, so no real network egress.
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, "/tmp/malt_resolve_unreachable_cache");
+    api.base_url = "http://127.0.0.1:9";
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema_mod.initSchema(&db);
+
+    var cache = FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+
+    // Empty cache → resolve hits getDeps → fetchFormula → ApiUnreachable. A
+    // swallowed fetch error would yield a zero-length success slice; the
+    // distinct error is what stops a truncated install graph landing.
+    try testing.expectError(
+        error.ResolutionFailed,
+        resolve(io, testing.allocator, "ghost", &api, &db, &cache),
+    );
+}
+
+test "resolve of a genuinely zero-dep formula returns a success empty slice" {
+    const client_mod = @import("../net/client.zig");
+    const schema_mod = @import("../db/schema.zig");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, "/tmp/malt_resolve_zerodep_cache");
+    api.base_url = "http://127.0.0.1:9";
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema_mod.initSchema(&db);
+
+    var cache = FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+    // Prime the root with a genuinely zero-dep formula so getDeps hits the
+    // cache and never dials out — empty graph here is success, not failure.
+    _ = try cache.getOrParse("solo", testFormulaJson("solo"));
+
+    const deps = try resolve(io, testing.allocator, "solo", &api, &db, &cache);
+    defer testing.allocator.free(deps);
+    try testing.expectEqual(@as(usize, 0), deps.len);
+}
+
+test "resolve aborts when a transitive dependency's formula can't be fetched" {
+    const client_mod = @import("../net/client.zig");
+    const schema_mod = @import("../db/schema.zig");
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var http = client_mod.HttpClient.init(io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var api = api_mod.BrewApi.init(io, testing.allocator, &http, "/tmp/malt_resolve_subdep_cache");
+    api.base_url = "http://127.0.0.1:9";
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema_mod.initSchema(&db);
+
+    var cache = FormulaCache.init(testing.allocator);
+    defer cache.deinit();
+    // Root is primed (so its own getDeps hits the cache), but its declared
+    // dep is uncached and the API is unreachable: the dep-level fan-out fetch
+    // must abort the whole resolve, not drop the dep's transitive closure.
+    _ = try cache.getOrParse(
+        "rootpkg",
+        "{\"name\":\"rootpkg\",\"versions\":{\"stable\":\"1.0\"}," ++
+            "\"dependencies\":[\"ghostdep\"],\"oldnames\":[]}",
+    );
+
+    try testing.expectError(
+        error.ResolutionFailed,
+        resolve(io, testing.allocator, "rootpkg", &api, &db, &cache),
+    );
 }
