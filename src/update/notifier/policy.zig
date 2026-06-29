@@ -19,9 +19,10 @@ pub const failure_backoff_secs: i64 = 5 * 60;
 pub fn shouldNotify(current: []const u8, latest_tag: []const u8, current_seen: []const u8) bool {
     const latest_no_v = release.stripVPrefix(latest_tag);
     if (latest_no_v.len == 0) return false;
-    if (std.mem.eql(u8, current, latest_no_v)) return false;
     if (std.mem.eql(u8, current, current_seen) and std.mem.eql(u8, current_seen, latest_no_v)) return false;
-    return true;
+    // Fire only when the released version is semantically newer — an equal
+    // or behind `latest` (e.g. an ahead-of-release dev build) must not nag.
+    return release.order(latest_no_v, current) == .gt;
 }
 
 pub fn cacheStale(now_secs: i64, checked_at: i64, ttl: i64) bool {
@@ -123,6 +124,16 @@ test "shouldNotify: post-update suppression — current_seen matches both" {
 test "shouldNotify: stale cache with mismatched current_seen still fires" {
     // Cache predates a downgrade-then-cache-rewrite; safe default is to fire.
     try std.testing.expect(shouldNotify("0.9.0", "v0.10.0", "0.8.0"));
+}
+
+test "shouldNotify: latest behind current never fires (no downgrade nag)" {
+    try std.testing.expect(!shouldNotify("0.20.0", "v0.0.1", ""));
+    try std.testing.expect(!shouldNotify("0.10.0", "v0.9.0", "0.10.0"));
+}
+
+test "shouldNotify: a pre-release build ahead of latest stays quiet" {
+    // Running 0.20.0-dev while the published latest is v0.19.3 — you're ahead.
+    try std.testing.expect(!shouldNotify("0.20.0-dev", "v0.19.3", ""));
 }
 
 test "cacheStale: TTL boundary" {

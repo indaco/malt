@@ -107,3 +107,52 @@ pub fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
 pub fn stripVPrefix(tag: []const u8) []const u8 {
     return if (tag.len > 0 and tag[0] == 'v') tag[1..] else tag;
 }
+
+/// Order two release strings by their `major.minor.patch` core, ignoring
+/// any pre-release suffix (everything from the first `-`). Degrades to a
+/// byte comparison when either side is not a clean numeric triple, so a
+/// malformed tag never silences a real update — it just behaves as the
+/// old string compare did. Callers strip a leading `v` first.
+pub fn order(a: []const u8, b: []const u8) std.math.Order {
+    const ta = coreTriple(a) orelse return std.mem.order(u8, a, b);
+    const tb = coreTriple(b) orelse return std.mem.order(u8, a, b);
+    for (ta, tb) |x, y| {
+        const o = std.math.order(x, y);
+        if (o != .eq) return o;
+    }
+    return .eq;
+}
+
+fn coreTriple(tag: []const u8) ?[3]u64 {
+    const core = if (std.mem.indexOfScalar(u8, tag, '-')) |i| tag[0..i] else tag;
+    var it = std.mem.splitScalar(u8, core, '.');
+    var out: [3]u64 = undefined;
+    inline for (0..3) |i| {
+        const part = it.next() orelse return null;
+        out[i] = std.fmt.parseInt(u64, part, 10) catch return null;
+    }
+    if (it.next() != null) return null; // extra components ⇒ not a clean triple
+    return out;
+}
+
+// --- inline tests --------------------------------------------------------
+
+test "order: numeric semver, not byte ordering" {
+    try std.testing.expectEqual(std.math.Order.lt, order("0.19.3", "0.20.0"));
+    try std.testing.expectEqual(std.math.Order.gt, order("0.20.0", "0.19.3"));
+    try std.testing.expectEqual(std.math.Order.eq, order("0.20.0", "0.20.0"));
+    // Byte comparison ranks "0.9.0" after "0.10.0"; semver must not.
+    try std.testing.expectEqual(std.math.Order.gt, order("0.10.0", "0.9.0"));
+}
+
+test "order: pre-release suffix compares by the core triple" {
+    try std.testing.expectEqual(std.math.Order.eq, order("0.20.0-dev", "0.20.0"));
+    try std.testing.expectEqual(std.math.Order.gt, order("0.20.0-dev", "0.19.3"));
+    try std.testing.expectEqual(std.math.Order.lt, order("0.19.3", "0.20.0-rc1"));
+}
+
+test "order: malformed component degrades to byte comparison" {
+    try std.testing.expectEqual(std.mem.order(u8, "1.x.0", "1.2.0"), order("1.x.0", "1.2.0"));
+    try std.testing.expectEqual(std.mem.order(u8, "1.2", "1.2.0"), order("1.2", "1.2.0"));
+    try std.testing.expectEqual(std.mem.order(u8, "1.2.3.4", "1.2.3"), order("1.2.3.4", "1.2.3"));
+}
