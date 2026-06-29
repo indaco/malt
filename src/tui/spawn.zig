@@ -298,14 +298,14 @@ pub fn runInline(t: *term.Term, argv: []const []const u8) InlineError!void {
 /// child outcome is captured (not thrown) so re-entry happens regardless, then
 /// returned, so a failed mutation lands the user back in the dashboard with
 /// `mt`'s real output already in their scrollback.
-fn aroundReenter(ctrl: anytype, body: anytype) !void {
+fn aroundReenter(ctrl: anytype, body: anytype) !@typeInfo(@TypeOf(body.run())).error_union.payload {
     ctrl.leave(); // hand the terminal to the child
-    const child = body.run(); // capture: the child's failure is data, not a throw
+    const child = body.run(); // capture: the child's outcome is data, not a throw
     ctrl.enter() catch |e| {
         ctrl.leave(); // a real terminal fault is fatal — leave it restored
         return e;
     };
-    return child; // back in the dashboard; surface a non-zero child exit as a value
+    return child; // back in the dashboard; surface the child's value (void or exit code)
 }
 
 /// Run a delegated mutation inline on the graceful path: a non-zero child exit
@@ -320,6 +320,29 @@ pub fn runInlineReenter(t: *term.Term, argv: []const []const u8) InlineError!voi
 /// cap, a signal, or a terminal fault surfaces as an error.
 pub fn runInlineReenterTolerant(t: *term.Term, argv: []const []const u8, max_ok_exit: u8) InlineError!void {
     return aroundReenter(TermCtrl{ .t = t }, ChildBody{ .io = t.io, .argv = argv, .max_ok_exit = max_ok_exit });
+}
+
+/// The mutation body that yields the child's exit code instead of collapsing
+/// non-zero to `ChildFailed`. A signal/stop has no code, so it stays an error.
+const StatusBody = struct {
+    io: std.Io,
+    argv: []const []const u8,
+    fn run(self: StatusBody) SpawnError!u8 {
+        var child = std.process.spawn(self.io, .{ .argv = self.argv }) catch return error.SpawnFailed;
+        return switch (child.wait(self.io) catch return error.WaitFailed) {
+            .exited => |code| code,
+            .signal, .stopped, .unknown => error.ChildFailed,
+        };
+    }
+};
+
+/// Like `runInlineReenter`, but return the child's exit code (0 = success)
+/// rather than mapping every non-zero to `ChildFailed`, so the caller can
+/// branch on a specific code — e.g. the cask "app is running" refusal — for a
+/// precise footer. Re-enters the dashboard regardless; only a terminal re-enter
+/// fault (or a spawn/signal fault) surfaces as an error.
+pub fn runInlineReenterStatus(t: *term.Term, argv: []const []const u8) InlineError!u8 {
+    return aroundReenter(TermCtrl{ .t = t }, StatusBody{ .io = t.io, .argv = argv });
 }
 
 // ─── tests ───────────────────────────────────────────────────────────
@@ -542,4 +565,34 @@ test "aroundReenter treats a re-enter fault as fatal and restores the terminal" 
     try testing.expectError(error.Reenter, aroundReenter(&ft, FakeBody{ .fails = false, .log = &log }));
     try testing.expectEqualStrings("LSEL", log.items); // leave, spawn, enter(fail), leave
     try testing.expect(!ft.entered);
+}
+
+const FakeStatusBody = struct {
+    code: u8,
+    log: *std.ArrayList(u8),
+    fn run(self: FakeStatusBody) error{Spawn}!u8 {
+        self.log.append(testing.allocator, 'S') catch {};
+        return self.code;
+    }
+};
+
+test "aroundReenter hands back the child's exit code and ends in the dashboard" {
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(testing.allocator);
+    var ft: FakeTerm = .{ .log = &log };
+    const code = try aroundReenter(&ft, FakeStatusBody{ .code = 3, .log = &log });
+    try testing.expectEqual(@as(u8, 3), code); // a non-zero exit is a value, not a throw
+    try testing.expectEqualStrings("LSE", log.items);
+    try testing.expect(ft.entered);
+}
+
+test "StatusBody.run yields the real child exit code and faults on a missing program" {
+    var t = threaded();
+    defer t.deinit();
+    // `true`/`false` exit 0/1 with no shell — a non-zero code is a value here,
+    // not the collapsed ChildFailed. The specific 3 mapping is covered by the
+    // FakeStatusBody test above; src/ forbids `sh -c` literals.
+    try testing.expectEqual(@as(u8, 0), try StatusBody.run(.{ .io = t.io(), .argv = &.{"/usr/bin/true"} }));
+    try testing.expectEqual(@as(u8, 1), try StatusBody.run(.{ .io = t.io(), .argv = &.{"/usr/bin/false"} }));
+    try testing.expectError(error.SpawnFailed, StatusBody.run(.{ .io = t.io(), .argv = &.{"/nonexistent/mt"} }));
 }
