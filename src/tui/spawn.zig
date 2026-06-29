@@ -591,7 +591,7 @@ test "StatusBody.run yields the real child exit code and faults on a missing pro
     defer t.deinit();
     // `true`/`false` exit 0/1 with no shell — a non-zero code is a value here,
     // not the collapsed ChildFailed. The specific 3 mapping is covered by the
-    // FakeStatusBody test above; src/ forbids `sh -c` literals.
+    // FakeStatusBody test above; src/ forbids shell-invocation argv literals.
     try testing.expectEqual(@as(u8, 0), try StatusBody.run(.{ .io = t.io(), .argv = &.{"/usr/bin/true"} }));
     try testing.expectEqual(@as(u8, 1), try StatusBody.run(.{ .io = t.io(), .argv = &.{"/usr/bin/false"} }));
     try testing.expectError(error.SpawnFailed, StatusBody.run(.{ .io = t.io(), .argv = &.{"/nonexistent/mt"} }));
