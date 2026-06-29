@@ -15,6 +15,8 @@ pub const CaskError = error{
     DownloadFailed,
     InstallFailed,
     UninstallFailed,
+    // Distinct from UninstallFailed so callers can say *why*: the app is live.
+    AppRunning,
     Sha256Mismatch,
     OutOfMemory,
 };
@@ -616,8 +618,9 @@ pub const CaskInstaller = struct {
                 // manifest itself.
                 self.removeManifestedFonts(app_path);
             } else {
-                // Check if the app is running (best-effort)
-                if (isAppRunning(self.io, app_path)) return CaskError.UninstallFailed;
+                // Refuse while the app is live: removing the old bundle would
+                // yank a running app. Distinct error so the caller can say so.
+                if (isAppRunning(self.io, app_path)) return CaskError.AppRunning;
 
                 // app may already be gone (manual delete); continue to DB cleanup.
                 std.Io.Dir.cwd().deleteTree(self.io, app_path) catch {};

@@ -38,6 +38,57 @@ test "CaskInstaller.uninstall on a missing token returns UninstallFailed" {
     try testing.expectError(cask.CaskError.UninstallFailed, installer.uninstall("nope-nope"));
 }
 
+test "CaskInstaller.uninstall refuses with AppRunning while the app bundle is live" {
+    const test_cask_json =
+        \\{"token":"running-app","name":["Running"],"version":"1.0","desc":"","homepage":"",
+        \\ "url":"https://example.com/running.dmg",
+        \\ "sha256":"00000000000000000000000000000000000000000000000000000000deadbeef",
+        \\ "auto_updates":false,"artifacts":[{"app":["Running.app"]}]}
+    ;
+    var c = try cask.parseCask(testing.allocator, test_cask_json);
+    defer c.deinit();
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    const base = "/tmp/malt_cask_running_test";
+    test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    try test_io.cwd().createDirPath(std.Options.debug_io, base);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, base) catch {};
+    const app_path_z = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/Running.app", .{base}, 0);
+    defer testing.allocator.free(app_path_z);
+    try test_io.makeDirAbsolute(std.Options.debug_io, app_path_z);
+    try cask.recordInstall(&db, &c, app_path_z, null);
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testEnviron() });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Stand in for the running .app: a live process whose argv carries the
+    // bundle path so `pgrep -f` matches. `read x` blocks on the unwritten pipe,
+    // so it stays a single process with no orphaned child to leak.
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/bin/sh", "-c", "read x", app_path_z },
+        .stdin = .pipe,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    defer child.kill(io); // kill also reaps
+
+    // Spawn→exec is async; poll until pgrep can see it. Each probe spawns
+    // pgrep (~ms), so the loop self-paces without a sleep dependency.
+    var tries: usize = 0;
+    while (tries < 300 and !cask.CaskInstaller.isAppRunningPub(io, app_path_z)) : (tries += 1) {}
+
+    const prefix: [:0]const u8 = "/tmp/mc-running";
+    test_io.cwd().createDirPath(std.Options.debug_io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
+    var installer = cask.CaskInstaller.init(io, testEnviron(), testing.allocator, &db, prefix);
+    // Distinct from UninstallFailed so the CLI can say "the app is running".
+    try testing.expectError(cask.CaskError.AppRunning, installer.uninstall("running-app"));
+}
+
 test "CaskInstaller.isOutdated returns false for an unknown token" {
     var db = try sqlite.Database.open(":memory:");
     defer db.close();

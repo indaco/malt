@@ -1082,6 +1082,21 @@ fn kindUpgradeArgv(
     return try spawn.inlineArgv(allocator, mt_path, rest);
 }
 
+/// The exit code `mt upgrade` returns when it refused a cask because the app is
+/// still running. Mirrors `main.zig`'s `AppRunning` exit mapping — the mt→TUI
+/// process contract, like the doctor severity cap the inline runner already knows.
+const cask_app_running_exit: u8 = 3;
+
+/// Footer detail for a failed cask upgrade pass: on the app-running refusal name
+/// the live app (or "a selected app" when the pass carried several) so the footer
+/// says *why*, not an opaque "ChildFailed". `buf` backs the single-cask name;
+/// `Banner.set` copies the result, so a stack buffer is enough.
+fn upgradeFailDetail(buf: []u8, code: u8, refs: []const UpgradedRef) []const u8 {
+    if (code != cask_app_running_exit) return "ChildFailed";
+    if (refs.len == 1) return std.fmt.bufPrint(buf, "{s} is running", .{refs[0].name}) catch "an app is running";
+    return "a selected app is running";
+}
+
 /// Delegate the checked upgrades to the real `mt` inline, then drop the upgraded
 /// rows in place. Runs one pass per kind (`--formula`, `--cask`) so the row the
 /// user checked is the row upgraded — `mt upgrade <name>` is formula-first, so a
@@ -1108,9 +1123,14 @@ fn doUpgrade(allocator: std.mem.Allocator, t: *term.Term, app: *App, store: *Sto
     for (passes) |pass| {
         const argv = (try kindUpgradeArgv(allocator, app.mt_path, pass.refs, pass.flag)) orelse continue;
         defer allocator.free(argv);
-        if (spawn.runInlineReenter(t, argv)) |_| {
-            try dropUpgradedRows(allocator, app, store, pass.refs);
-            dropped_any = true;
+        if (spawn.runInlineReenterStatus(t, argv)) |code| {
+            if (code == 0) {
+                try dropUpgradedRows(allocator, app, store, pass.refs);
+                dropped_any = true;
+            } else {
+                var dbuf: [96]u8 = undefined;
+                app.banner.set("upgrade failed", upgradeFailDetail(&dbuf, code, pass.refs));
+            }
         } else |err| {
             app.banner.set("upgrade failed", @errorName(err));
         }
@@ -2352,6 +2372,22 @@ test "service leaves an in-flight audit running when no mutation is pending" {
 
     try std.testing.expect(anyFetchActive(&fetches)); // untouched: navigation never blocks on an audit
     reapAllFetches(t.io(), std.testing.allocator, &fetches); // tidy the still-running child
+}
+
+test "upgradeFailDetail names the live app on the refusal code, else stays generic" {
+    var buf: [96]u8 = undefined;
+    const one = [_]UpgradedRef{.{ .name = "flux-markdown", .kind = .cask }};
+    const many = [_]UpgradedRef{ .{ .name = "a", .kind = .cask }, .{ .name = "b", .kind = .cask } };
+
+    // The refusal code names the one cask, or stays generic for a batch.
+    try std.testing.expectEqualStrings("flux-markdown is running", upgradeFailDetail(&buf, cask_app_running_exit, &one));
+    try std.testing.expectEqualStrings("a selected app is running", upgradeFailDetail(&buf, cask_app_running_exit, &many));
+    // Any other non-zero exit is the generic child failure, unnamed.
+    try std.testing.expectEqualStrings("ChildFailed", upgradeFailDetail(&buf, 1, &one));
+
+    // Edge: a name longer than the buffer falls back rather than truncating mid-name.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("an app is running", upgradeFailDetail(&tiny, cask_app_running_exit, &one));
 }
 
 test "dropUpgradedRows removes upgraded rows in place and preserves kept checked state" {
