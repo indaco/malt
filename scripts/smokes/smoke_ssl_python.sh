@@ -13,8 +13,9 @@
 # Assertions:
 #   1. <prefix>/bin/python3.14 present.
 #   2. mt shellenv exports SSL_CERT_FILE (the provisioned bundle).
-#   3. python3.14 urlopen("https://api.github.com/") returns HTTP 200 —
-#      i.e. no CERTIFICATE_VERIFY_FAILED.
+#   3. python3.14 urlopen("https://api.github.com/") completes the TLS
+#      handshake — any HTTP status proves the chain verified; only a real
+#      ssl.SSLError is a failure (a 403 rate-limit still proves the contract).
 #
 # Usage: scripts/smokes/smoke_ssl_python.sh
 # Requirements: built `malt` binary, network to formulae.brew.sh + ghcr.io
@@ -59,12 +60,39 @@ eval "$("$BIN" shellenv bash)"
 pass "mt shellenv exports SSL_CERT_FILE → $SSL_CERT_FILE"
 
 printf '▸ python3.14 urlopen https://api.github.com/\n'
-STATUS=$("$PY" -c 'import urllib.request; print(urllib.request.urlopen("https://api.github.com/").status)' 2>"$PREFIX/py.err") ||
-  {
-    cat "$PREFIX/py.err" >&2
-    fail "python urlopen raised — likely CERTIFICATE_VERIFY_FAILED"
-  }
-[[ "$STATUS" == "200" ]] || fail "expected HTTP 200, got '$STATUS'"
-pass "python3.14 verified a live HTTPS chain (status 200)"
+# This smoke verifies the TLS *chain*, not GitHub auth. Any HTTP response —
+# including an anonymous-rate-limit 403 — only arrives after the handshake and
+# certificate verification have already succeeded, so it proves the contract.
+# A genuine cert failure surfaces as an ssl.SSLError (the regression we guard);
+# a non-TLS network error (DNS/offline) is unrelated and downgrades to a SKIP.
+set +e
+"$PY" - >"$PREFIX/py.out" 2>"$PREFIX/py.err" <<'PY'
+import urllib.request, urllib.error, ssl, sys
+try:
+    r = urllib.request.urlopen("https://api.github.com/")
+    print("HTTP %d" % r.status)
+except urllib.error.HTTPError as e:
+    print("HTTP %d" % e.code)
+except urllib.error.URLError as e:
+    if isinstance(e.reason, ssl.SSLError):
+        print("ssl verification failed: %s" % e.reason, file=sys.stderr)
+        sys.exit(1)
+    print("network error: %s" % e.reason, file=sys.stderr)
+    sys.exit(2)
+PY
+rc=$?
+set -e
+case "$rc" in
+0) pass "python3.14 verified a live HTTPS chain ($(cat "$PREFIX/py.out"))" ;;
+1)
+  cat "$PREFIX/py.err" >&2
+  fail "python TLS chain verification failed — CERTIFICATE_VERIFY_FAILED"
+  ;;
+*)
+  cat "$PREFIX/py.err" >&2
+  echo "SKIP: non-TLS network error reaching api.github.com (TLS not exercised)"
+  exit 0
+  ;;
+esac
 
 printf '\n✔ ssl python TLS smoke passed\n'
