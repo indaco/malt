@@ -31,7 +31,8 @@ test "shouldNotify: full table — equal/newer/post-update" {
         .{ .current = "0.10.0", .latest = "0.10.1", .seen = "", .want = true },
         .{ .current = "0.10.1", .latest = "v0.10.1", .seen = "0.10.1", .want = false },
         .{ .current = "0.10.0", .latest = "", .seen = "", .want = false },
-        .{ .current = "0.10.0", .latest = "v0.9.0", .seen = "", .want = true },
+        // Latest semver-behind current: byte inequality once nagged; semver stays quiet.
+        .{ .current = "0.10.0", .latest = "v0.9.0", .seen = "", .want = false },
     };
     for (cases) |c| {
         const got = notifier.shouldNotify(c.current, c.latest, c.seen);
