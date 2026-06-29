@@ -261,11 +261,14 @@ pub fn collectFormulaJobs(
     // (the same caller allocator) — so the allocator here must match
     // `allocator`, otherwise free on the API-allocated bytes is a no-op
     // on the wrong allocator.
-    const deps = deps_mod.resolve(ctx.io, allocator, formula.name, api, db, cache) catch &.{};
+    // Let a resolve failure propagate: the caller routes it into
+    // "Failed to resolve <pkg>" + failed_count, rather than installing a
+    // truncated dep graph as success.
+    const deps = try deps_mod.resolve(ctx.io, allocator, formula.name, api, db, cache);
     defer {
         for (deps) |d| allocator.free(d.name);
-        // `catch &.{}` yields a static empty slice with no backing
-        // allocation — freeing it would be "invalid free" on safe
+        // A genuinely zero-dep formula resolves to a static empty slice with
+        // no backing allocation — freeing it would be "invalid free" on safe
         // allocators.
         if (deps.len > 0) allocator.free(deps);
     }
