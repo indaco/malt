@@ -14,6 +14,19 @@ pub const cache_ttl_secs: i64 = 24 * 60 * 60;
 /// network is picked up the next time the user runs anything.
 pub const failure_backoff_secs: i64 = 5 * 60;
 
+/// Refresh window once the cache already shows the user is behind. Shorter
+/// than the full TTL so a faster point release is re-fetched promptly
+/// instead of waiting out the 24 h — up-to-date users keep `cache_ttl_secs`
+/// and pay no extra probes.
+pub const behind_refresh_secs: i64 = 60 * 60;
+
+/// Pick the cache freshness window from whether a notice is already due:
+/// the shorter behind-window when the cache says the user is behind, the
+/// full TTL otherwise.
+pub fn refreshTtl(wants_notice: bool) i64 {
+    return if (wants_notice) behind_refresh_secs else cache_ttl_secs;
+}
+
 /// The `current == seen == latest_no_v` clause silences the notice for
 /// users who've just updated while the cache TTL is still alive.
 pub fn shouldNotify(current: []const u8, latest_tag: []const u8, current_seen: []const u8) bool {
@@ -134,6 +147,14 @@ test "shouldNotify: latest behind current never fires (no downgrade nag)" {
 test "shouldNotify: a pre-release build ahead of latest stays quiet" {
     // Running 0.20.0-dev while the published latest is v0.19.3 — you're ahead.
     try std.testing.expect(!shouldNotify("0.20.0-dev", "v0.19.3", ""));
+}
+
+test "refreshTtl: behind shortens the window; up-to-date keeps the full TTL" {
+    try std.testing.expectEqual(cache_ttl_secs, refreshTtl(false));
+    try std.testing.expectEqual(behind_refresh_secs, refreshTtl(true));
+    // The whole point of the fix: the behind window must actually be shorter,
+    // or a faster point release would still wait out the full TTL.
+    try std.testing.expect(behind_refresh_secs < cache_ttl_secs);
 }
 
 test "cacheStale: TTL boundary" {

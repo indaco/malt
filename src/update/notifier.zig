@@ -19,6 +19,8 @@ const policy = @import("notifier/policy.zig");
 
 pub const cache_ttl_secs = policy.cache_ttl_secs;
 pub const failure_backoff_secs = policy.failure_backoff_secs;
+pub const behind_refresh_secs = policy.behind_refresh_secs;
+pub const refreshTtl = policy.refreshTtl;
 pub const shouldNotify = policy.shouldNotify;
 pub const cacheStale = policy.cacheStale;
 pub const inFailureBackoff = policy.inFailureBackoff;
@@ -161,18 +163,24 @@ fn runNotify(ctx: *const AppCtx, allocator: std.mem.Allocator, current_version: 
     defer if (state) |s| freeState(allocator, s);
 
     const now = std.Io.Clock.real.now(ctx.io).toSeconds();
+
+    // Whether the cached view already says the user is behind. Computed
+    // first so a behind state can shorten the refresh window below — a
+    // faster point release gets re-fetched promptly instead of waiting out
+    // the full TTL, while up-to-date users still refresh only every TTL.
+    const wants_print = blk: {
+        const s = state orelse break :blk false;
+        break :blk shouldNotify(current_version, s.latest_tag, s.current_seen);
+    };
+
     const need_refresh = if (state) |s| blk: {
-        if (!cacheStale(now, s.checked_at, cache_ttl_secs)) break :blk false;
+        if (!cacheStale(now, s.checked_at, refreshTtl(wants_print))) break :blk false;
         break :blk !inFailureBackoff(now, s.last_attempt, s.checked_at, failure_backoff_secs);
     } else true;
 
     // The 33%-savings clause: cache fresh + no notice due → return without
     // touching `executablePath`/`realpath`. The dominant path on a healthy
     // workstation between refresh windows.
-    const wants_print = blk: {
-        const s = state orelse break :blk false;
-        break :blk shouldNotify(current_version, s.latest_tag, s.current_seen);
-    };
     if (!need_refresh and !wants_print) return;
 
     // Brew installs are owned by `brew upgrade --cask malt`; refresh and

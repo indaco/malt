@@ -58,6 +58,20 @@ test "parseArgs: unrecognised flags are ignored (do not crash)" {
     try testing.expect(opts.yes);
 }
 
+// --- updateAvailable ------------------------------------------------------
+//
+// The single gate for "is there a release to install". Routed through the
+// same semver comparator as the passive notifier so `mt version update` and
+// the nag can never disagree — an ahead-of-latest dev build must report
+// "up to date", not be offered a downgrade.
+
+test "updateAvailable: only a strictly newer release counts" {
+    try testing.expect(updater.updateAvailable("0.10.1", "0.10.0")); // newer
+    try testing.expect(!updater.updateAvailable("0.10.0", "0.10.0")); // equal
+    try testing.expect(!updater.updateAvailable("0.9.0", "0.10.0")); // behind (byte-greater!)
+    try testing.expect(!updater.updateAvailable("0.19.3", "0.20.0-dev")); // ahead dev build
+}
+
 // --- writeResponseBody ---------------------------------------------------
 //
 // BUG-012 regression guard: the old `writeDownload` allocated `path` and
