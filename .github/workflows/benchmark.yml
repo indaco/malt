@@ -197,7 +197,7 @@ jobs:
           git checkout -B "$BRANCH"
           git add README.md
           git commit -m "docs(benchmark): update results ${DATE}"
-          git push --force-with-lease -u origin "$BRANCH"
+          git push --force -u origin "$BRANCH"
 
           cat > /tmp/pr_body.md << 'BODY'
           ## Description
