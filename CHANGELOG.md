@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.20.2 - 2026-06-29
+
+### 🩹 Fixes
+
+- **cask:** tell the user when a running app blocks a cask upgrade ([f8900b9](https://github.com/indaco/malt/commit/f8900b9)) ([#579](https://github.com/indaco/malt/pull/579))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.20.1 - 2026-06-29
 
 ### 🩹 Fixes
