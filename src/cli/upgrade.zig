@@ -189,6 +189,8 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // item used to exit 0, hiding the failure from CI. We aggregate here
     // and surface error.Aborted so main.zig maps it to a non-zero exit.
     var any_failed = false;
+    var app_running = false; // a named cask refused because its app is live
+    var other_failed = false; // any failure that is not the app-running refusal
 
     if (names.items.len == 0) {
         // Upgrade all. A live `*Tally` threaded down both passes is also
@@ -215,17 +217,25 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
             if (!cask_only and isFormulaInstalled(&db, name)) {
                 upgradeFormula(ctx, allocator, name, &db, &api, &http, prefix, dry_run, force, pinned_only, isolate_deps, null) catch {
                     any_failed = true;
+                    other_failed = true;
                 };
                 continue;
             }
             // Not a formula (or --cask): try cask
-            upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only, null) catch {
+            upgradeCask(ctx, allocator, name, &db, &api, prefix, dry_run, force, pinned_only, null) catch |e| {
                 any_failed = true;
+                if (e == error.AppRunning) app_running = true else other_failed = true;
             };
         }
     }
 
-    if (any_failed) return error.Aborted;
+    // A batch whose only failure was a live cask app exits with the dedicated
+    // code so the TUI can footer the real cause; any other failure (even mixed
+    // in) stays the generic abort.
+    if (any_failed) {
+        if (app_running and !other_failed) return error.AppRunning;
+        return error.Aborted;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -611,7 +621,7 @@ fn upgradeTapFormula(
 /// attempt failed". The probe loop in `upgradeTapCaskFallback` continues
 /// on either — the pre-routed call from `upgradeCask` continues only on
 /// the latter (a 404 against a recorded `casks.tap` is user-facing).
-const TapRouteError = error{ NotInTap, Aborted };
+const TapRouteError = error{ NotInTap, Aborted, AppRunning };
 
 /// Upgrade a cask whose owning tap is known. Fetches the tap's
 /// `Casks/<token>.rb` once to read the new version, short-circuits when
@@ -720,8 +730,12 @@ fn upgradeRoutedTapCask(
     };
 
     installer.uninstall(token) catch |un_err| {
-        output.err("Failed to remove old version of {s}: {s}", .{ token, @errorName(un_err) });
         db.rollback();
+        if (un_err == error.AppRunning) {
+            output.err("Cannot upgrade {s}: the app is running. Quit it and try again.", .{token});
+            return error.AppRunning;
+        }
+        output.err("Failed to remove old version of {s}: {s}", .{ token, @errorName(un_err) });
         return error.Aborted;
     };
 
@@ -779,7 +793,7 @@ fn upgradeTapCaskFallback(
     dry_run: bool,
     force: bool,
     tally: ?*Tally,
-) bool {
+) error{AppRunning}!bool {
     const taps = tap_mod.list(allocator, db) catch return false;
     defer {
         for (taps) |t| {
@@ -798,6 +812,8 @@ fn upgradeTapCaskFallback(
             // Either "tap doesn't own this token" or "something went
             // wrong with this tap" — neither is fatal to the probe.
             error.NotInTap, error.Aborted => continue,
+            // The owning tap was found and refused: propagate, don't keep probing.
+            error.AppRunning => return error.AppRunning,
         };
 
         // The owning tap is now known. recordInstall sets `casks.tap`
@@ -988,6 +1004,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
                     output.err("Cask {s} is no longer in tap {s}", .{ token, tap_label });
                     return error.Aborted;
                 },
+                error.AppRunning => return error.AppRunning, // already explained; keep the distinct code
                 error.Aborted => return error.Aborted,
             };
             return;
@@ -999,7 +1016,7 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     // third-party tap if the core API 404s — the probe also backfills
     // `casks.tap` for the next invocation.
     const cask_json = api.fetchCask(token) catch {
-        if (upgradeTapCaskFallback(ctx, allocator, token, installed.version(), db, prefix, dry_run, force, tally)) return;
+        if (try upgradeTapCaskFallback(ctx, allocator, token, installed.version(), db, prefix, dry_run, force, tally)) return;
         output.err("Could not fetch cask info for {s}", .{token});
         return error.Aborted;
     };
@@ -1047,11 +1064,15 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
     };
 
     installer.uninstall(token) catch |un_err| {
+        db.rollback();
+        if (un_err == error.AppRunning) {
+            output.err("Cannot upgrade {s}: the app is running. Quit it and try again.", .{token});
+            return error.AppRunning;
+        }
         output.err(
             "Failed to remove old version of {s}: {s}",
             .{ token, @errorName(un_err) },
         );
-        db.rollback();
         return error.Aborted;
     };
 

@@ -498,6 +498,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // still surface loudly. Truly unexpected errors propagate too.
         const install_family = cmd == .install or cmd == .reinstall or cmd == .upgrade;
         dispatch(allocator, &ctx, cmd, cmd_args) catch |e| switch (e) {
+            // Dedicated code so the TUI can footer the cause; mirrored in
+            // `tui/app.zig`. Message already printed, like Aborted below.
+            error.AppRunning => std.process.exit(3),
             error.Aborted => std.process.exit(1),
             else => if (install_family and install.isReportedInstallError(e)) std.process.exit(1) else return e,
         };
