@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.20.1 - 2026-06-29
+
+### 🩹 Fixes
+
+- **tui:** stop in-TUI upgrades failing with database-locked errors ([c4eb77a](https://github.com/indaco/malt/commit/c4eb77a)) ([#578](https://github.com/indaco/malt/pull/578))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.20.0 - 2026-06-29
 
 ### Highlights
