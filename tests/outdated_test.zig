@@ -1252,6 +1252,44 @@ test "outdated execute drops snapshot entries whose keg was uninstalled" {
     try testing.expectEqualStrings("alpha", filtered[0].name);
 }
 
+test "intersectWithDb keeps a revisioned keg loaded from the DB" {
+    // End-to-end: a revisioned keg loads as bare version + revision, while the
+    // snapshot stores the revision-qualified installed. The intersect must
+    // rebuild the qualified string from the row so the keg stays listed.
+    var env = try UpdateEnv.init("outdated_revision_intersect");
+    defer env.deinit();
+
+    {
+        var db = try openUpdateDb(env.prefix_path);
+        defer db.close();
+        try db.exec(
+            "INSERT INTO kegs (name, full_name, version, revision, store_sha256, cellar_path) " ++
+                "VALUES ('alpha', 'alpha', '1.2.3', 1, 'deadbeef', '/cellar/alpha/1.2.3_1');",
+        );
+    }
+
+    const formulas = [_]outdated_mod.OutdatedEntry{
+        .{ .name = @constCast("alpha"), .installed = @constCast("1.2.3_1"), .latest = @constCast("1.3.0") },
+    };
+
+    var db = try openUpdateDb(env.prefix_path);
+    defer db.close();
+    const rows = try outdated_mod.loadFormulaRows(testing.allocator, &db, .all);
+    defer outdated_mod.freeKegRows(testing.allocator, rows);
+    const filtered = try outdated_mod.intersectWithDb(testing.allocator, rows, &formulas);
+    defer {
+        for (filtered) |e| {
+            testing.allocator.free(e.name);
+            testing.allocator.free(e.installed);
+            testing.allocator.free(e.latest);
+        }
+        testing.allocator.free(filtered);
+    }
+    try testing.expectEqual(@as(usize, 1), filtered.len);
+    try testing.expectEqualStrings("alpha", filtered[0].name);
+    try testing.expectEqualStrings("1.2.3_1", filtered[0].installed);
+}
+
 test "outdated execute serves a stale snapshot offline rather than recomputing" {
     var env = try UpdateEnv.init("outdated_stale_uses_cache");
     defer env.deinit();
