@@ -35,6 +35,14 @@ pub const Opts = struct {
     cleanup: bool = false,
 };
 
+/// The single gate for "is there a newer release to install". Routed
+/// through the same comparator as the passive notifier so the explicit
+/// updater and the nag never disagree — an equal or ahead-of-latest build
+/// is never offered a downgrade.
+pub fn updateAvailable(latest: []const u8, current: []const u8) bool {
+    return release.order(latest, current) == .gt;
+}
+
 pub fn parseArgs(args: []const []const u8) Opts {
     var opts = Opts{};
     for (args) |a| {
@@ -101,10 +109,10 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     };
     const latest = release.stripVPrefix(tag);
 
-    if (std.mem.eql(u8, latest, current_version)) {
-        // Freshen the passive notifier cache so a manual `--check` that
-        // confirms the running version stops the next invocation from
-        // nagging about an already-installed release.
+    if (!updateAvailable(latest, current_version)) {
+        // Nothing strictly newer to install — equal, or an ahead-of-latest
+        // dev build. Freshen the passive notifier cache so a manual `--check`
+        // stops the next invocation from nagging about an installed release.
         notifier.markUpdatedTo(ctx, tag, current_version);
         output.info("Already up to date ({s})", .{current_version});
         return;
