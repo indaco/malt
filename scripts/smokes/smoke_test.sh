@@ -201,7 +201,7 @@ else
 fi
 run_ok t2.update.check -- "$MT_BIN" update --check
 # mt update --check must write a parseable snapshot at the documented path.
-if [[ -s "$CACHE/outdated.json" ]] && grep -q '"version":1' "$CACHE/outdated.json"; then
+if [[ -s "$CACHE/outdated.json" ]] && grep -q '"version":2' "$CACHE/outdated.json"; then
   printf '  PASS  [t2.update.check.writes-snapshot] cache/outdated.json present\n'
   PASS=$((PASS + 1))
 else

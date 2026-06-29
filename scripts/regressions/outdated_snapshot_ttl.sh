@@ -55,7 +55,7 @@ mkdir -p "$PREFIX/db" "$MALT_CACHE"
 seed_snapshot() {
   local age_secs="$1" gen_ms
   gen_ms=$((($(date +%s) - age_secs) * 1000))
-  printf '{"version":1,"generated_at_ms":%s,"formulas":[{"name":"alpha","installed":"1.0","latest":"9.9"}],"casks":[]}' \
+  printf '{"version":2,"generated_at_ms":%s,"formulas":[{"name":"alpha","installed":"1.0","latest":"9.9"}],"casks":[]}' \
     "$gen_ms" >"$SNAP"
 }
 
