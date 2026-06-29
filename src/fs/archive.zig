@@ -279,6 +279,12 @@ fn preScanTarGz(
 /// for `path=`/`linkpath=`, returning the last value seen for each — std.tar
 /// applies these over the ustar fields of the following entry. The returned
 /// slices are arena-owned and outlive the scan. Reads exactly `size` bytes.
+///
+/// Streams record-by-record, mirroring `std.tar.PaxIterator`: only the bounded
+/// `path`/`linkpath` values are buffered; every other record (macOS bsdtar
+/// packs a file's extended attributes here, routinely hundreds of KiB) is
+/// discarded as it streams. Buffering the whole payload would either reject
+/// those legitimate archives or hold an attacker-sized allocation.
 fn parsePaxOverrides(
     r: *std.Io.Reader,
     arena: std.mem.Allocator,
@@ -286,29 +292,38 @@ fn parsePaxOverrides(
     out_name: *?[]const u8,
     out_link: *?[]const u8,
 ) !void {
-    // Real pax headers are tens of bytes; bound the buffer against a hostile
-    // size before allocating or reading.
-    if (size > 64 * 1024) return error.ExtractionFailed;
-    const payload = arena.alloc(u8, @intCast(size)) catch return error.ExtractionFailed;
-    r.readSliceAll(payload) catch return error.ExtractionFailed;
-
     // Each record is `"<len> KEY=VALUE\n"`; <len> counts the whole record.
-    var rest: []const u8 = payload;
-    while (rest.len > 0) {
-        const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse return error.ExtractionFailed;
-        const rec_len = std.fmt.parseInt(usize, rest[0..sp], 10) catch return error.ExtractionFailed;
-        if (rec_len < sp + 2 or rec_len > rest.len or rest[rec_len - 1] != '\n') return error.ExtractionFailed;
-        const kv = rest[sp + 1 .. rec_len - 1];
-        if (std.mem.indexOfScalar(u8, kv, '=')) |eq| {
-            const key = kv[0..eq];
-            const value = kv[eq + 1 ..];
-            if (std.mem.eql(u8, key, "linkpath")) {
-                out_link.* = value;
-            } else if (std.mem.eql(u8, key, "path")) {
-                out_name.* = value;
-            }
+    var remaining: usize = std.math.cast(usize, size) orelse return error.ExtractionFailed;
+    while (remaining > 0) {
+        const len_buf = r.takeSentinel(' ') catch return error.ExtractionFailed;
+        const rec_len = std.fmt.parseInt(usize, len_buf, 10) catch return error.ExtractionFailed;
+        const key = r.takeSentinel('=') catch return error.ExtractionFailed;
+        // Bytes consumed for framing: len digits, the space, the key, the '='.
+        const framed = len_buf.len + 1 + key.len + 1;
+        if (rec_len < framed + 1 or rec_len > remaining) return error.ExtractionFailed;
+        const value_len = rec_len - framed - 1; // trailing '\n'
+        remaining -= rec_len;
+
+        const slot: ?*?[]const u8 = if (std.mem.eql(u8, key, "linkpath"))
+            out_link
+        else if (std.mem.eql(u8, key, "path"))
+            out_name
+        else
+            null;
+        // A path/linkpath longer than the filesystem allows is not the value
+        // the extractor will use — std.tar caps both at max_path_bytes and
+        // errors past it — so treat an over-long one as a non-path record and
+        // discard it rather than buffering an attacker-sized blob.
+        if (slot != null and value_len <= std.Io.Dir.max_path_bytes) {
+            const value = arena.alloc(u8, value_len) catch return error.ExtractionFailed;
+            r.readSliceAll(value) catch return error.ExtractionFailed;
+            if (std.mem.indexOfScalar(u8, value, 0) != null) return error.ExtractionFailed;
+            slot.?.* = value;
+        } else {
+            r.discardAll(value_len) catch return error.ExtractionFailed;
         }
-        rest = rest[rec_len..];
+        const nl = r.takeByte() catch return error.ExtractionFailed;
+        if (nl != '\n') return error.ExtractionFailed;
     }
 }
 
@@ -567,11 +582,27 @@ const TestTar = struct {
     fn pax(self: *TestTar, typeflag: u8, key: []const u8, value: []const u8) void {
         var rec_buf: [512]u8 = undefined;
         const rec = testPaxRecord(&rec_buf, key, value);
+        self.paxRecord(typeflag, rec);
+    }
+
+    /// Append a pax header carrying a pre-formatted record, spanning as many
+    /// padded 512-byte blocks as the record needs (macOS xattr records are
+    /// routinely larger than one block).
+    fn paxRecord(self: *TestTar, typeflag: u8, rec: []const u8) void {
         const h = testTarHeader("PaxHeaders/0", typeflag, "", rec.len);
         @memcpy(self.buf[self.len..][0..512], h[0..]);
         self.len += 512;
         @memcpy(self.buf[self.len..][0..rec.len], rec);
-        self.len += 512; // record fits one padded block
+        self.len += (rec.len + 511) / 512 * 512;
+    }
+
+    /// Append a regular-file entry with `data` as its payload.
+    fn file(self: *TestTar, name: []const u8, data: []const u8) void {
+        const h = testTarHeader(name, '0', "", data.len);
+        @memcpy(self.buf[self.len..][0..512], h[0..]);
+        self.len += 512;
+        @memcpy(self.buf[self.len..][0..data.len], data);
+        self.len += (data.len + 511) / 512 * 512;
     }
 
     fn bytes(self: *const TestTar) []const u8 {
@@ -630,6 +661,111 @@ test "extractTarGz accepts a pax linkpath within the destination" {
 
     // The pax linkpath, not the ustar linkname, must be what landed on disk —
     // proving the pre-scan validated (and the extractor used) the same bytes.
+    var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dest", .{base});
+    var dest_dir = try std.Io.Dir.openDirAbsolute(io, dst, .{});
+    defer dest_dir.close(io);
+    var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = link_buf[0..try dest_dir.readLink(io, "link", &link_buf)];
+    try std.testing.expectEqualStrings("legit-target", target);
+}
+
+test "extractTarGz tolerates an oversized pax header from a file's xattrs" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest");
+
+    // macOS bsdtar packs a signed binary's extended attributes into a pax 'x'
+    // header far larger than any fixed payload buffer (yabai ships ~365 KiB).
+    // The pre-scan must stream past the unknown record like std.tar does, not
+    // reject the whole archive — the file that follows must still materialise.
+    const a = std.testing.allocator;
+    const tar = try a.alloc(u8, 256 * 1024);
+    defer a.free(tar);
+    const blob = try a.alloc(u8, 100 * 1024);
+    defer a.free(blob);
+    @memset(blob, 'x');
+    const rec_buf = try a.alloc(u8, 110 * 1024);
+    defer a.free(rec_buf);
+    const rec = testPaxRecord(rec_buf, "SCHILY.xattr.user.test", blob);
+
+    var t = TestTar.init(tar);
+    t.paxRecord('x', rec);
+    t.file("payload", "hello");
+    try testExtract(io, &tmp, t.bytes());
+
+    var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
+    var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/dest", .{base});
+    var dest_dir = try std.Io.Dir.openDirAbsolute(io, dst, .{});
+    defer dest_dir.close(io);
+    const st = try dest_dir.statFile(io, "payload", .{});
+    try std.testing.expectEqual(@as(u64, "hello".len), st.size);
+}
+
+test "extractTarGz rejects a pax linkpath escape that trails a large xattr record" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest");
+
+    // A malicious linkpath sitting *after* a discarded xattr blob in the same
+    // pax header must still be caught — proving the streaming parser stays
+    // byte-aligned across a discard and does not skip the record that follows.
+    const a = std.testing.allocator;
+    const tar = try a.alloc(u8, 256 * 1024);
+    defer a.free(tar);
+    const blob = try a.alloc(u8, 80 * 1024);
+    defer a.free(blob);
+    @memset(blob, 'x');
+    const rec_buf = try a.alloc(u8, 100 * 1024);
+    defer a.free(rec_buf);
+    const r1 = testPaxRecord(rec_buf, "SCHILY.xattr.user.x", blob);
+    const r2 = testPaxRecord(rec_buf[r1.len..], "linkpath", "../../../../../../tmp/evil");
+
+    var t = TestTar.init(tar);
+    t.paxRecord('x', rec_buf[0 .. r1.len + r2.len]);
+    t.entry("placeholder", '2', "benign");
+    try std.testing.expectError(error.ExtractionFailed, testExtract(io, &tmp, t.bytes()));
+}
+
+test "extractTarGz applies a pax linkpath that trails a large xattr record" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "dest");
+
+    // The positive mirror: a legitimate linkpath following the discarded blob
+    // must still be captured and applied to the entry.
+    const a = std.testing.allocator;
+    const tar = try a.alloc(u8, 256 * 1024);
+    defer a.free(tar);
+    const blob = try a.alloc(u8, 80 * 1024);
+    defer a.free(blob);
+    @memset(blob, 'x');
+    const rec_buf = try a.alloc(u8, 100 * 1024);
+    defer a.free(rec_buf);
+    const r1 = testPaxRecord(rec_buf, "SCHILY.xattr.user.x", blob);
+    const r2 = testPaxRecord(rec_buf[r1.len..], "linkpath", "legit-target");
+
+    var t = TestTar.init(tar);
+    t.paxRecord('x', rec_buf[0 .. r1.len + r2.len]);
+    t.entry("link", '2', "benign");
+    try testExtract(io, &tmp, t.bytes());
+
     var base_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const base = base_buf[0..try std.Io.Dir.realPath(tmp.dir, io, &base_buf)];
     var dst_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
