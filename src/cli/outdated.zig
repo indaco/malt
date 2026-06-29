@@ -4,6 +4,7 @@
 const std = @import("std");
 
 const AppCtx = @import("../app_ctx.zig").AppCtx;
+const formula_mod = @import("../core/formula.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -94,7 +95,13 @@ pub fn intersectWithDb(
     for (db_rows) |row| {
         const e_ptr = by_name.get(row.name) orelse continue;
         const e = e_ptr.*;
-        if (!std.mem.eql(u8, e.installed, row.version)) continue;
+        // Snapshot `installed` is revision-qualified (assembleEntries); rebuild
+        // the same string from the bare DB version + revision so revisioned
+        // kegs match. Overflow degrades to the bare version, matching the write
+        // side's fallback.
+        var installed_buf: [256]u8 = undefined;
+        const installed = formula_mod.pkgVersion(&installed_buf, row.version, row.revision) catch row.version;
+        if (!std.mem.eql(u8, e.installed, installed)) continue;
         const dup = try dupEntry(allocator, e);
         out.appendAssumeCapacity(dup);
     }
@@ -301,6 +308,37 @@ test "intersectWithDb drops entries whose installed version no longer matches" {
         // user upgraded alpha 1.0 -> 1.5 manually; we don't know if 1.5 is
         // outdated until the snapshot is refreshed, so we drop it.
         .{ .name = "alpha", .version = "1.5" },
+    };
+    const out = try intersectWithDb(std.testing.allocator, &db, &snap);
+    defer freeEntrySlice(std.testing.allocator, out);
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "intersectWithDb keeps a revision-bumped formula" {
+    // Snapshot writes `installed` revision-qualified (pkgVersion), but the DB
+    // keeps the bare version + separate revision; the match must reconstruct
+    // the qualified string so revisioned kegs survive the intersect.
+    const snap = [_]OutdatedEntry{
+        .{ .name = @constCast("foo"), .installed = @constCast("1.2.3_1"), .latest = @constCast("1.3.0") },
+    };
+    const db = [_]KegRow{
+        .{ .name = "foo", .version = "1.2.3", .revision = 1 },
+    };
+    const out = try intersectWithDb(std.testing.allocator, &db, &snap);
+    defer freeEntrySlice(std.testing.allocator, out);
+    try std.testing.expectEqual(@as(usize, 1), out.len);
+    try std.testing.expectEqualStrings("foo", out[0].name);
+    try std.testing.expectEqualStrings("1.2.3_1", out[0].installed);
+}
+
+test "intersectWithDb drops a keg whose revision moved past the snapshot" {
+    // Match key is the revision-aware installed string, so a manual revision
+    // upgrade (1.2.3_1 -> 1.2.3_2) past the snapshot still re-drops the entry.
+    const snap = [_]OutdatedEntry{
+        .{ .name = @constCast("foo"), .installed = @constCast("1.2.3_1"), .latest = @constCast("1.3.0") },
+    };
+    const db = [_]KegRow{
+        .{ .name = "foo", .version = "1.2.3", .revision = 2 },
     };
     const out = try intersectWithDb(std.testing.allocator, &db, &snap);
     defer freeEntrySlice(std.testing.allocator, out);
