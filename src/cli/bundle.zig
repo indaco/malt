@@ -348,32 +348,48 @@ fn cmdRemove(ctx: *const AppCtx, rest: []const []const u8) !void {
     output.success("bundle removed: {s}", .{name});
 }
 
-fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
+const CreateArgs = struct { format: Format, out_path: []const u8, include_services: bool };
+
+/// Parse `bundle create` args. The default filename is resolved once after the
+/// loop so an explicit positional path wins no matter where `--format` sits.
+/// Null signals an invalid format value.
+fn resolveCreateArgs(rest: []const []const u8) ?CreateArgs {
     var format: Format = .brewfile;
-    var out_path: []const u8 = "Brewfile";
+    var out_path: ?[]const u8 = null;
     var include_services = false;
     var i: usize = 0;
     while (i < rest.len) : (i += 1) {
         const a = rest[i];
         if (std.mem.eql(u8, a, "--format") and i + 1 < rest.len) {
             i += 1;
-            format = parseFormat(rest[i]) orelse return BundleError.InvalidArgs;
-            if (format == .json) out_path = "Maltfile.json";
+            format = parseFormat(rest[i]) orelse return null;
         } else if (std.mem.eql(u8, a, "--services")) {
             include_services = true;
         } else if (!std.mem.startsWith(u8, a, "-")) {
             out_path = a;
         }
     }
+    return .{
+        .format = format,
+        .out_path = out_path orelse switch (format) {
+            .brewfile => "Brewfile",
+            .json => "Maltfile.json",
+        },
+        .include_services = include_services,
+    };
+}
+
+fn cmdCreate(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
+    const args = resolveCreateArgs(rest) orelse return BundleError.InvalidArgs;
 
     var db = try openDb(ctx);
     defer db.close();
 
     var manifest = manifest_mod.Manifest.init(allocator);
     defer manifest.deinit();
-    try populateFromInstalled(&manifest, &db, .{ .include_services = include_services });
-    try writeManifest(ctx, manifest, out_path, format);
-    output.success("wrote {s}", .{out_path});
+    try populateFromInstalled(&manifest, &db, .{ .include_services = args.include_services });
+    try writeManifest(ctx, manifest, args.out_path, args.format);
+    output.success("wrote {s}", .{args.out_path});
 }
 
 fn cmdExport(ctx: *const AppCtx, allocator: std.mem.Allocator, rest: []const []const u8) !void {
@@ -679,4 +695,26 @@ fn printHelp(ctx: *const AppCtx) !void {
         \\
     ;
     ctx.stderr.writeStreamingAll(ctx.io, msg) catch {};
+}
+
+test "create: explicit out_path wins regardless of --format position" {
+    // Path before the flag was the broken order: a late --format json used to
+    // clobber the explicit path with the JSON default.
+    const a = resolveCreateArgs(&.{ "myfile", "--format", "json" }).?;
+    try std.testing.expectEqualStrings("myfile", a.out_path);
+    try std.testing.expectEqual(Format.json, a.format);
+
+    const b = resolveCreateArgs(&.{ "--format", "json", "myfile" }).?;
+    try std.testing.expectEqualStrings("myfile", b.out_path);
+
+    // No explicit path falls back to the format default.
+    try std.testing.expectEqualStrings("Maltfile.json", resolveCreateArgs(&.{ "--format", "json" }).?.out_path);
+    try std.testing.expectEqualStrings("Brewfile", resolveCreateArgs(&.{}).?.out_path);
+
+    // Repeated --format must not strand the JSON default on a brewfile result.
+    try std.testing.expectEqualStrings("Brewfile", resolveCreateArgs(&.{ "--format", "json", "--format", "brewfile" }).?.out_path);
+
+    // An invalid format is rejected; --services rides through to the result.
+    try std.testing.expect(resolveCreateArgs(&.{ "--format", "yaml" }) == null);
+    try std.testing.expect(resolveCreateArgs(&.{"--services"}).?.include_services);
 }
