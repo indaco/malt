@@ -20,6 +20,28 @@ const rollback = @import("rollback.zig");
 /// uniform without forcing every caller to allocate an empty slice.
 pub const no_history: []const rollback.Entry = &.{};
 
+/// Which package kinds a lookup should consider.
+const KindSelect = struct { formula: bool, cask: bool };
+
+/// Resolve `--cask`/`--formula` into inclusive kind selectors. Each flag
+/// opts its kind in; "both set" and "neither set" both select both kinds
+/// (formula first). Mirrors `search`'s contract so the two commands agree.
+fn selectKinds(force_cask: bool, force_formula: bool) KindSelect {
+    return .{
+        .formula = force_formula or !force_cask,
+        .cask = force_cask or !force_formula,
+    };
+}
+
+test "selectKinds treats both-set and neither-set as 'both kinds'" {
+    // The both-set case is the regression: it must not collapse to nothing.
+    try std.testing.expectEqual(KindSelect{ .formula = true, .cask = true }, selectKinds(false, false));
+    try std.testing.expectEqual(KindSelect{ .formula = true, .cask = true }, selectKinds(true, true));
+    // Single flag narrows to exactly that kind.
+    try std.testing.expectEqual(KindSelect{ .formula = false, .cask = true }, selectKinds(true, false));
+    try std.testing.expectEqual(KindSelect{ .formula = true, .cask = false }, selectKinds(false, true));
+}
+
 pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (help.showIfRequested(ctx, args, "info")) return;
 
@@ -67,11 +89,18 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 
     const colorize = !json_mode and color.isColorEnabled();
 
+    // `--cask`/`--formula` are inclusive selectors, like `search`: each
+    // flag opts its kind in, and "both set" reads the same as "neither set"
+    // (show whatever is installed, formula first). Modelled as exclusion
+    // guards instead, both-set selected nothing and a present package
+    // printed "not installed".
+    const sel = selectKinds(force_cask, force_formula);
+
     if (db_opt) |*db| {
         // Schema is idempotent; info's API fallback handles a broken DB gracefully.
         schema.initSchema(db) catch {};
-        if (!force_cask and try emitInstalledFormula(ctx, allocator, db, name, prefix, stdout, json_mode, colorize)) return;
-        if (!force_formula and try emitInstalledCask(allocator, db, name, stdout, json_mode, colorize)) return;
+        if (sel.formula and try emitInstalledFormula(ctx, allocator, db, name, prefix, stdout, json_mode, colorize)) return;
+        if (sel.cask and try emitInstalledCask(allocator, db, name, stdout, json_mode, colorize)) return;
     }
 
     // Not locally installed — fall back to Homebrew API metadata so
@@ -79,7 +108,7 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     // homepage, version, dependencies) instead of just "not
     // installed". We only reach this path when the local DB lookup
     // missed or the DB was absent entirely.
-    if (try emitApiMetadata(ctx, allocator, name, stdout, json_mode, colorize, force_cask, force_formula)) return;
+    if (try emitApiMetadata(ctx, allocator, name, stdout, json_mode, colorize, sel)) return;
 
     try emitNotFound(name, stdout, json_mode);
 }
@@ -231,8 +260,8 @@ fn emitNotFound(
 }
 
 /// Fetch Homebrew API metadata for a not-locally-installed package and
-/// emit it. Tries formula first (unless `--cask`), then cask (unless
-/// `--formula`). Returns true on any hit so the caller knows to stop.
+/// emit it. Honours the resolved kind selectors: formula first when
+/// selected, then cask. Returns true on any hit so the caller knows to stop.
 /// Silently returns false on network / parse failures — offline machines
 /// should still fall through cleanly to the "not installed" shape.
 fn emitApiMetadata(
@@ -242,8 +271,7 @@ fn emitApiMetadata(
     stdout: *std.Io.Writer,
     json_mode: bool,
     colorize: bool,
-    force_cask: bool,
-    force_formula: bool,
+    sel: KindSelect,
 ) !bool {
     const cache_dir = atomic.maltCacheDir(allocator) catch return false;
     defer allocator.free(cache_dir);
@@ -255,10 +283,10 @@ fn emitApiMetadata(
     api.base_url = ctx.mirrors.api_base;
     api.offline = ctx.offline;
 
-    if (!force_cask) {
+    if (sel.formula) {
         if (try emitApiFormula(allocator, &api, name, stdout, json_mode, colorize)) return true;
     }
-    if (!force_formula) {
+    if (sel.cask) {
         if (try emitApiCask(allocator, &api, name, stdout, json_mode, colorize)) return true;
     }
     return false;
