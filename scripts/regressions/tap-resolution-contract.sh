@@ -13,9 +13,10 @@
 #   2. `https://github.com/{s}"` — decorative writeback that lied about
 #      the actually-resolvable repo URL
 #   3. `MALT_GITHUB_TOKEN` / `authHeader` outside the seam —
-#      the token reaches exactly the GitHub API HEAD call and never
-#      the raw Formula/Cask fetches. Widening (or narrowing) the reach
-#      without explicit intent is a contract change.
+#      the token reaches the tap-resolution forge seam and the
+#      self-update GitHub API GET, and never the raw Formula/Cask
+#      fetches. Widening (or narrowing) the reach without explicit
+#      intent is a contract change.
 #
 # Allowed sites:
 #   - src/core/forge.zig        the host-shaped seam (URLs, parse, auth)
@@ -23,6 +24,9 @@
 #   - src/cli/migrate/keg.zig   on-disk Cellar path
 #                                 (<prefix>/Library/Taps/<user>/homebrew-<repo>) —
 #                                 Homebrew's filesystem layout, not a URL
+#   - src/net/client.zig        the self-update / notifier GET auto-injects
+#                                 the same primary token (HttpClient.githubApiToken)
+#                                 so `version update` honors it like tap lookups
 #   - Zig multiline-string (`\\`) lines — documentation, e.g. the `--help`
 #                                 env-var listing. A real token reach is
 #                                 executable code; it can never live inside
@@ -56,6 +60,7 @@ filtered=$(printf '%s\n' "$all" |
   grep -v '^src/core/forge\.zig:' |
   grep -v '^src/core/tap\.zig:' |
   grep -v '^src/cli/migrate/keg\.zig:' |
+  grep -v '^src/net/client\.zig:' |
   grep -vE ":[0-9]+:[[:space:]]*${bs}${bs}" |
   grep -v '^$' || true)
 

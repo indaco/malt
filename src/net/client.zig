@@ -347,6 +347,23 @@ pub const HttpClient = struct {
         return false;
     }
 
+    /// Token for the GitHub/Homebrew API `Authorization` header. Prefers
+    /// `MALT_GITHUB_TOKEN` (malt's primary GitHub token, shared with tap
+    /// lookups) and falls back to `HOMEBREW_GITHUB_API_TOKEN` for Homebrew
+    /// compatibility. An empty value is treated as unset for each — mirroring
+    /// `forge.authHeader` — so a leftover `MALT_GITHUB_TOKEN=` never shadows a
+    /// real Homebrew token. Returns the bare token; the caller adds the scheme.
+    pub fn githubApiToken(environ: std.process.Environ) ?[]const u8 {
+        return nonEmptyEnv(environ, "MALT_GITHUB_TOKEN") orelse
+            nonEmptyEnv(environ, "HOMEBREW_GITHUB_API_TOKEN");
+    }
+
+    fn nonEmptyEnv(environ: std.process.Environ, key: []const u8) ?[]const u8 {
+        const raw = std.process.Environ.getPosix(environ, key) orelse return null;
+        const v = std.mem.sliceTo(raw, 0);
+        return if (v.len == 0) null else v;
+    }
+
     /// http(s) scheme of a malt URL, or null for non-http(s). Used to gate
     /// whether a credential may follow a redirect — the scheme must match.
     fn urlScheme(url: []const u8) ?[]const u8 {
@@ -387,16 +404,17 @@ pub const HttpClient = struct {
         return hostIsSameOrSubdomain(fh, th);
     }
 
-    /// GET request; auto-injects HOMEBREW_GITHUB_API_TOKEN as Authorization
-    /// for GitHub/Homebrew hosts. Caller owns the returned `Response`.
+    /// GET request; auto-injects the GitHub API token (`MALT_GITHUB_TOKEN`,
+    /// then `HOMEBREW_GITHUB_API_TOKEN`) as Authorization for GitHub/Homebrew
+    /// hosts. Caller owns the returned `Response`.
     pub fn get(self: *HttpClient, url: []const u8) !Response {
         if (self.offline) return error.OfflineRequired;
-        if (std.process.Environ.getPosix(self.environ, "HOMEBREW_GITHUB_API_TOKEN")) |token| {
+        if (githubApiToken(self.environ)) |token| {
             // Host-component match, not substring: a look-alike host or a
             // path containing "github.com" must never receive the token.
             if (githubTokenApplies(url)) {
                 var auth_buf: [256]u8 = undefined;
-                const auth_value = std.fmt.bufPrint(&auth_buf, "token {s}", .{std.mem.sliceTo(token, 0)}) catch
+                const auth_value = std.fmt.bufPrint(&auth_buf, "token {s}", .{token}) catch
                     return self.doGet(url, &.{});
                 const headers = [_]std.http.Header{
                     .{ .name = "Authorization", .value = auth_value },
@@ -1141,6 +1159,69 @@ test "githubTokenApplies: tolerates the FQDN trailing-dot root form" {
     try std.testing.expect(HttpClient.githubTokenApplies("https://github.com./x"));
     try std.testing.expect(HttpClient.githubTokenApplies("https://api.github.com./x"));
     try std.testing.expect(!HttpClient.githubTokenApplies("https://github.com.evil.tld./x"));
+}
+
+// ── githubApiToken: env-var precedence ─────────────────────────────
+// The self-update GET (api.github.com/releases/latest) must honour the
+// project's primary token, MALT_GITHUB_TOKEN, not only the Homebrew
+// compatibility var — otherwise a user with one token still hits the
+// anonymous rate cap on `version update`.
+
+fn environFrom(entries: [:null]const ?[*:0]const u8) std.process.Environ {
+    return .{ .block = .{ .slice = entries } };
+}
+
+test "githubApiToken: MALT_GITHUB_TOKEN is preferred over HOMEBREW_GITHUB_API_TOKEN" {
+    const entries = [_:null]?[*:0]const u8{
+        "MALT_GITHUB_TOKEN=malt-tok".ptr,
+        "HOMEBREW_GITHUB_API_TOKEN=brew-tok".ptr,
+    };
+    try std.testing.expectEqualStrings("malt-tok", HttpClient.githubApiToken(environFrom(&entries)).?);
+}
+
+test "githubApiToken: empty MALT_GITHUB_TOKEN falls through to HOMEBREW_GITHUB_API_TOKEN" {
+    // A leftover `MALT_GITHUB_TOKEN=` in a shell rc must not shadow a real
+    // HOMEBREW token (mirrors forge.authHeader's empty-as-unset guard).
+    const entries = [_:null]?[*:0]const u8{
+        "MALT_GITHUB_TOKEN=".ptr,
+        "HOMEBREW_GITHUB_API_TOKEN=brew-tok".ptr,
+    };
+    try std.testing.expectEqualStrings("brew-tok", HttpClient.githubApiToken(environFrom(&entries)).?);
+}
+
+test "githubApiToken: MALT_GITHUB_TOKEN alone is honoured" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=malt-tok".ptr};
+    try std.testing.expectEqualStrings("malt-tok", HttpClient.githubApiToken(environFrom(&entries)).?);
+}
+
+test "githubApiToken: HOMEBREW_GITHUB_API_TOKEN alone still works (compat fallback)" {
+    const entries = [_:null]?[*:0]const u8{"HOMEBREW_GITHUB_API_TOKEN=brew-tok".ptr};
+    try std.testing.expectEqualStrings("brew-tok", HttpClient.githubApiToken(environFrom(&entries)).?);
+}
+
+test "githubApiToken: null when neither var is set or both are empty" {
+    try std.testing.expect(HttpClient.githubApiToken(std.process.Environ.empty) == null);
+    const empties = [_:null]?[*:0]const u8{
+        "MALT_GITHUB_TOKEN=".ptr,
+        "HOMEBREW_GITHUB_API_TOKEN=".ptr,
+    };
+    try std.testing.expect(HttpClient.githubApiToken(environFrom(&empties)) == null);
+}
+
+test "githubApiToken: empty MALT with HOMEBREW absent is null (no phantom token)" {
+    const entries = [_:null]?[*:0]const u8{"MALT_GITHUB_TOKEN=".ptr};
+    try std.testing.expect(HttpClient.githubApiToken(environFrom(&entries)) == null);
+}
+
+test "githubApiToken: a non-empty value is taken verbatim, not trimmed (matches forge.authHeader)" {
+    // forge.authHeader guards on len==0 only — no whitespace trim — so a
+    // whitespace-only MALT_GITHUB_TOKEN is a set value and must not fall
+    // through to HOMEBREW. Locks that deliberate divergence from mirror.zig.
+    const entries = [_:null]?[*:0]const u8{
+        "MALT_GITHUB_TOKEN=  ".ptr,
+        "HOMEBREW_GITHUB_API_TOKEN=brew-tok".ptr,
+    };
+    try std.testing.expectEqualStrings("  ", HttpClient.githubApiToken(environFrom(&entries)).?);
 }
 
 test "HttpClient.get returns OfflineRequired when offline is set" {

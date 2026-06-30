@@ -665,9 +665,10 @@ fn printUsage(ctx: *const AppCtx) void {
         \\                    default auto
         \\  MALT_THEMES_FILE  Path to a JSON file of custom themes
         \\                    (default: {prefix}/etc/malt/themes.json)
+        \\  MALT_GITHUB_TOKEN Primary GitHub token for all GitHub API traffic
+        \\                    (tap commit lookups and self-update)
         \\  HOMEBREW_GITHUB_API_TOKEN
-        \\                    GitHub token for higher API rate limits
-        \\  MALT_GITHUB_TOKEN GitHub token sent as Bearer on tap commit lookups
+        \\                    Compatibility fallback when MALT_GITHUB_TOKEN is unset
         \\  MALT_GITLAB_TOKEN GitLab token (PRIVATE-TOKEN) for GitLab-hosted taps
         \\  MALT_GITEA_TOKEN  Codeberg/Forgejo/Gitea token for those taps
         \\  MALT_HTTP_IDLE_TIMEOUT_SECS
