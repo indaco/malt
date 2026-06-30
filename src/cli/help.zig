@@ -144,7 +144,9 @@ const upgrade_help =
     \\
     \\Upgrade installed packages to latest versions. Pinned kegs and
     \\casks are skipped with a "pinned, skipped" line; pass --force to
-    \\override.
+    \\override. malt follows the tap: if the tap version differs from the
+    \\installed one it is applied, even if that moves the version down
+    \\(e.g. an upstream revert) — preview with --dry-run.
     \\
     \\Flags:
     \\  --all          Upgrade everything (formulas + casks)
@@ -190,6 +192,10 @@ const outdated_help =
     \\Reads the cached snapshot at {cache}/outdated.json when fresh
     \\(<= MALT_OUTDATED_MAX_AGE minutes, default 5); past that it recomputes
     \\live (or serves the cached read offline). --refresh always recomputes.
+    \\
+    \\A package is "outdated" when its installed version differs from the
+    \\current tap version (revision bumps included), not only when it is
+    \\older: malt follows the tap as source of truth.
     \\
 ;
 

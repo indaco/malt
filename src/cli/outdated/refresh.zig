@@ -174,6 +174,15 @@ fn isCorePathRow(row: KegRow) bool {
     return if (row.tap) |t| install_args_mod.isCoreTap(t) else true;
 }
 
+// Outdated policy: malt treats the tap as the source of truth. A keg is
+// "outdated" whenever its revision-qualified installed version is not byte-equal
+// to the current upstream version — NOT when it is strictly older. This never
+// misses an upgrade (any difference surfaces); the trade-off is that if upstream
+// moves backward (a yanked release), `outdated` lists it and `upgrade` follows
+// the tap down. That downgrade is by design, surfaced as `old -> new` in
+// `--dry-run`. Matching Homebrew's `PkgVersion` ordering instead would risk a
+// divergent comparator silently skipping a real upgrade — a worse failure mode.
+
 /// Resolve one keg against its version-map entry. Sets `found` to map
 /// membership (so the caller can tell "current" from "absent"), and
 /// returns a caller-owned `<stable>_<rev>` string when the row is
@@ -776,7 +785,11 @@ fn tapVersionFromSubtrees(
                 warnTapCaskFetchFailed(tap_label, name, reason);
                 return null;
             };
-            return alloc.dupe(u8, rb_info.version) catch null;
+            // Qualify with the .rb revision so a tap revision-only bump is
+            // detected, matching the core fetch path.
+            var ver_buf: [256]u8 = undefined;
+            const qualified = formula_mod.pkgVersion(&ver_buf, rb_info.version, rb_info.revision) catch rb_info.version;
+            return alloc.dupe(u8, qualified) catch null;
         }
         // Non-200 (likely a 404 for this layout) — try the next subtree.
         last_status = rb_resp.status;
@@ -829,7 +842,13 @@ fn fetchLatest(
     row: KegRow,
 ) std.mem.Allocator.Error!?[]u8 {
     const v = upstreamLatest(allocator, head_cache, db, api, io, environ, kind, row) orelse return null;
-    if (std.mem.eql(u8, row.version, v)) {
+    // Compare the revision-qualified installed string against the (now also
+    // revision-qualified) upstream so a revision-only bump isn't read as bare.
+    // `!eql` is deliberate: malt mirrors the tap as source of truth — see the
+    // policy note above `mapLatest`.
+    var installed_buf: [256]u8 = undefined;
+    const installed = formula_mod.pkgVersion(&installed_buf, row.version, row.revision) catch row.version;
+    if (std.mem.eql(u8, installed, v)) {
         allocator.free(v);
         return null;
     }
@@ -852,10 +871,21 @@ fn parseFormulaLatest(allocator: std.mem.Allocator, json_bytes: []const u8) ?[]u
         else => return null,
     };
     const stable_val = versions_obj.get("stable") orelse return null;
-    return switch (stable_val) {
-        .string => |s| allocator.dupe(u8, s) catch null,
-        else => null,
+    const stable = switch (stable_val) {
+        .string => |s| s,
+        else => return null,
     };
+    // Qualify with the top-level revision so the fetch fallback catches a
+    // revision-only bump (1.2.3 -> 1.2.3_1), mirroring the map path. Absent or
+    // non-integer revision is treated as 0; an overflow degrades to the bare
+    // stable rather than dropping the row.
+    const revision: i64 = switch (obj.get("revision") orelse std.json.Value{ .integer = 0 }) {
+        .integer => |n| n,
+        else => 0,
+    };
+    var buf: [256]u8 = undefined;
+    const qualified = formula_mod.pkgVersion(&buf, stable, revision) catch stable;
+    return allocator.dupe(u8, qualified) catch null;
 }
 
 // --- Pool path ---
@@ -916,7 +946,11 @@ fn runOne(out_alloc: std.mem.Allocator, wctx: *WorkerCtx) void {
     local_api.base_url = wctx.api_base;
     local_api.offline = wctx.offline;
     const latest = upstreamLatest(arena_alloc, wctx.head_cache, wctx.db, &local_api, wctx.io, wctx.environ, wctx.kind, wctx.row) orelse return;
-    if (std.mem.eql(u8, wctx.row.version, latest)) return;
+    // Qualify the installed side so a revision-only bump isn't read as bare
+    // (same fix as the serial `fetchLatest` path).
+    var installed_buf: [256]u8 = undefined;
+    const installed = formula_mod.pkgVersion(&installed_buf, wctx.row.version, wctx.row.revision) catch wctx.row.version;
+    if (std.mem.eql(u8, installed, latest)) return;
 
     // Move into the caller's allocator so the result outlives `arena.deinit()`.
     wctx.out = out_alloc.dupe(u8, latest) catch |e| blk: {
@@ -1150,6 +1184,19 @@ test "buildVersionMap parses tab-delimited entries with stable and revision" {
     try std.testing.expectEqual(@as(i64, 2), o.revision);
 }
 
+test "parseFormulaLatest qualifies stable with the top-level revision" {
+    const a = std.testing.allocator;
+    // Revision present → revision-qualified.
+    const bumped = parseFormulaLatest(a, "{\"versions\":{\"stable\":\"1.2.3\"},\"revision\":1}") orelse return error.ParseFailed;
+    defer a.free(bumped);
+    try std.testing.expectEqualStrings("1.2.3_1", bumped);
+
+    // Revision absent → bare stable (revision 0).
+    const bare = parseFormulaLatest(a, "{\"versions\":{\"stable\":\"1.2.3\"}}") orelse return error.ParseFailed;
+    defer a.free(bare);
+    try std.testing.expectEqualStrings("1.2.3", bare);
+}
+
 test "isCorePathRow routes core rows to the map and third-party taps per-HEAD" {
     // No tap or the homebrew core tap → bulk version map (formula and cask alike).
     try std.testing.expect(isCorePathRow(.{ .name = "wget", .version = "1" }));
@@ -1223,6 +1270,44 @@ test "tapVersionFromSubtrees falls back to the root layout and parses the versio
     defer if (v) |vv| std.testing.allocator.free(vv);
     try std.testing.expect(v != null);
     try std.testing.expectEqualStrings("1.2.3", v.?); // resolved from the root `.rb`
+}
+
+test "tapVersionFromSubtrees qualifies the resolved version with the .rb revision" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try addr.listen(io, .{ .reuse_address = true });
+    const port = listener.socket.address.getPort();
+
+    // A tap .rb whose stable is unchanged but whose revision bumped: the
+    // resolved latest must carry `_2` so the fetch fallback flags the bump.
+    const rev_rb =
+        \\class Pkg < Formula
+        \\  url "https://x/pkg-1.2.3.tar.gz"
+        \\  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+        \\  version "1.2.3"
+        \\  revision 2
+        \\end
+    ;
+    var srv = RbFallbackServer{ .io = io, .listener = &listener, .root_rb = rev_rb, .idx = std.atomic.Value(usize).init(0) };
+    const thread = try std.Thread.spawn(.{}, RbFallbackServer.serve, .{&srv});
+
+    var inner: std.http.Client = .{ .allocator = std.testing.allocator, .io = io };
+    var http = client_mod.HttpClient.initWith(&inner, io, std.process.Environ.empty, std.testing.allocator);
+    defer http.deinit();
+
+    var base_buf: [64]u8 = undefined;
+    const raw_base = try std.fmt.bufPrint(&base_buf, "http://127.0.0.1:{d}", .{port});
+
+    const v = tapVersionFromSubtrees(std.testing.allocator, &http, std.process.Environ.empty, .github, raw_base, "deadbeef", "pkg", &.{ .formula, .formula_root }, "formula", "user/repo");
+    listener.deinit(io);
+    thread.join();
+
+    defer if (v) |vv| std.testing.allocator.free(vv);
+    try std.testing.expect(v != null);
+    try std.testing.expectEqualStrings("1.2.3_2", v.?);
 }
 
 test "buildVersionMap skips malformed lines without aborting" {
