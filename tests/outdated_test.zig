@@ -381,6 +381,40 @@ test "collectOutdated warns and falls back to per-keg on an empty version map" {
     try testing.expect(std.mem.indexOf(u8, warn_buf.items, "falling back") != null);
 }
 
+test "collectOutdated fetch fallback detects an upstream revision-only bump" {
+    var http = client_mod.HttpClient.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator);
+    defer http.deinit();
+    var dir = try TempCacheDir.init(testing.allocator, "rev_bump_fetch");
+    defer dir.deinit();
+
+    // Empty side-car forces the per-keg fetch fallback. Upstream JSON keeps the
+    // same stable but bumps revision to 1; the installed keg is the bare 1.2.3.
+    try dir.writeCacheFile("versions_formula.txt", "");
+    try dir.writeCacheFile("formula_foo.json", "{\"name\":\"foo\",\"versions\":{\"stable\":\"1.2.3\"},\"revision\":1}");
+
+    var api = api_mod.BrewApi.init(std.Options.debug_io, testing.allocator, &http, dir.path);
+    api.offline = true;
+
+    // Swallow the expected "version map degraded" warning the empty side-car emits.
+    var warn_buf: std.ArrayList(u8) = .empty;
+    defer warn_buf.deinit(testing.allocator);
+    malt.output.beginStderrCapture(testing.allocator, &warn_buf);
+    defer malt.output.endStderrCapture();
+
+    const kegs = [_]outdated_mod.KegRow{
+        .{ .name = "foo", .version = "1.2.3", .revision = 0 }, // 1.2.3 < 1.2.3_1
+    };
+    var db = try openTestDb();
+    defer db.close();
+    const out = try outdated_mod.collectOutdatedFormulas(&malt.app_ctx.debug_ctx, testing.allocator, &db, &api, dir.path, &kegs, null);
+    defer freeEntries(testing.allocator, out);
+
+    try testing.expectEqual(@as(usize, 1), out.len);
+    try testing.expectEqualStrings("foo", out[0].name);
+    try testing.expectEqualStrings("1.2.3", out[0].installed);
+    try testing.expectEqualStrings("1.2.3_1", out[0].latest);
+}
+
 // --- --pinned-only filter ---
 
 fn setupPinnedPrefix(suffix: []const u8) ![:0]u8 {

@@ -13,6 +13,9 @@ const cask_mod = @import("../../core/cask.zig");
 /// the caller's use of this struct.
 pub const RubyFormulaInfo = struct {
     version: []const u8,
+    /// Homebrew `revision N` (0 when absent). Lets the outdated audit detect a
+    /// revision-only bump on a tap formula, matching the core path.
+    revision: i64 = 0,
     url: []const u8,
     sha256: []const u8,
     /// Empty by default. Populated only when the cask DSL set `arch`
@@ -41,6 +44,7 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
     const is_arm = @import("../../macho/codesign.zig").isArm64();
 
     var version: ?[]const u8 = null;
+    var revision: i64 = 0;
     var url: ?[]const u8 = null;
     var sha256: ?[]const u8 = null;
     var arch_token: []const u8 = "";
@@ -68,6 +72,13 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
                 if (extractQuoted(line, "version \"")) |v| {
                     version = v;
                 }
+            }
+
+            // Extract `revision N` (global, unquoted integer). Ignored by the
+            // install path; the outdated audit uses it to spot revision bumps.
+            if (revision == 0 and std.mem.startsWith(u8, line, "revision ")) {
+                const rest = std.mem.trim(u8, line["revision ".len..], " \t");
+                revision = std.fmt.parseInt(i64, rest, 10) catch 0;
             }
 
             // Track on_macos block. The cask DSL uses this as the only
@@ -162,6 +173,7 @@ pub fn parseRubyFormula(rb_content: []const u8) ?RubyFormulaInfo {
         const final_version = version orelse deriveVersionFromUrl(url.?) orelse return null;
         return .{
             .version = final_version,
+            .revision = revision,
             .url = url.?,
             .sha256 = sha256.?,
             .arch_token = arch_token,
@@ -409,6 +421,29 @@ test "parseRubyFormula: extracts version/url/sha256 from a flat formula" {
 
 test "parseRubyFormula: returns null when required fields are missing" {
     try std.testing.expect(parseRubyFormula("class X end") == null);
+}
+
+test "parseRubyFormula: extracts the revision and defaults it to 0" {
+    const with_rev =
+        \\class Foo < Formula
+        \\  url "https://example.com/foo-1.2.3.tar.gz"
+        \\  sha256 "deadbeef"
+        \\  version "1.2.3"
+        \\  revision 2
+        \\end
+    ;
+    const got = parseRubyFormula(with_rev) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(i64, 2), got.revision);
+
+    const no_rev =
+        \\class Foo < Formula
+        \\  url "https://example.com/foo-1.2.3.tar.gz"
+        \\  sha256 "deadbeef"
+        \\  version "1.2.3"
+        \\end
+    ;
+    const got0 = parseRubyFormula(no_rev) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(@as(i64, 0), got0.revision);
 }
 
 test "parseRubyFormula: derives version from /releases/download/ URL" {
