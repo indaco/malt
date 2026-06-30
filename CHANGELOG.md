@@ -4,7 +4,18 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
-## v0.20.2 - 2026-06-29
+## v0.20.3 - 2026-06-30
+
+### 🩹 Fixes
+
+- **search:** collapse mixed-case local exact match to one canonical row ([9475df4](https://github.com/indaco/malt/commit/9475df4)) ([#587](https://github.com/indaco/malt/pull/587))
+- **info:** show installed package when both --cask and --formula are set ([5613996](https://github.com/indaco/malt/commit/5613996)) ([#586](https://github.com/indaco/malt/pull/586))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.20.2 - 2026-06-30
 
 ### 🩹 Fixes
 
