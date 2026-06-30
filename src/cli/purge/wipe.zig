@@ -218,12 +218,18 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
     // would inflate the count to plan.len on a half-installed prefix.
     const existed = try allocator.alloc(bool, plan.len);
     defer allocator.free(existed);
+    // Per-path preflight sizes so a failed delete can be excluded from the
+    // freed-byte total; `total_bytes` stays the "bytes present" figure used
+    // by the dry-run return and the pre-flight "total:" display line.
+    const sizes = try allocator.alloc(u64, plan.len);
+    defer allocator.free(sizes);
 
     var total_bytes: u64 = 0;
     var existing_count: u32 = 0;
     for (plan, 0..) |t, idx| {
         existed[idx] = pathExists(io, t.path);
         const size = if (existed[idx]) util.pathSize(io, allocator, t.path) else 0;
+        sizes[idx] = size;
         total_bytes += size;
         if (existed[idx]) existing_count += 1;
         var sz_buf: [32]u8 = undefined;
@@ -259,6 +265,11 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
     var removed: usize = 0;
     var skipped: usize = 0;
     var freed_paths: u32 = 0;
+    // Mirror of the freed-path decision, indexed by plan slot, so the byte
+    // total credits exactly the targets the path count does.
+    const freed = try allocator.alloc(bool, plan.len);
+    defer allocator.free(freed);
+    @memset(freed, false);
     var db_idx: ?usize = null;
     var prefix_idx: ?usize = null;
 
@@ -276,7 +287,10 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
         }
         if (deleteTarget(io, t.path)) {
             removed += 1;
-            if (existed[idx]) freed_paths += 1;
+            if (existed[idx]) {
+                freed_paths += 1;
+                freed[idx] = true;
+            }
         } else skipped += 1;
     }
 
@@ -285,13 +299,19 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
     if (db_idx) |idx| {
         if (deleteTarget(io, plan[idx].path)) {
             removed += 1;
-            if (existed[idx]) freed_paths += 1;
+            if (existed[idx]) {
+                freed_paths += 1;
+                freed[idx] = true;
+            }
         } else skipped += 1;
     }
     if (prefix_idx) |idx| {
         if (deletePrefixRoot(io, plan[idx].path)) {
             removed += 1;
-            if (existed[idx]) freed_paths += 1;
+            if (existed[idx]) {
+                freed_paths += 1;
+                freed[idx] = true;
+            }
         } else skipped += 1;
     }
 
@@ -300,5 +320,44 @@ pub fn runWipe(ctx: *const AppCtx, allocator: std.mem.Allocator, opts: Options, 
     var sum_buf: [128]u8 = undefined;
     const sum = std.fmt.bufPrint(&sum_buf, "removed {d} target(s), skipped {d}", .{ removed, skipped }) catch "";
     output.success("{s}", .{sum});
-    return .{ .removed = freed_paths, .bytes = total_bytes };
+    return .{ .removed = freed_paths, .bytes = freedBytes(sizes, freed) };
+}
+
+/// Bytes credited by a wipe: only targets whose delete succeeded, using the
+/// preflight size. A target that resizes between the preflight stat and the
+/// unlink is a benign TOCTOU — this is a reporting figure, not a safety gate.
+/// `sizes[i]` is already 0 for non-existing paths, so `freed[i]` alone gates
+/// the sum and keeps the byte total consistent with the freed-path count.
+fn freedBytes(sizes: []const u64, freed: []const bool) u64 {
+    var total: u64 = 0;
+    for (sizes, freed) |s, f| {
+        if (f) total += s;
+    }
+    return total;
+}
+
+test "freedBytes credits only successfully-freed targets" {
+    const sizes = [_]u64{ 1048576, 4096, 8192 };
+    // Middle target's delete failed: its bytes must not be credited even
+    // though it was present in the preflight sum.
+    const freed = [_]bool{ true, false, true };
+    try std.testing.expectEqual(@as(u64, 1048576 + 8192), freedBytes(&sizes, &freed));
+}
+
+test "freedBytes is zero when every delete failed" {
+    const sizes = [_]u64{ 1048576, 4096 };
+    const freed = [_]bool{ false, false };
+    try std.testing.expectEqual(@as(u64, 0), freedBytes(&sizes, &freed));
+}
+
+test "freedBytes credits the full total when every delete succeeded" {
+    // The happy path: a fully successful wipe must still report all bytes,
+    // matching the old `total_bytes` behaviour that this fix preserves.
+    const sizes = [_]u64{ 1048576, 4096, 8192 };
+    const freed = [_]bool{ true, true, true };
+    try std.testing.expectEqual(@as(u64, 1048576 + 4096 + 8192), freedBytes(&sizes, &freed));
+}
+
+test "freedBytes is zero for an empty plan" {
+    try std.testing.expectEqual(@as(u64, 0), freedBytes(&.{}, &.{}));
 }
