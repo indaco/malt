@@ -502,7 +502,17 @@ fn readManifest(
     if (std.mem.endsWith(u8, path, ".json")) {
         return manifest_mod.parseJson(allocator, body) catch return BundleError.BundlefileParse;
     }
-    return brewfile_mod.parse(allocator, body, diag) catch return BundleError.BundlefileParse;
+    return brewfile_mod.parse(allocator, body, diag) catch |e| {
+        // Surface the specific cause (and line, when the parser recorded one);
+        // otherwise the user only sees the generic BundlefileParse.
+        const reason = brewfile_mod.describeError(e);
+        if (diag) |d| {
+            if (d.error_line) |ln| {
+                output.err("Brewfile parse error at line {d}: {s}", .{ ln, reason });
+            } else output.err("Brewfile parse error: {s}", .{reason});
+        }
+        return BundleError.BundlefileParse;
+    };
 }
 
 fn writeManifest(

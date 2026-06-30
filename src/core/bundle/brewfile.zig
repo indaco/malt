@@ -18,6 +18,7 @@ pub const BrewfileError = error{
     ExpectedString,
     ConditionalsUnsupported,
     BlocksUnsupported,
+    InterpolationUnsupported,
     OutOfMemory,
     MalformedJson,
     UnsupportedVersion,
@@ -31,6 +32,7 @@ pub fn describeError(err: BrewfileError) []const u8 {
         BrewfileError.ExpectedString => "directive expects a quoted string argument",
         BrewfileError.ConditionalsUnsupported => "Brewfile conditionals are unsupported; convert to Maltfile.json",
         BrewfileError.BlocksUnsupported => "Brewfile `do ... end` blocks are unsupported",
+        BrewfileError.InterpolationUnsupported => "Brewfile string interpolation (`#{...}`) is unsupported; convert to Maltfile.json",
         BrewfileError.OutOfMemory => "out of memory parsing Brewfile",
         BrewfileError.MalformedJson => "malformed bundle JSON",
         BrewfileError.UnsupportedVersion => "unsupported bundle schema version",
@@ -38,17 +40,14 @@ pub fn describeError(err: BrewfileError) []const u8 {
     };
 }
 
-const Line = struct {
-    text: []const u8,
-    num: usize,
-};
-
 /// Caller-owned out-bag for non-fatal parser warnings (currently: unknown
-/// directives we skip). Core returns outcomes; UI renders at the
-/// boundary — `cli/bundle.zig` drains this into `output.warn`.
+/// directives we skip) plus the 1-based line of a fatal parse error. Core
+/// returns outcomes; UI renders at the boundary — `cli/bundle.zig` drains
+/// `warnings` into `output.warn` and reports `error_line` on failure.
 pub const Diagnostics = struct {
     allocator: std.mem.Allocator,
     warnings: std.ArrayList([]const u8),
+    error_line: ?usize = null,
 
     pub fn init(allocator: std.mem.Allocator) Diagnostics {
         return .{ .allocator = allocator, .warnings = .empty };
@@ -60,6 +59,17 @@ pub const Diagnostics = struct {
         self.* = undefined;
     }
 };
+
+// Ruby control-flow keywords the narrow subset can't model. They are rejected
+// up front so the user gets a clear error instead of a misleading token error.
+const conditional_keywords = [_][]const u8{ "if", "unless", "elsif", "else", "case", "when" };
+const block_keywords = [_][]const u8{ "do", "while", "until", "for", "begin", "end" };
+
+/// Record the failing line for the UI boundary and propagate the error.
+fn parseFail(diag: ?*Diagnostics, line_no: usize, err: BrewfileError) BrewfileError {
+    if (diag) |d| d.error_line = line_no;
+    return err;
+}
 
 pub fn parse(
     parent: std.mem.Allocator,
@@ -83,14 +93,15 @@ pub fn parse(
         if (trimmed.len == 0) continue;
         if (trimmed[0] == '#') continue;
 
-        // Strip the comment once, then reject `if`/`do` only as bare code
-        // tokens — never inside the quoted arg ("my if tool") or as longer
-        // words ("download"). parseLine reuses the stripped slice.
+        // Strip the comment once and reject unsupported Ruby on the code only;
+        // parseLine reuses the stripped slice (matchers handle string spans).
         const code = stripTrailingComment(trimmed);
-        if (hasKeyword(code, "if")) return BrewfileError.ConditionalsUnsupported;
-        if (hasKeyword(code, "do")) return BrewfileError.BlocksUnsupported;
+        if (firstMatch(code, &conditional_keywords)) return parseFail(diag, line_no, BrewfileError.ConditionalsUnsupported);
+        if (firstMatch(code, &block_keywords)) return parseFail(diag, line_no, BrewfileError.BlocksUnsupported);
+        if (hasInterpolation(code)) return parseFail(diag, line_no, BrewfileError.InterpolationUnsupported);
 
-        try parseLine(a, code, line_no, &taps, &formulas, &casks, &services, diag);
+        parseLine(a, code, &taps, &formulas, &casks, &services, diag) catch |e|
+            return parseFail(diag, line_no, e);
     }
 
     m.taps = taps.toOwnedSlice(a) catch return BrewfileError.OutOfMemory;
@@ -104,15 +115,12 @@ pub fn parse(
 fn parseLine(
     a: std.mem.Allocator,
     code: []const u8,
-    line_no: usize,
     taps: *std.ArrayList([]const u8),
     formulas: *std.ArrayList(manifest_mod.FormulaEntry),
     casks: *std.ArrayList(manifest_mod.CaskEntry),
     services: *std.ArrayList(manifest_mod.ServiceEntry),
     diag: ?*Diagnostics,
 ) BrewfileError!void {
-    _ = line_no;
-
     var cursor: usize = 0;
     const directive = nextIdent(code, &cursor) orelse return BrewfileError.UnexpectedToken;
     skipSpaces(code, &cursor);
@@ -242,6 +250,35 @@ fn hasKeyword(code: []const u8, word: []const u8) bool {
 fn isIdentByte(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
         (c >= '0' and c <= '9') or c == '_';
+}
+
+fn firstMatch(code: []const u8, words: []const []const u8) bool {
+    for (words) |w| if (hasKeyword(code, w)) return true;
+    return false;
+}
+
+/// True when a double-quoted string in `code` contains a `#{...}` interpolation.
+/// Single-quoted strings are literal in Ruby, so only `"` spans count.
+fn hasInterpolation(code: []const u8) bool {
+    var in_str = false;
+    var quote: u8 = 0;
+    var i: usize = 0;
+    while (i < code.len) : (i += 1) {
+        const c = code[i];
+        if (in_str) {
+            if (c == '\\' and i + 1 < code.len) {
+                i += 1; // skip the escaped byte
+            } else if (c == quote) {
+                in_str = false;
+            } else if (quote == '"' and c == '#' and i + 1 < code.len and code[i + 1] == '{') {
+                return true;
+            }
+        } else if (c == '"' or c == '\'') {
+            in_str = true;
+            quote = c;
+        }
+    }
+    return false;
 }
 
 fn skipSpaces(s: []const u8, cursor: *usize) void {
@@ -396,4 +433,38 @@ test "keyword inside the quoted argument does not trip the guard" {
     try testing.expectEqualStrings("my if tool", m.formulas[0].name);
     try testing.expectEqual(@as(usize, 1), m.casks.len);
     try testing.expectEqualStrings("my do thing", m.casks[0].name);
+}
+
+test "other control-flow keywords are rejected with a clear error" {
+    try testing.expectError(
+        BrewfileError.ConditionalsUnsupported,
+        parse(testing.allocator, "unless OS.linux?\nbrew \"wget\"\nend\n", null),
+    );
+    try testing.expectError(
+        BrewfileError.BlocksUnsupported,
+        parse(testing.allocator, "brew \"wget\" while retry?\n", null),
+    );
+}
+
+test "double-quoted interpolation is rejected, single-quoted is literal" {
+    // Ruby interpolates only in double quotes, so `'a#{b}'` is a literal name.
+    try testing.expectError(
+        BrewfileError.InterpolationUnsupported,
+        parse(testing.allocator, "brew \"foo#{ENV['X']}\"\n", null),
+    );
+
+    var m = try parse(testing.allocator, "brew 'foo#{bar}'\n", null);
+    defer m.deinit();
+    try testing.expectEqual(@as(usize, 1), m.formulas.len);
+    try testing.expectEqualStrings("foo#{bar}", m.formulas[0].name);
+}
+
+test "diagnostics records the 1-based line of a parse failure" {
+    var diag = Diagnostics.init(testing.allocator);
+    defer diag.deinit();
+    try testing.expectError(
+        BrewfileError.ConditionalsUnsupported,
+        parse(testing.allocator, "brew \"wget\"\n\nbrew \"jq\" if OS.mac?\n", &diag),
+    );
+    try testing.expectEqual(@as(?usize, 3), diag.error_line);
 }
