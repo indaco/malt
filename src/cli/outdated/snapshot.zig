@@ -21,8 +21,11 @@ pub const snapshot_default_max_age_minutes: u64 = 5;
 pub const snapshot_max_age_env = "MALT_OUTDATED_MAX_AGE";
 
 /// On-disk snapshot version. Mismatched snapshots are treated as misses
-/// so a downgrade never tries to read a future shape.
-pub const snapshot_version: u32 = 1;
+/// so a downgrade never tries to read a future shape. Bumped to 2 when
+/// `installed` changed from a bare version to a revision-qualified one:
+/// a v1 snapshot's bare `installed` would mis-match the revision-aware
+/// intersect, so old snapshots must be refused and recomputed.
+pub const snapshot_version: u32 = 2;
 
 /// Snapshot filename under `{cache}/`.
 pub const snapshot_file = "outdated.json";
@@ -333,7 +336,7 @@ test "renderSnapshot emits the canonical JSON shape" {
     defer std.testing.allocator.free(json);
 
     const want =
-        \\{"version":1,"generated_at_ms":1700000000000,"formulas":[{"name":"alpha","installed":"1.0","latest":"2.0"}],"casks":[{"name":"beta","installed":"3.0","latest":"3.5"}]}
+        \\{"version":2,"generated_at_ms":1700000000000,"formulas":[{"name":"alpha","installed":"1.0","latest":"2.0"}],"casks":[{"name":"beta","installed":"3.0","latest":"3.5"}]}
     ;
     try std.testing.expectEqualStrings(want, json);
 }
@@ -376,15 +379,22 @@ test "parseSnapshot rejects mismatched version, missing fields, garbage" {
         error.InvalidSnapshot,
         parseSnapshot(std.testing.allocator, "{\"version\":99,\"generated_at_ms\":0,\"formulas\":[],\"casks\":[]}"),
     );
+    // v1 stored `installed` bare; reading it under the revision-qualified
+    // shape would mis-match the intersect, so the old version is refused
+    // and the caller recomputes.
+    try std.testing.expectError(
+        error.InvalidSnapshot,
+        parseSnapshot(std.testing.allocator, "{\"version\":1,\"generated_at_ms\":0,\"formulas\":[],\"casks\":[]}"),
+    );
     // Missing required field.
     try std.testing.expectError(
         error.InvalidSnapshot,
-        parseSnapshot(std.testing.allocator, "{\"version\":1,\"formulas\":[],\"casks\":[]}"),
+        parseSnapshot(std.testing.allocator, "{\"version\":2,\"formulas\":[],\"casks\":[]}"),
     );
     // Wrong type for formulas.
     try std.testing.expectError(
         error.InvalidSnapshot,
-        parseSnapshot(std.testing.allocator, "{\"version\":1,\"generated_at_ms\":0,\"formulas\":\"x\",\"casks\":[]}"),
+        parseSnapshot(std.testing.allocator, "{\"version\":2,\"generated_at_ms\":0,\"formulas\":\"x\",\"casks\":[]}"),
     );
 }
 
@@ -395,7 +405,7 @@ test "parseSnapshot bounds per-string allocation against tampered input" {
     const oversized_len = snapshot_max_value_len + 1;
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try buf.appendSlice(std.testing.allocator, "{\"version\":1,\"generated_at_ms\":0,\"formulas\":[{\"name\":\"");
+    try buf.appendSlice(std.testing.allocator, "{\"version\":2,\"generated_at_ms\":0,\"formulas\":[{\"name\":\"");
     try buf.appendNTimes(std.testing.allocator, 'a', oversized_len);
     try buf.appendSlice(std.testing.allocator, "\",\"installed\":\"1\",\"latest\":\"2\"}],\"casks\":[]}");
 
@@ -408,7 +418,7 @@ test "parseSnapshot bounds per-string allocation against tampered input" {
 test "parseSnapshot tolerates unknown forward-compatible fields" {
     // Adding a field server-side shouldn't invalidate existing snapshots.
     const json =
-        \\{"version":1,"generated_at_ms":0,"formulas":[],"casks":[],"future":42}
+        \\{"version":2,"generated_at_ms":0,"formulas":[],"casks":[],"future":42}
     ;
     const parsed = try parseSnapshot(std.testing.allocator, json);
     defer freeSnapshot(std.testing.allocator, parsed);
@@ -425,7 +435,7 @@ test "renderSnapshot handles empty formula and cask lists" {
     defer std.testing.allocator.free(json);
 
     const want =
-        \\{"version":1,"generated_at_ms":0,"formulas":[],"casks":[]}
+        \\{"version":2,"generated_at_ms":0,"formulas":[],"casks":[]}
     ;
     try std.testing.expectEqualStrings(want, json);
 }
