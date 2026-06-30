@@ -4,10 +4,26 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
-## v0.20.2 - 2026-06-29
+## v0.20.3 - 2026-06-30
 
 ### 🩹 Fixes
 
+- **search:** collapse mixed-case local exact match to one canonical row ([9475df4](https://github.com/indaco/malt/commit/9475df4)) ([#587](https://github.com/indaco/malt/pull/587))
+- **info:** show installed package when both --cask and --formula are set ([5613996](https://github.com/indaco/malt/commit/5613996)) ([#586](https://github.com/indaco/malt/pull/586))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
+## v0.20.2 - 2026-06-30
+
+### 🩹 Fixes
+
+- **outdated:** detect upstream revision-only bumps on the fetch fallback ([a4be3ec](https://github.com/indaco/malt/commit/a4be3ec)) ([#584](https://github.com/indaco/malt/pull/584))
+- **outdated:** refuse stale snapshots after revision-format change ([705fef8](https://github.com/indaco/malt/commit/705fef8)) ([#583](https://github.com/indaco/malt/pull/583))
+- **outdated:** keep revision-bumped formulas in cached listing ([4e5fc99](https://github.com/indaco/malt/commit/4e5fc99)) ([#582](https://github.com/indaco/malt/pull/582))
+- **install:** fail loudly when a dependency formula can't be fetched ([e5a8fd4](https://github.com/indaco/malt/commit/e5a8fd4)) ([#581](https://github.com/indaco/malt/pull/581))
+- **tui:** reword a test comment that tripped the spawn-invariant lint ([02dd65d](https://github.com/indaco/malt/commit/02dd65d)) ([#580](https://github.com/indaco/malt/pull/580))
 - **cask:** tell the user when a running app blocks a cask upgrade ([f8900b9](https://github.com/indaco/malt/commit/f8900b9)) ([#579](https://github.com/indaco/malt/pull/579))
 
 ### ❤️ Contributors
