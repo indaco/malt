@@ -637,11 +637,23 @@ fn writeHuman(
     r: KindResults,
     query: []const u8,
 ) void {
-    if (r.exact) writeResult(stdout, query, kind);
+    const exact_name = exactDisplayName(query, r.matches);
+    if (r.exact) writeResult(stdout, exact_name, kind);
     for (r.matches) |m| {
-        if (r.exact and std.mem.eql(u8, m, query)) continue;
+        if (r.exact and std.ascii.eqlIgnoreCase(m, query)) continue;
         writeResult(stdout, m, kind);
     }
+}
+
+/// Display name for the pinned exact row. Exactness is decided case-folded,
+/// so echoing the raw query would mis-case the row and dodge the dedup; use
+/// the canonical match instead, falling back to the query only on the
+/// day-of-release case where the index doesn't yet list it.
+fn exactDisplayName(query: []const u8, matches: []const []const u8) []const u8 {
+    for (matches) |m| {
+        if (std.ascii.eqlIgnoreCase(m, query)) return m;
+    }
+    return query;
 }
 
 /// One row of the unified `mt search --json` array. `installed` is derived
@@ -719,10 +731,11 @@ fn appendKind(
     set: InstalledSet,
 ) !void {
     if (r.exact) {
-        try list.append(allocator, .{ .name = query, .kind = kind, .installed = set.has(kind, query) });
+        const name = exactDisplayName(query, r.matches);
+        try list.append(allocator, .{ .name = name, .kind = kind, .installed = set.has(kind, name) });
     }
     for (r.matches) |m| {
-        if (r.exact and std.mem.eql(u8, m, query)) continue;
+        if (r.exact and std.ascii.eqlIgnoreCase(m, query)) continue;
         try list.append(allocator, .{ .name = m, .kind = kind, .installed = set.has(kind, m) });
     }
 }
@@ -865,6 +878,63 @@ test "buildResults pins the exact match first, dedupes it, and tags type" {
     try testing.expectEqualStrings("jira", results[2].name);
     try testing.expectEqual(api_mod.BrewApi.Kind.cask, results[2].kind);
     try testing.expect(!results[2].installed);
+}
+
+test "buildResults collapses a mixed-case exact match to one canonical row" {
+    // Query "JQ" matches canonical "jq" case-insensitively: the exact row
+    // must carry the canonical name and the substring "jq" must be deduped.
+    const formula: KindResults = .{ .exact = true, .matches = &.{ "jq", "jqp" } };
+    const set: InstalledSet = .{ .formulae = &.{"jq"}, .casks = &.{} };
+
+    const results = try buildResults(testing.allocator, formula, .{}, "JQ", set);
+    defer testing.allocator.free(results);
+
+    try testing.expectEqual(@as(usize, 2), results.len);
+    try testing.expectEqualStrings("jq", results[0].name);
+    try testing.expect(results[0].installed);
+    try testing.expectEqualStrings("jqp", results[1].name);
+}
+
+test "buildResults keeps the raw query when no match supplies a canonical name" {
+    // Day-of-release: API reports exact but the substring index lacks it,
+    // so the exact row falls back to the user's typed case — one row, no dup.
+    const formula: KindResults = .{ .exact = true, .matches = &.{} };
+    const results = try buildResults(testing.allocator, formula, .{}, "JQ", .{});
+    defer testing.allocator.free(results);
+
+    try testing.expectEqual(@as(usize, 1), results.len);
+    try testing.expectEqualStrings("JQ", results[0].name);
+}
+
+test "writeHuman collapses a mixed-case exact match to one canonical row" {
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    const r: KindResults = .{ .exact = true, .matches = &.{ "jq", "jqp" } };
+    writeHuman(&aw.writer, "formula", r, "JQ");
+
+    try testing.expectEqualStrings(
+        "  \xe2\x96\xb8 jq (formula)\n  \xe2\x96\xb8 jqp (formula)\n",
+        aw.written(),
+    );
+}
+
+test "writeHuman keeps the raw query when no match supplies a canonical name" {
+    // Day-of-release: API reports exact but the substring index lacks it,
+    // so the human row falls back to the user's typed case — still one row.
+    color.setForTest(false, false);
+    defer color.setForTest(null, null);
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+
+    const r: KindResults = .{ .exact = true, .matches = &.{} };
+    writeHuman(&aw.writer, "formula", r, "JQ");
+
+    try testing.expectEqualStrings("  \xe2\x96\xb8 JQ (formula)\n", aw.written());
 }
 
 test "buildResults marks an installed substring hit regardless of case" {
