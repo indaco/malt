@@ -278,14 +278,22 @@ fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8) Error!vo
     // Create parent directories when the user supplied a nested path.
     if (std.fs.path.dirname(path)) |dir| {
         if (dir.len > 0) {
-            // createDirPath is recursive (mkdir -p) and treats an existing
-            // dir as success; an absolute sub_path ignores the cwd handle, so
-            // one branch covers both. Surface real errors here instead of
-            // deferring to a confusing leaf createFile failure.
-            std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch {
-                output.err("Failed to create {s}", .{dir});
-                return Error.OpenFileFailed;
-            };
+            // Create the parent chain recursively (mkdir -p); an absolute
+            // sub_path ignores the cwd handle, so one call covers both kinds.
+            // createDirPath's kind check is nofollow, so it rejects an
+            // existing symlink-to-dir parent (e.g. /tmp) as NotDir — skip
+            // creation when the parent already resolves to a directory, and
+            // surface genuine failures instead of deferring to the leaf.
+            const already_dir = if (std.Io.Dir.cwd().statFile(ctx.io, dir, .{})) |st|
+                st.kind == .directory
+            else |_|
+                false;
+            if (!already_dir) {
+                std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch {
+                    output.err("Failed to create {s}", .{dir});
+                    return Error.OpenFileFailed;
+                };
+            }
         }
     }
 
@@ -574,6 +582,25 @@ test "writeToPath creates a relative nested parent chain (relative input)" {
 
     var dest_buf: [128]u8 = undefined;
     const dest = std.fmt.bufPrint(&dest_buf, "{s}/sub/backup.txt", .{rel_root}) catch unreachable;
+
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+    try writeToPath(&ctx, dest, "formula git\n");
+
+    const f = try std.Io.Dir.cwd().openFile(io, dest, .{});
+    defer f.close(io);
+    const stat = try f.stat(io);
+    try std.testing.expect(stat.size > 0);
+}
+
+test "writeToPath accepts a symlink-to-directory parent (e.g. /tmp)" {
+    // createDirPath's nofollow kind check rejects an existing symlink-to-dir
+    // as NotDir; the writer must still succeed when the parent resolves to a
+    // real directory (macOS /tmp is a symlink to /private/tmp).
+    const io = std.Options.debug_io;
+    const ts = std.Io.Clock.real.now(io).toNanoseconds();
+    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dest = std.fmt.bufPrint(&dest_buf, "/tmp/malt_backup_symlinkparent_{d}.txt", .{ts}) catch unreachable;
+    defer std.Io.Dir.cwd().deleteTree(io, dest) catch {};
 
     const ctx: AppCtx = .{ .io = io, .environ = .empty };
     try writeToPath(&ctx, dest, "formula git\n");
