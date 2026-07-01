@@ -950,18 +950,26 @@ test "artifactTypeFromTag maps unknown strings to .unknown" {
 
 // --- per-version cache sweep -------------------------------------------
 
-test "sweepPerVersionCache deletes only files prefixed by '<token>-'" {
+test "sweepOwnedVersionCache deletes only the token's own recorded versions" {
     const io = testIo();
     const prefix = "/tmp/malt_cask_sweep";
     test_io.deleteTreeAbsolute(io, prefix) catch {};
     defer test_io.deleteTreeAbsolute(io, prefix) catch {};
     try test_io.cwd().createDirPath(io, prefix ++ "/cache/Cask");
 
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // Two history rows for `git` (current + a rollback target) exercise the
+    // "sweep every version, not just casks.version" contract.
+    try cask.recordCaskVersion(&db, "git", "2.39.0", "u", "aa", "dmg", null);
+    try cask.recordCaskVersion(&db, "git", "2.38.0", "u", "aa", "dmg", null);
+
     const seeds = [_][]const u8{
-        prefix ++ "/cache/Cask/flux-markdown-1.0.dmg",
-        prefix ++ "/cache/Cask/flux-markdown-2.0.dmg",
-        prefix ++ "/cache/Cask/flux-markdown.dmg", // legacy unprefixed — preserved by sweep
-        prefix ++ "/cache/Cask/other-1.0.dmg", // unrelated token — must survive
+        prefix ++ "/cache/Cask/git-2.39.0.dmg", // owned current — removed
+        prefix ++ "/cache/Cask/git-2.38.0.dmg", // owned rollback — removed
+        prefix ++ "/cache/Cask/git-lfs-2.0.dmg", // prefix sibling — must survive
+        prefix ++ "/cache/Cask/git.dmg", // legacy unprefixed — untouched here
     };
     for (seeds) |p| {
         const f = try test_io.createFileAbsolute(io, p, .{ .truncate = true });
@@ -969,24 +977,80 @@ test "sweepPerVersionCache deletes only files prefixed by '<token>-'" {
         try f.writeStreamingAll(io, "x");
     }
 
-    cask.sweepPerVersionCache(io, prefix, "flux-markdown");
+    cask.sweepOwnedVersionCache(io, &db, prefix, "git");
 
-    // Per-version files are gone; legacy + unrelated remain.
+    // Recorded versions gone; the prefix sibling and legacy shape survive.
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, seeds[0], .{}));
     try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, seeds[1], .{}));
     try test_io.accessAbsolute(io, seeds[2], .{});
     try test_io.accessAbsolute(io, seeds[3], .{});
 }
 
-test "sweepPerVersionCache silently skips a missing cache directory" {
+test "sweepOwnedVersionCache is a no-op when the token has no history rows" {
     const io = testIo();
-    const prefix = "/tmp/malt_cask_sweep_missing";
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+
+    // No rows and an absent cache dir — the sweep must not error.
+    cask.sweepOwnedVersionCache(io, &db, "/tmp/malt_cask_sweep_missing", "git");
+}
+
+test "sweepOwnedVersionCache handles a dash-bearing version without touching siblings" {
+    const io = testIo();
+    const prefix = "/tmp/malt_cask_sweep_rev";
     test_io.deleteTreeAbsolute(io, prefix) catch {};
     defer test_io.deleteTreeAbsolute(io, prefix) catch {};
-    try test_io.cwd().createDirPath(io, prefix);
+    try test_io.cwd().createDirPath(io, prefix ++ "/cache/Cask");
 
-    // Cache dir deliberately absent — function must not error.
-    cask.sweepPerVersionCache(io, prefix, "flux-markdown");
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // A revision-bearing version proves why the sweep is DB-driven: dashes are
+    // legal in versions, so a lexical `git-` prefix can't tell `2.39.0-1` from
+    // the sibling token `git-lfs`. Exact `<token>-<version>` is the only signal.
+    try cask.recordCaskVersion(&db, "git", "2.39.0-1", "u", "aa", "dmg", null);
+
+    const owned = prefix ++ "/cache/Cask/git-2.39.0-1.dmg";
+    const sibling = prefix ++ "/cache/Cask/git-lfs-2.0.dmg";
+    for ([_][]const u8{ owned, sibling }) |p| {
+        const f = try test_io.createFileAbsolute(io, p, .{ .truncate = true });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "x");
+    }
+
+    cask.sweepOwnedVersionCache(io, &db, prefix, "git");
+
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, owned, .{}));
+    try test_io.accessAbsolute(io, sibling, .{});
+}
+
+test "sweepOwnedVersionCache sweeps a pre-v7 row with NULL artifact_type" {
+    const io = testIo();
+    const prefix = "/tmp/malt_cask_sweep_null";
+    test_io.deleteTreeAbsolute(io, prefix) catch {};
+    defer test_io.deleteTreeAbsolute(io, prefix) catch {};
+    try test_io.cwd().createDirPath(io, prefix ++ "/cache/Cask");
+
+    var db = try sqlite.Database.open(":memory:");
+    defer db.close();
+    try schema.initSchema(&db);
+    // Backfill-shape row: artifact_type NULL. The sweep must still find the
+    // artefact by iterating every extension, not narrow to the recorded type.
+    try db.exec(
+        \\INSERT INTO cask_versions (token, version, url)
+        \\VALUES ('git', '2.39.0', 'https://x.invalid/git.zip');
+    );
+
+    const owned = prefix ++ "/cache/Cask/git-2.39.0.zip";
+    {
+        const f = try test_io.createFileAbsolute(io, owned, .{ .truncate = true });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "x");
+    }
+
+    cask.sweepOwnedVersionCache(io, &db, prefix, "git");
+    try testing.expectError(error.FileNotFound, test_io.accessAbsolute(io, owned, .{}));
 }
 
 // --- reinstallFromHistory dispatch contract ---------------------------------
