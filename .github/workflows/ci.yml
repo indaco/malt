@@ -27,7 +27,7 @@ jobs:
     name: Build & Test (macOS)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -81,7 +81,7 @@ jobs:
     name: Lint
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -116,7 +116,7 @@ jobs:
     runs-on: macos-14
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Regenerate against committed pin
         run: |
