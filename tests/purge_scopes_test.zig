@@ -453,6 +453,38 @@ test "--wipe --yes --backup writes the manifest before the delete pass" {
     try test_io.accessAbsolute(std.Options.debug_io, backup_path, .{});
 }
 
+test "--wipe --yes --backup creates a nested absolute manifest path" {
+    // The manifest writer must create the full parent chain for a nested
+    // absolute --backup path whose grandparent is missing, matching the
+    // relative case — otherwise the wipe aborts before writing its safety net.
+    const allocator = testing.allocator;
+    var prefix = try ScratchPrefix.init(allocator, "wipe_backup_nested");
+    defer prefix.deinit(allocator);
+
+    try writeFileAt(allocator, &.{ prefix.path, "Cellar", "marker" }, "x");
+
+    // grandparent (`.../mani`) intentionally absent; lives outside the prefix.
+    const root = try std.fmt.allocPrint(allocator, "/tmp/malt_wipe_nested_{d}", .{
+        test_io.nanoTimestamp(std.Options.debug_io),
+    });
+    defer allocator.free(root);
+    defer test_io.deleteTreeAbsolute(std.Options.debug_io, root) catch {};
+    const backup_path = try std.fmt.allocPrint(allocator, "{s}/mani/a/backup.txt", .{root});
+    defer allocator.free(backup_path);
+
+    const prior = OutputState.save();
+    defer prior.restore();
+    output.setMode(.human);
+    output.setDryRun(false);
+    output.setNdjson(false);
+    output.setQuiet(true);
+
+    const ctx = malt.app_ctx.debug_ctx;
+    try purge.execute(&ctx, allocator, &.{ "--wipe", "--yes", "--backup", backup_path });
+
+    try test_io.accessAbsolute(std.Options.debug_io, backup_path, .{});
+}
+
 test "multi-scope dry-run renders the summary table when more than one scope ran" {
     // The summary table only renders when summary.rows.items.len > 1.
     // Pinning this guards the "--housekeeping prints a table" UX guarantee.
