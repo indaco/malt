@@ -95,15 +95,12 @@ if [ $# -ge 1 ]; then
   COMMIT="$1"
 else
   printf '▸ resolving homebrew-core HEAD\n' >&2
-  # The API returns the full commit (incl. the files diff), often well
-  # over the pipe buffer. awk must consume the whole stream — an early
-  # `exit` closes the pipe mid-write and the producer dies (curl error 56
-  # / SIGPIPE), which pipefail turns fatal. Take the first top-level sha
-  # without exiting.
-  head_json=$(curl -fsSL --max-time 10 \
-    "https://api.github.com/repos/Homebrew/homebrew-core/commits/HEAD")
-  COMMIT=$(printf '%s' "$head_json" |
-    awk -F'"' '/^  "sha":/ && !seen {print $4; seen=1}')
+  # Use git ls-remote, not the api.github.com REST endpoint: the latter's
+  # anonymous 60-req/hr cap is shared across GitHub-hosted runner egress
+  # IPs and reliably 403s the scheduled run. ls-remote hits the git smart
+  # protocol (no REST rate limit, no token) and returns the SHA directly.
+  COMMIT=$(git ls-remote https://github.com/Homebrew/homebrew-core.git HEAD |
+    awk 'NR==1{print $1}')
   [ -n "$COMMIT" ] || {
     echo "failed to resolve HEAD" >&2
     exit 1
