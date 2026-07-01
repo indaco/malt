@@ -141,18 +141,24 @@ fn writeBytesToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8) Err
     const io = ctx.io;
     if (std.fs.path.dirname(path)) |dir| {
         if (dir.len > 0) {
-            // Parent may already exist; the subsequent createFile reports real errors.
-            if (std.fs.path.isAbsolute(dir)) {
-                std.Io.Dir.createDirAbsolute(io, dir, .default_dir) catch {};
-            } else {
-                std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+            // Create the parent chain recursively (mkdir -p); an absolute
+            // sub_path ignores the cwd handle, so one call covers both kinds.
+            // createDirPath's kind check is nofollow, so it rejects an
+            // existing symlink-to-dir parent (e.g. /tmp) as NotDir — skip
+            // creation when the parent already resolves to a directory, and
+            // surface genuine failures instead of deferring to the leaf.
+            const already_dir = if (std.Io.Dir.cwd().statFile(io, dir, .{})) |st|
+                st.kind == .directory
+            else |_|
+                false;
+            if (!already_dir) {
+                std.Io.Dir.cwd().createDirPath(io, dir) catch return Error.OpenFileFailed;
             }
         }
     }
-    const file = if (std.fs.path.isAbsolute(path))
-        std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true }) catch return Error.OpenFileFailed
-    else
-        std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch return Error.OpenFileFailed;
+    // createFileAbsolute is just createFile on cwd (an absolute path ignores
+    // the cwd handle), so one call covers both path kinds.
+    const file = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch return Error.OpenFileFailed;
     defer file.close(io);
     file.writeStreamingAll(io, bytes) catch return Error.WriteFailed;
 }
@@ -360,4 +366,67 @@ test "freedBytes credits the full total when every delete succeeded" {
 
 test "freedBytes is zero for an empty plan" {
     try std.testing.expectEqual(@as(u64, 0), freedBytes(&.{}, &.{}));
+}
+
+test "writeBytesToPath creates a full absolute parent chain with a missing grandparent" {
+    // The safety manifest must land even when the user points --backup at a
+    // nested absolute path whose grandparent is absent — createDirPath is
+    // recursive and an absolute sub_path ignores the cwd handle.
+    const io = std.Options.debug_io;
+    const ts = std.Io.Clock.real.now(io).toNanoseconds();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = std.fmt.bufPrint(&buf, "/tmp/malt_purge_abschain_{d}", .{ts}) catch unreachable;
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+
+    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dest = std.fmt.bufPrint(&dest_buf, "{s}/a/b/manifest.txt", .{root}) catch unreachable;
+
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+    try writeBytesToPath(&ctx, dest, "formula git\n");
+
+    const f = try std.Io.Dir.cwd().openFile(io, dest, .{});
+    defer f.close(io);
+    const stat = try f.stat(io);
+    try std.testing.expect(stat.size > 0);
+}
+
+test "writeBytesToPath propagates a real parent-dir failure as OpenFileFailed" {
+    // Genuine mkdir errors (here: a parent component that is a regular file)
+    // must surface instead of being swallowed and deferred to the leaf.
+    const io = std.Options.debug_io;
+    const ts = std.Io.Clock.real.now(io).toNanoseconds();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = std.fmt.bufPrint(&buf, "/tmp/malt_purge_parentfile_{d}", .{ts}) catch unreachable;
+    std.Io.Dir.cwd().createDirPath(io, root) catch unreachable;
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+
+    var blocker_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const blocker = std.fmt.bufPrint(&blocker_buf, "{s}/afile", .{root}) catch unreachable;
+    (std.Io.Dir.cwd().createFile(io, blocker, .{ .truncate = true }) catch unreachable).close(io);
+
+    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dest = std.fmt.bufPrint(&dest_buf, "{s}/afile/sub/manifest.txt", .{root}) catch unreachable;
+
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+    try std.testing.expectError(Error.OpenFileFailed, writeBytesToPath(&ctx, dest, "formula git\n"));
+}
+
+test "writeBytesToPath accepts a symlink-to-directory parent (e.g. /tmp)" {
+    // createDirPath's nofollow kind check rejects an existing symlink-to-dir
+    // as NotDir; the writer must still succeed when the parent resolves to a
+    // real directory (macOS /tmp is a symlink to /private/tmp).
+    const io = std.Options.debug_io;
+    const ts = std.Io.Clock.real.now(io).toNanoseconds();
+    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dest = std.fmt.bufPrint(&dest_buf, "/tmp/malt_purge_symlinkparent_{d}.txt", .{ts}) catch unreachable;
+    defer std.Io.Dir.cwd().deleteTree(io, dest) catch {};
+
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+    try writeBytesToPath(&ctx, dest, "formula git\n");
+
+    const f = try std.Io.Dir.cwd().openFile(io, dest, .{});
+    defer f.close(io);
+    const stat = try f.stat(io);
+    try std.testing.expect(stat.size > 0);
 }
