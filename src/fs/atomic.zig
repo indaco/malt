@@ -152,6 +152,11 @@ const default_sync_ops: DefaultSyncOps = .{};
 /// the new ones — never a partial write. A crash before the rename
 /// leaves the tempfile behind; the next call writes its own and
 /// overwrites atomically.
+///
+/// Preconditions: `dst_path` must be absolute and its parent directory must
+/// already exist (the tempfile is a sibling and the parent is fsync'd). For an
+/// arbitrary user-supplied path that may need parents created, use
+/// `fs/path_write.zig` instead (non-atomic).
 pub fn atomicWriteFile(io: std.Io, dst_path: []const u8, data: []const u8) !void {
     return atomicWriteFileImpl(io, dst_path, data, default_sync_ops, .default_file);
 }
