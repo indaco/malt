@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.20.4 - 2026-07-01
+
+### 🩹 Fixes
+
+- **cask:** sweep only the uninstalled cask's own cached versions ([3bbee2a](https://github.com/indaco/malt/commit/3bbee2a)) ([#602](https://github.com/indaco/malt/pull/602))
+- **purge:** create nested parent directories for absolute manifest paths ([afe4f79](https://github.com/indaco/malt/commit/afe4f79)) ([#597](https://github.com/indaco/malt/pull/597))
+- **backup:** honor symlink-to-directory parents; collapse redundant leaf in writeToPath ([c72fddd](https://github.com/indaco/malt/commit/c72fddd)) ([#596](https://github.com/indaco/malt/pull/596))
+- **backup:** create nested parent directories for absolute output paths ([8877bfe](https://github.com/indaco/malt/commit/8877bfe)) ([#593](https://github.com/indaco/malt/pull/593))
+- **bundle:** honor explicit create path regardless of --format order ([f7e40e2](https://github.com/indaco/malt/commit/f7e40e2)) ([#592](https://github.com/indaco/malt/pull/592))
+- **purge:** credit only successfully-freed bytes on partial wipe ([b09d8e0](https://github.com/indaco/malt/commit/b09d8e0)) ([#591](https://github.com/indaco/malt/pull/591))
+- **net:** honor MALT_GITHUB_TOKEN across all GitHub API calls ([03b8936](https://github.com/indaco/malt/commit/03b8936)) ([#590](https://github.com/indaco/malt/pull/590))
+- **bundle:** stop trailing comments from aborting Brewfile imports ([685dfb4](https://github.com/indaco/malt/commit/685dfb4)) ([#589](https://github.com/indaco/malt/pull/589))
+
+### 💅 Refactors
+
+- **fs:** extract path_write leaf and route backup/purge/bundle through it ([8bf3f4d](https://github.com/indaco/malt/commit/8bf3f4d)) ([#599](https://github.com/indaco/malt/pull/599))
+- **cli:** collapse redundant absolute/relative file-open branches ([b63eed1](https://github.com/indaco/malt/commit/b63eed1)) ([#598](https://github.com/indaco/malt/pull/598))
+
+### ✅ Tests
+
+- **rollback:** isolate sandbox dirs per process to stop tmp-path races ([e9dc930](https://github.com/indaco/malt/commit/e9dc930)) ([#595](https://github.com/indaco/malt/pull/595))
+
+### 🤖 CI
+
+- ci/upgrade-gh-actions (#603) ([9f7b521](https://github.com/indaco/malt/commit/9f7b521))
+- fix pins auto-bump 403 on homebrew-core HEAD resolution ([13e50a2](https://github.com/indaco/malt/commit/13e50a2)) ([#594](https://github.com/indaco/malt/pull/594))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.20.3 - 2026-06-30
 
 ### 🩹 Fixes
