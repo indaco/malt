@@ -167,6 +167,28 @@ test "execute --output <path> writes only direct-install rows + casks" {
     try testing.expect(std.mem.indexOf(u8, body, "zlib") == null);
 }
 
+test "execute --output <nested absolute path> creates the missing parent chain" {
+    // Absolute destinations must get recursive parent creation, matching
+    // the relative case — a nested path whose grandparent is absent still
+    // writes the file instead of failing at the leaf createFile.
+    var s = try Scratch.init(testing.allocator, "nested_abs");
+    defer s.deinit(testing.allocator);
+    try seedRows(s.path);
+
+    // `$prefix/gp` does not exist yet; `gp/parent` must be created.
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/gp/parent/snap.txt", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+
+    try backup.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "--output", out_path });
+
+    const body = try readAll(testing.allocator, out_path);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "formula wget") != null);
+}
+
 test "execute -o <path> short alias mirrors --output" {
     var s = try Scratch.init(testing.allocator, "short");
     defer s.deinit(testing.allocator);
