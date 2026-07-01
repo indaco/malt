@@ -503,10 +503,9 @@ fn readManifest(
     path: []const u8,
     diag: ?*brewfile_mod.Diagnostics,
 ) !manifest_mod.Manifest {
-    const file = if (std.fs.path.isAbsolute(path))
-        std.Io.Dir.openFileAbsolute(ctx.io, path, .{}) catch return BundleError.BundlefileNotFound
-    else
-        std.Io.Dir.cwd().openFile(ctx.io, path, .{}) catch return BundleError.BundlefileNotFound;
+    // openFileAbsolute is just openFile on cwd (an absolute path ignores the
+    // cwd handle), so one call covers both path kinds.
+    const file = std.Io.Dir.cwd().openFile(ctx.io, path, .{}) catch return BundleError.BundlefileNotFound;
     defer file.close(ctx.io);
 
     const stat = file.stat(ctx.io) catch return BundleError.BundlefileNotFound;
@@ -537,10 +536,9 @@ fn writeManifest(
     path: []const u8,
     format: Format,
 ) !void {
-    const file = if (std.fs.path.isAbsolute(path))
-        std.Io.Dir.createFileAbsolute(ctx.io, path, .{ .truncate = true }) catch return BundleError.WriteFailed
-    else
-        std.Io.Dir.cwd().createFile(ctx.io, path, .{ .truncate = true }) catch return BundleError.WriteFailed;
+    // createFileAbsolute is just createFile on cwd for an absolute path, so
+    // one call covers both path kinds.
+    const file = std.Io.Dir.cwd().createFile(ctx.io, path, .{ .truncate = true }) catch return BundleError.WriteFailed;
     defer file.close(ctx.io);
     var write_buf: [4096]u8 = undefined;
     var fw = file.writer(ctx.io, &write_buf);
