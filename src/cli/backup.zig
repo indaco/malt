@@ -278,15 +278,14 @@ fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8) Error!vo
     // Create parent directories when the user supplied a nested path.
     if (std.fs.path.dirname(path)) |dir| {
         if (dir.len > 0) {
-            if (std.fs.path.isAbsolute(dir)) {
-                std.Io.Dir.createDirAbsolute(ctx.io, dir, .default_dir) catch |e| switch (e) {
-                    error.PathAlreadyExists => {},
-                    else => {},
-                };
-            } else {
-                // Parent may already exist; the subsequent createFile reports real errors.
-                std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch {};
-            }
+            // createDirPath is recursive (mkdir -p) and treats an existing
+            // dir as success; an absolute sub_path ignores the cwd handle, so
+            // one branch covers both. Surface real errors here instead of
+            // deferring to a confusing leaf createFile failure.
+            std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch {
+                output.err("Failed to create {s}", .{dir});
+                return Error.OpenFileFailed;
+            };
         }
     }
 
@@ -517,6 +516,52 @@ test "parseLine parses a service line and keeps `@` inside the name" {
     try std.testing.expectEqual(Kind.service, b.kind);
     try std.testing.expectEqualStrings("redis", b.name);
     try std.testing.expectEqualStrings("", b.version);
+}
+
+test "writeToPath creates a full absolute parent chain with a missing grandparent" {
+    // Regression: the absolute branch must be recursive (mkdir -p), matching
+    // the relative branch. A nested destination whose grandparent is absent
+    // must still be created, not fail at the leaf createFile.
+    const io = std.Options.debug_io;
+    const ts = std.Io.Clock.real.now(io).toNanoseconds();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = std.fmt.bufPrint(&buf, "/tmp/malt_backup_abschain_{d}", .{ts}) catch unreachable;
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+
+    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dest = std.fmt.bufPrint(&dest_buf, "{s}/a/b/backup.txt", .{root}) catch unreachable;
+
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+    try writeToPath(&ctx, dest, "formula git\n");
+
+    const f = try std.Io.Dir.cwd().openFile(io, dest, .{});
+    defer f.close(io);
+    const stat = try f.stat(io);
+    try std.testing.expect(stat.size > 0);
+}
+
+test "writeToPath propagates a real parent-dir failure as OpenFileFailed" {
+    // The recursive branch must surface genuine mkdir errors (here: a
+    // parent path component that is a regular file) instead of swallowing
+    // them and letting the leaf createFile emit a misleading error.
+    const io = std.Options.debug_io;
+    const ts = std.Io.Clock.real.now(io).toNanoseconds();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = std.fmt.bufPrint(&buf, "/tmp/malt_backup_parentfile_{d}", .{ts}) catch unreachable;
+    std.Io.Dir.cwd().createDirPath(io, root) catch unreachable;
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+
+    // A file where a directory component is expected blocks mkdir -p.
+    var blocker_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const blocker = std.fmt.bufPrint(&blocker_buf, "{s}/afile", .{root}) catch unreachable;
+    (std.Io.Dir.cwd().createFile(io, blocker, .{ .truncate = true }) catch unreachable).close(io);
+
+    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dest = std.fmt.bufPrint(&dest_buf, "{s}/afile/sub/backup.txt", .{root}) catch unreachable;
+
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+    try std.testing.expectError(Error.OpenFileFailed, writeToPath(&ctx, dest, "formula git\n"));
 }
 
 test "parseBackup silently drops any future unknown kind (forward-compat)" {
