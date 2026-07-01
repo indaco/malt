@@ -23,6 +23,13 @@ fn unsetPrefix() void {
     _ = c.unsetenv("MALT_PREFIX");
 }
 
+/// Per-process sandbox prefix. A shared `/tmp` path races with a concurrent
+/// `zig build test` (or the ReleaseSafe regression harness) and fails the
+/// WAL-mode open; keying on the pid keeps each runner isolated.
+fn rbPrefix(buf: []u8, comptime name: []const u8) [:0]const u8 {
+    return std.fmt.bufPrintZ(buf, "/tmp/malt_rb_{d}_" ++ name, .{std.c.getpid()}) catch unreachable;
+}
+
 /// Create a sandboxed malt prefix with an initialized empty DB. Caller must
 /// `deleteTreeAbsolute` on the returned path.
 fn makeSandbox(path: [:0]const u8) !void {
@@ -41,11 +48,14 @@ fn makeSandbox(path: [:0]const u8) !void {
 }
 
 test "schema creates kegs table with expected columns" {
-    const prefix = "/tmp/malt_rb_test";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "test");
     test_io.makeDirAbsolute(std.Options.debug_io, prefix) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
-    var db = try sqlite.Database.open("/tmp/malt_rb_test/rb.db");
+    var db_buf: [96]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_buf, "{s}/rb.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
 
@@ -68,7 +78,8 @@ test "rollback returns error.Aborted when no package name given" {
 }
 
 test "rollback returns error.Aborted for package not installed" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_notinstalled";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "notinstalled");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
@@ -85,7 +96,8 @@ test "rollback returns error.Aborted for package not installed" {
 }
 
 test "rollback returns error.Aborted when no previous version exists in store" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_nostore";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "nostore");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
@@ -110,11 +122,14 @@ test "rollback returns error.Aborted when no previous version exists in store" {
 }
 
 test "capturePinnedById reads the pinned column for a given keg id" {
-    const prefix = "/tmp/malt_rb_capture_pin";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "capture_pin");
     test_io.makeDirAbsolute(std.Options.debug_io, prefix) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
-    var db = try sqlite.Database.open("/tmp/malt_rb_capture_pin/db.db");
+    var db_buf: [96]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_buf, "{s}/db.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
 
@@ -145,7 +160,8 @@ test "capturePinnedById reads the pinned column for a given keg id" {
 }
 
 test "rollback distinguishes a cask token from a truly missing package" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_diag";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "cask_diag");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
@@ -185,11 +201,14 @@ test "rollback distinguishes a cask token from a truly missing package" {
 }
 
 test "schema version table exists" {
-    const prefix = "/tmp/malt_sv_test";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "sv_test");
     test_io.makeDirAbsolute(std.Options.debug_io, prefix) catch {};
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
-    var db = try sqlite.Database.open("/tmp/malt_sv_test/sv.db");
+    var db_buf: [96]u8 = undefined;
+    const db_path = try std.fmt.bufPrintZ(&db_buf, "{s}/sv.db", .{prefix});
+    var db = try sqlite.Database.open(db_path);
     defer db.close();
     try schema.initSchema(&db);
 
@@ -248,7 +267,8 @@ fn seedStoreEntry(
 }
 
 test "rollback --list prints every store entry available for the package" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_list_happy";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "list_happy");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
@@ -285,7 +305,8 @@ test "rollback --list prints every store entry available for the package" {
 }
 
 test "rollback --list --json emits the documented JSON shape" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_list_json";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "list_json");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
@@ -331,7 +352,8 @@ test "rollback --list --json emits the documented JSON shape" {
 }
 
 test "rollback --to <current_version> is a clean no-op, not a confusing refusal" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_to_current";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "to_current");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
@@ -362,7 +384,8 @@ test "rollback --to <current_version> is a clean no-op, not a confusing refusal"
 }
 
 test "rollback --to <version> refuses with the listing when the version is absent" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_to_missing";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "to_missing");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
@@ -425,7 +448,8 @@ fn seedCaskVersion(prefix: [:0]const u8, token: []const u8, version: []const u8,
 }
 
 test "rollback <cask> --list lists every retained cask version" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_list_happy";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "cask_list_happy");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
@@ -459,7 +483,8 @@ test "rollback <cask> --list lists every retained cask version" {
 }
 
 test "rollback <cask> --to <missing> refuses with the cask listing" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_to_missing";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "cask_to_missing");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
@@ -486,7 +511,8 @@ test "rollback <cask> --to <missing> refuses with the cask listing" {
 }
 
 test "rollback <cask> --to <current> is an idempotent no-op" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_to_current";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "cask_to_current");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
@@ -506,7 +532,8 @@ test "rollback <cask> --to <current> is an idempotent no-op" {
 }
 
 test "rollback <cask> --to <ver> dry-run announces without engaging install" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_dryrun";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "cask_dryrun");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
@@ -526,7 +553,8 @@ test "rollback <cask> --to <ver> dry-run announces without engaging install" {
 }
 
 test "rollback <cask> (no flag) lands on the newest non-current entry" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_default";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "cask_default");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
@@ -556,7 +584,8 @@ test "rollback <cask> (no flag) lands on the newest non-current entry" {
 }
 
 test "rollback <cask> with empty history refuses with a useful diagnostic" {
-    const prefix: [:0]const u8 = "/tmp/malt_rb_cask_empty";
+    var pbuf: [64]u8 = undefined;
+    const prefix = rbPrefix(&pbuf, "cask_empty");
     try makeSandbox(prefix);
     defer test_io.deleteTreeAbsolute(std.Options.debug_io, prefix) catch {};
 
