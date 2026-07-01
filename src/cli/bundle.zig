@@ -11,6 +11,7 @@ const runner_mod = @import("../core/bundle/runner.zig");
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const path_write = @import("../fs/path_write.zig");
 const output = @import("../ui/output.zig");
 const install_sink_mod = @import("install/sink.zig");
 const install_cmd = @import("install.zig");
@@ -536,8 +537,9 @@ fn writeManifest(
     path: []const u8,
     format: Format,
 ) !void {
-    // createFileAbsolute is just createFile on cwd for an absolute path, so
-    // one call covers both path kinds.
+    // Create parents for a nested out_path; streams into the file below, so
+    // only the parent step is shared with backup/purge's path_write.writeFile.
+    path_write.ensureParentDir(ctx.io, path) catch return BundleError.WriteFailed;
     const file = std.Io.Dir.cwd().createFile(ctx.io, path, .{ .truncate = true }) catch return BundleError.WriteFailed;
     defer file.close(ctx.io);
     var write_buf: [4096]u8 = undefined;
@@ -715,4 +717,27 @@ test "create: explicit out_path wins regardless of --format position" {
     // An invalid format is rejected; --services rides through to the result.
     try std.testing.expect(resolveCreateArgs(&.{ "--format", "yaml" }) == null);
     try std.testing.expect(resolveCreateArgs(&.{"--services"}).?.include_services);
+}
+
+test "writeManifest creates parent directories for a nested output path" {
+    // A nested out_path whose parent is missing must be created, not fail with
+    // no file — parity with `backup -o` / `purge --backup`.
+    const io = std.Options.debug_io;
+    const ts = std.Io.Clock.real.now(io).toNanoseconds();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = std.fmt.bufPrint(&buf, "/tmp/malt_bundle_nested_{d}", .{ts}) catch unreachable;
+    std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+
+    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dest = std.fmt.bufPrint(&dest_buf, "{s}/a/b/Brewfile", .{root}) catch unreachable;
+
+    var manifest = manifest_mod.Manifest.init(std.testing.allocator);
+    defer manifest.deinit();
+
+    const ctx: AppCtx = .{ .io = io, .environ = .empty };
+    try writeManifest(&ctx, manifest, dest, .brewfile);
+
+    const f = try std.Io.Dir.cwd().openFile(io, dest, .{});
+    f.close(io);
 }

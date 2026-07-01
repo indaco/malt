@@ -20,6 +20,7 @@ const AppCtx = @import("../app_ctx.zig").AppCtx;
 const schema = @import("../db/schema.zig");
 const sqlite = @import("../db/sqlite.zig");
 const atomic = @import("../fs/atomic.zig");
+const path_write = @import("../fs/path_write.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
 
@@ -275,37 +276,18 @@ fn executeJson(
 }
 
 fn writeToPath(ctx: *const AppCtx, path: []const u8, bytes: []const u8) Error!void {
-    // Create parent directories when the user supplied a nested path.
-    if (std.fs.path.dirname(path)) |dir| {
-        if (dir.len > 0) {
-            // Create the parent chain recursively (mkdir -p); an absolute
-            // sub_path ignores the cwd handle, so one call covers both kinds.
-            // createDirPath's kind check is nofollow, so it rejects an
-            // existing symlink-to-dir parent (e.g. /tmp) as NotDir — skip
-            // creation when the parent already resolves to a directory, and
-            // surface genuine failures instead of deferring to the leaf.
-            const already_dir = if (std.Io.Dir.cwd().statFile(ctx.io, dir, .{})) |st|
-                st.kind == .directory
-            else |_|
-                false;
-            if (!already_dir) {
-                std.Io.Dir.cwd().createDirPath(ctx.io, dir) catch {
-                    output.err("Failed to create {s}", .{dir});
-                    return Error.OpenFileFailed;
-                };
-            }
-        }
-    }
-
-    // createFileAbsolute is just createFile on cwd (an absolute path ignores
-    // the cwd handle), so one call covers both path kinds — mirrors the
-    // createDirPath collapse above.
-    const file = std.Io.Dir.cwd().createFile(ctx.io, path, .{ .truncate = true }) catch {
-        output.err("Failed to create {s}", .{path});
-        return Error.OpenFileFailed;
+    path_write.writeFile(ctx.io, path, bytes) catch |e| switch (e) {
+        // On a parent-dir failure the offending path is its dirname.
+        error.MakeParentDirFailed => {
+            output.err("Failed to create {s}", .{std.fs.path.dirname(path) orelse path});
+            return Error.OpenFileFailed;
+        },
+        error.OpenFileFailed => {
+            output.err("Failed to create {s}", .{path});
+            return Error.OpenFileFailed;
+        },
+        error.WriteFailed => return Error.WriteFailed,
     };
-    defer file.close(ctx.io);
-    file.writeStreamingAll(ctx.io, bytes) catch return Error.WriteFailed;
 }
 
 /// Plain-data view of one formula row for the `--json` writer.
@@ -524,9 +506,8 @@ test "parseLine parses a service line and keeps `@` inside the name" {
 }
 
 test "writeToPath creates a full absolute parent chain with a missing grandparent" {
-    // Regression: the absolute branch must be recursive (mkdir -p), matching
-    // the relative branch. A nested destination whose grandparent is absent
-    // must still be created, not fail at the leaf createFile.
+    // Delegation smoke: a nested destination whose grandparent is absent is
+    // still written (parent creation happens in path_write.writeFile).
     const io = std.Options.debug_io;
     const ts = std.Io.Clock.real.now(io).toNanoseconds();
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -547,9 +528,8 @@ test "writeToPath creates a full absolute parent chain with a missing grandparen
 }
 
 test "writeToPath propagates a real parent-dir failure as OpenFileFailed" {
-    // The recursive branch must surface genuine mkdir errors (here: a
-    // parent path component that is a regular file) instead of swallowing
-    // them and letting the leaf createFile emit a misleading error.
+    // Pins the other mapping arm: a parent-dir failure (a parent component is
+    // a regular file → MakeParentDirFailed) must surface as OpenFileFailed.
     const io = std.Options.debug_io;
     const ts = std.Io.Clock.real.now(io).toNanoseconds();
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -569,52 +549,10 @@ test "writeToPath propagates a real parent-dir failure as OpenFileFailed" {
     try std.testing.expectError(Error.OpenFileFailed, writeToPath(&ctx, dest, "formula git\n"));
 }
 
-test "writeToPath creates a relative nested parent chain (relative input)" {
-    // The collapsed path must accept a relative destination too, resolved
-    // against cwd. A uniquely-named dir under the test cwd exercises it
-    // without chdir or shared state, so coverage of the relative case
-    // doesn't hinge on the shell regression running.
-    const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var rel_buf: [64]u8 = undefined;
-    const rel_root = std.fmt.bufPrint(&rel_buf, "zz_malt_backup_rel_{d}", .{ts}) catch unreachable;
-    defer std.Io.Dir.cwd().deleteTree(io, rel_root) catch {};
-
-    var dest_buf: [128]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "{s}/sub/backup.txt", .{rel_root}) catch unreachable;
-
-    const ctx: AppCtx = .{ .io = io, .environ = .empty };
-    try writeToPath(&ctx, dest, "formula git\n");
-
-    const f = try std.Io.Dir.cwd().openFile(io, dest, .{});
-    defer f.close(io);
-    const stat = try f.stat(io);
-    try std.testing.expect(stat.size > 0);
-}
-
-test "writeToPath accepts a symlink-to-directory parent (e.g. /tmp)" {
-    // createDirPath's nofollow kind check rejects an existing symlink-to-dir
-    // as NotDir; the writer must still succeed when the parent resolves to a
-    // real directory (macOS /tmp is a symlink to /private/tmp).
-    const io = std.Options.debug_io;
-    const ts = std.Io.Clock.real.now(io).toNanoseconds();
-    var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dest = std.fmt.bufPrint(&dest_buf, "/tmp/malt_backup_symlinkparent_{d}.txt", .{ts}) catch unreachable;
-    defer std.Io.Dir.cwd().deleteTree(io, dest) catch {};
-
-    const ctx: AppCtx = .{ .io = io, .environ = .empty };
-    try writeToPath(&ctx, dest, "formula git\n");
-
-    const f = try std.Io.Dir.cwd().openFile(io, dest, .{});
-    defer f.close(io);
-    const stat = try f.stat(io);
-    try std.testing.expect(stat.size > 0);
-}
-
 test "writeToPath maps a failing leaf createFile to OpenFileFailed" {
-    // Parent creation succeeds, but the destination path is itself a
-    // directory, so the leaf createFile fails — the catch must surface
-    // OpenFileFailed rather than propagate a raw fs error.
+    // Exhaustive path_write edge cases live in `fs/path_write.zig`; here we
+    // only pin the caller's error mapping. Destination is a directory, so the
+    // leaf createFile fails and the catch must surface OpenFileFailed.
     const io = std.Options.debug_io;
     const ts = std.Io.Clock.real.now(io).toNanoseconds();
     var buf: [std.fs.max_path_bytes]u8 = undefined;
