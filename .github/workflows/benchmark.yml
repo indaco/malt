@@ -21,7 +21,7 @@ jobs:
       BENCH_TRUE_COLD: "1"
       BENCH_FAIL_FAST: "1"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
