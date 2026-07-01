@@ -394,6 +394,23 @@ test "bundle create --format json emits registered taps in the manifest" {
     try testing.expectEqualStrings("xykong/tap", taps.array.items[1].string);
 }
 
+test "bundle create writes a nested output path, creating missing parents" {
+    // The out_path's parent dir does not exist yet; create must make it
+    // rather than fail — parity with `backup -o` / `purge --backup`.
+    var s = try Scratch.init(testing.allocator, "create_nested");
+    defer s.deinit(testing.allocator);
+
+    const out_path = try std.fmt.allocPrint(testing.allocator, "{s}/nested/sub/Brewfile", .{s.path});
+    defer testing.allocator.free(out_path);
+
+    quiet();
+    defer unquiet();
+    try bundle.execute(&malt.app_ctx.debug_ctx, testing.allocator, &.{ "create", out_path });
+
+    const f = try test_io.openFileAbsolute(std.Options.debug_io, out_path, .{});
+    f.close(std.Options.debug_io);
+}
+
 test "bundle create --format json --services emits auto_start services only" {
     var s = try Scratch.init(testing.allocator, "create_services");
     defer s.deinit(testing.allocator);
