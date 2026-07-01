@@ -264,10 +264,9 @@ pub fn artifactTypeTag(t: ArtifactType) []const u8 {
 }
 
 /// Delete the per-version cache file for one `(token, version)` pair.
-/// Mirrors the `<prefix>/cache/Cask/<token>-<version>.<ext>` naming
-/// `sweepPerVersionCache` matches by prefix, but stays surgical so
-/// `purge --old-versions` can drop a stale version without touching
-/// the current one. Iterates every known extension because
+/// Writes to the `<prefix>/cache/Cask/<token>-<version>.<ext>` naming and
+/// stays surgical so `purge --old-versions` can drop a stale version
+/// without touching the current one. Iterates every known extension because
 /// `cask_versions.artifact_type` is nullable on rows backfilled
 /// before v7. Returns true when every file that existed was removed
 /// (or none existed); false when an existing file could not be
@@ -283,25 +282,22 @@ pub fn deletePerVersionCacheFile(io: std.Io, prefix: []const u8, token: []const 
     return true;
 }
 
-/// Iterate `{prefix}/cache/Cask/` and delete any file whose basename
-/// starts with `{token}-` — the per-version cache shape this binary
-/// writes. Used by uninstall + purge so per-version artefacts don't
-/// outlive their owning cask. Best-effort; silent on missing dirs.
-pub fn sweepPerVersionCache(io: std.Io, prefix: []const u8, token: []const u8) void {
-    var dir_buf: [512]u8 = undefined;
-    const cache_dir_path = std.fmt.bufPrint(&dir_buf, "{s}/cache/Cask", .{prefix}) catch return;
+/// Delete the cached per-version artefacts this token owns, resolved from
+/// its `cask_versions` history rather than a lexical `{token}-` prefix. A
+/// bare prefix also matches sibling tokens (`git` is a prefix of `git-lfs`),
+/// and versions legitimately contain dashes, so the recorded version list is
+/// the only signal that separates a real version from a sibling's suffix.
+/// Enumerates every history row so stale rollback artefacts are swept too.
+/// Best-effort: a failed delete never gates uninstall. Call BEFORE the
+/// history rows are deleted, or the version list is already empty.
+pub fn sweepOwnedVersionCache(io: std.Io, db: *sqlite.Database, prefix: []const u8, token: []const u8) void {
+    var stmt = db.prepare("SELECT version FROM cask_versions WHERE token = ?1;") catch return;
+    defer stmt.finalize();
+    stmt.bindText(1, token) catch return;
 
-    var dir = std.Io.Dir.openDirAbsolute(io, cache_dir_path, .{ .iterate = true }) catch return;
-    defer dir.close(io);
-
-    var prefix_buf: [256]u8 = undefined;
-    const name_prefix = std.fmt.bufPrint(&prefix_buf, "{s}-", .{token}) catch return;
-
-    var iter = dir.iterate();
-    while (iter.next(io) catch null) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.startsWith(u8, entry.name, name_prefix)) continue;
-        dir.deleteFile(io, entry.name) catch {};
+    while (stmt.step() catch false) {
+        const ver_ptr = stmt.columnText(0) orelse continue;
+        _ = deletePerVersionCacheFile(io, prefix, token, std.mem.sliceTo(ver_ptr, 0));
     }
 }
 
@@ -641,7 +637,9 @@ pub const CaskInstaller = struct {
             const cache_file = std.fmt.bufPrint(&cache_buf, "{s}/cache/Cask/{s}{s}", .{ self.prefix, token, ext }) catch continue;
             std.Io.Dir.cwd().deleteFile(self.io, cache_file) catch {};
         }
-        sweepPerVersionCache(self.io, self.prefix, token);
+        // Must precede the history wipe below — the sweep reads the version
+        // list from `cask_versions`, which the DELETE would otherwise empty.
+        sweepOwnedVersionCache(self.io, self.db, self.prefix, token);
 
         // Drop every history row so a future install starts clean.
         if (self.db.prepare("DELETE FROM cask_versions WHERE token = ?1;")) |prepared| {
