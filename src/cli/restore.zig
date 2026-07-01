@@ -169,10 +169,9 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
 }
 
 fn readFile(ctx: *const AppCtx, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = if (std.fs.path.isAbsolute(path))
-        try std.Io.Dir.openFileAbsolute(ctx.io, path, .{})
-    else
-        try std.Io.Dir.cwd().openFile(ctx.io, path, .{});
+    // openFileAbsolute is just openFile on cwd for an absolute path, so one
+    // call covers both path kinds.
+    const file = try std.Io.Dir.cwd().openFile(ctx.io, path, .{});
     defer file.close(ctx.io);
 
     const stat = try file.stat(ctx.io);

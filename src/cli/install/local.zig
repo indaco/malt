@@ -387,16 +387,12 @@ pub fn installLocalFormula(
     // messages and the kegs row — defeating the "relative path in a
     // shared Brewfile" footgun.
     var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const real_n = if (std.fs.path.isAbsolute(expanded))
-        std.Io.Dir.realPathFileAbsolute(ctx.io, expanded, &real_buf) catch {
-            sink.err("Cannot open local formula: {s}", .{pkg_arg});
-            return InstallError.LocalFormulaNotReadable;
-        }
-    else
-        std.Io.Dir.cwd().realPathFile(ctx.io, expanded, &real_buf) catch {
-            sink.err("Cannot open local formula: {s}", .{pkg_arg});
-            return InstallError.LocalFormulaNotReadable;
-        };
+    // realPathFileAbsolute is just realPathFile on cwd for an absolute path,
+    // so one call covers both path kinds.
+    const real_n = std.Io.Dir.cwd().realPathFile(ctx.io, expanded, &real_buf) catch {
+        sink.err("Cannot open local formula: {s}", .{pkg_arg});
+        return InstallError.LocalFormulaNotReadable;
+    };
     const realpath = real_buf[0..real_n];
 
     // Security warning on every install — the `.rb` is a code-execution
