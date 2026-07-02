@@ -130,6 +130,12 @@ pre-commit:
 pre-push: fmt-check test shell-lint
     #!/usr/bin/env bash
     set -euo pipefail
+    # Feed the smoke an auth token so GitHub rate limits don't silently
+    # downgrade the download-only tap check to SKIP.
+    if [ -z "${MALT_GITHUB_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
+        MALT_GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
+        export MALT_GITHUB_TOKEN
+    fi
     if [ "${MALT_SKIP_SMOKE:-0}" = "1" ]; then
         echo "▸ MALT_SKIP_SMOKE=1 — skipping install smoke"
     elif git rev-parse --verify origin/main >/dev/null 2>&1 \
