@@ -74,7 +74,7 @@ curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh
 
 The script needs [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/) on your `PATH`. To bypass verification (not recommended), set `MALT_ALLOW_UNVERIFIED=1`. If no release matches your platform, the script falls back to building from source.
 
-To verify `install.sh` itself out of band, pin to a release tag — the latest below, or any release you trust — and compare its SHA256 against that release's notes:
+To verify `install.sh` itself out of band, pin to a release tag - the latest below, or any release you trust - and compare its SHA256 against that release's notes:
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.20.0/scripts/install.sh" -o install.sh
@@ -82,7 +82,7 @@ shasum -a 256 install.sh
 bash install.sh
 ```
 
-`v0.20.0` here is an example — swap it for the release you intend to install (see the version badge at the top).
+`v0.20.0` here is an example - swap it for the release you intend to install (see the version badge at the top).
 
 ### Via Homebrew
 
@@ -246,7 +246,7 @@ Commands grouped by what you're doing. Every command works with `malt` or `mt`, 
 At a glance - `malt -h`:
 
 ```text
-malt — Homebrew's whole ecosystem, none of its weight.
+malt - Homebrew's whole ecosystem, none of its weight.
 Reuses every formula, bottle, and Brewfile; runs post_install natively.
 Themeable TUI and CLI.
 
@@ -383,8 +383,8 @@ mt which jq                              # reverse lookup: bin -> keg-path
 
 | Flag                              | Scope                                                    |
 | --------------------------------- | -------------------------------------------------------- |
-| (default) / `--api`               | Homebrew API — substring match across formulas and casks |
-| `--installed`                     | Local DB scan (`kegs.name`, `casks.token`) — no network  |
+| (default) / `--api`               | Homebrew API - substring match across formulas and casks |
+| `--installed`                     | Local DB scan (`kegs.name`, `casks.token`) - no network  |
 | `--all`                           | Both passes, merged and deduped                          |
 | `--offline` (or `MALT_OFFLINE=1`) | Collapses every scope into `--installed`                 |
 
@@ -539,7 +539,7 @@ Auto-classified from the host: `gitlab.*`, `codeberg.org`. Everything else needs
 
 - Self-hosted GitLab (e.g. `code.acme.com`) → `--forge gitlab`
 - Forgejo/Gitea → `--forge gitea`
-- Gogs → `--forge gogs` — always explicit. Gogs shares the Gitea API and `MALT_GITEA_TOKEN`, but its pin endpoint differs, so it can't be folded into auto-classification.
+- Gogs → `--forge gogs` - always explicit. Gogs shares the Gitea API and `MALT_GITEA_TOKEN`, but its pin endpoint differs, so it can't be folded into auto-classification.
 
 See the [environment variables](#environment-variables) table for what each token is sent as.
 
@@ -643,7 +643,7 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 | `MALT_MIGRATE_PARALLEL_WORKERS` | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                                                                                          | `4`                             |
 | `MALT_OUTDATED_MAX_AGE`         | TTL in minutes for the `outdated.json` snapshot                                                                                                          | `5`                             |
 | `MALT_ALLOW_RAW_POST_INSTALL`   | Disable terminal escape filter on ruby `post_install` output                                                                                             | unset                           |
-| `MALT_ALLOW_UNVERIFIED`         | Skip signature + checksum verification — in `install.sh`, and in `mt version update --no-verify` (use only when cosign is unavailable)                   | unset                           |
+| `MALT_ALLOW_UNVERIFIED`         | Skip signature + checksum verification - in `install.sh`, and in `mt version update --no-verify` (use only when cosign is unavailable)                   | unset                           |
 | `MALT_ALLOW_UNVERIFIED_SOURCE`  | Allow `install.sh` to clone `main` when no release tag resolves                                                                                          | unset                           |
 
 ## Safety and security
@@ -651,7 +651,7 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 malt's correctness rests on a few load-bearing properties:
 
 - **SHA256 verification.** Streaming hash computed during download, verified before extraction. No unverified data touches the store.
-- **Tar entry pre-scan.** Every entry's name and symlink target are validated before any byte is written. The 512-byte tar header is checksum-verified per entry. Hardlinks are applied via `linkat(..., 0)`, which refuses to follow a symlink — so a hostile tarball cannot land a hardlink inside the keg via a symlink to `/etc/passwd`.
+- **Tar entry pre-scan.** Every entry's name and symlink target are validated before any byte is written. The 512-byte tar header is checksum-verified per entry. Hardlinks are applied via `linkat(..., 0)`, which refuses to follow a symlink - so a hostile tarball cannot land a hardlink inside the keg via a symlink to `/etc/passwd`.
 - **Pre-flight checks.** Dependencies resolved, disk space verified, link conflicts detected before any download begins.
 - **Atomic installs.** The 9-step protocol uses `errdefer` at every stage. Interrupted installs leave no partial state.
 - **Concurrent access.** A 30-second-timeout advisory file lock prevents concurrent mutations. Read-only commands don't acquire it.
@@ -674,13 +674,13 @@ The supply-chain story:
 `mt install --local ./formula.rb` deserves its own paragraph because it is a code-execution surface in a way the rest of malt isn't. The `.rb` file names the archive URL and SHA256 of what ends up on your system - installing one trusts that file. Use it for your own formulas, for experimenting with upstream changes before they land in a tap, or for private in-house packages. Do not use it for a `.rb` you did not read.
 
 - **Path echo.** malt prints the canonical realpath on every install, so an attentive reader notices surprises like `/tmp/...`.
-- **Auto-detection.** A leading `./`, `/`, `~/`, or any embedded slash combined with a `.rb` suffix auto-detects as a local path; the same warning fires either way. Bare filenames (e.g. `wget.rb`) are _not_ auto-detected — pass `--local` to disambiguate.
+- **Auto-detection.** A leading `./`, `/`, `~/`, or any embedded slash combined with a `.rb` suffix auto-detects as a local path; the same warning fires either way. Bare filenames (e.g. `wget.rb`) are _not_ auto-detected - pass `--local` to disambiguate.
 - **Scheme allowlist.** The archive URL must be `https://`; plaintext HTTP, `file://`, `ftp://`, and `data:` are rejected before any download.
 - **Constant-time compare.** The SHA256 check runs in constant time.
 - **Ownership warning.** An extra ⚠ line fires if the `.rb` is world-writable or owned by a different user.
 - **Flag conflicts refused.** Combining `--local` with `--cask`, `--formula`, or `--use-system-ruby` is refused up front.
 
-For local installs, malt reads only the bottle-style `version` + `url` + `sha256` triple (optionally nested under `on_macos` / `on_arm` / `on_intel`). It does not evaluate `depends_on` or `post_install` — if you need either, publish the formula to a tap and install via `mt install user/tap/formula` instead.
+For local installs, malt reads only the bottle-style `version` + `url` + `sha256` triple (optionally nested under `on_macos` / `on_arm` / `on_intel`). It does not evaluate `depends_on` or `post_install` - if you need either, publish the formula to a tap and install via `mt install user/tap/formula` instead.
 
 Supported archive formats are `.tar.gz`, `.tgz`, `.tar.xz`, and `.zip`. The formula name comes from the file's basename: `hello.rb` installs `hello`. A minimal compatible `.rb`:
 
@@ -760,11 +760,11 @@ Homebrew bottles contain hardcoded `/opt/homebrew/Cellar/...` paths in Mach-O lo
 3. Rewrite paths in-place and pad the remaining space with null bytes.
 4. On arm64, ad-hoc codesign the patched binary via `codesign --force --sign -`.
 
-Text files (`.pc` configs, shell scripts) containing `@@HOMEBREW_PREFIX@@` or `@@HOMEBREW_CELLAR@@` placeholders are patched the same way. Patching always happens on the Cellar copy, never the store original — if it fails, the Cellar copy is deleted and the store entry stays pristine for retry.
+Text files (`.pc` configs, shell scripts) containing `@@HOMEBREW_PREFIX@@` or `@@HOMEBREW_CELLAR@@` placeholders are patched the same way. Patching always happens on the Cellar copy, never the store original - if it fails, the Cellar copy is deleted and the store entry stays pristine for retry.
 
 ### The post_install interpreter
 
-When a formula defines `post_install`, malt tries its native interpreter first — it only activates for formulas that define the method. It parses and evaluates the Ruby subset those blocks actually use:
+When a formula defines `post_install`, malt tries its native interpreter first - it only activates for formulas that define the method. It parses and evaluates the Ruby subset those blocks actually use:
 
 - `Pathname` operations, `FileUtils`, `inreplace`, `Dir.glob`
 - string interpolation, `%w[]` arrays, the boolean operators
@@ -773,7 +773,7 @@ When a formula defines `post_install`, malt tries its native interpreter first �
 
 Source for `homebrew-core` formulas is fetched on demand from GitHub if the tap isn't cloned locally.
 
-Every mutating filesystem operation — write, rm, chmod, symlink — is validated against the formula's Cellar prefix and the malt prefix; paths containing `..` or resolving outside the sandbox via symlinks are rejected immediately.
+Every mutating filesystem operation - write, rm, chmod, symlink - is validated against the formula's Cellar prefix and the malt prefix; paths containing `..` or resolving outside the sandbox via symlinks are rejected immediately.
 
 When the interpreter hits an unsupported construct, the user is directed to `--use-system-ruby`, which delegates to a sandboxed Ruby subprocess scoped to the formula's cellar, with:
 
@@ -892,7 +892,7 @@ A cold sample here starts from a wiped install prefix for every tool, so the fir
 
 - malt, nanobrew, zerobrew: one prefix wipe covers both (the cache lives inside the prefix).
 - Homebrew: the cache lives outside the prefix (`~/Library/Caches/Homebrew/downloads`), so it's wiped explicitly per formula and its transitive deps via `brew --cache`.
-- Without that extra Homebrew wipe, local brew numbers come out 5–25× faster than CI's — brew is reusing bottles cached by earlier rounds.
+- Without that extra Homebrew wipe, local brew numbers come out 5–25× faster than CI's - brew is reusing bottles cached by earlier rounds.
 
 Each package bench opens with a discarded warmup round: every tool runs one install/uninstall pair whose timings are thrown away, so DNS, TLS session cache, TCP congestion window, and disk caches are all populated before timing starts.
 
