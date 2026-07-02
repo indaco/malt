@@ -57,6 +57,16 @@ pub const GhcrClient = struct {
         self.cached_scopes.deinit(self.allocator);
     }
 
+    /// Mutex-guarded cache drop for callers that run *outside* the lock
+    /// (`downloadBlob`). `clearCache` assumes the caller already holds
+    /// `self.mutex`; reaching into it bare from the unlocked blob path would
+    /// race a sibling worker's `fetchToken`, so take the lock here.
+    fn invalidateToken(self: *GhcrClient) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.clearCache();
+    }
+
     /// Drop any cached token + the owned scope keys. Caller holds
     /// `self.mutex` where concurrent access is possible.
     fn clearCache(self: *GhcrClient) void {
@@ -230,30 +240,48 @@ pub const GhcrClient = struct {
         body_out: *std.ArrayList(u8),
         progress: ?client_mod.ProgressCallback,
     ) GhcrError!void {
-        const token = self.fetchToken(http, repo) catch return GhcrError.TokenFetchFailed;
-        defer self.allocator.free(token);
-
         var url_buf: [512]u8 = undefined;
         const url = try buildBlobUrl(&url_buf, self.base_url, repo, digest);
 
-        var auth_buf: [2048]u8 = undefined;
-        const auth_value = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token}) catch
-            return GhcrError.OutOfMemory;
+        // A 401 on a token the local clock still deems valid means the
+        // registry rejected it (skew / early revocation / scope gap), so
+        // routine expiry — already caught by `fetchToken`'s clock check — is
+        // not the case we retry. Invalidate the cache and re-fetch once; a
+        // fresh single-scope round-trip replaces the dead token. This also
+        // drops the shared multi-scope token `prefetchTokens` seeded, so
+        // sibling batch workers re-fetch per-repo on their next call — the
+        // cache re-converges, and that beats replaying a token the registry
+        // is actively rejecting. A second 401 is terminal.
+        var retried = false;
+        while (true) {
+            const token = self.fetchToken(http, repo) catch return GhcrError.TokenFetchFailed;
+            defer self.allocator.free(token);
 
-        const headers = [_]std.http.Header{
-            .{ .name = "Authorization", .value = auth_value },
-        };
+            var auth_buf: [2048]u8 = undefined;
+            const auth_value = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token}) catch
+                return GhcrError.OutOfMemory;
 
-        var resp = http.getWithHeaders(url, &headers, progress) catch
-            return GhcrError.DownloadFailed;
-        defer resp.deinit();
+            const headers = [_]std.http.Header{
+                .{ .name = "Authorization", .value = auth_value },
+            };
 
-        if (resp.status == 401) return GhcrError.Unauthorized;
-        if (resp.status != 200) {
-            return classifyGhcrStatus(resp.status);
+            var resp = http.getWithHeaders(url, &headers, progress) catch
+                return GhcrError.DownloadFailed;
+            defer resp.deinit();
+
+            if (resp.status == 401) {
+                if (retried) return GhcrError.Unauthorized;
+                retried = true;
+                self.invalidateToken();
+                continue;
+            }
+            if (resp.status != 200) {
+                return classifyGhcrStatus(resp.status);
+            }
+
+            body_out.appendSlice(allocator, resp.body) catch return GhcrError.OutOfMemory;
+            return;
         }
-
-        body_out.appendSlice(allocator, resp.body) catch return GhcrError.OutOfMemory;
     }
 
     pub fn classifyGhcrStatus(status: u16) GhcrError {
@@ -323,4 +351,29 @@ test "buildBlobUrl threads the override base into the blob path" {
 test "buildBlobUrl returns OutOfMemory when the buffer can't hold the URL" {
     var tiny: [8]u8 = undefined;
     try testing.expectError(GhcrError.OutOfMemory, GhcrClient.buildBlobUrl(&tiny, "https://reg.example.com", "homebrew/core/wget", "sha256:abc"));
+}
+
+test "invalidateToken clears a seeded cache and is a no-op when already empty" {
+    var pool = try pool_mod.HttpClientPool.init(std.Options.debug_io, std.process.Environ.empty, testing.allocator, 1);
+    defer pool.deinit();
+    const http = pool.acquire();
+    defer pool.release(http);
+
+    var g = GhcrClient.init(std.Options.debug_io, testing.allocator, http);
+    defer g.deinit();
+
+    // Empty cache: invalidation must not underflow or double-free.
+    g.invalidateToken();
+    try testing.expect(g.cached_token == null);
+
+    g.cached_token = try testing.allocator.dupe(u8, "dead-token");
+    try g.cached_scopes.put(testing.allocator, try testing.allocator.dupe(u8, "homebrew/core/tree"), {});
+    g.token_expiry = std.math.maxInt(i64);
+
+    // The blob-path invalidation the 401 retry relies on: a locally-unexpired
+    // but registry-rejected token is dropped so the next fetch re-fetches.
+    g.invalidateToken();
+    try testing.expect(g.cached_token == null);
+    try testing.expectEqual(@as(usize, 0), g.cached_scopes.count());
+    try testing.expect(!g.hasTokenFor("homebrew/core/tree"));
 }
