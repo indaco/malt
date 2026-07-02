@@ -13,12 +13,11 @@ Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosyste
 [![Built with Devbox](https://www.jetify.com/img/devbox/shield_galaxy.svg)](https://www.jetify.com/devbox/docs/contributor-quickstart/)
 
 <p align="center">
-  <b><a href="#why-malt-exists">Why malt</a></b> &middot;
-  <b><a href="#features">Features</a></b> &middot;
+  <b><a href="#why-this-and-whats-different">Why malt</a></b> &middot;
   <b><a href="#installation">Install</a></b> &middot;
   <b><a href="#first-commands">First commands</a></b> &middot;
-  <b><a href="#interactive-dashboard">TUI</a></b> &middot;
   <b><a href="#theming">Theming</a></b> &middot;
+  <b><a href="#interactive-dashboard">TUI</a></b> &middot;
   <b><a href="#command-reference">Reference</a></b> &middot;
   <b><a href="#safety-and-security">Security</a></b> &middot;
   <b><a href="#architecture">Architecture</a></b> &middot;
@@ -36,38 +35,25 @@ Reuses every formula, bottle, cask, tap, and `Brewfile` in the existing ecosyste
 >
 > This README tracks `main`, the development line, and may document features not yet in the latest release. For what actually ships with `install.sh` and the cask, read the README on the current `release/0.X` branch - the supported minor line, kept in sync with its patch releases.
 
-## Why malt exists
+## Why this, and what's different
 
-Three observations shape malt.
+malt is a **client** for the Homebrew registry, not a fork. It reuses every formula, bottle, cask, tap, and `Brewfile` in the ecosystem, installs to its own `/opt/malt` prefix, never touches Homebrew's files, and delegates anything it doesn't implement to `brew` when it's installed. What sets it apart:
 
-**Most alternative Homebrew clients quietly give up at `post_install`.** Plenty of formulas aren't finished the moment their files hit disk: they ship a `post_install` block - symlinks, man pages, config files, service registration - that the binary expects to find at runtime. Skip it and the package installs half-broken. Other clients tend to skip these scripts or special-case a handful of well-known ones. malt runs them: a built-in Zig interpreter for the Ruby subset these blocks use, so `node`, `openssl`, `fontconfig`, and `docbook` are fully configured by the time the install returns.
+- **It actually finishes the install.** Most alternative Homebrew clients quietly give up at `post_install` - the block that wires up symlinks, man pages, config, and service registration - and leave packages half-broken. malt ships a built-in Zig interpreter for the Ruby subset these blocks use, so `node`, `openssl`, `fontconfig`, and `docbook` are fully configured by the time the install returns. → [Native `post_install`](#the-post_install-interpreter)
+- **Reused work costs nothing.** Bottles are indexed by SHA256 and kegs are APFS `clonefile()` copies, so the same bottle is never downloaded or extracted twice. A second package shares libraries with the first; upgrades keep the rest of the dependency closure; reinstalls and rollbacks cost no network and no bytes - an `ffmpeg` install against an existing store finishes in **tens of milliseconds**. → [Benchmarks](#benchmarks)
+- **Safety without the startup tax.** A package manager runs as your user, writes to a privileged-ish prefix, fetches code from the internet, and patches Mach-O headers - so it earns the posture of any root-adjacent tool: streaming SHA256, atomic 9-step installs (old version untouched until the new one verifies), a 30 s advisory lock against concurrent mutations, sandboxed subprocesses. The binary is ~4 MB and starts in ~3 ms - **none of that safety is paid for in startup time**. → [Safety and security](#safety-and-security)
+- **One theme, everywhere.** A single `MALT_THEME` palette colours both the CLI and the `mt tui` dashboard - no separate config. → [Theming](#theming)
+- **A dashboard that drives the real CLI.** `mt tui` is a built-in, resize-aware terminal dashboard - search, install, upgrade, services, doctor from one screen - that delegates every action back to `mt <subcommand>`. No daemon, no companion binary. → [Interactive dashboard](#interactive-dashboard)
+- **Taps on any major forge.** Third-party taps resolve through the forge API without cloning the whole repo, on GitHub, GitLab (incl. self-hosted), Codeberg/Forgejo/Gitea, and Gogs - with per-forge token auth for private taps. → [Supported forges](#supported-forges)
+- **Signed, verifiable releases.** Every release is cosign-signed keyless via GitHub OIDC; `install.sh` and `mt version update` verify the signature before trusting the SHA256 checksum. A leaked GitHub token is not enough to ship a malicious binary. → [Safety and security](#safety-and-security)
 
-**Most of what a package manager does is repeat work.** The first download and extract of a bottle is a one-time cost. Everything after it reuses bytes already on disk: an upgrade pulls one new version but keeps the rest of its dependency closure; a second package shares libraries with the first; CI caches and devbox/nix-style rebuilds restore the same store over and over. malt indexes every bottle by SHA256 and copies kegs with APFS `clonefile()`, so reused work costs no network and no bytes - an `ffmpeg` install against an existing store finishes in **tens of milliseconds** (see [Benchmarks](#benchmarks) for the current figure).
-
-**A package manager is infrastructure on your machine.** It runs as your user, writes to a privileged-ish prefix, downloads code from the internet, and patches Mach-O headers. It earns the posture of any other root-adjacent tool: streaming SHA256, atomic installs, advisory locking, sandboxed subprocesses, cosign-verified releases. malt's binary is ~4 MB and starts in ~3 ms - none of that safety is paid for in startup time.
-
-malt installs to `/opt/malt`, never touches Homebrew's files, reads existing `Brewfile`s without conversion, and transparently delegates anything it doesn't implement to `brew` when it's installed. It is a client for the Homebrew registry, not a fork.
-
-The implementation is a study in human-directed AI: design and architecture by a human, every merged change reviewed by a human, every commit of Zig written by AI - [Claude Code](https://claude.ai/code) driven through a stack of skills and guideline frameworks ([ruflo](https://github.com/ruvnet/ruflo), [superpowers](https://github.com/obra/superpowers), [andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills), [improve](https://github.com/shadcn/improve), and project-specific skills) that encode the discipline a human would otherwise enforce by hand. The fragile commit in AI-generated code isn't the first - it's the tenth. malt has been refactored end-to-end more than once - install protocol, `post_install` interpreter, Mach-O patcher - each round steered by ADRs and security review the model wouldn't have written on its own. The repository, the test suite, and the running tool are the evidence.
-
-## Features
-
-The full surface area at a glance.
-
-- **Drop-in for Homebrew workflows.** Installs formulas, casks, tap formulas, and `user/tap/formula` shortcuts; reads existing `Brewfile`s with no conversion; `mt shellenv` is a drop-in for `eval "$(brew shellenv)"`; `mt services` is a drop-in for `brew services`. Installs to `/opt/malt`, never touches Homebrew's files.
-- **Native `post_install`.** A built-in Zig interpreter runs Homebrew `post_install` scripts natively, in-process - no external Ruby for the common cases; unsupported constructs are reported. The opt-in `--use-system-ruby` path delegates to a Ruby subprocess inside a `sandbox-exec` profile scoped to the formula's cellar, while the native interpreter validates every mutating operation against the Cellar/malt prefix. See [Architecture](#architecture) for the fallback flow.
-- **Content-addressable store.** Bottles indexed by SHA256; the same bottle is never downloaded or extracted twice. Kegs in `Cellar/` are APFS `clonefile()` copies. Reinstalls and rollbacks cost no bytes and no network.
-- **Atomic install protocol.** New versions verified before old versions are touched; `mt rollback --to <version>` reverts from the store with no re-download. Streaming SHA256 + parallel downloads + a 30 s advisory file lock against concurrent mutations.
-- **Themeable TUI and CLI.** A single `MALT_THEME` palette colours both the CLI and the `mt tui` dashboard - one theme everywhere, no separate config. See [Theming](#theming).
-- **Interactive dashboard.** `mt tui` is a built-in, resize-aware terminal dashboard that delegates every action back to the real CLI - no daemon, no companion binary. See [Interactive dashboard](#interactive-dashboard).
-- **Ephemeral run.** `mt run <pkg> -- <args...>` extracts and `execvp`s without a permanent install; `--keep` caches the bottle for next time.
-- **Taps on any major forge.** Third-party taps resolve through the forge API (without cloning the whole repo) on GitHub, GitLab (incl. self-hosted), Codeberg/Forgejo/Gitea, and Gogs - with per-forge token auth for private taps. See [Supported forges](#supported-forges).
-- **Full operational surface.** Services, bundle installs, doctor, purge, backup/restore, migrate, and reverse-dependency queries - see [Command reference](#command-reference) for the full surface.
-- **Scriptable.** `--json` and `--output-format=ndjson` everywhere it makes sense; orthogonal flags. `--quiet`, `--verbose`, `--debug`, `--dry-run`, `--offline` are global. `NO_COLOR`, `MALT_NO_EMOJI`, `MALT_PROGRESS`, `MALT_THEME` for shaping output.
-- **Signed, verifiable releases.** Every release is cosign-signed keyless via GitHub OIDC; `install.sh` and `mt version update` verify the signature before trusting the SHA256 checksum. See [Safety and security](#safety-and-security) for the full supply-chain story.
+Beyond these: ephemeral `mt run <pkg>` (no permanent install), a full operational surface (services, bundles, doctor, purge, backup/restore, migrate, reverse-dependency queries), and `--json`/`--output-format=ndjson` scripting everywhere it makes sense. See the [Command reference](#command-reference).
 
 > [!NOTE]
 > **Compatibility note.** "Drop-in" covers the directives a typical `Brewfile` uses - `tap`, `brew`, `cask`, `mas`, and `vscode` (the last two round-trip through the parser but are not yet installed by malt) - plus hash options and Ruby symbols. It does _not_ cover Ruby `do … end` blocks or conditionals like `if OS.mac?`. Both raise a clear error. macOS only - Linux and Windows are out of scope.
+
+> [!NOTE]
+> **Built by human-directed AI.** Design and architecture by a human; every merged change reviewed by a human; every commit of Zig written by [Claude Code](https://claude.ai/code), driven through a stack of skills and guideline frameworks ([ruflo](https://github.com/ruvnet/ruflo), [superpowers](https://github.com/obra/superpowers), [andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills), [improve](https://github.com/shadcn/improve), and project-specific skills) that encode the discipline a human would otherwise enforce by hand. malt has been refactored end-to-end more than once - install protocol, `post_install` interpreter, Mach-O patcher - each round steered by ADRs and security review. The repository, the test suite, and the running tool are the evidence.
 
 ## Installation
 
@@ -75,7 +61,12 @@ Three install paths - pick the one that matches your setup.
 
 ### One-liner script
 
-The script downloads the latest release, verifies the SHA256 checksum **and a cosign keyless signature** against the GitHub Actions workflow that produced it, installs the binary to `/usr/local/bin/`, and creates `/opt/malt` with proper ownership.
+The script:
+
+- downloads the latest release,
+- verifies the SHA256 checksum **and a cosign keyless signature** against the GitHub Actions workflow that produced it,
+- installs the binary to `/usr/local/bin/`,
+- and creates `/opt/malt` with proper ownership.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/indaco/malt/main/scripts/install.sh | bash
@@ -90,6 +81,8 @@ curl -fsSL "https://raw.githubusercontent.com/indaco/malt/v0.20.4/scripts/instal
 shasum -a 256 install.sh
 bash install.sh
 ```
+
+`v0.20.0` here is an example — swap it for the release you intend to install (see the version badge at the top).
 
 ### Via Homebrew
 
@@ -212,6 +205,40 @@ Each theme needs a `polarity` (`dark`/`light`) and all six roles. A colour is a 
 
 The file is validated all-or-nothing: any malformed value rejects the whole file and malt keeps the built-in themes (a one-line notice, never a crash). A theme is gated like a built-in - it applies only when its polarity matches the detected background; one built from hex/`[r,g,b]` colours additionally needs a truecolor terminal, while a theme written entirely with 256-colour indexes also paints on a 256-colour terminal.
 
+## Interactive dashboard
+
+`mt tui` opens a persistent, resize-aware dashboard over the same data the read commands expose - search and install, manage services, and run doctor from one screen, not just a read-only viewer. No daemon, no companion binary, nothing to install first.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/indaco/gh-assets/main/malt/tui-demo.gif" alt="mt tui - search, install, services, doctor" width="800">
+</p>
+
+```bash
+mt tui                                   # launch the dashboard
+MALT_THEME=dracula mt tui                # launch with a named theme
+```
+
+> [!NOTE]
+> `mt tui` needs a real terminal: on a pipe, in CI, or with `NO_COLOR` set it refuses to launch and exits 2 rather than stream escape sequences into a non-TTY.
+
+Five tabs, each a live view over `mt … --json`:
+
+| Tab       | Shows                                             | Acts via                         |
+| --------- | ------------------------------------------------- | -------------------------------- |
+| Search    | `mt search` hits, basket select across queries    | `mt install` the basket          |
+| Installed | every keg + cask with a detail pane               | `mt uninstall`                   |
+| Outdated  | upgradable packages, multi-select (pinned greyed) | `mt upgrade`                     |
+| Services  | launchd services + runtime state                  | `mt services start/stop/restart` |
+| Doctor    | structured `mt doctor` findings, errors first     | `mt doctor --fix <class>`        |
+
+Keys: `tab`/`←`/`→`/`1`-`5` switch tabs, `↑`/`↓` move the cursor, `/` filters the list (per-tab, survives a tab round-trip), `enter` searches or opens a detail pane, `q` or `Ctrl-C` quits. Each tab adds its own action keys in the footer - `space` select, `l` basket view, `i` install the basket (Search), `x` uninstall with a `[y/N]` guard (Installed), `space`/`a`/`n` select and `u` upgrade the batch (Outdated), `s`/`x`/`r` start/stop/restart (Services), `f` fix (Doctor).
+
+**It batches installs across searches.** The Search tab carries a cross-query basket: `space` adds the highlighted hit, and a pick survives when you run a new query - so you can search `bat`, then `redis`, and install both with a single `i`. `l` opens the basket to review it (`space`/`d` removes a pick, `n` clears it); the footer tracks the running count as `i: install N selected`.
+
+**It reads with `--json` and acts by delegating.** Every mutation drops out of the alternate screen, runs the real `mt <subcommand>` inline - so output and prompts land unchanged in your scrollback - then re-enters and refreshes the current tab (others refetch lazily). It never reimplements install, upgrade, or fix; it drives the CLI you already trust.
+
+**It resizes live.** Layout is a pure function of terminal size: drag the window and columns reflow, the viewport re-clamps, and long rows truncate without a keypress. Below a usable minimum it shows a "terminal too small" notice instead of a corrupted frame.
+
 ## Command reference
 
 Commands grouped by what you're doing. Every command works with `malt` or `mt`, accepts `--help` for the full flag list, and supports `--quiet`, `--dry-run` (where mutating), and `--json` (where applicable). See [Global flags](#global-flags) for the cross-cutting set.
@@ -292,7 +319,12 @@ mt run --keep ripgrep -- --help          # cache the bottle for next run
 
 `mt uninstall` removes a package, refusing if dependents exist or, for casks, if the application is running. `--force` (`-f`) bypasses both checks. `--cask` forces cask uninstall. Store entries are preserved for `mt purge --store-orphans`.
 
-`mt migrate` imports an existing Homebrew installation by scanning the Cellar and reinstalling each package through malt. It never modifies the Homebrew install. Packages with `post_install` are executed via the native interpreter; unsupported scripts fall back to `--use-system-ruby` or are skipped with a report. `--dry-run` previews. `--parallel` runs the per-keg work concurrently (4 workers by default; tune with `MALT_MIGRATE_PARALLEL_WORKERS=N`) and records each success in `{prefix}/cache/migrate.progress.json`, so a re-run after a crash or `^C` resumes where it stopped.
+`mt migrate` imports an existing Homebrew installation: it scans the Cellar and reinstalls each package through malt, without touching the Homebrew install itself.
+
+- Packages with `post_install` run through malt's native interpreter; unsupported scripts fall back to `--use-system-ruby`, or are skipped with a report.
+- `--dry-run` previews the migration.
+- `--parallel` runs per-keg work concurrently (4 workers by default; tune with `MALT_MIGRATE_PARALLEL_WORKERS=N`).
+- Progress is recorded in `{prefix}/cache/migrate.progress.json`, so a re-run after a crash or `^C` resumes where it stopped.
 
 ### Stay current
 
@@ -347,43 +379,18 @@ mt which jq                              # reverse lookup: bin -> keg-path
 
 `mt which` accepts a bare name (resolved through `{prefix}/bin/<name>`) or an absolute path to a malt-managed symlink. Output is `<name> <version> <keg-path>` (or `{"name", "version", "keg"}` with `--json`). It's read-only and offline; exits non-zero with a clear message when the binary is not owned by malt.
 
-`mt search` matches `brew search` by default - it queries the Homebrew API and ranks substring matches across formulas and casks. `--installed` flips it to a local-DB scan over `kegs.name` and `casks.token` (no network), `--all` runs both passes and merges results deduped, and `--api` is the explicit form of the default. `--offline` (or `MALT_OFFLINE=1`) collapses every scope into `--installed`, so a plane-mode user gets an answer instead of a connect timeout. `--json`, `--formula`, and `--cask` compose with every scope.
+`mt search` matches `brew search` by default and ranks substring matches across formulas and casks.
+
+| Flag                              | Scope                                                    |
+| --------------------------------- | -------------------------------------------------------- |
+| (default) / `--api`               | Homebrew API — substring match across formulas and casks |
+| `--installed`                     | Local DB scan (`kegs.name`, `casks.token`) — no network  |
+| `--all`                           | Both passes, merged and deduped                          |
+| `--offline` (or `MALT_OFFLINE=1`) | Collapses every scope into `--installed`                 |
+
+`--json`, `--formula`, and `--cask` compose with every scope above.
 
 `mt deps` is the forward symmetric of `mt uses`: "_what does X depend on?_" instead of "_who depends on X?_". Installed kegs read from the local DB; uninstalled formulas walk the upstream API. `--installed` is offline-safe. `--json` emits one entry per visited node, preserving graph shape on recursive walks.
-
-### Interactive dashboard
-
-`mt tui` opens a persistent, resize-aware dashboard over the same data the read commands expose - search and install, manage services, and run doctor from one screen, not just a read-only viewer. No daemon, no companion binary, nothing to install first.
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/indaco/gh-assets/main/malt/tui-demo.gif" alt="mt tui - search, install, services, doctor" width="800">
-</p>
-
-```bash
-mt tui                                   # launch the dashboard
-MALT_THEME=dracula mt tui                # launch with a named theme
-```
-
-> [!NOTE]
-> `mt tui` needs a real terminal: on a pipe, in CI, or with `NO_COLOR` set it refuses to launch and exits 2 rather than stream escape sequences into a non-TTY.
-
-Five tabs, each a live view over `mt … --json`:
-
-| Tab       | Shows                                             | Acts via                         |
-| --------- | ------------------------------------------------- | -------------------------------- |
-| Search    | `mt search` hits, basket select across queries    | `mt install` the basket          |
-| Installed | every keg + cask with a detail pane               | `mt uninstall`                   |
-| Outdated  | upgradable packages, multi-select (pinned greyed) | `mt upgrade`                     |
-| Services  | launchd services + runtime state                  | `mt services start/stop/restart` |
-| Doctor    | structured `mt doctor` findings, errors first     | `mt doctor --fix <class>`        |
-
-Keys: `tab`/`←`/`→`/`1`-`5` switch tabs, `↑`/`↓` move the cursor, `/` filters the list (per-tab, survives a tab round-trip), `enter` searches or opens a detail pane, `q` or `Ctrl-C` quits. Each tab adds its own action keys in the footer - `space` select, `l` basket view, `i` install the basket (Search), `x` uninstall with a `[y/N]` guard (Installed), `space`/`a`/`n` select and `u` upgrade the batch (Outdated), `s`/`x`/`r` start/stop/restart (Services), `f` fix (Doctor).
-
-**It batches installs across searches.** The Search tab carries a cross-query basket: `space` adds the highlighted hit, and a pick survives when you run a new query - so you can search `bat`, then `redis`, and install both with a single `i`. `l` opens the basket to review it (`space`/`d` removes a pick, `n` clears it); the footer tracks the running count as `i: install N selected`.
-
-**It reads with `--json` and acts by delegating.** Every mutation drops out of the alternate screen, runs the real `mt <subcommand>` inline - so output and prompts land unchanged in your scrollback - then re-enters and refreshes the current tab (others refetch lazily). It never reimplements install, upgrade, or fix; it drives the CLI you already trust.
-
-**It resizes live.** Layout is a pure function of terminal size: drag the window and columns reflow, the viewport re-clamps, and long rows truncate without a keypress. Below a usable minimum it shows a "terminal too small" notice instead of a corrupted frame.
 
 ### Maintain malt
 
@@ -516,7 +523,10 @@ Taps are auto-resolved during install (`mt install user/repo/formula`), so this 
 
 A tap can live on any of four forges. GitHub is the default; the others register with an explicit `--host` (which always needs an explicit `--repo`, since the `homebrew-<repo>` convention is GitHub-only).
 
-A single `--url https://<host>/<owner>/<repo>` is a self-contained alternative to the `--host` + `--repo` pair: it carries the host and the exact repo together and works for every forge, GitHub included. Because `--url` already names both, it cannot be combined with `--host` or `--repo` - but a host that doesn't auto-classify (a self-hosted GitLab/Gitea, or any Gogs host) still pairs it with `--forge`.
+`--url https://<host>/<owner>/<repo>` is a self-contained alternative to `--host` + `--repo`: one flag carries both the host and the exact repo, for every forge including GitHub.
+
+- `--url` cannot combine with `--host` or `--repo` (it already encodes both).
+- `--url` still needs `--forge` when the host doesn't auto-classify (a self-hosted GitLab/Gitea, or any Gogs host).
 
 | Forge                      | Hosts                                     | Register with                                                                               | Token env var       |
 | -------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------- |
@@ -525,7 +535,11 @@ A single `--url https://<host>/<owner>/<repo>` is a self-contained alternative t
 | Codeberg / Forgejo / Gitea | `codeberg.org`, self-hosted Forgejo/Gitea | `mt tap <slug> --host <host> --repo <owner>/<repo>`                                         | `MALT_GITEA_TOKEN`  |
 | Gogs                       | self-hosted Gogs                          | `mt tap <slug> --host <host> --forge gogs --repo <owner>/<repo>`                            | `MALT_GITEA_TOKEN`  |
 
-Only `gitlab.*` and `codeberg.org` auto-classify from the host. Any other instance - a self-hosted GitLab like `code.acme.com`, a Forgejo/Gitea host, or a Gogs host - needs `--forge gitlab`, `--forge gitea`, or `--forge gogs` so malt knows which API to speak. Gogs shares the Gitea API (and `MALT_GITEA_TOKEN`); it differs only in the pin endpoint, so it always needs the explicit `--forge gogs`.
+Auto-classified from the host: `gitlab.*`, `codeberg.org`. Everything else needs an explicit `--forge` so malt knows which API to speak:
+
+- Self-hosted GitLab (e.g. `code.acme.com`) → `--forge gitlab`
+- Forgejo/Gitea → `--forge gitea`
+- Gogs → `--forge gogs` — always explicit. Gogs shares the Gitea API and `MALT_GITEA_TOKEN`, but its pin endpoint differs, so it can't be folded into auto-classification.
 
 See the [environment variables](#environment-variables) table for what each token is sent as.
 
@@ -608,36 +622,36 @@ MALT_ALLOW_UNVERIFIED=1 mt version update --no-verify
 
 ### Environment variables
 
-| Variable                        | Description                                                                                                                                                                                                                                                                                                                                      | Default                         |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- |
-| `MALT_PREFIX`                   | Override install prefix                                                                                                                                                                                                                                                                                                                          | `/opt/malt`                     |
-| `MALT_CACHE`                    | Override cache directory                                                                                                                                                                                                                                                                                                                         | `{prefix}/cache`                |
-| `NO_COLOR`                      | Disable colored output                                                                                                                                                                                                                                                                                                                           | unset                           |
-| `MALT_NO_EMOJI`                 | Disable emoji in output                                                                                                                                                                                                                                                                                                                          | unset                           |
-| `MALT_NO_VERSION_NOTIFIER`      | Set to `1` to suppress the "newer malt available" notice                                                                                                                                                                                                                                                                                         | unset                           |
-| `MALT_PROGRESS`                 | Progress reporter for `install`/`upgrade`/`migrate`: `tty`, `plain`, or `none` (`CI=true` or `GITHUB_ACTIONS=true` flip the default to `plain`)                                                                                                                                                                                                  | `tty`                           |
-| `MALT_THEME`                    | Colour theme for all output (CLI and `mt tui`): `light`/`dark`/`auto` pick the background-aware default (OSC 11 detect); `dracula`, `catppuccin-mocha`/`-latte`, `rose-pine`/`-dawn`, `nord`, `tokyo-night`, `gruvbox-dark`/`-light`, `everforest` apply on a truecolor terminal whose background matches, else fall back to the default palette | `auto`                          |
-| `MALT_THEMES_FILE`              | Path to a JSON file of custom themes (see "Custom themes"); read once at boot, else `{prefix}/etc/malt/themes.json` is used if present                                                                                                                                                                                                           | `{prefix}/etc/malt/themes.json` |
-| `HOMEBREW_GITHUB_API_TOKEN`     | GitHub token for higher API rate limits                                                                                                                                                                                                                                                                                                          | unset                           |
-| `MALT_GITHUB_TOKEN`             | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only                                                                                                                                                                                                                                                                   | unset                           |
-| `MALT_GITLAB_TOKEN`             | GitLab token (PAT) sent as `PRIVATE-TOKEN` on tap commit + raw `.rb` calls for GitLab-hosted taps                                                                                                                                                                                                                                                | unset                           |
-| `MALT_GITEA_TOKEN`              | Codeberg/Forgejo (Gitea) token sent as `Authorization: token` on tap commit + raw `.rb` calls; covers Codeberg and self-hosted Forgejo/Gitea                                                                                                                                                                                                     | unset                           |
-| `MALT_HTTP_IDLE_TIMEOUT_SECS`   | HTTP idle (no-progress) read timeout in seconds (clamped to `[5, 600]`)                                                                                                                                                                                                                                                                          | `30`                            |
-| `MALT_API_DOMAIN`               | Override metadata API base URL; HTTPS only; falls back to `HOMEBREW_API_DOMAIN`                                                                                                                                                                                                                                                                  | `https://formulae.brew.sh/api`  |
-| `MALT_BOTTLE_DOMAIN`            | Override bottle registry base URL; HTTPS only; falls back to `HOMEBREW_BOTTLE_DOMAIN`                                                                                                                                                                                                                                                            | `https://ghcr.io`               |
-| `MALT_OFFLINE`                  | Set to `1`/`true` to route every fetch through the snapshot cache; misses surface `OfflineRequired` instead of stalling on connect (mirrors `--offline`)                                                                                                                                                                                         | unset                           |
-| `MALT_MIGRATE_PARALLEL_WORKERS` | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                                                                                                                                                                                                                                                                                  | `4`                             |
-| `MALT_OUTDATED_MAX_AGE`         | TTL in minutes for the `outdated.json` snapshot                                                                                                                                                                                                                                                                                                  | `5`                             |
-| `MALT_ALLOW_RAW_POST_INSTALL`   | Disable terminal escape filter on ruby `post_install` output                                                                                                                                                                                                                                                                                     | unset                           |
-| `MALT_ALLOW_UNVERIFIED`         | Skip signature + checksum verification — in `install.sh`, and in `mt version update --no-verify` (use only when cosign is unavailable)                                                                                                                                                                                                           | unset                           |
-| `MALT_ALLOW_UNVERIFIED_SOURCE`  | Allow `install.sh` to clone `main` when no release tag resolves                                                                                                                                                                                                                                                                                  | unset                           |
+| Variable                        | Description                                                                                                                                              | Default                         |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| `MALT_PREFIX`                   | Override install prefix                                                                                                                                  | `/opt/malt`                     |
+| `MALT_CACHE`                    | Override cache directory                                                                                                                                 | `{prefix}/cache`                |
+| `NO_COLOR`                      | Disable colored output                                                                                                                                   | unset                           |
+| `MALT_NO_EMOJI`                 | Disable emoji in output                                                                                                                                  | unset                           |
+| `MALT_NO_VERSION_NOTIFIER`      | Set to `1` to suppress the "newer malt available" notice                                                                                                 | unset                           |
+| `MALT_PROGRESS`                 | Progress reporter for `install`/`upgrade`/`migrate`: `tty`, `plain`, or `none` (`CI=true` or `GITHUB_ACTIONS=true` flip the default to `plain`)          | `tty`                           |
+| `MALT_THEME`                    | Colour theme for all output (CLI and `mt tui`). See [Theming](#theming) for the palette list and fallback rules.                                         | `auto`                          |
+| `MALT_THEMES_FILE`              | Path to a JSON file of custom themes (see "Custom themes"); read once at boot, else `{prefix}/etc/malt/themes.json` is used if present                   | `{prefix}/etc/malt/themes.json` |
+| `HOMEBREW_GITHUB_API_TOKEN`     | GitHub token for higher API rate limits                                                                                                                  | unset                           |
+| `MALT_GITHUB_TOKEN`             | GitHub token sent as `Authorization: Bearer` on tap `/commits/HEAD` calls only                                                                           | unset                           |
+| `MALT_GITLAB_TOKEN`             | GitLab token (PAT) sent as `PRIVATE-TOKEN` on tap commit + raw `.rb` calls for GitLab-hosted taps                                                        | unset                           |
+| `MALT_GITEA_TOKEN`              | Codeberg/Forgejo (Gitea) token sent as `Authorization: token` on tap commit + raw `.rb` calls; covers Codeberg and self-hosted Forgejo/Gitea             | unset                           |
+| `MALT_HTTP_IDLE_TIMEOUT_SECS`   | HTTP idle (no-progress) read timeout in seconds (clamped to `[5, 600]`)                                                                                  | `30`                            |
+| `MALT_API_DOMAIN`               | Override metadata API base URL; HTTPS only; falls back to `HOMEBREW_API_DOMAIN`                                                                          | `https://formulae.brew.sh/api`  |
+| `MALT_BOTTLE_DOMAIN`            | Override bottle registry base URL; HTTPS only; falls back to `HOMEBREW_BOTTLE_DOMAIN`                                                                    | `https://ghcr.io`               |
+| `MALT_OFFLINE`                  | Set to `1`/`true` to route every fetch through the snapshot cache; misses surface `OfflineRequired` instead of stalling on connect (mirrors `--offline`) | unset                           |
+| `MALT_MIGRATE_PARALLEL_WORKERS` | Worker count for `mt migrate --parallel` (clamped to `[1, 32]`)                                                                                          | `4`                             |
+| `MALT_OUTDATED_MAX_AGE`         | TTL in minutes for the `outdated.json` snapshot                                                                                                          | `5`                             |
+| `MALT_ALLOW_RAW_POST_INSTALL`   | Disable terminal escape filter on ruby `post_install` output                                                                                             | unset                           |
+| `MALT_ALLOW_UNVERIFIED`         | Skip signature + checksum verification — in `install.sh`, and in `mt version update --no-verify` (use only when cosign is unavailable)                   | unset                           |
+| `MALT_ALLOW_UNVERIFIED_SOURCE`  | Allow `install.sh` to clone `main` when no release tag resolves                                                                                          | unset                           |
 
 ## Safety and security
 
 malt's correctness rests on a few load-bearing properties:
 
 - **SHA256 verification.** Streaming hash computed during download, verified before extraction. No unverified data touches the store.
-- **Tar entry pre-scan.** Every entry's name **and symlink target** are validated before any byte is written; the 512-byte tar header is checksum-verified per entry; hardlinks are applied via `linkat(..., 0)`, which refuses to follow a symlink. A hostile tarball cannot land a hardlink inside the keg via a symlink to `/etc/passwd`.
+- **Tar entry pre-scan.** Every entry's name and symlink target are validated before any byte is written. The 512-byte tar header is checksum-verified per entry. Hardlinks are applied via `linkat(..., 0)`, which refuses to follow a symlink — so a hostile tarball cannot land a hardlink inside the keg via a symlink to `/etc/passwd`.
 - **Pre-flight checks.** Dependencies resolved, disk space verified, link conflicts detected before any download begins.
 - **Atomic installs.** The 9-step protocol uses `errdefer` at every stage. Interrupted installs leave no partial state.
 - **Concurrent access.** A 30-second-timeout advisory file lock prevents concurrent mutations. Read-only commands don't acquire it.
@@ -659,9 +673,16 @@ The supply-chain story:
 
 `mt install --local ./formula.rb` deserves its own paragraph because it is a code-execution surface in a way the rest of malt isn't. The `.rb` file names the archive URL and SHA256 of what ends up on your system - installing one trusts that file. Use it for your own formulas, for experimenting with upstream changes before they land in a tap, or for private in-house packages. Do not use it for a `.rb` you did not read.
 
-malt prints the canonical realpath on every install so an attentive reader notices surprises like `/tmp/...`. A leading `./`, `/`, `~/`, or any embedded slash combined with a `.rb` suffix auto-detects as a local path; the same warning fires either way. Bare filenames (e.g. `wget.rb`) are _not_ auto-detected - pass `--local` to disambiguate. The archive URL must be `https://`; plaintext HTTP, `file://`, `ftp://`, and `data:` are rejected before any download. The SHA256 check uses constant-time compare. An extra ⚠ line fires if the `.rb` is world-writable or owned by a different user. Combining `--local` with `--cask`, `--formula`, or `--use-system-ruby` is refused up front.
+- **Path echo.** malt prints the canonical realpath on every install, so an attentive reader notices surprises like `/tmp/...`.
+- **Auto-detection.** A leading `./`, `/`, `~/`, or any embedded slash combined with a `.rb` suffix auto-detects as a local path; the same warning fires either way. Bare filenames (e.g. `wget.rb`) are _not_ auto-detected — pass `--local` to disambiguate.
+- **Scheme allowlist.** The archive URL must be `https://`; plaintext HTTP, `file://`, `ftp://`, and `data:` are rejected before any download.
+- **Constant-time compare.** The SHA256 check runs in constant time.
+- **Ownership warning.** An extra ⚠ line fires if the `.rb` is world-writable or owned by a different user.
+- **Flag conflicts refused.** Combining `--local` with `--cask`, `--formula`, or `--use-system-ruby` is refused up front.
 
-For local installs, only the bottle-style `version` + `url` + `sha256` triple (optionally inside `on_macos` / `on_arm` / `on_intel`) is read. `depends_on` and `post_install` are _not_ evaluated; if you need either, publish the formula to a tap and install via `mt install user/tap/formula`. Archive formats: `.tar.gz`, `.tgz`, `.tar.xz`, `.zip`. The formula name comes from the file's basename - `hello.rb` installs `hello`. A minimal compatible `.rb`:
+For local installs, malt reads only the bottle-style `version` + `url` + `sha256` triple (optionally nested under `on_macos` / `on_arm` / `on_intel`). It does not evaluate `depends_on` or `post_install` — if you need either, publish the formula to a tap and install via `mt install user/tap/formula` instead.
+
+Supported archive formats are `.tar.gz`, `.tgz`, `.tar.xz`, and `.zip`. The formula name comes from the file's basename: `hello.rb` installs `hello`. A minimal compatible `.rb`:
 
 ```ruby
 class Hello < Formula
@@ -681,7 +702,11 @@ end
 
 A flat `url` / `sha256` at the top level works for single-arch archives. See `scripts/fixtures/local_formulae/hello.rb` for a runnable example.
 
-`--use-system-ruby` is also worth a word here. It is **per-formula** by design. The bare flag works only when installing a single package (`mt install jq --use-system-ruby`); multi-package installs must scope it (`mt install jq wget --use-system-ruby=jq`). `mt migrate` rejects the bare form entirely. This is deliberate: it prevents one package's failing `post_install` from silently widening the trust boundary across an entire batch.
+`--use-system-ruby` is per-formula by design: it prevents one package's failing `post_install` from silently widening the trust boundary across an entire batch.
+
+- Single package: the bare flag works (`mt install jq --use-system-ruby`).
+- Multi-package: scope it explicitly (`mt install jq wget --use-system-ruby=jq`).
+- `mt migrate` rejects the bare form entirely.
 
 ## Architecture
 
@@ -728,13 +753,33 @@ No intermediate archive file is written to disk. The SHA256 is verified against 
 
 ### Mach-O patching
 
-Homebrew bottles contain hardcoded `/opt/homebrew/Cellar/...` paths in Mach-O load commands. malt parses headers using struct-aware parsing (not raw byte scanning), identifies all relevant load commands (`LC_ID_DYLIB`, `LC_LOAD_DYLIB`, `LC_RPATH`, etc.), rewrites paths in-place, and pads the remaining space with null bytes. On arm64, every patched binary is ad-hoc codesigned via `codesign --force --sign -`. Text files (`.pc` configs, shell scripts) containing `@@HOMEBREW_PREFIX@@` or `@@HOMEBREW_CELLAR@@` placeholders are also patched. Patching always happens on the Cellar copy, never the store original; if it fails, the Cellar copy is deleted and the store entry remains pristine for retry.
+Homebrew bottles contain hardcoded `/opt/homebrew/Cellar/...` paths in Mach-O load commands. malt corrects them in four steps:
+
+1. Parse headers with struct-aware parsing (not raw byte scanning).
+2. Identify every relevant load command (`LC_ID_DYLIB`, `LC_LOAD_DYLIB`, `LC_RPATH`, etc.).
+3. Rewrite paths in-place and pad the remaining space with null bytes.
+4. On arm64, ad-hoc codesign the patched binary via `codesign --force --sign -`.
+
+Text files (`.pc` configs, shell scripts) containing `@@HOMEBREW_PREFIX@@` or `@@HOMEBREW_CELLAR@@` placeholders are patched the same way. Patching always happens on the Cellar copy, never the store original — if it fails, the Cellar copy is deleted and the store entry stays pristine for retry.
 
 ### The post_install interpreter
 
-When a formula defines `post_install`, malt tries the native interpreter first. The interpreter parses and evaluates the Ruby subset used in these blocks: `Pathname` operations, `FileUtils`, string interpolation, `inreplace`, `Dir.glob`, `if`/`unless`, `.each`/`.select`/`.map`, `Formula["name"]` cross-lookup, `ENV` access, `%w[]` arrays, the boolean operators. It only activates for formulas that define the method. Source for `homebrew-core` formulas is fetched on demand from GitHub if the tap isn't cloned locally.
+When a formula defines `post_install`, malt tries its native interpreter first — it only activates for formulas that define the method. It parses and evaluates the Ruby subset those blocks actually use:
 
-Every mutating filesystem operation - write, rm, chmod, symlink - is validated against the formula's Cellar prefix and the malt prefix. Paths containing `..` or resolving outside the sandbox via symlinks are rejected immediately. When the interpreter hits an unsupported construct, the user is directed to `--use-system-ruby`, which delegates to a sandboxed Ruby subprocess scoped to the formula's cellar, with a scrubbed environment, `RLIMIT_CPU`/`AS`/`FSIZE` caps, and terminal escape sequences filtered from child output.
+- `Pathname` operations, `FileUtils`, `inreplace`, `Dir.glob`
+- string interpolation, `%w[]` arrays, the boolean operators
+- control flow: `if`/`unless`, `.each`/`.select`/`.map`
+- `Formula["name"]` cross-lookup, `ENV` access
+
+Source for `homebrew-core` formulas is fetched on demand from GitHub if the tap isn't cloned locally.
+
+Every mutating filesystem operation — write, rm, chmod, symlink — is validated against the formula's Cellar prefix and the malt prefix; paths containing `..` or resolving outside the sandbox via symlinks are rejected immediately.
+
+When the interpreter hits an unsupported construct, the user is directed to `--use-system-ruby`, which delegates to a sandboxed Ruby subprocess scoped to the formula's cellar, with:
+
+- a scrubbed environment
+- `RLIMIT_CPU`/`AS`/`FSIZE` caps
+- terminal escape sequences filtered from child output
 
 ```text
 Formula has post_install?
@@ -843,9 +888,15 @@ Each cell is the **median of 5 rounds** (`BENCH_ROUNDS=5`, the default in [`scri
 
 A cold sample here starts from a wiped install prefix for every tool, so the first round exercises the full download → extract → link → db-write path. Some benchmark scripts define "cold" as an uninstall/reinstall, which keeps the download cache warm; the two definitions can produce different absolute cold numbers for the same tool on the same hardware.
 
-`BENCH_TRUE_COLD=1` wipes each tool's install prefix **and** its bottle download cache before every cold sample, so "cold" really means "no bottle anywhere on disk." malt, nanobrew, and zerobrew keep their download cache inside their install prefix, so the single prefix wipe takes both. Homebrew's cache lives outside the prefix (`~/Library/Caches/Homebrew/downloads`) and is therefore wiped explicitly per target formula and its transitive deps via `brew --cache`. Without this symmetry, local brew numbers come out 5–25× faster than CI's because brew reuses bottles cached by earlier rounds.
+`BENCH_TRUE_COLD=1` wipes each tool's install prefix **and** bottle download cache before every cold sample, so "cold" means no bottle anywhere on disk.
 
-Each package bench opens with a discarded warmup round - every tool runs one install/uninstall pair whose timings are thrown away - so DNS, TLS session cache, TCP congestion window, and disk caches are populated before timing starts. The measured rounds rotate tool order (round _r_ starts with `tools[r mod N]`), so no single tool reliably eats the "cold network" slot or benefits from the warmest one.
+- malt, nanobrew, zerobrew: one prefix wipe covers both (the cache lives inside the prefix).
+- Homebrew: the cache lives outside the prefix (`~/Library/Caches/Homebrew/downloads`), so it's wiped explicitly per formula and its transitive deps via `brew --cache`.
+- Without that extra Homebrew wipe, local brew numbers come out 5–25× faster than CI's — brew is reusing bottles cached by earlier rounds.
+
+Each package bench opens with a discarded warmup round: every tool runs one install/uninstall pair whose timings are thrown away, so DNS, TLS session cache, TCP congestion window, and disk caches are all populated before timing starts.
+
+The measured rounds then rotate tool order (round _r_ starts with `tools[r mod N]`), so no single tool reliably eats the "cold network" slot or benefits from the warmest one.
 
 `scripts/bench.sh` `git fetch`es nanobrew and zerobrew before each build so the comparison is always malt-today vs. each peer's latest commit, not a weeks-old snapshot. Set `BENCH_SKIP_UPDATE=1` to pin whatever is already checked out.
 
