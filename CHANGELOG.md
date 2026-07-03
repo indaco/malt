@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The changelog is generated and managed by [sley](https://github.com/indaco/sley).
 
+## v0.20.6 - 2026-07-03
+
+### 🩹 Fixes
+
+- **bundle:** escape names and versions in JSON, Brewfile and receipt emitters ([b456a2a](https://github.com/indaco/malt/commit/b456a2a)) ([#612](https://github.com/indaco/malt/pull/612))
+- **cli/run:** forward the run binary's exit code, args, and failures ([8e4fd68](https://github.com/indaco/malt/commit/8e4fd68)) ([#611](https://github.com/indaco/malt/pull/611))
+- **cli:** stop consuming global flags after the -- separator ([6e568f6](https://github.com/indaco/malt/commit/6e568f6)) ([#610](https://github.com/indaco/malt/pull/610))
+
+### ❤️ Contributors
+
+- [@indaco](https://github.com/indaco)
+
 ## v0.20.5 - 2026-07-03
 
 ### 🩹 Fixes
