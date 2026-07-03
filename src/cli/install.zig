@@ -1358,6 +1358,27 @@ fn resolveCaskArtifactViaHead(ctx: *const AppCtx, allocator: std.mem.Allocator, 
     return cask_mod.resolveArtifactType(allocator, resolved.final_url, resolved.content_disposition);
 }
 
+/// Gate the system-wide `sudo installer -pkg … -target /` escalation a PKG
+/// cask needs. Shared by every verb that can reach it — install, upgrade,
+/// rollback — so the confirmation is identical everywhere. `sudo` reads the
+/// password from the controlling terminal, so off a TTY the spawn stalls and
+/// then fails with a captured, post-mortem error; refuse up front with an
+/// actionable message instead. On a TTY, require an explicit confirmation
+/// before touching the whole system. Emits via the global `output` sink (the
+/// caller may print its own warn first). Returns true only when the escalation
+/// may proceed; on refusal the reason is already reported.
+pub fn confirmPkgSudo(token: []const u8) bool {
+    if (!output.stdinIsInteractive()) {
+        output.err("{s} is a PKG cask: it needs an interactive terminal for the sudo password. Re-run in a terminal.", .{token});
+        return false;
+    }
+    if (!output.confirmTyped("y", "This runs `sudo installer -target /` and installs system-wide. Continue? [y/N] ")) {
+        output.warn("Skipped {s}: PKG install not confirmed.", .{token});
+        return false;
+    }
+    return true;
+}
+
 /// Install a cask (DMG, ZIP, or PKG). When `download_only` is set, the
 /// flow stops after `<prefix>/cache/Cask/<file>` is sha-verified — no
 /// `/Applications` writes, no DB inserts.
@@ -1422,9 +1443,12 @@ fn installCask(
         return InstallError.CaskNotFound;
     }
 
-    // Warn for PKG casks (require sudo)
+    // PKG casks escalate to `sudo installer -target /`. Warn, then gate the
+    // escalation on a live TTY + confirmation before any download. `--download-only`
+    // never escalates, so it skips the gate.
     if (artifact_type == .pkg) {
         sink.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
+        if (!download_only and !confirmPkgSudo(cask.token)) return InstallError.CaskNotFound;
     }
 
     const prefix = atomic.maltPrefixOrAbort();

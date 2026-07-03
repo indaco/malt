@@ -1042,6 +1042,14 @@ fn upgradeCask(ctx: *const AppCtx, allocator: std.mem.Allocator, token: []const 
         return;
     }
 
+    // A PKG-cask upgrade re-runs `sudo installer -target /`. Gate it on a live
+    // terminal + confirmation here, before the uninstall below, so a refusal
+    // off a TTY leaves the installed version untouched.
+    if (cask_mod.artifactTypeFromUrl(parsed_cask.url) == .pkg) {
+        output.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{token});
+        if (!install_mod.confirmPkgSudo(token)) return error.Aborted;
+    }
+
     output.info("Upgrading {s} {s} -> {s}...", .{ token, installed_version, parsed_cask.version });
 
     // Snapshot the pin BEFORE uninstall removes the cask row; re-apply
