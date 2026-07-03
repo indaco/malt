@@ -591,22 +591,33 @@ pub const HttpClient = struct {
 
         fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
             const self: *CountingWriter = @fieldParentPtr("writer", w);
+            // Refuse the over-cap chunk before the inner Allocating writer grows
+            // to hold it. `drain` is the sole in-band writer, so a monotonic load suffices.
+            const incoming = std.Io.Writer.countSplat(data, splat);
+            if (self.bytes_written.load(.monotonic) + incoming > self.max_bytes) {
+                self.limit_exceeded = true;
+                return error.WriteFailed;
+            }
             const n = self.inner.writer.vtable.drain(&self.inner.writer, data, splat) catch
                 return error.WriteFailed;
             const total = self.bytes_written.fetchAdd(n, .release) + n;
             self.report(total);
-            if (total > self.max_bytes) {
-                self.limit_exceeded = true;
-                return error.WriteFailed;
-            }
             return n;
         }
 
         fn sendFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
             const self: *CountingWriter = @fieldParentPtr("writer", w);
-            const n = self.inner.writer.vtable.sendFile(&self.inner.writer, file_reader, limit) catch |e| return e;
+            const current = self.bytes_written.load(.monotonic);
+            if (current >= self.max_bytes) {
+                self.limit_exceeded = true;
+                return error.WriteFailed;
+            }
+            // Clamp the source so a file cannot overshoot the cap either.
+            const clamped = std.Io.Limit.min(limit, .limited64(self.max_bytes - current));
+            const n = self.inner.writer.vtable.sendFile(&self.inner.writer, file_reader, clamped) catch |e| return e;
             const total = self.bytes_written.fetchAdd(n, .release) + n;
             self.report(total);
+            // Backstop: the clamp bounds the write, but keep the post-check.
             if (total > self.max_bytes) {
                 self.limit_exceeded = true;
                 return error.WriteFailed;
@@ -1486,4 +1497,114 @@ test "isFollowableRedirect: never follows 304 Not Modified or 306" {
 test "isFollowableRedirect: ignores 2xx/300/305 and other statuses" {
     for ([_]u16{ 200, 204, 300, 305, 400, 404, 500 }) |s|
         try std.testing.expect(!HttpClient.isFollowableRedirect(s));
+}
+
+// Drives drain over a real Allocating writer so the committed length is
+// observable — the cap must bind before the inner write, not after.
+fn drainOnce(cw: *HttpClient.CountingWriter, chunk: []const u8) std.Io.Writer.Error!usize {
+    return cw.writer.vtable.drain(&cw.writer, &.{chunk}, 1);
+}
+
+test "CountingWriter.drain: refuses the over-cap chunk before allocating it" {
+    var inner: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer inner.deinit();
+    var cw = HttpClient.CountingWriter{
+        .inner = &inner,
+        .bytes_written = std.atomic.Value(u64).init(0),
+        .max_bytes = 10,
+        .limit_exceeded = false,
+        .progress = null,
+        .content_length = null,
+    };
+
+    try std.testing.expectEqual(@as(usize, 8), try drainOnce(&cw, "abcdefgh"));
+    // Second chunk pushes the total to 13 (> 10): must be refused whole.
+    try std.testing.expectError(error.WriteFailed, drainOnce(&cw, "ijklm"));
+    try std.testing.expect(cw.limit_exceeded);
+    // Peak commit stays at or below the cap — the over-cap bytes never landed.
+    try std.testing.expect(inner.writer.end <= cw.max_bytes);
+    try std.testing.expectEqual(@as(usize, 8), inner.writer.end);
+}
+
+test "CountingWriter.drain: accepts a chunk landing exactly on max_bytes" {
+    var inner: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer inner.deinit();
+    var cw = HttpClient.CountingWriter{
+        .inner = &inner,
+        .bytes_written = std.atomic.Value(u64).init(0),
+        .max_bytes = 10,
+        .limit_exceeded = false,
+        .progress = null,
+        .content_length = null,
+    };
+
+    try std.testing.expectEqual(@as(usize, 6), try drainOnce(&cw, "abcdef"));
+    // total == max_bytes is inclusive (check is strictly `>`).
+    try std.testing.expectEqual(@as(usize, 4), try drainOnce(&cw, "ghij"));
+    try std.testing.expect(!cw.limit_exceeded);
+    try std.testing.expectEqual(@as(usize, 10), inner.writer.end);
+}
+
+test "CountingWriter.drain: over-cap detected via splat count, not just data len" {
+    var inner: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer inner.deinit();
+    var cw = HttpClient.CountingWriter{
+        .inner = &inner,
+        .bytes_written = std.atomic.Value(u64).init(0),
+        .max_bytes = 4,
+        .limit_exceeded = false,
+        .progress = null,
+        .content_length = null,
+    };
+
+    // countSplat("ab" x3) == 6 > 4: the repeated last vector must be counted
+    // before delegating, otherwise the bound is read from data.len alone.
+    try std.testing.expectError(error.WriteFailed, cw.writer.vtable.drain(&cw.writer, &.{"ab"}, 3));
+    try std.testing.expect(cw.limit_exceeded);
+    try std.testing.expectEqual(@as(usize, 0), inner.writer.end);
+}
+
+test "CountingWriter.sendFile: clamps the source so a file cannot overshoot the cap" {
+    const io = std.Options.debug_io;
+    const alloc = std.testing.allocator;
+
+    // Per-random tmp path so concurrent test processes cannot clobber it.
+    var rnd: [8]u8 = undefined;
+    io.random(&rnd);
+    const path = try std.fmt.allocPrint(alloc, "/tmp/malt_cap_sendfile_{x}", .{std.mem.bytesToValue(u64, &rnd)});
+    defer alloc.free(path);
+    defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
+
+    {
+        const f = try std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
+        defer f.close(io);
+        try f.writeStreamingAll(io, "0123456789abcdefghij"); // 20 bytes > cap
+    }
+
+    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    var fbuf: [64]u8 = undefined;
+    var fr = f.reader(io, &fbuf);
+
+    var inner: std.Io.Writer.Allocating = .init(alloc);
+    defer inner.deinit();
+    var cw = HttpClient.CountingWriter{
+        .inner = &inner,
+        .bytes_written = std.atomic.Value(u64).init(0),
+        .max_bytes = 10,
+        .limit_exceeded = false,
+        .progress = null,
+        .content_length = null,
+    };
+
+    // Unlimited source over a 20-byte file: the clamp binds the write to the
+    // 10-byte cap, so nothing past max_bytes is committed.
+    try std.testing.expectEqual(@as(usize, 10), try cw.writer.vtable.sendFile(&cw.writer, &fr, .unlimited));
+    try std.testing.expectEqual(@as(usize, 10), inner.writer.end);
+    try std.testing.expect(!cw.limit_exceeded);
+
+    // Already at the cap: a further sendFile is refused before touching the source.
+    try std.testing.expectError(error.WriteFailed, cw.writer.vtable.sendFile(&cw.writer, &fr, .unlimited));
+    try std.testing.expect(cw.limit_exceeded);
+    try std.testing.expectEqual(@as(usize, 10), inner.writer.end);
 }
