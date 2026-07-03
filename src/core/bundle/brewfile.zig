@@ -307,20 +307,70 @@ fn expectString(a: std.mem.Allocator, s: []const u8, cursor: *usize) BrewfileErr
     if (quote != '"' and quote != '\'') return BrewfileError.ExpectedString;
     cursor.* += 1;
     const start = cursor.*;
+    var saw_escape = false;
     while (cursor.* < s.len) {
         const c = s[cursor.*];
         if (c == '\\' and cursor.* + 1 < s.len) {
+            saw_escape = true;
             cursor.* += 2;
             continue;
         }
         if (c == quote) {
             const raw = s[start..cursor.*];
             cursor.* += 1;
-            return a.dupe(u8, raw) catch return BrewfileError.OutOfMemory;
+            // Faithful round-trip: undo the emitter's `\"`/`\\` escaping. Common
+            // case (no backslash) keeps the original raw-span dup, no scan.
+            if (!saw_escape) return a.dupe(u8, raw) catch return BrewfileError.OutOfMemory;
+            return decodeEscapes(a, raw, quote) catch return BrewfileError.OutOfMemory;
         }
         cursor.* += 1;
     }
     return BrewfileError.UnterminatedString;
+}
+
+/// Decode the escapes the emitter writes, per Ruby quote semantics. Unknown
+/// escapes stay verbatim, so no bytes are lost and malt stays a narrow subset
+/// rather than a full Ruby string evaluator. Escapes never grow the string, so
+/// the raw length is a safe upper bound.
+fn decodeEscapes(a: std.mem.Allocator, raw: []const u8, quote: u8) BrewfileError![]const u8 {
+    const out = a.alloc(u8, raw.len) catch return BrewfileError.OutOfMemory;
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < raw.len) {
+        if (raw[i] == '\\' and i + 1 < raw.len) {
+            if (decodeEscape(quote, raw[i + 1])) |byte| {
+                out[w] = byte;
+                w += 1;
+                i += 2;
+                continue;
+            }
+        }
+        out[w] = raw[i];
+        w += 1;
+        i += 1;
+    }
+    return out[0..w];
+}
+
+/// The byte `\c` decodes to under `quote`'s Ruby semantics, or null when `\c`
+/// is not a recognized escape (kept verbatim). Single quotes process only `\\`
+/// and `\'`; double quotes also decode `\"` and the `\n`/`\r`/`\t` whitespace
+/// controls the emitter escapes.
+fn decodeEscape(quote: u8, c: u8) ?u8 {
+    if (quote == '\'') return switch (c) {
+        '\\' => '\\',
+        '\'' => '\'',
+        else => null,
+    };
+    return switch (c) {
+        '\\' => '\\',
+        '\'' => '\'',
+        '"' => '"',
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        else => null,
+    };
 }
 
 fn expectBool(s: []const u8, cursor: *usize) BrewfileError!bool {
@@ -457,6 +507,157 @@ test "double-quoted interpolation is rejected, single-quoted is literal" {
     defer m.deinit();
     try testing.expectEqual(@as(usize, 1), m.formulas.len);
     try testing.expectEqualStrings("foo#{bar}", m.formulas[0].name);
+}
+
+test "Brewfile round-trip preserves quotes, backslashes and newlines in names" {
+    const emit = @import("brewfile_emit.zig");
+    // Build a manifest whose fields carry quote/backslash/newline bytes, emit
+    // it, then re-parse: a faithful round-trip must return the same bytes, not a
+    // value truncated at the first unescaped quote or split across a raw newline.
+    var src = manifest_mod.Manifest.init(testing.allocator);
+    defer src.deinit();
+    const a = src.allocator();
+
+    const taps = try a.alloc([]const u8, 1);
+    taps[0] = try a.dupe(u8, "t\"p");
+    src.taps = taps;
+    const formulas = try a.alloc(manifest_mod.FormulaEntry, 1);
+    formulas[0] = .{ .name = try a.dupe(u8, "a\"b\\c\nd"), .version = try a.dupe(u8, "1\"2") };
+    src.formulas = formulas;
+    const casks = try a.alloc(manifest_mod.CaskEntry, 1);
+    casks[0] = .{ .name = try a.dupe(u8, "c\\k") };
+    src.casks = casks;
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try emit.emit(src, &aw.writer);
+
+    var back = try parse(testing.allocator, aw.written(), null);
+    defer back.deinit();
+
+    try testing.expectEqualStrings("t\"p", back.taps[0]);
+    try testing.expectEqualStrings("a\"b\\c\nd", back.formulas[0].name);
+    try testing.expectEqualStrings("1\"2", back.formulas[0].version.?);
+    try testing.expectEqualStrings("c\\k", back.casks[0].name);
+}
+
+test "single quotes decode only Ruby's literal escapes" {
+    // Ruby single-quoted strings process only \\ and \'; every other backslash
+    // (notably \") stays literal. Double quotes still unescape \".
+    var m = try parse(
+        testing.allocator,
+        "tap 'e\\'f'\nbrew 'a\\\"b'\ncask 'c\\\\d'\n",
+        null,
+    );
+    defer m.deinit();
+
+    try testing.expectEqualStrings("e'f", m.taps[0]); // \' -> '
+    try testing.expectEqualStrings("a\\\"b", m.formulas[0].name); // \" stays literal
+    try testing.expectEqualStrings("c\\d", m.casks[0].name); // \\ -> \
+
+    // Double-quoted \" still collapses, so the emit->parse round-trip holds.
+    var d = try parse(testing.allocator, "brew \"a\\\"b\"\n", null);
+    defer d.deinit();
+    try testing.expectEqualStrings("a\"b", d.formulas[0].name);
+}
+
+test "Brewfile emit output format is byte-stable for a plain manifest" {
+    // Golden lock for the escaper refactor: escape-free input must keep its
+    // exact single-line layout.
+    const emit = @import("brewfile_emit.zig");
+    const original =
+        \\tap "homebrew/core"
+        \\brew "wget"
+        \\brew "jq", version: "1.7"
+        \\cask "ghostty"
+    ;
+    var m = try parse(testing.allocator, original, null);
+    defer m.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try emit.emit(m, &aw.writer);
+
+    const expected =
+        \\tap "homebrew/core"
+        \\brew "wget"
+        \\brew "jq", version: "1.7"
+        \\cask "ghostty"
+        \\
+    ;
+    try testing.expectEqualStrings(expected, aw.written());
+}
+
+test "Brewfile round-trip covers CR, tab, empty and utf-8 values" {
+    const emit = @import("brewfile_emit.zig");
+    var src = manifest_mod.Manifest.init(testing.allocator);
+    defer src.deinit();
+    const a = src.allocator();
+
+    const formulas = try a.alloc(manifest_mod.FormulaEntry, 4);
+    formulas[0] = .{ .name = try a.dupe(u8, "a\r\tb") }; // CR + tab escape/decode
+    formulas[1] = .{ .name = try a.dupe(u8, "") }; // empty value
+    formulas[2] = .{ .name = try a.dupe(u8, "cafÉ🍺") }; // raw UTF-8 passes through
+    formulas[3] = .{ .name = try a.dupe(u8, "trail\\") }; // trailing backslash -> \\
+    src.formulas = formulas;
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try emit.emit(src, &aw.writer);
+
+    // Emitted text stays single-line-per-entry: one line per formula + trailing \n.
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, aw.written(), "\n"));
+
+    var back = try parse(testing.allocator, aw.written(), null);
+    defer back.deinit();
+    try testing.expectEqual(@as(usize, 4), back.formulas.len);
+    try testing.expectEqualStrings("a\r\tb", back.formulas[0].name);
+    try testing.expectEqualStrings("", back.formulas[1].name);
+    try testing.expectEqualStrings("cafÉ🍺", back.formulas[2].name);
+    try testing.expectEqualStrings("trail\\", back.formulas[3].name);
+}
+
+test "unknown double-quote escapes are kept verbatim" {
+    // malt is a narrow subset, not a full Ruby evaluator: \z is not a known
+    // escape, so the backslash is preserved rather than dropped.
+    var m = try parse(testing.allocator, "brew \"a\\zb\"\n", null);
+    defer m.deinit();
+    try testing.expectEqualStrings("a\\zb", m.formulas[0].name);
+}
+
+test "Brewfile round-trips every byte value in a name" {
+    // Exhaustive proof that leaving rare control bytes unescaped is safe: with
+    // the value always interior (`brew "..."`), no byte can break line splitting
+    // (only \n does, and it is escaped) or get eaten by trim (VT/FF are interior,
+    // never leading/trailing). Every byte 0..255 must survive emit->parse.
+    const emit = @import("brewfile_emit.zig");
+    var b: usize = 0;
+    while (b < 256) : (b += 1) {
+        var src = manifest_mod.Manifest.init(testing.allocator);
+        defer src.deinit();
+        const a = src.allocator();
+        const name = try a.alloc(u8, 3);
+        name[0] = 'x';
+        name[1] = @intCast(b);
+        name[2] = 'y';
+        const formulas = try a.alloc(manifest_mod.FormulaEntry, 1);
+        formulas[0] = .{ .name = name };
+        src.formulas = formulas;
+
+        var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer aw.deinit();
+        try emit.emit(src, &aw.writer);
+
+        var back = parse(testing.allocator, aw.written(), null) catch |e| {
+            std.debug.print("byte 0x{x:0>2} failed to parse: {s}\n", .{ b, @errorName(e) });
+            return e;
+        };
+        defer back.deinit();
+        testing.expectEqualStrings(name, back.formulas[0].name) catch |e| {
+            std.debug.print("byte 0x{x:0>2} did not round-trip\n", .{b});
+            return e;
+        };
+    }
 }
 
 test "diagnostics records the 1-based line of a parse failure" {

@@ -442,6 +442,40 @@ pub fn materializeFromLocalCellar(
     return .{ .name = name, .version = version, .path = owned_path };
 }
 
+/// Escape `s` as JSON string *contents* (no surrounding quotes) into `buf`,
+/// returning the written slice or null on overflow. Duplicated from the bundle
+/// emitter's escaper rather than importing across modules; this sink is a fixed
+/// buffer, not a `std.Io.Writer`, so it can't share the same signature.
+fn jsonEscapeInto(buf: []u8, s: []const u8) ?[]const u8 {
+    var w: usize = 0;
+    for (s) |byte| {
+        const esc: ?[]const u8 = switch (byte) {
+            '"' => "\\\"",
+            '\\' => "\\\\",
+            '\n' => "\\n",
+            '\r' => "\\r",
+            '\t' => "\\t",
+            0x08 => "\\b",
+            0x0c => "\\f",
+            else => null,
+        };
+        if (esc) |e| {
+            if (w + e.len > buf.len) return null;
+            @memcpy(buf[w..][0..e.len], e);
+            w += e.len;
+        } else if (byte < 0x20) {
+            if (w + 6 > buf.len) return null;
+            _ = std.fmt.bufPrint(buf[w..], "\\u{x:0>4}", .{byte}) catch return null;
+            w += 6;
+        } else {
+            if (w >= buf.len) return null;
+            buf[w] = byte;
+            w += 1;
+        }
+    }
+    return buf[0..w];
+}
+
 fn writeInstallReceipt(io: std.Io, cellar_path: []const u8, name: []const u8, version: []const u8, store_sha256: []const u8) void {
     writeInstallReceiptFull(io, cellar_path, name, version, store_sha256, null, true);
 }
@@ -463,9 +497,15 @@ pub fn writeInstallReceiptFull(
     defer file.close(io);
 
     const timestamp = std.Io.Clock.real.now(io).toSeconds();
-    const tap_str = tap orelse "homebrew/core";
     const reason = if (is_direct) "true" else "false";
     const dep_reason = if (is_direct) "false" else "true";
+
+    // Escape tap/version before interpolating them into quoted JSON slots: a
+    // `"`/`\` from a hand-authored tap would otherwise emit malformed receipts.
+    var tap_scratch: [256]u8 = undefined;
+    var ver_scratch: [256]u8 = undefined;
+    const tap_str = jsonEscapeInto(&tap_scratch, tap orelse "homebrew/core") orelse return;
+    const version_str = jsonEscapeInto(&ver_scratch, version) orelse return;
 
     var buf: [2048]u8 = undefined;
     const json = std.fmt.bufPrint(&buf,
@@ -497,7 +537,7 @@ pub fn writeInstallReceiptFull(
         reason,
         timestamp,
         tap_str,
-        version,
+        version_str,
         if (@import("builtin").cpu.arch == .aarch64) "arm64" else "x86_64",
         store_sha256,
     }) catch return;
@@ -535,4 +575,61 @@ test "describeError: action-hint tags keep prose, trivial tags fall back to @err
     inline for (fallback_tags) |e| {
         try std.testing.expectEqualStrings(@errorName(e), describeError(e));
     }
+}
+
+/// Test helper: write a receipt with the given tap/version into a unique temp
+/// dir, read it back, clean up, and return the owned bytes. `tag` keeps
+/// concurrent test binaries from colliding on the same path.
+fn writeReceiptAndRead(io: std.Io, alloc: std.mem.Allocator, tag: []const u8, tap: []const u8, version: []const u8) ![]u8 {
+    const ts = std.Io.Clock.real.now(io).toNanoseconds();
+    var dir_buf: [128]u8 = undefined;
+    const dir = std.fmt.bufPrint(&dir_buf, "/tmp/malt_receipt_{s}_{d}", .{ tag, ts }) catch unreachable;
+    std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    writeInstallReceiptFull(io, dir, "pkg", version, "abc123", tap, true);
+
+    var path_buf: [160]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/INSTALL_RECEIPT.json", .{dir}) catch unreachable;
+    const f = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer f.close(io);
+    const st = try f.stat(io);
+    const bytes = try alloc.alloc(u8, @intCast(st.size));
+    errdefer alloc.free(bytes);
+    _ = try f.readPositionalAll(io, bytes, 0);
+    return bytes;
+}
+
+test "install receipt with quoted tap and version stays valid JSON" {
+    const testing = std.testing;
+    const bytes = try writeReceiptAndRead(std.Options.debug_io, testing.allocator, "quoted", "ta\"p/\\core", "1\"0\\rc");
+    defer testing.allocator.free(bytes);
+
+    // The whole point: the receipt must re-parse despite quote/backslash bytes.
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, bytes, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("ta\"p/\\core", parsed.value.object.get("source").?.object.get("tap").?.string);
+    try testing.expectEqualStrings("1\"0\\rc", parsed.value.object.get("source").?.object.get("versions").?.object.get("stable").?.string);
+}
+
+test "install receipt escapes control chars in tap and version" {
+    const testing = std.testing;
+    const bytes = try writeReceiptAndRead(std.Options.debug_io, testing.allocator, "ctrl", "a\nb\tc", "v\x01w");
+    defer testing.allocator.free(bytes);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, bytes, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("a\nb\tc", parsed.value.object.get("source").?.object.get("tap").?.string);
+    try testing.expectEqualStrings("v\x01w", parsed.value.object.get("source").?.object.get("versions").?.object.get("stable").?.string);
+}
+
+test "install receipt with an over-long value degrades without crashing" {
+    const testing = std.testing;
+    // A tap longer than the escape scratch buffer overruns; the writer must
+    // bail out gracefully (best-effort path) rather than panic or truncate mid-JSON.
+    const long_tap = "a" ** 300;
+    const bytes = try writeReceiptAndRead(std.Options.debug_io, testing.allocator, "overflow", long_tap, "1.0");
+    defer testing.allocator.free(bytes);
+    // Nothing was written; the empty receipt is the graceful degradation.
+    try testing.expectEqual(@as(usize, 0), bytes.len);
 }
