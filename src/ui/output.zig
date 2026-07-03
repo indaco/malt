@@ -427,6 +427,21 @@ pub fn skip(comptime fmt: []const u8, args: anytype) void {
     emitPrefixLine(.skip, fmt, args);
 }
 
+/// True only when `file` is an interactive terminal. A probe error is
+/// treated as non-interactive so an escalation gated on this refuses to
+/// proceed unattended. Kept file-parameterised so tests can drive it
+/// against a pipe without a real TTY.
+fn isInteractive(file: std.Io.File, io: std.Io) bool {
+    return file.isTty(io) catch false;
+}
+
+/// True when stdin is an interactive terminal. PKG-cask install probes this
+/// before escalating to `sudo`, whose password read stalls off a TTY.
+pub fn stdinIsInteractive() bool {
+    const stdin_file: std.Io.File = .{ .handle = std.posix.STDIN_FILENO, .flags = .{ .nonblocking = false } };
+    return isInteractive(stdin_file, pkg_io);
+}
+
 /// Read a single line from stdin and return true iff the trimmed input
 /// matches `expected` exactly. Prints `prompt` via `question` first.
 ///
@@ -434,8 +449,7 @@ pub fn skip(comptime fmt: []const u8, args: anytype) void {
 /// refuse to run unattended without an explicit `--yes` opt-in.
 pub fn confirmTyped(expected: []const u8, prompt: []const u8) bool {
     const stdin_file: std.Io.File = .{ .handle = std.posix.STDIN_FILENO, .flags = .{ .nonblocking = false } };
-    const is_tty = stdin_file.isTty(pkg_io) catch false;
-    if (!is_tty) return false;
+    if (!isInteractive(stdin_file, pkg_io)) return false;
 
     question("{s}", .{prompt});
     return readMatchingLine(stdin_file, pkg_io, expected);
@@ -923,4 +937,44 @@ test "readMatchingLine returns false when stdin is at EOF" {
 
     const stdin_file: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
     try std.testing.expect(!readMatchingLine(stdin_file, std.Options.debug_io, "yes"));
+}
+
+// A pipe is never a terminal, so the PKG-cask sudo gate must classify it as
+// non-interactive and refuse escalation — the safety-critical direction: a
+// false positive here would let `sudo installer -target /` run unattended.
+test "isInteractive treats a non-terminal stdin as non-interactive" {
+    const fds = try pipeForTest();
+    defer _ = std.c.close(fds[0]);
+    defer _ = std.c.close(fds[1]);
+
+    const stdin_file: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+    try std.testing.expect(!isInteractive(stdin_file, std.Options.debug_io));
+}
+
+// A probe error (here: a closed fd) must fail safe to non-interactive so the
+// sudo gate never proceeds on an ambiguous result.
+test "isInteractive fails safe to non-interactive when the tty probe errors" {
+    const fds = try pipeForTest();
+    _ = std.c.close(fds[0]);
+    _ = std.c.close(fds[1]);
+
+    const closed_file: std.Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
+    try std.testing.expect(!isInteractive(closed_file, std.Options.debug_io));
+}
+
+extern "c" fn openpty(amaster: *c_int, aslave: *c_int, name: ?[*]u8, termp: ?*anyopaque, winp: ?*anyopaque) c_int;
+
+// The positive direction: a real terminal (a pty slave) must read as
+// interactive. Without this only the refusal path is covered, so a probe
+// broken to always report non-interactive would ship green yet make every
+// PKG-cask install/upgrade/rollback impossible.
+test "isInteractive treats a pty slave as interactive" {
+    var master: c_int = undefined;
+    var slave: c_int = undefined;
+    if (openpty(&master, &slave, null, null, null) != 0) return error.SkipZigTest;
+    defer _ = std.c.close(master);
+    defer _ = std.c.close(slave);
+
+    const slave_file: std.Io.File = .{ .handle = slave, .flags = .{ .nonblocking = false } };
+    try std.testing.expect(isInteractive(slave_file, std.Options.debug_io));
 }

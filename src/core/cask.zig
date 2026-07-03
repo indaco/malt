@@ -1160,9 +1160,12 @@ pub const CaskInstaller = struct {
     }
 
     fn installPkg(self: *CaskInstaller, pkg_path: []const u8) ![]const u8 {
-        // PKG installs require sudo — the caller must confirm
+        // The CLI gate already refused off a TTY and took the user's
+        // confirmation, so sudo here has a terminal to prompt on. Inherit
+        // stdio (not the captured `run`) so the password prompt and the
+        // installer's progress reach the user live, not as a post-mortem dump.
         const argv = [_][]const u8{ "sudo", "installer", "-pkg", pkg_path, "-target", "/" };
-        child_mod.runOrFail(self.io, self.allocator, &argv) catch return error.InstallFailed;
+        child_mod.runOrFailInherit(self.io, &argv) catch return error.InstallFailed;
         // PKG installs don't have a single app path — record the pkg location
         return std.fmt.allocPrint(self.allocator, "{s}", .{pkg_path}) catch return error.OutOfMemory;
     }
