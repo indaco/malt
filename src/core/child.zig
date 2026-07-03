@@ -35,6 +35,15 @@ pub const RunReport = struct {
     }
 };
 
+/// Collapse a wait `Term` to an exit code: the real code on a clean exit, a
+/// `255` sentinel for signal/stopped/unknown terminations.
+fn termToCode(term: std.process.Child.Term) u8 {
+    return switch (term) {
+        .exited => |c| c,
+        .signal, .stopped, .unknown => 255,
+    };
+}
+
 /// Carries one stream's drain result across the worker-thread boundary.
 const DrainCtx = struct {
     io: std.Io,
@@ -94,10 +103,7 @@ pub fn run(
     errdefer allocator.free(stderr_bytes);
 
     const term = child.wait(io) catch return error.WaitFailed;
-    const code: u8 = switch (term) {
-        .exited => |c| c,
-        .signal, .stopped, .unknown => 255,
-    };
+    const code = termToCode(term);
 
     return .{ .code = code, .stdout = stdout_bytes, .stderr = stderr_bytes };
 }
@@ -119,6 +125,18 @@ pub fn runOrFail(
     if (report.stderr.len > 0) stderr_file.writeStreamingAll(io, report.stderr) catch {};
     if (report.stdout.len > 0) stderr_file.writeStreamingAll(io, report.stdout) catch {};
     return error.NonZeroExit;
+}
+
+/// Spawn `argv` with the parent's stdin/stdout/stderr inherited, wait, and
+/// map a non-zero exit to `error.NonZeroExit`. Unlike `run`, nothing is
+/// captured — use this for a child that must talk to the terminal live, e.g.
+/// `sudo installer`, whose password prompt and progress must reach the user
+/// as they happen instead of being buffered and replayed only on failure.
+pub fn runOrFailInherit(io: std.Io, argv: []const []const u8) ChildError!void {
+    // Stdio defaults to `.inherit`; unlike `run`, we deliberately do not pipe.
+    var child = std.process.spawn(io, .{ .argv = argv }) catch return error.SpawnFailed;
+    const term = child.wait(io) catch return error.WaitFailed;
+    if (termToCode(term) != 0) return error.NonZeroExit;
 }
 
 fn drainPipe(
@@ -170,6 +188,27 @@ test "runOrFail returns SpawnFailed when program does not exist" {
     defer threaded.deinit();
     const argv = [_][]const u8{"/nonexistent/binary/malt_child_test"};
     try std.testing.expectError(ChildError.SpawnFailed, runOrFail(threaded.io(), std.testing.allocator, &argv));
+}
+
+test "runOrFailInherit returns void on exit code 0" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const argv = [_][]const u8{"/usr/bin/true"};
+    try runOrFailInherit(threaded.io(), &argv);
+}
+
+test "runOrFailInherit returns NonZeroExit on a non-zero exit" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const argv = [_][]const u8{"/usr/bin/false"};
+    try std.testing.expectError(ChildError.NonZeroExit, runOrFailInherit(threaded.io(), &argv));
+}
+
+test "runOrFailInherit returns SpawnFailed when program does not exist" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const argv = [_][]const u8{"/nonexistent/binary/malt_child_test"};
+    try std.testing.expectError(ChildError.SpawnFailed, runOrFailInherit(threaded.io(), &argv));
 }
 
 // Capture-content tests (dual-stream, non-zero exit) live in

@@ -15,6 +15,7 @@ const atomic = @import("../fs/atomic.zig");
 const color = @import("../ui/color.zig");
 const output = @import("../ui/output.zig");
 const help = @import("help.zig");
+const install_mod = @import("install.zig");
 const formula_mod = @import("../core/formula.zig");
 
 /// `error.Aborted` is returned on every user-facing failure. The caller has
@@ -284,6 +285,18 @@ fn dispatchCask(
     if (parsed.dry_run) {
         output.info("Dry run: would reinstall {s} {s} from cask history", .{ token, target_pkg_version });
         return;
+    }
+
+    // A PKG-cask rollback re-runs `sudo installer -target /`. Gate it before the
+    // lock + reinstall so a refusal off a TTY changes nothing on disk.
+    const target_is_pkg = blk: {
+        var row = (cask_mod.lookupCaskVersion(allocator, db, token, target_pkg_version) catch null) orelse break :blk false;
+        defer row.deinit(allocator);
+        break :blk cask_mod.artifactTypeFromTag(row.artifact_type) == .pkg;
+    };
+    if (target_is_pkg) {
+        output.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{token});
+        if (!install_mod.confirmPkgSudo(token)) return error.Aborted;
     }
 
     const prefix = atomic.maltPrefixOrAbort();

@@ -948,6 +948,7 @@ fn materializeTapCask(
 
     if (kind == .pkg) {
         sink.warn("{s} is a PKG cask and requires sudo to install via macOS Installer.", .{cask.token});
+        if (!download_only and !install_mod.confirmPkgSudo(cask.token)) return InstallError.CaskNotFound;
     }
 
     // `--download-only` for a cask-shaped tap entry reuses the cask
