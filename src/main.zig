@@ -219,6 +219,32 @@ pub fn applyGlobalFlag(arg: []const u8) bool {
     return true;
 }
 
+/// Index at which verbatim pass-through begins: the position of the first
+/// `--` at or after the command token. Everything from there on is the
+/// subcommand's business (e.g. `mt run <pkg> -- <child args>`), so the
+/// dispatch loop must stop applying global-flag semantics past this point.
+/// Returns null when there is no such separator. Pure so the boundary is
+/// testable without touching the process-wide `output.*` globals.
+fn passthroughStart(args: []const []const u8) ?usize {
+    var found_cmd = false;
+    for (args, 0..) |arg, i| {
+        if (!found_cmd) {
+            // Mirror the command-token detection in `main`: the first bare
+            // positional, or --help/-h/--version acting as a command.
+            if (!std.mem.startsWith(u8, arg, "-") or
+                std.mem.eql(u8, arg, "--help") or
+                std.mem.eql(u8, arg, "-h") or
+                std.mem.eql(u8, arg, "--version"))
+            {
+                found_cmd = true;
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--")) return i;
+    }
+    return null;
+}
+
 test "applyGlobalFlag --output-format=ndjson toggles ndjson mode" {
     const output = @import("ui/output.zig");
     const prior = output.isNdjson();
@@ -255,6 +281,46 @@ test "applyGlobalFlag returns false for unrecognised flags" {
 test "dispatch accepts AppCtx and routes help without panic" {
     const ctx: AppCtx = .{ .io = std.Options.debug_io, .environ = .empty };
     try dispatch(std.testing.allocator, &ctx, .help, &.{});
+}
+
+test "passthroughStart finds the first -- after the command token" {
+    const argv = &[_][]const u8{ "run", "jq", "--", "--json" };
+    try std.testing.expectEqual(@as(?usize, 2), passthroughStart(argv));
+}
+
+test "passthroughStart ignores -- appearing before any command" {
+    // A `--` with no command yet is not a pass-through boundary; the loop
+    // still needs to discover the command token first.
+    const argv = &[_][]const u8{ "--", "run" };
+    try std.testing.expectEqual(@as(?usize, null), passthroughStart(argv));
+}
+
+test "passthroughStart returns null when there is no separator" {
+    const argv = &[_][]const u8{ "run", "jq", "--json" };
+    try std.testing.expectEqual(@as(?usize, null), passthroughStart(argv));
+}
+
+test "passthroughStart treats help-as-command as the command token" {
+    // `--help`/`-h`/`--version` act as the command when seen first, so a
+    // later `--` still opens a pass-through region.
+    inline for (.{ "--help", "-h", "--version" }) |cmd| {
+        const argv = &[_][]const u8{ cmd, "--", "--json" };
+        try std.testing.expectEqual(@as(?usize, 1), passthroughStart(argv));
+    }
+}
+
+test "passthroughStart returns the first separator, not a later one" {
+    // A second `--` is child argv, not a fresh boundary; everything from the
+    // first `--` on is passed verbatim.
+    const argv = &[_][]const u8{ "run", "jq", "--", "-a", "--", "-b" };
+    try std.testing.expectEqual(@as(?usize, 2), passthroughStart(argv));
+}
+
+test "passthroughStart handles a global flag before the command token" {
+    // A leading global flag is not a command; the command is the first bare
+    // positional after it, and the `--` past that opens the region.
+    const argv = &[_][]const u8{ "--json", "run", "--", "-x" };
+    try std.testing.expectEqual(@as(?usize, 2), passthroughStart(argv));
 }
 
 test "applyGlobalFlag does not consume --offline (handled inline by main)" {
@@ -455,7 +521,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer filtered.deinit(allocator);
     var cmd_str: []const u8 = "";
     var found_cmd = false;
-    for (args) |arg| {
+    // Everything at/after the first `--` (once a command is seen) is the
+    // subcommand's business — POSIX end-of-options. Passing it verbatim stops
+    // global flags meant for a `run` child from being consumed here.
+    const passthrough = passthroughStart(args);
+    for (args, 0..) |arg, i| {
+        if (passthrough) |p| {
+            if (i >= p) {
+                try filtered.append(allocator, arg);
+                continue;
+            }
+        }
         if (!found_cmd and !std.mem.startsWith(u8, arg, "-")) {
             cmd_str = arg;
             found_cmd = true;
