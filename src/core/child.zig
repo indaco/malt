@@ -37,7 +37,7 @@ pub const RunReport = struct {
 
 /// Collapse a wait `Term` to an exit code: the real code on a clean exit, a
 /// `255` sentinel for signal/stopped/unknown terminations.
-fn termToCode(term: std.process.Child.Term) u8 {
+pub fn termToCode(term: std.process.Child.Term) u8 {
     return switch (term) {
         .exited => |c| c,
         .signal, .stopped, .unknown => 255,

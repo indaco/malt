@@ -7,6 +7,7 @@ const AppCtx = @import("../app_ctx.zig").AppCtx;
 const formula_mod = @import("../core/formula.zig");
 const bottle_mod = @import("../core/bottle.zig");
 const client_mod = @import("../net/client.zig");
+const child_mod = @import("../core/child.zig");
 const ghcr_mod = @import("../net/ghcr.zig");
 const api_mod = @import("../net/api.zig");
 const atomic = @import("../fs/atomic.zig");
@@ -104,13 +105,16 @@ pub fn execute(ctx: *const AppCtx, allocator: std.mem.Allocator, args: []const [
     const prefix = atomic.maltPrefixOrAbort();
 
     var bin_buf: [512]u8 = undefined;
-    const installed_bin = std.fmt.bufPrint(&bin_buf, "{s}/bin/{s}", .{ prefix, parsed.pkg_name }) catch return;
+    const installed_bin = std.fmt.bufPrint(&bin_buf, "{s}/bin/{s}", .{ prefix, parsed.pkg_name }) catch {
+        output.err("Installed binary path too long for {s}", .{parsed.pkg_name});
+        return error.Aborted;
+    };
     std.Io.Dir.accessAbsolute(ctx.io, installed_bin, .{}) catch {
         return ephemeralRun(ctx, allocator, parsed.pkg_name, parsed.cmd_args, parsed.keep, prefix);
     };
 
     output.info("Running installed {s}...", .{parsed.pkg_name});
-    return try execBinary(ctx, allocator, installed_bin, parsed.cmd_args);
+    return try execBinary(ctx, allocator, installed_bin, parsed.cmd_args, null);
 }
 
 fn ephemeralRun(
@@ -128,7 +132,10 @@ fn ephemeralRun(
     http.offline = ctx.offline;
 
     var cache_buf: [512]u8 = undefined;
-    const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch return;
+    const cache_dir = std.fmt.bufPrint(&cache_buf, "{s}/cache", .{prefix}) catch {
+        output.err("Cache path too long for {s}", .{pkg_name});
+        return error.Aborted;
+    };
     var api = api_mod.BrewApi.init(ctx.io, allocator, &http, cache_dir);
     api.base_url = ctx.mirrors.api_base;
     api.offline = ctx.offline;
@@ -191,7 +198,7 @@ fn ephemeralRun(
             // Drop the lock before exec so peers can run the cached binary unblocked.
             releaseKeepLock(ctx.io, &keep_lock);
             output.info("Running cached {s} {s}...", .{ pkg_name, formula.version });
-            return try execBinary(ctx, allocator, cached_bin, cmd_args);
+            return try execBinary(ctx, allocator, cached_bin, cmd_args, null);
         }
     }
 
@@ -239,10 +246,22 @@ fn ephemeralRun(
     if (std.mem.startsWith(u8, bottle.url, ghcr_prefix)) {
         const path = bottle.url[ghcr_prefix.len..];
         if (std.mem.indexOf(u8, path, "/blobs/")) |blobs_pos| {
-            repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch return;
-            digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch return;
-        } else return;
-    } else return;
+            repo = std.fmt.bufPrint(&repo_buf, "{s}", .{path[0..blobs_pos]}) catch {
+                output.err("Bottle repo path too long for {s}", .{pkg_name});
+                return error.Aborted;
+            };
+            digest = std.fmt.bufPrint(&digest_buf, "{s}", .{path[blobs_pos + "/blobs/".len ..]}) catch {
+                output.err("Bottle digest too long for {s}", .{pkg_name});
+                return error.Aborted;
+            };
+        } else {
+            output.err("Bottle for '{s}' is not a GHCR blob reference: {s}", .{ pkg_name, bottle.url });
+            return error.Aborted;
+        }
+    } else {
+        output.err("Bottle for '{s}' is not a GHCR blob reference: {s}", .{ pkg_name, bottle.url });
+        return error.Aborted;
+    }
 
     output.info("Downloading {s} {s}...", .{ pkg_name, formula.version });
     _ = bottle_mod.download(ctx.io, allocator, &ghcr, &http, repo, digest, bottle.sha256, dest_dir, null, null) catch {
@@ -256,7 +275,10 @@ fn ephemeralRun(
         pkg_name,
         formula.version,
         pkg_name,
-    }) catch return;
+    }) catch {
+        output.err("Bottle binary path too long for {s}", .{pkg_name});
+        return error.Aborted;
+    };
 
     std.Io.Dir.accessAbsolute(ctx.io, bin_path, .{}) catch {
         output.err("Binary '{s}' not found in bottle", .{pkg_name});
@@ -264,7 +286,10 @@ fn ephemeralRun(
     };
 
     {
-        const f = std.Io.Dir.openFileAbsolute(ctx.io, bin_path, .{ .mode = .read_write }) catch return;
+        const f = std.Io.Dir.openFileAbsolute(ctx.io, bin_path, .{ .mode = .read_write }) catch {
+            output.err("Binary '{s}' not accessible in bottle", .{pkg_name});
+            return error.Aborted;
+        };
         defer f.close(ctx.io);
         // Bottles ship with +x; chmod is belt-and-suspenders. exec below surfaces EACCES.
         f.setPermissions(ctx.io, std.Io.File.Permissions.fromMode(0o755)) catch {};
@@ -283,24 +308,69 @@ fn ephemeralRun(
     // Separator is purely cosmetic; a closed stderr shouldn't kill the run.
     stderr.writeStreamingAll(ctx.io, "---\n") catch {};
 
-    try execBinary(ctx, allocator, bin_path, cmd_args);
+    // Pass owned_tmp so the exit path deletes the ephemeral extract; it is
+    // null on --keep, where the slot under {cache} is intentionally retained.
+    try execBinary(ctx, allocator, bin_path, cmd_args, owned_tmp);
 }
 
-fn execBinary(ctx: *const AppCtx, _: std.mem.Allocator, path: []const u8, cmd_args: []const []const u8) !void {
-    // Build argv: [path] ++ cmd_args
-    var argv_buf: [64][]const u8 = undefined;
-    argv_buf[0] = path;
-    const argc = @min(cmd_args.len, argv_buf.len - 1);
-    for (cmd_args[0..argc], 1..) |arg, i| {
-        argv_buf[i] = arg;
-    }
+/// Assemble `[path] ++ cmd_args` into a freshly allocated argv. Heap-backed
+/// (not a fixed stack buffer) so no forwarded argument is ever dropped.
+fn buildArgv(allocator: std.mem.Allocator, path: []const u8, cmd_args: []const []const u8) ![]const []const u8 {
+    const argv = try allocator.alloc([]const u8, cmd_args.len + 1);
+    argv[0] = path;
+    for (cmd_args, 1..) |arg, i| argv[i] = arg;
+    return argv;
+}
 
-    var child = std.process.spawn(ctx.io, .{ .argv = argv_buf[0 .. argc + 1] }) catch {
+fn execBinary(
+    ctx: *const AppCtx,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    cmd_args: []const []const u8,
+    cleanup_dir: ?[]const u8,
+) !void {
+    const argv = try buildArgv(allocator, path, cmd_args);
+    defer allocator.free(argv);
+
+    var child = std.process.spawn(ctx.io, .{ .argv = argv }) catch {
         output.err("Failed to execute binary", .{});
         return error.Aborted;
     };
-    // Ephemeral run is fire-and-forget; child exit code isn't surfaced to the shell.
-    _ = child.wait(ctx.io) catch {};
+    const term = child.wait(ctx.io) catch {
+        output.err("Failed to wait for {s}", .{path});
+        return error.Aborted;
+    };
+    // The child has exited, so its binary is no longer mapped: delete the
+    // ephemeral extract dir here, because std.process.exit below skips the
+    // caller's `defer` cleanup. Errors on error-return paths are left to it.
+    if (cleanup_dir) |dir| atomic.cleanupTempDir(ctx.io, dir);
+    // Forward the child's real exit status so `mt run … && …` and CI
+    // conditionals see what the run binary returned. exec wrapper has no
+    // return channel for arbitrary codes, so exit directly.
+    std.process.exit(child_mod.termToCode(term));
+}
+
+test "buildArgv prepends path and forwards every arg" {
+    const allocator = std.testing.allocator;
+    // 100 args past the old 63-slot cap — none may be dropped.
+    var cmd_args: [100][]const u8 = undefined;
+    for (&cmd_args, 0..) |*a, i| a.* = if (i % 2 == 0) "a" else "b";
+
+    const argv = try buildArgv(allocator, "/opt/malt/bin/foo", &cmd_args);
+    defer allocator.free(argv);
+
+    try std.testing.expectEqual(@as(usize, 101), argv.len);
+    try std.testing.expectEqualStrings("/opt/malt/bin/foo", argv[0]);
+    try std.testing.expectEqualStrings("a", argv[1]);
+    try std.testing.expectEqualStrings("b", argv[100]);
+}
+
+test "buildArgv with no cmd args is just the path" {
+    const allocator = std.testing.allocator;
+    const argv = try buildArgv(allocator, "/bin/x", &[_][]const u8{});
+    defer allocator.free(argv);
+    try std.testing.expectEqual(@as(usize, 1), argv.len);
+    try std.testing.expectEqualStrings("/bin/x", argv[0]);
 }
 
 test "parseArgs splits at double dash" {
