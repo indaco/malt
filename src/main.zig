@@ -219,12 +219,10 @@ pub fn applyGlobalFlag(arg: []const u8) bool {
     return true;
 }
 
-/// Index at which verbatim pass-through begins: the position of the first
-/// `--` at or after the command token. Everything from there on is the
-/// subcommand's business (e.g. `mt run <pkg> -- <child args>`), so the
-/// dispatch loop must stop applying global-flag semantics past this point.
-/// Returns null when there is no such separator. Pure so the boundary is
-/// testable without touching the process-wide `output.*` globals.
+/// First index that passes through verbatim — the `--` at or after the
+/// command token, past which argv belongs to the subcommand (e.g. a `run`
+/// child). Pure, so the boundary is unit-testable without touching the
+/// `output.*` globals that `applyGlobalFlag` mutates.
 fn passthroughStart(args: []const []const u8) ?usize {
     var found_cmd = false;
     for (args, 0..) |arg, i| {
@@ -521,9 +519,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer filtered.deinit(allocator);
     var cmd_str: []const u8 = "";
     var found_cmd = false;
-    // Everything at/after the first `--` (once a command is seen) is the
-    // subcommand's business — POSIX end-of-options. Passing it verbatim stops
-    // global flags meant for a `run` child from being consumed here.
+    // Stop global-flag parsing at the POSIX `--`; the rest is the subcommand's.
     const passthrough = passthroughStart(args);
     for (args, 0..) |arg, i| {
         if (passthrough) |p| {
