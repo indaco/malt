@@ -158,16 +158,49 @@ pub fn parseJson(parent: std.mem.Allocator, json_text: []const u8) ManifestError
     return manifest;
 }
 
+/// Write `s` as a quoted JSON string literal (RFC 8259 escapes). Duplicated
+/// from `ui.output.jsonStr` on purpose: `core → ui` is an upward layer edge,
+/// so the ~15 lines are copied rather than imported.
+fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
+    try w.writeByte('"');
+    var start: usize = 0;
+    for (s, 0..) |byte, i| {
+        const escape: ?[]const u8 = switch (byte) {
+            '"' => "\\\"",
+            '\\' => "\\\\",
+            '\n' => "\\n",
+            '\r' => "\\r",
+            '\t' => "\\t",
+            0x08 => "\\b",
+            0x0c => "\\f",
+            else => null,
+        };
+        if (escape) |esc| {
+            if (i > start) try w.writeAll(s[start..i]);
+            try w.writeAll(esc);
+            start = i + 1;
+        } else if (byte < 0x20) {
+            if (i > start) try w.writeAll(s[start..i]);
+            var hex_buf: [6]u8 = undefined;
+            const hex = std.fmt.bufPrint(&hex_buf, "\\u{x:0>4}", .{byte}) catch unreachable;
+            try w.writeAll(hex);
+            start = i + 1;
+        }
+    }
+    if (start < s.len) try w.writeAll(s[start..]);
+    try w.writeByte('"');
+}
+
 pub fn emitJson(manifest: Manifest, writer: *std.Io.Writer) !void {
-    try writer.writeAll("{\n");
-    try writer.print("  \"name\": \"{s}\",\n", .{manifest.name});
-    try writer.print("  \"version\": {d}", .{manifest.version});
+    try writer.writeAll("{\n  \"name\": ");
+    try writeJsonString(writer, manifest.name);
+    try writer.print(",\n  \"version\": {d}", .{manifest.version});
 
     if (manifest.taps.len > 0) {
         try writer.writeAll(",\n  \"taps\": [");
         for (manifest.taps, 0..) |t, i| {
             if (i != 0) try writer.writeAll(", ");
-            try writer.print("\"{s}\"", .{t});
+            try writeJsonString(writer, t);
         }
         try writer.writeAll("]");
     }
@@ -176,8 +209,12 @@ pub fn emitJson(manifest: Manifest, writer: *std.Io.Writer) !void {
         try writer.writeAll(",\n  \"formulas\": [");
         for (manifest.formulas, 0..) |f, i| {
             if (i != 0) try writer.writeAll(", ");
-            try writer.print("{{\"name\": \"{s}\"", .{f.name});
-            if (f.version) |v| try writer.print(", \"version\": \"{s}\"", .{v});
+            try writer.writeAll("{\"name\": ");
+            try writeJsonString(writer, f.name);
+            if (f.version) |v| {
+                try writer.writeAll(", \"version\": ");
+                try writeJsonString(writer, v);
+            }
             if (f.restart_service) try writer.writeAll(", \"restart_service\": true");
             try writer.writeAll("}");
         }
@@ -188,7 +225,9 @@ pub fn emitJson(manifest: Manifest, writer: *std.Io.Writer) !void {
         try writer.writeAll(",\n  \"casks\": [");
         for (manifest.casks, 0..) |c, i| {
             if (i != 0) try writer.writeAll(", ");
-            try writer.print("{{\"name\": \"{s}\"}}", .{c.name});
+            try writer.writeAll("{\"name\": ");
+            try writeJsonString(writer, c.name);
+            try writer.writeAll("}");
         }
         try writer.writeAll("]");
     }
@@ -197,7 +236,8 @@ pub fn emitJson(manifest: Manifest, writer: *std.Io.Writer) !void {
         try writer.writeAll(",\n  \"services\": [");
         for (manifest.services, 0..) |s, i| {
             if (i != 0) try writer.writeAll(", ");
-            try writer.print("{{\"name\": \"{s}\"", .{s.name});
+            try writer.writeAll("{\"name\": ");
+            try writeJsonString(writer, s.name);
             if (s.auto_start) try writer.writeAll(", \"auto_start\": true");
             try writer.writeAll("}");
         }
@@ -259,6 +299,146 @@ test "reject version mismatch" {
 test "reject malformed json" {
     const testing = std.testing;
     try testing.expectError(ManifestError.MalformedJson, parseJson(testing.allocator, "not json at all"));
+}
+
+test "round-trip survives quotes and backslashes in every string field" {
+    const testing = std.testing;
+    // std.json decodes \" \\ \n \t on the way in, so these fields hold raw
+    // quote/backslash/control bytes — the exact case a raw {s} emitter corrupts.
+    // The name carries a newline+tab to also exercise the control-char escapes.
+    const json =
+        \\{"name":"a\"b\\c\n\t","version":1,"taps":["t\"p"],"formulas":[{"name":"w\"g","version":"1\\2"}],"casks":[{"name":"c\"k"}],"services":[{"name":"s\"v","auto_start":true}]}
+    ;
+    var m1 = try parseJson(testing.allocator, json);
+    defer m1.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try emitJson(m1, &aw.writer);
+
+    var m2 = try parseJson(testing.allocator, aw.written());
+    defer m2.deinit();
+
+    try testing.expectEqualStrings(m1.name, m2.name);
+    try testing.expectEqualStrings(m1.taps[0], m2.taps[0]);
+    try testing.expectEqualStrings(m1.formulas[0].name, m2.formulas[0].name);
+    try testing.expectEqualStrings(m1.formulas[0].version.?, m2.formulas[0].version.?);
+    try testing.expectEqualStrings(m1.casks[0].name, m2.casks[0].name);
+    try testing.expectEqualStrings(m1.services[0].name, m2.services[0].name);
+}
+
+test "emitJson output format is byte-stable for a plain manifest" {
+    // Golden lock: the escaper refactor must not drift the emitted layout for
+    // ordinary (escape-free) input. Any format change fails here loudly.
+    const testing = std.testing;
+    const json =
+        \\{"name":"dev","version":1,"taps":["homebrew/core"],"formulas":[{"name":"wget"},{"name":"jq","version":"1.7","restart_service":true}],"casks":[{"name":"ghostty"}],"services":[{"name":"pg","auto_start":true}]}
+    ;
+    var m = try parseJson(testing.allocator, json);
+    defer m.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try emitJson(m, &aw.writer);
+
+    const expected =
+        \\{
+        \\  "name": "dev",
+        \\  "version": 1,
+        \\  "taps": ["homebrew/core"],
+        \\  "formulas": [{"name": "wget"}, {"name": "jq", "version": "1.7", "restart_service": true}],
+        \\  "casks": [{"name": "ghostty"}],
+        \\  "services": [{"name": "pg", "auto_start": true}]
+        \\}
+        \\
+    ;
+    try testing.expectEqualStrings(expected, aw.written());
+}
+
+test "round-trip covers control chars, utf-8, empty strings and multiple entries" {
+    const testing = std.testing;
+    // The name mixes \b (0x08), \f (0x0c) named escapes with a raw UTF-8
+    // sequence; taps/version/cask carry empty strings. Every value must
+    // survive emit->parse, and the emitted text must be valid JSON.
+    const json =
+        \\{"name":"\b\fé🍺","version":1,"taps":["",""],"formulas":[{"name":"a\"1","version":""},{"name":"b\\2"}],"casks":[{"name":""}],"services":[{"name":"s\ty"}]}
+    ;
+    var m1 = try parseJson(testing.allocator, json);
+    defer m1.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try emitJson(m1, &aw.writer);
+
+    // Emitted text is well-formed JSON (independent of our own parser).
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, aw.written(), .{});
+    parsed.deinit();
+
+    var m2 = try parseJson(testing.allocator, aw.written());
+    defer m2.deinit();
+
+    try testing.expectEqualStrings(m1.name, m2.name);
+    try testing.expectEqual(@as(usize, 2), m2.taps.len);
+    try testing.expectEqualStrings("", m2.taps[0]);
+    try testing.expectEqualStrings("a\"1", m2.formulas[0].name);
+    try testing.expectEqualStrings("", m2.formulas[0].version.?);
+    try testing.expectEqualStrings("b\\2", m2.formulas[1].name);
+    try testing.expectEqualStrings("", m2.casks[0].name);
+    try testing.expectEqualStrings("s\ty", m2.services[0].name);
+}
+
+test "writeJsonString escapes unnamed control bytes as \\uXXXX and round-trips" {
+    const testing = std.testing;
+    // Build in-memory so the raw 0x01/0x1f bytes never sit in a source literal.
+    var m1 = Manifest.init(testing.allocator);
+    defer m1.deinit();
+    const a = m1.allocator();
+    m1.name = try a.dupe(u8, "x\x01y\x1fz");
+
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try emitJson(m1, &aw.writer);
+
+    // The two unnamed controls must appear as \u0001 / \u001f, not raw bytes.
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "\\u0001") != null);
+    try testing.expect(std.mem.indexOf(u8, aw.written(), "\\u001f") != null);
+    try testing.expect(std.mem.indexOfScalar(u8, aw.written(), 0x01) == null);
+
+    var m2 = try parseJson(testing.allocator, aw.written());
+    defer m2.deinit();
+    try testing.expectEqualStrings(m1.name, m2.name);
+}
+
+test "emitJson round-trips every ASCII byte in a name" {
+    // Exhaustive over 0x00..0x7f — the range that is a valid lone byte in a JSON
+    // string (higher bytes are only legal as multi-byte UTF-8). Every one must
+    // emit as valid JSON and survive the round-trip.
+    const testing = std.testing;
+    var b: usize = 0;
+    while (b < 0x80) : (b += 1) {
+        var m1 = Manifest.init(testing.allocator);
+        defer m1.deinit();
+        const a = m1.allocator();
+        const name = try a.alloc(u8, 3);
+        name[0] = 'x';
+        name[1] = @intCast(b);
+        name[2] = 'y';
+        m1.name = name;
+
+        var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer aw.deinit();
+        try emitJson(m1, &aw.writer);
+
+        var m2 = parseJson(testing.allocator, aw.written()) catch |e| {
+            std.debug.print("byte 0x{x:0>2} emitted invalid JSON: {s}\n", .{ b, @errorName(e) });
+            return e;
+        };
+        defer m2.deinit();
+        testing.expectEqualStrings(name, m2.name) catch |e| {
+            std.debug.print("byte 0x{x:0>2} did not round-trip\n", .{b});
+            return e;
+        };
+    }
 }
 
 test "round-trip parse emit parse" {
