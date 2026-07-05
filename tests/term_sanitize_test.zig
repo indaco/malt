@@ -95,16 +95,35 @@ test "cursor up passes" {
     try check("\x1b[3A", "\x1b[3A");
 }
 
-test "cursor position passes" {
-    try check("\x1b[10;20H", "\x1b[10;20H");
+test "absolute cursor position dropped" {
+    // H/f absolute positioning enables screen spoofing; progress output uses
+    // relative motion only, so the sanitizer drops absolute positioning.
+    try check("\x1b[10;20H", "");
+    try check("\x1b[10;20f", "");
 }
 
 test "erase line passes" {
     try check("\x1b[2K", "\x1b[2K");
 }
 
-test "save/restore cursor passes" {
-    try check("\x1b[s\x1b[u", "\x1b[s\x1b[u");
+test "erase display screen variants pass" {
+    try check("\x1b[J", "\x1b[J");
+    try check("\x1b[0J", "\x1b[0J");
+    try check("\x1b[1J", "\x1b[1J");
+    try check("\x1b[2J", "\x1b[2J");
+}
+
+test "erase display unknown params dropped" {
+    // Only the visible-screen variants are whitelisted; 3 (scrollback) and any
+    // other/multi-param form fail closed.
+    try check("a\x1b[4Jb", "ab");
+    try check("a\x1b[3;4Jb", "ab");
+}
+
+test "save/restore cursor dropped" {
+    // Save/restore aids screen spoofing and no in-repo output needs it; the
+    // DEC ESC 7/8 form already drops, so drop the CSI form too.
+    try check("a\x1b[sb\x1b[uc", "abc");
 }
 
 // ── CSI other commands dropped ──────────────────────────────────────
@@ -120,6 +139,67 @@ test "mode reset CSI l dropped" {
 
 test "scroll region CSI r dropped" {
     try check("a\x1b[1;24rb", "ab");
+}
+
+test "CSI 3 J erase scrollback dropped" {
+    try check("a\x1b[3Jb", "ab");
+}
+
+// ── anti-injection: 8-bit C1 introducers handled like 7-bit ─────────
+
+test "8-bit CSI introducer routed through the CSI filter" {
+    // 0x9B is the C1 form of ESC [ . Like the 7-bit path it filters: a
+    // whitelisted SGR normalises to 7-bit and passes…
+    try check("a\x9b31mXb", "a\x1b[31mXb");
+    // …but scrollback erase via the 8-bit introducer is still dropped.
+    try check("a\x9b3Jb", "ab");
+}
+
+test "8-bit OSC 52 clipboard attempt dropped" {
+    // C1 OSC (0x9D) … C1 ST (0x9C): the 8-bit twin of ESC ] 52 … ST.
+    try check("a\x9d52;c;cHduZWQ=\x9cb", "ab");
+}
+
+test "8-bit DCS dropped, 8-bit ST terminates" {
+    try check("a\x90payload\x9cb", "ab");
+}
+
+test "lone C1 control dropped" {
+    // 0x9C (ST) and 0x99 are C1 controls but not introducers: dropped outright.
+    try check("a\x9cb\x99b", "abb");
+}
+
+// ── anti-injection: C0/ESC inside a CSI fails closed ────────────────
+
+test "BEL smuggled inside a CSI drops the whole sequence" {
+    try check("a\x1b[\x07mb", "ab");
+}
+
+test "ESC inside a CSI aborts it" {
+    // Mid-CSI ESC restarts escape parsing; the first (aborted) CSI vanishes,
+    // the second is a valid SGR that passes.
+    try check("\x1b[3\x1b[31mX", "\x1b[31mX");
+}
+
+// ── UTF-8 preservation with C1-range continuation bytes ─────────────
+
+test "UTF-8 codepoint with C1-range continuation preserved" {
+    // ✓ = E2 9C 93; the 0x9C continuation byte overlaps the C1 range but must
+    // pass because a lead byte is expecting it.
+    try check("\xe2\x9c\x93", "\xe2\x9c\x93");
+    // U+0080 = C2 80 — lowest C1 codepoint, continuation byte 0x80.
+    try check("\xc2\x80", "\xc2\x80");
+    // U+1F600 😀 = F0 9F 98 80 — 4-byte lead, continuation 0x98 in the C1 range.
+    try check("\xf0\x9f\x98\x80", "\xf0\x9f\x98\x80");
+    // U+265B ♛ = E2 99 9B — its trailing continuation byte is 0x9B, the C1 CSI
+    // introducer. Mid-codepoint it must pass, never start a CSI.
+    try check("\xe2\x99\x9b", "\xe2\x99\x9b");
+}
+
+test "incomplete UTF-8 lead is flushed when a control follows" {
+    // A truncated codepoint (lead with no continuation) followed by ESC: the
+    // lead byte still emits, the escape is parsed fresh (dropped here).
+    try check("x\xe2\x1b[?25ly", "x\xe2y");
 }
 
 // ── OSC always dropped ──────────────────────────────────────────────
@@ -190,6 +270,58 @@ test "OSC split across chunks is dropped end-to-end" {
     try s.feed("\x1b\\b", buf.sink());
     try s.flush(buf.sink());
     try testing.expectEqualStrings("ab", buf.list.items);
+}
+
+test "UTF-8 codepoint split across feed() calls is reassembled" {
+    // The real filter reads fixed-size chunks, so a multibyte codepoint will
+    // straddle a boundary; the continuation counter must survive across calls.
+    var buf: Buf = .{};
+    defer buf.deinit();
+    var s = ts.Sanitizer.init();
+    try s.feed("caf\xc3", buf.sink()); // é lead only
+    try s.feed("\xa9 \xe2\x9c", buf.sink()); // é continuation + ✓ lead+cont1
+    try s.feed("\x93!", buf.sink()); // ✓ final continuation
+    try s.flush(buf.sink());
+    try testing.expectEqualStrings("caf\xc3\xa9 \xe2\x9c\x93!", buf.list.items);
+}
+
+test "8-bit OSC split across chunks is dropped end-to-end" {
+    var buf: Buf = .{};
+    defer buf.deinit();
+    var s = ts.Sanitizer.init();
+    try s.feed("a\x9d52;c;", buf.sink());
+    try s.feed("PAYLOAD", buf.sink());
+    try s.feed("\x9cb", buf.sink()); // 8-bit ST terminates
+    try s.flush(buf.sink());
+    try testing.expectEqualStrings("ab", buf.list.items);
+}
+
+// ── defense-in-depth invariant over a hostile corpus ────────────────
+
+test "no BEL or bare ESC survives a dense hostile control corpus" {
+    const hostile =
+        "\x1b[\x07m" ++ // BEL in CSI
+        "\x9d52;c;x\x9c" ++ // 8-bit OSC 52
+        "\x1b]0;title\x07" ++ // OSC BEL-terminated
+        "\x9b3J" ++ // 8-bit CSI erase scrollback
+        "\x1b[3J" ++ // 7-bit erase scrollback
+        "\x00\x7f\x9c\x90p\x9c" ++ // NUL, DEL, stray ST, DCS
+        "ok\x1b[31mX\x1b[0m\x1b[2Jy"; // legit SGR + screen erase
+    var buf: Buf = .{};
+    defer buf.deinit();
+    var s = ts.Sanitizer.init();
+    try s.feed(hostile, buf.sink());
+    try s.flush(buf.sink());
+    const out = buf.list.items;
+    // No BEL leaks; every emitted ESC begins a whitelisted CSI (ESC [ …).
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null);
+    for (out, 0..) |c, i| {
+        if (c == 0x1B) try testing.expect(i + 1 < out.len and out[i + 1] == '[');
+        try testing.expect(!(c >= 0x80 and c <= 0x9F)); // no C1 leak (corpus has no UTF-8)
+        try testing.expect(c >= 0x20 or c == 0x1B); // no other C0 leak
+    }
+    // Legitimate output still passes through.
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[31mX\x1b[0m") != null);
 }
 
 // ── empty + pathological inputs ─────────────────────────────────────
